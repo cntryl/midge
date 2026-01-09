@@ -14,6 +14,7 @@
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
+use cntryl_midge::{TransactionMode, WriteOptions};
 
 // ============================================================================
 // WAL RECOVERY TESTS
@@ -26,10 +27,13 @@ fn should_recover_writes_given_unflushed_memtable_when_reopening() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // Write to WAL but don't flush memtable
-            engine.put(cf, b"key1", b"value1").expect("put");
-            engine.put(cf, b"key2", b"value2").expect("put");
+            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+            tx.put(b"key1".to_vec(), b"value1".to_vec(), None).expect("put");
+            tx.put(b"key2".to_vec(), b"value2".to_vec(), None).expect("put");
+            engine.commit(tx, WriteOptions::default()).unwrap();
             // Engine dropped here, simulating crash with unflushed memtable
         }
 
@@ -37,15 +41,17 @@ fn should_recover_writes_given_unflushed_memtable_when_reopening() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
+            let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
             assert_eq!(
-                engine.get(cf, b"key1").expect("get"),
+                tx.get(b"key1").expect("get"),
                 Some(Bytes::from_static(b"value1")),
                 "mode: {}",
                 mode
             );
             assert_eq!(
-                engine.get(cf, b"key2").expect("get"),
+                tx.get(b"key2").expect("get"),
                 Some(Bytes::from_static(b"value2")),
                 "mode: {}",
                 mode
@@ -61,11 +67,12 @@ fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // Write with fsync guarantee (durability_opts sets fsync_enabled: true)
-            engine
-                .put(cf, b"critical_key", b"critical_value")
-                .expect("put");
+            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+            tx.put(b"critical_key".to_vec(), b"critical_value".to_vec(), None).expect("put");
+            engine.commit(tx, WriteOptions::default()).unwrap();
             // Simulate immediate crash
         }
 
@@ -73,9 +80,11 @@ fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
+            let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
             assert_eq!(
-                engine.get(cf, b"critical_key").expect("get"),
+                tx.get(b"critical_key").expect("get"),
                 Some(Bytes::from_static(b"critical_value")),
                 "mode: {}",
                 mode
@@ -90,12 +99,15 @@ fn should_call_fsync_given_wal_sync_enabled_when_put() {
         // Arrange
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
         // Act: Write with WAL sync enabled (opts has fsync_enabled: true)
-        let result = engine.put(cf, b"test_key", b"test_value");
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+        let result = tx.put(b"test_key".to_vec(), b"test_value".to_vec(), None);
 
         // Assert: Put succeeds (fsync was called without blocking)
         assert!(result.is_ok(), "put should succeed in mode: {}", mode);
+        engine.commit(tx, WriteOptions::default()).unwrap();
     });
 }
 
@@ -110,15 +122,16 @@ fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // Write enough data to trigger WAL rotation
+            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
             for i in 0..1000 {
                 let key = format!("key_{:04}", i);
                 let value = format!("value_{:04}_with_padding_to_exceed_buffer_size", i);
-                engine
-                    .put(cf, key.as_bytes(), value.as_bytes())
-                    .expect("put");
+                tx.put(key.into_bytes(), value.into_bytes(), None).expect("put");
             }
+            engine.commit(tx, WriteOptions::default()).unwrap();
             // Force checkpoint to ensure WAL segments are created
             engine.flush().expect("flush");
         }
@@ -127,20 +140,22 @@ fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // Spot check across the range
+            let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
             assert!(
-                engine.get(cf, b"key_0000").expect("get").is_some(),
+                tx.get(b"key_0000").expect("get").is_some(),
                 "mode: {}",
                 mode
             );
             assert!(
-                engine.get(cf, b"key_0500").expect("get").is_some(),
+                tx.get(b"key_0500").expect("get").is_some(),
                 "mode: {}",
                 mode
             );
             assert!(
-                engine.get(cf, b"key_0999").expect("get").is_some(),
+                tx.get(b"key_0999").expect("get").is_some(),
                 "mode: {}",
                 mode
             );
@@ -159,16 +174,17 @@ fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // Write in phases to create multiple WAL segments
             for batch in 0..3 {
+                let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
                 for i in 0..100 {
                     let key = format!("batch_{}_key_{:03}", batch, i);
                     let value = format!("batch_{}_value_{:03}", batch, i);
-                    engine
-                        .put(cf, key.as_bytes(), value.as_bytes())
-                        .expect("put");
+                    tx.put(key.into_bytes(), value.into_bytes(), None).expect("put");
                 }
+                engine.commit(tx, WriteOptions::default()).unwrap();
             }
         }
 
@@ -176,13 +192,15 @@ fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // Verify records from each batch
+            let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
             for batch in 0..3 {
                 for i in 0..100 {
                     let key = format!("batch_{}_key_{:03}", batch, i);
                     assert!(
-                        engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                        tx.get(key.as_bytes()).expect("get").is_some(),
                         "Missing key from batch {} in mode: {}",
                         batch,
                         mode
@@ -199,7 +217,8 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
         // Arrange & Act (Phase 1)
         {
             let engine = std::sync::Arc::new(open_with_mode(opts.clone(), mode));
-            let _cf = engine.default_column_family();
+            let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // Concurrent writes from multiple threads
             let mut handles = vec![];
@@ -209,13 +228,9 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
                     for i in 0..20 {
                         let key = format!("thread_{}_key_{:02}", thread_id, i);
                         let value = format!("thread_{}_value_{:02}", thread_id, i);
-                        engine_clone
-                            .put(
-                                engine_clone.default_column_family(),
-                                key.as_bytes(),
-                                value.as_bytes(),
-                            )
-                            .expect("put");
+                        let mut tx = engine_clone.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+                        tx.put(key.into_bytes(), value.into_bytes(), None).expect("put");
+                        engine_clone.commit(tx, WriteOptions::default()).unwrap();
                     }
                 });
                 handles.push(handle);
@@ -231,12 +246,14 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
+            let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
             for thread_id in 0..5 {
                 for i in 0..20 {
                     let key = format!("thread_{}_key_{:02}", thread_id, i);
                     assert!(
-                        engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                        tx.get(key.as_bytes()).expect("get").is_some(),
                         "Missing write from thread {} in mode: {}",
                         thread_id,
                         mode
@@ -258,23 +275,28 @@ fn should_skip_corrupted_wal_tail_given_truncated_tail_when_recovering() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // Write data (some will be in incomplete record at tail)
+            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
             for i in 0..10 {
                 let key = format!("key_{:02}", i);
-                engine.put(cf, key.as_bytes(), b"value").expect("put");
+                tx.put(key.into_bytes(), b"value".to_vec(), None).expect("put");
             }
+            engine.commit(tx, WriteOptions::default()).unwrap();
             // Simulate crash without flushing final records
         }
 
         // Assert (Phase 2): Skips corrupted records, recovers valid ones
         {
             let engine = open_with_mode(opts, mode);
-            let _cf = engine.default_column_family();
+            let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // Some early records should be recovered (before corruption)
             // Recovery should skip the truncated tail, not panic
-            let _ = engine.get(_cf, b"key_00").expect("get");
+            let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+            let _ = tx.get(b"key_00").expect("get");
         }
     });
 }
@@ -286,9 +308,12 @@ fn should_not_recover_data_given_truncated_wal_append_when_reopening() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // Write without fsync, simulating crash mid-write
-            engine.put(cf, b"unsafe_key", b"unsafe_value").expect("put");
+            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+            tx.put(b"unsafe_key".to_vec(), b"unsafe_value".to_vec(), None).expect("put");
+            engine.commit(tx, WriteOptions::default()).unwrap();
             // Immediate crash before fsync
         }
 
@@ -296,10 +321,12 @@ fn should_not_recover_data_given_truncated_wal_append_when_reopening() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // Key may or may not exist depending on fsync timing
             // Recovery should not panic or corrupt data
-            let _result = engine.get(cf, b"unsafe_key").expect("get");
+            let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+            let _result = tx.get(b"unsafe_key").expect("get");
         }
     });
 }
@@ -317,11 +344,12 @@ fn should_allow_data_loss_given_skipped_fsync_when_crash_occurs() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // Write without guaranteeing sync
-            engine
-                .put(cf, b"transient_key", b"transient_value")
-                .expect("put");
+            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+            tx.put(b"transient_key".to_vec(), b"transient_value".to_vec(), None).expect("put");
+            engine.commit(tx, WriteOptions::default()).unwrap();
             // Crash
         }
 
@@ -329,10 +357,12 @@ fn should_allow_data_loss_given_skipped_fsync_when_crash_occurs() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // With durable_storage_modes, if fsync is enabled, data should persist
             // This test documents the contract: if you disable fsync, data loss is possible
-            let _result = engine.get(cf, b"transient_key").expect("get");
+            let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+            let _result = tx.get(b"transient_key").expect("get");
         }
     });
 }
@@ -344,10 +374,13 @@ fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // Write valid records followed by corruption
-            engine.put(cf, b"valid_key_1", b"value_1").expect("put");
-            engine.put(cf, b"valid_key_2", b"value_2").expect("put");
+            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+            tx.put(b"valid_key_1".to_vec(), b"value_1".to_vec(), None).expect("put");
+            tx.put(b"valid_key_2".to_vec(), b"value_2".to_vec(), None).expect("put");
+            engine.commit(tx, WriteOptions::default()).unwrap();
             // Simulate corruption by crashing mid-record
         }
 
@@ -355,15 +388,17 @@ fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
 
             // Valid records before corruption should be recovered
+            let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
             assert!(
-                engine.get(cf, b"valid_key_1").expect("get").is_some(),
+                tx.get(b"valid_key_1").expect("get").is_some(),
                 "mode: {}",
                 mode
             );
             assert!(
-                engine.get(cf, b"valid_key_2").expect("get").is_some(),
+                tx.get(b"valid_key_2").expect("get").is_some(),
                 "mode: {}",
                 mode
             );

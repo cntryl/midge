@@ -13,7 +13,7 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use cntryl_midge::{AckPolicy, MidgeEngine, MidgeOptions, StorageMode, WriteBatch};
+use cntryl_midge::{AckPolicy, MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{
     criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
@@ -56,6 +56,9 @@ fn setup_db(name: &str) -> MidgeEngine {
 }
 
 /// Benchmark batch put operations (hot path for write throughput)
+///
+/// Measures throughput of multiple puts in a single transaction + commit.
+/// This is the canonical way to batch writes in Midge.
 fn bench_batch_put(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_batch_put");
     group.sampling_mode(SamplingMode::Flat);
@@ -64,24 +67,26 @@ fn bench_batch_put(c: &mut Criterion) {
     let engine = setup_db("batch_put");
     let cf = engine.default_column_family();
     let cf_id = cf.id();
+    
+    // Reuse WriteOptions across iterations (allowed optimization)
+    let write_opts = cntryl_midge::WriteOptions::default();
 
     for &batch_size in &[100, 1_000] {
-        // Precompute keys/values and the WriteBatch ONCE.
-        // Note: `iter_batched` would re-run the setup closure many times and can
-        // dominate wall-clock runtime even if setup is excluded from timing.
+        // Precompute keys/values ONCE (outside measurement)
         let (keys, vals) = make_fixed_kv(batch_size);
-        let mut batch = WriteBatch::new();
-        for i in 0..batch_size {
-            batch.put_cf(cf_id, keys[i].clone(), vals[i].clone());
-        }
 
         group.throughput(Throughput::Elements(batch_size as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
-            &batch,
-            |b, batch| {
+            &batch_size,
+            |b, &size| {
                 b.iter(|| {
-                    engine.write_batch(black_box(batch)).unwrap();
+                    // Measure: begin transaction, add all puts, commit
+                    let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
+                    for i in 0..size {
+                        tx.put(keys[i].to_vec(), vals[i].to_vec(), None).unwrap();
+                    }
+                    engine.commit(tx, write_opts).unwrap();
                     black_box(())
                 })
             },

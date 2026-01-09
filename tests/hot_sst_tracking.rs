@@ -4,13 +4,13 @@
 //! for read-aware compaction prioritization.
 
 use cntryl_midge::common::MidgeResult;
-use cntryl_midge::testkit::new_engine;
+use cntryl_midge::testkit::{open_with_mode, opts_for_mode};
 use cntryl_midge::{TransactionMode, WriteOptions};
 
 #[test]
 fn should_track_read_counts_per_sst_when_accessed() -> MidgeResult<()> {
     // Arrange: Create engine with multiple SSTs
-    let engine = new_engine()?;
+    let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
     // Write batch 1 - will become SST 1
@@ -53,7 +53,7 @@ fn should_track_read_counts_per_sst_when_accessed() -> MidgeResult<()> {
 #[test]
 fn should_track_l0_reads_separately() -> MidgeResult<()> {
     // Arrange: Create multiple L0 SSTs
-    let engine = new_engine()?;
+    let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
     // Create 3 L0 files with overlapping ranges
@@ -83,7 +83,7 @@ fn should_track_l0_reads_separately() -> MidgeResult<()> {
 #[test]
 fn should_skip_cold_ssts_using_key_ranges() -> MidgeResult<()> {
     // Arrange: Create SSTs with disjoint key ranges
-    let engine = new_engine()?;
+    let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
     // SST 1: keys [a000-a999]
@@ -128,7 +128,7 @@ fn should_skip_cold_ssts_using_key_ranges() -> MidgeResult<()> {
 #[test]
 fn should_accumulate_reads_over_time() -> MidgeResult<()> {
     // Arrange: Create SST
-    let engine = new_engine()?;
+    let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
     for i in 0..20 {

@@ -15,6 +15,7 @@
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
+use cntryl_midge::{TransactionMode, WriteOptions};
 
 // ============================================================================
 // SIZE EXTREMES (Tests 1-4)
@@ -26,13 +27,18 @@ fn should_retrieve_stored_keys_when_megabyte_sized() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
         let large_key = vec![65u8; 500_000]; // 500KB key
         let small_value = b"value";
 
         // Act: Store and retrieve
-        engine.put(cf, &large_key, small_value).expect("put");
-        let got = engine.get(cf, &large_key).expect("get");
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+        tx.put(large_key.clone(), small_value.to_vec(), None).expect("put");
+        engine.commit(tx, WriteOptions::default()).unwrap();
+
+        let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+        let got = tx.get(&large_key).expect("get");
 
         // Assert
         assert_eq!(
@@ -50,13 +56,18 @@ fn should_retrieve_stored_values_when_hundred_megabytes() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
         let small_key = b"big_value";
         let large_value = vec![42u8; 10_000_000]; // 10MB value
 
         // Act: Store and retrieve
-        engine.put(cf, small_key, &large_value).expect("put");
-        let got = engine.get(cf, small_key).expect("get");
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+        tx.put(small_key.to_vec(), large_value.clone(), None).expect("put");
+        engine.commit(tx, WriteOptions::default()).unwrap();
+
+        let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+        let got = tx.get(small_key).expect("get");
 
         // Assert: Verify size and content
         assert!(got.is_some(), "failed to retrieve 10MB value in {mode}");
@@ -74,34 +85,22 @@ fn should_handle_mixed_size_values_when_ranging_from_bytes_to_megabytes() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
         // Act: Store values of wildly different sizes
-        engine.put(cf, b"tiny", b"x").expect("put");
-        engine.put(cf, b"small", &[42u8; 100]).expect("put");
-        engine
-            .put(cf, b"medium", &vec![42u8; 100_000])
-            .expect("put");
-        engine
-            .put(cf, b"large", &vec![42u8; 1_000_000])
-            .expect("put");
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+        tx.put(b"tiny".to_vec(), b"x".to_vec(), None).expect("put");
+        tx.put(b"small".to_vec(), vec![42u8; 100], None).expect("put");
+        tx.put(b"medium".to_vec(), vec![42u8; 100_000], None).expect("put");
+        tx.put(b"large".to_vec(), vec![42u8; 1_000_000], None).expect("put");
+        engine.commit(tx, WriteOptions::default()).unwrap();
 
         // Assert: Retrieve all and verify
-        assert_eq!(
-            engine.get(cf, b"tiny").expect("get").map(|b| b.len()),
-            Some(1)
-        );
-        assert_eq!(
-            engine.get(cf, b"small").expect("get").map(|b| b.len()),
-            Some(100)
-        );
-        assert_eq!(
-            engine.get(cf, b"medium").expect("get").map(|b| b.len()),
-            Some(100_000)
-        );
-        assert_eq!(
-            engine.get(cf, b"large").expect("get").map(|b| b.len()),
-            Some(1_000_000)
-        );
+        let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+        assert_eq!(tx.get(b"tiny").expect("get").map(|b| b.len()), Some(1));
+        assert_eq!(tx.get(b"small").expect("get").map(|b| b.len()), Some(100));
+        assert_eq!(tx.get(b"medium").expect("get").map(|b| b.len()), Some(100_000));
+        assert_eq!(tx.get(b"large").expect("get").map(|b| b.len()), Some(1_000_000));
     });
 }
 
@@ -111,24 +110,28 @@ fn should_handle_special_characters_in_keys_when_utf8_and_binary_mixed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
         // Act: Store keys with special characters and binary data
-        let keys = [
-            b"normal_key" as &[u8],
-            "unicode_ðŸ˜€_key".as_bytes(),
+        let keys: Vec<&[u8]> = vec![
+            b"normal_key",
+            "unicode_\u{1F600}_key".as_bytes(),
             b"\x00\x01\x02\x03", // Binary nulls
             b"key\twith\ttabs",
             b"key\nwith\nnewlines",
         ];
 
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         for (i, key) in keys.iter().enumerate() {
             let value = format!("value_{i}");
-            engine.put(cf, key, value.as_bytes()).expect("put");
+            tx.put(key.to_vec(), value.into_bytes(), None).expect("put");
         }
+        engine.commit(tx, WriteOptions::default()).unwrap();
 
         // Assert: Retrieve all
+        let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
         for (i, key) in keys.iter().enumerate() {
-            let got = engine.get(cf, key).expect("get");
+            let got = tx.get(*key).expect("get");
             let expected_value = format!("value_{i}");
             assert_eq!(
                 got,
@@ -150,9 +153,11 @@ fn should_handle_empty_database_when_no_keys_written() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
         // Act: Try to read from empty database
-        let got = engine.get(cf, b"nonexistent").expect("get");
+        let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+        let got = tx.get(b"nonexistent").expect("get");
 
         // Assert
         assert_eq!(
@@ -168,12 +173,16 @@ fn should_handle_single_record_database_when_one_key_value_pair() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
         // Act: Write single record
-        engine.put(cf, b"only_key", b"only_value").expect("put");
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+        tx.put(b"only_key".to_vec(), b"only_value".to_vec(), None).expect("put");
+        engine.commit(tx, WriteOptions::default()).unwrap();
 
         // Assert: Can retrieve it
-        let got = engine.get(cf, b"only_key").expect("get");
+        let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+        let got = tx.get(b"only_key").expect("get");
         assert_eq!(
             got,
             Some(Bytes::from_static(b"only_value")),
@@ -181,7 +190,7 @@ fn should_handle_single_record_database_when_one_key_value_pair() {
         );
 
         // Assert: Other keys don't exist
-        let not_got = engine.get(cf, b"other_key").expect("get");
+        let not_got = tx.get(b"other_key").expect("get");
         assert_eq!(
             not_got, None,
             "unexpected key found in single-record database"
@@ -195,26 +204,28 @@ fn should_handle_range_query_at_boundaries_when_first_last_and_missing() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
         // Act: Write sorted keys
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         for i in 0..5 {
             let key = format!("key_{i:02}");
-            engine
-                .put(cf, key.as_bytes(), format!("value_{i}").as_bytes())
-                .expect("put");
+            tx.put(key.into_bytes(), format!("value_{i}").into_bytes(), None).expect("put");
         }
+        engine.commit(tx, WriteOptions::default()).unwrap();
 
         // Assert: Boundary keys are retrievable
+        let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
         assert!(
-            engine.get(cf, b"key_00").expect("get").is_some(),
+            tx.get(b"key_00").expect("get").is_some(),
             "first key not found"
         );
         assert!(
-            engine.get(cf, b"key_04").expect("get").is_some(),
+            tx.get(b"key_04").expect("get").is_some(),
             "last key not found"
         );
         assert_eq!(
-            engine.get(cf, b"key_99").expect("get"),
+            tx.get(b"key_99").expect("get"),
             None,
             "non-existent key should be None"
         );
@@ -231,19 +242,21 @@ fn should_handle_rapid_operations_when_one_thousand_puts_per_second() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
-        // Act: Rapid writes
+        // Act: Rapid writes (batched in a single transaction for efficiency)
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         for i in 0..1000 {
             let key = format!("rapid_{i:05}");
-            engine
-                .put(cf, key.as_bytes(), format!("v_{i}").as_bytes())
-                .expect("put");
+            tx.put(key.into_bytes(), format!("v_{i}").into_bytes(), None).expect("put");
         }
+        engine.commit(tx, WriteOptions::default()).unwrap();
 
         // Assert: All retrievable
+        let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
         for i in (0..1000).step_by(100) {
             let key = format!("rapid_{i:05}");
-            let got = engine.get(cf, key.as_bytes()).expect("get");
+            let got = tx.get(key.as_bytes()).expect("get");
             assert!(got.is_some(), "lost rapid write in {mode}");
         }
     });
@@ -255,22 +268,28 @@ fn should_handle_delete_all_pattern_when_writing_then_deleting_all_keys() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         for i in 0..100 {
             let key = format!("del_test_{i:03}");
-            engine.put(cf, key.as_bytes(), b"delete_me").expect("put");
+            tx.put(key.into_bytes(), b"delete_me".to_vec(), None).expect("put");
         }
+        engine.commit(tx, WriteOptions::default()).unwrap();
 
         // Act: Delete all keys
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         for i in 0..100 {
             let key = format!("del_test_{i:03}");
-            engine.delete(cf, key.as_bytes()).expect("delete");
+            tx.delete(key.into_bytes()).expect("delete");
         }
+        engine.commit(tx, WriteOptions::default()).unwrap();
 
         // Assert: All deleted
+        let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
         for i in 0..100 {
             let key = format!("del_test_{i:03}");
-            let got = engine.get(cf, key.as_bytes()).expect("get");
+            let got = tx.get(key.as_bytes()).expect("get");
             assert_eq!(got, None, "key not deleted in {mode}");
         }
     });
@@ -282,18 +301,22 @@ fn should_handle_tombstone_accumulation_when_many_deletes_create_tombstones() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
         // Act: 10 put/delete cycles on same key
         for cycle in 0..10 {
-            let key = b"tombstone_test";
-            engine
-                .put(cf, key, format!("cycle_{cycle}").as_bytes())
-                .expect("put");
-            engine.delete(cf, key).expect("delete");
+            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+            tx.put(b"tombstone_test".to_vec(), format!("cycle_{cycle}").into_bytes(), None).expect("put");
+            engine.commit(tx, WriteOptions::default()).unwrap();
+
+            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+            tx.delete(b"tombstone_test".to_vec()).expect("delete");
+            engine.commit(tx, WriteOptions::default()).unwrap();
         }
 
         // Assert: Final state is deleted (tombstone wins)
-        let got = engine.get(cf, b"tombstone_test").expect("get");
+        let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+        let got = tx.get(b"tombstone_test").expect("get");
         assert_eq!(got, None, "tombstone did not win over old put in {mode}");
     });
 }
@@ -307,19 +330,21 @@ fn should_handle_ten_thousand_keys_when_large_keyspace() {
     for_each_storage_mode(&["memory", "local"], |mode, opts| {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
-        // Act: Write 10k keys
+        // Act: Write 10k keys (batched in a single transaction)
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         for i in 0..10_000 {
             let key = format!("large_ks_{i:05}");
-            engine
-                .put(cf, key.as_bytes(), format!("v_{i}").as_bytes())
-                .expect("put");
+            tx.put(key.into_bytes(), format!("v_{i}").into_bytes(), None).expect("put");
         }
+        engine.commit(tx, WriteOptions::default()).unwrap();
 
         // Assert: Random samples retrieve correctly
+        let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
         for i in [0, 100, 1000, 5000, 9999].iter() {
             let key = format!("large_ks_{i:05}");
-            let got = engine.get(cf, key.as_bytes()).expect("get");
+            let got = tx.get(key.as_bytes()).expect("get");
             assert!(got.is_some(), "lost key in 10k keyspace at {i} in {mode}");
         }
     });
@@ -338,6 +363,7 @@ fn should_batch_concurrent_puts_when_cloudfirst_mode() {
 
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family().clone();
+        let cf_id = cf.id();
 
         let threads: usize = 16;
         let puts_per_thread: usize = 200;
@@ -347,21 +373,23 @@ fn should_batch_concurrent_puts_when_cloudfirst_mode() {
         std::thread::scope(|s| {
             let engine_ref = &engine;
             for t in 0..threads {
-                let cf = cf.clone();
                 s.spawn(move || {
                     for i in 0..puts_per_thread {
                         let key = format!("k_{t}_{i}");
-                        engine_ref.put(&cf, key.as_bytes(), b"value").expect("put");
+                        let mut tx = engine_ref.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+                        tx.put(key.into_bytes(), b"value".to_vec(), None).expect("put");
+                        engine_ref.commit(tx, WriteOptions::default()).unwrap();
                     }
                 });
             }
         });
 
         // Assert: correctness (spot-check)
+        let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
         for t in 0..threads {
             for i in [0, puts_per_thread / 2, puts_per_thread - 1] {
                 let key = format!("k_{t}_{i}");
-                let got = engine.get(&cf, key.as_bytes()).expect("get");
+                let got = tx.get(key.as_bytes()).expect("get");
                 assert!(got.is_some(), "missing key {key}");
             }
         }

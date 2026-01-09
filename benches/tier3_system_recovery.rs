@@ -92,8 +92,10 @@ fn run_wal_replay_case(ctx: &mut StressContext, opts: MidgeOptions) {
     ctx.measure(|| {
         let engine = setup_engine(opts.clone());
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
         let k0 = [0u8; KEY_SIZE];
-        let _ = engine.get(cf, &k0[..]).unwrap();
+        let tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let _ = tx.get(&k0[..]).unwrap();
         drop(engine);
     });
 }

@@ -78,11 +78,13 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
 
     // Phase 3: Measured (duration-based; multi-client)
     let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
+        let write_opts = cntryl_midge::WriteOptions::default();
         ycsb::run_multi_client_for_duration(Arc::clone(&engine), clients, MEASURED, |client_id| {
             let mut inserts_so_far: u64 = 0;
             move |e, cf, op_index| {
                 let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
                 let is_insert = (r0 % 100) >= 95;
+                let cf_id = cf.id();
 
                 if is_insert {
                     inserts_so_far = inserts_so_far.wrapping_add(1);
@@ -91,7 +93,9 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         .wrapping_add(inserts_so_far);
                     let k = ycsb::make_key(key_id);
                     let v = ycsb::make_value((op_index % 251) as u8);
-                    e.put(cf, &k[..], &v[..]).expect("measured insert");
+                    let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("measured begin");
+                    tx.put(k.to_vec(), v.to_vec(), None).expect("measured insert");
+                    e.commit(tx, write_opts).expect("measured commit");
                     return;
                 }
 
@@ -109,7 +113,8 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                 };
 
                 let k = ycsb::make_key(pick);
-                let _ = e.get(cf, &k[..]).expect("measured get");
+                let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("measured begin");
+                let _ = tx.get(&k[..]).expect("measured get");
             }
         })
     });

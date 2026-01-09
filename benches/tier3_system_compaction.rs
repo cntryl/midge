@@ -71,10 +71,12 @@ fn run_compact_all_many_sst_case(
 
     let engine = setup_engine(opts);
     let cf = engine.default_column_family();
+    let cf_id = cf.id();
 
     // Setup (not measured): create multiple flush outputs.
     let batches = 4usize;
     let chunk = (num_keys / batches).max(1);
+    let write_opts = cntryl_midge::WriteOptions::default();
 
     for i in 0..batches {
         let start = i * chunk;
@@ -84,9 +86,9 @@ fn run_compact_all_many_sst_case(
             ((i + 1) * chunk).min(num_keys)
         };
         for idx in start..end {
-            engine
-                .put(cf, &keys[idx][..], values[idx].as_slice())
-                .expect("setup put");
+            let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+            tx.put(keys[idx].to_vec(), values[idx].clone(), None).expect("setup put");
+            engine.commit(tx, write_opts).expect("setup commit");
         }
         engine.flush().expect("setup flush");
     }
@@ -112,6 +114,8 @@ fn run_many_overlapping_l0_files_case(
 
     let engine = setup_engine(opts);
     let cf = engine.default_column_family();
+    let cf_id = cf.id();
+    let write_opts = cntryl_midge::WriteOptions::default();
 
     // Setup: create multiple L0 files with overlapping keyspace.
     for batch in 0..num_batches {
@@ -122,9 +126,9 @@ fn run_many_overlapping_l0_files_case(
             let mut k = base_keys[idx];
             // Introduce overlap across batches.
             k[0] = (batch % 10) as u8;
-            engine
-                .put(cf, &k[..], base_values[idx].as_slice())
-                .expect("setup put");
+            let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+            tx.put(k.to_vec(), base_values[idx].clone(), None).expect("setup put");
+            engine.commit(tx, write_opts).expect("setup commit");
         }
         engine.flush().expect("setup flush");
     }
@@ -149,19 +153,17 @@ fn run_overlap_pressure_compact_case(
 
     let engine = setup_engine(opts);
     let cf = engine.default_column_family();
+    let cf_id = cf.id();
+    let write_opts = cntryl_midge::WriteOptions::default();
 
     // Setup: create many overlapping flush outputs by repeatedly writing the same keyspace.
     for batch in 0..num_batches {
         for idx in 0..num_keys_per_batch {
             // Reuse the same key range each batch to maximize overlap.
             let k = base_keys[idx];
-            engine
-                .put(
-                    cf,
-                    &k[..],
-                    base_values[batch * num_keys_per_batch + idx].as_slice(),
-                )
-                .expect("setup put");
+            let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+            tx.put(k.to_vec(), base_values[batch * num_keys_per_batch + idx].clone(), None).expect("setup put");
+            engine.commit(tx, write_opts).expect("setup commit");
         }
         engine.flush().expect("setup flush");
     }

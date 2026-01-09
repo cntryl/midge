@@ -4,7 +4,7 @@
 //! and determine if there are any contradictions in spill behavior documentation
 
 use cntryl_midge::testkit::*;
-use cntryl_midge::WriteOptions;
+use cntryl_midge::{TransactionMode, WriteOptions};
 
 #[test]
 fn should_commit_large_transaction_when_memory_limit_exceeded() {
@@ -12,16 +12,16 @@ fn should_commit_large_transaction_when_memory_limit_exceeded() {
 
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Use disk-based mode to see spill files
-        let mut opts = opts;
-        opts = opts.memory_budget(128 * 1024); // 128KB to force spill
+        let opts = opts.memory_budget(128 * 1024); // 128KB to force spill
 
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
         eprintln!("Memory budget set to 128KB (mode: {})", mode);
 
         // Try to write data exceeding memory limit
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         let mut total_bytes = 0;
 
         for i in 0..500 {
@@ -41,7 +41,7 @@ fn should_commit_large_transaction_when_memory_limit_exceeded() {
         eprintln!("Memory budget is 128KB, so spill should trigger at ~128KB");
 
         // Commit the transaction
-        let commit_result = engine.commit(tx, cntryl_midge::WriteOptions::default());
+        let commit_result = engine.commit(tx, WriteOptions::default());
         eprintln!("Commit result: {:?}", commit_result);
 
         match commit_result {
@@ -50,7 +50,8 @@ fn should_commit_large_transaction_when_memory_limit_exceeded() {
 
                 // Verify some data is actually present
                 let check_key = "large_key_00000";
-                let value = engine.get(cf, check_key.as_bytes()).expect("get");
+                let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+                let value = tx.get(check_key.as_bytes()).expect("get");
                 match value {
                     Some(v) => {
                         eprintln!(
@@ -81,16 +82,16 @@ fn should_respect_memory_budget_across_transactions() {
     eprintln!("\n=== AUDIT: MEMORY BUDGET ENFORCEMENT ===");
 
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        let mut opts = opts;
-        opts = opts.memory_budget(256 * 1024); // 256KB
+        let opts = opts.memory_budget(256 * 1024); // 256KB
 
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
         eprintln!("Memory budget: 256KB (mode: {})", mode);
 
         // Write transaction 1: 128KB
-        let mut tx1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        let mut tx1 = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         for i in 0..128 {
             let key = format!("batch1_key_{:03}", i);
             let value = vec![65u8; 1024]; // 1KB per key
@@ -99,11 +100,11 @@ fn should_respect_memory_budget_across_transactions() {
         }
         eprintln!("TX1: Writing 128KB of data");
 
-        let result1 = engine.commit(tx1, cntryl_midge::WriteOptions::default());
+        let result1 = engine.commit(tx1, WriteOptions::default());
         eprintln!("TX1 result: {:?}", result1);
 
         // Write transaction 2: another 128KB (total would be 256KB, within budget)
-        let mut tx2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        let mut tx2 = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         for i in 0..128 {
             let key = format!("batch2_key_{:03}", i);
             let value = vec![66u8; 1024]; // 1KB per key
@@ -112,7 +113,7 @@ fn should_respect_memory_budget_across_transactions() {
         }
         eprintln!("TX2: Writing another 128KB of data");
 
-        let result2 = engine.commit(tx2, cntryl_midge::WriteOptions::default());
+        let result2 = engine.commit(tx2, WriteOptions::default());
         eprintln!("TX2 result: {:?}", result2);
 
         match (result1, result2) {
@@ -120,8 +121,9 @@ fn should_respect_memory_budget_across_transactions() {
                 eprintln!("✓ Both transactions committed within budget");
 
                 // Verify data from both
-                let val1 = engine.get(cf, b"batch1_key_000").expect("get").is_some();
-                let val2 = engine.get(cf, b"batch2_key_000").expect("get").is_some();
+                let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+                let val1 = tx.get(b"batch1_key_000").expect("get").is_some();
+                let val2 = tx.get(b"batch2_key_000").expect("get").is_some();
 
                 if val1 && val2 {
                     eprintln!("✓ Data from both transactions persisted - memory budgeting working");
@@ -141,11 +143,11 @@ fn should_handle_transaction_spill_to_disk_correctly() {
     eprintln!("\n=== AUDIT: SPILL TO DISK MECHANISM ===");
 
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        let mut opts = opts;
-        opts = opts.memory_budget(64 * 1024); // Very small: 64KB to force spill quickly
+        let opts = opts.memory_budget(64 * 1024); // Very small: 64KB to force spill quickly
 
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
+        let cf_id = cf.id();
 
         eprintln!(
             "Memory budget: 64KB (very small to force spill) - mode: {}",
@@ -154,7 +156,7 @@ fn should_handle_transaction_spill_to_disk_correctly() {
         eprintln!("Sync writes: enabled");
 
         // Single transaction with data > 64KB
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
 
         eprintln!("Writing 200 keys x 512 bytes = 100KB (exceeds 64KB budget)");
         for i in 0..200 {
@@ -164,7 +166,7 @@ fn should_handle_transaction_spill_to_disk_correctly() {
                 .expect("put");
         }
 
-        let commit_result = engine.commit(tx, cntryl_midge::WriteOptions::default());
+        let commit_result = engine.commit(tx, WriteOptions::default());
 
         match commit_result {
             Ok(_) => {
@@ -179,9 +181,10 @@ fn should_handle_transaction_spill_to_disk_correctly() {
                     "spilltest_key_0100",
                     "spilltest_key_0199",
                 ];
+                let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
                 let all_present = sample_checks
                     .iter()
-                    .all(|key| engine.get(cf, key.as_bytes()).expect("get").is_some());
+                    .all(|key| tx.get(key.as_bytes()).expect("get").is_some());
 
                 if all_present {
                     eprintln!("✓ Spilled data verified: sample keys are accessible");

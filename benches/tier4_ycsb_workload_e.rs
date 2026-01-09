@@ -33,6 +33,7 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
 
     // Phase 2: Warm-up (not measured)
     {
+        let write_opts = cntryl_midge::WriteOptions::default();
         let _warmup_ops = ycsb::run_multi_client_for_duration(
             Arc::clone(&engine),
             clients,
@@ -41,12 +42,15 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                 move |e, cf, op_index| {
                     let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
                     let is_insert = (r0 % 100) >= 95;
+                    let cf_id = cf.id();
 
                     if is_insert {
                         let key_id = INITIAL_KEYS as u64 + ((client_id as u64) << 32) + op_index;
                         let k = ycsb::make_key(key_id);
                         let v = ycsb::make_value((op_index % 251) as u8);
-                        e.put(cf, &k[..], &v[..]).expect("warmup insert");
+                        let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+                        tx.put(k.to_vec(), v.to_vec(), None).expect("warmup insert");
+                        e.commit(tx, write_opts).expect("commit");
                         return;
                     }
 
@@ -56,8 +60,8 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                     let start = ycsb::make_key(start_id);
                     let end = ycsb::make_key(start_id.saturating_add(SCAN_LEN));
 
-                    let _scanned = e
-                        .range(cf, &start[..], &end[..])
+                    let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+                    let _scanned = tx.scan(&start[..], &end[..])
                         .expect("warmup range")
                         .len();
                 }
@@ -67,16 +71,20 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
 
     // Phase 3: Measured (duration-based; multi-client)
     let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
+        let write_opts = cntryl_midge::WriteOptions::default();
         ycsb::run_multi_client_for_duration(Arc::clone(&engine), clients, MEASURED, |client_id| {
             move |e, cf, op_index| {
                 let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
                 let is_insert = (r0 % 100) >= 95;
+                let cf_id = cf.id();
 
                 if is_insert {
                     let key_id = INITIAL_KEYS as u64 + ((client_id as u64) << 32) + op_index;
                     let k = ycsb::make_key(key_id);
                     let v = ycsb::make_value((op_index % 251) as u8);
-                    e.put(cf, &k[..], &v[..]).expect("measured insert");
+                    let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("measured begin");
+                    tx.put(k.to_vec(), v.to_vec(), None).expect("measured insert");
+                    e.commit(tx, write_opts).expect("measured commit");
                     return;
                 }
 
@@ -86,8 +94,8 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                 let start = ycsb::make_key(start_id);
                 let end = ycsb::make_key(start_id.saturating_add(SCAN_LEN));
 
-                let _scanned = e
-                    .range(cf, &start[..], &end[..])
+                let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("measured begin");
+                let _scanned = tx.scan(&start[..], &end[..])
                     .expect("measured range")
                     .len();
             }

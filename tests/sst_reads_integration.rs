@@ -1,13 +1,13 @@
 //! Integration test for SST reads with read amplification metrics
 
 use cntryl_midge::common::MidgeResult;
-use cntryl_midge::testkit::new_engine;
+use cntryl_midge::testkit::{open_with_mode, opts_for_mode};
 use cntryl_midge::WriteOptions;
 
 #[test]
 fn should_read_from_sst_after_flush() -> MidgeResult<()> {
     // Arrange: Create engine
-    let engine = new_engine()?;
+    let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
     // Write keys that will be flushed to SST
@@ -40,7 +40,7 @@ fn should_read_from_sst_after_flush() -> MidgeResult<()> {
 #[test]
 fn should_track_l0_sst_reads() -> MidgeResult<()> {
     // Arrange: Create engine and write multiple batches to create L0 files
-    let engine = new_engine()?;
+    let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
     // Write and flush multiple times to create multiple L0 SSTs
@@ -72,7 +72,7 @@ fn should_track_l0_sst_reads() -> MidgeResult<()> {
 #[test]
 fn should_use_key_ranges_for_higher_levels() -> MidgeResult<()> {
     // Arrange: Create engine
-    let engine = new_engine()?;
+    let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
     // Write sorted keys
@@ -106,7 +106,7 @@ fn should_use_key_ranges_for_higher_levels() -> MidgeResult<()> {
 #[test]
 fn should_handle_memtable_and_sst_reads() -> MidgeResult<()> {
     // Arrange: Mix of memtable and SST data
-    let engine = new_engine()?;
+    let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
     // Write to SST

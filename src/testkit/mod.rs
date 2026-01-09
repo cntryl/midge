@@ -11,7 +11,6 @@ pub mod zipfian;
 
 mod assertions;
 mod config;
-mod engine_compat;
 mod misc;
 mod storage_mock;
 
@@ -22,10 +21,8 @@ pub use config::{
     manual_compaction_test_opts, memory_opts, memory_storage_modes, opts_for_mode, test_temp_dir,
     MidgeOptions, StorageMode,
 };
-pub use engine_compat::{
-    create_storage_mode, new_engine, open_engine, open_with_mode, MidgeEngineTestExt,
-};
 pub use misc::{
-    populate_multi_level_data, test_helpers, with_engine_restart, DurabilityTestContext,
+    open_with_mode, populate_multi_level_data, test_helpers, with_engine_restart,
+    DurabilityTestContext,
 };
 pub use storage_mock::MockStorage;

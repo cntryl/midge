@@ -101,6 +101,7 @@ fn run_streaming_phase(
 
         handles.push(thread::spawn(move || {
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
             barrier.wait();
 
             let mut next: u64 = 0;
@@ -114,7 +115,8 @@ fn run_streaming_phase(
                 }
 
                 let key = ycsb::make_key(next);
-                let hit = engine.get(cf, &key[..]).ok().flatten().is_some();
+                let tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+                let hit = tx.get(&key[..]).ok().flatten().is_some();
 
                 if count {
                     local.reads = local.reads.wrapping_add(1);

@@ -4,6 +4,24 @@
 
 use super::MidgeOptions;
 
+/// Open a Midge engine with the given options.
+///
+/// This is the canonical test helper for opening engines in integration tests.
+/// The `mode` parameter is for diagnostics only; the actual configuration comes from `opts`.
+///
+/// # Arguments
+/// * `opts` - Configuration options for the engine (from `opts_for_mode`)
+/// * `_mode` - Mode string (for logging/diagnostics only, not used)
+///
+/// # Returns
+/// The opened `MidgeEngine` instance.
+///
+/// # Panics
+/// Panics if the engine fails to open.
+pub fn open_with_mode(opts: MidgeOptions, _mode: &str) -> crate::MidgeEngine {
+    crate::MidgeEngine::open_with_options(opts).expect("failed to open engine")
+}
+
 /// Durability test context (stub for compatibility).
 pub struct DurabilityTestContext {
     _private: (),

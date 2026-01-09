@@ -4,13 +4,13 @@
 //! through the public API for observability.
 
 use cntryl_midge::common::MidgeResult;
-use cntryl_midge::testkit::new_engine;
+use cntryl_midge::testkit::{open_with_mode, opts_for_mode};
 use cntryl_midge::WriteOptions;
 
 #[test]
 fn should_expose_read_amp_metrics_through_api() -> MidgeResult<()> {
     // Arrange: Create engine and perform operations
-    let engine = new_engine()?;
+    let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
     // Write data
@@ -71,7 +71,7 @@ fn should_expose_read_amp_metrics_through_api() -> MidgeResult<()> {
 #[test]
 fn should_track_l0_overlap_in_metrics() -> MidgeResult<()> {
     // Arrange: Create multiple L0 files with overlapping ranges
-    let engine = new_engine()?;
+    let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
     // Create 3 overlapping L0 files
@@ -108,9 +108,9 @@ fn should_track_l0_overlap_in_metrics() -> MidgeResult<()> {
 }
 
 #[test]
-fn should_show_zero_metrics_for_new_engine() -> MidgeResult<()> {
+fn should_show_zero_metrics_for_fresh_engine() -> MidgeResult<()> {
     // Arrange: Fresh engine with no operations
-    let engine = new_engine()?;
+    let engine = open_with_mode(opts_for_mode("memory"), "memory");
 
     // Act: Get metrics before any reads
     let metrics = engine.get_read_amp_metrics()?;
@@ -132,7 +132,7 @@ fn should_show_zero_metrics_for_new_engine() -> MidgeResult<()> {
 #[test]
 fn should_accumulate_metrics_over_multiple_reads() -> MidgeResult<()> {
     // Arrange: Create SST with data
-    let engine = new_engine()?;
+    let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
     for i in 0..10 {
@@ -172,7 +172,7 @@ fn should_accumulate_metrics_over_multiple_reads() -> MidgeResult<()> {
 #[test]
 fn should_report_budget_violations_when_exceeded() -> MidgeResult<()> {
     // Arrange: Create many small overlapping L0 files to force budget violations
-    let engine = new_engine()?;
+    let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
     // Create 10 L0 files all with same key (extreme overlap)
