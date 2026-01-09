@@ -8,7 +8,7 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::engine::ColumnFamilyId;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Read set entry: (value, sequence number)
 type ReadSetEntry = (Option<Vec<u8>>, u64);
@@ -466,8 +466,47 @@ impl Transaction {
     /// Returns all key-value pairs in the range [start, end) visible at this transaction's
     /// snapshot sequence.
     pub fn scan(&self, start: &[u8], end: &[u8]) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
-        self.engine()
-            .scan_at_sequence(self.cf_id, start, end, self.start_sequence)
+        let base_results = self
+            .engine()
+            .scan_at_sequence(self.cf_id, start, end, self.start_sequence)?;
+
+        let mut merged: BTreeMap<Vec<u8>, Option<bytes::Bytes>> = BTreeMap::new();
+
+        for (key, value) in base_results {
+            merged.insert(key.to_vec(), Some(value));
+        }
+
+        for intent in self.write_set.iter() {
+            match intent {
+                WriteIntent::Put { key, value, .. } | WriteIntent::Insert { key, value, .. } => {
+                    merged.insert(key.clone(), Some(bytes::Bytes::from(value.clone())));
+                }
+                WriteIntent::Delete { key, .. } => {
+                    merged.insert(key.clone(), None);
+                }
+                WriteIntent::DeleteRange {
+                    start_key,
+                    end_key,
+                    ..
+                } => {
+                    let start = start_key.as_slice();
+                    let end = end_key.as_slice();
+                    merged.retain(|existing_key, _| {
+                        existing_key.as_slice() < start || existing_key.as_slice() >= end
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        let mut results = Vec::new();
+        for (key, value_opt) in merged {
+            if let Some(value) = value_opt {
+                results.push((bytes::Bytes::from(key), value));
+            }
+        }
+
+        Ok(results)
     }
 
     /// Range scan with Query parameters within this transaction

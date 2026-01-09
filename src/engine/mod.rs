@@ -620,6 +620,8 @@ impl MidgeEngine {
     pub fn commit(&self, mut txn: api::Transaction, opts: api::WriteOptions) -> MidgeResult<()> {
         // ReadOnly transactions are a no-op for commit
         if txn.is_read_only() {
+            txn.enter_read_phase()?;
+            txn.enter_commit_phase()?;
             let txn_id = txn.id();
             txn.mark_committed(txn_id)?;
             return Ok(());
@@ -627,7 +629,7 @@ impl MidgeEngine {
 
         if opts.is_no_wal() {
             return Err(MidgeError::InvalidArgument(
-                "Transactions do not support no_wal policy".to_string(),
+                "disable_wal is not allowed in transactions".to_string(),
             ));
         }
 
