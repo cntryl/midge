@@ -162,44 +162,5 @@ fn should_permit_lost_updates_when_not_prevented() {
     );
 }
 
-/// Verify: Snapshots see uncommitted changes (NOT true Snapshot Isolation)
-#[test]
-#[ignore] // Snapshots API not available - requires separate fix
-fn should_not_isolate_snapshots_when_isolation_disabled() {
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
-    let cf = engine.default_column_family();
-
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx.put(b"initial".to_vec(), b"value".to_vec(), None).unwrap();
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
-
-    // TODO: Need snapshot API
-    // let snapshot = engine.snapshot();
-    // let initial_count = snapshot
-    //     .scan(cf, &cntryl_midge::Query::new())
-    //     .unwrap()
-    //     .len();
-
-    // Add new data after snapshot
-    let mut tx2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx2.put(b"added_later".to_vec(), b"value".to_vec(), None).unwrap();
-    engine.commit(tx2, cntryl_midge::WriteOptions::default()).unwrap();
-
-    // let later_count = snapshot
-    //     .scan(cf, &cntryl_midge::Query::new())
-    //     .unwrap()
-    //     .len();
-
-    // Note: Not asserting here because snapshot behavior may vary
-    // The point is to document that true Snapshot Isolation is NOT guaranteed
-    // eprintln!("Initial snapshot rows: {}", initial_count);
-    // eprintln!("After insert, snapshot rows: {}", later_count);
-    // eprintln!(
-    //     "Snapshot sees new rows: {}",
-    //     if later_count > initial_count {
-    //         "YES - NOT true snapshot isolation"
-    //     } else {
-    //         "NO - appears to be snapshot isolated"
-    //     }
-    // );
-}
+// Note: Snapshot isolation testing removed as the snapshot API is not yet implemented.
+// When snapshots are added, snapshot visibility tests should be reintroduced.

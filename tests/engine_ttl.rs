@@ -170,35 +170,6 @@ fn should_preserve_non_expired_entries_given_compaction_when_ttl_not_exceeded() 
 }
 
 // ============================================================================
-// Snapshot Interaction
-// ============================================================================
-
-#[test]
-#[ignore = "snapshot API not implemented"]
-fn should_hide_expired_key_given_snapshot_after_expiry_when_reading_at_snapshot() {
-    // Test disabled - requires snapshot API implementation
-    // Would test: TTL expiration should be visible in snapshots taken after expiration
-}
-
-#[test]
-#[ignore = "snapshot API not implemented"]
-fn should_check_expiration_at_read_time_given_snapshot_when_ttl_elapses_after_snapshot() {
-    // Test disabled - requires snapshot API implementation
-    // Would test: TTL expiration checked at read time, not snapshot time
-}
-
-// ============================================================================
-// Write Batch & TTL
-// ============================================================================
-
-#[test]
-#[ignore = "write_batch API not implemented"]
-fn should_apply_ttl_given_write_batch_with_ttl_when_committed() {
-    // Test disabled - requires write_batch API implementation
-    // Would test: TTL in write batches is properly applied
-}
-
-// ============================================================================
 // Mixed TTL Keys
 // ============================================================================
 

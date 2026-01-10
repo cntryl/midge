@@ -220,54 +220,8 @@ fn should_detect_read_modify_write_conflicts_when_concurrent() {
 // DIAGNOSTIC TEST 4: Snapshot Isolation (Phantom Reads)
 // ============================================================================
 //
-// If Midge supports snapshot isolation, the "phantom read" test should fail.
-// If snapshots are implemented, a transaction shouldn't see rows inserted
-// after snapshot creation.
-
-#[test]
-#[ignore] // Snapshots API not available
-fn should_prevent_phantom_reads_when_isolation_enforced() {
-    eprintln!("\n=== AUDIT: PHANTOM READ PREVENTION (Snapshot Isolation) ===");
-    eprintln!("Question: Can rows inserted after transaction starts become visible?");
-
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
-    let cf = engine.default_column_family();
-
-    // Initial state: 3 keys
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx.put(b"k1".to_vec(), b"v1".to_vec(), None).unwrap();
-    tx.put(b"k2".to_vec(), b"v2".to_vec(), None).unwrap();
-    tx.put(b"k3".to_vec(), b"v3".to_vec(), None).unwrap();
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
-
-    // Create snapshot/transaction
-    // let snapshot = engine.snapshot();
-    // let initial_count = snapshot
-    //     .scan(cf, &cntryl_midge::Query::new())
-    //     .unwrap()
-    //     .len();
-    // eprintln!("Snapshot sees {} keys initially", initial_count);
-
-    // Insert new key after snapshot created
-    let mut tx2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx2.put(b"k4".to_vec(), b"v4".to_vec(), None).unwrap();
-    engine.commit(tx2, cntryl_midge::WriteOptions::default()).unwrap();
-
-    // Check if snapshot sees the new key
-    // let later_count = snapshot
-    //     .scan(cf, &cntryl_midge::Query::new())
-    //     .unwrap()
-    //     .len();
-    // eprintln!("Snapshot sees {} keys after insert", later_count);
-
-    // if later_count > initial_count {
-    //     eprintln!("❌ PHANTOM READ: Snapshot sees newly inserted rows");
-    //     eprintln!("   => NOT Snapshot Isolation");
-    // } else {
-    //     eprintln!("✅ NO PHANTOM READS: Snapshot is consistent");
-    //     eprintln!("   => Snapshot Isolation supported");
-    // }
-}
+// Note: Snapshot isolation testing removed as the snapshot API is not yet implemented.
+// When snapshots are added, phantom read prevention tests should be reintroduced.
 
 // ============================================================================
 // DIAGNOSTIC TEST 5: Write Conflict on Committed Base

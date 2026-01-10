@@ -392,45 +392,6 @@ fn should_not_corrupt_state_given_unclean_shutdown_when_recovering() {
     );
 }
 
-/// INVARIANT TEST: Durability frontier enforcement
-///
-/// This test verifies that reads respect the durability frontier.
-/// When a write is acknowledged to the user, the read must not return
-/// data that hasn't been synced (if using Strict durability).
-///
-/// Currently this is a placeholder; actual implementation requires
-/// chaos engineering or crash simulation. For now, we verify that
-/// the get() API can be called and returns reasonable values.
-#[test]
-#[ignore] // TODO: Enable after implementing durability frontier enforcement
-fn should_not_return_unsynced_data_on_read_with_strict_durability() {
-    // Arrange
-    let mut opts = opts_for_mode("local");
-    opts.wal_sync = true; // Enable Strict durability
-
-    let engine = open_with_mode(opts, "local");
-    let cf = engine.default_column_family();
-
-    // Act
-    let mut tx = engine
-        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-        .unwrap();
-    tx.put(b"durable_key".to_vec(), b"durable_value".to_vec(), None)
-        .expect("put");
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
-        .unwrap();
-
-    // Assert
-    // With Strict durability, after put() returns Ok, the data MUST be on disk.
-    // A read should return the value (no issue here).
-    // The real test would involve:
-    // 1. Crash simulator that kills the process mid-flush
-    // 2. Verify that reads never return data that wasn't fsynced
-    // 3. Verify that after restart, no data is lost
-    let tx = engine
-        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-        .unwrap();
-    let result = tx.get(b"durable_key").expect("get");
-    assert_eq!(result, Some(Bytes::from_static(b"durable_value")));
-}
+// Note: Durability frontier enforcement test removed as it requires
+// chaos engineering or crash simulation infrastructure that is not yet implemented.
+// This should be reintroduced when proper crash testing infrastructure is available.

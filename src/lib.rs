@@ -117,9 +117,10 @@ pub use testkit::{MidgeOptions, MockStorage, StorageMode};
 ///
 /// ```no_run
 /// use cntryl_midge::prelude::*;
+/// use std::path::PathBuf;
 ///
 /// // Open engine
-/// let engine = MidgeEngine::open("./db")?;
+/// let engine = MidgeEngine::open(PathBuf::from("./db"))?;
 /// let cf = engine.default_column_family();
 ///
 /// // All operations require explicit transactions
