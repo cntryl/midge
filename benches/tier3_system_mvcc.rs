@@ -37,15 +37,20 @@ fn run_overwrite_hot_keys_case(
             let fill = (r % 251) as u8;
             let v = vec![fill; VALUE_SIZE];
             for k in keys.iter() {
-                let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+                let mut tx = e
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                    .expect("begin");
                 tx.put(k.to_vec(), v.clone(), None).unwrap();
-                e.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
+                e.commit(tx, cntryl_midge::WriteOptions::buffered())
+                    .unwrap();
             }
         }
     });
 
     // Not timed
-    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin");
     assert!(tx.get(&keys[0][..]).unwrap().is_some());
 
     drop(engine);
@@ -61,20 +66,30 @@ fn run_read_old_versions_case(ctx: &mut StressContext, opts: MidgeOptions, num_k
     for i in 0..num_keys {
         let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
         keys.push(k);
-        let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        let mut tx = engine
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin");
         tx.put(k.to_vec(), vec![1u8; VALUE_SIZE], None).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
+            .unwrap();
     }
     engine.flush().unwrap();
 
     // Create snapshot via transaction
-    let snap_tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+    let snap_tx = engine
+        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin");
     let _snap_seq = snap_tx.start_sequence();
 
     for k in keys.iter() {
-        let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        let mut tx = engine
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin");
         tx.put(k.to_vec(), vec![2u8; VALUE_SIZE], None).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
+            .unwrap();
     }
     engine.flush().unwrap();
     engine.compact_all().unwrap();

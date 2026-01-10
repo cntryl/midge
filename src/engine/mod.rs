@@ -709,12 +709,13 @@ impl MidgeEngine {
                     let key_id = (*cf_id, key.clone());
                     if let Some(operands) = merge_operands.remove(&key_id) {
                         // Get the merge operator for this CF
-                        let merge_op = self.merge_operators.get(&cf_id.as_u32()).ok_or_else(|| {
-                            MidgeError::InvalidArgument(format!(
-                                "No merge operator registered for column family {}",
-                                cf_id.as_u32()
-                            ))
-                        })?;
+                        let merge_op =
+                            self.merge_operators.get(&cf_id.as_u32()).ok_or_else(|| {
+                                MidgeError::InvalidArgument(format!(
+                                    "No merge operator registered for column family {}",
+                                    cf_id.as_u32()
+                                ))
+                            })?;
 
                         // Get the base value: first check if a put/delete in this tx set it,
                         // otherwise read from the engine
@@ -726,11 +727,7 @@ impl MidgeEngine {
                         };
 
                         // Apply the merge operator
-                        let merged_value = merge_op.merge(
-                            key,
-                            base_value.as_deref(),
-                            &operands,
-                        )?;
+                        let merged_value = merge_op.merge(key, base_value.as_deref(), &operands)?;
 
                         // Write the merged value as a put
                         if let Some(value) = merged_value {

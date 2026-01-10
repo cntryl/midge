@@ -15,7 +15,7 @@ pub use errors::{ApiError, ApiResult};
 pub use iterator::{Direction, Iterator, IteratorBuilder};
 pub use kv::{Key, KvPair, OptionalValue, Value};
 pub use merge_operator::MergeOperator;
-pub use options::{Goal, MemoryBudget, OpenOptions, WorkloadProfile};
+pub use options::{Goal, MemoryBudget, OpenOptions, Storage, WorkloadProfile};
 // Note: Durability is for INTERNAL runtime use only - not part of public API
 pub(crate) use options::Durability;
 pub use query::Query;

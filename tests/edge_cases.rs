@@ -34,7 +34,8 @@ fn should_retrieve_stored_keys_when_megabyte_sized() {
 
         // Act: Store and retrieve
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-        tx.put(large_key.clone(), small_value.to_vec(), None).expect("put");
+        tx.put(large_key.clone(), small_value.to_vec(), None)
+            .expect("put");
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -63,7 +64,8 @@ fn should_retrieve_stored_values_when_hundred_megabytes() {
 
         // Act: Store and retrieve
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-        tx.put(small_key.to_vec(), large_value.clone(), None).expect("put");
+        tx.put(small_key.to_vec(), large_value.clone(), None)
+            .expect("put");
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -90,17 +92,26 @@ fn should_handle_mixed_size_values_when_ranging_from_bytes_to_megabytes() {
         // Act: Store values of wildly different sizes
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         tx.put(b"tiny".to_vec(), b"x".to_vec(), None).expect("put");
-        tx.put(b"small".to_vec(), vec![42u8; 100], None).expect("put");
-        tx.put(b"medium".to_vec(), vec![42u8; 100_000], None).expect("put");
-        tx.put(b"large".to_vec(), vec![42u8; 1_000_000], None).expect("put");
+        tx.put(b"small".to_vec(), vec![42u8; 100], None)
+            .expect("put");
+        tx.put(b"medium".to_vec(), vec![42u8; 100_000], None)
+            .expect("put");
+        tx.put(b"large".to_vec(), vec![42u8; 1_000_000], None)
+            .expect("put");
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert: Retrieve all and verify
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
         assert_eq!(tx.get(b"tiny").expect("get").map(|b| b.len()), Some(1));
         assert_eq!(tx.get(b"small").expect("get").map(|b| b.len()), Some(100));
-        assert_eq!(tx.get(b"medium").expect("get").map(|b| b.len()), Some(100_000));
-        assert_eq!(tx.get(b"large").expect("get").map(|b| b.len()), Some(1_000_000));
+        assert_eq!(
+            tx.get(b"medium").expect("get").map(|b| b.len()),
+            Some(100_000)
+        );
+        assert_eq!(
+            tx.get(b"large").expect("get").map(|b| b.len()),
+            Some(1_000_000)
+        );
     });
 }
 
@@ -177,7 +188,8 @@ fn should_handle_single_record_database_when_one_key_value_pair() {
 
         // Act: Write single record
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-        tx.put(b"only_key".to_vec(), b"only_value".to_vec(), None).expect("put");
+        tx.put(b"only_key".to_vec(), b"only_value".to_vec(), None)
+            .expect("put");
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert: Can retrieve it
@@ -210,7 +222,8 @@ fn should_handle_range_query_at_boundaries_when_first_last_and_missing() {
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         for i in 0..5 {
             let key = format!("key_{i:02}");
-            tx.put(key.into_bytes(), format!("value_{i}").into_bytes(), None).expect("put");
+            tx.put(key.into_bytes(), format!("value_{i}").into_bytes(), None)
+                .expect("put");
         }
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
@@ -248,7 +261,8 @@ fn should_handle_rapid_operations_when_one_thousand_puts_per_second() {
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         for i in 0..1000 {
             let key = format!("rapid_{i:05}");
-            tx.put(key.into_bytes(), format!("v_{i}").into_bytes(), None).expect("put");
+            tx.put(key.into_bytes(), format!("v_{i}").into_bytes(), None)
+                .expect("put");
         }
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
@@ -273,7 +287,8 @@ fn should_handle_delete_all_pattern_when_writing_then_deleting_all_keys() {
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         for i in 0..100 {
             let key = format!("del_test_{i:03}");
-            tx.put(key.into_bytes(), b"delete_me".to_vec(), None).expect("put");
+            tx.put(key.into_bytes(), b"delete_me".to_vec(), None)
+                .expect("put");
         }
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
@@ -306,7 +321,12 @@ fn should_handle_tombstone_accumulation_when_many_deletes_create_tombstones() {
         // Act: 10 put/delete cycles on same key
         for cycle in 0..10 {
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-            tx.put(b"tombstone_test".to_vec(), format!("cycle_{cycle}").into_bytes(), None).expect("put");
+            tx.put(
+                b"tombstone_test".to_vec(),
+                format!("cycle_{cycle}").into_bytes(),
+                None,
+            )
+            .expect("put");
             engine.commit(tx, WriteOptions::buffered()).unwrap();
 
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
@@ -336,7 +356,8 @@ fn should_handle_ten_thousand_keys_when_large_keyspace() {
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         for i in 0..10_000 {
             let key = format!("large_ks_{i:05}");
-            tx.put(key.into_bytes(), format!("v_{i}").into_bytes(), None).expect("put");
+            tx.put(key.into_bytes(), format!("v_{i}").into_bytes(), None)
+                .expect("put");
         }
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
@@ -376,8 +397,11 @@ fn should_batch_concurrent_puts_when_cloudfirst_mode() {
                 s.spawn(move || {
                     for i in 0..puts_per_thread {
                         let key = format!("k_{t}_{i}");
-                        let mut tx = engine_ref.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-                        tx.put(key.into_bytes(), b"value".to_vec(), None).expect("put");
+                        let mut tx = engine_ref
+                            .begin_tx(cf_id, TransactionMode::ReadWrite)
+                            .unwrap();
+                        tx.put(key.into_bytes(), b"value".to_vec(), None)
+                            .expect("put");
                         engine_ref.commit(tx, WriteOptions::buffered()).unwrap();
                     }
                 });

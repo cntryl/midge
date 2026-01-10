@@ -77,7 +77,9 @@ fn run_streaming_phase(
                 let key = ycsb::make_key(seq);
                 let value = make_value((seq & 0xFF) as u8);
 
-                let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+                let mut tx = engine
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                    .expect("begin");
                 tx.put(key.to_vec(), value.to_vec(), None).ok();
                 let _ = engine.commit(tx, cntryl_midge::WriteOptions::buffered());
 
@@ -115,7 +117,9 @@ fn run_streaming_phase(
                 }
 
                 let key = ycsb::make_key(next);
-                let tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+                let tx = engine
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                    .expect("begin");
                 let hit = tx.get(&key[..]).ok().flatten().is_some();
 
                 if count {

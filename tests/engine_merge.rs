@@ -122,7 +122,9 @@ fn should_merge_without_base_value_given_no_existing_key_when_merging() {
             .unwrap();
 
         // Act
-        let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx.merge(b"key1".to_vec(), b"value1".to_vec()).unwrap();
         engine.commit(tx, WriteOptions::buffered()).unwrap();
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -143,12 +145,16 @@ fn should_merge_with_existing_base_value_given_put_when_merging() {
         engine
             .register_merge_operator(cf.id().as_u32(), Box::new(op))
             .unwrap();
-        let mut tx1 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx1 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx1.put(b"key1".to_vec(), b"base".to_vec(), None).unwrap();
         engine.commit(tx1, WriteOptions::buffered()).unwrap();
 
         // Act
-        let mut tx2 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx2 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx2.merge(b"key1".to_vec(), b"append".to_vec()).unwrap();
         engine.commit(tx2, WriteOptions::buffered()).unwrap();
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -171,13 +177,19 @@ fn should_apply_multiple_merges_sequentially_given_repeated_operations_when_read
             .unwrap();
 
         // Act
-        let mut tx1 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx1 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx1.merge(b"key1".to_vec(), b"a".to_vec()).unwrap();
         engine.commit(tx1, WriteOptions::buffered()).unwrap();
-        let mut tx2 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx2 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx2.merge(b"key1".to_vec(), b"b".to_vec()).unwrap();
         engine.commit(tx2, WriteOptions::buffered()).unwrap();
-        let mut tx3 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx3 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx3.merge(b"key1".to_vec(), b"c".to_vec()).unwrap();
         engine.commit(tx3, WriteOptions::buffered()).unwrap();
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -198,15 +210,21 @@ fn should_merge_after_delete_given_tombstone_when_treating_as_missing() {
         engine
             .register_merge_operator(cf.id().as_u32(), Box::new(op))
             .unwrap();
-        let mut tx1 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx1 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx1.put(b"key1".to_vec(), b"old".to_vec(), None).unwrap();
         engine.commit(tx1, WriteOptions::buffered()).unwrap();
-        let mut tx2 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx2 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx2.delete(b"key1".to_vec()).unwrap();
         engine.commit(tx2, WriteOptions::buffered()).unwrap();
 
         // Act
-        let mut tx3 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx3 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx3.merge(b"key1".to_vec(), b"new".to_vec()).unwrap();
         engine.commit(tx3, WriteOptions::buffered()).unwrap();
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -229,13 +247,19 @@ fn should_handle_merge_with_put_interleaved_given_mixed_ops_when_reading() {
             .unwrap();
 
         // Act
-        let mut tx1 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx1 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx1.merge(b"key1".to_vec(), b"a".to_vec()).unwrap();
         engine.commit(tx1, WriteOptions::buffered()).unwrap();
-        let mut tx2 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx2 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx2.put(b"key1".to_vec(), b"reset".to_vec(), None).unwrap();
         engine.commit(tx2, WriteOptions::buffered()).unwrap();
-        let mut tx3 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx3 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx3.merge(b"key1".to_vec(), b"b".to_vec()).unwrap();
         engine.commit(tx3, WriteOptions::buffered()).unwrap();
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -262,10 +286,14 @@ fn should_use_string_append_operator_given_delimiter_when_merging() {
             .unwrap();
 
         // Act
-        let mut tx1 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx1 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx1.merge(b"key1".to_vec(), b"foo".to_vec()).unwrap();
         engine.commit(tx1, WriteOptions::buffered()).unwrap();
-        let mut tx2 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx2 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx2.merge(b"key1".to_vec(), b"bar".to_vec()).unwrap();
         engine.commit(tx2, WriteOptions::buffered()).unwrap();
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -286,15 +314,21 @@ fn should_string_append_with_base_value_given_initial_put_when_merging() {
         engine
             .register_merge_operator(cf.id().as_u32(), Box::new(op))
             .unwrap();
-        let mut tx1 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx1 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx1.put(b"key1".to_vec(), b"start".to_vec(), None).unwrap();
         engine.commit(tx1, WriteOptions::buffered()).unwrap();
 
         // Act
-        let mut tx2 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx2 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx2.merge(b"key1".to_vec(), b"middle".to_vec()).unwrap();
         engine.commit(tx2, WriteOptions::buffered()).unwrap();
-        let mut tx3 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx3 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx3.merge(b"key1".to_vec(), b"end".to_vec()).unwrap();
         engine.commit(tx3, WriteOptions::buffered()).unwrap();
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -317,13 +351,19 @@ fn should_handle_empty_merge_operand_given_empty_bytes_when_appending() {
             .unwrap();
 
         // Act
-        let mut tx1 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx1 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx1.merge(b"key1".to_vec(), b"a".to_vec()).unwrap();
         engine.commit(tx1, WriteOptions::buffered()).unwrap();
-        let mut tx2 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx2 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx2.merge(b"key1".to_vec(), b"".to_vec()).unwrap();
         engine.commit(tx2, WriteOptions::buffered()).unwrap();
-        let mut tx3 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx3 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx3.merge(b"key1".to_vec(), b"c".to_vec()).unwrap();
         engine.commit(tx3, WriteOptions::buffered()).unwrap();
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -369,7 +409,9 @@ fn should_error_when_merging_without_registered_operator_when_merging() {
         let cf = engine.default_column_family();
 
         // Act
-        let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
         tx.merge(b"key1".to_vec(), b"value1".to_vec()).unwrap();
         let result = engine.commit(tx, WriteOptions::buffered());
 

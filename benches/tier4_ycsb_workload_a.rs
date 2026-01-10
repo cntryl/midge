@@ -55,11 +55,15 @@ fn run_workload_a(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
 
                     // Deterministic, stochastic 50/50 mix (avoids perfect alternation).
                     if (op_r & 1) == 0 {
-                        let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+                        let tx = e
+                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                            .expect("begin");
                         let _ = tx.get(&k[..]).expect("warmup get");
                     } else {
                         let v = ycsb::make_value((op_index % 251) as u8);
-                        let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+                        let mut tx = e
+                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                            .expect("begin");
                         tx.put(k.to_vec(), v.to_vec(), None).expect("warmup put");
                         e.commit(tx, write_opts).expect("warmup commit");
                     }
@@ -89,11 +93,15 @@ fn run_workload_a(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
 
                 // Deterministic, stochastic 50/50 mix (avoids perfect alternation).
                 if (op_r & 1) == 0 {
-                    let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("measured begin");
+                    let tx = e
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                        .expect("measured begin");
                     let _ = tx.get(&k[..]).expect("measured get");
                 } else {
                     let v = ycsb::make_value((op_index % 251) as u8);
-                    let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("measured begin");
+                    let mut tx = e
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                        .expect("measured begin");
                     tx.put(k.to_vec(), v.to_vec(), None).expect("measured put");
                     e.commit(tx, write_opts).expect("measured commit");
                 }

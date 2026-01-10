@@ -20,8 +20,11 @@ fn should_recover_data_from_wal_after_flush() {
     // Write data (goes to WAL + memtable)
     for i in 0..50 {
         let key = format!("wal_key_{:04}", i);
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        tx.put(key.as_bytes().to_vec(), b"wal_value".to_vec(), None).unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(key.as_bytes().to_vec(), b"wal_value".to_vec(), None)
+            .unwrap();
         engine.commit(tx, WriteOptions::buffered()).ok();
     }
 
@@ -32,7 +35,9 @@ fn should_recover_data_from_wal_after_flush() {
     eprintln!("Flushed to SST");
 
     // Verify data persisted
-    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let scan = tx.scan_range(&cntryl_midge::Query::new()).unwrap();
     let count = scan.len();
 
@@ -59,8 +64,11 @@ fn should_handle_large_values_in_wal() {
     let large_value = vec![0xFF; 1_000_000]; // 1MB value
 
     // Write large value
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx.put(b"large_wal_key".to_vec(), large_value.clone(), None).unwrap();
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx.put(b"large_wal_key".to_vec(), large_value.clone(), None)
+        .unwrap();
     engine.commit(tx, WriteOptions::buffered()).ok();
     eprintln!("Wrote 1MB value to WAL");
 
@@ -68,7 +76,9 @@ fn should_handle_large_values_in_wal() {
     engine.flush().ok();
 
     // Retrieve and verify
-    let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let read_tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let retrieved = read_tx.get(b"large_wal_key").unwrap();
 
     match retrieved {
@@ -95,18 +105,25 @@ fn should_recover_deletes_from_wal() {
     // Insert data
     for i in 0..30 {
         let key = format!("del_key_{:04}", i);
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None).unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
+            .unwrap();
         engine.commit(tx, WriteOptions::buffered()).ok();
     }
 
     // Delete some keys via transaction
-    let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let mut txn = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
     for i in 0..10 {
         let key = format!("del_key_{:04}", i);
         txn.delete(key.into_bytes()).ok();
     }
-    engine.commit(txn, cntryl_midge::WriteOptions::buffered()).ok();
+    engine
+        .commit(txn, cntryl_midge::WriteOptions::buffered())
+        .ok();
 
     eprintln!("Deleted 10 of 30 keys via transaction");
 
@@ -117,7 +134,9 @@ fn should_recover_deletes_from_wal() {
     let mut deleted_count = 0;
     for i in 0..10 {
         let key = format!("del_key_{:04}", i);
-        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
         if read_tx.get(key.as_bytes()).unwrap().is_none() {
             deleted_count += 1;
         }
@@ -149,16 +168,22 @@ fn should_recover_range_tombstones_from_wal() {
     // Insert keys
     for i in 0..100 {
         let key = format!("k{:03}", i);
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None).unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
+            .unwrap();
         engine.commit(tx, WriteOptions::buffered()).ok();
     }
 
     // Range delete
-    let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    txn.delete_range(b"k020".to_vec(), b"k080".to_vec())
+    let mut txn = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    txn.delete_range(b"k020".to_vec(), b"k080".to_vec()).ok();
+    engine
+        .commit(txn, cntryl_midge::WriteOptions::buffered())
         .ok();
-    engine.commit(txn, cntryl_midge::WriteOptions::buffered()).ok();
 
     eprintln!("Applied range delete [k020, k080)");
 
@@ -166,7 +191,9 @@ fn should_recover_range_tombstones_from_wal() {
     engine.flush().ok();
 
     // Verify range is empty
-    let scan_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let scan_tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let in_range = scan_tx
         .scan_range(&cntryl_midge::Query::new())
         .unwrap()
@@ -203,8 +230,11 @@ fn should_handle_wal_rotation_and_multiple_segments() {
     for batch in 0..5 {
         for i in 0..100 {
             let key = format!("batch{}_key{:04}", batch, i);
-            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-            tx.put(key.as_bytes().to_vec(), b"batch_value".to_vec(), None).unwrap();
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            tx.put(key.as_bytes().to_vec(), b"batch_value".to_vec(), None)
+                .unwrap();
             engine.commit(tx, WriteOptions::buffered()).ok();
         }
 
@@ -214,8 +244,13 @@ fn should_handle_wal_rotation_and_multiple_segments() {
     }
 
     // Verify all data present
-    let final_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
-    let total = final_tx.scan_range(&cntryl_midge::Query::new()).unwrap().len();
+    let final_tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
+    let total = final_tx
+        .scan_range(&cntryl_midge::Query::new())
+        .unwrap()
+        .len();
 
     eprintln!("Total keys after {} batches: {}", batch_count, total);
 
@@ -238,32 +273,48 @@ fn should_recover_mixed_operations_from_wal() {
     eprintln!("\n=== MIXED OPERATIONS IN WAL ===");
 
     // Put
-    let mut tx0 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx0.put(b"put_key".to_vec(), b"put_value".to_vec(), None).unwrap();
+    let mut tx0 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx0.put(b"put_key".to_vec(), b"put_value".to_vec(), None)
+        .unwrap();
     engine.commit(tx0, WriteOptions::buffered()).ok();
 
     // Delete
-    let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let mut txn1 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
     txn1.delete(b"put_key".to_vec()).ok();
-    engine.commit(txn1, cntryl_midge::WriteOptions::buffered()).ok();
+    engine
+        .commit(txn1, cntryl_midge::WriteOptions::buffered())
+        .ok();
 
     // Put again
-    let mut tx1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx1.put(b"put_key".to_vec(), b"put_value_v2".to_vec(), None).unwrap();
+    let mut tx1 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx1.put(b"put_key".to_vec(), b"put_value_v2".to_vec(), None)
+        .unwrap();
     engine.commit(tx1, WriteOptions::buffered()).ok();
 
     // Delete range
     for i in 0..20 {
         let key = format!("dr_{:02}", i);
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        tx.put(key.as_bytes().to_vec(), b"v".to_vec(), None).unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(key.as_bytes().to_vec(), b"v".to_vec(), None)
+            .unwrap();
         engine.commit(tx, WriteOptions::buffered()).ok();
     }
 
-    let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    txn2.delete_range(b"dr_05".to_vec(), b"dr_15".to_vec())
+    let mut txn2 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    txn2.delete_range(b"dr_05".to_vec(), b"dr_15".to_vec()).ok();
+    engine
+        .commit(txn2, cntryl_midge::WriteOptions::buffered())
         .ok();
-    engine.commit(txn2, cntryl_midge::WriteOptions::buffered()).ok();
 
     eprintln!("Applied: put, delete, put, delete_range");
 
@@ -271,7 +322,9 @@ fn should_recover_mixed_operations_from_wal() {
     engine.flush().ok();
 
     // Verify final state
-    let verify_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let verify_tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let put_val = verify_tx.get(b"put_key").unwrap();
     let dr_remaining = verify_tx
         .scan_range(&cntryl_midge::Query::new())

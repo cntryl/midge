@@ -32,13 +32,17 @@ fn should_prevent_dirty_reads_when_reading_uncommitted_writes() {
     let cf = engine.default_column_family();
 
     // Transaction 1: Write but don't commit
-    let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let mut txn1 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
     txn1.put(b"key".to_vec(), b"uncommitted_value".to_vec(), None)
         .unwrap();
     // TXN1 NOT COMMITTED
 
     // Transaction 2: Try to read the same key
-    let txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let txn2 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let value_seen = txn2.get(b"key").unwrap();
 
     if value_seen.is_some() {
@@ -71,13 +75,23 @@ fn should_resolve_concurrent_write_conflicts_when_concurrent() {
     let cf = engine.default_column_family();
 
     // Initial state
-    let mut tx_init = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx_init.put(b"key".to_vec(), b"initial".to_vec(), None).unwrap();
-    engine.commit(tx_init, cntryl_midge::WriteOptions::buffered()).unwrap();
+    let mut tx_init = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx_init
+        .put(b"key".to_vec(), b"initial".to_vec(), None)
+        .unwrap();
+    engine
+        .commit(tx_init, cntryl_midge::WriteOptions::buffered())
+        .unwrap();
 
     // Transaction 1 and 2 both read and modify the same key
-    let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let mut txn1 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    let mut txn2 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
 
     // Both read current value
     // (If isolation were perfect, they'd each have snapshot)
@@ -92,7 +106,9 @@ fn should_resolve_concurrent_write_conflicts_when_concurrent() {
     let result1 = engine.commit(txn1, cntryl_midge::WriteOptions::buffered());
     let result2 = engine.commit(txn2, cntryl_midge::WriteOptions::buffered());
 
-    let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let tx_read = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let final_value = tx_read.get(b"key").unwrap();
 
     eprintln!("TXN1 commit result: {:?}", result1);
@@ -152,13 +168,23 @@ fn should_detect_read_modify_write_conflicts_when_concurrent() {
     let cf = engine.default_column_family();
 
     // Initial counter value
-    let mut tx_init = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx_init.put(b"counter".to_vec(), b"0".to_vec(), None).unwrap();
-    engine.commit(tx_init, cntryl_midge::WriteOptions::buffered()).unwrap();
+    let mut tx_init = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx_init
+        .put(b"counter".to_vec(), b"0".to_vec(), None)
+        .unwrap();
+    engine
+        .commit(tx_init, cntryl_midge::WriteOptions::buffered())
+        .unwrap();
 
     // Scenario: Two transactions each increment counter
-    let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let mut txn1 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    let mut txn2 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
 
     // TXN1: Read counter
     let val1 = txn1.get(b"counter").unwrap();
@@ -191,10 +217,16 @@ fn should_detect_read_modify_write_conflicts_when_concurrent() {
     .unwrap();
 
     // Commit both
-    engine.commit(txn1, cntryl_midge::WriteOptions::buffered()).ok();
-    engine.commit(txn2, cntryl_midge::WriteOptions::buffered()).ok();
+    engine
+        .commit(txn1, cntryl_midge::WriteOptions::buffered())
+        .ok();
+    engine
+        .commit(txn2, cntryl_midge::WriteOptions::buffered())
+        .ok();
 
-    let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let tx_read = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let final_val = tx_read.get(b"counter").unwrap();
     let final_count: i32 = String::from_utf8_lossy(&final_val.unwrap_or_default())
         .parse()
@@ -239,26 +271,38 @@ fn should_detect_write_skew_when_isolation_enabled() {
     let cf = engine.default_column_family();
 
     // Scenario: Two transactions read the same base but write different keys
-    let mut tx_init = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx_init.put(b"shared".to_vec(), b"base_value".to_vec(), None).unwrap();
-    tx_init.put(b"flag1".to_vec(), b"false".to_vec(), None).unwrap();
-    tx_init.put(b"flag2".to_vec(), b"false".to_vec(), None).unwrap();
-    engine.commit(tx_init, cntryl_midge::WriteOptions::buffered()).unwrap();
+    let mut tx_init = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx_init
+        .put(b"shared".to_vec(), b"base_value".to_vec(), None)
+        .unwrap();
+    tx_init
+        .put(b"flag1".to_vec(), b"false".to_vec(), None)
+        .unwrap();
+    tx_init
+        .put(b"flag2".to_vec(), b"false".to_vec(), None)
+        .unwrap();
+    engine
+        .commit(tx_init, cntryl_midge::WriteOptions::buffered())
+        .unwrap();
 
-    let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let mut txn1 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    let mut txn2 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
 
     // Both read the shared key
     let _shared1 = txn1.get(b"shared").unwrap();
     let _shared2 = txn2.get(b"shared").unwrap();
 
     // TXN1 writes to different key
-    txn1.put(b"flag1".to_vec(), b"true".to_vec(), None)
-        .unwrap();
+    txn1.put(b"flag1".to_vec(), b"true".to_vec(), None).unwrap();
 
     // TXN2 writes to different key
-    txn2.put(b"flag2".to_vec(), b"true".to_vec(), None)
-        .unwrap();
+    txn2.put(b"flag2".to_vec(), b"true".to_vec(), None).unwrap();
 
     let r1 = engine.commit(txn1, cntryl_midge::WriteOptions::buffered());
     let r2 = engine.commit(txn2, cntryl_midge::WriteOptions::buffered());

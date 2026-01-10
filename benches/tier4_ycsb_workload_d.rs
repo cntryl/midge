@@ -49,9 +49,12 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                             .wrapping_add(inserts_so_far);
                         let k = ycsb::make_key(key_id);
                         let v = ycsb::make_value((op_index % 251) as u8);
-                        let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+                        let mut tx = e
+                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                            .expect("begin");
                         tx.put(k.to_vec(), v.to_vec(), None).expect("warmup insert");
-                        e.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
+                        e.commit(tx, cntryl_midge::WriteOptions::buffered())
+                            .expect("commit");
                         return;
                     }
 
@@ -69,7 +72,9 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                     };
 
                     let k = ycsb::make_key(pick);
-                    let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+                    let tx = e
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                        .expect("begin");
                     let _ = tx.get(&k[..]).expect("warmup get");
                 }
             },
@@ -93,8 +98,11 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         .wrapping_add(inserts_so_far);
                     let k = ycsb::make_key(key_id);
                     let v = ycsb::make_value((op_index % 251) as u8);
-                    let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("measured begin");
-                    tx.put(k.to_vec(), v.to_vec(), None).expect("measured insert");
+                    let mut tx = e
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                        .expect("measured begin");
+                    tx.put(k.to_vec(), v.to_vec(), None)
+                        .expect("measured insert");
                     e.commit(tx, write_opts).expect("measured commit");
                     return;
                 }
@@ -113,7 +121,9 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                 };
 
                 let k = ycsb::make_key(pick);
-                let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("measured begin");
+                let tx = e
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                    .expect("measured begin");
                 let _ = tx.get(&k[..]).expect("measured get");
             }
         })

@@ -21,14 +21,19 @@ fn run_durability_puts_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops
         for i in 0..num_ops {
             let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
             let v = vec![(i % 251) as u8; VALUE_SIZE];
-            let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+            let mut tx = e
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin");
             tx.put(k.to_vec(), v, None).unwrap();
-            e.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
+            e.commit(tx, cntryl_midge::WriteOptions::buffered())
+                .unwrap();
         }
     });
 
     // Not timed
-    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin");
     assert!(tx.get(&[0u8; KEY_SIZE]).is_ok());
 
     drop(engine);

@@ -10,7 +10,7 @@
 //! These tests validate the config builder's behavior without requiring an
 //! engine instance, since configuration is orthogonal to storage modes.
 
-use cntryl_midge::{Goal, MemoryBudget, OpenOptions, WorkloadProfile};
+use cntryl_midge::{Goal, MemoryBudget, OpenOptions, Storage, WorkloadProfile};
 use std::path::PathBuf;
 
 // ============================================================================
@@ -20,10 +20,10 @@ use std::path::PathBuf;
 #[test]
 fn should_build_config_given_minimal_defaults_when_only_path_provided() {
     // Arrange & Act
-    let opts = OpenOptions::new().path("./test_db").build();
+    let opts = OpenOptions::in_memory().build();
 
     // Assert
-    assert_eq!(opts.path, PathBuf::from("./test_db"));
+    assert_eq!(opts.storage, Storage::InMemory);
     assert_eq!(opts.goal, Goal::Latency);
     assert_eq!(opts.memory_budget, MemoryBudget::Auto);
     assert_eq!(opts.workload, WorkloadProfile::Mixed);
@@ -36,7 +36,7 @@ fn should_build_config_given_minimal_defaults_when_only_path_provided() {
 #[test]
 fn should_set_goal_given_latency_when_optimizing_for_p99() {
     // Arrange & Act
-    let opts = OpenOptions::new().goal(Goal::Latency).build();
+    let opts = OpenOptions::in_memory().goal(Goal::Latency).build();
 
     // Assert
     assert_eq!(opts.goal, Goal::Latency);
@@ -49,7 +49,7 @@ fn should_set_goal_given_latency_when_optimizing_for_p99() {
 #[test]
 fn should_set_goal_given_throughput_when_optimizing_for_bulk_writes() {
     // Arrange & Act
-    let opts = OpenOptions::new().goal(Goal::Throughput).build();
+    let opts = OpenOptions::in_memory().goal(Goal::Throughput).build();
 
     // Assert
     assert_eq!(opts.goal, Goal::Throughput);
@@ -62,7 +62,7 @@ fn should_set_goal_given_throughput_when_optimizing_for_bulk_writes() {
 #[test]
 fn should_set_goal_given_cost_when_minimizing_resources() {
     // Arrange & Act
-    let opts = OpenOptions::new().goal(Goal::Economy).build();
+    let opts = OpenOptions::in_memory().goal(Goal::Economy).build();
 
     // Assert
     assert_eq!(opts.goal, Goal::Economy);
@@ -83,7 +83,7 @@ fn should_respect_memory_budget_given_explicit_bytes_when_configured() {
     let budget = MemoryBudget::Bytes(256 * 1024 * 1024); // 256MB
 
     // Act
-    let opts = OpenOptions::new().memory_budget(budget).build();
+    let opts = OpenOptions::in_memory().memory_budget(budget).build();
 
     // Assert
     assert_eq!(opts.memory_budget, budget);
@@ -96,7 +96,7 @@ fn should_respect_memory_budget_given_explicit_bytes_when_configured() {
 #[test]
 fn should_use_auto_memory_given_no_explicit_budget_when_default() {
     // Arrange & Act
-    let opts = OpenOptions::new().build();
+    let opts = OpenOptions::in_memory().build();
 
     // Assert
     assert_eq!(opts.memory_budget, MemoryBudget::Auto);
@@ -114,10 +114,12 @@ fn should_use_auto_memory_given_no_explicit_budget_when_default() {
 #[test]
 fn should_optimize_params_given_write_heavy_profile_when_configured() {
     // Arrange
-    let normal = OpenOptions::new().workload(WorkloadProfile::Mixed).build();
+    let normal = OpenOptions::in_memory()
+        .workload(WorkloadProfile::Mixed)
+        .build();
 
     // Act
-    let write_heavy = OpenOptions::new()
+    let write_heavy = OpenOptions::in_memory()
         .workload(WorkloadProfile::WriteHeavy)
         .build();
 
@@ -132,10 +134,12 @@ fn should_optimize_params_given_write_heavy_profile_when_configured() {
 #[test]
 fn should_optimize_params_given_read_mostly_profile_when_configured() {
     // Arrange
-    let normal = OpenOptions::new().workload(WorkloadProfile::Mixed).build();
+    let normal = OpenOptions::in_memory()
+        .workload(WorkloadProfile::Mixed)
+        .build();
 
     // Act
-    let read_mostly = OpenOptions::new()
+    let read_mostly = OpenOptions::in_memory()
         .workload(WorkloadProfile::ReadMostly)
         .build();
 
@@ -150,10 +154,10 @@ fn should_optimize_params_given_read_mostly_profile_when_configured() {
 #[test]
 fn should_optimize_params_given_range_scan_profile_when_configured() {
     // Arrange
-    let normal = OpenOptions::new().build();
+    let normal = OpenOptions::in_memory().build();
 
     // Act
-    let range_scan = OpenOptions::new()
+    let range_scan = OpenOptions::in_memory()
         .workload(WorkloadProfile::RangeScan)
         .build();
 
@@ -172,8 +176,7 @@ fn should_optimize_params_given_range_scan_profile_when_configured() {
 #[test]
 fn should_derive_consistent_params_given_all_knobs_set_when_building() {
     // Arrange & Act
-    let opts = OpenOptions::new()
-        .path("./integrated_db")
+    let opts = OpenOptions::in_memory()
         .goal(Goal::Throughput)
         .memory_budget(MemoryBudget::Bytes(1024 * 1024 * 1024)) // 1GB
         .workload(WorkloadProfile::WriteHeavy)
@@ -185,16 +188,15 @@ fn should_derive_consistent_params_given_all_knobs_set_when_building() {
         opts.memtable_size_limit() > 64 * 1024 * 1024,
         "Write-heavy + throughput should have large memtables"
     );
-    assert_eq!(opts.path, PathBuf::from("./integrated_db"));
 }
 
 #[test]
 fn should_derive_different_params_given_latency_vs_throughput_when_comparing() {
     // Arrange
-    let latency_opts = OpenOptions::new().goal(Goal::Latency).build();
+    let latency_opts = OpenOptions::in_memory().goal(Goal::Latency).build();
 
     // Act
-    let throughput_opts = OpenOptions::new().goal(Goal::Throughput).build();
+    let throughput_opts = OpenOptions::in_memory().goal(Goal::Throughput).build();
 
     // Assert
     assert_ne!(
@@ -221,7 +223,7 @@ fn should_derive_different_params_given_latency_vs_throughput_when_comparing() {
 #[test]
 fn should_provide_getter_access_given_derived_params_when_querying() {
     // Arrange & Act
-    let opts = OpenOptions::new().build();
+    let opts = OpenOptions::in_memory().build();
 
     // Assert - all getters should return positive values
     assert!(opts.block_size() > 0);
@@ -239,19 +241,29 @@ fn should_provide_getter_access_given_derived_params_when_querying() {
 #[test]
 fn should_store_path_given_relative_path_when_building() {
     // Arrange & Act
-    let opts = OpenOptions::new().path("./relative/path").build();
+    let opts = OpenOptions::local("./relative/path").build();
 
     // Assert
-    assert_eq!(opts.path, PathBuf::from("./relative/path"));
+    assert_eq!(
+        opts.storage,
+        Storage::Local {
+            path: PathBuf::from("./relative/path")
+        }
+    );
 }
 
 #[test]
 fn should_store_path_given_absolute_path_when_building() {
     // Arrange & Act
-    let opts = OpenOptions::new().path("/absolute/path/to/db").build();
+    let opts = OpenOptions::local("/absolute/path/to/db").build();
 
     // Assert
-    assert_eq!(opts.path, PathBuf::from("/absolute/path/to/db"));
+    assert_eq!(
+        opts.storage,
+        Storage::Local {
+            path: PathBuf::from("/absolute/path/to/db")
+        }
+    );
 }
 
 // ============================================================================
@@ -261,8 +273,7 @@ fn should_store_path_given_absolute_path_when_building() {
 #[test]
 fn should_clone_options_preserving_all_settings_given_configured_opts_when_cloning() {
     // Arrange
-    let original = OpenOptions::new()
-        .path("./db")
+    let original = OpenOptions::in_memory()
         .goal(Goal::Throughput)
         .workload(WorkloadProfile::WriteHeavy)
         .build();
@@ -271,7 +282,7 @@ fn should_clone_options_preserving_all_settings_given_configured_opts_when_cloni
     let cloned = original.clone();
 
     // Assert
-    assert_eq!(cloned.path, original.path);
+    assert_eq!(cloned.storage, original.storage);
     assert_eq!(cloned.goal, original.goal);
     assert_eq!(cloned.workload, original.workload);
     assert_eq!(cloned.block_size(), original.block_size());
@@ -281,7 +292,7 @@ fn should_clone_options_preserving_all_settings_given_configured_opts_when_cloni
 #[test]
 fn should_use_sensible_defaults_given_no_configuration_when_using_default() {
     // Arrange & Act
-    let opts = OpenOptions::default();
+    let opts = OpenOptions::in_memory();
 
     // Assert
     assert_eq!(opts.goal, Goal::Latency);

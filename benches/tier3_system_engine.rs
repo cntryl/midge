@@ -26,14 +26,19 @@ fn run_put_get_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize
 
     ctx.measure_ref(&engine, |e| {
         for (k, v) in keys.iter().zip(values.iter()) {
-            let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+            let mut tx = e
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin");
             tx.put(k.to_vec(), v.clone(), None).unwrap();
-            e.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
+            e.commit(tx, cntryl_midge::WriteOptions::buffered())
+                .unwrap();
         }
 
         let mut found = 0usize;
         for k in keys.iter() {
-            let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+            let tx = e
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin");
             if tx.get(&k[..]).unwrap().is_some() {
                 found += 1;
             }
@@ -42,7 +47,9 @@ fn run_put_get_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize
     });
 
     // Quick correctness smoke (not timed)
-    let tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+    let tx = engine
+        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin");
     assert!(tx.get(&keys[0][..]).unwrap().is_some());
 
     drop(engine);
@@ -66,11 +73,14 @@ fn run_write_batch_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops: us
 
     // Measure exactly one transaction with multiple puts
     ctx.measure_ref(&engine, |e| {
-        let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        let mut tx = e
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin");
         for (k, v) in &keys_vals {
             tx.put(k.to_vec(), v.clone(), None).expect("put");
         }
-        e.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit")
+        e.commit(tx, cntryl_midge::WriteOptions::buffered())
+            .expect("commit")
     });
 
     drop(engine);

@@ -60,12 +60,16 @@ fn should_prevent_dirty_writes_when_uncommitted() {
     let cf = engine.default_column_family();
 
     // Create uncomitted transaction
-    let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let mut txn = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
     txn.put(b"key".to_vec(), b"uncommitted".to_vec(), None)
         .unwrap();
 
     // Other reader should NOT see uncommitted value
-    let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let tx_read = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let val = tx_read.get(b"key").unwrap();
 
     assert!(
@@ -80,8 +84,12 @@ fn should_resolve_concurrent_writes_with_lww_when_enabled() {
     let engine = Arc::new(open_with_mode(opts_for_mode("memory"), "memory"));
     let cf = engine.default_column_family();
 
-    let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let mut txn1 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    let mut txn2 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
 
     txn1.put(b"key".to_vec(), b"from_txn1".to_vec(), None)
         .unwrap();
@@ -95,7 +103,9 @@ fn should_resolve_concurrent_writes_with_lww_when_enabled() {
     assert!(r1.is_ok(), "TXN1 should not be rejected");
     assert!(r2.is_ok(), "TXN2 should not be rejected");
 
-    let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let tx_read = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let final_val = tx_read.get(b"key").unwrap();
 
     // Last commit should be visible
@@ -113,12 +123,22 @@ fn should_permit_lost_updates_when_not_prevented() {
     let cf = engine.default_column_family();
 
     // Initialize counter
-    let mut tx_init = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx_init.put(b"counter".to_vec(), b"0".to_vec(), None).unwrap();
-    engine.commit(tx_init, cntryl_midge::WriteOptions::buffered()).unwrap();
+    let mut tx_init = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx_init
+        .put(b"counter".to_vec(), b"0".to_vec(), None)
+        .unwrap();
+    engine
+        .commit(tx_init, cntryl_midge::WriteOptions::buffered())
+        .unwrap();
 
-    let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let mut txn1 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    let mut txn2 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
 
     // Both read counter
     let val1 = txn1.get(b"counter").unwrap();
@@ -146,10 +166,16 @@ fn should_permit_lost_updates_when_not_prevented() {
     )
     .unwrap();
 
-    engine.commit(txn1, cntryl_midge::WriteOptions::buffered()).ok();
-    engine.commit(txn2, cntryl_midge::WriteOptions::buffered()).ok();
+    engine
+        .commit(txn1, cntryl_midge::WriteOptions::buffered())
+        .ok();
+    engine
+        .commit(txn2, cntryl_midge::WriteOptions::buffered())
+        .ok();
 
-    let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let tx_read = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let final_val = tx_read.get(b"counter").unwrap();
     let final_count: i32 = String::from_utf8_lossy(&final_val.unwrap_or_default())
         .parse()

@@ -47,7 +47,9 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         r
                     }) as u64;
                     let k = ycsb::make_key(key_idx);
-                    let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+                    let tx = e
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                        .expect("begin");
                     let _ = tx.get(&k[..]).expect("warmup get");
                 }
             },
@@ -68,7 +70,9 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                     r
                 }) as u64;
                 let k = ycsb::make_key(key_idx);
-                let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+                let tx = e
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                    .expect("begin");
                 let _ = tx.get(&k[..]).expect("measured get");
             }
         })

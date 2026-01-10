@@ -19,9 +19,13 @@ fn write_some(engine: &MidgeEngine, num_keys: usize) {
     for i in 0..num_keys {
         let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
         let v = vec![(i % 251) as u8; VALUE_SIZE];
-        let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        let mut tx = engine
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin");
         tx.put(k.to_vec(), v, None).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
+            .unwrap();
     }
 }
 
@@ -94,7 +98,9 @@ fn run_wal_replay_case(ctx: &mut StressContext, opts: MidgeOptions) {
         let cf = engine.default_column_family();
         let cf_id = cf.id();
         let k0 = [0u8; KEY_SIZE];
-        let tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let tx = engine
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+            .expect("begin");
         let _ = tx.get(&k0[..]).unwrap();
         drop(engine);
     });

@@ -29,9 +29,13 @@ fn run_sst_point_lookup_case(
     let cf_id = cf.id();
     for (i, k) in keys.iter().enumerate() {
         let v = vec![(i % 251) as u8; VALUE_SIZE];
-        let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        let mut tx = engine
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin");
         tx.put(k.to_vec(), v, None).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
+            .unwrap();
     }
     engine.flush().unwrap();
 
@@ -41,7 +45,10 @@ fn run_sst_point_lookup_case(
     ctx.measure_ref(&engine, |e| {
         let mut found = 0usize;
         for i in 0..num_gets {
-            let k = &keys[i % keys.len()];            let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+            let k = &keys[i % keys.len()];
+            let tx = e
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin");
             if tx.get(&k[..]).unwrap().is_some() {
                 found += 1;
             }
@@ -61,9 +68,13 @@ fn run_sst_range_scan_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
     let cf_id = cf.id();
     for (i, k) in keys.iter().enumerate() {
         let v = vec![(i % 251) as u8; VALUE_SIZE];
-        let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        let mut tx = engine
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin");
         tx.put(k.to_vec(), v, None).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
+            .unwrap();
     }
     engine.flush().unwrap();
 
@@ -73,7 +84,9 @@ fn run_sst_range_scan_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
     ctx.set_elements(1);
 
     ctx.measure_ref(&engine, |e| {
-        let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let tx = e
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+            .expect("begin");
         let results = tx.scan(&start[..], &end[..]).expect("range failed");
         results.len()
     });
@@ -95,9 +108,13 @@ fn run_sst_sparse_keyspace_cloud_case(ctx: &mut StressContext, opts: MidgeOption
         k[..8].copy_from_slice(&spaced.to_be_bytes());
         keys.push(k);
         let v = vec![(i % 251) as u8; VALUE_SIZE];
-        let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        let mut tx = engine
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin");
         tx.put(k.to_vec(), v, None).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
+            .unwrap();
     }
     engine.flush().unwrap();
 
@@ -107,7 +124,9 @@ fn run_sst_sparse_keyspace_cloud_case(ctx: &mut StressContext, opts: MidgeOption
     ctx.measure_ref(&engine, |e| {
         let start = keys[0];
         let end = keys[keys.len() - 1];
-        let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let tx = e
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+            .expect("begin");
         let results = tx.scan(&start[..], &end[..]).expect("range failed");
         results.len()
     });

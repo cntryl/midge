@@ -47,9 +47,13 @@ fn run_flush_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize, 
     // Setup (not measured)
     let cf_id = cf.id();
     for (k, v) in keys.iter().zip(values.iter()) {
-        let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        let mut tx = engine
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin");
         tx.put(k.to_vec(), v.clone(), None).expect("setup put");
-        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
+            .expect("commit");
     }
 
     // Measure exactly one flush
@@ -86,8 +90,11 @@ fn run_compact_all_many_sst_case(
             ((i + 1) * chunk).min(num_keys)
         };
         for idx in start..end {
-            let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
-            tx.put(keys[idx].to_vec(), values[idx].clone(), None).expect("setup put");
+            let mut tx = engine
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin");
+            tx.put(keys[idx].to_vec(), values[idx].clone(), None)
+                .expect("setup put");
             engine.commit(tx, write_opts).expect("setup commit");
         }
         engine.flush().expect("setup flush");
@@ -126,8 +133,11 @@ fn run_many_overlapping_l0_files_case(
             let mut k = base_keys[idx];
             // Introduce overlap across batches.
             k[0] = (batch % 10) as u8;
-            let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
-            tx.put(k.to_vec(), base_values[idx].clone(), None).expect("setup put");
+            let mut tx = engine
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin");
+            tx.put(k.to_vec(), base_values[idx].clone(), None)
+                .expect("setup put");
             engine.commit(tx, write_opts).expect("setup commit");
         }
         engine.flush().expect("setup flush");
@@ -161,8 +171,15 @@ fn run_overlap_pressure_compact_case(
         for idx in 0..num_keys_per_batch {
             // Reuse the same key range each batch to maximize overlap.
             let k = base_keys[idx];
-            let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
-            tx.put(k.to_vec(), base_values[batch * num_keys_per_batch + idx].clone(), None).expect("setup put");
+            let mut tx = engine
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin");
+            tx.put(
+                k.to_vec(),
+                base_values[batch * num_keys_per_batch + idx].clone(),
+                None,
+            )
+            .expect("setup put");
             engine.commit(tx, write_opts).expect("setup commit");
         }
         engine.flush().expect("setup flush");

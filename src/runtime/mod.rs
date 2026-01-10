@@ -737,13 +737,7 @@ impl Runtime {
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())
             .spawn(move || {
-                match EventLoop::new(
-                    state,
-                    trace_enabled,
-                    router,
-                    config,
-                    Some(msg_tx_for_loop),
-                ) {
+                match EventLoop::new(state, trace_enabled, router, config, Some(msg_tx_for_loop)) {
                     Ok(mut event_loop) => {
                         // Signal successful initialization
                         let _ = init_tx.send(Ok(()));

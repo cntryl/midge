@@ -87,6 +87,7 @@ pub use engine::api::{
     OpenOptions,
     // Query/Scan
     Query,
+    Storage,
     Transaction,
     TransactionMode,
     TransactionState,
@@ -102,9 +103,9 @@ pub use engine::api::MergeOperator;
 // Internal APIs (hidden from documentation)
 #[doc(hidden)]
 pub use engine::api::{
-    CasResult,   // Return type for compare_and_swap
+    CasResult,    // Return type for compare_and_swap
     InsertResult, // Return type for insert
-    WriteIntent, // Internal transaction state
+    WriteIntent,  // Internal transaction state
 };
 
 // Observability

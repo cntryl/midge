@@ -67,7 +67,7 @@ fn bench_batch_put(c: &mut Criterion) {
     let engine = setup_db("batch_put");
     let cf = engine.default_column_family();
     let cf_id = cf.id();
-    
+
     // Reuse WriteOptions across iterations (allowed optimization)
     let write_opts = cntryl_midge::WriteOptions::buffered();
 
@@ -82,7 +82,9 @@ fn bench_batch_put(c: &mut Criterion) {
             |b, &size| {
                 b.iter(|| {
                     // Measure: begin transaction, add all puts, commit
-                    let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
+                    let mut tx = engine
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                        .unwrap();
                     for i in 0..size {
                         tx.put(keys[i].to_vec(), vals[i].to_vec(), None).unwrap();
                     }
@@ -114,9 +116,13 @@ fn bench_single_get(c: &mut Criterion) {
 
     // Pre-populate with data (NO flush - keep in memtable for hot path)
     for i in 0..num_keys {
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin");
         tx.put(keys[i].to_vec(), vals[i].to_vec(), None).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
+            .unwrap();
     }
     // Note: intentionally NOT flushing to keep data in memtable
 
@@ -127,7 +133,9 @@ fn bench_single_get(c: &mut Criterion) {
         b.iter(|| {
             let idx = counter % num_keys;
             counter += 1;
-            let tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+            let tx = engine
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin");
             let result = tx.get(black_box(&keys[idx]));
             black_box(result)
         })
@@ -148,7 +156,9 @@ fn bench_single_get(c: &mut Criterion) {
         b.iter(|| {
             let idx = miss_counter % num_keys;
             miss_counter += 1;
-            let tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+            let tx = engine
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin");
             let result = tx.get(black_box(&miss_keys[idx]));
             black_box(result)
         })
@@ -176,9 +186,14 @@ fn bench_single_put(c: &mut Criterion) {
         b.iter(|| {
             let idx = counter % num_ops;
             counter += 1;
-            let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
-            tx.put(keys[idx].to_vec(), vals[idx].to_vec(), None).unwrap();
-            engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
+            let mut tx = engine
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin");
+            tx.put(keys[idx].to_vec(), vals[idx].to_vec(), None)
+                .unwrap();
+            engine
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
+                .unwrap();
             black_box(());
         })
     });

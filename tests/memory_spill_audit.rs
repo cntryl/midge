@@ -162,8 +162,7 @@ fn should_handle_transaction_spill_to_disk_correctly() {
         for i in 0..200 {
             let key = format!("spilltest_key_{:04}", i);
             let value = vec![88u8; 512]; // 512 bytes per key
-            tx.put(key.as_bytes().to_vec(), value, None)
-                .expect("put");
+            tx.put(key.as_bytes().to_vec(), value, None).expect("put");
         }
 
         let commit_result = engine.commit(tx, WriteOptions::buffered());

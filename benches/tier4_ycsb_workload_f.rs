@@ -47,12 +47,17 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         r
                     }) as u64;
                     let k = ycsb::make_key(key_idx);
-                    let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+                    let tx = e
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                        .expect("begin");
                     let _old = tx.get(&k[..]).expect("warmup get");
                     let v = ycsb::make_value((op_index % 251) as u8);
-                    let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+                    let mut tx = e
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                        .expect("begin");
                     tx.put(k.to_vec(), v.to_vec(), None).expect("warmup put");
-                    e.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
+                    e.commit(tx, cntryl_midge::WriteOptions::buffered())
+                        .expect("commit");
                 }
             },
         );
@@ -73,11 +78,15 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                     r
                 }) as u64;
                 let k = ycsb::make_key(key_idx);
-                let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("measured begin");
+                let tx = e
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                    .expect("measured begin");
                 let _old = tx.get(&k[..]).expect("measured get");
                 drop(tx);
                 let v = ycsb::make_value((op_index % 251) as u8);
-                let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("measured begin");
+                let mut tx = e
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                    .expect("measured begin");
                 tx.put(k.to_vec(), v.to_vec(), None).expect("measured put");
                 e.commit(tx, write_opts).expect("measured commit");
             }

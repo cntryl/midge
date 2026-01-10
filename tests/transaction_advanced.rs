@@ -25,12 +25,16 @@ fn should_persist_atomic_transactions_after_restart() {
             let engine = open_with_mode(opts_clone.clone(), mode);
             let cf = engine.default_column_family();
 
-            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin_tx");
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin_tx");
             tx.put(b"tx_key1".to_vec(), b"tx_value1".to_vec(), None)
                 .expect("put");
             tx.put(b"tx_key2".to_vec(), b"tx_value2".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
+            engine
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
+                .expect("commit");
             // engine dropped, crash simulation
         }
 
@@ -39,7 +43,9 @@ fn should_persist_atomic_transactions_after_restart() {
             let engine = open_with_mode(opts_clone, mode);
             let cf = engine.default_column_family();
 
-            let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
+            let tx_read = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin_tx");
             let got1 = tx_read.get(b"tx_key1").expect("get");
             let got2 = tx_read.get(b"tx_key2").expect("get");
 
@@ -74,7 +80,9 @@ fn should_not_persist_uncommitted_transaction_after_restart() {
             let engine = open_with_mode(opts_clone.clone(), mode);
             let cf = engine.default_column_family();
 
-            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin_tx");
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin_tx");
             tx.put(
                 b"uncommitted_key".to_vec(),
                 b"uncommitted_value".to_vec(),
@@ -89,7 +97,9 @@ fn should_not_persist_uncommitted_transaction_after_restart() {
             let engine = open_with_mode(opts_clone, mode);
             let cf = engine.default_column_family();
 
-            let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
+            let tx_read = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin_tx");
             let got = tx_read.get(b"uncommitted_key").expect("get");
             assert_eq!(got, None, "uncommitted data persisted in mode: {}", mode);
         }
@@ -111,9 +121,14 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
             let cf = engine.default_column_family();
             for i in 0..10 {
                 let key = format!("key{}", i);
-                let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin_tx");
-                tx.put(key.as_bytes().to_vec(), b"initial_value".to_vec(), None).expect("put");
-                engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
+                let mut tx = engine
+                    .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                    .expect("begin_tx");
+                tx.put(key.as_bytes().to_vec(), b"initial_value".to_vec(), None)
+                    .expect("put");
+                engine
+                    .commit(tx, cntryl_midge::WriteOptions::buffered())
+                    .expect("commit");
             }
         }
 
@@ -122,13 +137,17 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
             let engine = open_with_mode(opts_clone.clone(), mode);
             let cf = engine.default_column_family();
 
-            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin_tx");
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin_tx");
             tx.delete_range(
                 b"key3".to_vec(),
                 b"key7".to_vec(), // [key3, key7)
             )
             .expect("delete_range");
-            engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
+            engine
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
+                .expect("commit");
             // crash simulation
         }
 
@@ -137,7 +156,9 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
             let engine = open_with_mode(opts_clone, mode);
             let cf = engine.default_column_family();
 
-            let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
+            let tx_read = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin_tx");
             // Keys before range should exist
             assert_eq!(
                 tx_read.get(b"key2").unwrap(),
@@ -179,14 +200,18 @@ fn should_recover_committed_spill_given_restart_after_commit() {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
 
-            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin_tx");
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin_tx");
             for i in 0..200 {
                 let key = format!("spill_key{:04}", i);
                 let value = format!("spill_value_{:04}", i);
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
+            engine
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
+                .expect("commit");
             // crash simulation
         }
 
@@ -195,7 +220,9 @@ fn should_recover_committed_spill_given_restart_after_commit() {
             let engine = open_with_mode(opts_clone, mode);
             let cf = engine.default_column_family();
 
-            let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
+            let tx_read = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin_tx");
             for i in 0..200 {
                 let key = format!("spill_key{:04}", i);
                 let expected = format!("spill_value_{:04}", i);
@@ -227,7 +254,9 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
 
-            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin_tx");
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin_tx");
             for i in 0..200 {
                 let key = format!("uncom_key{:04}", i);
                 let value = format!("uncom_value_{:04}", i);
@@ -242,7 +271,9 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
             let engine = open_with_mode(opts_clone, mode);
             let cf = engine.default_column_family();
 
-            let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
+            let tx_read = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin_tx");
             for i in 0..200 {
                 let key = format!("uncom_key{:04}", i);
                 let got = tx_read.get(key.as_bytes()).expect("get");
@@ -268,12 +299,16 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
                 let engine = open_with_mode(opts_clone.clone(), mode);
                 let cf = engine.default_column_family();
 
-                let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin_tx");
+                let mut tx = engine
+                    .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                    .expect("begin_tx");
                 let key = format!("cycle{}_key", cycle);
                 let value = format!("cycle{}_value", cycle);
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
-                engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
+                engine
+                    .commit(tx, cntryl_midge::WriteOptions::buffered())
+                    .expect("commit");
             }
 
             {
@@ -281,7 +316,9 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
                 let cf = engine.default_column_family();
                 let key = format!("cycle{}_key", cycle);
                 let expected = format!("cycle{}_value", cycle);
-                let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
+                let tx_read = engine
+                    .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                    .expect("begin_tx");
                 let got = tx_read.get(key.as_bytes()).expect("get");
                 let got_str = got.as_ref().map(|b| String::from_utf8_lossy(b).to_string());
                 assert_eq!(
@@ -308,12 +345,16 @@ fn should_maintain_exactly_once_semantics_given_transaction_with_crash() {
             let engine = open_with_mode(opts_clone.clone(), mode);
             let cf = engine.default_column_family();
 
-            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin_tx");
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin_tx");
             tx.put(b"idempotent_key".to_vec(), b"value1".to_vec(), None)
                 .expect("put");
             tx.put(b"idempotent_key".to_vec(), b"value2".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
+            engine
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
+                .expect("commit");
         }
 
         // Assert: Final value should be the last write (value2)
@@ -321,7 +362,9 @@ fn should_maintain_exactly_once_semantics_given_transaction_with_crash() {
             let engine = open_with_mode(opts_clone, mode);
             let cf = engine.default_column_family();
 
-            let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
+            let tx_read = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin_tx");
             let got = tx_read.get(b"idempotent_key").expect("get");
             assert_eq!(
                 got,
@@ -347,14 +390,18 @@ fn should_recover_large_transaction_given_crash_during_spill() {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
 
-            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin_tx");
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin_tx");
             for i in 0..500 {
                 let key = format!("large_key{:04}", i);
                 let value = format!("large_value_{:04}_{}", i, "x".repeat(100)); // 100 byte values
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
+            engine
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
+                .expect("commit");
         }
 
         // Assert: All data recovered despite tight spill conditions
@@ -362,7 +409,9 @@ fn should_recover_large_transaction_given_crash_during_spill() {
             let engine = open_with_mode(opts_clone, mode);
             let cf = engine.default_column_family();
 
-            let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
+            let tx_read = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin_tx");
             for i in 0..500 {
                 let key = format!("large_key{:04}", i);
                 let got = tx_read.get(key.as_bytes()).expect("get");
@@ -383,21 +432,23 @@ fn should_not_lose_transaction_writes_given_incomplete_wal_sync() {
             let engine = open_with_mode(opts_clone.clone(), mode);
             let cf = engine.default_column_family();
 
-            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin_tx");
-            tx.put(
-                b"wal_test_key".to_vec(),
-                b"wal_test_value".to_vec(),
-                None,
-            )
-            .expect("put");
-            engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin_tx");
+            tx.put(b"wal_test_key".to_vec(), b"wal_test_value".to_vec(), None)
+                .expect("put");
+            engine
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
+                .expect("commit");
         }
 
         {
             let engine = open_with_mode(opts_clone, mode);
             let cf = engine.default_column_family();
 
-            let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
+            let tx_read = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin_tx");
             let got = tx_read.get(b"wal_test_key").expect("get");
             assert_eq!(
                 got,
@@ -422,21 +473,27 @@ fn should_survive_mid_spill_crash_given_transaction_recovery() {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
 
-            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin_tx");
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin_tx");
             for i in 0..300 {
                 let key = format!("mid_spill_{:04}", i);
                 let value = format!("value_{:04}", i);
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
+            engine
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
+                .expect("commit");
         }
 
         {
             let engine = open_with_mode(opts_clone, mode);
             let cf = engine.default_column_family();
 
-            let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
+            let tx_read = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin_tx");
             for i in 0..300 {
                 let key = format!("mid_spill_{:04}", i);
                 let got = tx_read.get(key.as_bytes()).expect("get");

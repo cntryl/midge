@@ -31,8 +31,10 @@ fn should_recover_writes_given_unflushed_memtable_when_reopening() {
 
             // Write to WAL but don't flush memtable
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-            tx.put(b"key1".to_vec(), b"value1".to_vec(), None).expect("put");
-            tx.put(b"key2".to_vec(), b"value2".to_vec(), None).expect("put");
+            tx.put(b"key1".to_vec(), b"value1".to_vec(), None)
+                .expect("put");
+            tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
+                .expect("put");
             engine.commit(tx, WriteOptions::buffered()).unwrap();
             // Engine dropped here, simulating crash with unflushed memtable
         }
@@ -71,7 +73,8 @@ fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
 
             // Write with fsync guarantee (durability_opts sets fsync_enabled: true)
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-            tx.put(b"critical_key".to_vec(), b"critical_value".to_vec(), None).expect("put");
+            tx.put(b"critical_key".to_vec(), b"critical_value".to_vec(), None)
+                .expect("put");
             engine.commit(tx, WriteOptions::buffered()).unwrap();
             // Simulate immediate crash
         }
@@ -129,7 +132,8 @@ fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
             for i in 0..1000 {
                 let key = format!("key_{:04}", i);
                 let value = format!("value_{:04}_with_padding_to_exceed_buffer_size", i);
-                tx.put(key.into_bytes(), value.into_bytes(), None).expect("put");
+                tx.put(key.into_bytes(), value.into_bytes(), None)
+                    .expect("put");
             }
             engine.commit(tx, WriteOptions::buffered()).unwrap();
             // Force checkpoint to ensure WAL segments are created
@@ -182,7 +186,8 @@ fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
                 for i in 0..100 {
                     let key = format!("batch_{}_key_{:03}", batch, i);
                     let value = format!("batch_{}_value_{:03}", batch, i);
-                    tx.put(key.into_bytes(), value.into_bytes(), None).expect("put");
+                    tx.put(key.into_bytes(), value.into_bytes(), None)
+                        .expect("put");
                 }
                 engine.commit(tx, WriteOptions::buffered()).unwrap();
             }
@@ -228,8 +233,11 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
                     for i in 0..20 {
                         let key = format!("thread_{}_key_{:02}", thread_id, i);
                         let value = format!("thread_{}_value_{:02}", thread_id, i);
-                        let mut tx = engine_clone.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-                        tx.put(key.into_bytes(), value.into_bytes(), None).expect("put");
+                        let mut tx = engine_clone
+                            .begin_tx(cf_id, TransactionMode::ReadWrite)
+                            .unwrap();
+                        tx.put(key.into_bytes(), value.into_bytes(), None)
+                            .expect("put");
                         engine_clone.commit(tx, WriteOptions::buffered()).unwrap();
                     }
                 });
@@ -281,7 +289,8 @@ fn should_skip_corrupted_wal_tail_given_truncated_tail_when_recovering() {
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
             for i in 0..10 {
                 let key = format!("key_{:02}", i);
-                tx.put(key.into_bytes(), b"value".to_vec(), None).expect("put");
+                tx.put(key.into_bytes(), b"value".to_vec(), None)
+                    .expect("put");
             }
             engine.commit(tx, WriteOptions::buffered()).unwrap();
             // Simulate crash without flushing final records
@@ -312,7 +321,8 @@ fn should_not_recover_data_given_truncated_wal_append_when_reopening() {
 
             // Write without fsync, simulating crash mid-write
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-            tx.put(b"unsafe_key".to_vec(), b"unsafe_value".to_vec(), None).expect("put");
+            tx.put(b"unsafe_key".to_vec(), b"unsafe_value".to_vec(), None)
+                .expect("put");
             engine.commit(tx, WriteOptions::buffered()).unwrap();
             // Immediate crash before fsync
         }
@@ -348,7 +358,8 @@ fn should_allow_data_loss_given_skipped_fsync_when_crash_occurs() {
 
             // Write without guaranteeing sync
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-            tx.put(b"transient_key".to_vec(), b"transient_value".to_vec(), None).expect("put");
+            tx.put(b"transient_key".to_vec(), b"transient_value".to_vec(), None)
+                .expect("put");
             engine.commit(tx, WriteOptions::buffered()).unwrap();
             // Crash
         }
@@ -378,8 +389,10 @@ fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
 
             // Write valid records followed by corruption
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-            tx.put(b"valid_key_1".to_vec(), b"value_1".to_vec(), None).expect("put");
-            tx.put(b"valid_key_2".to_vec(), b"value_2".to_vec(), None).expect("put");
+            tx.put(b"valid_key_1".to_vec(), b"value_1".to_vec(), None)
+                .expect("put");
+            tx.put(b"valid_key_2".to_vec(), b"value_2".to_vec(), None)
+                .expect("put");
             engine.commit(tx, WriteOptions::buffered()).unwrap();
             // Simulate corruption by crashing mid-record
         }

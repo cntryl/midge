@@ -466,9 +466,9 @@ impl Transaction {
     /// Returns all key-value pairs in the range [start, end) visible at this transaction's
     /// snapshot sequence.
     pub fn scan(&self, start: &[u8], end: &[u8]) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
-        let base_results = self
-            .engine()
-            .scan_at_sequence(self.cf_id, start, end, self.start_sequence)?;
+        let base_results =
+            self.engine()
+                .scan_at_sequence(self.cf_id, start, end, self.start_sequence)?;
 
         let mut merged: BTreeMap<Vec<u8>, Option<bytes::Bytes>> = BTreeMap::new();
 
@@ -485,9 +485,7 @@ impl Transaction {
                     merged.insert(key.clone(), None);
                 }
                 WriteIntent::DeleteRange {
-                    start_key,
-                    end_key,
-                    ..
+                    start_key, end_key, ..
                 } => {
                     let start = start_key.as_slice();
                     let end = end_key.as_slice();

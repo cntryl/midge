@@ -25,6 +25,56 @@
 
 use std::path::PathBuf;
 
+/// Storage backend specification - MUST be explicit
+///
+/// This enum enforces unambiguous storage selection. There are NO defaults,
+/// NO inference, and NO magic switching between backends.
+///
+/// Each variant clearly answers: "Where does this database live?"
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Storage {
+    /// In-memory storage - no persistence
+    ///
+    /// Data is lost when the engine is dropped or process exits.
+    /// Use for: testing, caching, ephemeral workloads
+    InMemory,
+
+    /// Local filesystem storage
+    ///
+    /// Data persists to local disk at the specified path.
+    /// Use for: traditional deployments, single-node databases
+    Local {
+        /// Filesystem path to database directory
+        path: PathBuf,
+    },
+
+    /// Cloud object storage (provider-agnostic)
+    ///
+    /// Data persists to cloud object storage. Supports:
+    /// - AWS S3
+    /// - Azure Blob Storage  
+    /// - Google Cloud Storage
+    /// - Cloudflare R2
+    /// - MinIO and other S3-compatible services
+    /// - Any object storage with appropriate credentials
+    ///
+    /// Uses a hybrid model with local cache for performance.
+    ///
+    /// Use for: cloud-native deployments, serverless, distributed systems
+    Cloud {
+        /// Local cache/staging path for performance
+        local_cache_path: PathBuf,
+        /// Bucket/container name (provider-specific terminology)
+        bucket: String,
+        /// Object key prefix (e.g., "databases/myapp/")
+        prefix: String,
+        /// Optional endpoint override (for custom cloud providers or regional endpoints)
+        endpoint: Option<String>,
+        /// Optional region/location override
+        region: Option<String>,
+    },
+}
+
 /// Performance optimization goal.
 ///
 /// Determines the primary optimization target for derived parameters.
@@ -110,10 +160,15 @@ pub enum WorkloadProfile {
 ///
 /// Use the builder pattern to configure high-level knobs, and all low-level
 /// parameters will be derived automatically.
+///
+/// Storage backend MUST be explicitly specified via constructors:
+/// - OpenOptions::in_memory()
+/// - OpenOptions::local(path)
+/// - OpenOptions::cloud(cache_path, bucket, prefix)
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
-    /// Database path
-    pub path: PathBuf,
+    /// Storage backend (REQUIRED - no default)
+    pub storage: Storage,
 
     /// Performance goal
     pub goal: Goal,
@@ -144,22 +199,21 @@ pub struct OpenOptions {
     pub(crate) l0_compaction_trigger: usize,
 }
 
-impl Default for OpenOptions {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl OpenOptions {
-    /// Create new options with default values.
+    /// Create in-memory database instance
     ///
-    /// Defaults:
-    /// - Goal: Latency
-    /// - Memory: Auto (50% of system RAM)
-    /// - Workload: Mixed
-    pub fn new() -> Self {
+    /// Data is NOT persisted and will be lost when engine is dropped.
+    /// Ideal for: testing, caching, ephemeral workloads
+    ///
+    /// # Example
+    /// ```ignore
+    /// let opts = OpenOptions::in_memory()
+    ///     .goal(Goal::Latency)
+    ///     .build();
+    /// ```
+    pub fn in_memory() -> Self {
         Self {
-            path: PathBuf::from("./midge_db"),
+            storage: Storage::InMemory,
             goal: Goal::default(),
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
@@ -173,10 +227,80 @@ impl OpenOptions {
         }
     }
 
-    /// Set database path.
-    pub fn path<P: Into<PathBuf>>(mut self, path: P) -> Self {
-        self.path = path.into();
-        self
+    /// Create local filesystem database instance
+    ///
+    /// Data persists to the specified path on local disk.
+    /// Ideal for: traditional deployments, single-node databases
+    ///
+    /// # Example
+    /// ```ignore
+    /// let opts = OpenOptions::local("./my_database")
+    ///     .goal(Goal::Throughput)
+    ///     .build();
+    /// ```
+    pub fn local<P: Into<PathBuf>>(path: P) -> Self {
+        Self {
+            storage: Storage::Local { path: path.into() },
+            goal: Goal::default(),
+            memory_budget: MemoryBudget::default(),
+            workload: WorkloadProfile::default(),
+            // Temporary defaults until build() derives them
+            block_size: 16 * 1024,
+            memtable_size_limit: 64 * 1024 * 1024,
+            target_sst_size: 256 * 1024 * 1024,
+            block_cache_size: 128 * 1024 * 1024,
+            wal_buffer_size: 256 * 1024,
+            l0_compaction_trigger: 4,
+        }
+    }
+
+    /// Create cloud-backed database instance
+    ///
+    /// Data persists to cloud object storage (S3, Azure, GCS, R2, etc.).
+    /// Uses hybrid model with local cache for performance.
+    /// Ideal for: cloud-native deployments, serverless, distributed systems
+    ///
+    /// # Arguments
+    /// * `local_cache_path` - Local directory for caching/staging
+    /// * `bucket` - Cloud bucket/container name
+    /// * `prefix` - Object key prefix
+    ///
+    /// # Example
+    /// ```ignore
+    /// // AWS S3 with local cache
+    /// let opts = OpenOptions::cloud("./cache", "my-bucket", "db/prod/")
+    ///     .goal(Goal::Economy)
+    ///     .build();
+    ///
+    /// // Cloudflare R2 with local cache
+    /// let opts = OpenOptions::cloud("/tmp/midge-cache", "my-r2-bucket", "db/")
+    ///     .goal(Goal::Throughput)
+    ///     .build();
+    /// ```
+    pub fn cloud<P: Into<PathBuf>, S: Into<String>>(
+        local_cache_path: P,
+        bucket: S,
+        prefix: S,
+    ) -> Self {
+        Self {
+            storage: Storage::Cloud {
+                local_cache_path: local_cache_path.into(),
+                bucket: bucket.into(),
+                prefix: prefix.into(),
+                endpoint: None,
+                region: None,
+            },
+            goal: Goal::default(),
+            memory_budget: MemoryBudget::default(),
+            workload: WorkloadProfile::default(),
+            // Temporary defaults until build() derives them
+            block_size: 16 * 1024,
+            memtable_size_limit: 64 * 1024 * 1024,
+            target_sst_size: 256 * 1024 * 1024,
+            block_cache_size: 128 * 1024 * 1024,
+            wal_buffer_size: 256 * 1024,
+            l0_compaction_trigger: 4,
+        }
     }
 
     /// Set performance goal.
@@ -394,36 +518,42 @@ mod tests {
     // ========== OpenOptions Builder Tests ==========
 
     #[test]
-    fn should_create_options_with_defaults() {
+    fn should_create_in_memory_options() {
         // Arrange
         // (no setup required)
 
         // Act
-        let opts = OpenOptions::new();
+        let opts = OpenOptions::in_memory();
 
         // Assert
+        assert_eq!(opts.storage, Storage::InMemory);
         assert_eq!(opts.goal, Goal::Latency);
         assert_eq!(opts.memory_budget, MemoryBudget::Auto);
         assert_eq!(opts.workload, WorkloadProfile::Mixed);
     }
 
     #[test]
-    fn should_set_path_when_calling_path() {
+    fn should_create_local_options_with_path() {
         // Arrange
         // (no setup required)
 
         // Act
-        let opts = OpenOptions::new().path("./test_db");
+        let opts = OpenOptions::local("./test_db");
 
         // Assert
-        assert_eq!(opts.path, PathBuf::from("./test_db"));
+        assert_eq!(
+            opts.storage,
+            Storage::Local {
+                path: PathBuf::from("./test_db")
+            }
+        );
     }
 
     #[test]
     fn should_set_goal_when_calling_goal() {
         // Arrange
         // Act
-        let opts = OpenOptions::new().goal(Goal::Throughput);
+        let opts = OpenOptions::in_memory().goal(Goal::Throughput);
 
         // Assert
         assert_eq!(opts.goal, Goal::Throughput);
@@ -435,7 +565,7 @@ mod tests {
         let budget = MemoryBudget::Bytes(2 * 1024 * 1024 * 1024);
 
         // Act
-        let opts = OpenOptions::new().memory_budget(budget);
+        let opts = OpenOptions::in_memory().memory_budget(budget);
 
         // Assert
         assert_eq!(opts.memory_budget, budget);
@@ -443,7 +573,7 @@ mod tests {
 
     #[test]
     fn should_set_workload_when_calling_workload() {
-        let opts = OpenOptions::new().workload(WorkloadProfile::WriteHeavy);
+        let opts = OpenOptions::in_memory().workload(WorkloadProfile::WriteHeavy);
         assert_eq!(opts.workload, WorkloadProfile::WriteHeavy);
     }
 
@@ -453,14 +583,18 @@ mod tests {
         // (no setup required)
 
         // Act
-        let opts = OpenOptions::new()
-            .path("./db")
+        let opts = OpenOptions::local("./db")
             .goal(Goal::Latency)
             .workload(WorkloadProfile::ReadMostly)
             .build();
 
         // Assert
-        assert_eq!(opts.path, PathBuf::from("./db"));
+        assert_eq!(
+            opts.storage,
+            Storage::Local {
+                path: PathBuf::from("./db")
+            }
+        );
         assert_eq!(opts.goal, Goal::Latency);
         assert_eq!(opts.workload, WorkloadProfile::ReadMostly);
     }
@@ -471,7 +605,7 @@ mod tests {
         // (no setup required)
 
         // Act
-        let opts = OpenOptions::new().goal(Goal::Latency).build();
+        let opts = OpenOptions::in_memory().goal(Goal::Latency).build();
 
         // Assert
         assert!(opts.block_size > 0);
@@ -486,8 +620,8 @@ mod tests {
         // (no setup required)
 
         // Act
-        let latency_opts = OpenOptions::new().goal(Goal::Latency).build();
-        let throughput_opts = OpenOptions::new().goal(Goal::Throughput).build();
+        let latency_opts = OpenOptions::in_memory().goal(Goal::Latency).build();
+        let throughput_opts = OpenOptions::in_memory().goal(Goal::Throughput).build();
 
         // Assert
         assert_ne!(latency_opts.block_size, throughput_opts.block_size);
@@ -499,8 +633,10 @@ mod tests {
         // (no setup required)
 
         // Act
-        let normal = OpenOptions::new().workload(WorkloadProfile::Mixed).build();
-        let write_heavy = OpenOptions::new()
+        let normal = OpenOptions::in_memory()
+            .workload(WorkloadProfile::Mixed)
+            .build();
+        let write_heavy = OpenOptions::in_memory()
             .workload(WorkloadProfile::WriteHeavy)
             .build();
 
@@ -509,26 +645,12 @@ mod tests {
     }
 
     #[test]
-    fn should_derive_parameters_from_default() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = OpenOptions::default().build();
-
-        // Assert
-        assert_eq!(opts.goal, Goal::Latency);
-        assert!(opts.block_size > 0);
-        assert!(opts.memtable_size_limit > 0);
-    }
-
-    #[test]
     fn should_provide_getter_methods() {
         // Arrange
         // (no setup required)
 
         // Act
-        let opts = OpenOptions::new().build();
+        let opts = OpenOptions::in_memory().build();
 
         // Assert - getters should be callable
         let _ = opts.block_size();
@@ -540,19 +662,13 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_path_conversion() {
-        let opts = OpenOptions::new().path("/tmp/db");
-        assert_eq!(opts.path, PathBuf::from("/tmp/db"));
-    }
-
-    #[test]
     fn should_respect_explicit_memory_budget() {
         // Arrange
         // Use a realistic budget larger than 2x memtable size to have cache allocation
         let budget = MemoryBudget::Bytes(512 * 1024 * 1024); // 512MB
 
         // Act
-        let opts = OpenOptions::new().memory_budget(budget).build();
+        let opts = OpenOptions::in_memory().memory_budget(budget).build();
 
         // Assert
         assert!(opts.block_cache_size > 0);
@@ -561,8 +677,7 @@ mod tests {
     #[test]
     fn should_clone_options() {
         // Arrange
-        let original = OpenOptions::new()
-            .goal(Goal::Throughput);
+        let original = OpenOptions::in_memory().goal(Goal::Throughput);
 
         // Act
         let cloned = original.clone();

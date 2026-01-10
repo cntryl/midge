@@ -28,8 +28,10 @@ fn should_not_create_filesystem_artifacts_when_memory_mode() {
     let cf_id = cf.id();
 
     let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-    tx.put(b"test_key_1".to_vec(), b"test_value_1".to_vec(), None).expect("put");
-    tx.put(b"test_key_2".to_vec(), b"test_value_2".to_vec(), None).expect("put");
+    tx.put(b"test_key_1".to_vec(), b"test_value_1".to_vec(), None)
+        .expect("put");
+    tx.put(b"test_key_2".to_vec(), b"test_value_2".to_vec(), None)
+        .expect("put");
     engine.commit(tx, WriteOptions::buffered()).unwrap();
     // engine dropped here - memory mode stores nothing on disk
 
@@ -50,7 +52,12 @@ fn should_not_persist_data_across_restart_given_memory_mode_when_reopening() {
 
         // Act: Write to memory engine
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-        tx.put(b"persist_test".to_vec(), b"should_not_persist".to_vec(), None).expect("put");
+        tx.put(
+            b"persist_test".to_vec(),
+            b"should_not_persist".to_vec(),
+            None,
+        )
+        .expect("put");
         engine.commit(tx, WriteOptions::buffered()).unwrap();
         // engine dropped
     }
@@ -81,15 +88,21 @@ fn should_isolate_data_given_multiple_memory_engines_when_separate_instances() {
     let engine1 = open_with_mode(opts1, "memory");
     let cf1 = engine1.default_column_family();
     let cf_id1 = cf1.id();
-    let mut tx = engine1.begin_tx(cf_id1, TransactionMode::ReadWrite).unwrap();
-    tx.put(b"test_key".to_vec(), b"engine1_value".to_vec(), None).expect("put");
+    let mut tx = engine1
+        .begin_tx(cf_id1, TransactionMode::ReadWrite)
+        .unwrap();
+    tx.put(b"test_key".to_vec(), b"engine1_value".to_vec(), None)
+        .expect("put");
     engine1.commit(tx, WriteOptions::buffered()).unwrap();
 
     let engine2 = open_with_mode(opts2, "memory");
     let cf2 = engine2.default_column_family();
     let cf_id2 = cf2.id();
-    let mut tx = engine2.begin_tx(cf_id2, TransactionMode::ReadWrite).unwrap();
-    tx.put(b"test_key".to_vec(), b"engine2_value".to_vec(), None).expect("put");
+    let mut tx = engine2
+        .begin_tx(cf_id2, TransactionMode::ReadWrite)
+        .unwrap();
+    tx.put(b"test_key".to_vec(), b"engine2_value".to_vec(), None)
+        .expect("put");
     engine2.commit(tx, WriteOptions::buffered()).unwrap();
 
     // Assert: Each engine instance has isolated data
@@ -122,7 +135,8 @@ fn should_handle_many_writes_efficiently_when_writing_100_keys() {
     let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
     for i in 0..100 {
         let key = format!("write_test_{i:03}");
-        tx.put(key.into_bytes(), b"value".to_vec(), None).expect("put");
+        tx.put(key.into_bytes(), b"value".to_vec(), None)
+            .expect("put");
     }
     engine.commit(tx, WriteOptions::buffered()).unwrap();
 
@@ -151,7 +165,8 @@ fn should_handle_many_deletes_efficiently_when_deleting_50_keys() {
     let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
     for i in 0..50 {
         let key = format!("delete_test_{i:02}");
-        tx.put(key.into_bytes(), b"value".to_vec(), None).expect("put");
+        tx.put(key.into_bytes(), b"value".to_vec(), None)
+            .expect("put");
     }
     engine.commit(tx, WriteOptions::buffered()).unwrap();
 
@@ -191,7 +206,8 @@ fn should_handle_mixed_operations_efficiently_when_put_delete_overwrite() {
     engine.commit(tx, WriteOptions::buffered()).unwrap();
 
     let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-    tx.put(b"key1".to_vec(), b"v1_new".to_vec(), None).expect("put");
+    tx.put(b"key1".to_vec(), b"v1_new".to_vec(), None)
+        .expect("put");
     tx.put(b"key3".to_vec(), b"v3".to_vec(), None).expect("put");
     engine.commit(tx, WriteOptions::buffered()).unwrap();
 

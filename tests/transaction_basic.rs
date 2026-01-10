@@ -469,19 +469,30 @@ fn should_allow_operations_given_previous_commit_failed_when_disk_full() {
 
         // Act - first transaction fails (simulated disk full)
         {
-            let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-            txn1.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+            let mut txn1 = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            txn1.put(b"key1".to_vec(), b"value1".to_vec(), None)
+                .unwrap();
             // Simulate commit failure by dropping
         }
 
         // Second transaction should work
-        let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn2.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
+        let mut txn2 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn2.put(b"key2".to_vec(), b"value2".to_vec(), None)
+            .unwrap();
         engine.commit(txn2, WriteOptions::buffered()).unwrap();
 
         // Assert
-        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
-        assert_eq!(read_tx.get(b"key2").unwrap(), Some(Bytes::from_static(b"value2")));
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(
+            read_tx.get(b"key2").unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
     });
 }
 
@@ -496,7 +507,9 @@ fn should_persist_transaction_given_commit_when_crash_after() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
-            let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+            let mut txn = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
             txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
             engine.commit(txn, WriteOptions::buffered()).unwrap();
             // Engine dropped (simulated crash)
@@ -506,7 +519,9 @@ fn should_persist_transaction_given_commit_when_crash_after() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+            let tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .unwrap();
             let value = tx.get(b"key1").unwrap();
             assert_eq!(value, Some(Bytes::from_static(b"value1")));
         }
@@ -520,7 +535,9 @@ fn should_not_persist_transaction_given_abort_when_crash_after() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
-            let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+            let mut txn = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
             txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
             // Txn dropped without commit
             // Engine dropped (simulated crash)
@@ -530,7 +547,9 @@ fn should_not_persist_transaction_given_abort_when_crash_after() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+            let tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .unwrap();
             let value = tx.get(b"key1").unwrap();
             assert_eq!(value, None);
         }
@@ -546,12 +565,18 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
             let cf = engine.default_column_family();
 
             // Multiple transactions
-            let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-            txn1.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+            let mut txn1 = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            txn1.put(b"key1".to_vec(), b"value1".to_vec(), None)
+                .unwrap();
             engine.commit(txn1, WriteOptions::buffered()).unwrap();
 
-            let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-            txn2.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
+            let mut txn2 = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            txn2.put(b"key2".to_vec(), b"value2".to_vec(), None)
+                .unwrap();
             engine.commit(txn2, WriteOptions::buffered()).unwrap();
 
             // Engine dropped
@@ -561,9 +586,17 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
-            assert_eq!(tx.get(b"key1").unwrap(), Some(Bytes::from_static(b"value1")));
-            assert_eq!(tx.get(b"key2").unwrap(), Some(Bytes::from_static(b"value2")));
+            let tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .unwrap();
+            assert_eq!(
+                tx.get(b"key1").unwrap(),
+                Some(Bytes::from_static(b"value1"))
+            );
+            assert_eq!(
+                tx.get(b"key2").unwrap(),
+                Some(Bytes::from_static(b"value2"))
+            );
         }
     });
 }

@@ -5,9 +5,9 @@
 //! - storage-mode parameterization
 //! - engine setup from high-level knobs (via `OpenOptions`)
 
-use crate::testkit::{MidgeOptions, StorageMode};
-use crate::{Goal, MemoryBudget, MidgeEngine, OpenOptions, WorkloadProfile};
 use crate::common::AckPolicy;
+use crate::testkit::{MidgeOptions, StorageMode};
+use crate::{Goal, MemoryBudget, MidgeEngine, WorkloadProfile};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -141,14 +141,6 @@ impl BenchEngineConfig {
     /// `db_path` is required for `LocalDisk` storage mode and should be the
     /// filesystem path the engine will use. Pass `None` for `Memory` mode.
     pub fn build_midge_options(&self, db_path: Option<PathBuf>) -> MidgeOptions {
-        // Use the public OpenOptions builder as the source of truth for derived knobs.
-        // This keeps benches aligned with user-facing configuration semantics.
-        let open_opts = OpenOptions::new()
-            .goal(self.goal)
-            .workload(self.workload)
-            .memory_budget(self.memory_budget)
-            .build();
-
         let storage_mode = match self.storage_mode {
             BenchStorageMode::Memory => StorageMode::Memory,
             BenchStorageMode::LocalDisk => {
@@ -162,9 +154,7 @@ impl BenchEngineConfig {
 
         MidgeOptions {
             storage_mode,
-            memtable_size: self
-                .memtable_size
-                .unwrap_or(open_opts.memtable_size_limit()),
+            memtable_size: self.memtable_size.unwrap_or(64 * 1024 * 1024),
             enable_compaction: self.enable_compaction,
             // WAL sync is determined at commit time via WriteOptions, not OpenOptions
             wal_sync: false,
@@ -214,8 +204,6 @@ pub fn reopen_engine_at_path(path: &Path, config: &BenchEngineConfig) -> MidgeEn
     let opts = config.build_midge_options(Some(path.to_path_buf()));
     MidgeEngine::open(opts).expect("failed to open engine")
 }
-
-
 
 /// Setup Arc-wrapped engine for concurrent benchmarks.
 pub fn setup_engine_arc(prefix: &str, mode: BenchStorageMode) -> Arc<MidgeEngine> {
