@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::engine::api;
-use crate::{ColumnFamily, MidgeEngine};
+use crate::{ColumnFamilyHandle, MidgeEngine};
 
 use super::MidgeOptions;
 
@@ -58,7 +58,7 @@ pub fn open_tier4_engine(mut opts: MidgeOptions) -> MidgeEngine {
     MidgeEngine::open_with_options(opts).expect("open tier4 engine")
 }
 
-pub fn load_initial_dataset(engine: &MidgeEngine, cf: &ColumnFamily, initial_keys: usize) {
+pub fn load_initial_dataset(engine: &MidgeEngine, cf: &ColumnFamilyHandle, initial_keys: usize) {
     // Load is not measured; optimize aggressively to keep Tier-4 runs practical.
     // Use transactions with batched commits to amortize WAL overhead.
     const BATCH_OPS: usize = 1024;
@@ -156,7 +156,7 @@ pub fn run_multi_client_for_duration<MakeClient, Step>(
 ) -> u64
 where
     MakeClient: Fn(usize) -> Step,
-    Step: FnMut(&MidgeEngine, &ColumnFamily, u64) + Send + 'static,
+    Step: FnMut(&MidgeEngine, &ColumnFamilyHandle, u64) + Send + 'static,
 {
     let stop = Arc::new(AtomicBool::new(false));
     let barrier = Arc::new(Barrier::new(clients + 1));
@@ -169,7 +169,7 @@ where
         let mut step = make_client(client_id);
 
         handles.push(thread::spawn(move || {
-            let cf: &ColumnFamily = engine.default_column_family();
+            let cf: &ColumnFamilyHandle = engine.default_column_family();
 
             // Start all clients together to reduce launch skew.
             barrier.wait();

@@ -3,8 +3,6 @@
 //! Provides explicit control over write durability semantics.
 //! Callers must always specify durability policy - no defaults.
 
-use crate::common::AckPolicy;
-
 /// Write options - MUST be explicitly provided for all commits
 ///
 /// Deliberately NO Default impl to force explicit choices
@@ -61,20 +59,6 @@ impl WriteOptions {
     /// Check if WAL is disabled
     pub fn is_no_wal(&self) -> bool {
         matches!(self.policy, DurabilityPolicy::NoWAL)
-    }
-
-    /// Convert to AckPolicy for internal use
-    pub(crate) fn to_ack_policy(&self) -> AckPolicy {
-        match self.policy {
-            DurabilityPolicy::Sync => AckPolicy::AfterLocalDurable,
-            DurabilityPolicy::Buffered => AckPolicy::Immediate,
-            DurabilityPolicy::NoWAL => AckPolicy::Immediate, // WAL disabled elsewhere
-        }
-    }
-
-    /// Check if WAL should be used
-    pub(crate) fn use_wal(&self) -> bool {
-        !matches!(self.policy, DurabilityPolicy::NoWAL)
     }
 
     /// Builder-style: set policy to Sync

@@ -10,7 +10,6 @@
 //! All tests run on ALL storage modes.
 
 use bytes::Bytes;
-use cntryl_midge::engine::api::WriteBatch;
 use cntryl_midge::testkit::*;
 use cntryl_midge::{MergeOperator, MidgeResult};
 use std::sync::Arc;

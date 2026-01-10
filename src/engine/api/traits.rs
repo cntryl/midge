@@ -8,7 +8,7 @@
 //! - No batch API (transactions ARE the batch)
 
 use super::WriteOptions;
-use crate::common::{MidgeError, MidgeResult};
+use crate::common::MidgeResult;
 use crate::engine::ColumnFamilyId;
 use std::ops::Range;
 
@@ -63,12 +63,6 @@ pub trait KvIterator {
 /// Concrete iterator implementation wrapping the internal iterator
 pub struct MidgeKvIterator {
     inner: super::Iterator,
-}
-
-impl MidgeKvIterator {
-    pub(crate) fn new(inner: super::Iterator) -> Self {
-        Self { inner }
-    }
 }
 
 impl KvIterator for MidgeKvIterator {

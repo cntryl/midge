@@ -89,7 +89,6 @@ fn should_handle_large_values_in_wal() {
 fn should_recover_deletes_from_wal() {
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.default_column_family();
-    let cf_id = cf.id();
 
     eprintln!("\n=== DELETE RECOVERY FROM WAL ===");
 
@@ -144,7 +143,6 @@ fn should_recover_deletes_from_wal() {
 fn should_recover_range_tombstones_from_wal() {
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.default_column_family();
-    let cf_id = cf.id();
 
     eprintln!("\n=== RANGE TOMBSTONE IN WAL ===");
 
@@ -236,7 +234,6 @@ fn should_handle_wal_rotation_and_multiple_segments() {
 fn should_recover_mixed_operations_from_wal() {
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.default_column_family();
-    let cf_id = cf.id();
 
     eprintln!("\n=== MIXED OPERATIONS IN WAL ===");
 

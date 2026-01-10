@@ -131,7 +131,7 @@ fn should_handle_special_characters_in_keys_when_utf8_and_binary_mixed() {
         // Assert: Retrieve all
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
         for (i, key) in keys.iter().enumerate() {
-            let got = tx.get(*key).expect("get");
+            let got = tx.get(key).expect("get");
             let expected_value = format!("value_{i}");
             assert_eq!(
                 got,

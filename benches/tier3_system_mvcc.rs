@@ -60,7 +60,7 @@ fn run_read_old_versions_case(ctx: &mut StressContext, opts: MidgeOptions, num_k
     let cf_id = cf.id();
     for i in 0..num_keys {
         let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
-        keys.push(k.clone());
+        keys.push(k);
         let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
         tx.put(k.to_vec(), vec![1u8; VALUE_SIZE], None).unwrap();
         engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
@@ -69,7 +69,7 @@ fn run_read_old_versions_case(ctx: &mut StressContext, opts: MidgeOptions, num_k
 
     // Create snapshot via transaction
     let snap_tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
-    let snap_seq = snap_tx.start_sequence();
+    let _snap_seq = snap_tx.start_sequence();
 
     for k in keys.iter() {
         let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");

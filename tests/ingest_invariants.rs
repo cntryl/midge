@@ -5,7 +5,7 @@
 //! - Attempting probe/load/transaction during ingest panics with clear messages
 //! - Compaction abort logs occur exactly once per job
 
-use cntryl_midge::{IsolationLevel, MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 
 /// Helper to create a test engine with a temporary directory
 fn create_test_engine() -> (MidgeEngine, tempfile::TempDir) {

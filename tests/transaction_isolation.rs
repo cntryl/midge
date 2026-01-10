@@ -8,7 +8,6 @@
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
-use cntryl_midge::WriteOptions;
 use std::sync::Arc;
 
 // ============================================================================

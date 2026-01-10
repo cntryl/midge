@@ -101,15 +101,12 @@ pub use engine::api::{
 // Merge operators (stable API)
 pub use engine::api::MergeOperator;
 
-// Legacy/Internal APIs (hidden from documentation)
+// Internal APIs (hidden from documentation)
 #[doc(hidden)]
 pub use engine::api::{
-    CasResult,    // Internal
-    ColumnFamily, // Internal
-    InsertResult, // Internal
-    Snapshot,     // Internal: not part of public API
-    WriteBatch,   // Internal: not part of public API
-    WriteIntent,  // Internal
+    CasResult,   // Return type for compare_and_swap
+    InsertResult, // Return type for insert
+    WriteIntent, // Internal transaction state
 };
 
 // Observability
