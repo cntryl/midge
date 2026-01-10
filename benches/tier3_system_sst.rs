@@ -74,7 +74,7 @@ fn run_sst_range_scan_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
 
     ctx.measure_ref(&engine, |e| {
         let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
-        let results = tx.scan(Some(&start[..]), Some(&end[..])).expect("range failed");
+        let results = tx.scan(&start[..], &end[..]).expect("range failed");
         results.len()
     });
 
@@ -107,7 +107,8 @@ fn run_sst_sparse_keyspace_cloud_case(ctx: &mut StressContext, opts: MidgeOption
     ctx.measure_ref(&engine, |e| {
         let start = keys[0];
         let end = keys[keys.len() - 1];
-        let results = e.range(cf, &start[..], &end[..]).expect("range failed");
+        let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let results = tx.scan(&start[..], &end[..]).expect("range failed");
         results.len()
     });
 

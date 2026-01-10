@@ -27,17 +27,28 @@
 // Foundation - no dependencies
 pub mod common;
 
-// Internal modules - implementation details (pub for internal use)
-pub(crate) mod compaction;
-pub(crate) mod io;
-pub(crate) mod iterators;
-pub(crate) mod metadata;
-pub(crate) mod metrics;
-pub(crate) mod runtime;
-pub(crate) mod sst;
-pub(crate) mod storage;
-pub(crate) mod telemetry;
-pub(crate) mod wal;
+// Internal modules - implementation details
+// Exposed for benchmarks but hidden from public documentation
+#[doc(hidden)]
+pub mod compaction;
+#[doc(hidden)]
+pub mod io;
+#[doc(hidden)]
+pub mod iterators;
+#[doc(hidden)]
+pub mod metadata;
+#[doc(hidden)]
+pub mod metrics;
+#[doc(hidden)]
+pub mod runtime;
+#[doc(hidden)]
+pub mod sst;
+#[doc(hidden)]
+pub mod storage;
+#[doc(hidden)]
+pub mod telemetry;
+#[doc(hidden)]
+pub mod wal;
 
 // Main engine (public)
 pub mod engine;

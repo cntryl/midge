@@ -29,11 +29,15 @@ fn run_scan_query_case(
     // Setup (not measured)
     setup(&engine);
 
+    // Extract query bounds (precompute outside measurement)
+    let start = query.effective_start().expect("query must have start");
+    let end_vec = query.effective_end().expect("query must have end");
+
     // Measure exactly one scan
     let cf_id = cf.id();
     ctx.measure_ref(&engine, |e| {
         let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
-        let results = tx.scan(query.start.as_deref(), query.end.as_deref()).expect("scan failed");
+        let results = tx.scan(start, &end_vec).expect("scan failed");
         results.len()
     });
 
