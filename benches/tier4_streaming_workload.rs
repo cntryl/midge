@@ -79,7 +79,7 @@ fn run_streaming_phase(
 
                 let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
                 tx.put(key.to_vec(), value.to_vec(), None).ok();
-                let _ = engine.commit(tx, cntryl_midge::WriteOptions::default());
+                let _ = engine.commit(tx, cntryl_midge::WriteOptions::buffered());
 
                 if count {
                     local_writes = local_writes.wrapping_add(1);

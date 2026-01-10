@@ -49,7 +49,7 @@ fn run_flush_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize, 
     for (k, v) in keys.iter().zip(values.iter()) {
         let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
         tx.put(k.to_vec(), v.clone(), None).expect("setup put");
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
     }
 
     // Measure exactly one flush
@@ -76,7 +76,7 @@ fn run_compact_all_many_sst_case(
     // Setup (not measured): create multiple flush outputs.
     let batches = 4usize;
     let chunk = (num_keys / batches).max(1);
-    let write_opts = cntryl_midge::WriteOptions::default();
+    let write_opts = cntryl_midge::WriteOptions::buffered();
 
     for i in 0..batches {
         let start = i * chunk;
@@ -115,7 +115,7 @@ fn run_many_overlapping_l0_files_case(
     let engine = setup_engine(opts);
     let cf = engine.default_column_family();
     let cf_id = cf.id();
-    let write_opts = cntryl_midge::WriteOptions::default();
+    let write_opts = cntryl_midge::WriteOptions::buffered();
 
     // Setup: create multiple L0 files with overlapping keyspace.
     for batch in 0..num_batches {
@@ -154,7 +154,7 @@ fn run_overlap_pressure_compact_case(
     let engine = setup_engine(opts);
     let cf = engine.default_column_family();
     let cf_id = cf.id();
-    let write_opts = cntryl_midge::WriteOptions::default();
+    let write_opts = cntryl_midge::WriteOptions::buffered();
 
     // Setup: create many overlapping flush outputs by repeatedly writing the same keyspace.
     for batch in 0..num_batches {

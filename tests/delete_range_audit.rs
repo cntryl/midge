@@ -25,7 +25,7 @@ fn should_verify_delete_range_works_despite_range_being_stubbed() {
             tx.put(key.into_bytes(), val.into_bytes(), None).unwrap();
         }
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
 
         eprintln!("  Inserted 10 keys: key01..key10");
@@ -37,7 +37,7 @@ fn should_verify_delete_range_works_despite_range_being_stubbed() {
         tx.delete_range(b"key02".to_vec(), b"key08".to_vec())
             .unwrap();
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
         eprintln!("  Called delete_range(key02, key08)");
 
@@ -101,7 +101,7 @@ fn should_test_range_method_directly_if_available() {
         tx.put(b"c".to_vec(), b"val_c".to_vec(), None).unwrap();
         tx.put(b"d".to_vec(), b"val_d".to_vec(), None).unwrap();
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
 
         // Try to call range() - if it exists and is not stubbed, this will return keys

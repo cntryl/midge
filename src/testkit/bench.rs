@@ -6,7 +6,8 @@
 //! - engine setup from high-level knobs (via `OpenOptions`)
 
 use crate::testkit::{MidgeOptions, StorageMode};
-use crate::{Durability, Goal, MemoryBudget, MidgeEngine, OpenOptions, WorkloadProfile};
+use crate::{Goal, MemoryBudget, MidgeEngine, OpenOptions, WorkloadProfile};
+use crate::common::AckPolicy;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -67,7 +68,6 @@ pub struct BenchEngineConfig {
     pub storage_mode: BenchStorageMode,
     /// High-level tuning knobs (use the public OpenOptions builder).
     pub goal: Goal,
-    pub durability: Durability,
     pub workload: WorkloadProfile,
     pub memory_budget: MemoryBudget,
     /// Optional WAL batch config to control group commit behavior for benches.
@@ -82,7 +82,6 @@ impl Default for BenchEngineConfig {
         Self {
             storage_mode: BenchStorageMode::LocalDisk,
             goal: Goal::default(),
-            durability: Durability::default(),
             workload: WorkloadProfile::default(),
             memory_budget: MemoryBudget::default(),
             wal_batch_config: None,
@@ -109,11 +108,6 @@ impl BenchEngineConfig {
 
     pub fn with_goal(mut self, goal: Goal) -> Self {
         self.goal = goal;
-        self
-    }
-
-    pub fn with_durability(mut self, durability: Durability) -> Self {
-        self.durability = durability;
         self
     }
 
@@ -151,7 +145,6 @@ impl BenchEngineConfig {
         // This keeps benches aligned with user-facing configuration semantics.
         let open_opts = OpenOptions::new()
             .goal(self.goal)
-            .durability(self.durability)
             .workload(self.workload)
             .memory_budget(self.memory_budget)
             .build();
@@ -173,9 +166,9 @@ impl BenchEngineConfig {
                 .memtable_size
                 .unwrap_or(open_opts.memtable_size_limit()),
             enable_compaction: self.enable_compaction,
-            // Derived from durability/goal/workload by OpenOptions.
-            wal_sync: open_opts.wal_sync_on_write(),
-            ack_policy: open_opts.ack_policy(),
+            // WAL sync is determined at commit time via WriteOptions, not OpenOptions
+            wal_sync: false,
+            ack_policy: AckPolicy::Immediate,
             wal_batch_config: self.wal_batch_config,
             ..Default::default()
         }
@@ -222,19 +215,7 @@ pub fn reopen_engine_at_path(path: &Path, config: &BenchEngineConfig) -> MidgeEn
     MidgeEngine::open(opts).expect("failed to open engine")
 }
 
-/// Setup engine with storage mode and durability.
-pub fn setup_engine_with_mode_and_durability(
-    prefix: &str,
-    mode: BenchStorageMode,
-    durability: Durability,
-) -> MidgeEngine {
-    let config = BenchEngineConfig {
-        storage_mode: mode,
-        durability,
-        ..Default::default()
-    };
-    setup_engine(prefix, &config)
-}
+
 
 /// Setup Arc-wrapped engine for concurrent benchmarks.
 pub fn setup_engine_arc(prefix: &str, mode: BenchStorageMode) -> Arc<MidgeEngine> {

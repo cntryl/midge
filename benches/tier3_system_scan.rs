@@ -13,7 +13,7 @@ fn write_prefixed_keys(engine: &MidgeEngine, num_keys: usize, prefix: u8) {
         let v = vec![(i % 251) as u8; VALUE_SIZE];
         let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
         tx.put(k.to_vec(), v, None).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
     }
 }
 

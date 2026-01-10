@@ -28,7 +28,7 @@ fn run_put_get_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize
         for (k, v) in keys.iter().zip(values.iter()) {
             let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
             tx.put(k.to_vec(), v.clone(), None).unwrap();
-            e.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+            e.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
         }
 
         let mut found = 0usize;
@@ -70,7 +70,7 @@ fn run_write_batch_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops: us
         for (k, v) in &keys_vals {
             tx.put(k.to_vec(), v.clone(), None).expect("put");
         }
-        e.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit")
+        e.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit")
     });
 
     drop(engine);

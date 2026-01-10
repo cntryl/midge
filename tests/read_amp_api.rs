@@ -18,7 +18,7 @@ fn should_expose_read_amp_metrics_through_api() -> MidgeResult<()> {
         let key = format!("key{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::default())?;
+        engine.commit(tx, WriteOptions::buffered())?;
     }
     engine.flush()?;
     std::thread::sleep(std::time::Duration::from_millis(500)); // Wait for flush to complete
@@ -27,7 +27,7 @@ fn should_expose_read_amp_metrics_through_api() -> MidgeResult<()> {
     // This ensures reads must come from SSTs
     let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
     tx.put(b"dummy".to_vec(), b"data".to_vec(), None)?;
-    engine.commit(tx, WriteOptions::default())?;
+    engine.commit(tx, WriteOptions::buffered())?;
     engine.flush()?;
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -81,7 +81,7 @@ fn should_track_l0_overlap_in_metrics() -> MidgeResult<()> {
             let value = format!("value_batch{}", batch);
             let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)?;
-            engine.commit(tx, WriteOptions::default())?;
+            engine.commit(tx, WriteOptions::buffered())?;
         }
         engine.flush()?;
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -139,7 +139,7 @@ fn should_accumulate_metrics_over_multiple_reads() -> MidgeResult<()> {
         let key = format!("key{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::default())?;
+        engine.commit(tx, WriteOptions::buffered())?;
     }
     engine.flush()?;
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -180,7 +180,7 @@ fn should_report_budget_violations_when_exceeded() -> MidgeResult<()> {
         let value = format!("value{}", batch);
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(b"hotkey".to_vec(), value.as_bytes().to_vec(), None)?;
-        engine.commit(tx, WriteOptions::default())?;
+        engine.commit(tx, WriteOptions::buffered())?;
         engine.flush()?;
         std::thread::sleep(std::time::Duration::from_millis(20));
     }

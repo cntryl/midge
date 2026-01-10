@@ -39,7 +39,7 @@ fn run_overwrite_hot_keys_case(
             for k in keys.iter() {
                 let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
                 tx.put(k.to_vec(), v.clone(), None).unwrap();
-                e.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+                e.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
             }
         }
     });
@@ -63,7 +63,7 @@ fn run_read_old_versions_case(ctx: &mut StressContext, opts: MidgeOptions, num_k
         keys.push(k);
         let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
         tx.put(k.to_vec(), vec![1u8; VALUE_SIZE], None).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
     }
     engine.flush().unwrap();
 
@@ -74,7 +74,7 @@ fn run_read_old_versions_case(ctx: &mut StressContext, opts: MidgeOptions, num_k
     for k in keys.iter() {
         let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
         tx.put(k.to_vec(), vec![2u8; VALUE_SIZE], None).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
     }
     engine.flush().unwrap();
     engine.compact_all().unwrap();

@@ -27,7 +27,7 @@ fn should_progress_through_lsm_levels_or_document_current_behavior() {
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
             engine
-                .commit(tx, cntryl_midge::WriteOptions::default())
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
                 .ok();
         }
         engine.flush().ok();
@@ -72,7 +72,7 @@ fn should_maintain_read_consistency_during_compaction() {
         tx.put(key.as_bytes().to_vec(), b"initial_value".to_vec(), None)
             .ok();
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .ok();
     }
 
@@ -126,7 +126,7 @@ fn should_handle_concurrent_writes_during_compaction() {
             .unwrap();
         tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .ok();
     }
 
@@ -142,7 +142,7 @@ fn should_handle_concurrent_writes_during_compaction() {
             .unwrap();
         tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None).ok();
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .ok();
     }
 
@@ -185,7 +185,7 @@ fn should_preserve_range_tombstones_through_multi_level_compaction() {
         tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
             .ok();
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .ok();
     }
     engine.flush().ok();
@@ -196,7 +196,7 @@ fn should_preserve_range_tombstones_through_multi_level_compaction() {
         .unwrap();
     txn.delete_range(b"k300".to_vec(), b"k700".to_vec()).ok();
     engine
-        .commit(txn, cntryl_midge::WriteOptions::default())
+        .commit(txn, cntryl_midge::WriteOptions::buffered())
         .ok();
     engine.flush().ok();
 
@@ -247,7 +247,7 @@ fn should_handle_large_values_through_compaction() {
         tx.put(key.as_bytes().to_vec(), large_value.clone(), None)
             .ok();
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .ok();
     }
 
@@ -290,7 +290,7 @@ fn should_eliminate_obsolete_versions_through_compaction() {
         tx.put(b"hotkey".to_vec(), value.as_bytes().to_vec(), None)
             .ok();
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .ok();
     }
 
@@ -365,7 +365,7 @@ fn should_document_lsm_level_progression_strategy_when_tested() {
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
             engine
-                .commit(tx, cntryl_midge::WriteOptions::default())
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
                 .ok();
         }
         engine.flush().ok();

@@ -26,7 +26,7 @@ fn should_read_written_value_when_in_memory() {
     tx.put(b"key".to_vec(), b"value".to_vec(), None)
         .expect("put");
     engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
 
     let tx = engine
@@ -51,7 +51,7 @@ fn should_read_written_value_after_flush() {
     tx.put(b"key".to_vec(), b"value".to_vec(), None)
         .expect("put");
     engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
 
     engine.flush().expect("flush");
@@ -78,7 +78,7 @@ fn should_hide_value_when_deleted() {
     tx.put(b"key".to_vec(), b"value".to_vec(), None)
         .expect("put");
     engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
 
     let mut tx = engine
@@ -86,7 +86,7 @@ fn should_hide_value_when_deleted() {
         .unwrap();
     tx.delete(b"key".to_vec()).expect("delete");
     engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
 
     let tx = engine
@@ -111,7 +111,7 @@ fn should_preserve_tombstone_when_flushed() {
     tx.put(b"key".to_vec(), b"value".to_vec(), None)
         .expect("put");
     engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
 
     let mut tx = engine
@@ -119,7 +119,7 @@ fn should_preserve_tombstone_when_flushed() {
         .unwrap();
     tx.delete(b"key".to_vec()).expect("delete");
     engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
 
     engine.flush().expect("flush");
@@ -152,7 +152,7 @@ fn should_persist_data_given_write_when_restarted() {
         )
         .expect("put");
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
     }
 
@@ -187,7 +187,7 @@ fn should_persist_tombstone_given_delete_when_restarted() {
         tx.put(b"key".to_vec(), b"value".to_vec(), None)
             .expect("put");
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
 
         let mut tx = engine
@@ -195,7 +195,7 @@ fn should_persist_tombstone_given_delete_when_restarted() {
             .unwrap();
         tx.delete(b"key".to_vec()).expect("delete");
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
     }
 
@@ -223,7 +223,7 @@ fn should_maintain_isolation_given_snapshot_when_concurrent_writes() {
         .unwrap();
     tx.put(b"key".to_vec(), b"v1".to_vec(), None).expect("put");
     engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
 
     let snapshot = engine
@@ -262,7 +262,7 @@ fn should_preserve_latest_version_when_compacting() {
         .unwrap();
     tx.put(b"key".to_vec(), b"v1".to_vec(), None).expect("put");
     engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
     engine.flush().expect("flush");
 
@@ -271,7 +271,7 @@ fn should_preserve_latest_version_when_compacting() {
         .unwrap();
     tx.put(b"key".to_vec(), b"v2".to_vec(), None).expect("put");
     engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
     engine.flush().expect("flush");
     engine.compact_all().expect("compact");
@@ -303,7 +303,7 @@ fn should_respect_visibility_rules_when_range_scanning() {
     tx.put(b"b".to_vec(), b"2".to_vec(), None).expect("put");
     tx.put(b"c".to_vec(), b"3".to_vec(), None).expect("put");
     engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
 
     let mut tx = engine
@@ -311,7 +311,7 @@ fn should_respect_visibility_rules_when_range_scanning() {
         .unwrap();
     tx.delete(b"b".to_vec()).expect("delete");
     engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
 
     let tx = engine
@@ -343,7 +343,7 @@ fn should_maintain_monotonic_sequence_numbers_when_writing() {
         tx.put(format!("key{}", i).into_bytes(), b"val".to_vec(), None)
             .expect("put");
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
     }
 
@@ -367,7 +367,7 @@ fn should_not_corrupt_state_given_unclean_shutdown_when_recovering() {
         tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
             .expect("put");
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
         // Intentionally drop without explicit close (simulates unclean shutdown)
     }

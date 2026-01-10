@@ -1,4 +1,4 @@
-﻿//! Key-Value API Types
+//! Key-Value API Types
 //!
 //! Common types used throughout the KV API.
 

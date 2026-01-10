@@ -41,7 +41,7 @@ fn should_commit_large_transaction_when_memory_limit_exceeded() {
         eprintln!("Memory budget is 128KB, so spill should trigger at ~128KB");
 
         // Commit the transaction
-        let commit_result = engine.commit(tx, WriteOptions::default());
+        let commit_result = engine.commit(tx, WriteOptions::buffered());
         eprintln!("Commit result: {:?}", commit_result);
 
         match commit_result {
@@ -100,7 +100,7 @@ fn should_respect_memory_budget_across_transactions() {
         }
         eprintln!("TX1: Writing 128KB of data");
 
-        let result1 = engine.commit(tx1, WriteOptions::default());
+        let result1 = engine.commit(tx1, WriteOptions::buffered());
         eprintln!("TX1 result: {:?}", result1);
 
         // Write transaction 2: another 128KB (total would be 256KB, within budget)
@@ -113,7 +113,7 @@ fn should_respect_memory_budget_across_transactions() {
         }
         eprintln!("TX2: Writing another 128KB of data");
 
-        let result2 = engine.commit(tx2, WriteOptions::default());
+        let result2 = engine.commit(tx2, WriteOptions::buffered());
         eprintln!("TX2 result: {:?}", result2);
 
         match (result1, result2) {
@@ -166,7 +166,7 @@ fn should_handle_transaction_spill_to_disk_correctly() {
                 .expect("put");
         }
 
-        let commit_result = engine.commit(tx, WriteOptions::default());
+        let commit_result = engine.commit(tx, WriteOptions::buffered());
 
         match commit_result {
             Ok(_) => {

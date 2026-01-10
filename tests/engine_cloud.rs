@@ -44,7 +44,7 @@ fn should_persist_data_to_cloud_storage() {
     match put_result {
         Ok(()) => {
             engine
-                .commit(tx, cntryl_midge::WriteOptions::default())
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
                 .unwrap();
             eprintln!("✓ Put to cloud succeeded");
 
@@ -99,7 +99,7 @@ fn should_support_transactions_with_cloud_storage() {
         Ok(()) => {
             eprintln!("Put in cloud transaction succeeded");
 
-            match engine.commit(txn, cntryl_midge::WriteOptions::default()) {
+            match engine.commit(txn, cntryl_midge::WriteOptions::buffered()) {
                 Ok(()) => {
                     eprintln!("✓ Cloud transaction committed");
 
@@ -151,7 +151,7 @@ fn should_support_range_scans_on_cloud() {
             return;
         }
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
     }
 
@@ -202,7 +202,7 @@ fn should_support_snapshots_on_cloud_data() {
         return;
     }
     engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
 
     // Snapshot
@@ -230,7 +230,7 @@ fn should_support_snapshots_on_cloud_data() {
     tx2.put(b"snap_key".to_vec(), b"snap_v2".to_vec(), None)
         .ok();
     engine
-        .commit(tx2, cntryl_midge::WriteOptions::default())
+        .commit(tx2, cntryl_midge::WriteOptions::buffered())
         .ok();
 
     // Verify snapshot unchanged
@@ -268,7 +268,7 @@ fn should_support_deletes_on_cloud() {
         return;
     }
     engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
 
     // Delete via transaction
@@ -277,7 +277,7 @@ fn should_support_deletes_on_cloud() {
         .unwrap();
     txn.delete(b"del_key".to_vec()).ok();
     engine
-        .commit(txn, cntryl_midge::WriteOptions::default())
+        .commit(txn, cntryl_midge::WriteOptions::buffered())
         .ok();
 
     eprintln!("Deleted key from cloud");
@@ -368,7 +368,7 @@ fn should_respect_wal_cloud_separation_given_hybrid_storage_when_cloud_first_ena
     tx.put(b"test_key".to_vec(), b"test_value".to_vec(), None)
         .expect("put");
     engine
-        .commit(tx, cntryl_midge::WriteOptions::default())
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
 
     // Flush to create SST (in real implementation, would verify cloud upload path)
@@ -402,7 +402,7 @@ fn should_preserve_lww_semantics_across_all_storage_modes_when_verified() {
         tx.put(b"lww_key".to_vec(), b"v1".to_vec(), None)
             .expect("put1");
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -410,7 +410,7 @@ fn should_preserve_lww_semantics_across_all_storage_modes_when_verified() {
         tx.put(b"lww_key".to_vec(), b"v2".to_vec(), None)
             .expect("put2");
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
 
         // Verify we get last write
@@ -449,7 +449,7 @@ fn should_isolate_column_family_writes_across_storage_modes_when_cloud_backed() 
         tx.put(b"shared_key".to_vec(), b"from_default".to_vec(), None)
             .expect("put_default");
         engine
-            .commit(tx, cntryl_midge::WriteOptions::default())
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
 
         // Verify isolation in default CF

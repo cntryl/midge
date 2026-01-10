@@ -20,7 +20,7 @@ fn should_return_value_given_ttl_not_elapsed_when_reading() {
         let cf = engine.default_column_family();
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(3600)).unwrap(); // 1 hour TTL
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -39,7 +39,7 @@ fn should_return_none_given_ttl_elapsed_when_reading() {
         let cf = engine.default_column_family();
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(1)).unwrap(); // 1 second TTL
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act
         thread::sleep(Duration::from_millis(1100)); // Wait for expiration
@@ -59,7 +59,7 @@ fn should_not_expire_key_given_zero_ttl_when_zero_means_infinite() {
         let cf = engine.default_column_family();
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(0)).unwrap(); // 0 = no expiration (infinite)
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act
         thread::sleep(Duration::from_millis(100));
@@ -84,7 +84,7 @@ fn should_persist_ttl_metadata_given_restart_when_reopening() {
             let cf = engine.default_column_family();
             let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
             tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(3600)).unwrap(); // 1 hour
-            engine.commit(tx, WriteOptions::default()).unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
             // Engine dropped
         }
 
@@ -108,7 +108,7 @@ fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening(
             let cf = engine.default_column_family();
             let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
             tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(1)).unwrap(); // 1 second
-            engine.commit(tx, WriteOptions::default()).unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
             thread::sleep(Duration::from_millis(1100)); // Wait for expiration
             // Engine dropped
         }
@@ -136,7 +136,7 @@ fn should_remove_expired_entries_given_compaction_when_ttl_exceeded() {
         let cf = engine.default_column_family();
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(1)).unwrap(); // 1 second
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
         thread::sleep(Duration::from_millis(1100));
 
         // Act - trigger compaction
@@ -157,7 +157,7 @@ fn should_preserve_non_expired_entries_given_compaction_when_ttl_not_exceeded() 
         let cf = engine.default_column_family();
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(3600)).unwrap(); // 1 hour
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act - trigger compaction
         engine.compact_all().unwrap();
@@ -181,13 +181,13 @@ fn should_handle_mixed_ttl_keys_given_some_expire_when_reading() {
         let cf = engine.default_column_family();
         let mut tx1 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
         tx1.put(b"key1".to_vec(), b"value1".to_vec(), Some(1)).unwrap(); // Expires
-        engine.commit(tx1, WriteOptions::default()).unwrap();
+        engine.commit(tx1, WriteOptions::buffered()).unwrap();
         let mut tx2 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
         tx2.put(b"key2".to_vec(), b"value2".to_vec(), Some(0)).unwrap(); // Never expires
-        engine.commit(tx2, WriteOptions::default()).unwrap();
+        engine.commit(tx2, WriteOptions::buffered()).unwrap();
         let mut tx3 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
         tx3.put(b"key3".to_vec(), b"value3".to_vec(), Some(3600)).unwrap(); // Long TTL
-        engine.commit(tx3, WriteOptions::default()).unwrap();
+        engine.commit(tx3, WriteOptions::buffered()).unwrap();
 
         // Act
         thread::sleep(Duration::from_millis(1100));
@@ -217,13 +217,13 @@ fn should_update_ttl_given_overwrite_with_new_ttl_when_writing() {
         let cf = engine.default_column_family();
         let mut tx1 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
         tx1.put(b"key1".to_vec(), b"value1".to_vec(), Some(1)).unwrap(); // 1 second
-        engine.commit(tx1, WriteOptions::default()).unwrap();
+        engine.commit(tx1, WriteOptions::buffered()).unwrap();
         thread::sleep(Duration::from_millis(500));
 
         // Act - overwrite with longer TTL
         let mut tx2 = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).unwrap();
         tx2.put(b"key1".to_vec(), b"value2".to_vec(), Some(3600)).unwrap(); // 1 hour
-        engine.commit(tx2, WriteOptions::default()).unwrap();
+        engine.commit(tx2, WriteOptions::buffered()).unwrap();
         thread::sleep(Duration::from_millis(700)); // Original would have expired
 
         // Assert - should still be readable with new TTL

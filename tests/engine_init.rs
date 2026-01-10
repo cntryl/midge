@@ -1,4 +1,4 @@
-﻿use cntryl_midge::testkit::*;
+use cntryl_midge::testkit::*;
 
 #[test]
 fn should_create_engine_in_all_modes() {

@@ -1,1 +1,1 @@
-﻿pub struct Types;
+pub struct Types;

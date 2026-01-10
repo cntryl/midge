@@ -58,7 +58,7 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         let v = ycsb::make_value((op_index % 251) as u8);
                         let mut tx = e.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
                         tx.put(k.to_vec(), v.to_vec(), None).expect("warmup put");
-                        e.commit(tx, cntryl_midge::WriteOptions::default()).expect("warmup commit");
+                        e.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("warmup commit");
                     }
                 }
             },
@@ -68,7 +68,7 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     // Phase 3: Measured (duration-based; multi-client)
     let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
         let zipf = Arc::new(ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA));
-        let write_opts = cntryl_midge::WriteOptions::default();
+        let write_opts = cntryl_midge::WriteOptions::buffered();
         ycsb::run_multi_client_for_duration(Arc::clone(&engine), clients, MEASURED, |client_id| {
             let zipf = Arc::clone(&zipf);
             move |e, cf, op_index| {

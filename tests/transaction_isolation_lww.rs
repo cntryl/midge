@@ -88,8 +88,8 @@ fn should_resolve_concurrent_writes_with_lww_when_enabled() {
     txn2.put(b"key".to_vec(), b"from_txn2".to_vec(), None)
         .unwrap();
 
-    let r1 = engine.commit(txn1, cntryl_midge::WriteOptions::default());
-    let r2 = engine.commit(txn2, cntryl_midge::WriteOptions::default());
+    let r1 = engine.commit(txn1, cntryl_midge::WriteOptions::buffered());
+    let r2 = engine.commit(txn2, cntryl_midge::WriteOptions::buffered());
 
     // Both should succeed (LWW)
     assert!(r1.is_ok(), "TXN1 should not be rejected");
@@ -115,7 +115,7 @@ fn should_permit_lost_updates_when_not_prevented() {
     // Initialize counter
     let mut tx_init = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
     tx_init.put(b"counter".to_vec(), b"0".to_vec(), None).unwrap();
-    engine.commit(tx_init, cntryl_midge::WriteOptions::default()).unwrap();
+    engine.commit(tx_init, cntryl_midge::WriteOptions::buffered()).unwrap();
 
     let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
     let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
@@ -146,8 +146,8 @@ fn should_permit_lost_updates_when_not_prevented() {
     )
     .unwrap();
 
-    engine.commit(txn1, cntryl_midge::WriteOptions::default()).ok();
-    engine.commit(txn2, cntryl_midge::WriteOptions::default()).ok();
+    engine.commit(txn1, cntryl_midge::WriteOptions::buffered()).ok();
+    engine.commit(txn2, cntryl_midge::WriteOptions::buffered()).ok();
 
     let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
     let final_val = tx_read.get(b"counter").unwrap();

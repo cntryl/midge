@@ -25,7 +25,7 @@ fn run_durability_puts_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops
             let v = vec![(i % 251) as u8; VALUE_SIZE];
             let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
             tx.put(k.to_vec(), v, None).unwrap();
-            e.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+            e.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
         }
     });
 

@@ -46,6 +46,14 @@ impl WriteOptions {
         }
     }
 
+    /// The recommended WriteOptions for production use
+    ///
+    /// This is an alias for sync() - full durability with immediate fsync.
+    /// Use this when you want safe defaults without ambiguity.
+    pub fn recommended() -> Self {
+        Self::sync()
+    }
+
     /// Get durability policy
     pub fn policy(&self) -> DurabilityPolicy {
         self.policy
@@ -69,13 +77,5 @@ impl WriteOptions {
             self.policy = DurabilityPolicy::Buffered;
         }
         self
-    }
-}
-
-/// Default provides Buffered policy for convenience
-/// WARNING: This is NOT fully durable. Use WriteOptions::sync() for full durability.
-impl Default for WriteOptions {
-    fn default() -> Self {
-        Self::buffered()
     }
 }

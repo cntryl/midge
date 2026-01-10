@@ -78,7 +78,7 @@ pub fn load_initial_dataset(engine: &MidgeEngine, cf: &ColumnFamilyHandle, initi
 
         if count >= BATCH_OPS {
             engine
-                .commit(tx, api::WriteOptions::default())
+                .commit(tx, api::WriteOptions::buffered())
                 .expect("commit failed");
             tx = engine
                 .begin_tx(cf_id, api::TransactionMode::ReadWrite)
@@ -89,7 +89,7 @@ pub fn load_initial_dataset(engine: &MidgeEngine, cf: &ColumnFamilyHandle, initi
 
     if count > 0 {
         engine
-            .commit(tx, api::WriteOptions::default())
+            .commit(tx, api::WriteOptions::buffered())
             .expect("commit failed");
     }
 

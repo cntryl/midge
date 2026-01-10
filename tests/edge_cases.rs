@@ -35,7 +35,7 @@ fn should_retrieve_stored_keys_when_megabyte_sized() {
         // Act: Store and retrieve
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         tx.put(large_key.clone(), small_value.to_vec(), None).expect("put");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
         let got = tx.get(&large_key).expect("get");
@@ -64,7 +64,7 @@ fn should_retrieve_stored_values_when_hundred_megabytes() {
         // Act: Store and retrieve
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         tx.put(small_key.to_vec(), large_value.clone(), None).expect("put");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
         let got = tx.get(small_key).expect("get");
@@ -93,7 +93,7 @@ fn should_handle_mixed_size_values_when_ranging_from_bytes_to_megabytes() {
         tx.put(b"small".to_vec(), vec![42u8; 100], None).expect("put");
         tx.put(b"medium".to_vec(), vec![42u8; 100_000], None).expect("put");
         tx.put(b"large".to_vec(), vec![42u8; 1_000_000], None).expect("put");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert: Retrieve all and verify
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -126,7 +126,7 @@ fn should_handle_special_characters_in_keys_when_utf8_and_binary_mixed() {
             let value = format!("value_{i}");
             tx.put(key.to_vec(), value.into_bytes(), None).expect("put");
         }
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert: Retrieve all
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -178,7 +178,7 @@ fn should_handle_single_record_database_when_one_key_value_pair() {
         // Act: Write single record
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         tx.put(b"only_key".to_vec(), b"only_value".to_vec(), None).expect("put");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert: Can retrieve it
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -212,7 +212,7 @@ fn should_handle_range_query_at_boundaries_when_first_last_and_missing() {
             let key = format!("key_{i:02}");
             tx.put(key.into_bytes(), format!("value_{i}").into_bytes(), None).expect("put");
         }
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert: Boundary keys are retrievable
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -250,7 +250,7 @@ fn should_handle_rapid_operations_when_one_thousand_puts_per_second() {
             let key = format!("rapid_{i:05}");
             tx.put(key.into_bytes(), format!("v_{i}").into_bytes(), None).expect("put");
         }
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert: All retrievable
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -275,7 +275,7 @@ fn should_handle_delete_all_pattern_when_writing_then_deleting_all_keys() {
             let key = format!("del_test_{i:03}");
             tx.put(key.into_bytes(), b"delete_me".to_vec(), None).expect("put");
         }
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act: Delete all keys
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
@@ -283,7 +283,7 @@ fn should_handle_delete_all_pattern_when_writing_then_deleting_all_keys() {
             let key = format!("del_test_{i:03}");
             tx.delete(key.into_bytes()).expect("delete");
         }
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert: All deleted
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -307,11 +307,11 @@ fn should_handle_tombstone_accumulation_when_many_deletes_create_tombstones() {
         for cycle in 0..10 {
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
             tx.put(b"tombstone_test".to_vec(), format!("cycle_{cycle}").into_bytes(), None).expect("put");
-            engine.commit(tx, WriteOptions::default()).unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
 
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
             tx.delete(b"tombstone_test".to_vec()).expect("delete");
-            engine.commit(tx, WriteOptions::default()).unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
         }
 
         // Assert: Final state is deleted (tombstone wins)
@@ -338,7 +338,7 @@ fn should_handle_ten_thousand_keys_when_large_keyspace() {
             let key = format!("large_ks_{i:05}");
             tx.put(key.into_bytes(), format!("v_{i}").into_bytes(), None).expect("put");
         }
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert: Random samples retrieve correctly
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -378,7 +378,7 @@ fn should_batch_concurrent_puts_when_cloudfirst_mode() {
                         let key = format!("k_{t}_{i}");
                         let mut tx = engine_ref.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
                         tx.put(key.into_bytes(), b"value".to_vec(), None).expect("put");
-                        engine_ref.commit(tx, WriteOptions::default()).unwrap();
+                        engine_ref.commit(tx, WriteOptions::buffered()).unwrap();
                     }
                 });
             }

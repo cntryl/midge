@@ -69,7 +69,7 @@ fn bench_batch_put(c: &mut Criterion) {
     let cf_id = cf.id();
     
     // Reuse WriteOptions across iterations (allowed optimization)
-    let write_opts = cntryl_midge::WriteOptions::default();
+    let write_opts = cntryl_midge::WriteOptions::buffered();
 
     for &batch_size in &[100, 1_000] {
         // Precompute keys/values ONCE (outside measurement)
@@ -116,7 +116,7 @@ fn bench_single_get(c: &mut Criterion) {
     for i in 0..num_keys {
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
         tx.put(keys[i].to_vec(), vals[i].to_vec(), None).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
     }
     // Note: intentionally NOT flushing to keep data in memtable
 
@@ -178,7 +178,7 @@ fn bench_single_put(c: &mut Criterion) {
             counter += 1;
             let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
             tx.put(keys[idx].to_vec(), vals[idx].to_vec(), None).unwrap();
-            engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+            engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
             black_box(());
         })
     });

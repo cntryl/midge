@@ -1,8 +1,8 @@
 //! Config API Integration Tests
 //!
 //! Tests the builder-based configuration system that derives low-level parameters
-//! from high-level optimization goals (latency/throughput/cost), durability
-//! requirements, memory budgets, and workload profiles.
+//! from high-level optimization goals (latency/throughput/cost), memory budgets,
+//! and workload profiles.
 //!
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
@@ -10,7 +10,7 @@
 //! These tests validate the config builder's behavior without requiring an
 //! engine instance, since configuration is orthogonal to storage modes.
 
-use cntryl_midge::{Durability, Goal, MemoryBudget, OpenOptions, WorkloadProfile};
+use cntryl_midge::{Goal, MemoryBudget, OpenOptions, WorkloadProfile};
 use std::path::PathBuf;
 
 // ============================================================================
@@ -25,7 +25,6 @@ fn should_build_config_given_minimal_defaults_when_only_path_provided() {
     // Assert
     assert_eq!(opts.path, PathBuf::from("./test_db"));
     assert_eq!(opts.goal, Goal::Latency);
-    assert_eq!(opts.durability, Durability::Steady);
     assert_eq!(opts.memory_budget, MemoryBudget::Auto);
     assert_eq!(opts.workload, WorkloadProfile::Mixed);
 }
@@ -71,36 +70,6 @@ fn should_set_goal_given_cost_when_minimizing_resources() {
     assert!(
         opts.block_cache_size() <= 256 * 1024 * 1024,
         "Cost should limit cache"
-    );
-}
-
-// ============================================================================
-// DURABILITY SETTING TESTS
-// ============================================================================
-
-#[test]
-fn should_set_durability_given_strict_when_fsync_per_write_required() {
-    // Arrange & Act
-    let opts = OpenOptions::new().durability(Durability::Strict).build();
-
-    // Assert
-    assert_eq!(opts.durability, Durability::Strict);
-    assert!(
-        opts.wal_sync_on_write(),
-        "Strict durability must sync on every write"
-    );
-}
-
-#[test]
-fn should_set_durability_given_steady_when_balanced_sync_needed() {
-    // Arrange & Act
-    let opts = OpenOptions::new().durability(Durability::Steady).build();
-
-    // Assert
-    assert_eq!(opts.durability, Durability::Steady);
-    assert!(
-        !opts.wal_sync_on_write(),
-        "Steady durability should not sync every write"
     );
 }
 
@@ -206,15 +175,12 @@ fn should_derive_consistent_params_given_all_knobs_set_when_building() {
     let opts = OpenOptions::new()
         .path("./integrated_db")
         .goal(Goal::Throughput)
-        .durability(Durability::Strict)
         .memory_budget(MemoryBudget::Bytes(1024 * 1024 * 1024)) // 1GB
         .workload(WorkloadProfile::WriteHeavy)
         .build();
 
     // Assert
     assert_eq!(opts.goal, Goal::Throughput);
-    assert_eq!(opts.durability, Durability::Strict);
-    assert!(opts.wal_sync_on_write());
     assert!(
         opts.memtable_size_limit() > 64 * 1024 * 1024,
         "Write-heavy + throughput should have large memtables"
@@ -298,7 +264,6 @@ fn should_clone_options_preserving_all_settings_given_configured_opts_when_cloni
     let original = OpenOptions::new()
         .path("./db")
         .goal(Goal::Throughput)
-        .durability(Durability::Strict)
         .workload(WorkloadProfile::WriteHeavy)
         .build();
 
@@ -308,7 +273,6 @@ fn should_clone_options_preserving_all_settings_given_configured_opts_when_cloni
     // Assert
     assert_eq!(cloned.path, original.path);
     assert_eq!(cloned.goal, original.goal);
-    assert_eq!(cloned.durability, original.durability);
     assert_eq!(cloned.workload, original.workload);
     assert_eq!(cloned.block_size(), original.block_size());
     assert_eq!(cloned.memtable_size_limit(), original.memtable_size_limit());
@@ -321,7 +285,6 @@ fn should_use_sensible_defaults_given_no_configuration_when_using_default() {
 
     // Assert
     assert_eq!(opts.goal, Goal::Latency);
-    assert_eq!(opts.durability, Durability::Steady);
     assert_eq!(opts.memory_budget, MemoryBudget::Auto);
     assert_eq!(opts.workload, WorkloadProfile::Mixed);
 }

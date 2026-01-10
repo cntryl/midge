@@ -4,11 +4,10 @@
 //!
 //! # Design Philosophy
 //!
-//! Instead of exposing hundreds of low-level tuning knobs, Midge asks **three core questions**:
+//! Instead of exposing hundreds of low-level tuning knobs, Midge asks **two core questions**:
 //!
-//! 1. **What's the performance goal?** (`Goal::Latency` | `Goal::Throughput` | `Goal::Cost`)
-//! 2. **What durability guarantee?** (`Durability::Strict` | `Durability::Steady` | `Durability::CloudPersisted`)
-//! 3. **How much memory?** (`MemoryBudget::Auto` | `MemoryBudget::Bytes(n)`)
+//! 1. **What's the performance goal?** (`Goal::Latency` | `Goal::Throughput` | `Goal::Economy`)
+//! 2. **How much memory?** (`MemoryBudget::Auto` | `MemoryBudget::Bytes(n)`)
 //!
 //! All other parameters (block sizes, buffer sizes, compaction triggers, cache allocation, etc.)
 //! are **derived automatically** from these three inputs plus optional workload hints.
@@ -25,8 +24,6 @@
 //! ```
 
 use std::path::PathBuf;
-
-use crate::common::AckPolicy;
 
 /// Performance optimization goal.
 ///
@@ -57,34 +54,6 @@ pub enum Goal {
     /// - Smaller bloom filters
     /// - Higher compression
     Economy,
-}
-
-/// Durability guarantee level.
-///
-/// Determines when writes are considered durable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Durability {
-    /// Fsync on every write commit.
-    ///
-    /// **Guarantee:** Data survives process crash and power loss.
-    /// **Latency:** Highest (per-write fsync overhead).
-    /// **Use case:** Critical data, financial transactions.
-    Strict,
-
-    /// Fsync at controlled intervals (default: 20ms, auto-tuned 10-40ms).
-    ///
-    /// **Guarantee:** Data loss window ≤ sync interval on crash.
-    /// **Latency:** Low (amortized fsync cost).
-    /// **Use case:** Most applications, balanced durability/performance.
-    #[default]
-    Steady,
-
-    /// Durability confirmed via local fsync + verified cloud copy.
-    ///
-    /// **Guarantee:** Data survives node failure (cloud durability 11+ nines).
-    /// **Latency:** Medium (local fsync + async cloud verification).
-    /// **Use case:** Distributed systems, high availability.
-    CloudPersisted,
 }
 
 /// Memory budget specification.
@@ -149,14 +118,6 @@ pub struct OpenOptions {
     /// Performance goal
     pub goal: Goal,
 
-    /// Durability level
-    pub durability: Durability,
-
-    /// Derived acknowledgment policy (internal).
-    ///
-    /// Users choose durability; the system derives acknowledgment semantics.
-    pub(crate) ack_policy: AckPolicy,
-
     /// Memory budget
     pub memory_budget: MemoryBudget,
 
@@ -176,9 +137,6 @@ pub struct OpenOptions {
     /// Block cache size (derived)
     pub(crate) block_cache_size: usize,
 
-    /// WAL sync on every write (derived)
-    pub(crate) wal_sync_on_write: bool,
-
     /// WAL buffer size (derived)
     pub(crate) wal_buffer_size: usize,
 
@@ -197,24 +155,19 @@ impl OpenOptions {
     ///
     /// Defaults:
     /// - Goal: Latency
-    /// - Durability: Steady
     /// - Memory: Auto (50% of system RAM)
     /// - Workload: Mixed
     pub fn new() -> Self {
         Self {
             path: PathBuf::from("./midge_db"),
             goal: Goal::default(),
-            durability: Durability::default(),
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
-            // Defaults align with Durability::Steady.
-            ack_policy: AckPolicy::Immediate,
             // Temporary defaults until build() derives them
             block_size: 16 * 1024,
             memtable_size_limit: 64 * 1024 * 1024,
             target_sst_size: 256 * 1024 * 1024,
             block_cache_size: 128 * 1024 * 1024,
-            wal_sync_on_write: false,
             wal_buffer_size: 256 * 1024,
             l0_compaction_trigger: 4,
         }
@@ -229,12 +182,6 @@ impl OpenOptions {
     /// Set performance goal.
     pub fn goal(mut self, goal: Goal) -> Self {
         self.goal = goal;
-        self
-    }
-
-    /// Set durability level.
-    pub fn durability(mut self, durability: Durability) -> Self {
-        self.durability = durability;
         self
     }
 
@@ -303,17 +250,7 @@ impl OpenOptions {
         let usable_memory = total_memory.saturating_sub(self.memtable_size_limit * 2); // 2 memtables
         self.block_cache_size = ((usable_memory as f64) * cache_ratio) as usize;
 
-        // Derive WAL settings
-        self.wal_sync_on_write = matches!(self.durability, Durability::Strict);
-
-        // Derive acknowledgment semantics from durability.
-        //
-        // Principle: users choose durability; the system chooses ack semantics.
-        self.ack_policy = match self.durability {
-            Durability::Strict => AckPolicy::AfterLocalDurable,
-            Durability::Steady => AckPolicy::Immediate,
-            Durability::CloudPersisted => AckPolicy::Immediate,
-        };
+        // Derive WAL buffer size
         self.wal_buffer_size = match self.goal {
             Goal::Latency => 128 * 1024,     // 128KB
             Goal::Throughput => 1024 * 1024, // 1MB
@@ -351,18 +288,6 @@ impl OpenOptions {
     /// Get derived block cache size
     pub fn block_cache_size(&self) -> usize {
         self.block_cache_size
-    }
-
-    /// Check if WAL should sync on every write
-    pub fn wal_sync_on_write(&self) -> bool {
-        self.wal_sync_on_write
-    }
-
-    /// Get the derived acknowledgment policy.
-    ///
-    /// This is derived from `durability` during `build()`.
-    pub fn ack_policy(&self) -> AckPolicy {
-        self.ack_policy
     }
 
     /// Get derived WAL buffer size
@@ -404,29 +329,7 @@ mod tests {
         assert_ne!(Goal::Economy, Goal::Latency);
     }
 
-    // ========== Durability Enum Tests ==========
-
-    #[test]
-    fn should_have_steady_as_default_durability() {
-        assert_eq!(Durability::default(), Durability::Steady);
-    }
-
-    #[test]
-    fn should_create_strict_durability() {
-        assert_eq!(Durability::Strict, Durability::Strict);
-    }
-
-    #[test]
-    fn should_create_cloud_persisted_durability() {
-        assert_eq!(Durability::CloudPersisted, Durability::CloudPersisted);
-    }
-
-    #[test]
-    fn should_distinguish_different_durabilities() {
-        assert_ne!(Durability::Strict, Durability::Steady);
-        assert_ne!(Durability::Steady, Durability::CloudPersisted);
-        assert_ne!(Durability::CloudPersisted, Durability::Strict);
-    }
+    // Note: Durability enum tests removed - it's internal-only and should not have defaults
 
     // ========== MemoryBudget Enum Tests ==========
 
@@ -500,7 +403,6 @@ mod tests {
 
         // Assert
         assert_eq!(opts.goal, Goal::Latency);
-        assert_eq!(opts.durability, Durability::Steady);
         assert_eq!(opts.memory_budget, MemoryBudget::Auto);
         assert_eq!(opts.workload, WorkloadProfile::Mixed);
     }
@@ -525,16 +427,6 @@ mod tests {
 
         // Assert
         assert_eq!(opts.goal, Goal::Throughput);
-    }
-
-    #[test]
-    fn should_set_durability_when_calling_durability() {
-        // Arrange
-        // Act
-        let opts = OpenOptions::new().durability(Durability::Strict);
-
-        // Assert
-        assert_eq!(opts.durability, Durability::Strict);
     }
 
     #[test]
@@ -564,14 +456,12 @@ mod tests {
         let opts = OpenOptions::new()
             .path("./db")
             .goal(Goal::Latency)
-            .durability(Durability::Strict)
             .workload(WorkloadProfile::ReadMostly)
             .build();
 
         // Assert
         assert_eq!(opts.path, PathBuf::from("./db"));
         assert_eq!(opts.goal, Goal::Latency);
-        assert_eq!(opts.durability, Durability::Strict);
         assert_eq!(opts.workload, WorkloadProfile::ReadMostly);
     }
 
@@ -588,45 +478,6 @@ mod tests {
         assert!(opts.memtable_size_limit > 0);
         assert!(opts.target_sst_size > 0);
         assert!(opts.block_cache_size > 0);
-    }
-
-    #[test]
-    fn should_set_wal_sync_for_strict_durability() {
-        let opts = OpenOptions::new().durability(Durability::Strict).build();
-
-        assert!(opts.wal_sync_on_write);
-    }
-
-    #[test]
-    fn should_not_set_wal_sync_for_steady_durability() {
-        let opts = OpenOptions::new().durability(Durability::Steady).build();
-
-        assert!(!opts.wal_sync_on_write);
-    }
-
-    #[test]
-    fn should_derive_ack_policy_after_local_durable_for_strict() {
-        let opts = OpenOptions::new().durability(Durability::Strict).build();
-        assert_eq!(opts.ack_policy, AckPolicy::AfterLocalDurable);
-    }
-
-    #[test]
-    fn should_derive_ack_policy_immediate_for_steady() {
-        let opts = OpenOptions::new().durability(Durability::Steady).build();
-        assert_eq!(opts.ack_policy, AckPolicy::Immediate);
-    }
-
-    #[test]
-    fn should_derive_ack_policy_immediate_for_cloud_persisted() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = OpenOptions::new()
-            .durability(Durability::CloudPersisted)
-            .build();
-        // Assert
-        assert_eq!(opts.ack_policy, AckPolicy::Immediate);
     }
 
     #[test]
@@ -684,7 +535,6 @@ mod tests {
         let _ = opts.memtable_size_limit();
         let _ = opts.target_sst_size();
         let _ = opts.block_cache_size();
-        let _ = opts.wal_sync_on_write();
         let _ = opts.wal_buffer_size();
         let _ = opts.l0_compaction_trigger();
     }
@@ -712,15 +562,27 @@ mod tests {
     fn should_clone_options() {
         // Arrange
         let original = OpenOptions::new()
-            .goal(Goal::Throughput)
-            .durability(Durability::Strict);
+            .goal(Goal::Throughput);
 
         // Act
         let cloned = original.clone();
 
         // Assert
-
         assert_eq!(cloned.goal, original.goal);
-        assert_eq!(cloned.durability, original.durability);
     }
+}
+
+/// Durability level for runtime use
+///
+/// NOTE: This enum is for INTERNAL runtime durability tracking only.
+/// It should NOT be exposed in OpenOptions or any user-facing configuration.
+/// Write-time durability decisions use WriteOptions::DurabilityPolicy instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Durability {
+    /// Strict - fsync on every write
+    Strict,
+    /// Steady - fsync every N ms
+    Steady,
+    /// CloudPersisted - wait for cloud backup
+    CloudPersisted,
 }

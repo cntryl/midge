@@ -160,7 +160,7 @@ fn should_allow_writes_before_and_after_ingest_mode() {
     // Act: write BEFORE entering ingest mode
     let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
     tx.put(b"test_key".to_vec(), b"test_value".to_vec(), None).expect("put");
-    let result = engine.commit(tx, cntryl_midge::WriteOptions::default());
+    let result = engine.commit(tx, cntryl_midge::WriteOptions::buffered());
     assert!(result.is_ok(), "writes should work before ingest mode");
 
     // Enter and exit ingest mode
@@ -186,7 +186,7 @@ fn should_allow_batch_writes_before_and_after_ingest_mode() {
     tx.put(b"key2".to_vec(), b"val2".to_vec(), None).expect("put");
     tx.put(b"key3".to_vec(), b"val3".to_vec(), None).expect("put");
 
-    let result = engine.commit(tx, cntryl_midge::WriteOptions::default());
+    let result = engine.commit(tx, cntryl_midge::WriteOptions::buffered());
     assert!(
         result.is_ok(),
         "batch writes should work before ingest mode"
@@ -212,7 +212,7 @@ fn should_allow_reads_before_and_after_ingest_mode() {
     // Write some data before ingest
     let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
     tx.put(b"pre_key".to_vec(), b"pre_value".to_vec(), None).unwrap();
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+    engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
 
     // Read before entering ingest mode
     let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
@@ -279,7 +279,7 @@ fn should_support_multiple_ingest_cycles() {
     {
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
         tx.put(b"cycle1_key".to_vec(), b"cycle1_val".to_vec(), None).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
 
         let prev = engine.enter_ingest_mode().expect("enter ingest failed");
         engine.exit_ingest_mode(prev).expect("exit ingest failed");
@@ -295,7 +295,7 @@ fn should_support_multiple_ingest_cycles() {
     {
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
         tx.put(b"cycle2_key".to_vec(), b"cycle2_val".to_vec(), None).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).unwrap();
 
         let prev = engine.enter_ingest_mode().expect("enter ingest failed");
         engine.exit_ingest_mode(prev).expect("exit ingest failed");

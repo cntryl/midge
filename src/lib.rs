@@ -73,8 +73,6 @@ pub use engine::api::{
     ApiResult,
     Direction,
 
-    Durability,
-
     // Write options
     DurabilityPolicy,
     Goal,
@@ -116,68 +114,57 @@ pub use metrics::EngineMetrics;
 pub use testkit::{MidgeOptions, MockStorage, StorageMode};
 
 // ---------------------------------------------------------------------------
-// Ergonomic Prelude
+// Canonical Prelude
 // ---------------------------------------------------------------------------
 
-/// Prelude for ergonomic wildcard imports.
+/// Canonical prelude - the ONE correct way to use Midge.
 ///
-/// # Example
+/// This module re-exports only the essential, AI-safe API surface required
+/// for the canonical usage pattern. It contains no convenience methods,
+/// no legacy APIs, and no alternative entry points.
+///
+/// **Design principle:** If it's in the prelude, it's required for almost
+/// every real program. If it's optional, advanced, or dangerous, it must
+/// be imported explicitly.
+///
+/// # Canonical Usage Pattern
 ///
 /// ```no_run
-/// use cntryl_midge::prelude::*;
+/// use midge::prelude::*;
 /// use std::path::PathBuf;
 ///
 /// // Open engine
 /// let engine = MidgeEngine::open(PathBuf::from("./db"))?;
 /// let cf = engine.default_column_family();
 ///
-/// // All operations require explicit transactions
+/// // Write: explicit transaction, explicit commit, explicit durability
 /// let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 /// tx.put(b"key".to_vec(), b"value".to_vec(), None)?;
+/// engine.commit(tx, WriteOptions::recommended())?;
 ///
-/// // Commit with explicit durability
-/// let opts = WriteOptions::default().with_sync(true);
-/// engine.commit(tx, opts)?;
-/// # Ok::<(), cntryl_midge::MidgeError>(())
+/// // Read: explicit transaction
+/// let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
+/// let value = tx.get(b"key")?;
+/// # Ok::<(), MidgeError>(())
 /// ```
+///
+/// Everything needed for this pattern is in the prelude.
+/// Nothing else is.
 pub mod prelude {
-    pub use crate::{
-        // API
-        ApiError,
-        ApiResult,
-        // Column families
-        ColumnFamilyHandle,
-        ColumnFamilyId,
+    //! Canonical API surface for Midge.
+    //!
+    //! Use `use midge::prelude::*;` to import the essential types needed
+    //! for the standard transaction-based workflow.
 
-        Direction,
+    // Engine
+    pub use crate::engine::{open_engine, ColumnFamilyHandle, ColumnFamilyId, MidgeEngine};
 
-        Durability,
-        DurabilityPolicy,
+    // Transactions
+    pub use crate::engine::api::{Transaction, TransactionMode, WriteOptions};
 
-        Goal,
-        IsolationLevel,
+    // Core data types
+    pub use crate::engine::api::{Key, Value};
 
-        // Data types
-        Key,
-        KvPair,
-
-        MemoryBudget,
-
-        // Core types
-        MidgeEngine,
-        MidgeError,
-        MidgeResult,
-
-        // Configuration
-        OpenOptions,
-        // Query
-        Query,
-        // Transactions
-        Transaction,
-        TransactionMode,
-        Value,
-        WorkloadProfile,
-        // Write options
-        WriteOptions,
-    };
+    // Errors
+    pub use crate::common::{MidgeError, MidgeResult};
 }

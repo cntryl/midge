@@ -33,25 +33,25 @@ fn should_delete_keys_in_range_given_delete_range_when_querying() {
             .unwrap();
         tx.put(b"key1".to_vec(), b"val1".to_vec(), None)
             .expect("put1");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key2".to_vec(), b"val2".to_vec(), None)
             .expect("put2");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key3".to_vec(), b"val3".to_vec(), None)
             .expect("put3");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key4".to_vec(), b"val4".to_vec(), None)
             .expect("put4");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act
         let mut tx = engine
@@ -59,7 +59,7 @@ fn should_delete_keys_in_range_given_delete_range_when_querying() {
             .unwrap();
         tx.delete_range(b"key2".to_vec(), b"key4".to_vec())
             .expect("delete_range");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert
         // Keys outside range should still exist
@@ -104,7 +104,7 @@ fn should_handle_empty_range_given_start_equals_end_when_delete_range() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key".to_vec(), b"val".to_vec(), None).expect("put");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act
         let mut tx = engine
@@ -112,7 +112,7 @@ fn should_handle_empty_range_given_start_equals_end_when_delete_range() {
             .unwrap();
         tx.delete_range(b"key".to_vec(), b"key".to_vec())
             .expect("delete_range");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert
         // Empty range should not delete anything
@@ -140,7 +140,7 @@ fn should_accept_delete_range_call_with_valid_bounds_when_called() {
                 .unwrap();
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::default()).unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
         }
 
         // Act
@@ -149,7 +149,7 @@ fn should_accept_delete_range_call_with_valid_bounds_when_called() {
             .unwrap();
         let result = tx.delete_range(b"key010".to_vec(), b"key090".to_vec());
         if result.is_ok() {
-            engine.commit(tx, WriteOptions::default()).unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
         }
 
         // Assert: delete_range should not error
@@ -169,7 +169,7 @@ fn should_delete_key_given_delete_range_with_single_key_when_matching() {
             .unwrap();
         tx.put(b"target".to_vec(), b"value".to_vec(), None)
             .expect("put");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act
         // Range [target, targetZ) includes target
@@ -178,7 +178,7 @@ fn should_delete_key_given_delete_range_with_single_key_when_matching() {
             .unwrap();
         tx.delete_range(b"target".to_vec(), b"targetZ".to_vec())
             .expect("delete_range");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert
         // Target should be deleted (in range)
@@ -208,19 +208,19 @@ fn should_handle_delete_range_after_put_when_interleaved() {
             .unwrap();
         tx.put(b"a".to_vec(), b"val_a".to_vec(), None)
             .expect("put_a");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"b".to_vec(), b"val_b".to_vec(), None)
             .expect("put_b");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"c".to_vec(), b"val_c".to_vec(), None)
             .expect("put_c");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act
         let mut tx = engine
@@ -228,13 +228,13 @@ fn should_handle_delete_range_after_put_when_interleaved() {
             .unwrap();
         tx.delete_range(b"a".to_vec(), b"c".to_vec())
             .expect("delete_range");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"b".to_vec(), b"new_b".to_vec(), None)
             .expect("put_after_range");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert
         // Key should have new value from the put after delete_range
@@ -262,7 +262,7 @@ fn should_allow_multiple_delete_ranges_when_called_sequentially() {
                 .unwrap();
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::default()).unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
         }
 
         // Act
@@ -271,13 +271,13 @@ fn should_allow_multiple_delete_ranges_when_called_sequentially() {
             .unwrap();
         tx.delete_range(b"k03".to_vec(), b"k10".to_vec())
             .expect("delete_range1");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.delete_range(b"k15".to_vec(), b"k18".to_vec())
             .expect("delete_range2");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert: Keys in ranges should be deleted
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -316,25 +316,25 @@ fn should_persist_keys_across_delete_range_with_restart_when_durable() {
                 .unwrap();
             tx.put(b"key1".to_vec(), b"val1".to_vec(), None)
                 .expect("put1");
-            engine.commit(tx, WriteOptions::default()).unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(b"key2".to_vec(), b"val2".to_vec(), None)
                 .expect("put2");
-            engine.commit(tx, WriteOptions::default()).unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(b"key3".to_vec(), b"val3".to_vec(), None)
                 .expect("put3");
-            engine.commit(tx, WriteOptions::default()).unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .unwrap();
             tx.delete_range(b"key1".to_vec(), b"key3".to_vec())
                 .expect("delete_range");
-            engine.commit(tx, WriteOptions::default()).unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
             let _ = cf;
         }
 
@@ -382,7 +382,7 @@ fn should_handle_concurrent_delete_ranges_when_multiple_threads() {
                 .unwrap();
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::default()).unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
         }
 
         // Act: Multiple threads calling delete_range
@@ -398,7 +398,7 @@ fn should_handle_concurrent_delete_ranges_when_multiple_threads() {
                     .unwrap();
                 tx.delete_range(start.as_bytes().to_vec(), end.as_bytes().to_vec())
                     .expect("delete_range");
-                engine_clone.commit(tx, WriteOptions::default()).unwrap();
+                engine_clone.commit(tx, WriteOptions::buffered()).unwrap();
             });
             handles.push(h);
         }
@@ -440,7 +440,7 @@ fn should_handle_concurrent_mixed_operations_when_put_delete_interleaved() {
                 .unwrap();
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::default()).unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
         }
 
         // Act: Concurrent delete_ranges
@@ -456,7 +456,7 @@ fn should_handle_concurrent_mixed_operations_when_put_delete_interleaved() {
                     .unwrap();
                 tx.delete_range(start.as_bytes().to_vec(), end.as_bytes().to_vec())
                     .expect("delete_range");
-                engine_clone.commit(tx, WriteOptions::default()).unwrap();
+                engine_clone.commit(tx, WriteOptions::buffered()).unwrap();
             });
             del_handles.push(h);
         }
@@ -500,13 +500,13 @@ fn should_document_current_limitation_of_range_method_when_called() {
             .unwrap();
         tx.put(b"key1".to_vec(), b"val1".to_vec(), None)
             .expect("put1");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key2".to_vec(), b"val2".to_vec(), None)
             .expect("put2");
-        engine.commit(tx, WriteOptions::default()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act: Call scan() via transaction to demonstrate current behavior
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();

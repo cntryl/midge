@@ -18,7 +18,7 @@ fn should_track_read_counts_per_sst_when_accessed() -> MidgeResult<()> {
         let key = format!("batch1_key{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value1".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::default())?;
+        engine.commit(tx, WriteOptions::buffered())?;
     }
     engine.flush()?;
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -28,7 +28,7 @@ fn should_track_read_counts_per_sst_when_accessed() -> MidgeResult<()> {
         let key = format!("batch2_key{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value2".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::default())?;
+        engine.commit(tx, WriteOptions::buffered())?;
     }
     engine.flush()?;
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -63,7 +63,7 @@ fn should_track_l0_reads_separately() -> MidgeResult<()> {
             let value = format!("value_batch{}", batch);
             let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)?;
-            engine.commit(tx, WriteOptions::default())?;
+            engine.commit(tx, WriteOptions::buffered())?;
         }
         engine.flush()?;
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -91,7 +91,7 @@ fn should_skip_cold_ssts_using_key_ranges() -> MidgeResult<()> {
         let key = format!("a{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value_a".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::default())?;
+        engine.commit(tx, WriteOptions::buffered())?;
     }
     engine.flush()?;
 
@@ -100,7 +100,7 @@ fn should_skip_cold_ssts_using_key_ranges() -> MidgeResult<()> {
         let key = format!("b{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value_b".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::default())?;
+        engine.commit(tx, WriteOptions::buffered())?;
     }
     engine.flush()?;
 
@@ -109,7 +109,7 @@ fn should_skip_cold_ssts_using_key_ranges() -> MidgeResult<()> {
         let key = format!("c{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value_c".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::default())?;
+        engine.commit(tx, WriteOptions::buffered())?;
     }
     engine.flush()?;
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -135,7 +135,7 @@ fn should_accumulate_reads_over_time() -> MidgeResult<()> {
         let key = format!("key{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::default())?;
+        engine.commit(tx, WriteOptions::buffered())?;
     }
     engine.flush()?;
     std::thread::sleep(std::time::Duration::from_millis(100));

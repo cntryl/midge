@@ -32,7 +32,7 @@ fn should_commit_large_transaction_given_many_writes_exceeding_memory_limit() {
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                 .expect("put");
         }
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
 
         // Assert: All committed despite spill
         let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
@@ -72,7 +72,7 @@ fn should_handle_very_large_transaction_given_multiple_spills_when_persisted() {
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                 .expect("put");
         }
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
 
         let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
         for i in (0..500).step_by(50) {
@@ -101,7 +101,7 @@ fn should_preserve_data_integrity_given_large_transaction_with_specific_values()
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                 .expect("put");
         }
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
 
         let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
         for i in 0..200 {
@@ -136,7 +136,7 @@ fn should_preserve_key_order_given_large_transaction_when_iterating() {
             tx.put(key.as_bytes().to_vec(), b"v".to_vec(), None)
                 .expect("put");
         }
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
 
         let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
         for i in 0..200 {
@@ -200,7 +200,7 @@ fn should_cleanup_spill_files_given_transaction_rollback_when_finalizing() {
 
         let mut tx_write = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin_tx");
         tx_write.put(b"test".to_vec(), b"value".to_vec(), None).expect("put");
-        engine.commit(tx_write, cntryl_midge::WriteOptions::default()).expect("commit");
+        engine.commit(tx_write, cntryl_midge::WriteOptions::buffered()).expect("commit");
         
         let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
         let got = tx_read.get(b"test").expect("get");
@@ -263,7 +263,7 @@ fn should_recover_committed_spill_given_restart_after_commit() {
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+            engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
         }
 
         {
@@ -301,8 +301,8 @@ fn should_not_starve_foreground_writes_given_background_spill_activity() {
 
         let mut tx_fg = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin_tx");
         tx_fg.put(b"foreground".to_vec(), b"works".to_vec(), None).expect("put");
-        engine.commit(tx_fg, cntryl_midge::WriteOptions::default()).expect("commit");
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        engine.commit(tx_fg, cntryl_midge::WriteOptions::buffered()).expect("commit");
+        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
 
         let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
         let fg = tx_read.get(b"foreground").expect("get");
@@ -333,7 +333,7 @@ fn should_handle_concurrent_large_transactions_given_memory_pressure() {
                 tx.put(key.as_bytes().to_vec(), b"t1_value".to_vec(), None)
                     .expect("put");
             }
-            engine_clone.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+            engine_clone.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
         });
 
         let engine_clone = std::sync::Arc::clone(&engine);
@@ -345,7 +345,7 @@ fn should_handle_concurrent_large_transactions_given_memory_pressure() {
                 tx.put(key.as_bytes().to_vec(), b"t2_value".to_vec(), None)
                     .expect("put");
             }
-            engine_clone.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+            engine_clone.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
         });
 
         t1.join().expect("t1 join");
@@ -386,7 +386,7 @@ fn should_handle_transaction_with_tiny_memory_limit_given_forced_spill() {
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                 .expect("put");
         }
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
 
         let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
         let got = tx_read.get(b"tiny_00").expect("get");
@@ -418,7 +418,7 @@ fn should_handle_mixed_value_sizes_in_spilled_transaction_when_committed() {
             tx.put(key.as_bytes().to_vec(), value, None)
                 .expect("put");
         }
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
 
         let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
         let got_tiny = tx_read.get(b"mixed_0000").expect("get");
@@ -455,7 +455,7 @@ fn should_not_create_disk_artifacts_given_large_transaction_when_memory_mode() {
         tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
             .expect("put");
     }
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+    engine.commit(tx, cntryl_midge::WriteOptions::buffered()).expect("commit");
 
     let tx_read = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin_tx");
     let got = tx_read.get(b"mem_only_0000").expect("get");
