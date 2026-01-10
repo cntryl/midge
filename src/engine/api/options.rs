@@ -217,7 +217,7 @@ impl OpenOptions {
             goal: Goal::default(),
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
-            // Temporary defaults until build() derives them
+            // Initial derived values until build() recomputes them
             block_size: 16 * 1024,
             memtable_size_limit: 64 * 1024 * 1024,
             target_sst_size: 256 * 1024 * 1024,
@@ -244,7 +244,7 @@ impl OpenOptions {
             goal: Goal::default(),
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
-            // Temporary defaults until build() derives them
+            // Initial derived values until build() recomputes them
             block_size: 16 * 1024,
             memtable_size_limit: 64 * 1024 * 1024,
             target_sst_size: 256 * 1024 * 1024,
@@ -293,7 +293,7 @@ impl OpenOptions {
             goal: Goal::default(),
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
-            // Temporary defaults until build() derives them
+            // Initial derived values until build() recomputes them
             block_size: 16 * 1024,
             memtable_size_limit: 64 * 1024 * 1024,
             target_sst_size: 256 * 1024 * 1024,
@@ -329,9 +329,8 @@ impl OpenOptions {
         // Derive memory budget
         let total_memory = match self.memory_budget {
             MemoryBudget::Auto => {
-                // Use 50% of available system memory
-                // TODO: Query actual system memory
-                512 * 1024 * 1024 // Default to 512MB for now
+                // Auto currently uses a fixed 512MB budget (~50% of a 1 GiB system).
+                512 * 1024 * 1024
             }
             MemoryBudget::Bytes(n) => n,
         };
@@ -452,8 +451,6 @@ mod tests {
         assert_ne!(Goal::Throughput, Goal::Economy);
         assert_ne!(Goal::Economy, Goal::Latency);
     }
-
-    // Note: Durability enum tests removed - it's internal-only and should not have defaults
 
     // ========== MemoryBudget Enum Tests ==========
 

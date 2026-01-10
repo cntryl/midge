@@ -131,7 +131,7 @@ pub use testkit::{MidgeOptions, MockStorage, StorageMode};
 /// # Canonical Usage Pattern
 ///
 /// ```no_run
-/// use midge::prelude::*;
+/// use cntryl_midge::prelude::*;
 /// use std::path::PathBuf;
 ///
 /// // Open engine
@@ -152,11 +152,10 @@ pub use testkit::{MidgeOptions, MockStorage, StorageMode};
 /// Everything needed for this pattern is in the prelude.
 /// Nothing else is.
 pub mod prelude {
-    //! Canonical API surface for Midge.
-    //!
-    //! Use `use midge::prelude::*;` to import the essential types needed
-    //! for the standard transaction-based workflow.
-
+    /// Canonical API surface for Midge.
+    ///
+    /// Use `use midge::prelude::*;` to import the essential types needed
+    /// for the standard transaction-based workflow.
     // Engine
     pub use crate::engine::{open_engine, ColumnFamilyHandle, ColumnFamilyId, MidgeEngine};
 
