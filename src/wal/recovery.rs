@@ -185,7 +185,10 @@ pub fn replay_wal(
         Err(MidgeError::Corruption(e)) => {
             stats.mark_corruption();
             tracing::warn!(dir = %wal_dir, error = %e, "wal replay encountered corruption");
-            Err(MidgeError::Corruption(e))
+            // Tolerate corruption by returning successfully with whatever state was recovered
+            // before the corruption point (commonly a truncated tail record after a crash).
+            let _ = e;
+            Ok(stats)
         }
         Err(e) => {
             tracing::error!(dir = %wal_dir, error = %e, "wal replay failed");

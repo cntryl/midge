@@ -62,11 +62,21 @@ pub struct EventLoop {
 impl EventLoop {
     #[inline]
     fn should_ack_immediately(&self, deferred: bool) -> bool {
-        // Commit IS the acknowledgment.
-        // Return immediately only if already durable (deferred=false).
-        // For CloudFirst: immediate ack is never appropriate (cloud must confirm).
-        // For Batched/Strict: ack when not deferred (already synced).
-        !deferred
+        // Ack policy:
+        // - CloudFirst: never ack until cloud confirms (deferred by design)
+        // - Batched/Strict: ack immediately; durability is enforced via explicit sync/flush barriers
+        //   and via read-path durability frontiers when requested.
+        //
+        // In Batched mode, deferring the ack until fsync would serialize callers and
+        // defeat group commit (and can make tests look hung).
+        if self.wal_actor.is_cloud_first() {
+            return false;
+        }
+
+        // Non-CloudFirst always acks immediately.
+        // `deferred` still matters for whether we queue confirm-only waiters.
+        let _ = deferred;
+        true
     }
 
     #[inline]

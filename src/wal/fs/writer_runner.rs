@@ -229,15 +229,6 @@ impl WriterRunner {
                 s.completed_fsyncs = s.pending_fsyncs;
                 self.config.sync_cond.notify_all();
             }
-
-            // Check for shutdown after processing
-            if self
-                .config
-                .shutdown
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
-                break;
-            }
         }
     }
 }

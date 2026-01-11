@@ -9,7 +9,23 @@
 //!
 //! These tests run across all storage modes (Memory, LocalDisk, CloudBacked).
 
+use bytes::Bytes;
 use cntryl_midge::testkit::*;
+use cntryl_midge::{Query, Transaction};
+
+fn collect_scan(tx: &Transaction, query: Query) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut iter = tx.scan(&query).unwrap();
+    std::iter::from_fn(|| iter.next()).collect()
+}
+
+fn scan_between(tx: &Transaction, start: &[u8], end: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    collect_scan(
+        tx,
+        Query::new()
+            .start_key(Bytes::copy_from_slice(start))
+            .end_key(Bytes::copy_from_slice(end)),
+    )
+}
 
 // ============================================================================
 // RANGE SCAN TESTS
@@ -42,7 +58,7 @@ fn should_iterate_all_keys_in_order_given_populated_db_when_scanning() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = engine.tx_scan(&tx, b"k00", b"k99").unwrap();
+        let results = scan_between(&tx, b"k00", b"k99");
 
         // Assert
         assert_eq!(results.len(), 10);
@@ -80,15 +96,15 @@ fn should_iterate_in_reverse_given_reverse_query_when_scanning() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = engine.tx_scan_range(&tx, &query).unwrap();
+        let results = collect_scan(&tx, query);
 
         // Assert: Results should be in reverse order
         assert_eq!(results.len(), 5);
-        assert_eq!(results[0].0.as_ref(), b"k04");
-        assert_eq!(results[1].0.as_ref(), b"k03");
-        assert_eq!(results[2].0.as_ref(), b"k02");
-        assert_eq!(results[3].0.as_ref(), b"k01");
-        assert_eq!(results[4].0.as_ref(), b"k00");
+        assert_eq!(results[0].0.as_slice(), b"k04");
+        assert_eq!(results[1].0.as_slice(), b"k03");
+        assert_eq!(results[2].0.as_slice(), b"k02");
+        assert_eq!(results[3].0.as_slice(), b"k01");
+        assert_eq!(results[4].0.as_slice(), b"k00");
     });
 }
 
@@ -119,13 +135,13 @@ fn should_limit_results_given_limit_query_when_scanning() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = engine.tx_scan_range(&tx, &query).unwrap();
+        let results = collect_scan(&tx, query);
 
         // Assert
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0].0.as_ref(), b"k00");
-        assert_eq!(results[1].0.as_ref(), b"k01");
-        assert_eq!(results[2].0.as_ref(), b"k02");
+        assert_eq!(results[0].0.as_slice(), b"k00");
+        assert_eq!(results[1].0.as_slice(), b"k01");
+        assert_eq!(results[2].0.as_slice(), b"k02");
     });
 }
 
@@ -140,7 +156,7 @@ fn should_return_empty_given_empty_db_when_scanning() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = engine.tx_scan(&tx, b"k00", b"k99").unwrap();
+        let results = scan_between(&tx, b"k00", b"k99");
 
         // Assert
         assert!(results.is_empty());
@@ -169,13 +185,13 @@ fn should_return_next_key_given_seek_to_missing_key_when_scanning() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = engine.tx_scan(&tx, b"k00", b"k99").unwrap();
+        let results = scan_between(&tx, b"k00", b"k99");
 
         // Assert: Should return all keys >= k00
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0].0.as_ref(), b"k01");
-        assert_eq!(results[1].0.as_ref(), b"k03");
-        assert_eq!(results[2].0.as_ref(), b"k05");
+        assert_eq!(results[0].0.as_slice(), b"k01");
+        assert_eq!(results[1].0.as_slice(), b"k03");
+        assert_eq!(results[2].0.as_slice(), b"k05");
     });
 }
 
@@ -199,7 +215,7 @@ fn should_return_empty_given_seek_past_end_when_scanning() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = engine.tx_scan(&tx, b"k99", b"k99").unwrap();
+        let results = scan_between(&tx, b"k99", b"k99");
 
         // Assert
         assert!(results.is_empty());
@@ -226,7 +242,7 @@ fn should_return_empty_given_invalid_range_when_start_greater_than_end() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = engine.tx_scan(&tx, b"k99", b"k00").unwrap();
+        let results = scan_between(&tx, b"k99", b"k00");
 
         // Assert: No results because start >= end
         assert!(results.is_empty());
@@ -269,13 +285,13 @@ fn should_skip_deleted_keys_given_tombstones_when_scanning() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = engine.tx_scan(&tx, b"k00", b"k99").unwrap();
+        let results = scan_between(&tx, b"k00", b"k99");
 
         // Assert: k01 and k03 should not appear
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0].0.as_ref(), b"k00");
-        assert_eq!(results[1].0.as_ref(), b"k02");
-        assert_eq!(results[2].0.as_ref(), b"k04");
+        assert_eq!(results[0].0.as_slice(), b"k00");
+        assert_eq!(results[1].0.as_slice(), b"k02");
+        assert_eq!(results[2].0.as_slice(), b"k04");
     });
 }
 
@@ -314,15 +330,15 @@ fn should_respect_range_tombstones_given_delete_range_when_scanning() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = engine.tx_scan(&tx, b"k00", b"k99").unwrap();
+        let results = scan_between(&tx, b"k00", b"k99");
 
         // Assert: k02-k06 should be gone, k00, k01, k07-k09 remain
         assert_eq!(results.len(), 5);
-        assert_eq!(results[0].0.as_ref(), b"k00");
-        assert_eq!(results[1].0.as_ref(), b"k01");
-        assert_eq!(results[2].0.as_ref(), b"k07");
-        assert_eq!(results[3].0.as_ref(), b"k08");
-        assert_eq!(results[4].0.as_ref(), b"k09");
+        assert_eq!(results[0].0.as_slice(), b"k00");
+        assert_eq!(results[1].0.as_slice(), b"k01");
+        assert_eq!(results[2].0.as_slice(), b"k07");
+        assert_eq!(results[3].0.as_slice(), b"k08");
+        assert_eq!(results[4].0.as_slice(), b"k09");
     });
 }
 
@@ -371,12 +387,12 @@ fn should_return_latest_value_given_interleaved_puts_deletes_when_scanning() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = engine.tx_scan(&tx, b"a", b"z").unwrap();
+        let results = scan_between(&tx, b"a", b"z");
 
         // Assert: Should have latest value
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0.as_ref(), b"key");
-        assert_eq!(results[0].1.as_ref(), b"value3");
+        assert_eq!(results[0].0.as_slice(), b"key");
+        assert_eq!(results[0].1.as_slice(), b"value3");
     });
 }
 
@@ -406,11 +422,11 @@ fn should_match_regular_scan_given_streaming_scan_when_comparing() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let range_results = engine.tx_scan(&tx, b"k00", b"k99").unwrap();
+        let range_results = scan_between(&tx, b"k00", b"k99");
 
         // Act: Scan with query
         let query = cntryl_midge::Query::new();
-        let scan_results = engine.tx_scan_range(&tx, &query).unwrap();
+        let scan_results = collect_scan(&tx, query);
 
         // Assert: Should produce identical results
         assert_eq!(range_results, scan_results);
@@ -446,12 +462,12 @@ fn should_respect_limit_given_streaming_scan_when_limited() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = engine.tx_scan_range(&tx, &query).unwrap();
+        let results = collect_scan(&tx, query);
 
         // Assert
         assert_eq!(results.len(), 5);
-        assert_eq!(results[0].0.as_ref(), b"k05");
-        assert_eq!(results[4].0.as_ref(), b"k09");
+        assert_eq!(results[0].0.as_slice(), b"k05");
+        assert_eq!(results[4].0.as_slice(), b"k09");
     });
 }
 
@@ -491,12 +507,12 @@ fn should_apply_tombstones_given_streaming_scan_when_keys_deleted() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = engine.tx_scan_range(&tx, &query).unwrap();
+        let results = collect_scan(&tx, query);
 
         // Assert
         assert_eq!(results.len(), 8);
-        assert!(!results.iter().any(|(k, _)| k.as_ref() == b"k02"));
-        assert!(!results.iter().any(|(k, _)| k.as_ref() == b"k05"));
+        assert!(!results.iter().any(|(k, _)| k.as_slice() == b"k02"));
+        assert!(!results.iter().any(|(k, _)| k.as_slice() == b"k05"));
     });
 }
 
@@ -507,27 +523,27 @@ fn should_handle_large_scan_given_many_keys_when_iterating() {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        // Insert 500 keys
+        // Insert 500 keys (batch into one transaction for speed)
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
         for i in 0..500 {
-            let mut tx = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-                .unwrap();
             tx.put(
                 format!("k{:04}", i).as_bytes().to_vec(),
                 format!("v{:04}", i).as_bytes().to_vec(),
                 None,
             )
             .unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
         }
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
+            .unwrap();
 
         // Act
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = engine.tx_scan(&tx, b"k0000", b"k0500").unwrap();
+        let results = scan_between(&tx, b"k0000", b"k0500");
 
         // Assert
         assert_eq!(results.len(), 500);
@@ -573,7 +589,7 @@ fn should_handle_large_streaming_scan_given_multiple_ssts_when_spanning() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = engine.tx_scan_range(&tx, &query).unwrap();
+        let results = collect_scan(&tx, query);
 
         // Assert: All 100 keys should be returned in order
         assert_eq!(results.len(), 100);
@@ -619,13 +635,13 @@ fn should_handle_concurrent_streaming_scans_when_multiple_threads() {
                     let tx = engine_clone
                         .begin_tx(cf_clone.id(), cntryl_midge::TransactionMode::ReadOnly)
                         .unwrap();
-                    engine_clone.tx_scan_range(&tx, &query).unwrap()
+                    collect_scan(&tx, query)
                 })
             })
             .collect();
 
         // Assert: All threads should get same results
-        let results: Vec<Vec<(bytes::Bytes, bytes::Bytes)>> =
+        let results: Vec<Vec<(Vec<u8>, Vec<u8>)>> =
             handles.into_iter().map(|h| h.join().unwrap()).collect();
 
         for r in results.iter().skip(1) {
@@ -662,15 +678,15 @@ fn should_produce_identical_results_given_repeated_scans_when_rewinding() {
         let tx1 = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results1 = engine.tx_scan(&tx1, b"k00", b"k99").unwrap();
+        let results1 = scan_between(&tx1, b"k00", b"k99");
         let tx2 = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results2 = engine.tx_scan(&tx2, b"k00", b"k99").unwrap();
+        let results2 = scan_between(&tx2, b"k00", b"k99");
         let tx3 = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results3 = engine.tx_scan(&tx3, b"k00", b"k99").unwrap();
+        let results3 = scan_between(&tx3, b"k00", b"k99");
 
         // Assert: All scans should produce identical results
         assert_eq!(results1, results2);

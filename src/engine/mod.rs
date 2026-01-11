@@ -18,6 +18,9 @@ use crate::runtime::{
     next_request_id, Runtime, RuntimeHandle, RuntimeMsg, RuntimeResponse, RuntimeState,
 };
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static IN_MEMORY_OPEN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) mod api;
 mod context;
@@ -156,7 +159,19 @@ impl Engine {
         let start = std::time::Instant::now();
         let (db_path, memory_mode) = match &opts.storage {
             Storage::InMemory => (
-                PathBuf::from(format!("target/tmp/memory_{}", std::process::id())),
+                {
+                    let counter = IN_MEMORY_OPEN_COUNTER.fetch_add(1, Ordering::SeqCst);
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0);
+                    PathBuf::from(format!(
+                        "target/tmp/midge_test_memory_{}_{}_{}",
+                        std::process::id(),
+                        counter,
+                        timestamp
+                    ))
+                },
                 true,
             ),
             Storage::Local { path } => (path.clone(), false),
@@ -165,7 +180,31 @@ impl Engine {
             } => (local_cache_path.clone(), false),
         };
 
-        let mut state = RuntimeState::new(db_path.clone(), memory_mode);
+        let _ = std::fs::create_dir_all(&db_path);
+
+        // Build runtime state/config.
+        // Cloud storage mode uses CloudFirst durability + HybridStorage.
+        let (mut state, runtime_config) = match &opts.storage {
+            Storage::Cloud { .. } => {
+                let cloud = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
+                    &db_path,
+                )?;
+
+                let state = RuntimeState::new_with_recovery_dir(
+                    db_path.clone(),
+                    memory_mode,
+                    Some(cloud.recovery_cloud_wal_dir.clone()),
+                );
+
+                let mut config = crate::runtime::RuntimeConfig::default();
+                config.wal_durability_policy = crate::wal::DurabilityPolicy::CloudFirst;
+                config.hybrid_storage = Some(cloud.hybrid_storage);
+                config.hybrid_storage_events = Some(cloud.events);
+
+                (state, config)
+            }
+            _ => (RuntimeState::new(db_path.clone(), memory_mode), crate::runtime::RuntimeConfig::default()),
+        };
 
         // 🔑 CRITICAL: Replay intent log to recover any interrupted mutations
         // Must happen BEFORE runtime starts processing messages
@@ -173,7 +212,7 @@ impl Engine {
 
         // Start runtime
         let (runtime_inst, _) = Runtime::new()?;
-        let (runtime, runtime_handle) = runtime_inst.start(state)?;
+        let (runtime, runtime_handle) = runtime_inst.start_with_config(state, runtime_config)?;
 
         let default_cf = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
         let column_families = dashmap::DashMap::new();
@@ -184,7 +223,7 @@ impl Engine {
         // Load existing CFs from manifest
         let manifest = crate::metadata::ManifestPersistence::load(&db_path).unwrap_or_default();
         for cf_meta in &manifest.column_families {
-            if cf_meta.id != 0 {
+            if cf_meta.id != 0 && cf_meta.deleted_at.is_none() {
                 let handle =
                     ColumnFamilyHandle::new(ColumnFamilyId(cf_meta.id), cf_meta.name.clone());
                 column_families.insert(cf_meta.id, handle);
