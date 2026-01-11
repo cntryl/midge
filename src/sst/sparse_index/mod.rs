@@ -12,3 +12,4 @@ pub mod shared;
 pub mod writer;
 
 pub use reader::SparseIndexReader;
+pub use shared::IndexEntry;
