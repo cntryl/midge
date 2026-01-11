@@ -38,7 +38,7 @@ mod runtime;
 pub mod sst;
 mod storage;
 mod telemetry;
-mod wal;
+pub mod wal;
 
 // Main engine (canonical public API)
 mod engine;
