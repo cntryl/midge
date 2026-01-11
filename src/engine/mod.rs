@@ -792,7 +792,7 @@ impl Engine {
     }
 
     /// Compact all data (stub - not implemented)
-    pub(crate) fn compact_all(&self) -> MidgeResult<()> {
+    pub fn compact_all(&self) -> MidgeResult<()> {
         // Stub implementation: trigger a flush as a proxy for compaction
         // In a full LSM, this would compact all levels
         self.flush()

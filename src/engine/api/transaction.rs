@@ -203,7 +203,7 @@ impl Transaction {
         self.id
     }
 
-    pub(crate) fn start_sequence(&self) -> u64 {
+    pub fn start_sequence(&self) -> u64 {
         self.start_sequence
     }
 
