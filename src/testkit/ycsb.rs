@@ -10,9 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::engine::api;
-use crate::{ColumnFamilyHandle, MidgeEngine};
+use crate::{ColumnFamilyId, Engine};
 
-use super::MidgeOptions;
+use super::config::MidgeOptions;
 
 pub const KEY_SIZE: usize = 16;
 pub const VALUE_SIZE: usize = 128;
@@ -49,21 +49,21 @@ pub fn make_value(fill: u8) -> [u8; VALUE_SIZE] {
     [fill; VALUE_SIZE]
 }
 
-pub fn open_tier4_engine(mut opts: MidgeOptions) -> MidgeEngine {
+pub fn open_tier4_engine(mut opts: MidgeOptions) -> Engine {
     // Tier-4 workloads should exercise the full system shape.
     opts.enable_compaction = true;
     // Avoid tiny testkit memtables causing constant flush.
     opts.memtable_size = TIER4_MEMTABLE_SIZE_BYTES;
 
-    MidgeEngine::open_with_options(opts).expect("open tier4 engine")
+    Engine::open_with_options(opts).expect("open tier4 engine")
 }
 
-pub fn load_initial_dataset(engine: &MidgeEngine, cf: &ColumnFamilyHandle, initial_keys: usize) {
+pub fn load_initial_dataset(engine: &Engine, cf_id: &ColumnFamilyId, initial_keys: usize) {
     // Load is not measured; optimize aggressively to keep Tier-4 runs practical.
     // Use transactions with batched commits to amortize WAL overhead.
     const BATCH_OPS: usize = 1024;
 
-    let cf_id = cf.id();
+    let cf_id = *cf_id;
     let mut tx = engine
         .begin_tx(cf_id, api::TransactionMode::ReadWrite)
         .expect("begin_tx failed");

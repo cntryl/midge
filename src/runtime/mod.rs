@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Runtime - Actor-based background task execution
 //!
 //! Deterministic actor framework for compaction, flushing, WAL, cloud ops, GC, and manifest.
@@ -20,13 +22,13 @@ pub mod scheduler;
 pub mod state;
 pub mod task;
 
-pub use actors::{CloudActor, CompactionActor, FlushActor, GcActor, ManifestActor, WalActor};
-pub use dispatch::Dispatcher;
+
+
 pub use event_loop::EventLoop;
 pub use intent_persistence::IntentPersistence;
-pub use scheduler::Scheduler;
+
 pub use state::RuntimeState;
-pub use task::{Task, TaskId, TaskKind, TaskPriority};
+
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::wal::policy::BatchConfig;
@@ -92,17 +94,18 @@ pub struct FileMeta {
     pub largest_seq: Option<u64>,
 }
 
-/// A single operation within a write batch.
+/// A single operation within an atomic transaction apply.
 ///
-/// This type lives in the runtime layer so that the engine can send a batch
-/// without depending on engine API types.
+/// This type lives in the runtime layer so higher layers can submit a
+/// transaction without depending on engine API types.
 #[derive(Debug, Clone)]
-pub enum WriteBatchOp {
+pub enum TransactionOp {
     Put {
         cf_id: u32,
         key: Vec<u8>,
         value: Vec<u8>,
         ttl_seconds: Option<u64>,
+        insert_only: bool,
     },
     Delete {
         cf_id: u32,
@@ -177,13 +180,21 @@ pub enum RuntimeMsg {
         insert_only: bool,        // When true, fail if key already exists
     },
 
-    /// Apply a write batch as a single atomic unit.
+    /// Append delete range tombstone to WAL.
+    WalAppendDeleteRange {
+        request_id: u64,
+        cf_id: u32,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+    },
+
+    /// Apply a transaction as a single atomic unit.
     ///
     /// Sequence numbers are allocated in-order inside the runtime.
-    /// The response returns the last allocated sequence for the batch.
-    WriteBatch {
+    /// The response returns the last allocated sequence for the transaction.
+    ApplyTransaction {
         request_id: u64,
-        ops: Vec<WriteBatchOp>,
+        ops: Vec<TransactionOp>,
     },
     /// Sync WAL to disk.
     WalSync { request_id: u64 },
@@ -316,7 +327,8 @@ impl RuntimeMsg {
             | RunCompaction { request_id, .. }
             | CompactionComplete { request_id, .. }
             | WalAppend { request_id, .. }
-            | WriteBatch { request_id, .. }
+            | WalAppendDeleteRange { request_id, .. }
+            | ApplyTransaction { request_id, .. }
             | WalSync { request_id }
             | WalRotate { request_id }
             | WalSyncComplete { request_id, .. }
@@ -355,7 +367,8 @@ impl RuntimeMsg {
             RunCompaction { .. } => "RunCompaction",
             CompactionComplete { .. } => "CompactionComplete",
             WalAppend { .. } => "WalAppend",
-            WriteBatch { .. } => "WriteBatch",
+            WalAppendDeleteRange { .. } => "WalAppendDeleteRange",
+            ApplyTransaction { .. } => "ApplyTransaction",
             WalSync { .. } => "WalSync",
             WalRotate { .. } => "WalRotate",
             WalSyncComplete { .. } => "WalSyncComplete",
@@ -402,10 +415,10 @@ pub enum RuntimeResponse {
         sequence: u64,
     },
 
-    /// Write batch accepted and assigned a contiguous sequence range.
+    /// Transaction accepted and assigned a contiguous sequence range.
     ///
-    /// `last_sequence` is the last (highest) sequence allocated for the batch.
-    WriteBatchAppended {
+    /// `last_sequence` is the last (highest) sequence allocated for the transaction.
+    TransactionApplied {
         request_id: u64,
         last_sequence: u64,
         op_count: usize,
@@ -475,7 +488,7 @@ impl RuntimeResponse {
         match self {
             RuntimeResponse::Ok { request_id }
             | RuntimeResponse::WalAppended { request_id, .. }
-            | RuntimeResponse::WriteBatchAppended { request_id, .. }
+            | RuntimeResponse::TransactionApplied { request_id, .. }
             | RuntimeResponse::Error { request_id, .. }
             | RuntimeResponse::ReadValue { request_id, .. }
             | RuntimeResponse::RangeScanResults { request_id, .. }
@@ -1014,7 +1027,7 @@ mod tests {
         );
 
         assert_eq!(
-            RuntimeResponse::WriteBatchAppended {
+            RuntimeResponse::TransactionApplied {
                 request_id: 9,
                 last_sequence: 200,
                 op_count: 2

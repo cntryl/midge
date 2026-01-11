@@ -15,7 +15,7 @@
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
-use cntryl_midge::{TransactionMode, WriteOptions};
+use cntryl_midge::{Query, TransactionMode, WriteOptions};
 
 // ============================================================================
 // BASIC RANGE DELETION
@@ -510,7 +510,15 @@ fn should_document_current_limitation_of_range_method_when_called() {
 
         // Act: Call scan() via transaction to demonstrate current behavior
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
-        let results = tx.scan(b"key1", b"key3").expect("scan");
+        let mut iter = tx
+            .scan(
+                &Query::new()
+                    .start_key(Bytes::from(&b"key1"[..]))
+                    .end_key(Bytes::from(&b"key3"[..])),
+            )
+            .expect("scan");
+        let results: Vec<_> =
+            std::iter::from_fn(|| iter.next().transpose().ok().flatten()).collect();
 
         // Assert: range() should return keys in the range
         // Currently it returns empty, but should return [key1, key2]

@@ -1,3 +1,5 @@
+#![allow(rustdoc::broken_intra_doc_links)]
+
 //! Utilities intended for benchmarks (and other perf-style harnesses).
 //!
 //! The goal of this module is to keep benchmark targets thin by centralizing:
@@ -6,7 +8,7 @@
 //! - engine setup from high-level knobs (via `OpenOptions`)
 
 use crate::testkit::{MidgeOptions, StorageMode};
-use crate::{Goal, MemoryBudget, MidgeEngine, WorkloadProfile};
+use crate::{Engine, Goal, MemoryBudget, WorkloadProfile};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -164,7 +166,7 @@ impl BenchEngineConfig {
 }
 
 /// Setup a benchmark engine with the given configuration.
-pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> MidgeEngine {
+pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> Engine {
     let path = unique_bench_path(prefix);
 
     // Only clean up filesystem paths (memory mode doesn't need cleanup).
@@ -173,11 +175,11 @@ pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> MidgeEngine {
     }
 
     let opts = config.build_midge_options(Some(path));
-    MidgeEngine::open(opts).expect("failed to open engine")
+    Engine::open(opts).expect("failed to open engine")
 }
 
 /// Setup engine with storage mode (convenience wrapper with defaults).
-pub fn setup_engine_with_mode(prefix: &str, mode: BenchStorageMode) -> MidgeEngine {
+pub fn setup_engine_with_mode(prefix: &str, mode: BenchStorageMode) -> Engine {
     let config = BenchEngineConfig {
         storage_mode: mode,
         ..Default::default()
@@ -187,24 +189,24 @@ pub fn setup_engine_with_mode(prefix: &str, mode: BenchStorageMode) -> MidgeEngi
 
 /// Setup a benchmark engine at a specific path with the given configuration.
 /// This creates a NEW database at the path (deletes any existing data).
-pub fn setup_engine_at_path(path: &Path, config: &BenchEngineConfig) -> MidgeEngine {
+pub fn setup_engine_at_path(path: &Path, config: &BenchEngineConfig) -> Engine {
     let _ = std::fs::remove_dir_all(path);
     reopen_engine_at_path(path, config)
 }
 
 /// Reopen an existing database at a specific path.
 /// Does NOT delete existing data - use for recovery/reopen tests.
-pub fn reopen_engine_at_path(path: &Path, config: &BenchEngineConfig) -> MidgeEngine {
+pub fn reopen_engine_at_path(path: &Path, config: &BenchEngineConfig) -> Engine {
     if let BenchStorageMode::Memory = config.storage_mode {
         panic!("setup_engine_at_path requires persistent storage");
     }
 
     let opts = config.build_midge_options(Some(path.to_path_buf()));
-    MidgeEngine::open(opts).expect("failed to open engine")
+    Engine::open(opts).expect("failed to open engine")
 }
 
 /// Setup Arc-wrapped engine for concurrent benchmarks.
-pub fn setup_engine_arc(prefix: &str, mode: BenchStorageMode) -> Arc<MidgeEngine> {
+pub fn setup_engine_arc(prefix: &str, mode: BenchStorageMode) -> Arc<Engine> {
     Arc::new(setup_engine_with_mode(prefix, mode))
 }
 

@@ -2,6 +2,7 @@
 //!
 //! Provides a fluent API for specifying range scans with optional filters.
 
+use super::iterator::Direction;
 use bytes::Bytes;
 
 /// Lightweight scan query builder for range operations.
@@ -15,8 +16,8 @@ pub struct Query {
     pub prefix: Option<Bytes>,
     /// Maximum number of results to return
     pub limit: Option<usize>,
-    /// Iterate in reverse order (from end to start)
-    pub reverse: bool,
+    /// Iteration direction (Forward or Reverse)
+    pub direction: Direction,
 }
 
 impl Default for Query {
@@ -33,7 +34,7 @@ impl Query {
             end: None,
             prefix: None,
             limit: None,
-            reverse: false,
+            direction: Direction::Forward,
         }
     }
 
@@ -63,7 +64,7 @@ impl Query {
 
     /// Reverse the iteration direction
     pub fn reverse(mut self) -> Self {
-        self.reverse = true;
+        self.direction = Direction::Reverse;
         self
     }
 
@@ -113,7 +114,7 @@ mod tests {
         assert_eq!(query.end, None);
         assert_eq!(query.prefix, None);
         assert_eq!(query.limit, None);
-        assert!(!query.reverse);
+        assert_eq!(query.direction, Direction::Forward);
     }
 
     #[test]
@@ -129,7 +130,7 @@ mod tests {
         assert_eq!(query.end, None);
         assert_eq!(query.prefix, None);
         assert_eq!(query.limit, None);
-        assert!(!query.reverse);
+        assert_eq!(query.direction, Direction::Forward);
     }
 
     #[test]
@@ -146,7 +147,7 @@ mod tests {
         assert_eq!(new_query.end, default_query.end);
         assert_eq!(new_query.prefix, default_query.prefix);
         assert_eq!(new_query.limit, default_query.limit);
-        assert_eq!(new_query.reverse, default_query.reverse);
+        assert_eq!(new_query.direction, default_query.direction);
     }
 
     #[test]
@@ -158,7 +159,7 @@ mod tests {
         let query = Query::new();
 
         // Assert
-        assert!(!query.reverse);
+        assert_eq!(query.direction, Direction::Forward);
     }
 
     // ========== Query Start Key Tests ==========
@@ -363,7 +364,7 @@ mod tests {
 
         // Assert
         assert_eq!(query.limit, Some(10));
-        assert!(query.reverse);
+        assert_eq!(query.direction, Direction::Reverse);
     }
 
     #[test]
@@ -406,7 +407,7 @@ mod tests {
         let query = Query::new().reverse();
 
         // Assert
-        assert!(query.reverse);
+        assert_eq!(query.direction, Direction::Reverse);
     }
 
     #[test]
@@ -419,7 +420,7 @@ mod tests {
 
         // Assert
         assert_eq!(query.start, Some(start));
-        assert!(query.reverse);
+        assert_eq!(query.direction, Direction::Reverse);
     }
 
     #[test]
@@ -429,7 +430,7 @@ mod tests {
         let query = Query::new().reverse().reverse();
 
         // Assert
-        assert!(query.reverse);
+        assert_eq!(query.direction, Direction::Reverse);
     }
 
     #[test]
@@ -447,8 +448,8 @@ mod tests {
         let query2 = Query::new().start_key(start).reverse().end_key(end);
 
         // Assert - reverse should be true in both
-        assert!(query1.reverse);
-        assert!(query2.reverse);
+        assert_eq!(query1.direction, Direction::Reverse);
+        assert_eq!(query2.direction, Direction::Reverse);
     }
 
     // ========== Query Clone Tests ==========
@@ -472,7 +473,7 @@ mod tests {
         assert_eq!(cloned.end, original.end);
         assert_eq!(cloned.prefix, original.prefix);
         assert_eq!(cloned.limit, original.limit);
-        assert_eq!(cloned.reverse, original.reverse);
+        assert_eq!(cloned.direction, original.direction);
     }
 
     #[test]
@@ -706,7 +707,7 @@ mod tests {
         assert_eq!(query.start, Some(start));
         assert_eq!(query.end, Some(end));
         assert_eq!(query.limit, Some(50));
-        assert!(query.reverse);
+        assert_eq!(query.direction, Direction::Reverse);
         assert_eq!(query.prefix, None);
     }
 
@@ -721,7 +722,7 @@ mod tests {
         // Assert
         assert_eq!(query.prefix, Some(prefix));
         assert_eq!(query.limit, Some(100));
-        assert!(query.reverse);
+        assert_eq!(query.direction, Direction::Reverse);
     }
 
     #[test]
@@ -742,7 +743,7 @@ mod tests {
 
         // Assert
         assert_eq!(q1.limit, q2.limit);
-        assert_eq!(q1.reverse, q2.reverse);
+        assert_eq!(q1.direction, q2.direction);
         assert_eq!(q1.start, q2.start);
     }
 
@@ -817,7 +818,7 @@ mod tests {
         assert_eq!(query.end, Some(end));
         assert_eq!(query.prefix, Some(prefix));
         assert_eq!(query.limit, Some(42));
-        assert!(query.reverse);
+        assert_eq!(query.direction, Direction::Reverse);
     }
 
     #[test]

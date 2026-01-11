@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Metadata - manifest and version management
 //!
 //! Tracks SST files, levels, and version history
@@ -9,13 +11,13 @@ pub mod version_manager;
 pub mod version_set;
 
 pub use journal::{
-    append_edit, append_edit_batch, append_fsync_marker, replay_journal, truncate_journal,
+    append_edit, append_edit_batch,
     ManifestEdit,
 };
-pub use manifest::{CloudCheckpoint, ColumnFamilyMeta, FileMeta, Manifest};
+pub use manifest::{CloudCheckpoint, FileMeta, Manifest};
 pub use persistence::ManifestPersistence;
-pub use version_manager::VersionManager;
-pub use version_set::VersionSet;
+
+
 
 /// Version identifier
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]

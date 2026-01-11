@@ -1,11 +1,11 @@
+#![allow(dead_code)]
+
 pub mod executor;
 pub mod merge;
 pub mod planner;
 pub mod strategy;
 
-pub use executor::CompactionVersion;
-pub use merge::MergeIterator;
-pub use planner::{CompactionLog, CompactionTask};
+
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 
 use crate::common::{MidgeError, MidgeResult};

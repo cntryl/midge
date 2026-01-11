@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
-use cntryl_midge::WriteOptions;
+use cntryl_midge::{Query, WriteOptions};
 use std::sync::Arc;
 
 // ============================================================================
@@ -427,7 +427,15 @@ fn should_hide_deleted_range_given_transaction_scan_when_delete_range() {
             .unwrap();
 
         // Scan within transaction
-        let results = txn.scan(b"key0", b"key9").unwrap();
+        let mut iter = txn
+            .scan(
+                &Query::new()
+                    .start_key(Bytes::from(&b"key0"[..]))
+                    .end_key(Bytes::from(&b"key9"[..])),
+            )
+            .unwrap();
+        let results: Vec<_> =
+            std::iter::from_fn(|| iter.next().transpose().ok().flatten()).collect();
 
         // Assert - Should only see key3
         assert_eq!(results.len(), 1);
@@ -449,7 +457,15 @@ fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
         txn.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
 
         // Scan within transaction
-        let results = txn.scan(b"key0", b"key9").unwrap();
+        let mut iter = txn
+            .scan(
+                &Query::new()
+                    .start_key(Bytes::from(&b"key0"[..]))
+                    .end_key(Bytes::from(&b"key9"[..])),
+            )
+            .unwrap();
+        let results: Vec<_> =
+            std::iter::from_fn(|| iter.next().transpose().ok().flatten()).collect();
 
         // Assert - should see uncommitted writes
         assert_eq!(results.len(), 2);

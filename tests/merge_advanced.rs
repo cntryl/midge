@@ -11,8 +11,7 @@
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
-#![cfg(feature = "merge")]
-
+#[cfg(feature = "merge")]
 use cntryl_midge::{MergeOperator, MidgeResult};
 use std::sync::Arc;
 

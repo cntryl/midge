@@ -1,10 +1,13 @@
-use crate::{MidgeEngine, MidgeOptions};
+#![allow(rustdoc::broken_intra_doc_links)]
+
+use crate::testkit::config::MidgeOptions;
+use crate::Engine;
 
 pub const KEY_SIZE: usize = 16;
 
-pub fn open_engine_no_compaction(mut opts: MidgeOptions) -> MidgeEngine {
+pub fn open_engine_no_compaction(mut opts: MidgeOptions) -> Engine {
     opts.enable_compaction = false;
-    MidgeEngine::open_with_options(opts).expect("open_engine_no_compaction: open engine")
+    Engine::open_with_options(opts).expect("open_engine_no_compaction: open engine")
 }
 
 pub fn key16_u64_be(i: u64) -> [u8; KEY_SIZE] {

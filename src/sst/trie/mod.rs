@@ -54,9 +54,9 @@ pub mod reader;
 pub mod writer;
 
 pub use builder::TrieBuilder;
-pub use node::{TrieEdge, TrieNode};
-pub use reader::TrieReader;
-pub use writer::TrieWriter;
+
+
+
 
 /// Calculate longest common prefix length
 pub fn lcp(a: &[u8], b: &[u8]) -> usize {

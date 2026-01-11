@@ -30,7 +30,6 @@ pub enum MidgeError {
     /// Invalid path
     InvalidPath,
 
-
     /// Write stall - memtable full or compaction lagging behind
     /// Application must apply backpressure
     WriteStall(String),

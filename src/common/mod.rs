@@ -2,7 +2,6 @@
 
 pub mod error;
 pub mod singleflight;
-pub mod tlv;
 
 pub use error::{MidgeError, MidgeResult};
-pub use singleflight::{Accumulator, FlushPolicy, KeyedGroupCommit};
+pub use singleflight::KeyedGroupCommit;

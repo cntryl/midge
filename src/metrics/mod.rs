@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Metrics and observability
 //!
 //! Comprehensive performance monitoring and statistics collection.

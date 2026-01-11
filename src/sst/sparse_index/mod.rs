@@ -12,5 +12,4 @@ pub mod shared;
 pub mod writer;
 
 pub use reader::SparseIndexReader;
-pub use shared::{BlockRange, IndexEntry};
-pub use writer::SparseIndexWriter;
+

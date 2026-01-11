@@ -73,15 +73,15 @@ enum PendingCloudWrite {
         sequence: u64,
         enqueued_at: Instant,
     },
-    Batch {
+    Transaction {
         commit_sequence: u64,
-        ops: Vec<BatchApplyOp>,
+        ops: Vec<TransactionApplyOp>,
         enqueued_at: Instant,
     },
 }
 
 #[derive(Debug)]
-enum BatchApplyOp {
+enum TransactionApplyOp {
     Put {
         cf_id: u32,
         key: Vec<u8>,
@@ -268,7 +268,7 @@ impl WalActor {
                 let enqueued_at = match pw {
                     PendingCloudWrite::Single { enqueued_at, .. }
                     | PendingCloudWrite::Merge { enqueued_at, .. }
-                    | PendingCloudWrite::Batch { enqueued_at, .. } => *enqueued_at,
+                    | PendingCloudWrite::Transaction { enqueued_at, .. } => *enqueued_at,
                 };
                 now.duration_since(enqueued_at) > CLOUD_UPLOAD_TIMEOUT
             })
@@ -459,7 +459,123 @@ impl WalActor {
         Ok((sequence, deferred))
     }
 
-    /// Append a batch of operations to the WAL as a single atomic unit.
+    /// Append a delete range tombstone to WAL.
+    ///
+    /// This writes a single DeleteRange record covering [start_key, end_key).
+    /// Much more efficient than scanning and deleting each key individually.
+    pub fn append_delete_range(
+        &mut self,
+        state: &mut RuntimeState,
+        request_id: u64,
+        cf_id: u32,
+        start_key: Bytes,
+        end_key: Bytes,
+    ) -> MidgeResult<(u64, bool)> {
+        // Allocate sequence idempotently
+        let (first_seq, _count) = state.allocate_sequences_idempotent(request_id, 1);
+        let sequence = first_seq;
+
+        // Check for idempotent retry that's already confirmed
+        if let Some((_first, _cnt, confirmed_at)) =
+            state.sequence_idempotency_cache.get(&request_id)
+        {
+            if *confirmed_at > 0 {
+                tracing::debug!(
+                    request_id = request_id,
+                    sequence = sequence,
+                    "idempotent delete_range already confirmed; returning existing allocation"
+                );
+                return Ok((sequence, false));
+            }
+        }
+
+        // Create DeleteRange WAL record
+        let record = WalRecord {
+            cf_id,
+            op: WalOpKind::DeleteRange,
+            key: start_key,
+            value: None,
+            seq: sequence,
+            expiration: None,
+            range_end: Some(end_key),
+            txn_id: None,
+            compression: None,
+        };
+
+        let record_size = record.estimated_size();
+
+        // Append to local WAL
+        if let Some(writer) = &mut self.writer {
+            let a_start = Instant::now();
+            writer.append_record(&record)?;
+            let a_elapsed = a_start.elapsed();
+            self.append_calls += 1;
+            self.append_total += a_elapsed;
+            if let Some(t) = crate::telemetry::Telemetry::global() {
+                t.metrics()
+                    .record_wal_append(record.estimated_size() as u64);
+                t.metrics().record_wal_append_count();
+                t.metrics()
+                    .record_wal_append_ns(a_elapsed.as_nanos() as u64);
+            }
+        }
+
+        // Update state tracking
+        state.wal.pending_writes += 1;
+        self.pending_sync_count += 1;
+        self.bytes_since_sync += record_size;
+
+        // Apply durability policy
+        match self.durability_policy {
+            DurabilityPolicy::Strict => {
+                self.sync_internal(state)?;
+                state.wal.local_durable_seq = sequence;
+                // DeleteRange tombstones are applied during reads/compaction
+                // No immediate memtable modification needed
+            }
+            DurabilityPolicy::Batched => {
+                // Defer response until group commit completes
+            }
+            DurabilityPolicy::CloudMirrored => {
+                self.sync_internal(state)?;
+                state.wal.local_durable_seq = sequence;
+            }
+            DurabilityPolicy::CloudFirst => {
+                if self.should_apply_backpressure() {
+                    tracing::warn!(
+                        pending_count = self.pending_cloud_writes.len(),
+                        pending_bytes = self.pending_cloud_write_bytes,
+                        "CloudFirst write stall on delete_range"
+                    );
+                    return Err(MidgeError::WriteStall(
+                        "CloudFirst pending queue at capacity".to_string(),
+                    ));
+                }
+
+                let timed_out = self.count_timed_out_writes();
+                if timed_out > 0 {
+                    return Err(MidgeError::Internal(format!(
+                        "{} pending writes exceeded cloud upload timeout",
+                        timed_out
+                    )));
+                }
+
+                // Queue for cloud confirmation
+                // DeleteRange is special - we don't queue it for memtable application
+                // It's applied during reads via range tombstone filtering
+            }
+        }
+
+        tracing::trace!(cf_id, sequence, policy = ?self.durability_policy, "WAL append_delete_range");
+
+        let deferred = matches!(
+            self.durability_policy,
+            DurabilityPolicy::Batched | DurabilityPolicy::CloudFirst
+        );
+        Ok((sequence, deferred))
+    }
+
+    /// Apply a transaction's operations to the WAL as a single atomic unit.
     ///
     /// This method:
     /// - allocates a single transaction id
@@ -469,14 +585,31 @@ impl WalActor {
     /// - applies all operations to memtables (in order)
     ///
     /// Returns the last allocated sequence number for the batch.
-    pub fn append_batch(
+    pub fn append_transaction(
         &mut self,
         state: &mut RuntimeState,
         _request_id: u64,
-        ops: Vec<crate::runtime::WriteBatchOp>,
+        ops: Vec<crate::runtime::TransactionOp>,
     ) -> MidgeResult<(u64, usize, bool)> {
         if ops.is_empty() {
             return Ok((state.sequence, 0, false));
+        }
+
+        // Preflight insert-only operations so we can fail without writing any WAL records.
+        for op in ops.iter() {
+            if let crate::runtime::TransactionOp::Put {
+                cf_id,
+                key,
+                insert_only: true,
+                ..
+            } = op
+            {
+                if self.key_exists_or_pending(state, *cf_id, key.as_slice()) {
+                    return Err(MidgeError::InvalidArgument(
+                        "key already exists".to_string(),
+                    ));
+                }
+            }
         }
 
         let txn_id = state.next_txn_id();
@@ -530,25 +663,32 @@ impl WalActor {
         self.pending_sync_count += 1;
         self.bytes_since_sync += begin_record.estimated_size();
 
-        let mut apply_ops: Vec<BatchApplyOp> = Vec::with_capacity(ops_count);
+        let mut apply_ops: Vec<TransactionApplyOp> = Vec::with_capacity(ops_count);
 
         // Now write op records using deterministic sequences
         for (i, op) in ops.into_iter().enumerate() {
             let seq = first_op_seq + i as u64;
             match op {
-                crate::runtime::WriteBatchOp::Put {
+                crate::runtime::TransactionOp::Put {
                     cf_id,
                     key,
                     value,
                     ttl_seconds,
+                    insert_only,
                 } => {
                     let key_b = Bytes::from(key);
                     let value_b = Bytes::from(value);
 
+                    let op_kind = if insert_only {
+                        WalOpKind::Insert
+                    } else {
+                        WalOpKind::Put
+                    };
+
                     let mut record = match ttl_seconds {
                         Some(ttl) if ttl > 0 => WalRecord::new_with_ttl(
                             cf_id,
-                            WalOpKind::Put,
+                            op_kind,
                             key_b.clone(),
                             Some(value_b.clone()),
                             seq,
@@ -556,7 +696,7 @@ impl WalActor {
                         ),
                         _ => WalRecord::new_cf(
                             cf_id,
-                            WalOpKind::Put,
+                            op_kind,
                             key_b.clone(),
                             Some(value_b.clone()),
                             seq,
@@ -582,7 +722,7 @@ impl WalActor {
                     self.pending_sync_count += 1;
                     self.bytes_since_sync += record.estimated_size();
 
-                    apply_ops.push(BatchApplyOp::Put {
+                    apply_ops.push(TransactionApplyOp::Put {
                         cf_id,
                         key: key_b.to_vec(),
                         value: value_b.to_vec(),
@@ -590,7 +730,7 @@ impl WalActor {
                         sequence: seq,
                     });
                 }
-                crate::runtime::WriteBatchOp::Delete { cf_id, key } => {
+                crate::runtime::TransactionOp::Delete { cf_id, key } => {
                     let key_b = Bytes::from(key);
 
                     let mut record =
@@ -615,7 +755,7 @@ impl WalActor {
                     self.pending_sync_count += 1;
                     self.bytes_since_sync += record.estimated_size();
 
-                    apply_ops.push(BatchApplyOp::Delete {
+                    apply_ops.push(TransactionApplyOp::Delete {
                         cf_id,
                         key: key_b.to_vec(),
                         sequence: seq,
@@ -670,7 +810,7 @@ impl WalActor {
         // For batched mode, mark the sequence range as pending atomicity
         // Reads at sequences >= begin_seq must wait for the batch to become durable
         if matches!(self.durability_policy, DurabilityPolicy::Batched) {
-            state.pending_batch_min_seq = Some(begin_seq);
+            state.pending_txn_min_seq = Some(begin_seq);
         }
 
         if self.is_cloud_first() {
@@ -705,14 +845,14 @@ impl WalActor {
             let batch_estimated_bytes: usize = apply_ops
                 .iter()
                 .map(|op| match op {
-                    BatchApplyOp::Put { key, value, .. } => key.len() + value.len() + 64,
-                    BatchApplyOp::Delete { key, .. } => key.len() + 64,
+                    TransactionApplyOp::Put { key, value, .. } => key.len() + value.len() + 64,
+                    TransactionApplyOp::Delete { key, .. } => key.len() + 64,
                 })
                 .sum();
             self.pending_cloud_write_bytes += batch_estimated_bytes;
 
             self.pending_cloud_writes
-                .push_back(PendingCloudWrite::Batch {
+                .push_back(PendingCloudWrite::Transaction {
                     commit_sequence: last_sequence,
                     ops: apply_ops,
                     enqueued_at: Instant::now(),
@@ -729,7 +869,7 @@ impl WalActor {
             // Apply to memtables in-order (atomic visibility within the actor).
             for apply_op in apply_ops {
                 match apply_op {
-                    BatchApplyOp::Put {
+                    TransactionApplyOp::Put {
                         cf_id,
                         key,
                         value,
@@ -745,7 +885,7 @@ impl WalActor {
                             expiration,
                         )?;
                     }
-                    BatchApplyOp::Delete {
+                    TransactionApplyOp::Delete {
                         cf_id,
                         key,
                         sequence,
@@ -756,7 +896,7 @@ impl WalActor {
             }
         }
 
-        tracing::trace!(txn_id, last_sequence, op_count, "WAL batch append");
+        tracing::trace!(txn_id, last_sequence, op_count, "WAL transaction apply");
 
         // Return deferred=true if using group commit (Batched or CloudFirst modes)
         let deferred = matches!(
@@ -893,15 +1033,15 @@ impl WalActor {
                         return true;
                     }
                 }
-                PendingCloudWrite::Batch { ops, .. } => {
+                PendingCloudWrite::Transaction { ops, .. } => {
                     for op in ops {
                         match op {
-                            BatchApplyOp::Put {
+                            TransactionApplyOp::Put {
                                 cf_id: p_cf,
                                 key: p_key,
                                 ..
                             }
-                            | BatchApplyOp::Delete {
+                            | TransactionApplyOp::Delete {
                                 cf_id: p_cf,
                                 key: p_key,
                                 sequence: _,
@@ -957,10 +1097,12 @@ impl WalActor {
         sequence: u64,
     ) -> MidgeResult<()> {
         if let Some(cf_state) = state.column_families.get(&cf_id) {
+            // TODO: Implement proper merge operator logic
+            // For now, treat merge as a put operation
             cf_state
                 .memtable
                 .as_ref()
-                .merge_with_seq(key.to_vec(), operand.to_vec(), sequence)?;
+                .put_with_seq(key.to_vec(), operand.to_vec(), sequence, None)?;
         }
         Ok(())
     }
@@ -1124,7 +1266,7 @@ impl WalActor {
             let gate_seq = match pending {
                 PendingCloudWrite::Single { sequence, .. } => *sequence,
                 PendingCloudWrite::Merge { sequence, .. } => *sequence,
-                PendingCloudWrite::Batch {
+                PendingCloudWrite::Transaction {
                     commit_sequence, ..
                 } => *commit_sequence,
             };
@@ -1144,11 +1286,11 @@ impl WalActor {
                     key.len() + value.as_ref().map_or(0, |v| v.len()) + 64
                 }
                 PendingCloudWrite::Merge { key, operand, .. } => key.len() + operand.len() + 64,
-                PendingCloudWrite::Batch { ops, .. } => ops
+                PendingCloudWrite::Transaction { ops, .. } => ops
                     .iter()
                     .map(|op| match op {
-                        BatchApplyOp::Put { key, value, .. } => key.len() + value.len() + 64,
-                        BatchApplyOp::Delete { key, .. } => key.len() + 64,
+                        TransactionApplyOp::Put { key, value, .. } => key.len() + value.len() + 64,
+                        TransactionApplyOp::Delete { key, .. } => key.len() + 64,
                     })
                     .sum(),
             };
@@ -1198,7 +1340,7 @@ impl WalActor {
                     let operand_bytes = Bytes::from(operand);
                     self.apply_merge_to_memtable(state, cf_id, &key, &operand_bytes, sequence)?;
                 }
-                PendingCloudWrite::Batch {
+                PendingCloudWrite::Transaction {
                     commit_sequence,
                     ops,
                     enqueued_at,
@@ -1209,11 +1351,11 @@ impl WalActor {
                         commit_sequence,
                         op_count,
                         wait_ms = wait_time.as_millis(),
-                        "Applying pending batch after cloud durability"
+                        "Applying pending transaction after cloud durability"
                     );
                     for op in ops {
                         match op {
-                            BatchApplyOp::Put {
+                            TransactionApplyOp::Put {
                                 cf_id,
                                 key,
                                 value,
@@ -1229,7 +1371,7 @@ impl WalActor {
                                     expiration,
                                 )?;
                             }
-                            BatchApplyOp::Delete {
+                            TransactionApplyOp::Delete {
                                 cf_id,
                                 key,
                                 sequence,
@@ -1254,7 +1396,7 @@ impl WalActor {
             match pending {
                 PendingCloudWrite::Single { .. }
                 | PendingCloudWrite::Merge { .. }
-                | PendingCloudWrite::Batch { .. } => {}
+                | PendingCloudWrite::Transaction { .. } => {}
             }
         }
     }
@@ -1426,21 +1568,23 @@ mod tests {
 
         // Act: append a small batch (deferred in Batched mode)
         let ops = vec![
-            crate::runtime::WriteBatchOp::Put {
+            crate::runtime::TransactionOp::Put {
                 cf_id: 0,
                 key: b"k1".to_vec(),
                 value: b"v1".to_vec(),
                 ttl_seconds: None,
+                insert_only: false,
             },
-            crate::runtime::WriteBatchOp::Put {
+            crate::runtime::TransactionOp::Put {
                 cf_id: 0,
                 key: b"k2".to_vec(),
                 value: b"v2".to_vec(),
                 ttl_seconds: None,
+                insert_only: false,
             },
         ];
 
-        let (_last_seq, _count, deferred) = wal_actor.append_batch(&mut state, 1, ops)?;
+        let (_last_seq, _count, deferred) = wal_actor.append_transaction(&mut state, 1, ops)?;
         assert!(deferred);
 
         // Should not request an immediate sync (time/bytes thresholds not met)

@@ -8,7 +8,7 @@ pub mod wal;
 
 pub use cloud::CloudActor;
 pub use compaction::CompactionActor;
-pub use eviction::{EvictionActor, EvictionEvent};
+pub use eviction::EvictionActor;
 pub use flush::FlushActor;
 pub use gc::GcActor;
 pub use manifest::ManifestActor;

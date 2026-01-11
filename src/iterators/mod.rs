@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Iterator abstraction
 //!
 //! Generic iterator traits for traversing key-value data
@@ -5,7 +7,7 @@
 pub mod merge;
 pub mod skiplist;
 
-pub use merge::{MergeIterator, SourceIterator};
+
 pub use skiplist::SkipList;
 
 use crate::common::MidgeResult;

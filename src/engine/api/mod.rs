@@ -1,25 +1,33 @@
-//! Engine API - Public interfaces
-pub mod errors;
-pub mod iterator;
-pub mod kv;
-pub mod options;
-pub mod query;
-pub mod results;
-pub mod traits;
-pub mod transaction;
-pub mod types;
-pub mod write_options;
+//! Engine API - canonical public interfaces
+//!
+//! IMPORTANT: This module intentionally exposes a *minimal* surface.
+//! All data operations happen on `Transaction`. The `Engine` must not provide
+//! alternate entry points, helpers, or convenience APIs.
 
-pub use errors::{ApiError, ApiResult};
-pub use iterator::{Direction, Iterator, IteratorBuilder};
-pub use kv::{Key, KvPair, OptionalValue, Value};
-pub use options::{Goal, MemoryBudget, OpenOptions, Storage, WorkloadProfile};
-// Note: Durability is for INTERNAL runtime use only - not part of public API
-pub(crate) use options::Durability;
+// Canonical modules
+mod kv;
+mod options;
+mod transaction;
+mod write_options;
+
+// Scan API - required public types
+pub mod iterator;
+pub mod query;
+
+// Internal-only legacy/advanced modules (kept crate-private)
+pub(crate) mod errors;
+pub(crate) mod results;
+pub(crate) mod traits;
+pub(crate) mod types;
+
+pub use iterator::{Direction, Iterator as ScanIterator};
+pub use kv::{Key, Value};
+pub use options::OpenOptions;
+pub use options::Storage;
 pub use query::Query;
-pub use results::{CasResult, InsertResult};
-pub use traits::{Engine as EngineT, KvIterator, Transaction as TransactionT, Ttl, TxMode};
-pub use transaction::{
-    IsolationLevel, Transaction, TransactionMode, TransactionState, WriteIntent,
-};
-pub use write_options::{DurabilityPolicy, WriteOptions};
+pub use transaction::{Transaction, TransactionMode, WriteIntent};
+pub use write_options::WriteOptions;
+
+// Internal types needed by runtime but not part of public API
+pub(crate) use options::Durability;
+

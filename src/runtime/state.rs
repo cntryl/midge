@@ -111,9 +111,9 @@ pub struct RuntimeState {
     pub sequence: u64,
     /// Next transaction ID
     pub next_txn_id: u64,
-    /// Minimum sequence of a pending WriteBatch (for read atomicity)
+    /// Minimum sequence of a pending transaction apply (for read atomicity)
     /// When set, reads at sequences >= this value must wait for durability
-    pub pending_batch_min_seq: Option<u64>,
+    pub pending_txn_min_seq: Option<u64>,
     /// Idempotency cache: request_id → (first_sequence, count, confirmed_at)
     /// Prevents duplicate sequence allocation on retry of same request_id.
     /// Entries cleared when durability frontier advances past confirmed_at.
@@ -352,7 +352,7 @@ impl RuntimeState {
             sst_dir,
             sequence: recovered_sequence,
             next_txn_id: 0,
-            pending_batch_min_seq: None,
+            pending_txn_min_seq: None,
             sequence_idempotency_cache: HashMap::new(),
             column_families,
             manifest,
@@ -660,8 +660,7 @@ impl RuntimeState {
             .active_snapshots
             .iter()
             .filter(|(_id, (_seq, created_at, _ref_count))| {
-                Instant::now().duration_since(*created_at)
-                    > self.snapshots.max_snapshot_lifetime
+                Instant::now().duration_since(*created_at) > self.snapshots.max_snapshot_lifetime
             })
             .count()
     }

@@ -19,10 +19,13 @@ use crate::runtime::{
 };
 use std::path::PathBuf;
 
-mod api;
+pub(crate) mod api;
 mod context;
 
-pub use api::{Key, OpenOptions, Storage, Transaction, TransactionMode, Value, WriteOptions};
+pub use api::{
+    Direction, Key, OpenOptions, Query, ScanIterator, Storage, Transaction, TransactionMode, Value,
+    WriteOptions,
+};
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<u32, ColumnFamilyHandle>;
 
@@ -158,8 +161,7 @@ impl Engine {
             ),
             Storage::Local { path } => (path.clone(), false),
             Storage::Cloud {
-                local_cache_path,
-                ..
+                local_cache_path, ..
             } => (local_cache_path.clone(), false),
         };
 
@@ -201,7 +203,7 @@ impl Engine {
     }
 
     /// Fetch the current runtime configuration snapshot for diagnostics or restoration.
-    pub fn get_runtime_config(&self) -> MidgeResult<IngestModeSnapshot> {
+    pub(crate) fn get_runtime_config(&self) -> MidgeResult<IngestModeSnapshot> {
         let request_id = crate::runtime::next_request_id();
         let resp = self
             .runtime_handle
@@ -228,7 +230,7 @@ impl Engine {
     }
 
     /// Return whether an ingest barrier is currently active.
-    pub fn is_ingesting(&self) -> MidgeResult<bool> {
+    pub(crate) fn is_ingesting(&self) -> MidgeResult<bool> {
         let request_id = crate::runtime::next_request_id();
         let resp = self
             .runtime_handle
@@ -243,7 +245,7 @@ impl Engine {
 
     /// Enter a temporary ingest mode: disable compaction, relax WAL, increase memtable limits.
     /// Returns the previous configuration snapshot which can be used to restore state.
-    pub fn enter_ingest_mode(&self) -> MidgeResult<IngestModeSnapshot> {
+    pub(crate) fn enter_ingest_mode(&self) -> MidgeResult<IngestModeSnapshot> {
         // Capture current runtime config so we can restore it later
         let prev = self.get_runtime_config()?;
 
@@ -289,7 +291,7 @@ impl Engine {
     }
 
     /// Restore runtime configuration from a previously-captured snapshot.
-    pub fn exit_ingest_mode(&self, prev: IngestModeSnapshot) -> MidgeResult<()> {
+    pub(crate) fn exit_ingest_mode(&self, prev: IngestModeSnapshot) -> MidgeResult<()> {
         // Step 1: End ingest barrier (flush outstanding memtables and bump epoch)
         let bid = crate::runtime::next_request_id();
         let br = self
@@ -334,7 +336,7 @@ impl Engine {
     // ========================================================================
 
     /// Sync all pending writes to disk
-    pub fn sync(&self) -> MidgeResult<()> {
+    pub(crate) fn sync(&self) -> MidgeResult<()> {
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalSync {
             request_id: next_request_id(),
         })?;
@@ -349,12 +351,12 @@ impl Engine {
     }
 
     /// Force a flush of the default column family
-    pub fn flush(&self) -> MidgeResult<()> {
+    pub(crate) fn flush(&self) -> MidgeResult<()> {
         self.flush_cf(&self.default_cf)
     }
 
     /// Force a flush of a specific column family
-    pub fn flush_cf(&self, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
+    pub(crate) fn flush_cf(&self, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
         let response = self
             .runtime_handle
             .send_and_wait(RuntimeMsg::FlushMemtable {
@@ -407,13 +409,12 @@ impl Engine {
             Ok(RuntimeResponse::CurrentSequence { sequence, .. }) => sequence,
             _ => fallback_sequence,
         };
-        // Use Serializable isolation by default
+        
         Ok(api::Transaction::new(
-            self as *const Self,
+            self.runtime_handle.clone(),
             txn_id,
             cf_id,
             mode,
-            api::IsolationLevel::Serializable,
             start_sequence,
         ))
     }
@@ -423,13 +424,9 @@ impl Engine {
     /// # Arguments
     /// * `txn` - Transaction to commit
     /// * `opts` - Write options specifying durability guarantees
-    pub fn commit(&self, mut txn: api::Transaction, opts: api::WriteOptions) -> MidgeResult<()> {
+    pub fn commit(&self, txn: api::Transaction, opts: api::WriteOptions) -> MidgeResult<()> {
         // ReadOnly transactions are a no-op for commit
         if txn.is_read_only() {
-            txn.enter_read_phase()?;
-            txn.enter_commit_phase()?;
-            let txn_id = txn.id();
-            txn.mark_committed(txn_id)?;
             return Ok(());
         }
 
@@ -439,15 +436,8 @@ impl Engine {
             ));
         }
 
-        // Transition through state machine: Active → ReadPhase → Committing
-        txn.enter_read_phase()?;
-        txn.enter_commit_phase()?;
-
         if !txn.has_writes() {
-            // Read-write transaction with no writes - mark committed with current ID
-            let txn_id = txn.id();
-            txn.mark_committed(txn_id)?;
-
+            // Read-write transaction with no writes
             // Apply sync if requested
             if opts.is_sync() {
                 self.sync()?;
@@ -484,11 +474,9 @@ impl Engine {
                                 .store(sequence, std::sync::atomic::Ordering::SeqCst);
                         }
                         RuntimeResponse::Error { message, .. } => {
-                            txn.mark_failed()?;
                             return Err(MidgeError::Internal(message));
                         }
                         _ => {
-                            txn.mark_failed()?;
                             return Err(MidgeError::Internal(
                                 "Unexpected response to transaction put".to_string(),
                             ));
@@ -517,11 +505,9 @@ impl Engine {
                                 .store(sequence, std::sync::atomic::Ordering::SeqCst);
                         }
                         RuntimeResponse::Error { message, .. } => {
-                            txn.mark_failed()?;
                             return Err(MidgeError::Internal(message));
                         }
                         _ => {
-                            txn.mark_failed()?;
                             return Err(MidgeError::Internal(
                                 "Unexpected response to transaction insert".to_string(),
                             ));
@@ -544,11 +530,9 @@ impl Engine {
                                 .store(sequence, std::sync::atomic::Ordering::SeqCst);
                         }
                         RuntimeResponse::Error { message, .. } => {
-                            txn.mark_failed()?;
                             return Err(MidgeError::Internal(message));
                         }
                         _ => {
-                            txn.mark_failed()?;
                             return Err(MidgeError::Internal(
                                 "Unexpected response to transaction delete".to_string(),
                             ));
@@ -561,43 +545,32 @@ impl Engine {
                     end_key,
                     ..
                 } => {
-                    // Delete range by scanning and deleting each key
-                    // TODO: Implement efficient range deletion at WAL level
-                    let keys = self.scan_at_sequence(*cf_id, start_key, end_key, u64::MAX)?;
-                    for (key, _) in keys {
-                        let response =
-                            self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
+                    // Write a single DeleteRange tombstone to WAL
+                    let response =
+                        self.runtime_handle
+                            .send_and_wait(RuntimeMsg::WalAppendDeleteRange {
                                 request_id: next_request_id(),
                                 cf_id: cf_id.as_u32(),
-                                key: key.to_vec(),
-                                value: None,
-                                ttl_seconds: None,
-                                insert_only: false,
+                                start_key: start_key.clone(),
+                                end_key: end_key.clone(),
                             })?;
-                        match response {
-                            RuntimeResponse::WalAppended { sequence, .. } => {
-                                // Update engine's sequence to reflect completed delete
-                                self.sequence
-                                    .store(sequence, std::sync::atomic::Ordering::SeqCst);
-                            }
-                            RuntimeResponse::Error { message, .. } => {
-                                txn.mark_failed()?;
-                                return Err(MidgeError::Internal(message));
-                            }
-                            _ => {
-                                txn.mark_failed()?;
-                                return Err(MidgeError::Internal(
-                                    "Unexpected response to transaction delete_range".to_string(),
-                                ));
-                            }
+                    match response {
+                        RuntimeResponse::WalAppended { sequence, .. } => {
+                            self.sequence
+                                .store(sequence, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        RuntimeResponse::Error { message, .. } => {
+                            return Err(MidgeError::Internal(message));
+                        }
+                        _ => {
+                            return Err(MidgeError::Internal(
+                                "Unexpected response to transaction delete_range".to_string(),
+                            ));
                         }
                     }
                 }
             }
         }
-
-        let txn_id = txn.id();
-        txn.mark_committed(txn_id)?;
 
         // Apply sync if requested
         if opts.is_sync() {
@@ -608,8 +581,8 @@ impl Engine {
     }
 
     /// Rollback a transaction
-    pub fn rollback_transaction(&self, mut txn: api::Transaction) -> MidgeResult<()> {
-        txn.mark_rolled_back()
+    pub fn rollback_transaction(&self, _txn: api::Transaction) -> MidgeResult<()> {
+        Ok(())
     }
 
     // === Internal Transaction Helpers ===
@@ -667,76 +640,6 @@ impl Engine {
         }
     }
 
-    pub fn tx_scan(
-        &self,
-        txn: &api::Transaction,
-        start: &[u8],
-        end: &[u8],
-    ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
-        // TODO: Get cf_id from transaction when we add CF binding
-        let cf_id = ColumnFamilyId::DEFAULT;
-
-        let response = self.runtime_handle.send_and_wait(RuntimeMsg::RangeScan {
-            request_id: next_request_id(),
-            cf_id: cf_id.as_u32(),
-            start: start.to_vec(),
-            end: end.to_vec(),
-            sequence: txn.start_sequence(),
-            requested_durability: api::Durability::Steady,
-        })?;
-
-        match response {
-            RuntimeResponse::RangeScanResults { results, .. } => Ok(results
-                .into_iter()
-                .map(|(k, v)| (bytes::Bytes::from(k), bytes::Bytes::from(v)))
-                .collect()),
-            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
-            _ => Err(MidgeError::Internal(
-                "Unexpected response to transactional scan".to_string(),
-            )),
-        }
-    }
-
-    /// Range scan within a transaction with Query parameters
-    pub fn tx_scan_range(
-        &self,
-        txn: &api::Transaction,
-        query: &api::Query,
-    ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
-        // Use the effective start/end from the query
-        let start_owned;
-        let start = if let Some(s) = query.effective_start() {
-            s
-        } else {
-            start_owned = vec![];
-            &start_owned[..]
-        };
-
-        let end_vec = query.effective_end();
-        let end_sentinel = vec![0xFFu8; 256];
-        let end = if let Some(ref e) = end_vec {
-            &e[..]
-        } else if query.prefix.is_none() && query.end.is_none() {
-            &end_sentinel[..]
-        } else {
-            &[][..]
-        };
-
-        let mut results = self.tx_scan(txn, start, end)?;
-
-        // Apply limit
-        if let Some(limit) = query.limit {
-            results.truncate(limit);
-        }
-
-        // Apply reverse
-        if query.reverse {
-            results.reverse();
-        }
-
-        Ok(results)
-    }
-
     /// Shutdown the engine gracefully
     pub fn shutdown(self) -> MidgeResult<()> {
         self.runtime_handle.shutdown()
@@ -782,7 +685,7 @@ impl Engine {
     }
 
     /// Drop a column family by ID
-    pub fn drop_column_family(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {
+    pub(crate) fn drop_column_family(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {
         let response = self.runtime_handle.send_and_wait_filtered(
             RuntimeMsg::ManifestDropColumnFamily {
                 request_id: next_request_id(),
@@ -818,7 +721,7 @@ impl Engine {
     }
 
     /// List all active column families
-    pub fn list_column_families(&self) -> MidgeResult<Vec<ColumnFamilyHandle>> {
+    pub(crate) fn list_column_families(&self) -> MidgeResult<Vec<ColumnFamilyHandle>> {
         Ok(self
             .column_families
             .iter()
@@ -827,7 +730,7 @@ impl Engine {
     }
 
     /// Compact all data (stub - not implemented)
-    pub fn compact_all(&self) -> MidgeResult<()> {
+    pub(crate) fn compact_all(&self) -> MidgeResult<()> {
         // Stub implementation: trigger a flush as a proxy for compaction
         // In a full LSM, this would compact all levels
         self.flush()
@@ -841,7 +744,7 @@ impl Engine {
     /// - Budget violation rates
     ///
     /// Use this for monitoring read performance and tuning compaction triggers.
-    pub fn get_read_amp_metrics(&self) -> MidgeResult<ReadAmpMetricsSnapshot> {
+    pub(crate) fn get_read_amp_metrics(&self) -> MidgeResult<ReadAmpMetricsSnapshot> {
         let response = self
             .runtime_handle
             .send_and_wait(RuntimeMsg::GetReadAmpMetrics {

@@ -26,13 +26,13 @@ pub enum DurabilityWaiter {
     ConfirmWalAppend {
         request_id: u64,
     },
-    WriteBatch {
+    TransactionApply {
         request_id: u64,
         last_sequence: u64,
         op_count: usize,
     },
     /// Internal waiter used when caller already acknowledged but needs cleanup.
-    ConfirmWriteBatch {
+    ConfirmTransactionApply {
         request_id: u64,
     },
     Read {

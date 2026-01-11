@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Base I/O subsystem - domain-agnostic filesystem abstraction
 //!
 //! This is the foundation for all filesystem interactions in Midge:
@@ -40,10 +42,7 @@ pub mod mock;
 pub mod real;
 pub mod traits;
 
-pub use chaos::ChaosFs;
+
 pub use mock::MockFs;
 pub use real::RealFs;
-pub use traits::{
-    DirEntry, Durability, File, FileCaps, Fs, FsError, FsPath, FsResult, Metadata, OpenMode,
-    OpenOptions,
-};
+pub use traits::{Durability, File, Fs, FsPath, FsResult, OpenMode, OpenOptions};

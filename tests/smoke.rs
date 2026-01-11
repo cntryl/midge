@@ -12,6 +12,7 @@
 //! - If all unit tests + this file pass, the database is not fundamentally broken
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
+use cntryl_midge::Query;
 
 #[test]
 fn should_read_written_value_when_in_memory() {
@@ -317,7 +318,14 @@ fn should_respect_visibility_rules_when_range_scanning() {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let results = tx.scan(b"a", b"d").expect("scan");
+    let mut iter = tx
+        .scan(
+            &Query::new()
+                .start_key(Bytes::from(&b"a"[..]))
+                .end_key(Bytes::from(&b"d"[..])),
+        )
+        .expect("scan");
+    let results: Vec<_> = std::iter::from_fn(|| iter.next().transpose().ok().flatten()).collect();
 
     // Assert - 'b' should be filtered out by delete
     assert_eq!(

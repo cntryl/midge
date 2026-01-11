@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 // == COPILOT MASTER RULES FOR SST SUBSYSTEM ==========================================
 // These rules define the authoritative architecture for Midge SSTs. All completions
 // touching SST encoding, blocks, builders, iterators, index files, filters, or table
@@ -243,19 +245,15 @@ pub mod traits;
 pub mod trie;
 pub mod types;
 
-pub use bloom::{BloomFactory, BloomFilterFactory, BloomReader, BloomTestResult, BloomWriter};
-pub use cache::{BlockCache, CacheKey, CacheMetrics, CachePolicyType, CacheValue};
-pub use compression::{
-    compress_block, decompress_block, CompressionAlgo, CompressionPolicy, BLOCK_TRAILER_SIZE,
-    MAX_BLOCK_SIZE, MIN_COMPRESS_SIZE,
-};
+
+
 pub use fs::FsSstFactoryIo;
-pub use index::{IndexKind, IndexTuner, KeyStructureProfile, KeyStructureProfiler};
+
 pub use read_amp_metrics::ReadAmpMetrics;
-pub use sparse_index::{BlockRange, IndexEntry, SparseIndexReader, SparseIndexWriter};
-pub use traits::{DynSstWriter, SstFactory, SstReader, SstStateReader, SstWriter};
-pub use trie::{TrieBuilder, TrieReader, TrieWriter};
-pub use types::{Block, BlockHandle, BlockType, Footer, KeyState, RangeTombstone, SstEntry};
+
+pub use traits::{SstFactory, SstReader, SstStateReader};
+
+
 
 /// Key-value pair
 #[derive(Clone, Debug)]

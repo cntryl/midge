@@ -10,7 +10,6 @@
 use super::WriteOptions;
 use crate::common::MidgeResult;
 use crate::engine::ColumnFamilyId;
-use std::ops::Range;
 
 pub type Bytes = bytes::Bytes;
 
@@ -62,7 +61,7 @@ pub trait KvIterator {
 
 /// Concrete iterator implementation wrapping the internal iterator
 pub struct MidgeKvIterator {
-    inner: super::Iterator,
+    inner: super::iterator::Iterator,
 }
 
 impl KvIterator for MidgeKvIterator {
@@ -101,16 +100,6 @@ pub trait Transaction {
     /// Returns None if key doesn't exist or has been deleted.
     /// Provides read-your-own-writes semantics.
     fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>>;
-
-    /// Scan half-open range [start, end)
-    ///
-    /// Returns an iterator over all key-value pairs in the range.
-    fn scan(&self, start: &[u8], end: &[u8]) -> MidgeResult<Self::Iter>;
-
-    /// Scan using a Range<Bytes> for convenience
-    fn scan_range(&self, range: Range<Bytes>) -> MidgeResult<Self::Iter> {
-        self.scan(&range.start, &range.end)
-    }
 
     // === Writes (only allowed in ReadWrite mode) ===
 

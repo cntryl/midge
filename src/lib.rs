@@ -42,8 +42,10 @@ mod wal;
 // Main engine (canonical public API)
 mod engine;
 
-// Test support (crate-internal only)
-#[cfg(test)]
+// Test support
+#[cfg(any(test, feature = "test-support"))]
+pub mod testkit;
+#[cfg(all(not(test), not(feature = "test-support")))]
 mod testkit;
 
 // ---------------------------------------------------------------------------
@@ -59,6 +61,9 @@ pub use common::{MidgeError, MidgeResult};
 
 // Engine / Transactions
 pub use engine::{ColumnFamilyId, Engine, Transaction, TransactionMode};
+
+// Scan API
+pub use engine::{Direction, Query, ScanIterator};
 
 // Configuration
 pub use engine::{OpenOptions, Storage, WriteOptions};
@@ -109,7 +114,7 @@ pub mod prelude {
     /// Use `use midge::prelude::*;` to import the essential types needed
     /// for the standard transaction-based workflow.
     pub use crate::{
-        ColumnFamilyId, Engine, Key, MidgeError, MidgeResult, OpenOptions, Storage, Transaction,
-        TransactionMode, Value, WriteOptions,
+        ColumnFamilyId, Direction, Engine, Key, MidgeError, MidgeResult, OpenOptions, Query,
+        ScanIterator, Storage, Transaction, TransactionMode, Value, WriteOptions,
     };
 }

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! OpenTelemetry instrumentation for Midge
 //!
 //! Provides tracing, metrics, and structured logging with semantic attributes.
@@ -9,7 +11,7 @@ pub mod spans;
 
 pub use config::TelemetryConfig;
 pub use metrics::Metrics;
-pub use spans::MidgeSpan;
+
 
 use std::sync::Arc;
 use std::sync::OnceLock;

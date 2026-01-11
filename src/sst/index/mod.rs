@@ -70,6 +70,3 @@
 
 pub mod profiler;
 pub mod tuner;
-
-pub use profiler::{KeyStructureProfile, KeyStructureProfiler};
-pub use tuner::{IndexKind, IndexTuner};

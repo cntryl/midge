@@ -34,7 +34,8 @@ impl Dispatcher {
 
             // WAL
             WalAppend { .. }
-            | WriteBatch { .. }
+            | WalAppendDeleteRange { .. }
+            | ApplyTransaction { .. }
             | WalSync { .. }
             | WalRotate { .. }
             | WalSyncComplete { .. } => TaskKind::Wal,

@@ -3,7 +3,9 @@
 //! Tests LSM compaction scenarios: multi-level progression, concurrent operations,
 //! range tombstone handling, and data consistency during compaction.
 
+use bytes::Bytes;
 use cntryl_midge::testkit::*;
+use cntryl_midge::Query;
 
 // ============================================================================
 // TEST GROUP 1: Basic Multi-Level Compaction Progression
@@ -38,7 +40,15 @@ fn should_progress_through_lsm_levels_or_document_current_behavior() {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let scan_result = tx.scan(b"", b"\xff\xff\xff\xff").unwrap();
+    let mut iter = tx
+        .scan(
+            &Query::new()
+                .start_key(Bytes::from(&b""[..]))
+                .end_key(Bytes::from(&b"\xff\xff\xff\xff"[..])),
+        )
+        .unwrap();
+    let scan_result: Vec<_> =
+        std::iter::from_fn(|| iter.next().transpose().ok().flatten()).collect();
     let key_count = scan_result.len();
 
     eprintln!("Total keys in engine: {}", key_count);
