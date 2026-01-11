@@ -87,8 +87,11 @@ fn run_sst_range_scan_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
         let tx = e
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin");
-        let results = tx.scan(&start[..], &end[..]).expect("range failed");
-        results.len()
+        let query = cntryl_midge::Query::new()
+            .start_key(bytes::Bytes::copy_from_slice(&start[..]))
+            .end_key(bytes::Bytes::copy_from_slice(&end[..]));
+        let mut results = tx.scan(&query).expect("range failed");
+        results.remaining()
     });
 
     drop(engine);
@@ -127,8 +130,11 @@ fn run_sst_sparse_keyspace_cloud_case(ctx: &mut StressContext, opts: MidgeOption
         let tx = e
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin");
-        let results = tx.scan(&start[..], &end[..]).expect("range failed");
-        results.len()
+        let query = cntryl_midge::Query::new()
+            .start_key(bytes::Bytes::copy_from_slice(&start[..]))
+            .end_key(bytes::Bytes::copy_from_slice(&end[..]));
+        let mut results = tx.scan(&query).expect("range failed");
+        results.remaining()
     });
 
     drop(engine);
