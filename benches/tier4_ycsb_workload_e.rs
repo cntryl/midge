@@ -68,7 +68,7 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                     let query = cntryl_midge::Query::new()
                         .start_key(bytes::Bytes::copy_from_slice(&start[..]))
                         .end_key(bytes::Bytes::copy_from_slice(&end[..]));
-                    let mut iter = tx.scan(&query).expect("warmup range");
+                    let iter = tx.scan(&query).expect("warmup range");
                     let _scanned = iter.remaining();
                 }
             },
@@ -109,7 +109,7 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                 let query = cntryl_midge::Query::new()
                     .start_key(bytes::Bytes::copy_from_slice(&start[..]))
                     .end_key(bytes::Bytes::copy_from_slice(&end[..]));
-                let mut iter = tx.scan(&query).expect("measured range");
+                let iter = tx.scan(&query).expect("measured range");
                 let _scanned = iter.remaining();
             }
         })

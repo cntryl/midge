@@ -271,6 +271,10 @@ fn should_return_old_value_given_snapshot_before_write_when_reading() {
             .unwrap();
         let current_value = current_tx.get(b"key").unwrap();
         assert_eq!(current_value, Some(Bytes::from_static(b"v2")));
+
+        // Assert - snapshot transaction still sees the old value
+        let snap_value = snap_tx.get(b"key").unwrap();
+        assert_eq!(snap_value, Some(Bytes::from_static(b"v1")));
     });
 }
 

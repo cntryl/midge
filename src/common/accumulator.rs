@@ -71,6 +71,17 @@ where
     }
 }
 
+// Provide a Default impl so `Accumulator::new()` matches `Default::default()` as suggested by clippy.
+impl<V, R> Default for Accumulator<V, R>
+where
+    V: Clone,
+    R: Clone,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
