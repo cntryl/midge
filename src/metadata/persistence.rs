@@ -3,7 +3,7 @@
 //! Persists manifest state to disk in YAML format to enable
 //! recovery of LSM structure across restarts.
 
-use crate::metadata::Manifest;
+use crate::metadata::{ColumnFamilyMeta, Manifest};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 

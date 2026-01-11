@@ -60,6 +60,37 @@ impl MidgeOptions {
         self.memory_budget = Some(bytes);
         self
     }
+
+    /// Convert MidgeOptions to OpenOptions for use with Engine::open.
+    pub fn to_open_options(&self) -> crate::OpenOptions {
+        let storage = match &self.storage_mode {
+            StorageMode::Memory => crate::Storage::InMemory,
+            StorageMode::LocalDisk { db_path } => crate::Storage::Local {
+                path: db_path.clone(),
+            },
+            StorageMode::CloudBacked { local_cache_path } => crate::Storage::Cloud {
+                local_cache_path: local_cache_path.clone(),
+                bucket: "test-bucket".to_string(),
+                prefix: "test-prefix/".to_string(),
+                endpoint: None,
+                region: None,
+            },
+        };
+
+        crate::OpenOptions {
+            storage,
+            goal: crate::Goal::default(),
+            memory_budget: crate::MemoryBudget::default(),
+            workload: crate::WorkloadProfile::default(),
+            // Derived fields are set by default constructors
+            block_size: 0,
+            memtable_size_limit: 0,
+            target_sst_size: 0,
+            block_cache_size: 0,
+            wal_buffer_size: 0,
+            l0_compaction_trigger: 0,
+        }
+    }
 }
 
 // ===== Mode lists =====

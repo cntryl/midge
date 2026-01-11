@@ -14,7 +14,7 @@ pub use journal::{
     append_edit, append_edit_batch,
     ManifestEdit,
 };
-pub use manifest::{CloudCheckpoint, FileMeta, Manifest};
+pub use manifest::{ColumnFamilyMeta, CloudCheckpoint, FileMeta, Manifest};
 pub use persistence::ManifestPersistence;
 
 

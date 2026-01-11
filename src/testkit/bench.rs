@@ -175,7 +175,7 @@ pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> Engine {
     }
 
     let opts = config.build_midge_options(Some(path));
-    Engine::open(opts).expect("failed to open engine")
+    Engine::open_with_options(opts).expect("failed to open engine")
 }
 
 /// Setup engine with storage mode (convenience wrapper with defaults).
@@ -202,7 +202,7 @@ pub fn reopen_engine_at_path(path: &Path, config: &BenchEngineConfig) -> Engine 
     }
 
     let opts = config.build_midge_options(Some(path.to_path_buf()));
-    Engine::open(opts).expect("failed to open engine")
+    Engine::open_with_options(opts).expect("failed to open engine")
 }
 
 /// Setup Arc-wrapped engine for concurrent benchmarks.
@@ -274,7 +274,7 @@ pub fn run_single_shot_from_seed<F>(
     measure_fn: F,
 ) -> std::time::Duration
 where
-    F: FnOnce(MidgeEngine),
+    F: FnOnce(Engine),
 {
     let tmp_path = unique_bench_path("tier3_case");
     let _ = std::fs::remove_dir_all(&tmp_path);
@@ -306,8 +306,8 @@ pub fn run_single_shot_with_restore<R, T>(
     timed_fn: T,
 ) -> std::time::Duration
 where
-    R: FnOnce(&MidgeEngine),
-    T: FnOnce(&MidgeEngine),
+    R: FnOnce(&Engine),
+    T: FnOnce(&Engine),
 {
     let tmp_path = unique_bench_path("tier3_case_restore");
     let _ = std::fs::remove_dir_all(&tmp_path);

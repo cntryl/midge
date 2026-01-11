@@ -14,12 +14,12 @@ use super::MidgeOptions;
 /// * `_mode` - Mode string (for logging/diagnostics only, not used)
 ///
 /// # Returns
-/// The opened `MidgeEngine` instance.
+/// The opened `Engine` instance.
 ///
 /// # Panics
 /// Panics if the engine fails to open.
-pub fn open_with_mode(opts: MidgeOptions, _mode: &str) -> crate::MidgeEngine {
-    crate::MidgeEngine::open_with_options(opts).expect("failed to open engine")
+pub fn open_with_mode(opts: MidgeOptions, _mode: &str) -> crate::Engine {
+    crate::Engine::open_with_options(opts).expect("failed to open engine")
 }
 
 /// Durability test context (stub for compatibility).
@@ -43,7 +43,7 @@ impl Default for DurabilityTestContext {
 ///
 /// NOTE: Currently a stub retained for compatibility.
 pub fn populate_multi_level_data(
-    _engine: &crate::MidgeEngine,
+    _engine: &crate::Engine,
     _cf: &crate::ColumnFamilyHandle,
     _levels: usize,
 ) -> crate::MidgeResult<()> {
@@ -63,17 +63,17 @@ pub mod test_helpers {
 /// Helper for testing engine restart scenarios.
 pub fn with_engine_restart<F1, F2>(opts: MidgeOptions, before_restart: F1, after_restart: F2)
 where
-    F1: FnOnce(&crate::MidgeEngine),
-    F2: FnOnce(&crate::MidgeEngine),
+    F1: FnOnce(&crate::Engine),
+    F2: FnOnce(&crate::Engine),
 {
     {
-        let engine = crate::MidgeEngine::open_with_options(opts.clone()).expect("open");
+        let engine = crate::Engine::open_with_options(opts.clone()).expect("open");
         before_restart(&engine);
         drop(engine);
     }
 
     {
-        let engine = crate::MidgeEngine::open_with_options(opts).expect("reopen");
+        let engine = crate::Engine::open_with_options(opts).expect("reopen");
         after_restart(&engine);
     }
 }

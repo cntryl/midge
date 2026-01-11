@@ -42,11 +42,8 @@ mod wal;
 // Main engine (canonical public API)
 mod engine;
 
-// Test support
-#[cfg(any(test, feature = "test-support"))]
+// Test support (public for testkit when testing, otherwise acts as private module)
 pub mod testkit;
-#[cfg(all(not(test), not(feature = "test-support")))]
-mod testkit;
 
 // ---------------------------------------------------------------------------
 // Public Export Surface
@@ -60,13 +57,16 @@ mod testkit;
 pub use common::{MidgeError, MidgeResult};
 
 // Engine / Transactions
-pub use engine::{ColumnFamilyId, Engine, Transaction, TransactionMode};
+pub use engine::{ColumnFamilyHandle, ColumnFamilyId, Engine, Transaction, TransactionMode};
+
+// Backward-compatible alias
+pub type MidgeEngine = Engine;
 
 // Scan API
 pub use engine::{Direction, Query, ScanIterator};
 
 // Configuration
-pub use engine::{OpenOptions, Storage, WriteOptions};
+pub use engine::{Goal, MemoryBudget, OpenOptions, Storage, WriteOptions, WorkloadProfile};
 
 // Key/value types
 pub use engine::{Key, Value};

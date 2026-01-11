@@ -22,8 +22,7 @@ pub(crate) mod types;
 
 pub use iterator::{Direction, Iterator as ScanIterator};
 pub use kv::{Key, Value};
-pub use options::OpenOptions;
-pub use options::Storage;
+pub use options::{Goal, MemoryBudget, OpenOptions, Storage, WorkloadProfile};
 pub use query::Query;
 pub use transaction::{Transaction, TransactionMode, WriteIntent};
 pub use write_options::WriteOptions;

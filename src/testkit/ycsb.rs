@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::engine::api;
-use crate::{ColumnFamilyId, Engine};
+use crate::{ColumnFamilyHandle, ColumnFamilyId, Engine, MidgeEngine};
 
 use super::config::MidgeOptions;
 

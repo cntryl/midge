@@ -23,8 +23,8 @@ pub(crate) mod api;
 mod context;
 
 pub use api::{
-    Direction, Key, OpenOptions, Query, ScanIterator, Storage, Transaction, TransactionMode, Value,
-    WriteOptions,
+    Direction, Goal, Key, MemoryBudget, OpenOptions, Query, ScanIterator, Storage, Transaction, TransactionMode, Value,
+    WorkloadProfile, WriteOptions,
 };
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<u32, ColumnFamilyHandle>;
@@ -200,6 +200,22 @@ impl Engine {
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
             column_families,
         })
+    }
+
+    /// Return a handle to the default column family.
+    ///
+    /// The default column family is created automatically when the engine opens.
+    /// All keys without an explicit column family belong to this one.
+    pub fn default_column_family(&self) -> &ColumnFamilyHandle {
+        &self.default_cf
+    }
+
+    /// Open a database with the provided MidgeOptions.
+    ///
+    /// Convenience method for testkit and standard testing patterns.
+    pub fn open_with_options(opts: crate::testkit::MidgeOptions) -> MidgeResult<Self> {
+        let open_opts = opts.to_open_options();
+        Self::open(open_opts)
     }
 
     /// Fetch the current runtime configuration snapshot for diagnostics or restoration.
@@ -924,70 +940,6 @@ mod tests {
 
         // Assert
         assert_eq!(handle.name(), unicode_name);
-    }
-
-    // ============================================================================
-    // Tests for OpenParam trait invariants
-    // ============================================================================
-
-    #[test]
-    fn should_convert_pathbuf_to_path_via_openparam() {
-        // Arrange
-        let path = PathBuf::from("/test/db");
-
-        // Act
-        let result = path.clone().to_path();
-
-        // Assert
-        assert_eq!(result, path);
-    }
-
-    #[test]
-    fn should_convert_midgeoptions_memory_to_memory_path() {
-        // Arrange
-        let opts = crate::testkit::MidgeOptions {
-            storage_mode: crate::testkit::StorageMode::Memory,
-            ..Default::default()
-        };
-
-        // Act
-        let path = opts.to_path();
-
-        // Assert
-        assert_eq!(path.to_string_lossy(), ":memory:");
-    }
-
-    #[test]
-    fn should_convert_midgeoptions_local_disk_to_db_path() {
-        // Arrange
-        let db_path = PathBuf::from("/tmp/test_db");
-        let opts = crate::testkit::MidgeOptions {
-            storage_mode: crate::testkit::StorageMode::LocalDisk {
-                db_path: db_path.clone(),
-            },
-            ..Default::default()
-        };
-
-        // Act
-        let result_path = opts.to_path();
-
-        // Assert
-        assert_eq!(result_path, db_path);
-    }
-
-    #[test]
-    fn should_convert_midgeoptions_ref_memory_to_memory_path() {
-        // Arrange
-        let opts = crate::testkit::MidgeOptions {
-            storage_mode: crate::testkit::StorageMode::Memory,
-            ..Default::default()
-        };
-
-        // Act
-        let path = (&opts).to_path();
-
-        // Assert
-        assert_eq!(path.to_string_lossy(), ":memory:");
     }
 
     // ============================================================================

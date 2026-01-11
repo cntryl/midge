@@ -64,7 +64,7 @@ impl Default for TrieWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sst::trie::TrieReader;
+    use crate::sst::trie::reader::TrieReader;
 
     #[test]
     fn should_create_enabled_writer() {
