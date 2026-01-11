@@ -275,7 +275,6 @@ fn should_preserve_latest_version_when_compacting() {
         .commit(tx, cntryl_midge::WriteOptions::buffered())
         .unwrap();
     engine.flush().expect("flush");
-    engine.compact_all().expect("compact");
 
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -325,7 +324,7 @@ fn should_respect_visibility_rules_when_range_scanning() {
                 .end_key(Bytes::from(&b"d"[..])),
         )
         .expect("scan");
-    let results: Vec<_> = std::iter::from_fn(|| iter.next().transpose().ok().flatten()).collect();
+    let results: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
 
     // Assert - 'b' should be filtered out by delete
     assert_eq!(

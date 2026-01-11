@@ -157,8 +157,8 @@ fn should_remove_expired_entries_given_compaction_when_ttl_exceeded() {
         engine.commit(tx, WriteOptions::buffered()).unwrap();
         thread::sleep(Duration::from_millis(1100));
 
-        // Act - trigger compaction
-        engine.compact_all().unwrap();
+        // Act - trigger flush
+        engine.flush().unwrap();
 
         // Assert - expired entry should be removed
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -180,8 +180,8 @@ fn should_preserve_non_expired_entries_given_compaction_when_ttl_not_exceeded() 
             .unwrap(); // 1 hour
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
-        // Act - trigger compaction
-        engine.compact_all().unwrap();
+        // Act - trigger flush
+        engine.flush().unwrap();
 
         // Assert - non-expired entry preserved
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();

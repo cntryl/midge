@@ -109,7 +109,8 @@ fn should_test_range_method_directly_if_available() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = tx.scan_range(&query).unwrap();
+        let mut iter = tx.scan(&query).unwrap();
+        let results: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
 
         eprintln!("  scan() returned {} results", results.len());
 

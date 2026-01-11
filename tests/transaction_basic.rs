@@ -435,7 +435,7 @@ fn should_hide_deleted_range_given_transaction_scan_when_delete_range() {
             )
             .unwrap();
         let results: Vec<_> =
-            std::iter::from_fn(|| iter.next().transpose().ok().flatten()).collect();
+            std::iter::from_fn(|| iter.next()).collect();
 
         // Assert - Should only see key3
         assert_eq!(results.len(), 1);
@@ -465,7 +465,7 @@ fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
             )
             .unwrap();
         let results: Vec<_> =
-            std::iter::from_fn(|| iter.next().transpose().ok().flatten()).collect();
+            std::iter::from_fn(|| iter.next()).collect();
 
         // Assert - should see uncommitted writes
         assert_eq!(results.len(), 2);

@@ -11,7 +11,6 @@
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
-use cntryl_midge::testkit::{for_each_storage_mode, all_storage_modes_new, open_with_mode};
 use cntryl_midge::{TransactionMode, WriteOptions};
 
 // ============================================================================

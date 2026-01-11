@@ -38,8 +38,8 @@ fn should_recover_data_from_wal_after_flush() {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let scan = tx.scan_range(&cntryl_midge::Query::new()).unwrap();
-    let count = scan.len();
+    let mut iter = tx.scan(&cntryl_midge::Query::new()).unwrap();
+    let count = std::iter::from_fn(|| iter.next()).count();
 
     eprintln!("Keys after flush: {}", count);
 
@@ -194,10 +194,10 @@ fn should_recover_range_tombstones_from_wal() {
     let scan_tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let in_range = scan_tx
-        .scan_range(&cntryl_midge::Query::new())
-        .unwrap()
-        .into_iter()
+    let mut iter = scan_tx
+        .scan(&cntryl_midge::Query::new())
+        .unwrap();
+    let in_range = std::iter::from_fn(|| iter.next())
         .filter(|(k, _)| {
             let k_str = String::from_utf8_lossy(k.as_ref());
             k_str.as_ref() >= "k020" && k_str.as_ref() < "k080"
@@ -247,10 +247,10 @@ fn should_handle_wal_rotation_and_multiple_segments() {
     let final_tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let total = final_tx
-        .scan_range(&cntryl_midge::Query::new())
-        .unwrap()
-        .len();
+    let mut iter = final_tx
+        .scan(&cntryl_midge::Query::new())
+        .unwrap();
+    let total = std::iter::from_fn(|| iter.next()).count();
 
     eprintln!("Total keys after {} batches: {}", batch_count, total);
 
@@ -326,10 +326,10 @@ fn should_recover_mixed_operations_from_wal() {
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
     let put_val = verify_tx.get(b"put_key").unwrap();
-    let dr_remaining = verify_tx
-        .scan_range(&cntryl_midge::Query::new())
-        .unwrap()
-        .into_iter()
+    let mut iter = verify_tx
+        .scan(&cntryl_midge::Query::new())
+        .unwrap();
+    let dr_remaining = std::iter::from_fn(|| iter.next())
         .filter(|(k, _)| {
             let k_str = String::from_utf8_lossy(k.as_ref());
             k_str.as_ref() >= "dr_05" && k_str.as_ref() < "dr_15"

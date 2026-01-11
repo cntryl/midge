@@ -161,16 +161,18 @@ fn should_support_range_scans_on_cloud() {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let scan = tx.scan(b"", b"\xff\xff\xff\xff");
+    let query = cntryl_midge::Query::new();
+    let scan = tx.scan(&query);
 
     match scan {
-        Ok(results) => {
-            eprintln!("✓ Cloud scan succeeded: {} keys", results.len());
+        Ok(mut iterator) => {
+            let count: usize = std::iter::from_fn(|| iterator.next()).count();
+            eprintln!("✓ Cloud scan succeeded: {} keys", count);
 
-            if results.len() >= 20 {
+            if count >= 20 {
                 eprintln!("✓ All keys present in cloud scan");
             } else {
-                eprintln!("✗ Incomplete scan: {} keys < 20 expected", results.len());
+                eprintln!("✗ Incomplete scan: < 20 keys expected");
             }
         }
         Err(e) => {

@@ -48,7 +48,7 @@ fn should_progress_through_lsm_levels_or_document_current_behavior() {
         )
         .unwrap();
     let scan_result: Vec<_> =
-        std::iter::from_fn(|| iter.next().transpose().ok().flatten()).collect();
+        std::iter::from_fn(|| iter.next()).collect();
     let key_count = scan_result.len();
 
     eprintln!("Total keys in engine: {}", key_count);
@@ -162,7 +162,7 @@ fn should_handle_concurrent_writes_during_compaction() {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let total_keys = tx.scan(b"", b"\xff\xff\xff\xff").unwrap().len();
+    let total_keys = tx.scan(&Query::new()).unwrap().remaining();
 
     if total_keys >= 950 {
         eprintln!("✓ All writes persisted through compaction");
@@ -216,14 +216,11 @@ fn should_preserve_range_tombstones_through_multi_level_compaction() {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let remaining = tx
-        .scan(b"", b"\xff\xff\xff\xff")
-        .unwrap()
-        .into_iter()
-        .filter(|(k, _)| {
-            let k_str = String::from_utf8_lossy(k.as_ref());
-            k_str.as_ref() >= "k300" && k_str.as_ref() < "k700"
-        })
+    let query = Query::new()
+        .start_key(Bytes::from(&b"k300"[..]))
+        .end_key(Bytes::from(&b"k700"[..]));
+    let mut iter = tx.scan(&query).unwrap();
+    let remaining = std::iter::from_fn(|| iter.next())
         .count();
 
     eprintln!("Keys remaining in deleted range: {}", remaining);
@@ -386,11 +383,12 @@ fn should_document_lsm_level_progression_strategy_when_tested() {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let result = tx.scan(b"", b"\xff\xff\xff\xff").ok();
+    let result = tx.scan(&Query::new()).ok();
     match result {
-        Some(results) => {
+        Some(mut results) => {
+            let key_count = std::iter::from_fn(|| results.next()).count();
             eprintln!("\n✓ LSM compaction did not lose data");
-            eprintln!("  Keys accessible after {} flushes: {}+", 3, results.len());
+            eprintln!("  Keys accessible after {} flushes: {}+", 3, key_count);
             eprintln!("  Expected: ~1500 (3 batches × 500 keys)");
         }
         None => {

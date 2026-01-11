@@ -3,7 +3,7 @@
 //! Validates that the engine exposes read amplification metrics
 //! through the public API for observability.
 
-use cntryl_midge::common::MidgeResult;
+use cntryl_midge::MidgeResult;
 use cntryl_midge::testkit::{open_with_mode, opts_for_mode};
 use cntryl_midge::WriteOptions;
 

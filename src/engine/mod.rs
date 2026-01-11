@@ -351,7 +351,7 @@ impl Engine {
     // Range Operations
     // ========================================================================
 
-    /// Sync all pending writes to disk
+    /// Flush all pending writes to disk (used by tests)
     pub(crate) fn sync(&self) -> MidgeResult<()> {
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalSync {
             request_id: next_request_id(),
@@ -367,12 +367,12 @@ impl Engine {
     }
 
     /// Force a flush of the default column family
-    pub(crate) fn flush(&self) -> MidgeResult<()> {
+    pub fn flush(&self) -> MidgeResult<()> {
         self.flush_cf(&self.default_cf)
     }
 
     /// Force a flush of a specific column family
-    pub(crate) fn flush_cf(&self, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
+    pub fn flush_cf(&self, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
         let response = self
             .runtime_handle
             .send_and_wait(RuntimeMsg::FlushMemtable {
@@ -701,7 +701,8 @@ impl Engine {
     }
 
     /// Drop a column family by ID
-    pub(crate) fn drop_column_family(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {
+    /// Drop a column family (used by tests)
+    pub fn drop_column_family(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {
         let response = self.runtime_handle.send_and_wait_filtered(
             RuntimeMsg::ManifestDropColumnFamily {
                 request_id: next_request_id(),
@@ -737,7 +738,7 @@ impl Engine {
     }
 
     /// List all active column families
-    pub(crate) fn list_column_families(&self) -> MidgeResult<Vec<ColumnFamilyHandle>> {
+    pub fn list_column_families(&self) -> MidgeResult<Vec<ColumnFamilyHandle>> {
         Ok(self
             .column_families
             .iter()
@@ -760,7 +761,8 @@ impl Engine {
     /// - Budget violation rates
     ///
     /// Use this for monitoring read performance and tuning compaction triggers.
-    pub(crate) fn get_read_amp_metrics(&self) -> MidgeResult<ReadAmpMetricsSnapshot> {
+    /// Get read amplification metrics (used by tests)
+    pub fn get_read_amp_metrics(&self) -> MidgeResult<ReadAmpMetricsSnapshot> {
         let response = self
             .runtime_handle
             .send_and_wait(RuntimeMsg::GetReadAmpMetrics {
@@ -993,7 +995,7 @@ mod tests {
             ..Default::default()
         };
 
-        let engine = MidgeEngine::open(opts).expect("open memory engine");
+        let engine = Engine::open_with_options(opts).expect("open memory engine");
         // These operations should be no-ops and return Ok
         engine.flush().expect("memory flush should succeed");
         engine
