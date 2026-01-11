@@ -90,14 +90,7 @@ fn run_sst_range_scan_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
         let query = cntryl_midge::Query::new()
             .start_key(bytes::Bytes::copy_from_slice(&start[..]))
             .end_key(bytes::Bytes::copy_from_slice(&end[..]));
-        let mut results = tx.scan(&query).expect("range failed");
-        results.remaining()
-    });
-
-    drop(engine);
-}
-
-fn run_sst_sparse_keyspace_cloud_case(ctx: &mut StressContext, opts: MidgeOptions) {
+        let results = tx.scan(&query).expect("range failed");
     let engine = setup_engine(opts);
     let cf = engine.default_column_family();
 
@@ -133,16 +126,7 @@ fn run_sst_sparse_keyspace_cloud_case(ctx: &mut StressContext, opts: MidgeOption
         let query = cntryl_midge::Query::new()
             .start_key(bytes::Bytes::copy_from_slice(&start[..]))
             .end_key(bytes::Bytes::copy_from_slice(&end[..]));
-        let mut results = tx.scan(&query).expect("range failed");
-        results.remaining()
-    });
-
-    drop(engine);
-}
-
-#[stress_test]
-fn tier3_sst_point_lookup_mem(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+        let results = tx.scan(&query).expect("range failed");
     run_sst_point_lookup_case(ctx, opts, 5_000, 10_000);
 }
 

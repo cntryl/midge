@@ -39,7 +39,7 @@ fn run_scan_query_case(
         let tx = e
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin");
-        let mut results = tx.scan(&query).expect("scan failed");
+        let results = tx.scan(&query).expect("scan failed");
         results.remaining()
     });
 
