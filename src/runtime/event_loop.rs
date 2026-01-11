@@ -561,7 +561,6 @@ impl EventLoop {
 
                 // TODO: Re-enable merge support when RuntimeMsg::WalMerge exists
                 // Ok(RuntimeMsg::WalMerge { .. }) => { ... }
-
                 Ok(RuntimeMsg::ApplyTransaction { request_id, ops }) => {
                     match self
                         .wal_actor
@@ -2038,6 +2037,13 @@ impl EventLoop {
             None => return vec![],
         };
 
+        // Treat empty bounds as unbounded.
+        //
+        // `Transaction::scan` uses empty Vecs when the caller does not specify start/end.
+        // Interpreting empty as an actual key would make Query::new() scan the empty range.
+        let start_opt = if start.is_empty() { None } else { Some(start) };
+        let end_opt = if end.is_empty() { None } else { Some(end) };
+
         // Collect results in order: SSTs (oldest->newest) -> immutable memtables (oldest->newest) -> active memtable
         // so that newer versions override older ones.
         let mut results: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
@@ -2060,7 +2066,7 @@ impl EventLoop {
             for file_meta in l0_files.iter().rev() {
                 let sst_path = self.state.sst_dir.join(&file_meta.name);
                 if let Ok(reader) = self.compaction_actor.open_sst_reader(&sst_path) {
-                    if let Ok(pairs) = reader.scan_range(Some(start), Some(end)) {
+                    if let Ok(pairs) = reader.scan_range(start_opt, end_opt) {
                         for (k, v) in pairs {
                             // SstReader::scan_range returns only (key, value) tuples of present values.
                             // Treat all returned values as valid for the snapshot (SSTs are persisted).
@@ -2089,7 +2095,7 @@ impl EventLoop {
 
                 let sst_path = self.state.sst_dir.join(&file_meta.name);
                 if let Ok(reader) = self.compaction_actor.open_sst_reader(&sst_path) {
-                    if let Ok(pairs) = reader.scan_range(Some(start), Some(end)) {
+                    if let Ok(pairs) = reader.scan_range(start_opt, end_opt) {
                         for (k, v) in pairs {
                             // SstReader::scan_range returns only (key, value) tuples of present values.
                             // Treat all returned values as valid for the snapshot (SSTs are persisted).
@@ -2116,7 +2122,9 @@ impl EventLoop {
                 if value.is_none() {
                     continue; // tombstone
                 }
-                if key.as_slice() >= start && key.as_slice() < end {
+                let in_start = start_opt.is_none_or(|s| key.as_slice() >= s);
+                let in_end = end_opt.is_none_or(|e| key.as_slice() < e);
+                if in_start && in_end {
                     results.insert(key.clone(), value.clone().expect("value already checked"));
                 }
             }
@@ -2135,7 +2143,9 @@ impl EventLoop {
             if value.is_none() {
                 continue;
             }
-            if key.as_slice() >= start && key.as_slice() < end {
+            let in_start = start_opt.is_none_or(|s| key.as_slice() >= s);
+            let in_end = end_opt.is_none_or(|e| key.as_slice() < e);
+            if in_start && in_end {
                 results.insert(key.clone(), value.clone().expect("value already checked"));
             }
         }

@@ -15,11 +15,11 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use cntryl_midge::MidgeEngine;
-//! use std::path::PathBuf;
+//! use cntryl_midge::{MidgeEngine, OpenOptions};
 //!
 //! // Open a database with default options
-//! let engine = MidgeEngine::open(PathBuf::from("./my_db"))?;
+//! let opts = OpenOptions::local("./my_db").build();
+//! let engine = MidgeEngine::open(opts)?;
 //! # Ok::<(), cntryl_midge::MidgeError>(())
 //! ```
 

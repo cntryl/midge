@@ -22,13 +22,10 @@ pub mod scheduler;
 pub mod state;
 pub mod task;
 
-
-
 pub use event_loop::EventLoop;
 pub use intent_persistence::IntentPersistence;
 
 pub use state::RuntimeState;
-
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::wal::policy::BatchConfig;

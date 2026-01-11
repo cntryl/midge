@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Midge - High-performance embedded LSM-tree database
 //!
 //! # Architecture
@@ -25,16 +26,16 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 // Foundation - no dependencies
-mod common;
+pub mod common;
 
 // Internal modules - implementation details (NOT part of public API)
 mod compaction;
 mod io;
-mod iterators;
+pub mod iterators;
 mod metadata;
 mod metrics;
 mod runtime;
-mod sst;
+pub mod sst;
 mod storage;
 mod telemetry;
 mod wal;
@@ -66,10 +67,11 @@ pub type MidgeEngine = Engine;
 pub use engine::{Direction, Query, ScanIterator};
 
 // Configuration
-pub use engine::{Goal, MemoryBudget, OpenOptions, Storage, WriteOptions, WorkloadProfile};
+pub use engine::{Goal, MemoryBudget, OpenOptions, Storage, WorkloadProfile, WriteOptions};
 
 // Key/value types
 pub use engine::{Key, Value};
+pub use testkit::{MidgeOptions, StorageMode};
 
 // ---------------------------------------------------------------------------
 // Canonical Prelude
@@ -92,7 +94,7 @@ pub use engine::{Key, Value};
 /// use std::path::PathBuf;
 ///
 /// // Open engine
-/// let engine = MidgeEngine::open(PathBuf::from("./db"))?;
+/// let engine = Engine::open(OpenOptions::local("./db").build())?;
 /// let cf = engine.default_column_family();
 ///
 /// // Write: explicit transaction, explicit commit, explicit durability

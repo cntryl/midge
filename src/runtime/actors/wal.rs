@@ -73,6 +73,13 @@ enum PendingCloudWrite {
         sequence: u64,
         enqueued_at: Instant,
     },
+    DeleteRange {
+        cf_id: u32,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        sequence: u64,
+        enqueued_at: Instant,
+    },
     Transaction {
         commit_sequence: u64,
         ops: Vec<TransactionApplyOp>,
@@ -268,6 +275,7 @@ impl WalActor {
                 let enqueued_at = match pw {
                     PendingCloudWrite::Single { enqueued_at, .. }
                     | PendingCloudWrite::Merge { enqueued_at, .. }
+                    | PendingCloudWrite::DeleteRange { enqueued_at, .. }
                     | PendingCloudWrite::Transaction { enqueued_at, .. } => *enqueued_at,
                 };
                 now.duration_since(enqueued_at) > CLOUD_UPLOAD_TIMEOUT
@@ -493,11 +501,11 @@ impl WalActor {
         let record = WalRecord {
             cf_id,
             op: WalOpKind::DeleteRange,
-            key: start_key,
+            key: start_key.clone(),
             value: None,
             seq: sequence,
             expiration: None,
-            range_end: Some(end_key),
+            range_end: Some(end_key.clone()),
             txn_id: None,
             compression: None,
         };
@@ -530,15 +538,41 @@ impl WalActor {
             DurabilityPolicy::Strict => {
                 self.sync_internal(state)?;
                 state.wal.local_durable_seq = sequence;
-                // DeleteRange tombstones are applied during reads/compaction
-                // No immediate memtable modification needed
+                if let Some(range_end) = record.range_end.as_ref() {
+                    self.apply_delete_range_to_memtable(
+                        state,
+                        sequence,
+                        cf_id,
+                        record.key.as_ref(),
+                        range_end.as_ref(),
+                    )?;
+                }
             }
             DurabilityPolicy::Batched => {
-                // Defer response until group commit completes
+                // Apply to memtable immediately, but defer response until fsync completes
+                if let Some(range_end) = record.range_end.as_ref() {
+                    self.apply_delete_range_to_memtable(
+                        state,
+                        sequence,
+                        cf_id,
+                        record.key.as_ref(),
+                        range_end.as_ref(),
+                    )?;
+                }
+                // Return deferred=true so caller joins group commit
             }
             DurabilityPolicy::CloudMirrored => {
                 self.sync_internal(state)?;
                 state.wal.local_durable_seq = sequence;
+                if let Some(range_end) = record.range_end.as_ref() {
+                    self.apply_delete_range_to_memtable(
+                        state,
+                        sequence,
+                        cf_id,
+                        record.key.as_ref(),
+                        range_end.as_ref(),
+                    )?;
+                }
             }
             DurabilityPolicy::CloudFirst => {
                 if self.should_apply_backpressure() {
@@ -560,9 +594,19 @@ impl WalActor {
                     )));
                 }
 
-                // Queue for cloud confirmation
-                // DeleteRange is special - we don't queue it for memtable application
-                // It's applied during reads via range tombstone filtering
+                // Queue for cloud confirmation.
+                // DeleteRange will be applied to memtable after cloud upload confirmation
+                // in handle_cloud_upload_complete, ensuring CloudFirst durability.
+                self.queue_cloud_delete_range(
+                    cf_id,
+                    record.key.to_vec(),
+                    record
+                        .range_end
+                        .as_ref()
+                        .map(|b| b.to_vec())
+                        .unwrap_or_default(),
+                    sequence,
+                );
             }
         }
 
@@ -1033,6 +1077,10 @@ impl WalActor {
                         return true;
                     }
                 }
+                PendingCloudWrite::DeleteRange { .. } => {
+                    // DeleteRange isn't currently applied to memtable, so it doesn't affect
+                    // insert-only existence checks.
+                }
                 PendingCloudWrite::Transaction { ops, .. } => {
                     for op in ops {
                         match op {
@@ -1099,10 +1147,30 @@ impl WalActor {
         if let Some(cf_state) = state.column_families.get(&cf_id) {
             // TODO: Implement proper merge operator logic
             // For now, treat merge as a put operation
+            cf_state.memtable.as_ref().put_with_seq(
+                key.to_vec(),
+                operand.to_vec(),
+                sequence,
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Apply a delete_range operation to the memtable
+    fn apply_delete_range_to_memtable(
+        &self,
+        state: &RuntimeState,
+        sequence: u64,
+        cf_id: u32,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> MidgeResult<()> {
+        if let Some(cf_state) = state.column_families.get(&cf_id) {
             cf_state
                 .memtable
                 .as_ref()
-                .put_with_seq(key.to_vec(), operand.to_vec(), sequence, None)?;
+                .delete_range_with_seq(start_key, end_key, sequence)?;
         }
         Ok(())
     }
@@ -1266,6 +1334,7 @@ impl WalActor {
             let gate_seq = match pending {
                 PendingCloudWrite::Single { sequence, .. } => *sequence,
                 PendingCloudWrite::Merge { sequence, .. } => *sequence,
+                PendingCloudWrite::DeleteRange { sequence, .. } => *sequence,
                 PendingCloudWrite::Transaction {
                     commit_sequence, ..
                 } => *commit_sequence,
@@ -1286,6 +1355,9 @@ impl WalActor {
                     key.len() + value.as_ref().map_or(0, |v| v.len()) + 64
                 }
                 PendingCloudWrite::Merge { key, operand, .. } => key.len() + operand.len() + 64,
+                PendingCloudWrite::DeleteRange {
+                    start_key, end_key, ..
+                } => start_key.len() + end_key.len() + 64,
                 PendingCloudWrite::Transaction { ops, .. } => ops
                     .iter()
                     .map(|op| match op {
@@ -1339,6 +1411,26 @@ impl WalActor {
                     );
                     let operand_bytes = Bytes::from(operand);
                     self.apply_merge_to_memtable(state, cf_id, &key, &operand_bytes, sequence)?;
+                }
+                PendingCloudWrite::DeleteRange {
+                    cf_id,
+                    start_key,
+                    end_key,
+                    sequence,
+                    enqueued_at,
+                } => {
+                    let wait_time = Instant::now().duration_since(enqueued_at);
+                    tracing::debug!(
+                        cf_id,
+                        sequence,
+                        wait_ms = wait_time.as_millis(),
+                        start_len = start_key.len(),
+                        end_len = end_key.len(),
+                        "Applying pending delete_range after cloud durability"
+                    );
+                    self.apply_delete_range_to_memtable(
+                        state, sequence, cf_id, &start_key, &end_key,
+                    )?;
                 }
                 PendingCloudWrite::Transaction {
                     commit_sequence,
@@ -1396,6 +1488,7 @@ impl WalActor {
             match pending {
                 PendingCloudWrite::Single { .. }
                 | PendingCloudWrite::Merge { .. }
+                | PendingCloudWrite::DeleteRange { .. }
                 | PendingCloudWrite::Transaction { .. } => {}
             }
         }
@@ -1450,6 +1543,37 @@ impl WalActor {
             pending_count = self.pending_cloud_writes.len(),
             pending_bytes = self.pending_cloud_write_bytes,
             "Queued merge for cloud durability"
+        );
+    }
+
+    /// Queue a delete_range marker waiting for cloud durability (CloudFirst mode).
+    ///
+    /// DeleteRange isn't currently applied to memtable/recovery, but we still track it so
+    /// CloudFirst flush/rotate happens and callers waiting for CloudAck can complete.
+    pub fn queue_cloud_delete_range(
+        &mut self,
+        cf_id: u32,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        sequence: u64,
+    ) {
+        let estimated_bytes = start_key.len() + end_key.len() + 64; // 64 for overhead
+        self.pending_cloud_write_bytes += estimated_bytes;
+
+        self.pending_cloud_writes
+            .push_back(PendingCloudWrite::DeleteRange {
+                cf_id,
+                start_key,
+                end_key,
+                sequence,
+                enqueued_at: Instant::now(),
+            });
+
+        tracing::trace!(
+            sequence,
+            pending_count = self.pending_cloud_writes.len(),
+            pending_bytes = self.pending_cloud_write_bytes,
+            "Queued delete_range for cloud durability"
         );
     }
 

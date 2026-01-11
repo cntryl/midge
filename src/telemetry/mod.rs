@@ -12,7 +12,6 @@ pub mod spans;
 pub use config::TelemetryConfig;
 pub use metrics::Metrics;
 
-
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -82,7 +81,6 @@ impl Telemetry {
                     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
             );
 
-        #[cfg(feature = "telemetry-otlp")]
         let registry = tracing_subscriber::registry().with(fmt_layer);
 
         #[cfg(feature = "telemetry-otlp")]
@@ -110,7 +108,6 @@ impl Telemetry {
             return Ok(());
         }
 
-        let registry = tracing_subscriber::registry().with(fmt_layer);
         registry.init();
         Ok(())
     }

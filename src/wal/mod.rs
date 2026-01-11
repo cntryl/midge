@@ -29,12 +29,10 @@ pub use traits::{WalReaderDyn, WalWriter};
 
 // Re-export encoding functions
 
-
 // Re-export io::Fs-based implementations
 pub use fs::FsWalFactoryIo;
 
 // Re-export recovery
-
 
 // Re-export policy types
 pub use policy::DurabilityPolicy;

@@ -26,8 +26,8 @@ pub(crate) mod api;
 mod context;
 
 pub use api::{
-    Direction, Goal, Key, MemoryBudget, OpenOptions, Query, ScanIterator, Storage, Transaction, TransactionMode, Value,
-    WorkloadProfile, WriteOptions,
+    Direction, Goal, Key, MemoryBudget, OpenOptions, Query, ScanIterator, Storage, Transaction,
+    TransactionMode, Value, WorkloadProfile, WriteOptions,
 };
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<u32, ColumnFamilyHandle>;
@@ -107,6 +107,7 @@ impl ColumnFamilyHandle {
 }
 
 /// Snapshot of runtime configuration that can be restored later.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct IngestModeSnapshot {
     pub memtable_size_limit: usize,
@@ -196,14 +197,19 @@ impl Engine {
                     Some(cloud.recovery_cloud_wal_dir.clone()),
                 );
 
-                let mut config = crate::runtime::RuntimeConfig::default();
-                config.wal_durability_policy = crate::wal::DurabilityPolicy::CloudFirst;
-                config.hybrid_storage = Some(cloud.hybrid_storage);
-                config.hybrid_storage_events = Some(cloud.events);
+                let config = crate::runtime::RuntimeConfig {
+                    wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
+                    hybrid_storage: Some(cloud.hybrid_storage),
+                    hybrid_storage_events: Some(cloud.events),
+                    ..Default::default()
+                };
 
                 (state, config)
             }
-            _ => (RuntimeState::new(db_path.clone(), memory_mode), crate::runtime::RuntimeConfig::default()),
+            _ => (
+                RuntimeState::new(db_path.clone(), memory_mode),
+                crate::runtime::RuntimeConfig::default(),
+            ),
         };
 
         // 🔑 CRITICAL: Replay intent log to recover any interrupted mutations
@@ -464,7 +470,7 @@ impl Engine {
             Ok(RuntimeResponse::CurrentSequence { sequence, .. }) => sequence,
             _ => fallback_sequence,
         };
-        
+
         Ok(api::Transaction::new(
             self.runtime_handle.clone(),
             txn_id,

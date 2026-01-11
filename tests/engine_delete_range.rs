@@ -517,8 +517,7 @@ fn should_document_current_limitation_of_range_method_when_called() {
                     .end_key(Bytes::from(&b"key3"[..])),
             )
             .expect("scan");
-        let results: Vec<_> =
-            std::iter::from_fn(|| iter.next()).collect();
+        let results: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
 
         // Assert: range() should return keys in the range
         // Currently it returns empty, but should return [key1, key2]

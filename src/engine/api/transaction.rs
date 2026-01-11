@@ -38,10 +38,7 @@ pub enum WriteIntent {
         ttl_seconds: Option<u64>,
     },
     /// Delete operation
-    Delete {
-        cf_id: ColumnFamilyId,
-        key: Vec<u8>,
-    },
+    Delete { cf_id: ColumnFamilyId, key: Vec<u8> },
     /// Delete range operation
     DeleteRange {
         cf_id: ColumnFamilyId,
@@ -62,7 +59,12 @@ impl WriteIntent {
     }
 
     /// Create an insert intent (error if exists)
-    fn insert(cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>, ttl_seconds: Option<u64>) -> Self {
+    fn insert(
+        cf_id: ColumnFamilyId,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl_seconds: Option<u64>,
+    ) -> Self {
         Self::Insert {
             cf_id,
             key,
@@ -78,7 +80,11 @@ impl WriteIntent {
 
     /// Create a delete range intent
     fn delete_range(cf_id: ColumnFamilyId, start_key: Vec<u8>, end_key: Vec<u8>) -> Self {
-        Self::DeleteRange { cf_id, start_key, end_key }
+        Self::DeleteRange {
+            cf_id,
+            start_key,
+            end_key,
+        }
     }
 }
 
@@ -279,9 +285,18 @@ impl Transaction {
                 WriteIntent::Delete { key, .. } => {
                     merged.insert(key.clone(), None);
                 }
-                WriteIntent::DeleteRange { .. } => {
-                    // DeleteRange tombstones don't affect single-key lookups
-                    // They only affect range scans
+                WriteIntent::DeleteRange {
+                    start_key, end_key, ..
+                } => {
+                    // Apply delete-range tombstone: mark all keys within [start_key, end_key) as deleted
+                    // Collect keys to avoid mutating map while iterating
+                    let keys_to_tombstone: Vec<Vec<u8>> = merged
+                        .range(start_key.clone()..end_key.clone())
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    for k in keys_to_tombstone {
+                        merged.insert(k, None);
+                    }
                 }
             }
         }
@@ -290,6 +305,18 @@ impl Transaction {
         for (key, value_opt) in merged {
             if let Some(value) = value_opt {
                 results.push((key, value.to_vec()));
+            }
+        }
+
+        // Apply limit (respect direction semantics: for Reverse keep the last N elements)
+        if let Some(limit) = query.limit {
+            if query.direction == super::iterator::Direction::Forward {
+                if results.len() > limit {
+                    results.truncate(limit);
+                }
+            } else if results.len() > limit {
+                let start = results.len() - limit;
+                results = results[start..].to_vec();
             }
         }
 

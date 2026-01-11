@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-
 // == COPILOT MASTER RULES FOR STORAGE SUBSYSTEM =====================================
 // These rules define the *correct* architecture of the Midge storage layer. You MUST
 // follow them in all completions that touch storage, providers, WAL durability, or
@@ -276,7 +275,7 @@ impl<T: Clone> StorageOutcome<T> {
     }
 
     /// Convert StorageOutcome to MidgeResult
-    pub fn to_result(self) -> MidgeResult<T> {
+    pub fn into_result(self) -> MidgeResult<T> {
         match self {
             StorageOutcome::Ok(v) => Ok(v),
             StorageOutcome::Err(e) => Err(crate::common::MidgeError::Internal(e)),

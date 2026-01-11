@@ -47,8 +47,7 @@ fn should_progress_through_lsm_levels_or_document_current_behavior() {
                 .end_key(Bytes::from(&b"\xff\xff\xff\xff"[..])),
         )
         .unwrap();
-    let scan_result: Vec<_> =
-        std::iter::from_fn(|| iter.next()).collect();
+    let scan_result: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
     let key_count = scan_result.len();
 
     eprintln!("Total keys in engine: {}", key_count);
@@ -220,8 +219,7 @@ fn should_preserve_range_tombstones_through_multi_level_compaction() {
         .start_key(Bytes::from(&b"k300"[..]))
         .end_key(Bytes::from(&b"k700"[..]));
     let mut iter = tx.scan(&query).unwrap();
-    let remaining = std::iter::from_fn(|| iter.next())
-        .count();
+    let remaining = std::iter::from_fn(|| iter.next()).count();
 
     eprintln!("Keys remaining in deleted range: {}", remaining);
 

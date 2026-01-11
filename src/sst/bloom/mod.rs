@@ -20,5 +20,6 @@ pub mod reader;
 pub mod writer;
 
 pub use block_bloom::BlockBloomFilter;
-pub use metrics::BloomMetrics;pub use reader::BloomReader;
+pub use metrics::BloomMetrics;
+pub use reader::BloomReader;
 pub use writer::BloomWriter;

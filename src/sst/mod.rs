@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-
 // == COPILOT MASTER RULES FOR SST SUBSYSTEM ==========================================
 // These rules define the authoritative architecture for Midge SSTs. All completions
 // touching SST encoding, blocks, builders, iterators, index files, filters, or table
@@ -245,15 +244,11 @@ pub mod traits;
 pub mod trie;
 pub mod types;
 
-
-
 pub use fs::FsSstFactoryIo;
 
 pub use read_amp_metrics::ReadAmpMetrics;
 
 pub use traits::{SstFactory, SstReader, SstStateReader};
-
-
 
 /// Key-value pair
 #[derive(Clone, Debug)]
@@ -338,6 +333,23 @@ impl SkipListMemtable {
     pub fn delete_with_seq(&self, key: Vec<u8>, seq: u64) -> MidgeResult<()> {
         let size_delta = key.len() + 16;
         self.skiplist.delete(Bytes::from(key), seq);
+        self.size_bytes
+            .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Delete range with explicit sequence [start_key, end_key)
+    pub fn delete_range_with_seq(
+        &self,
+        start_key: &[u8],
+        end_key: &[u8],
+        seq: u64,
+    ) -> MidgeResult<()> {
+        let count = self
+            .skiplist
+            .delete_range(Some(start_key), Some(end_key), seq);
+        // Estimate size impact: tombstone per deleted key
+        let size_delta = count * 32; // rough estimate
         self.size_bytes
             .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
         Ok(())

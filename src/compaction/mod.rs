@@ -5,7 +5,6 @@ pub mod merge;
 pub mod planner;
 pub mod strategy;
 
-
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 
 use crate::common::{MidgeError, MidgeResult};

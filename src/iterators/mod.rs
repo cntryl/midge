@@ -7,7 +7,6 @@
 pub mod merge;
 pub mod skiplist;
 
-
 pub use skiplist::SkipList;
 
 use crate::common::MidgeResult;

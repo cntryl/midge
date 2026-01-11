@@ -3,8 +3,8 @@
 //! Validates that frequently accessed SSTs are tracked correctly
 //! for read-aware compaction prioritization.
 
-use cntryl_midge::MidgeResult;
 use cntryl_midge::testkit::{open_with_mode, opts_for_mode};
+use cntryl_midge::MidgeResult;
 use cntryl_midge::{TransactionMode, WriteOptions};
 
 #[test]

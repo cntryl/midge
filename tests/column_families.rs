@@ -603,7 +603,7 @@ fn should_persist_cf_drop_given_restart_when_cf_was_dropped() {
             engine.flush().ok(); // Flush before dropping
             engine.drop_column_family(cf.id()).unwrap();
             engine.flush().ok(); // Flush after dropping to persist the deletion
-            // Engine dropped
+                                 // Engine dropped
         }
 
         // Assert (Phase 2)

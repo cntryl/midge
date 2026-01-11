@@ -472,6 +472,43 @@ fn should_respect_limit_given_streaming_scan_when_limited() {
 }
 
 #[test]
+fn should_respect_limit_in_reverse_query_when_limited() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
+
+        for i in 0..10 {
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            tx.put(
+                format!("k{:02}", i).as_bytes().to_vec(),
+                format!("v{:02}", i).as_bytes().to_vec(),
+                None,
+            )
+            .unwrap();
+            engine
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
+                .unwrap();
+        }
+
+        // Act: Reverse query with limit
+        let query = cntryl_midge::Query::new().reverse().limit(3);
+        let tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        let results = collect_scan(&tx, query);
+
+        // Assert: Should return last 3 keys in descending order
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0.as_slice(), b"k09");
+        assert_eq!(results[1].0.as_slice(), b"k08");
+        assert_eq!(results[2].0.as_slice(), b"k07");
+    });
+}
+
+#[test]
 fn should_apply_tombstones_given_streaming_scan_when_keys_deleted() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange

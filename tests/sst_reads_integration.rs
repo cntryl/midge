@@ -1,7 +1,7 @@
 //! Integration test for SST reads with read amplification metrics
 
-use cntryl_midge::MidgeResult;
 use cntryl_midge::testkit::{open_with_mode, opts_for_mode};
+use cntryl_midge::MidgeResult;
 use cntryl_midge::WriteOptions;
 
 #[test]

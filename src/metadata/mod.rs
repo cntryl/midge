@@ -10,14 +10,10 @@ pub mod persistence;
 pub mod version_manager;
 pub mod version_set;
 
-pub use journal::{
-    append_edit, append_edit_batch,
-    ManifestEdit,
-};
-pub use manifest::{ColumnFamilyMeta, CloudCheckpoint, FileMeta, Manifest};
+pub use journal::{append_edit, append_edit_batch, ManifestEdit};
+#[allow(unused_imports)]
+pub use manifest::{CloudCheckpoint, ColumnFamilyMeta, FileMeta, Manifest};
 pub use persistence::ManifestPersistence;
-
-
 
 /// Version identifier
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]

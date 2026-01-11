@@ -402,7 +402,14 @@ fn apply_record(
             memtable.delete_with_seq(record.key.to_vec(), record.seq)?;
         }
         WalOpKind::DeleteRange => {
-            // TODO: range tombstone support; treat as no-op for now.
+            // Apply delete_range to memtable during recovery
+            if let Some(end_key) = &record.range_end {
+                memtable.delete_range_with_seq(
+                    record.key.as_ref(),
+                    end_key.as_ref(),
+                    record.seq,
+                )?;
+            }
         }
         WalOpKind::Merge => {
             // Merge operators are not applied during recovery yet.

@@ -85,6 +85,7 @@ where
         state.pending.len()
     }
 
+    #[allow(dead_code)]
     pub fn inflight_len(&self) -> usize {
         let state = self.state.lock();
         state.inflight.len()

@@ -194,9 +194,7 @@ fn should_recover_range_tombstones_from_wal() {
     let scan_tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let mut iter = scan_tx
-        .scan(&cntryl_midge::Query::new())
-        .unwrap();
+    let mut iter = scan_tx.scan(&cntryl_midge::Query::new()).unwrap();
     let in_range = std::iter::from_fn(|| iter.next())
         .filter(|(k, _)| {
             let k_str = String::from_utf8_lossy(k.as_ref());
@@ -247,9 +245,7 @@ fn should_handle_wal_rotation_and_multiple_segments() {
     let final_tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let mut iter = final_tx
-        .scan(&cntryl_midge::Query::new())
-        .unwrap();
+    let mut iter = final_tx.scan(&cntryl_midge::Query::new()).unwrap();
     let total = std::iter::from_fn(|| iter.next()).count();
 
     eprintln!("Total keys after {} batches: {}", batch_count, total);
@@ -326,9 +322,7 @@ fn should_recover_mixed_operations_from_wal() {
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
     let put_val = verify_tx.get(b"put_key").unwrap();
-    let mut iter = verify_tx
-        .scan(&cntryl_midge::Query::new())
-        .unwrap();
+    let mut iter = verify_tx.scan(&cntryl_midge::Query::new()).unwrap();
     let dr_remaining = std::iter::from_fn(|| iter.next())
         .filter(|(k, _)| {
             let k_str = String::from_utf8_lossy(k.as_ref());

@@ -29,4 +29,3 @@ pub use write_options::WriteOptions;
 
 // Internal types needed by runtime but not part of public API
 pub(crate) use options::Durability;
-

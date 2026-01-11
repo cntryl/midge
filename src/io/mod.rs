@@ -42,7 +42,6 @@ pub mod mock;
 pub mod real;
 pub mod traits;
 
-
 pub use mock::MockFs;
 pub use real::RealFs;
 pub use traits::{Durability, File, Fs, FsPath, FsResult, OpenMode, OpenOptions};

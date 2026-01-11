@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Key-Value API Types
 //!
 //! Common types used throughout the KV API.
