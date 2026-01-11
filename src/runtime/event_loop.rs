@@ -20,7 +20,6 @@ use super::actors::{
 use super::durability::{DurabilityCoordinator, DurabilityWaiter};
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
-use crate::common::AckPolicy;
 use crate::sst::traits::SstReader;
 use crate::sst::Memtable;
 
@@ -49,8 +48,6 @@ pub struct EventLoop {
     /// Per-request router (oneshot channels)
     router: Arc<ResponseRouter>,
 
-    write_ack_policy: AckPolicy,
-
     /// One buffered message we pulled from the channel while draining writes.
     ///
     /// This preserves FIFO semantics when we opportunistically `try_recv()` to batch writes:
@@ -65,17 +62,11 @@ pub struct EventLoop {
 impl EventLoop {
     #[inline]
     fn should_ack_immediately(&self, deferred: bool) -> bool {
-        if self.wal_actor.is_cloud_first() {
-            return matches!(self.write_ack_policy, AckPolicy::Immediate);
-        }
-
-        match self.write_ack_policy {
-            AckPolicy::Immediate => true,
-            AckPolicy::AfterLocalDurable => !deferred,
-            // Non-CloudFirst builds currently have no notion of cloud-durable writes.
-            // This is validated at open time for user-facing paths.
-            AckPolicy::AfterCloudDurable => !deferred,
-        }
+        // Commit IS the acknowledgment.
+        // Return immediately only if already durable (deferred=false).
+        // For CloudFirst: immediate ack is never appropriate (cloud must confirm).
+        // For Batched/Strict: ack when not deferred (already synced).
+        !deferred
     }
 
     #[inline]
@@ -154,7 +145,6 @@ impl EventLoop {
             trace_enabled,
             durability: DurabilityCoordinator::new(initial_durability_key, is_cloud_first),
             router,
-            write_ack_policy: config.write_ack_policy,
             pending_msg: None,
             worker_msg_tx,
         };
@@ -1607,85 +1597,6 @@ impl EventLoop {
                     self.maybe_flush_cloudfirst_wal();
                 }
 
-                RuntimeMsg::WalMerge {
-                    request_id,
-                    cf_id,
-                    key,
-                    operand,
-                } => {
-                    let result = self.wal_actor.append_merge(
-                        &mut self.state,
-                        request_id,
-                        cf_id,
-                        bytes::Bytes::from(key),
-                        bytes::Bytes::from(operand),
-                    );
-
-                    match result {
-                        Ok((seq, deferred)) => {
-                            if self.should_ack_immediately(deferred) {
-                                if self.wal_actor.is_cloud_first() {
-                                    self.durability.queue_waiter(
-                                        DurabilityWaiter::ConfirmWalAppend { request_id },
-                                    );
-                                } else if deferred {
-                                    self.maybe_queue_confirm_only_waiter(
-                                        deferred, request_id, false,
-                                    );
-                                } else {
-                                    self.state.confirm_sequences(request_id);
-                                }
-
-                                self.respond(
-                                    request_id,
-                                    RuntimeResponse::WalAppended {
-                                        request_id,
-                                        sequence: seq,
-                                    },
-                                );
-                            } else {
-                                self.durability.queue_waiter(DurabilityWaiter::WalAppend {
-                                    request_id,
-                                    sequence: seq,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            self.respond(
-                                request_id,
-                                RuntimeResponse::Error {
-                                    request_id,
-                                    message: e.to_string(),
-                                },
-                            );
-                        }
-                    }
-
-                    // Auto-sync batched writes if needed (group commit completes all waiters)
-                    self.sync_batched_wal_if_needed(&msg_rx);
-
-                    self.maybe_flush_cloudfirst_wal();
-                }
-
-                RuntimeMsg::RegisterMergeOperator {
-                    request_id,
-                    cf_id,
-                    operator,
-                } => {
-                    if let Some(cf_state) = self.state.column_families.get_mut(&cf_id) {
-                        cf_state.merge_operator = Some(operator);
-                        self.respond(request_id, RuntimeResponse::Ok { request_id });
-                    } else {
-                        self.respond(
-                            request_id,
-                            RuntimeResponse::Error {
-                                request_id,
-                                message: format!("Invalid CF ID: {}", cf_id),
-                            },
-                        );
-                    }
-                }
-
                 RuntimeMsg::WalSync { request_id } => {
                     let result = self.wal_actor.sync(&mut self.state);
                     let resp = result
@@ -1919,86 +1830,10 @@ impl EventLoop {
     }
 
     /// Local read path: memtable → immutable memtables → [SST TODO]
-    /// Resolves merge operands if a merge operator is registered
     fn handle_read(&self, cf_id: u32, key: &[u8], _seq: u64) -> Option<Vec<u8>> {
         let cf_state = self.state.column_families.get(&cf_id)?;
 
-        // Check if there's a merge operator for this CF
-        if cf_state.merge_operator.is_some() {
-            // Collect all versions from memtables
-            let mut all_versions = Vec::new();
-
-            // Active memtable
-            let active_versions = cf_state.memtable.get_versions_for_merge(key);
-            all_versions.extend(active_versions);
-
-            // Immutable memtables (newest → oldest)
-            for imm in cf_state.immutable_memtables.iter().rev() {
-                let imm_versions = imm.get_versions_for_merge(key);
-                all_versions.extend(imm_versions);
-            }
-
-            // Sort versions by sequence (oldest first) - versions are already in order
-            // from each memtable, but we need to merge them
-
-            if all_versions.is_empty() {
-                return None;
-            }
-
-            // Separate base value and merge operands
-            // Versions are in newest-first order, so we need to process in reverse
-            // to find the oldest Put (base value) and subsequent Merges
-            let mut base_value: Option<Vec<u8>> = None;
-            let mut merge_operands: Vec<Vec<u8>> = Vec::new();
-
-            use crate::iterators::skiplist::OpType;
-            // Process versions in reverse (oldest first)
-            for (value_opt, _exp, op_type) in all_versions.iter().rev() {
-                match op_type {
-                    OpType::Put => {
-                        // Oldest Put becomes the base value
-                        if let Some(value) = value_opt.as_ref() {
-                            base_value = Some(value.to_vec());
-                        }
-                        merge_operands.clear(); // Start fresh after a Put
-                    }
-                    OpType::Delete => {
-                        // Tombstone clears everything
-                        base_value = None;
-                        merge_operands.clear();
-                    }
-                    OpType::Merge => {
-                        // Collect merge operand in chronological order
-                        if let Some(v) = value_opt {
-                            merge_operands.push(v.to_vec());
-                        }
-                    }
-                }
-            }
-
-            // If there are merge operands, resolve them
-            if !merge_operands.is_empty() {
-                if let Some(operator) = &cf_state.merge_operator {
-                    match operator.merge(key, base_value.as_deref(), &merge_operands) {
-                        Ok(Some(resolved)) => return Some(resolved),
-                        Ok(None) => return None,
-                        Err(e) => {
-                            tracing::error!("Merge operator failed: {}", e);
-                            return None;
-                        }
-                    }
-                } else {
-                    // Shouldn't happen - we checked for merge operator above
-                    tracing::error!("Merge operands found but no operator registered");
-                    return None;
-                }
-            }
-
-            // No merge operands, return base value
-            return base_value;
-        }
-
-        // No merge operator - use simple get logic
+        // Simple get logic
         // Active memtable
         if let Ok(Some(v)) = cf_state.memtable.get(key) {
             return Some(v);

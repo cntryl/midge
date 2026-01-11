@@ -5,7 +5,6 @@
 //! - storage-mode parameterization
 //! - engine setup from high-level knobs (via `OpenOptions`)
 
-use crate::common::AckPolicy;
 use crate::testkit::{MidgeOptions, StorageMode};
 use crate::{Goal, MemoryBudget, MidgeEngine, WorkloadProfile};
 use std::path::{Path, PathBuf};
@@ -158,7 +157,6 @@ impl BenchEngineConfig {
             enable_compaction: self.enable_compaction,
             // WAL sync is determined at commit time via WriteOptions, not OpenOptions
             wal_sync: false,
-            ack_policy: AckPolicy::Immediate,
             wal_batch_config: self.wal_batch_config,
             ..Default::default()
         }

@@ -30,8 +30,6 @@ pub enum MidgeError {
     /// Invalid path
     InvalidPath,
 
-    /// Merge operator error
-    MergeOperatorFailed(String),
 
     /// Write stall - memtable full or compaction lagging behind
     /// Application must apply backpressure
@@ -48,7 +46,6 @@ impl fmt::Display for MidgeError {
             MidgeError::NotSupported(msg) => write!(f, "Not supported: {}", msg),
             MidgeError::Internal(msg) => write!(f, "Internal error: {}", msg),
             MidgeError::InvalidPath => write!(f, "Invalid path"),
-            MidgeError::MergeOperatorFailed(msg) => write!(f, "Merge operator failed: {}", msg),
             MidgeError::WriteStall(msg) => write!(f, "Write stall: {}", msg),
         }
     }

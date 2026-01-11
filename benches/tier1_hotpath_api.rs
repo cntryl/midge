@@ -13,7 +13,7 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use cntryl_midge::{AckPolicy, MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{
     criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
@@ -42,7 +42,6 @@ fn setup_db(name: &str) -> MidgeEngine {
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
         wal_sync: false,
-        ack_policy: AckPolicy::default(),
         wal_batch_config: None,
         // Keep the memtable large enough that we do not trigger flush/compaction
         // during the measurement window.

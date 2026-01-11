@@ -4,7 +4,7 @@
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 
-use cntryl_midge::{AckPolicy, MidgeOptions};
+use cntryl_midge::MidgeOptions;
 
 const KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
 const VALUE_SIZE: usize = 128;
@@ -43,7 +43,6 @@ fn run_durability_puts_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops
 fn tier3_durability_async_local(ctx: &mut StressContext) {
     let mut opts = cntryl_midge::testkit::opts_for_mode("local");
     opts.wal_sync = false;
-    opts.ack_policy = AckPolicy::Immediate;
     run_durability_puts_case(ctx, opts, 10);
 }
 
@@ -51,7 +50,6 @@ fn tier3_durability_async_local(ctx: &mut StressContext) {
 fn tier3_durability_async_local_100(ctx: &mut StressContext) {
     let mut opts = cntryl_midge::testkit::opts_for_mode("local");
     opts.wal_sync = false;
-    opts.ack_policy = AckPolicy::Immediate;
     run_durability_puts_case(ctx, opts, 100);
 }
 
@@ -59,7 +57,6 @@ fn tier3_durability_async_local_100(ctx: &mut StressContext) {
 fn tier3_durability_async_local_1000(ctx: &mut StressContext) {
     let mut opts = cntryl_midge::testkit::opts_for_mode("local");
     opts.wal_sync = false;
-    opts.ack_policy = AckPolicy::Immediate;
     run_durability_puts_case(ctx, opts, 1_000);
 }
 
@@ -67,7 +64,6 @@ fn tier3_durability_async_local_1000(ctx: &mut StressContext) {
 fn tier3_durability_sync_local(ctx: &mut StressContext) {
     let mut opts = cntryl_midge::testkit::opts_for_mode("local");
     opts.wal_sync = true;
-    opts.ack_policy = AckPolicy::AfterLocalDurable;
     run_durability_puts_case(ctx, opts, 10);
 }
 
@@ -75,7 +71,6 @@ fn tier3_durability_sync_local(ctx: &mut StressContext) {
 fn tier3_durability_sync_local_100(ctx: &mut StressContext) {
     let mut opts = cntryl_midge::testkit::opts_for_mode("local");
     opts.wal_sync = true;
-    opts.ack_policy = AckPolicy::AfterLocalDurable;
     run_durability_puts_case(ctx, opts, 100);
 }
 
@@ -83,7 +78,6 @@ fn tier3_durability_sync_local_100(ctx: &mut StressContext) {
 fn tier3_durability_sync_local_1000(ctx: &mut StressContext) {
     let mut opts = cntryl_midge::testkit::opts_for_mode("local");
     opts.wal_sync = true;
-    opts.ack_policy = AckPolicy::AfterLocalDurable;
     run_durability_puts_case(ctx, opts, 1_000);
 }
 

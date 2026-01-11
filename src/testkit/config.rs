@@ -25,10 +25,6 @@ pub struct MidgeOptions {
     /// WAL sync enabled.
     pub wal_sync: bool,
 
-    /// When writes are acknowledged to callers.
-    ///
-    /// Note: this is distinct from `wal_sync` / WAL durability mechanisms.
-    pub ack_policy: crate::common::AckPolicy,
     /// Batch config for WAL group commit (optional).
     pub wal_batch_config: Option<crate::wal::policy::BatchConfig>,
     /// Maximum memtable size before flush.
@@ -46,7 +42,6 @@ impl Default for MidgeOptions {
         Self {
             storage_mode: StorageMode::Memory,
             wal_sync: false,
-            ack_policy: crate::common::AckPolicy::default(),
             wal_batch_config: None,
             memtable_size: 64 * 1024 * 1024, // 64 MB
             compression: false,
@@ -126,7 +121,6 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
         "memory" => MidgeOptions {
             storage_mode: StorageMode::Memory,
             wal_sync: false,
-            ack_policy: crate::common::AckPolicy::default(),
             wal_batch_config: None,
             // Keep test default small to reduce runtime.
             memtable_size: 64 * 1024,
@@ -149,7 +143,6 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             MidgeOptions {
                 storage_mode: StorageMode::LocalDisk { db_path: test_dir },
                 wal_sync: true,
-                ack_policy: crate::common::AckPolicy::default(),
                 wal_batch_config: None,
                 memtable_size: 64 * 1024,
                 compression: false,
@@ -174,7 +167,6 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                     local_cache_path: test_dir,
                 },
                 wal_sync: true,
-                ack_policy: crate::common::AckPolicy::default(),
                 wal_batch_config: None,
                 memtable_size: 64 * 1024,
                 compression: false,
@@ -221,7 +213,6 @@ pub fn compaction_test_opts() -> MidgeOptions {
             db_path: test_temp_dir().path().to_path_buf(),
         },
         wal_sync: true,
-        ack_policy: crate::common::AckPolicy::default(),
         wal_batch_config: None,
         memtable_size: 1024 * 1024, // 1 MB for faster flushing in tests
         compression: false,
@@ -237,7 +228,6 @@ pub fn manual_compaction_test_opts() -> MidgeOptions {
             db_path: test_temp_dir().path().to_path_buf(),
         },
         wal_sync: true,
-        ack_policy: crate::common::AckPolicy::default(),
         wal_batch_config: None,
         memtable_size: 512 * 1024, // 512 KB for even faster flushing
         compression: false,
@@ -253,7 +243,6 @@ pub fn durability_opts() -> MidgeOptions {
             db_path: test_temp_dir().path().to_path_buf(),
         },
         wal_sync: true,
-        ack_policy: crate::common::AckPolicy::default(),
         wal_batch_config: None,
         memtable_size: 64 * 1024,
         compression: false,

@@ -22,8 +22,6 @@ pub struct ColumnFamilyState {
     pub memtable: Arc<SkipListMemtable>,
     /// Immutable memtables waiting to be flushed
     pub immutable_memtables: Vec<Arc<SkipListMemtable>>,
-    /// Merge operator for this CF (if registered)
-    pub merge_operator: Option<std::sync::Arc<dyn crate::engine::MergeOperator>>,
 }
 
 impl ColumnFamilyState {
@@ -33,7 +31,6 @@ impl ColumnFamilyState {
             name,
             memtable: Arc::new(SkipListMemtable::new()),
             immutable_memtables: Vec::new(),
-            merge_operator: None,
         }
     }
 }
@@ -713,7 +710,6 @@ mod tests {
         // Assert
         assert_eq!(cf.id, 42);
         assert_eq!(cf.name, "test_cf");
-        assert!(cf.merge_operator.is_none());
         assert!(cf.immutable_memtables.is_empty());
     }
 

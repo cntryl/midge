@@ -9,7 +9,6 @@
 //! - Transaction lifecycle (begin_tx, commit, rollback)
 //! - Column family management
 //! - Flush and compaction control
-//! - Merge operator registration
 //! - Metrics and observability
 //!
 //! Data operations (get, put, delete, scan) are methods on Transaction.
@@ -20,24 +19,12 @@ use crate::runtime::{
 };
 use std::path::PathBuf;
 
-pub mod api;
-pub mod context;
-pub mod open;
+mod api;
+mod context;
 
-pub use api::*;
-pub use context::Context;
-pub use open::open_engine;
-
-/// Registry of merge operators, keyed by column family ID
-type MergeOperatorRegistry = dashmap::DashMap<u32, std::sync::Arc<dyn MergeOperator>>;
+pub use api::{Key, OpenOptions, Storage, Transaction, TransactionMode, Value, WriteOptions};
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<u32, ColumnFamilyHandle>;
-
-/// Trait for types that can be converted to engine open parameters
-/// Allows both PathBuf and MidgeOptions to be used with MidgeEngine::open
-pub trait OpenParam {
-    fn to_path(self) -> PathBuf;
-}
 
 /// Column family identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -126,7 +113,7 @@ pub struct IngestModeSnapshot {
 ///
 /// This is a thin façade over the runtime. All state and background work
 /// is managed by the runtime actors.
-pub struct MidgeEngine {
+pub struct Engine {
     /// Runtime (owns the event loop thread)
     _runtime: Option<Runtime>,
     /// Handle to submit work to the runtime
@@ -143,13 +130,11 @@ pub struct MidgeEngine {
     sequence: std::sync::atomic::AtomicU64,
     /// Next snapshot ID counter (local only, not related to sequence numbers)
     next_snapshot_id: std::sync::atomic::AtomicU64,
-    /// Merge operators registered per column family
-    merge_operators: MergeOperatorRegistry,
     /// Column families registry (CF ID -> Handle)
     column_families: ColumnFamilyRegistry,
 }
 
-impl Drop for MidgeEngine {
+impl Drop for Engine {
     fn drop(&mut self) {
         // Gracefully shutdown the runtime when engine is dropped
         // Send shutdown message first
@@ -159,43 +144,25 @@ impl Drop for MidgeEngine {
     }
 }
 
-impl OpenParam for PathBuf {
-    fn to_path(self) -> PathBuf {
-        self
-    }
-}
-
-impl OpenParam for crate::testkit::MidgeOptions {
-    fn to_path(self) -> PathBuf {
-        match &self.storage_mode {
-            crate::testkit::StorageMode::Memory => PathBuf::from(":memory:"),
-            crate::testkit::StorageMode::LocalDisk { db_path } => db_path.clone(),
-            crate::testkit::StorageMode::CloudBacked { local_cache_path } => {
-                local_cache_path.clone()
-            }
-        }
-    }
-}
-
-impl OpenParam for &crate::testkit::MidgeOptions {
-    fn to_path(self) -> PathBuf {
-        match &self.storage_mode {
-            crate::testkit::StorageMode::Memory => PathBuf::from(":memory:"),
-            crate::testkit::StorageMode::LocalDisk { db_path } => db_path.clone(),
-            crate::testkit::StorageMode::CloudBacked { local_cache_path } => {
-                local_cache_path.clone()
-            }
-        }
-    }
-}
-
-impl MidgeEngine {
-    /// Open a database from flexible parameters (PathBuf or MidgeOptions)
-    pub fn open<P: OpenParam>(param: P) -> MidgeResult<Self> {
+impl Engine {
+    /// Open a database with explicit environment selection.
+    ///
+    /// The storage backend is specified by `OpenOptions.storage`. There is no
+    /// inference from paths or sentinel strings.
+    pub fn open(opts: OpenOptions) -> MidgeResult<Self> {
         let start = std::time::Instant::now();
-        let db_path = param.to_path();
-        // Detect memory mode from path (":memory:" sentinel)
-        let memory_mode = db_path.to_string_lossy() == ":memory:";
+        let (db_path, memory_mode) = match &opts.storage {
+            Storage::InMemory => (
+                PathBuf::from(format!("target/tmp/memory_{}", std::process::id())),
+                true,
+            ),
+            Storage::Local { path } => (path.clone(), false),
+            Storage::Cloud {
+                local_cache_path,
+                ..
+            } => (local_cache_path.clone(), false),
+        };
+
         let mut state = RuntimeState::new(db_path.clone(), memory_mode);
 
         // 🔑 CRITICAL: Replay intent log to recover any interrupted mutations
@@ -229,135 +196,8 @@ impl MidgeEngine {
             default_cf,
             sequence: std::sync::atomic::AtomicU64::new(0),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
-            merge_operators: dashmap::DashMap::new(),
             column_families,
         })
-    }
-
-    /// Open a database with test configuration options
-    pub fn open_with_options(opts: crate::testkit::MidgeOptions) -> MidgeResult<Self> {
-        if matches!(opts.ack_policy, crate::common::AckPolicy::AfterCloudDurable)
-            && !matches!(
-                opts.storage_mode,
-                crate::testkit::StorageMode::CloudBacked { .. }
-            )
-        {
-            return Err(crate::common::MidgeError::InvalidArgument(
-                "AckPolicy::AfterCloudDurable requires StorageMode::CloudBacked".to_string(),
-            ));
-        }
-
-        let (db_path, memory_mode) = match &opts.storage_mode {
-            crate::testkit::StorageMode::Memory => {
-                // For memory mode, use a placeholder path that will never be touched
-                (
-                    PathBuf::from(format!("target/tmp/memory_{}", std::process::id())),
-                    true,
-                )
-            }
-            crate::testkit::StorageMode::LocalDisk { db_path } => (db_path.clone(), false),
-            crate::testkit::StorageMode::CloudBacked { local_cache_path } => {
-                (local_cache_path.clone(), false)
-            }
-        };
-
-        let mut runtime_config = crate::runtime::RuntimeConfig::default();
-        // Honor optional batch config from options if provided
-        // If provided, apply WAL batch config from options (BatchConfig is Copy)
-        if let Some(batch_cfg) = opts.wal_batch_config {
-            runtime_config.wal_batch_config = batch_cfg;
-        }
-        // Caller-visible acknowledgment semantics.
-        runtime_config.write_ack_policy = opts.ack_policy;
-
-        let mut state = match &opts.storage_mode {
-            crate::testkit::StorageMode::CloudBacked { .. } => {
-                // Local cache is ephemeral; cloud WAL is the source of truth.
-                let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
-                    &db_path,
-                )?;
-
-                let hybrid = setup.hybrid_storage;
-                let rx = setup.events;
-                let cloud_wal_dir = setup.recovery_cloud_wal_dir;
-
-                runtime_config.wal_durability_policy = crate::wal::DurabilityPolicy::CloudFirst;
-                runtime_config.hybrid_storage = Some(hybrid);
-                runtime_config.hybrid_storage_events = Some(rx);
-
-                RuntimeState::new_with_recovery_dir(
-                    db_path.clone(),
-                    memory_mode,
-                    Some(cloud_wal_dir),
-                )
-            }
-            _ => {
-                runtime_config.wal_durability_policy = if opts.wal_sync {
-                    crate::wal::DurabilityPolicy::Strict
-                } else {
-                    crate::wal::DurabilityPolicy::Batched
-                };
-                RuntimeState::new(db_path.clone(), memory_mode)
-            }
-        };
-
-        // Apply tuning knobs from options.
-        // Keep thresholds sane if caller passes 0.
-        if opts.memtable_size > 0 {
-            state.memtable_size_limit = opts.memtable_size;
-            state.memtable_flush_threshold = opts.memtable_size;
-        }
-
-        // Honor compaction option from open opts
-        state.enable_compaction = opts.enable_compaction;
-
-        // Log resolved WAL mode and batch configuration for diagnostics
-        tracing::info!(
-            wal_sync = opts.wal_sync,
-            batching_enabled = opts.wal_batch_config.is_some(),
-            batch_max_delay_ms = opts.wal_batch_config.map(|c| c.max_delay_ms),
-            batch_max_bytes = opts.wal_batch_config.map(|c| c.max_bytes),
-            ack_policy = ?opts.ack_policy,
-            "Resolved WAL configuration"
-        );
-
-        // Start runtime
-        let start = std::time::Instant::now();
-        let (runtime_inst, _) = Runtime::new()?;
-        let (runtime, runtime_handle) = runtime_inst.start_with_config(state, runtime_config)?;
-
-        let default_cf = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
-        let column_families = dashmap::DashMap::new();
-        column_families.insert(0, default_cf.clone());
-
-        tracing::info!(db_path = %db_path.display(), open_ms = start.elapsed().as_secs_f64() * 1000.0, "engine open completed (with options)");
-
-        // Load existing CFs from manifest (skip in memory mode and deleted CFs)
-        if !memory_mode {
-            let manifest = crate::metadata::ManifestPersistence::load(&db_path).unwrap_or_default();
-            for cf_meta in &manifest.column_families {
-                if cf_meta.id != 0 && cf_meta.deleted_at.is_none() {
-                    let handle =
-                        ColumnFamilyHandle::new(ColumnFamilyId(cf_meta.id), cf_meta.name.clone());
-                    column_families.insert(cf_meta.id, handle);
-                }
-            }
-        }
-
-        Ok(Self {
-            _runtime: Some(runtime),
-            runtime_handle,
-            db_path,
-            default_cf,
-            sequence: std::sync::atomic::AtomicU64::new(0),
-            next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
-            merge_operators: dashmap::DashMap::new(),
-            column_families,
-        })
-    }
-
-    pub fn default_column_family(&self) -> &ColumnFamilyHandle {
-        &self.default_cf
     }
 
     /// Fetch the current runtime configuration snapshot for diagnostics or restoration.
@@ -485,40 +325,6 @@ impl MidgeEngine {
             }
             _ => Err(crate::common::MidgeError::Internal(
                 "unexpected response to EndIngest".to_string(),
-            )),
-        }
-    }
-
-    // ========================================================================
-    // Merge Operations
-    // ========================================================================
-
-    /// Register a merge operator for a column family
-    pub fn register_merge_operator(
-        &self,
-        cf_id: u32,
-        operator: Box<dyn MergeOperator>,
-    ) -> MidgeResult<()> {
-        // Convert to Arc so it can be shared
-        let operator_arc: std::sync::Arc<dyn MergeOperator> = operator.into();
-
-        // Store locally (DashMap provides lock-free concurrent access)
-        self.merge_operators.insert(cf_id, operator_arc.clone());
-
-        // Send to runtime
-        let response = self
-            .runtime_handle
-            .send_and_wait(RuntimeMsg::RegisterMergeOperator {
-                request_id: next_request_id(),
-                cf_id,
-                operator: operator_arc,
-            })?;
-
-        match response {
-            RuntimeResponse::Ok { .. } => Ok(()),
-            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
-            _ => Err(MidgeError::Internal(
-                "Unexpected response to RegisterMergeOperator".to_string(),
             )),
         }
     }
@@ -652,114 +458,10 @@ impl MidgeEngine {
         // Collect write intents to avoid borrow issues
         let write_intents: Vec<_> = txn.iter_writes().cloned().collect();
 
-        // Pre-process merge operations: group merge operands by (cf_id, key) in order
-        // We need to apply all merge operands together with the merge operator
-        use std::collections::HashMap;
-        let mut merge_operands: HashMap<(ColumnFamilyId, Vec<u8>), Vec<Vec<u8>>> = HashMap::new();
-        let mut key_base_values: HashMap<(ColumnFamilyId, Vec<u8>), Option<Vec<u8>>> =
-            HashMap::new();
-        let mut last_non_merge_values: HashMap<(ColumnFamilyId, Vec<u8>), Option<Vec<u8>>> =
-            HashMap::new();
-
-        // First pass: collect merge operands and track prior puts/deletes for those keys
-        for intent in &write_intents {
-            match intent {
-                api::WriteIntent::Merge {
-                    cf_id,
-                    key,
-                    operand,
-                    ..
-                } => {
-                    let key_id = (*cf_id, key.clone());
-                    merge_operands
-                        .entry(key_id.clone())
-                        .or_default()
-                        .push(operand.clone());
-
-                    if !key_base_values.contains_key(&key_id) {
-                        if let Some(base) = last_non_merge_values.get(&key_id) {
-                            key_base_values.insert(key_id.clone(), base.clone());
-                        }
-                    }
-                }
-                api::WriteIntent::Put {
-                    cf_id, key, value, ..
-                } => {
-                    last_non_merge_values.insert((*cf_id, key.clone()), Some(value.clone()));
-                }
-                api::WriteIntent::Delete { cf_id, key, .. } => {
-                    last_non_merge_values.insert((*cf_id, key.clone()), None);
-                }
-                _ => {}
-            }
-        }
-
         // CRITICAL: Use send_and_wait for durability.
         // TODO: Add RuntimeMsg::CommitTransaction for true atomic commit.
         for intent in write_intents {
             match &intent {
-                api::WriteIntent::Merge {
-                    cf_id,
-                    key,
-                    operand: _,
-                    ..
-                } => {
-                    // Only process on the first merge operand for this key
-                    // (subsequent merges for same key are handled together)
-                    let key_id = (*cf_id, key.clone());
-                    if let Some(operands) = merge_operands.remove(&key_id) {
-                        // Get the merge operator for this CF
-                        let merge_op =
-                            self.merge_operators.get(&cf_id.as_u32()).ok_or_else(|| {
-                                MidgeError::InvalidArgument(format!(
-                                    "No merge operator registered for column family {}",
-                                    cf_id.as_u32()
-                                ))
-                            })?;
-
-                        // Get the base value: first check if a put/delete in this tx set it,
-                        // otherwise read from the engine
-                        let base_value = if let Some(base) = key_base_values.get(&key_id) {
-                            base.clone()
-                        } else {
-                            self.read_at_sequence(*cf_id, key, u64::MAX)?
-                                .map(|b| b.to_vec())
-                        };
-
-                        // Apply the merge operator
-                        let merged_value = merge_op.merge(key, base_value.as_deref(), &operands)?;
-
-                        // Write the merged value as a put
-                        if let Some(value) = merged_value {
-                            let response =
-                                self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
-                                    request_id: next_request_id(),
-                                    cf_id: cf_id.as_u32(),
-                                    key: key.clone(),
-                                    value: Some(value),
-                                    ttl_seconds: None,
-                                    insert_only: false,
-                                })?;
-                            match response {
-                                RuntimeResponse::WalAppended { sequence, .. } => {
-                                    self.sequence
-                                        .store(sequence, std::sync::atomic::Ordering::SeqCst);
-                                }
-                                RuntimeResponse::Error { message, .. } => {
-                                    txn.mark_failed()?;
-                                    return Err(MidgeError::Internal(message));
-                                }
-                                _ => {
-                                    txn.mark_failed()?;
-                                    return Err(MidgeError::Internal(
-                                        "Unexpected response to transaction merge".to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    // else: already processed this key's merges, skip
-                }
                 api::WriteIntent::Put {
                     cf_id,
                     key,

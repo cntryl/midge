@@ -5,6 +5,8 @@
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
+#![cfg(feature = "merge")]
+
 use cntryl_midge::{MergeOperator, MidgeResult, TransactionMode, WriteOptions};
 use std::sync::Arc;
 

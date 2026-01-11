@@ -28,7 +28,6 @@ pub use scheduler::Scheduler;
 pub use state::RuntimeState;
 pub use task::{Task, TaskId, TaskKind, TaskPriority};
 
-use crate::common::AckPolicy;
 use crate::common::{MidgeError, MidgeResult};
 use crate::wal::policy::BatchConfig;
 use crate::wal::DurabilityPolicy;
@@ -43,7 +42,6 @@ use std::thread::{self, JoinHandle};
 pub struct RuntimeConfig {
     pub wal_durability_policy: DurabilityPolicy,
     pub wal_batch_config: BatchConfig,
-    pub write_ack_policy: AckPolicy,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
 }
@@ -53,7 +51,6 @@ impl Default for RuntimeConfig {
         Self {
             wal_durability_policy: DurabilityPolicy::Batched,
             wal_batch_config: BatchConfig::default(),
-            write_ack_policy: AckPolicy::default(),
             hybrid_storage: None,
             hybrid_storage_events: None,
         }
@@ -179,13 +176,6 @@ pub enum RuntimeMsg {
         ttl_seconds: Option<u64>, // TTL in seconds, None means no expiration
         insert_only: bool,        // When true, fail if key already exists
     },
-    /// Append merge operand to WAL.
-    WalMerge {
-        request_id: u64,
-        cf_id: u32,
-        key: Vec<u8>,
-        operand: Vec<u8>,
-    },
 
     /// Apply a write batch as a single atomic unit.
     ///
@@ -239,12 +229,6 @@ pub enum RuntimeMsg {
     ManifestCreateColumnFamily { request_id: u64, name: String },
     /// Drop a column family (soft delete).
     ManifestDropColumnFamily { request_id: u64, cf_id: u32 },
-    /// Register a merge operator for a column family
-    RegisterMergeOperator {
-        request_id: u64,
-        cf_id: u32,
-        operator: std::sync::Arc<dyn crate::engine::MergeOperator>,
-    },
 
     /// Begin an ingest barrier: prevent new compactions, bump ingest epoch,
     /// and wait until in-flight compactions drain.
@@ -332,7 +316,6 @@ impl RuntimeMsg {
             | RunCompaction { request_id, .. }
             | CompactionComplete { request_id, .. }
             | WalAppend { request_id, .. }
-            | WalMerge { request_id, .. }
             | WriteBatch { request_id, .. }
             | WalSync { request_id }
             | WalRotate { request_id }
@@ -347,7 +330,6 @@ impl RuntimeMsg {
             | ManifestPersist { request_id }
             | ManifestCreateColumnFamily { request_id, .. }
             | ManifestDropColumnFamily { request_id, .. }
-            | RegisterMergeOperator { request_id, .. }
             | Read { request_id, .. }
             | RangeScan { request_id, .. }
             | GetReadAmpMetrics { request_id }
@@ -373,7 +355,6 @@ impl RuntimeMsg {
             RunCompaction { .. } => "RunCompaction",
             CompactionComplete { .. } => "CompactionComplete",
             WalAppend { .. } => "WalAppend",
-            WalMerge { .. } => "WalMerge",
             WriteBatch { .. } => "WriteBatch",
             WalSync { .. } => "WalSync",
             WalRotate { .. } => "WalRotate",
@@ -388,7 +369,6 @@ impl RuntimeMsg {
             ManifestPersist { .. } => "ManifestPersist",
             ManifestCreateColumnFamily { .. } => "ManifestCreateColumnFamily",
             ManifestDropColumnFamily { .. } => "ManifestDropColumnFamily",
-            RegisterMergeOperator { .. } => "RegisterMergeOperator",
             Read { .. } => "Read",
             RangeScan { .. } => "RangeScan",
             GetReadAmpMetrics { .. } => "GetReadAmpMetrics",

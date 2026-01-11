@@ -43,46 +43,37 @@ fn run_durability_puts_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops
 
 #[stress_test]
 fn tier4_durability_async_cloud(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    // "Async" in cloud mode = do not wait for cloud durability.
-    opts.ack_policy = AckPolicy::AfterLocalDurable;
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_durability_puts_case(ctx, opts, 10);
 }
 
 #[stress_test]
 fn tier4_durability_async_cloud_100(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    // "Async" in cloud mode = do not wait for cloud durability.
-    opts.ack_policy = AckPolicy::AfterLocalDurable;
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_durability_puts_case(ctx, opts, 100);
 }
 
 #[stress_test]
 fn tier4_durability_async_cloud_1000(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    // "Async" in cloud mode = do not wait for cloud durability.
-    opts.ack_policy = AckPolicy::AfterLocalDurable;
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_durability_puts_case(ctx, opts, 1_000);
 }
 
 #[stress_test]
 fn tier4_durability_sync_cloud(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    opts.ack_policy = AckPolicy::AfterCloudDurable;
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_durability_puts_case(ctx, opts, 10);
 }
 
 #[stress_test]
 fn tier4_durability_sync_cloud_100(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    opts.ack_policy = AckPolicy::AfterCloudDurable;
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_durability_puts_case(ctx, opts, 100);
 }
 
 #[stress_test]
 fn tier4_durability_sync_cloud_1000(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    opts.ack_policy = AckPolicy::AfterCloudDurable;
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_durability_puts_case(ctx, opts, 1_000);
 }
 

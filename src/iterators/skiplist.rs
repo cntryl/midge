@@ -31,17 +31,15 @@ pub type SkipListEntryWithExp = (Bytes, Option<Bytes>, u64, bool, Option<u64>, O
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpType {
     Put,
-    Merge,
     Delete,
 }
 
 impl OpType {
-    /// Convert OpType to u8 for SST encoding (0=Put, 1=Insert, 2=Delete, 3=Merge)
+    /// Convert OpType to u8 for SST encoding (0=Put, 2=Delete)
     pub fn as_u8(&self) -> u8 {
         match self {
             OpType::Put => 0,
             OpType::Delete => 2,
-            OpType::Merge => 3,
         }
     }
 }
@@ -258,23 +256,6 @@ impl SkipList {
         None
     }
 
-    /// Internal helper: iterate all visible versions for merge.
-    #[inline]
-    fn collect_visible_versions_for_merge(
-        versions_head: &Atomic<VersionNode>,
-        snapshot_seq: u64,
-        guard: &Guard,
-        out: &mut Vec<(Option<Bytes>, Option<u64>, OpType)>,
-    ) {
-        let mut v = versions_head.load(AO::Acquire, guard);
-        while let Some(vn) = unsafe { v.as_ref() } {
-            if vn.seq < snapshot_seq {
-                out.push((vn.val.clone(), vn.exp, vn.op));
-            }
-            v = vn.next.load(AO::Relaxed, guard);
-        }
-    }
-
     /// Get the visible value at or before snapshot_seq.
     ///
     /// Returns `Some(value)` if a visible non-tombstone version exists,
@@ -318,33 +299,6 @@ impl SkipList {
         }
 
         None
-    }
-
-    /// Get all versions for merge resolution (visible at snapshot_seq).
-    ///
-    /// Newest-first ordering, including tombstones and expirations.
-    pub fn get_versions_for_merge(
-        &self,
-        key: &[u8],
-        snapshot_seq: u64,
-    ) -> Vec<(Option<Bytes>, Option<u64>, OpType)> {
-        let guard = &epoch::pin();
-        let node_ptr = self.find_node(key, guard);
-
-        let mut versions = Vec::new();
-
-        if let Some(node) = unsafe { node_ptr.as_ref() } {
-            if node.key.as_ref() == key {
-                Self::collect_visible_versions_for_merge(
-                    &node.versions_head,
-                    snapshot_seq,
-                    guard,
-                    &mut versions,
-                );
-            }
-        }
-
-        versions
     }
 
     /// Upsert with optional expiration and OpType (lock-free, linearizable).
@@ -886,42 +840,6 @@ mod tests {
     }
 
     #[test]
-    fn should_get_versions_for_merge() {
-        // Arrange
-        let sl = SkipList::new();
-        sl.upsert_exp(
-            Bytes::from_static(b"k"),
-            Some(Bytes::from_static(b"base")),
-            10,
-            None,
-            OpType::Put,
-        );
-        sl.upsert_exp(
-            Bytes::from_static(b"k"),
-            Some(Bytes::from_static(b"op1")),
-            20,
-            None,
-            OpType::Merge,
-        );
-        sl.upsert_exp(
-            Bytes::from_static(b"k"),
-            Some(Bytes::from_static(b"op2")),
-            30,
-            None,
-            OpType::Merge,
-        );
-
-        // Act
-        let versions = sl.get_versions_for_merge(b"k", u64::MAX);
-
-        // Assert
-        assert_eq!(versions.len(), 3);
-        assert_eq!(versions[0].2, OpType::Merge);
-        assert_eq!(versions[1].2, OpType::Merge);
-        assert_eq!(versions[2].2, OpType::Put);
-    }
-
-    #[test]
     fn should_delete_range() {
         // Arrange
         let sl = SkipList::new();
@@ -994,18 +912,6 @@ mod tests {
     }
 
     #[test]
-    fn should_convert_optype_merge_to_u8() {
-        // Arrange
-        // (no setup)
-
-        // Act
-        let code = OpType::Merge.as_u8();
-
-        // Assert: Merge maps to 3
-        assert_eq!(code, 3);
-    }
-
-    #[test]
     fn should_support_optype_equality() {
         // Arrange
         // (no setup)
@@ -1016,9 +922,7 @@ mod tests {
         // Assert
         assert_eq!(OpType::Put, OpType::Put);
         assert_eq!(OpType::Delete, OpType::Delete);
-        assert_eq!(OpType::Merge, OpType::Merge);
         assert_ne!(OpType::Put, OpType::Delete);
-        assert_ne!(OpType::Put, OpType::Merge);
     }
 
     #[test]
@@ -1434,69 +1338,6 @@ mod tests {
     }
 
     // ========================================================================
-    // OpType tracking tests
-    // ========================================================================
-
-    #[test]
-    fn should_track_put_operations() {
-        // Arrange
-        let sl = SkipList::new();
-
-        // Act
-        sl.upsert_exp(
-            Bytes::from_static(b"k"),
-            Some(Bytes::from_static(b"v")),
-            1,
-            None,
-            OpType::Put,
-        );
-
-        // Assert
-        let versions = sl.get_versions_for_merge(b"k", u64::MAX);
-        assert_eq!(versions[0].2, OpType::Put);
-    }
-
-    #[test]
-    fn should_track_merge_operations() {
-        // Arrange
-        let sl = SkipList::new();
-
-        // Act
-        sl.upsert_exp(
-            Bytes::from_static(b"k"),
-            Some(Bytes::from_static(b"v")),
-            1,
-            None,
-            OpType::Merge,
-        );
-
-        // Assert
-        let versions = sl.get_versions_for_merge(b"k", u64::MAX);
-        assert_eq!(versions[0].2, OpType::Merge);
-    }
-
-    #[test]
-    fn should_track_delete_operations() {
-        // Arrange
-        let sl = SkipList::new();
-        sl.upsert_exp(
-            Bytes::from_static(b"k"),
-            Some(Bytes::from_static(b"v")),
-            1,
-            None,
-            OpType::Put,
-        );
-
-        // Act
-        sl.upsert_exp(Bytes::from_static(b"k"), None, 2, None, OpType::Delete);
-
-        // Assert
-        let versions = sl.get_versions_for_merge(b"k", u64::MAX);
-        assert_eq!(versions[0].2, OpType::Delete); // Most recent
-        assert_eq!(versions[1].2, OpType::Put); // Older
-    }
-
-    // ========================================================================
     // get_all_keys tests
     // ========================================================================
 
@@ -1598,14 +1439,14 @@ mod tests {
         let sl = SkipList::new();
         sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v")), 1);
 
-        // Act: delete and then query versions
+        // Act
         sl.delete_range(Some(b"k"), Some(b"l"), 2);
-        let versions = sl.get_versions_for_merge(b"k", u64::MAX);
 
-        // Assert: two versions (put, then delete)
-        assert_eq!(versions.len(), 2);
-        assert!(versions[0].0.is_none()); // Delete is tombstone
-        assert_eq!(versions[1].0, Some(Bytes::from_static(b"v"))); // Original put
+        // Assert
+        // - At snapshot_seq=2, delete seq=2 is NOT visible (strictly less-than), so we see put.
+        assert_eq!(sl.get(b"k", 2), Some(Bytes::from_static(b"v")));
+        // - At snapshot_seq=3, delete seq=2 is visible, so key is deleted.
+        assert_eq!(sl.get(b"k", 3), None);
     }
 
     // ========================================================================

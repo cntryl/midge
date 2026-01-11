@@ -25,94 +25,46 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 // Foundation - no dependencies
-pub mod common;
+mod common;
 
-// Internal modules - implementation details
-// Exposed for benchmarks but hidden from public documentation
-#[doc(hidden)]
-pub mod compaction;
-#[doc(hidden)]
-pub mod io;
-#[doc(hidden)]
-pub mod iterators;
-#[doc(hidden)]
-pub mod metadata;
-#[doc(hidden)]
-pub mod metrics;
-#[doc(hidden)]
-pub mod runtime;
-#[doc(hidden)]
-pub mod sst;
-#[doc(hidden)]
-pub mod storage;
-#[doc(hidden)]
-pub mod telemetry;
-#[doc(hidden)]
-pub mod wal;
+// Internal modules - implementation details (NOT part of public API)
+mod compaction;
+mod io;
+mod iterators;
+mod metadata;
+mod metrics;
+mod runtime;
+mod sst;
+mod storage;
+mod telemetry;
+mod wal;
 
-// Main engine (public)
-pub mod engine;
+// Main engine (canonical public API)
+mod engine;
 
-// Testing utilities (public for integration tests)
-pub mod testkit;
+// Test support (crate-internal only)
+#[cfg(test)]
+mod testkit;
 
 // ---------------------------------------------------------------------------
 // Public Export Surface
 // ---------------------------------------------------------------------------
 
-// Core error types
-pub use common::{AckPolicy, MidgeError, MidgeResult};
+// ---------------------------------------------------------------------------
+// Canonical Public Export Surface (1.0)
+// ---------------------------------------------------------------------------
 
-// Main engine
-pub use engine::{open_engine, ColumnFamilyHandle, ColumnFamilyId, MidgeEngine};
+// Errors
+pub use common::{MidgeError, MidgeResult};
 
-// Transaction API
-pub use engine::api::{
-    // Errors
-    ApiError,
-    ApiResult,
-    Direction,
+// Engine / Transactions
+pub use engine::{ColumnFamilyId, Engine, Transaction, TransactionMode};
 
-    // Write options
-    DurabilityPolicy,
-    Goal,
-    // Transaction types
-    IsolationLevel,
-    // Core data types
-    Key,
-    KvPair,
+// Configuration
+pub use engine::{OpenOptions, Storage, WriteOptions};
 
-    MemoryBudget,
-    // Configuration
-    OpenOptions,
-    // Query/Scan
-    Query,
-    Storage,
-    Transaction,
-    TransactionMode,
-    TransactionState,
-
-    Value,
-    WorkloadProfile,
-    WriteOptions,
-};
-
-// Merge operators (stable API)
-pub use engine::api::MergeOperator;
-
-// Internal APIs (hidden from documentation)
-#[doc(hidden)]
-pub use engine::api::{
-    CasResult,    // Return type for compare_and_swap
-    InsertResult, // Return type for insert
-    WriteIntent,  // Internal transaction state
-};
-
-// Observability
-pub use metrics::EngineMetrics;
-
-// Testing utilities
-pub use testkit::{MidgeOptions, MockStorage, StorageMode};
+// Key/value types
+pub use engine::{Key, Value};
 
 // ---------------------------------------------------------------------------
 // Canonical Prelude
@@ -156,15 +108,8 @@ pub mod prelude {
     ///
     /// Use `use midge::prelude::*;` to import the essential types needed
     /// for the standard transaction-based workflow.
-    // Engine
-    pub use crate::engine::{open_engine, ColumnFamilyHandle, ColumnFamilyId, MidgeEngine};
-
-    // Transactions
-    pub use crate::engine::api::{Transaction, TransactionMode, WriteOptions};
-
-    // Core data types
-    pub use crate::engine::api::{Key, Value};
-
-    // Errors
-    pub use crate::common::{MidgeError, MidgeResult};
+    pub use crate::{
+        ColumnFamilyId, Engine, Key, MidgeError, MidgeResult, OpenOptions, Storage, Transaction,
+        TransactionMode, Value, WriteOptions,
+    };
 }

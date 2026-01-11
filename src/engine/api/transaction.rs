@@ -54,7 +54,7 @@ pub enum TransactionState {
     CommitFailed,
 }
 
-/// Write intent: pending put, insert, delete, merge, or delete_range operation
+/// Write intent: pending put, insert, delete, or delete_range operation
 #[derive(Debug, Clone)]
 pub enum WriteIntent {
     /// Put operation (upsert)
@@ -84,13 +84,6 @@ pub enum WriteIntent {
         cf_id: ColumnFamilyId,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
-        sequence: u64,
-    },
-    /// Merge operation (applies merge operator during commit)
-    Merge {
-        cf_id: ColumnFamilyId,
-        key: Vec<u8>,
-        operand: Vec<u8>,
         sequence: u64,
     },
 }
@@ -147,23 +140,12 @@ impl WriteIntent {
         }
     }
 
-    /// Create a merge intent
-    pub fn merge(cf_id: ColumnFamilyId, key: Vec<u8>, operand: Vec<u8>) -> Self {
-        Self::Merge {
-            cf_id,
-            key,
-            operand,
-            sequence: 0,
-        }
-    }
-
     pub fn cf_id(&self) -> ColumnFamilyId {
         match self {
             Self::Put { cf_id, .. }
             | Self::Insert { cf_id, .. }
             | Self::Delete { cf_id, .. }
-            | Self::DeleteRange { cf_id, .. }
-            | Self::Merge { cf_id, .. } => *cf_id,
+            | Self::DeleteRange { cf_id, .. } => *cf_id,
         }
     }
 
@@ -171,8 +153,7 @@ impl WriteIntent {
         match self {
             Self::Put { key, .. }
             | Self::Insert { key, .. }
-            | Self::Delete { key, .. }
-            | Self::Merge { key, .. } => Some(key),
+            | Self::Delete { key, .. } => Some(key),
             Self::DeleteRange { .. } => None,
         }
     }
@@ -180,14 +161,6 @@ impl WriteIntent {
     pub fn value(&self) -> Option<&[u8]> {
         match self {
             Self::Put { value, .. } | Self::Insert { value, .. } => Some(value),
-            _ => None,
-        }
-    }
-
-    /// Get the operand for merge operations
-    pub fn operand(&self) -> Option<&[u8]> {
-        match self {
-            Self::Merge { operand, .. } => Some(operand),
             _ => None,
         }
     }
@@ -215,17 +188,12 @@ impl WriteIntent {
         matches!(self, Self::DeleteRange { .. })
     }
 
-    pub fn is_merge(&self) -> bool {
-        matches!(self, Self::Merge { .. })
-    }
-
     pub fn sequence(&self) -> u64 {
         match self {
             Self::Put { sequence, .. }
             | Self::Insert { sequence, .. }
             | Self::Delete { sequence, .. }
-            | Self::DeleteRange { sequence, .. }
-            | Self::Merge { sequence, .. } => *sequence,
+            | Self::DeleteRange { sequence, .. } => *sequence,
         }
     }
 
@@ -234,8 +202,7 @@ impl WriteIntent {
             Self::Put { sequence, .. }
             | Self::Insert { sequence, .. }
             | Self::Delete { sequence, .. }
-            | Self::DeleteRange { sequence, .. }
-            | Self::Merge { sequence, .. } => *sequence = seq,
+            | Self::DeleteRange { sequence, .. } => *sequence = seq,
         }
     }
 
@@ -582,30 +549,6 @@ impl Transaction {
             // Swap failed - current value doesn't match expected
             Ok(false)
         }
-    }
-
-    /// Merge operation within this transaction
-    ///
-    /// Applies a merge operand to the key. The actual merge semantics are defined
-    /// by the merge operator registered for this transaction's column family.
-    pub fn merge(&mut self, key: Vec<u8>, operand: Vec<u8>) -> MidgeResult<()> {
-        if self.state != TransactionState::Active {
-            return Err(MidgeError::InvalidArgument(format!(
-                "Cannot merge in {:?} state",
-                self.state
-            )));
-        }
-        if self.is_read_only() {
-            return Err(MidgeError::InvalidArgument(
-                "Cannot merge in ReadOnly transaction".to_string(),
-            ));
-        }
-
-        // Store merge operation as a Merge write intent
-        // The engine will apply the merge operator during commit
-        self.write_set
-            .push(WriteIntent::merge(self.cf_id, key, operand));
-        Ok(())
     }
 
     /// Read a key from the transaction's write set (read-your-own-writes)

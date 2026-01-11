@@ -34,7 +34,6 @@ impl Dispatcher {
 
             // WAL
             WalAppend { .. }
-            | WalMerge { .. }
             | WriteBatch { .. }
             | WalSync { .. }
             | WalRotate { .. }
@@ -58,7 +57,6 @@ impl Dispatcher {
             // User-level (reads, control, registration, observability)
             Read { .. }
             | RangeScan { .. }
-            | RegisterMergeOperator { .. }
             | GetReadAmpMetrics { .. }
             | GetCurrentSequence { .. }
             | SetRuntimeConfig { .. }
@@ -191,24 +189,6 @@ mod tests {
             value: Some(b"value".to_vec()),
             ttl_seconds: None,
             insert_only: false,
-        };
-
-        // Act
-        let kind = dispatcher.route(&msg);
-
-        // Assert
-        assert_eq!(kind, TaskKind::Wal);
-    }
-
-    #[test]
-    fn should_route_wal_merge_to_wal() {
-        // Arrange
-        let dispatcher = create_dispatcher();
-        let msg = RuntimeMsg::WalMerge {
-            request_id: 1,
-            cf_id: 0,
-            key: b"key".to_vec(),
-            operand: b"operand".to_vec(),
         };
 
         // Act
@@ -463,44 +443,6 @@ mod tests {
             end: b"z".to_vec(),
             sequence: 1,
             requested_durability: crate::engine::api::Durability::Steady,
-        };
-
-        // Act
-        let kind = dispatcher.route(&msg);
-
-        // Assert
-        assert_eq!(kind, TaskKind::User);
-    }
-
-    #[test]
-    fn should_route_register_merge_operator_to_user() {
-        // Arrange
-        let dispatcher = create_dispatcher();
-
-        // Create a mock merge operator for testing
-        use std::sync::Arc;
-        #[derive(Debug)]
-        struct MockOperator;
-        impl crate::engine::MergeOperator for MockOperator {
-            fn merge(
-                &self,
-                _key: &[u8],
-                _base_value: Option<&[u8]>,
-                _operands: &[Vec<u8>],
-            ) -> crate::common::MidgeResult<Option<Vec<u8>>> {
-                Ok(None)
-            }
-
-            fn name(&self) -> &str {
-                "mock"
-            }
-        }
-
-        let operator = Arc::new(MockOperator) as Arc<dyn crate::engine::MergeOperator>;
-        let msg = RuntimeMsg::RegisterMergeOperator {
-            request_id: 1,
-            cf_id: 0,
-            operator,
         };
 
         // Act
