@@ -16,17 +16,18 @@ fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
 fn write_some(engine: &MidgeEngine, num_keys: usize) {
     let cf = engine.default_column_family();
     let cf_id = cf.id();
+    let mut tx = engine
+        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin");
     for i in 0..num_keys {
         let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
         let v = vec![(i % 251) as u8; VALUE_SIZE];
-        let mut tx = engine
-            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-            .expect("begin");
+
         tx.put(k.to_vec(), v, None).unwrap();
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
     }
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
+        .unwrap();
 }
 
 fn run_reopen_clean_case(ctx: &mut StressContext, opts: MidgeOptions) {

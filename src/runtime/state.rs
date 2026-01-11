@@ -8,9 +8,10 @@ use crate::metadata::Manifest;
 use crate::runtime::IntentLogEntry;
 use crate::sst::{ReadAmpMetrics, SkipListMemtable};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::io::traits::Fs;
 
@@ -88,7 +89,7 @@ pub struct CloudState {
 #[derive(Default)]
 pub struct SnapshotState {
     /// Active snapshots: snapshot_id → (sequence, created_at, ref_count)
-    pub active_snapshots: HashMap<u64, (u64, std::time::Instant, usize)>,
+    pub active_snapshots: HashMap<u64, (u64, Instant, usize)>,
     /// Maximum time to hold a snapshot (1 hour by default)
     pub max_snapshot_lifetime: std::time::Duration,
 }
@@ -601,7 +602,7 @@ impl RuntimeState {
 
         self.snapshots
             .active_snapshots
-            .insert(snapshot_id, (sequence, std::time::Instant::now(), 1));
+            .insert(snapshot_id, (sequence, Instant::now(), 1));
 
         tracing::trace!(snapshot_id, sequence, "Snapshot registered for SST pinning");
 
@@ -622,14 +623,14 @@ impl RuntimeState {
 
     /// Get list of SSTs referenced by active snapshots.
     /// These SSTs must NOT be deleted during garbage collection.
-    pub fn get_pinned_sst_names(&self) -> std::collections::HashSet<String> {
-        let mut pinned = std::collections::HashSet::new();
+    pub fn get_pinned_sst_names(&self) -> HashSet<String> {
+        let mut pinned = HashSet::new();
 
         for (snapshot_id, (snapshot_seq, created_at, _ref_count)) in
             &self.snapshots.active_snapshots
         {
             // Check if snapshot has exceeded max lifetime
-            let age = std::time::Instant::now().duration_since(*created_at);
+            let age = Instant::now().duration_since(*created_at);
             if age > self.snapshots.max_snapshot_lifetime {
                 tracing::warn!(
                     snapshot_id,
@@ -662,7 +663,7 @@ impl RuntimeState {
             .active_snapshots
             .iter()
             .filter(|(_id, (_seq, created_at, _ref_count))| {
-                std::time::Instant::now().duration_since(*created_at)
+                Instant::now().duration_since(*created_at)
                     > self.snapshots.max_snapshot_lifetime
             })
             .count()

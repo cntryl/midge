@@ -5,6 +5,7 @@
 
 use crate::metadata::Manifest;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 /// Manifest persistence operations
 pub struct ManifestPersistence;
@@ -33,11 +34,10 @@ impl ManifestPersistence {
     ) -> Result<Manifest, String> {
         use crate::io::traits::FsPath;
 
-        // Prefer snapshot when present
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
         let mut manifest = match fs.exists(&snap_path) {
             Ok(true) => {
-                let start = std::time::Instant::now();
+                let start = Instant::now();
                 let file = fs
                     .open(
                         &snap_path,
@@ -59,18 +59,23 @@ impl ManifestPersistence {
                     .map_err(|e| format!("snapshot not utf8: {}", e))?;
                 let manifest: Manifest = serde_yaml::from_str(&contents)
                     .map_err(|e| format!("failed to parse manifest snapshot YAML: {}", e))?;
-                tracing::info!(path = ?snap_path, files = manifest.files.len(), cf = manifest.column_families.len(), elapsed_ms = start.elapsed().as_secs_f64() * 1000.0, "manifest snapshot loaded");
-                manifest
+                let elapsed = start.elapsed();
+                tracing::info!(
+                    path = ?snap_path,
+                    files = manifest.files.len(),
+                    cf = manifest.column_families.len(),
+                    elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+                    "manifest snapshot loaded"
+                );
+                Ok(manifest)
             }
             Ok(false) => {
-                // Legacy YAML
                 let manifest_path = FsPath::new(Self::MANIFEST_FILE);
                 if !fs.exists(&manifest_path).unwrap_or(false) {
                     tracing::debug!(path = ?manifest_path, "manifest file not found, using default");
-                    Manifest::default()
+                    Ok(Manifest::default())
                 } else {
-                    // Read file (measure read+parse time)
-                    let start = std::time::Instant::now();
+                    let start = Instant::now();
                     let file = fs
                         .open(
                             &manifest_path,
@@ -92,7 +97,6 @@ impl ManifestPersistence {
                         .map_err(|e| format!("manifest not utf8: {}", e))?;
                     let size_bytes = contents.len() as u64;
 
-                    // Deserialize YAML
                     let manifest: Manifest = serde_yaml::from_str(&contents)
                         .map_err(|e| format!("failed to parse manifest YAML: {}", e))?;
 
@@ -105,11 +109,11 @@ impl ManifestPersistence {
                         elapsed_ms = elapsed.as_secs_f64() * 1000.0,
                         "manifest loaded successfully"
                     );
-                    manifest
+                    Ok(manifest)
                 }
             }
-            Err(e) => return Err(format!("fs exists error: {:?}", e)),
-        };
+            Err(e) => Err(format!("fs exists error: {:?}", e)),
+        }?;
 
         // Check for an explicit bench-only trust mode (opt-in via env var)
         let trust_snapshot_enabled = std::env::var("MIDGE_BENCH_TRUST_SNAPSHOT").ok().as_deref()
