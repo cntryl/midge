@@ -1,0 +1,30 @@
+name: Bench
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "benches/**"
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Update Rust toolchain
+        run: rustup update stable
+
+      - name: Run benchmarks
+        run: cargo bench --bench *
+
+      - name: Upload Criterion artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: criterion-artifacts
+          path: target/criterion/**

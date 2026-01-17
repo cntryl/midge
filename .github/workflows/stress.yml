@@ -1,0 +1,33 @@
+name: Stress
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "benches/**"
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Update Rust toolchain
+        run: rustup update stable
+
+      - name: Install Stress
+        run: cargo install cntryl-stress
+
+      - name: Run benchmarks
+        run: cargo stress -v > stress.log
+
+      - name: Upload Criterion artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: stress-artifacts
+          path: stress.log
