@@ -239,13 +239,18 @@ fn bench_eviction(c: &mut Criterion) {
     let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
 
     group.bench_function("insert_1000_into_512_capacity", |b| {
-        b.iter(|| {
-            let cache = create_cache(cache_size);
-            for i in 0..num_blocks {
-                cache.put(keys[i], blocks[i].clone());
-            }
-            black_box(cache)
-        })
+        // Use iter_batched to create fresh cache for each iteration
+        // This isolates cache construction overhead and provides consistent eviction behavior
+        b.iter_batched(
+            || create_cache(cache_size),
+            |cache| {
+                for i in 0..num_blocks {
+                    cache.put(keys[i], blocks[i].clone());
+                }
+                black_box(cache)
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.finish();
