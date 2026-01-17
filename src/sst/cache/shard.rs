@@ -9,6 +9,7 @@ use bytes::Bytes;
 use crossbeam_channel::{unbounded, Sender};
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 /// Message sent to admission worker
@@ -35,6 +36,8 @@ pub struct CacheShard {
     max_bytes: u64,
     /// Channel for async admission requests
     admission_tx: Sender<AdmissionRequest>,
+    /// Fallback to inline admission when worker thread cannot be spawned
+    admission_inline: AtomicBool,
 }
 
 impl CacheShard {
@@ -54,16 +57,25 @@ impl CacheShard {
             metrics: CacheMetrics::new(),
             max_bytes,
             admission_tx: tx,
+            admission_inline: AtomicBool::new(false),
         });
 
         // Spawn background admission worker
         let shard_clone = Arc::clone(&shard);
-        thread::Builder::new()
+        let spawn_result = thread::Builder::new()
             .name("cache-admission-worker".to_string())
             .spawn(move || {
                 shard_clone.admission_worker(rx);
-            })
-            .expect("failed to spawn admission worker");
+            });
+
+        if let Err(err) = spawn_result {
+            // Fall back to inline admission when thread creation fails (e.g., CI limits)
+            shard.admission_inline.store(true, Ordering::Relaxed);
+            tracing::warn!(
+                error = %err,
+                "cache admission worker spawn failed; falling back to inline admission"
+            );
+        }
 
         shard
     }
@@ -89,13 +101,50 @@ impl CacheShard {
     ///
     /// Returns true if request was queued, false if channel is disconnected.
     pub fn put(&self, key: CacheKey, value: Bytes) -> bool {
+        if self.admission_inline.load(Ordering::Relaxed) {
+            self.put_inline(key, value);
+            return true;
+        }
+
         // Track access for admission control (fast path)
         self.record_access_for_admission(&key);
 
         // Send to admission worker (non-blocking)
-        self.admission_tx
-            .send(AdmissionRequest { key, value })
+        if self
+            .admission_tx
+            .send(AdmissionRequest {
+                key,
+                value: value.clone(),
+            })
             .is_ok()
+        {
+            true
+        } else {
+            // If the channel is disconnected, fall back to inline admission
+            self.admission_inline.store(true, Ordering::Relaxed);
+            self.put_inline(key, value);
+            true
+        }
+    }
+
+    /// Insert a value into the cache (inline admission fallback)
+    fn put_inline(&self, key: CacheKey, value: Bytes) {
+        // Track access for admission control
+        self.record_access_for_admission(&key);
+
+        // Check type-aware admission policy
+        if !self.should_admit(&key) {
+            return;
+        }
+
+        // Wrap in CacheValue
+        let cache_value = CacheValue::new(value);
+
+        // Insert and update metrics
+        self.insert_and_update_metrics(key, cache_value);
+
+        // Evict if over capacity
+        self.evict_if_needed();
     }
 
     /// Insert a value into the cache (synchronous, for tests)
