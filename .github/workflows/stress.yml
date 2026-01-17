@@ -23,7 +23,7 @@ jobs:
       - name: Install Stress
         run: cargo install cntryl-stress
 
-      - name: Run benchmarks
+      - name: Run stress tests
         run: cargo stress -v > stress.log
 
       - name: Upload Criterion artifacts
