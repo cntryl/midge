@@ -1,0 +1,25 @@
+name: Cleanup Workflow Runs
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Cleanup Workflow Runs
+        uses: fgrzl/actions/workflow-cleanup@v0.0.6
+        with:
+          days_old: 3
+          per_page: 100
