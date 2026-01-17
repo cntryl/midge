@@ -224,9 +224,17 @@ mod tests {
 
         // Trigger failure
         mock.set_should_fail(true);
-        std::thread::sleep(Duration::from_millis(150)); // Wait for failed renewal
 
-        assert!(!heartbeat.is_healthy());
+        // Wait up to a timeout for unhealthy state to be set.
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while heartbeat.is_healthy() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            !heartbeat.is_healthy(),
+            "expected heartbeat to be unhealthy after renewal failure"
+        );
         heartbeat.stop();
     }
 }
