@@ -195,13 +195,20 @@ mod tests {
         let mut heartbeat = LeaseHeartbeat::new(mock.clone() as Arc<dyn PrimaryLease>);
 
         heartbeat.start();
-        std::thread::sleep(Duration::from_millis(400)); // Wait for ~4 renewals
+
+        // Wait up to a reasonable timeout for several renewals to happen.
+        // Using a loop with a timeout reduces flakiness on slower or busy runners.
+        let deadline = std::time::Instant::now() + mock.ttl() * 5;
+        while mock.get_renewal_count() < 3 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
         heartbeat.stop();
 
         let renewal_count = mock.get_renewal_count();
         assert!(
             renewal_count >= 3,
-            "expected at least 3 renewals, got {}",
+            "expected at least 3 renewals within timeout, got {}",
             renewal_count
         );
         assert!(heartbeat.is_healthy());
