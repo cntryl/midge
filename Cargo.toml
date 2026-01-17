@@ -1,6 +1,6 @@
 [package]
 name = "cntryl-midge"
-version = "0.0.1"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.91"
 description = "A high-performance embedded key-value database with LSM-tree storage"
@@ -102,8 +102,6 @@ clap = { version = "4.5", features = ["derive"] }
 criterion = "0.7"
 paste = "1.0"
 proptest = "1.8"
-tempfile = "3.23"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 cntryl-stress = "0.1.1"
 
 # =============================================================================
@@ -130,8 +128,8 @@ cloud-common = [
 ]
 cloud-aws = ["cloud-common", "dep:md5"]
 cloud-azure = ["cloud-common"]
-cloud-gcp = ["cloud-common", "dep:urlencoding"]
-cloud-oci = ["cloud-common", "dep:urlencoding"]
+cloud-gcp = ["cloud-common"]
+cloud-oci = ["cloud-common"]
 cloud-all = ["cloud-aws", "cloud-azure", "cloud-gcp", "cloud-oci"]
 cloud_integration = ["cloud-all"]
 
