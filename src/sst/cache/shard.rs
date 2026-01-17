@@ -8,8 +8,8 @@ use crate::sst::cache::value::CacheValue;
 use bytes::Bytes;
 use crossbeam_channel::{unbounded, Sender};
 use dashmap::DashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 
 /// Message sent to admission worker

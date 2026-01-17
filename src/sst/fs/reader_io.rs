@@ -239,7 +239,9 @@ impl SstFileIo {
             let buf_end = buf_offset + handle.size as usize;
 
             if buf_end > buffer.len() {
-                return Err(MidgeError::Corruption("Block extends past read buffer".into()));
+                return Err(MidgeError::Corruption(
+                    "Block extends past read buffer".into(),
+                ));
             }
 
             let block_slice = &buffer[buf_offset..buf_end];
