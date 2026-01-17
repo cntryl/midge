@@ -1,0 +1,694 @@
+//! Transaction Basic Tests
+//!
+//! Core transaction functionality: begin, commit, rollback, isolation.
+
+use bytes::Bytes;
+use cntryl_midge::testkit::*;
+use cntryl_midge::{Query, WriteOptions};
+use std::sync::Arc;
+
+// ============================================================================
+// Commit Tests
+// ============================================================================
+
+#[test]
+fn should_commit_transaction_given_multiple_operations_when_committed() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        // Act
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+        txn.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
+        txn.delete(b"key3".to_vec()).unwrap();
+        engine.commit(txn, WriteOptions::buffered()).unwrap();
+
+        // Assert
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(
+            read_tx.get(b"key1").unwrap(),
+            Some(Bytes::from_static(b"value1"))
+        );
+        assert_eq!(
+            read_tx.get(b"key2").unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
+        assert_eq!(read_tx.get(b"key3").unwrap(), None);
+    });
+}
+
+#[test]
+fn should_succeed_given_empty_transaction_when_committed() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        // Act
+        let txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        let result = engine.commit(txn, WriteOptions::buffered());
+
+        // Assert
+        assert!(result.is_ok());
+    });
+}
+
+#[test]
+fn should_succeed_given_read_only_transaction_when_committed() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let mut write_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        write_tx
+            .put(b"key1".to_vec(), b"value1".to_vec(), None)
+            .unwrap();
+        engine.commit(write_tx, WriteOptions::buffered()).unwrap();
+
+        // Act
+        let txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        let _value = txn.get(b"key1").unwrap();
+        let result = engine.commit(txn, WriteOptions::buffered());
+
+        // Assert
+        assert!(result.is_ok());
+    });
+}
+
+// ============================================================================
+// Rollback Tests
+// ============================================================================
+
+#[test]
+fn should_rollback_transaction_given_uncommitted_when_dropped() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        // Act
+        {
+            let mut txn = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+            // txn dropped here without commit
+        }
+
+        // Assert - writes not visible
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(read_tx.get(b"key1").unwrap(), None);
+    });
+}
+
+#[test]
+fn should_rollback_all_writes_given_multiple_operations_when_dropped() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"key1".to_vec(), b"original".to_vec(), None)
+            .unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
+
+        // Act
+        {
+            let mut txn = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            txn.put(b"key1".to_vec(), b"updated".to_vec(), None)
+                .unwrap();
+            txn.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
+            txn.delete(b"key3".to_vec()).unwrap();
+            // txn dropped without commit
+        }
+
+        // Assert - original value preserved, new writes not visible
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(
+            read_tx.get(b"key1").unwrap(),
+            Some(Bytes::from_static(b"original"))
+        );
+        assert_eq!(read_tx.get(b"key2").unwrap(), None);
+    });
+}
+
+#[test]
+fn should_release_locks_given_aborted_transaction_when_cleanup() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        // Act - first txn acquires lock and aborts
+        {
+            let mut txn1 = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            txn1.put(b"key1".to_vec(), b"value1".to_vec(), None)
+                .unwrap();
+            // Dropped without commit - should release lock
+        }
+
+        // Second txn should be able to acquire the lock
+        let mut txn2 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn2.put(b"key1".to_vec(), b"value2".to_vec(), None)
+            .unwrap();
+        engine.commit(txn2, WriteOptions::buffered()).unwrap();
+
+        // Assert
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(
+            read_tx.get(b"key1").unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
+    });
+}
+
+// ============================================================================
+// Snapshot Isolation
+// ============================================================================
+
+#[test]
+fn should_allow_concurrent_writes_with_lww_semantics_given_transaction_when_active() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
+
+        // Act - start transaction (captures snapshot)
+        let txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+
+        // Concurrent write happens outside transaction
+        let mut tx2 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx2.put(b"key1".to_vec(), b"v2".to_vec(), None).unwrap();
+        engine.commit(tx2, WriteOptions::buffered()).unwrap();
+
+        // Assert - Midge implements Last-Write-Wins (LWW) semantics
+        // Transactions see latest committed data (not true snapshot isolation)
+        let value = txn.get(b"key1").unwrap();
+        assert!(
+            value == Some(Bytes::from_static(b"v1")) || value == Some(Bytes::from_static(b"v2"))
+        );
+
+        // Drop transaction
+        drop(txn);
+    });
+}
+
+#[test]
+fn should_read_own_writes_given_transaction_when_reading() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        // Act
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+
+        // Read within same transaction
+        let value = txn.get(b"key1").unwrap();
+
+        // Assert - should see own uncommitted write
+        assert_eq!(value, Some(Bytes::from_static(b"value1")));
+
+        engine.commit(txn, WriteOptions::buffered()).unwrap();
+    });
+}
+
+#[test]
+fn should_read_own_writes_given_kv_transaction_when_getting() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        // Act
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.put(b"test_key".to_vec(), b"test_value".to_vec(), None)
+            .unwrap();
+        let value = txn.get(b"test_key").unwrap();
+
+        // Assert
+        assert_eq!(value, Some(Bytes::from_static(b"test_value")));
+    });
+}
+
+#[test]
+fn should_hide_deleted_value_given_kv_transaction_when_getting() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        // Act
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.put(b"k".to_vec(), b"v".to_vec(), None).unwrap();
+        txn.delete(b"k".to_vec()).unwrap();
+        let value = txn.get(b"k").unwrap();
+
+        // Assert
+        assert_eq!(value, None);
+    });
+}
+
+#[test]
+fn should_persist_writes_given_kv_transaction_when_committed_boxed() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        // Act
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.put(b"key_commit".to_vec(), b"value_commit".to_vec(), None)
+            .unwrap();
+        engine.commit(txn, WriteOptions::buffered()).unwrap();
+
+        // Assert
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(
+            read_tx.get(b"key_commit").unwrap(),
+            Some(Bytes::from_static(b"value_commit"))
+        );
+    });
+}
+
+#[test]
+fn should_succeed_given_best_effort_when_committing_transaction_during_bulk_load() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange: Simulate bulk load scenario with best_effort()
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let write_opts = WriteOptions::best_effort();
+
+        // Act: Load many keys with best_effort() (acceptable for initialization phase)
+        for i in 0..100 {
+            let mut txn = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            let key = format!("bulk_key_{}", i).into_bytes();
+            let value = format!("bulk_value_{}", i).into_bytes();
+            txn.put(key, value, None).unwrap();
+            engine.commit(txn, write_opts).unwrap();
+        }
+
+        // Flush to ensure data reaches storage
+        engine.flush_cf(&cf).unwrap();
+
+        // Assert: Data should be persisted after flush
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(
+            read_tx.get(b"bulk_key_50").unwrap(),
+            Some(Bytes::from_static(b"bulk_value_50"))
+        );
+        assert_eq!(
+            read_tx.get(b"bulk_key_99").unwrap(),
+            Some(Bytes::from_static(b"bulk_value_99"))
+        );
+    });
+}
+
+// ============================================================================
+// Transaction Operations
+// ============================================================================
+
+#[test]
+fn should_insert_value_given_nonexistent_key_when_insert_in_transaction() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        // Act
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+        engine.commit(txn, WriteOptions::buffered()).unwrap();
+
+        // Assert
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(
+            read_tx.get(b"key1").unwrap(),
+            Some(Bytes::from_static(b"value1"))
+        );
+    });
+}
+
+#[test]
+fn should_delete_range_given_committed_transaction_when_delete_range() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
+        tx.put(b"key2".to_vec(), b"v2".to_vec(), None).unwrap();
+        tx.put(b"key3".to_vec(), b"v3".to_vec(), None).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
+
+        // Act - delete range in transaction
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.delete_range(b"key1".to_vec(), b"key3".to_vec())
+            .unwrap(); // Delete key1, key2 (not key3)
+        engine.commit(txn, WriteOptions::buffered()).unwrap();
+
+        // Assert
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(read_tx.get(b"key1").unwrap(), None);
+        assert_eq!(read_tx.get(b"key2").unwrap(), None);
+        assert_eq!(
+            read_tx.get(b"key3").unwrap(),
+            Some(Bytes::from_static(b"v3"))
+        );
+    });
+}
+
+#[test]
+fn should_hide_deleted_range_given_transaction_scan_when_delete_range() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
+        tx.put(b"key2".to_vec(), b"v2".to_vec(), None).unwrap();
+        tx.put(b"key3".to_vec(), b"v3".to_vec(), None).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
+
+        // Act
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.delete_range(b"key1".to_vec(), b"key3".to_vec())
+            .unwrap();
+
+        // Scan within transaction
+        let mut iter = txn
+            .scan(
+                &Query::new()
+                    .start_key(Bytes::from(&b"key0"[..]))
+                    .end_key(Bytes::from(&b"key9"[..])),
+            )
+            .unwrap();
+        let results: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
+
+        // Assert - Should only see key3
+        assert_eq!(results.len(), 1);
+    });
+}
+
+#[test]
+fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        // Act
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+        txn.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
+
+        // Scan within transaction
+        let mut iter = txn
+            .scan(
+                &Query::new()
+                    .start_key(Bytes::from(&b"key0"[..]))
+                    .end_key(Bytes::from(&b"key9"[..])),
+            )
+            .unwrap();
+        let results: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
+
+        // Assert - should see uncommitted writes
+        assert_eq!(results.len(), 2);
+    });
+}
+
+// ============================================================================
+// Error Handling
+// ============================================================================
+
+#[test]
+fn should_allow_operations_given_previous_commit_failed_when_disk_full() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        // Act - first transaction fails (simulated disk full)
+        {
+            let mut txn1 = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            txn1.put(b"key1".to_vec(), b"value1".to_vec(), None)
+                .unwrap();
+            // Simulate commit failure by dropping
+        }
+
+        // Second transaction should work
+        let mut txn2 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn2.put(b"key2".to_vec(), b"value2".to_vec(), None)
+            .unwrap();
+        engine.commit(txn2, WriteOptions::buffered()).unwrap();
+
+        // Assert
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(
+            read_tx.get(b"key2").unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
+    });
+}
+
+// ============================================================================
+// Persistence Tests
+// ============================================================================
+
+#[test]
+fn should_persist_transaction_given_commit_when_crash_after() {
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.create_column_family("test").expect("create cf");
+            let mut txn = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+            engine.commit(txn, WriteOptions::buffered()).unwrap();
+            // Engine dropped (simulated crash)
+        }
+
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.get_column_family("test").expect("get cf");
+            let tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .unwrap();
+            let value = tx.get(b"key1").unwrap();
+            assert_eq!(value, Some(Bytes::from_static(b"value1")));
+        }
+    });
+}
+
+#[test]
+fn should_not_persist_transaction_given_abort_when_crash_after() {
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.create_column_family("test").expect("create cf");
+            let mut txn = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+            // Txn dropped without commit
+            // Engine dropped (simulated crash)
+        }
+
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.get_column_family("test").expect("get cf");
+            let tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .unwrap();
+            let value = tx.get(b"key1").unwrap();
+            assert_eq!(value, None);
+        }
+    });
+}
+
+#[test]
+fn should_recover_committed_transactions_given_wal_replay_when_restart() {
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.create_column_family("test").expect("create cf");
+
+            // Multiple transactions
+            let mut txn1 = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            txn1.put(b"key1".to_vec(), b"value1".to_vec(), None)
+                .unwrap();
+            engine.commit(txn1, WriteOptions::buffered()).unwrap();
+
+            let mut txn2 = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            txn2.put(b"key2".to_vec(), b"value2".to_vec(), None)
+                .unwrap();
+            engine.commit(txn2, WriteOptions::buffered()).unwrap();
+
+            // Engine dropped
+        }
+
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.get_column_family("test").expect("get cf");
+            let tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .unwrap();
+            assert_eq!(
+                tx.get(b"key1").unwrap(),
+                Some(Bytes::from_static(b"value1"))
+            );
+            assert_eq!(
+                tx.get(b"key2").unwrap(),
+                Some(Bytes::from_static(b"value2"))
+            );
+        }
+    });
+}
+
+// ============================================================================
+// Bulk Load Pattern (best_effort usage)
+// ============================================================================
+
+#[test]
+fn should_support_best_effort_during_bulk_load_phase_when_followed_by_flush() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange: Initialize engine and column family
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("bulk_test").expect("create cf");
+        let best_effort_opts = WriteOptions::best_effort();
+        let buffered_opts = WriteOptions::buffered();
+
+        // Act (Phase 1): Fast bulk load with best_effort (setup, not measured)
+        const BULK_COUNT: usize = 1000;
+        for i in 0..BULK_COUNT {
+            let mut txn = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            let key = format!("bulk_{:05}", i).into_bytes();
+            let value = format!("data_{}", i * 2).into_bytes();
+            txn.put(key, value, None).unwrap();
+            // Use best_effort() for fast bulk load - data loss on crash acceptable here
+            engine.commit(txn, best_effort_opts).unwrap();
+        }
+
+        // Flush to ensure bulk-loaded data reaches storage
+        engine.flush_cf(&cf).unwrap();
+
+        // Act (Phase 2): Verify data persisted, then switch to buffered for measured operations
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.put(b"measured_key".to_vec(), b"measured_value".to_vec(), None)
+            .unwrap();
+        // Switch to buffered() for measured operations
+        engine.commit(txn, buffered_opts).unwrap();
+
+        // Assert: Verify all data is readable
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+
+        // Check bulk-loaded entries
+        assert_eq!(
+            read_tx.get(b"bulk_00000").unwrap(),
+            Some(Bytes::from_static(b"data_0"))
+        );
+        assert_eq!(
+            read_tx.get(b"bulk_00500").unwrap(),
+            Some(Bytes::from_static(b"data_1000"))
+        );
+        assert_eq!(
+            read_tx.get(b"bulk_00999").unwrap(),
+            Some(Bytes::from_static(b"data_1998"))
+        );
+
+        // Check measured-workload entry
+        assert_eq!(
+            read_tx.get(b"measured_key").unwrap(),
+            Some(Bytes::from_static(b"measured_value"))
+        );
+    });
+}

@@ -1,0 +1,60 @@
+
+# ==================================================================
+# .gitattributes — repository-level attributes for Midge
+# Enforce consistent text normalization, mark common binary files and
+# keep build/output directories out of source archives and language stats.
+# ==================================================================
+
+# Auto-detect text files and normalize to LF in the repository
+* text=auto eol=lf
+
+# Explicit common text file types
+*.rs text
+*.toml text
+*.md text
+*.markdown text
+*.txt text
+*.json text
+*.yml text
+*.yaml text
+*.html text
+*.css text
+*.js text
+*.py text
+*.ps1 text
+
+# Treat common binary/media files as binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+
+# Native artifacts / build outputs
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.lib binary
+*.a binary
+*.zip binary
+*.tar.gz binary
+*.tgz binary
+
+# Keep generated build output out of exported archives and mark them as vendored for linguist
+/target/** export-ignore linguist-vendored
+/.cargo/** export-ignore linguist-vendored
+
+# Editor / IDE folders to ignore when generating archives
+/.vscode/** export-ignore
+/.idea/** export-ignore
+
+# Ensure this file itself is treated as text
+.gitattributes text
+
+# Optional: mark vendored/generated directories so GitHub's language stats ignore them
+/target/** linguist-vendored

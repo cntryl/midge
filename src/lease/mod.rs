@@ -1,0 +1,84 @@
+//! Primary instance exclusivity via distributed leases.
+//!
+//! This module enforces the critical safety invariant:
+//! **"At most one Midge instance holds the primary lease at any time."**
+//!
+//! Prevents split-brain scenarios where multiple instances write to the same storage,
+//! which could lead to data corruption or inconsistent state.
+//!
+//! ## Design
+//!
+//! - **Fencing lease**: Not advisory—enforced by the storage backend
+//! - **TTL-based**: Lease expires if not renewed (handles crashes gracefully)
+//! - **Heartbeat loop**: Continuous renewal during normal operation
+//! - **Fail-stop semantics**: Loss of lease immediately stops accepting writes
+//!
+//! ## Backends
+//!
+//! - **Cloud storage**: Preferred for distributed deployments (blob leases, conditional writes)
+//! - **Filesystem**: Local-only fallback using exclusive file locks (`flock`)
+//!
+//! ## Usage
+//!
+//! Lease acquisition MUST occur before engine initialization:
+//!
+//! ```ignore
+//! let lease = acquire_lease(storage_config)?;
+//! let _guard = lease.try_acquire()?;  // Fails if another instance holds lease
+//! let engine = Engine::open(opts)?;
+//! // Start heartbeat loop
+//! ```
+
+mod cloud;
+mod filesystem;
+mod heartbeat;
+mod traits;
+
+pub use filesystem::FileSystemLease;
+pub use heartbeat::LeaseHeartbeat;
+pub use traits::{LeaseError, LeaseGuard, PrimaryLease};
+
+use crate::engine::api::Storage;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+static INMEM_LEASE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Create a lease implementation appropriate for the given storage backend.
+pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseError> {
+    match storage {
+        Storage::InMemory => {
+            // In-memory mode: use filesystem lease on temp directory
+            // This is safe because each InMemory instance gets a unique temp path.
+            // NOTE: On some platforms (notably Windows) `SystemTime` resolution is not truly
+            // nanosecond-granular, so concurrent callers can collide. Add a counter to ensure
+            // uniqueness even under heavy parallel test load.
+            let unique = INMEM_LEASE_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let temp_path = std::env::temp_dir().join(format!(
+                "midge_inmem_{}_{}_{}",
+                std::process::id(),
+                unique,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&temp_path).map_err(|e| {
+                LeaseError::AcquisitionFailed(format!("failed to create temp dir: {}", e))
+            })?;
+            Ok(Arc::new(FileSystemLease::new(temp_path)))
+        }
+        Storage::Local { path } => {
+            // Local storage: use filesystem lease
+            Ok(Arc::new(FileSystemLease::new(path.clone())))
+        }
+        Storage::Cloud {
+            local_cache_path, ..
+        } => {
+            // Cloud storage: use cloud lease (future enhancement)
+            // For now, fall back to filesystem lease on the cache directory
+            // TODO: Implement proper cloud blob lease (Azure Blob Lease, S3 conditional writes, etc.)
+            Ok(Arc::new(FileSystemLease::new(local_cache_path.clone())))
+        }
+    }
+}
