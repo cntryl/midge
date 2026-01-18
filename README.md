@@ -4,15 +4,24 @@
 
 # Midge
 
-Midge is a small, fast, embedded LSM-tree key/value engine for Rust. It provides a simple, explicit transaction API so you can open an engine, write keys, and read them back safely.
+Midge is a high-performance, embedded LSM-tree key/value engine for Rust with an explicit transaction API.
+
+## Should I use this?
+
+Use Midge if you want:
+
+- An embedded database (no separate server process) you ship with your Rust app.
+- LSM-tree storage with range scans, delete-range tombstones, and column families.
+- A transaction-scoped API (all reads/writes happen inside explicit transactions).
+- Explicit durability choices per commit (e.g. `WriteOptions::sync()`).
 
 ## Quick start ✅
 
-Add to your `Cargo.toml` (check crates.io for the latest version):
+Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cntryl-midge = "<latest-version>"
+cntryl-midge = "1"
 ```
 
 Example (minimal):
@@ -38,6 +47,11 @@ fn main() -> Result<(), MidgeError> {
     Ok(())
 }
 ```
+
+Run the test suite:
+
+- `cargo test`
+- `python ./scripts/validate_tests.py --summary`
 
 ## Common operations ✨
 
@@ -80,8 +94,14 @@ engine.commit(tx, WriteOptions::sync())?;
 
 ```rust
 let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-let mut iter = tx.scan(&Query::new()).unwrap();
+let mut iter = tx.scan(&Query::new())?;
 while let Some((k, v)) = iter.next() {
     println!("k={:?} v={:?}", k, v);
 }
 ```
+
+## Docs
+
+- Architecture overview: [docs/THE_BIG_IDEA.md](docs/THE_BIG_IDEA.md)
+- Benchmarks: [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
+- What's in the repo: [inventory.md](inventory.md)
