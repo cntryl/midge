@@ -283,7 +283,7 @@ fn should_eliminate_obsolete_versions_through_compaction() {
 // ============================================================================
 
 #[test]
-fn document_compaction_implementation_gaps() {
+fn should_document_compaction_implementation_gaps() {
     eprintln!("\n=== COMPACTION IMPLEMENTATION STATUS ===");
     eprintln!("\nTests above document:");
     eprintln!("  1. LSM level progression (L0â†’L1, L1â†’L2, etc)");

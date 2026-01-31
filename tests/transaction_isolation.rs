@@ -810,7 +810,7 @@ fn should_recover_snapshot_view_after_engine_restart() {
 // ============================================================================
 
 #[test]
-fn should_document_and_verify_lww_as_isolation_model_when_testing() {
+fn should_document_verify_lww_as_isolation_model_when_testing() {
     eprintln!("\n=== ARCHITECTURE: MIDGE ISOLATION MODEL IS LAST-WRITE-WINS (LWW) ===\n");
 
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {

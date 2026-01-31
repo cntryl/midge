@@ -226,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_mixed_accesses_and_removals() {
+    fn should_handle_mixed_accesses_with_removals() {
         // Arrange
         let policy = LruPolicy::new();
         let key1 = CacheKey::for_data(1, 0);

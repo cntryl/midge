@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn should_find_first_and_last_children() {
+    fn should_find_first_last_children() {
         // Arrange
         let mut node = TrieNode::new(0, b"root".to_vec(), None);
         node.add_child(TrieEdge::new(0, 0)); // Minimum byte value

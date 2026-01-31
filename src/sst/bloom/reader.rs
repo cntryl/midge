@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn should_have_adaptive_k_and_preserve_it() {
+    fn should_preserve_adaptive_k_when_serialized() {
         // Arrange
         let mut writer_small = BloomWriter::new(10, 0.01);
         for i in 0..10 {

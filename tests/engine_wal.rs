@@ -216,7 +216,7 @@ fn should_recover_range_tombstones_from_wal() {
 // ============================================================================
 
 #[test]
-fn should_handle_wal_rotation_and_multiple_segments() {
+fn should_handle_wal_rotation_multiple_segments() {
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
@@ -351,7 +351,7 @@ fn should_recover_mixed_operations_from_wal() {
 // ============================================================================
 
 #[test]
-fn document_wal_implementation_status() {
+fn should_document_wal_implementation_status() {
     eprintln!("\n=== WAL IMPLEMENTATION STATUS ===");
     eprintln!("\nCritical durability guarantees:");
     eprintln!("  1. Basic write recovery (puts)");

@@ -591,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn should_track_hit_and_miss_metrics() {
+    fn should_track_hit_miss_metrics() {
         // Arrange
         let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
         let key = CacheKey::for_data(1, 0);

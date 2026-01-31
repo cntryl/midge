@@ -144,14 +144,13 @@ Layer 7: engine/              (depends on all below, public API)
 ```
 
 **Validation:**
-```bash
-python ./scripts/validate_tests.py --summary
-```
 
-This enforces:
-- No circular dependencies
-- Clear module boundaries
-- Testability (lower layers test independently)
+- CI runs `cargo clippy --all-targets -- -D warnings`, `cargo build`, and `cargo test`.
+- The optional validator script checks test naming and AAA markers:
+
+    ```bash
+    python ./scripts/validate_tests.py --summary
+    ```
 
 **Why this matters:**
 - Changes to `common/` affect everything (be careful)
@@ -998,5 +997,5 @@ cargo doc --document-private-items
 
 - **Philosophy**: [THE_BIG_IDEA.md](THE_BIG_IDEA.md)
 - **API usage**: [API_GUIDE.md](API_GUIDE.md)
-- **Testing guide**: [TESTING.md](TESTING.md) _(to be created)_
+- **Testing guide**: [TESTING.md](TESTING.md)
 - **Benchmark guide**: [BENCHMARKS.md](BENCHMARKS.md)

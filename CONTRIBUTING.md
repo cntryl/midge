@@ -42,8 +42,11 @@ cargo build --workspace
 # Run all tests
 cargo test
 
-# Validate test structure (required before PR)
+# Validate test structure (recommended)
 python ./scripts/validate_tests.py --summary
+
+# Note: the current codebase contains some legacy violations; when changing or
+# adding tests, prefer making them compliant and avoid increasing violations.
 
 # Run benchmarks
 cargo bench
@@ -54,6 +57,8 @@ cargo bench
 Start with these docs:
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) - Technical implementation guide
 - [THE_BIG_IDEA.md](docs/THE_BIG_IDEA.md) - Design philosophy
+- [TESTING.md](docs/TESTING.md) - Testing conventions and workflows
+- [BENCHMARKS.md](docs/BENCHMARKS.md) - Benchmarking workflows and rules
 - `.github/copilot-instructions.md` - Development conventions
 
 ## Development Workflow
@@ -79,20 +84,20 @@ Follow [Code Standards](#code-standards) and [Testing Requirements](#testing-req
 
 ### 3. Validate Before Committing
 
-**Required checks:**
+**Preflight checks (CI will run the Rust checks on PRs):**
 
 ```bash
 # 1. All tests pass
 cargo test
 
-# 2. Test structure validation (enforces conventions)
-python ./scripts/validate_tests.py --summary
+# 2. No clippy warnings (CI uses `-- -D warnings`)
+cargo clippy --all-targets -- -D warnings
 
-# 3. No clippy warnings
-cargo clippy --all-targets
-
-# 4. Code formatting
+# 3. Code formatting
 cargo fmt --check
+
+# 4. Optional: test naming/AAA validator (not CI-gated yet)
+python ./scripts/validate_tests.py --summary
 ```
 
 **Fix issues:**
@@ -170,12 +175,11 @@ common/ → io/ → storage/ → wal/, sst/ → metadata/, iterators/
   → compaction/ → runtime/ → engine/
 ```
 
-**Validation:**
-```bash
-python ./scripts/validate_tests.py --summary
-```
+**How we enforce this:**
+- Code review + keeping module boundaries clean
+- CI runs `cargo clippy --all-targets -- -D warnings`, `cargo build`, and `cargo test`
 
-This will fail CI if violated. See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
+See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
 
 ### Test Naming Convention (Required)
 
@@ -218,7 +222,7 @@ fn test_should_get_value() { }  // 'test_' prefix unnecessary
 - Enforces descriptive test names
 - Acts as documentation
 - Makes test failures self-explanatory
-- Meta-tests validate this convention
+- The validator script can check this convention
 
 ### AAA Pattern (Arrange-Act-Assert)
 
@@ -336,17 +340,18 @@ group.bench_function("get", |b| {
 
 ### Test Validation
 
-Before submitting PR:
+Recommended before submitting PR:
 
 ```bash
 python ./scripts/validate_tests.py --summary
 ```
 
-This enforces:
-- Test naming convention
-- AAA pattern structure
-- Layer dependency rules
-- No test function skipping
+This checks:
+- Test naming convention (`should_{action}_when_{context}`)
+- AAA marker presence for non-trivial tests (`// Arrange`, `// Act`, `// Assert`)
+- Multiple `// Act` sections (multi-behavior heuristic)
+
+Note: existing violations are present today; prefer not to increase them.
 
 ## Submitting Changes
 
@@ -355,9 +360,9 @@ This enforces:
 Before opening a PR, ensure:
 
 - [ ] All tests pass: `cargo test`
-- [ ] Test validation passes: `python ./scripts/validate_tests.py --summary`
-- [ ] No clippy warnings: `cargo clippy --all-targets`
+- [ ] No clippy warnings: `cargo clippy --all-targets -- -D warnings`
 - [ ] Code formatted: `cargo fmt`
+- [ ] Test validator reviewed: `python ./scripts/validate_tests.py --summary` (aim for compliance on new/changed tests)
 - [ ] New tests added for new functionality
 - [ ] Documentation updated (if API changed)
 - [ ] Commit messages are clear and descriptive

@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn should_implement_clone_and_copy_traits() {
+    fn should_implement_clone_copy_traits() {
         // Arrange
         let kind1 = IndexKind::Sparse;
 
@@ -562,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn should_choose_trie_for_high_prefix_correlation_and_low_entropy() {
+    fn should_choose_trie_for_high_prefix_correlation_with_low_entropy() {
         // Arrange
         let profile = KeyStructureProfile {
             avg_shared_prefix: 6.0,

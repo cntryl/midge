@@ -306,7 +306,7 @@ fn should_support_deletes_on_cloud() {
 // ============================================================================
 
 #[test]
-fn should_support_hybrid_local_and_cloud_storage() {
+fn should_support_hybrid_local_cloud_storage() {
     eprintln!("\n=== HYBRID LOCAL+CLOUD TEST ===");
 
     // Test if hybrid mode works (local cache + cloud backing)
@@ -327,7 +327,7 @@ fn should_support_hybrid_local_and_cloud_storage() {
 // ============================================================================
 
 #[test]
-fn document_cloud_storage_implementation_status() {
+fn should_document_cloud_storage_implementation_status() {
     eprintln!("\n=== CLOUD STORAGE IMPLEMENTATION STATUS ===");
     eprintln!("\nCritical cloud features:");
     eprintln!("  1. Basic cloud read/write operations");

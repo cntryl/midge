@@ -369,14 +369,14 @@ mod tests {
     };
 
     #[test]
-    fn test_unique_paths_are_unique() {
+    fn should_return_unique_paths_when_called_twice() {
         let p1 = unique_bench_path("test");
         let p2 = unique_bench_path("test");
         assert_ne!(p1, p2);
     }
 
     #[test]
-    fn test_single_shot_helpers_run() {
+    fn should_run_single_shot_helpers_when_seed_dir_exists() {
         // Arrange
         let seed = create_seed_dir("test_single_shot_seed", |p| {
             let cfg = BenchEngineConfig::default();
@@ -392,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn test_restore_then_timed_order() {
+    fn should_run_restore_before_timed_phase_when_using_restore_helper() {
         use std::sync::{Arc, Mutex};
 
         // Arrange

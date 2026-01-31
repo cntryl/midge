@@ -111,7 +111,6 @@ impl CachePolicy for ClockProPolicy {
             // Existing entry: set reference bit and promote to hot if cold
             if slot_idx < slots.len() {
                 let was_cold = !slots[slot_idx].hot_bit;
-                slots[slot_idx].ref_bit = true;
 
                 // Promote cold → hot on access if hot set not full
                 if was_cold && *self.hot_count.lock() < *hot_target {
@@ -372,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_mixed_accesses_and_removals() {
+    fn should_handle_mixed_accesses_with_removals() {
         // Arrange
         let policy = ClockProPolicy::new();
         let keys: Vec<CacheKey> = (1..=5).map(|i| CacheKey::for_data(i, 0)).collect();

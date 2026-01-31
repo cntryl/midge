@@ -468,7 +468,7 @@ mod tests {
     // =========== CloudStorage Routing Tests ===========
 
     #[test]
-    fn should_route_and_namespace_put_operation() {
+    fn should_route_namespace_put_operation() {
         // Arrange
         let storage = CloudStorage::with_mock();
         let (tx, rx) = mpsc::channel();
@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn should_route_and_namespace_get_operation() {
+    fn should_route_namespace_get_operation() {
         // Arrange
         let storage = CloudStorage::with_mock();
 
@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn should_route_delete_and_apply_namespace() {
+    fn should_route_delete_with_namespace_applied() {
         // Arrange
         let storage = CloudStorage::with_mock();
         let (tx, rx) = mpsc::channel();
@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn should_route_list_and_apply_namespace() {
+    fn should_route_list_with_namespace_applied() {
         // Arrange
         let storage = CloudStorage::with_mock();
 
@@ -568,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn should_route_head_and_return_metadata() {
+    fn should_route_head_return_metadata() {
         // Arrange
         let storage = CloudStorage::with_mock();
 
