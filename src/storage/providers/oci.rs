@@ -69,9 +69,13 @@ impl OciProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn should_create_oci_s3_compat_provider() {
+        // Arrange
+
+        // Act
         let provider = OciProvider::s3_compat(
             "my-bucket".into(),
             "mynamespace".into(),
@@ -79,16 +83,27 @@ mod tests {
             "oci-access-key".into(),
             "oci-secret-key".into(),
         );
-        let _ = provider.inner();
+
+        let backend = provider.inner().backend();
+
+        // Assert
+        assert!(Arc::strong_count(&backend) >= 1);
     }
 
     #[test]
     fn should_create_oci_provider_with_new() {
+        // Arrange
+
+        // Act
         let provider = OciProvider::new(
             "mynamespace".to_string(),
             "mybucket".to_string(),
             "us-phoenix-1".to_string(),
         );
-        let _ = provider.inner();
+
+        let backend = provider.inner().backend();
+
+        // Assert
+        assert!(Arc::strong_count(&backend) >= 1);
     }
 }

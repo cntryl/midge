@@ -54,21 +54,6 @@
 //! - Actual HTTP execution happens in `CloudExecutor`'s embedded tokio runtime
 //!
 //! ## Example Usage
-//!
-//! ```ignore
-//! use midge::storage::providers::S3Provider;
-//! use midge::storage::cloud::CloudCallback;
-//!
-//! let provider = S3Provider::new(
-//!     "s3.amazonaws.com".into(),
-//!     "my-bucket".into(),
-//!     None, // no signer for unsigned requests
-//! );
-//!
-//! let (tx, rx) = std::sync::mpsc::channel();
-//! provider.submit_put("key".into(), vec![1, 2, 3], tx);
-//! let event = rx.recv().unwrap();
-//! ```
 
 pub mod aws;
 pub mod azure;

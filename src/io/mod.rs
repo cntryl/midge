@@ -25,17 +25,6 @@
 //! ## Usage Pattern
 //!
 //! Higher layers (SST, WAL, storage) depend on this via trait objects:
-//!
-//! ```ignore
-//! // Use base abstraction
-//! let fs: Arc<dyn Fs> = Arc::new(RealFs::new(path)?);
-//!
-//! // Or with chaos injection for testing
-//! let fs: Arc<dyn Fs> = Arc::new(ChaosFs::new(
-//!     Arc::new(MockFs::new()),
-//!     fail_every,
-//! ));
-//! ```
 
 pub mod chaos;
 pub mod mock;

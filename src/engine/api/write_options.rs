@@ -62,17 +62,6 @@ impl WriteOptions {
     /// 3. Switch to `buffered()` or `sync()` for measured workload
     /// 4. If engine restarts, reload initial dataset from scratch
     ///
-    /// # Example (Tier 4 YCSB workloads)
-    /// ```ignore
-    /// // Phase 1: Fast load (no durability required)
-    /// let opts = WriteOptions::best_effort();
-    /// // ... load 100k initial keys ...
-    /// engine.flush_cf(&cf)?;  // Persist loaded data to SST
-    ///
-    /// // Phase 2: Measured workload (durability required)
-    /// let opts = WriteOptions::buffered();
-    /// // ... run measured benchmark ...
-    /// ```
     pub fn best_effort() -> Self {
         Self {
             policy: DurabilityPolicy::BestEffort,

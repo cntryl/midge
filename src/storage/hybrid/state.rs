@@ -110,7 +110,9 @@ mod tests {
 
     #[test]
     fn should_create_disk_state_with_zeros() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let state = DiskState::new();
 
         // Assert
@@ -132,8 +134,11 @@ mod tests {
         state.new_sst_reserve = 30;
         state.wal_reserve = 20;
 
-        // Act & Assert
-        assert_eq!(state.total_committed(), 400);
+        // Act
+        let total = state.total_committed();
+
+        // Assert
+        assert_eq!(total, 400);
     }
 
     #[test]
@@ -143,8 +148,11 @@ mod tests {
         state.sst_bytes = 300;
         let limit = 1000;
 
-        // Act & Assert
-        assert_eq!(state.free_bytes(limit), 700);
+        // Act
+        let free = state.free_bytes(limit);
+
+        // Assert
+        assert_eq!(free, 700);
     }
 
     #[test]
@@ -154,19 +162,25 @@ mod tests {
         state.sst_bytes = 1000;
         let limit = 500;
 
-        // Act & Assert
-        assert_eq!(state.free_bytes(limit), 0); // Saturating subtraction
+        // Act
+        let free = state.free_bytes(limit);
+
+        // Assert
+        assert_eq!(free, 0); // Saturating subtraction
     }
 
     #[test]
     fn should_calculate_usage_percent_correctly() {
-        // Arrange & Act
+        // Arrange
         let mut state = DiskState::new();
         state.sst_bytes = 500;
         let limit = 1000;
 
+        // Act
+        let percent = state.usage_percent(limit);
+
         // Assert
-        assert_eq!(state.usage_percent(limit), 50);
+        assert_eq!(percent, 50);
     }
 
     #[test]
@@ -176,8 +190,11 @@ mod tests {
         state.sst_bytes = 1000;
         let limit = 500;
 
-        // Act & Assert
-        assert_eq!(state.usage_percent(limit), 200); // 1000 / 500 * 100 = 200
+        // Act
+        let percent = state.usage_percent(limit);
+
+        // Assert
+        assert_eq!(percent, 200); // 1000 / 500 * 100 = 200
     }
 
     #[test]
@@ -186,13 +203,18 @@ mod tests {
         let state = DiskState::new();
         let limit = 0;
 
-        // Act & Assert
-        assert_eq!(state.usage_percent(limit), 100);
+        // Act
+        let percent = state.usage_percent(limit);
+
+        // Assert
+        assert_eq!(percent, 100);
     }
 
     #[test]
     fn should_implement_default_for_disk_state() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let state = DiskState::default();
 
         // Assert
@@ -201,7 +223,9 @@ mod tests {
 
     #[test]
     fn should_create_atomic_disk_state_with_zero() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let state = AtomicDiskState::new();
 
         // Assert
@@ -243,13 +267,18 @@ mod tests {
         let state = AtomicDiskState::new();
         state.update(400);
 
-        // Act & Assert
-        assert_eq!(state.usage_percent(1000), 40);
+        // Act
+        let percent = state.usage_percent(1000);
+
+        // Assert
+        assert_eq!(percent, 40);
     }
 
     #[test]
     fn should_implement_default_for_atomic_disk_state() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let state = AtomicDiskState::default();
 
         // Assert
@@ -262,20 +291,20 @@ mod tests {
         let mut state = DiskState::new();
         let limit = 10000;
 
-        // Act & Assert: Test various usage levels
-        state.sst_bytes = 0;
-        assert_eq!(state.usage_percent(limit), 0);
+        let cases = [(0, 0), (1000, 10), (5000, 50), (9000, 90), (10000, 100)];
 
-        state.sst_bytes = 1000;
-        assert_eq!(state.usage_percent(limit), 10);
+        // Act
+        let results: Vec<u32> = cases
+            .iter()
+            .map(|(sst_bytes, _expected)| {
+                state.sst_bytes = *sst_bytes;
+                state.usage_percent(limit)
+            })
+            .collect();
 
-        state.sst_bytes = 5000;
-        assert_eq!(state.usage_percent(limit), 50);
-
-        state.sst_bytes = 9000;
-        assert_eq!(state.usage_percent(limit), 90);
-
-        state.sst_bytes = 10000;
-        assert_eq!(state.usage_percent(limit), 100);
+        // Assert
+        for ((_, expected), actual) in cases.iter().zip(results.iter().copied()) {
+            assert_eq!(actual, *expected);
+        }
     }
 }

@@ -79,11 +79,14 @@ mod tests {
 
     #[test]
     fn should_create_policy_with_default_watermarks() {
-        // Arrange & Act
+        // Arrange
+        let max_local_bytes = 1024 * 1024;
+
+        // Act
         let policy = StorageBudgetPolicy::new(1024 * 1024);
 
         // Assert
-        assert_eq!(policy.max_local_bytes, 1024 * 1024);
+        assert_eq!(policy.max_local_bytes, max_local_bytes);
         assert_eq!(policy.high_watermark_percent, 90);
         assert_eq!(policy.critical_watermark_percent, 95);
         assert_eq!(policy.emergency_watermark_percent, 98);
@@ -94,11 +97,17 @@ mod tests {
         // Arrange
         let policy = StorageBudgetPolicy::new(1024 * 1024);
 
-        // Act & Assert
-        assert!(!policy.is_high_watermark(89));
-        assert!(policy.is_high_watermark(90));
-        assert!(policy.is_high_watermark(95));
-        assert!(policy.is_high_watermark(98));
+        // Act
+        let below = policy.is_high_watermark(89);
+        let at = policy.is_high_watermark(90);
+        let above_95 = policy.is_high_watermark(95);
+        let above_98 = policy.is_high_watermark(98);
+
+        // Assert
+        assert!(!below);
+        assert!(at);
+        assert!(above_95);
+        assert!(above_98);
     }
 
     #[test]
@@ -106,10 +115,15 @@ mod tests {
         // Arrange
         let policy = StorageBudgetPolicy::new(1024 * 1024);
 
-        // Act & Assert
-        assert!(!policy.is_critical_watermark(94));
-        assert!(policy.is_critical_watermark(95));
-        assert!(policy.is_critical_watermark(98));
+        // Act
+        let below = policy.is_critical_watermark(94);
+        let at = policy.is_critical_watermark(95);
+        let above = policy.is_critical_watermark(98);
+
+        // Assert
+        assert!(!below);
+        assert!(at);
+        assert!(above);
     }
 
     #[test]
@@ -117,22 +131,33 @@ mod tests {
         // Arrange
         let policy = StorageBudgetPolicy::new(1024 * 1024);
 
-        // Act & Assert
-        assert!(!policy.is_emergency_watermark(97));
-        assert!(policy.is_emergency_watermark(98));
-        assert!(policy.is_emergency_watermark(99));
-        assert!(policy.is_emergency_watermark(100));
+        // Act
+        let below = policy.is_emergency_watermark(97);
+        let at = policy.is_emergency_watermark(98);
+        let above_99 = policy.is_emergency_watermark(99);
+        let max = policy.is_emergency_watermark(100);
+
+        // Assert
+        assert!(!below);
+        assert!(at);
+        assert!(above_99);
+        assert!(max);
     }
 
     #[test]
     fn should_customize_watermarks() {
-        // Arrange & Act
+        // Arrange
+        let high = 80;
+        let critical = 85;
+        let emergency = 90;
+
+        // Act
         let policy = StorageBudgetPolicy::new(1024 * 1024).with_watermarks(80, 85, 90);
 
         // Assert
-        assert_eq!(policy.high_watermark_percent, 80);
-        assert_eq!(policy.critical_watermark_percent, 85);
-        assert_eq!(policy.emergency_watermark_percent, 90);
+        assert_eq!(policy.high_watermark_percent, high);
+        assert_eq!(policy.critical_watermark_percent, critical);
+        assert_eq!(policy.emergency_watermark_percent, emergency);
     }
 
     #[test]
@@ -140,17 +165,25 @@ mod tests {
         // Arrange
         let policy = StorageBudgetPolicy::new(1000); // 1000 bytes, high at 90%
 
-        // Act & Assert
+        // Act
+        let remaining_at_0 = policy.bytes_until_high_watermark(0);
+        let remaining_at_450 = policy.bytes_until_high_watermark(450);
+        let remaining_at_threshold = policy.bytes_until_high_watermark(900);
+        let remaining_over_threshold = policy.bytes_until_high_watermark(950);
+
+        // Assert
         // High threshold = 900 bytes
-        assert_eq!(policy.bytes_until_high_watermark(0), 900); // 900 bytes free
-        assert_eq!(policy.bytes_until_high_watermark(450), 450); // 450 bytes free
-        assert_eq!(policy.bytes_until_high_watermark(900), 0); // At threshold
-        assert_eq!(policy.bytes_until_high_watermark(950), -50); // Over threshold
+        assert_eq!(remaining_at_0, 900); // 900 bytes free
+        assert_eq!(remaining_at_450, 450); // 450 bytes free
+        assert_eq!(remaining_at_threshold, 0); // At threshold
+        assert_eq!(remaining_over_threshold, -50); // Over threshold
     }
 
     #[test]
     fn should_return_default_policy() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let policy = StorageBudgetPolicy::default();
 
         // Assert
@@ -160,8 +193,13 @@ mod tests {
 
     #[test]
     fn should_have_eviction_strategies_with_default() {
-        // Arrange & Act & Assert
-        assert_eq!(EvictionStrategy::default(), EvictionStrategy::Lru);
+        // Arrange
+
+        // Act
+        let default_strategy = EvictionStrategy::default();
+
+        // Assert
+        assert_eq!(default_strategy, EvictionStrategy::Lru);
         assert_ne!(EvictionStrategy::Lru, EvictionStrategy::Fifo);
         assert_ne!(EvictionStrategy::Fifo, EvictionStrategy::Random);
     }

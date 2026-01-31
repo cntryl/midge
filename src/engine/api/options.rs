@@ -208,12 +208,6 @@ impl OpenOptions {
     /// Data is NOT persisted and will be lost when engine is dropped.
     /// Ideal for: testing, caching, ephemeral workloads
     ///
-    /// # Example
-    /// ```ignore
-    /// let opts = OpenOptions::in_memory()
-    ///     .goal(Goal::Latency)
-    ///     .build();
-    /// ```
     pub fn in_memory() -> Self {
         Self {
             storage: Storage::InMemory,
@@ -236,12 +230,6 @@ impl OpenOptions {
     /// Data persists to the specified path on local disk.
     /// Ideal for: traditional deployments, single-node databases
     ///
-    /// # Example
-    /// ```ignore
-    /// let opts = OpenOptions::local("./my_database")
-    ///     .goal(Goal::Throughput)
-    ///     .build();
-    /// ```
     pub fn local<P: Into<PathBuf>>(path: P) -> Self {
         Self {
             storage: Storage::Local { path: path.into() },
@@ -269,19 +257,6 @@ impl OpenOptions {
     /// * `local_cache_path` - Local directory for caching/staging
     /// * `bucket` - Cloud bucket/container name
     /// * `prefix` - Object key prefix
-    ///
-    /// # Example
-    /// ```ignore
-    /// // AWS S3 with local cache
-    /// let opts = OpenOptions::cloud("./cache", "my-bucket", "db/prod/")
-    ///     .goal(Goal::Economy)
-    ///     .build();
-    ///
-    /// // Cloudflare R2 with local cache
-    /// let opts = OpenOptions::cloud("/tmp/midge-cache", "my-r2-bucket", "db/")
-    ///     .goal(Goal::Throughput)
-    ///     .build();
-    /// ```
     pub fn cloud<P: Into<PathBuf>, S: Into<String>>(
         local_cache_path: P,
         bucket: S,
