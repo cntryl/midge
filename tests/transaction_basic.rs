@@ -641,7 +641,7 @@ fn should_support_best_effort_during_bulk_load_phase_when_followed_by_flush() {
         let best_effort_opts = WriteOptions::best_effort();
         let buffered_opts = WriteOptions::buffered();
 
-        // Act (Phase 1): Fast bulk load with best_effort (setup, not measured)
+        // Arrange: Fast bulk load with best_effort (setup; data loss on crash acceptable here)
         const BULK_COUNT: usize = 1000;
         for i in 0..BULK_COUNT {
             let mut txn = engine
@@ -650,20 +650,16 @@ fn should_support_best_effort_during_bulk_load_phase_when_followed_by_flush() {
             let key = format!("bulk_{:05}", i).into_bytes();
             let value = format!("data_{}", i * 2).into_bytes();
             txn.put(key, value, None).unwrap();
-            // Use best_effort() for fast bulk load - data loss on crash acceptable here
             engine.commit(txn, best_effort_opts).unwrap();
         }
 
-        // Flush to ensure bulk-loaded data reaches storage
+        // Act: Flush to ensure bulk-loaded data reaches storage, then write a "measured" key.
         engine.flush_cf(&cf).unwrap();
-
-        // Act (Phase 2): Verify data persisted, then switch to buffered for measured operations
         let mut txn = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         txn.put(b"measured_key".to_vec(), b"measured_value".to_vec(), None)
             .unwrap();
-        // Switch to buffered() for measured operations
         engine.commit(txn, buffered_opts).unwrap();
 
         // Assert: Verify all data is readable

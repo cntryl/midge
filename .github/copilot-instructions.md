@@ -11,7 +11,7 @@ the project's architecture, conventions, and developer workflows.
 
 STOP!
 
-- did you validate tests? `python ./scripts/validate_tests.py -- --summary`
+- did you validate tests? `python ./scripts/validate_tests.py --summary`
 - did you fix all clippy warnings? `cargo clippy --all-targets`
 
 - **Big picture**: Midge is an embedded LSM-tree engine in Rust. Key
@@ -30,7 +30,7 @@ STOP!
 
   - `cargo build --workspace`
   - `cargo test` (runs unit + integration tests)
-  - `python ./scripts/validate_tests.py -- --summary` (enforces test rules)
+  - `python ./scripts/validate_tests.py --summary` (test naming/structure validation)
   - `cargo bench` / `cargo bench --bench <name>` (Criterion benches)
 
 - **Where examples live**:
@@ -41,7 +41,7 @@ STOP!
 
 - **Test conventions (required)**:
 
-  - Name: `should_{action}_when_{context}`. Meta-tests enforce this.
+  - Name: `should_{action}_when_{context}`. Validator script checks this.
   - Structure for non-trivial tests: include `// Arrange`, `// Act`,
     `// Assert`. Only one `// Act` per test. Small tests (<5 lines)
     may omit full AAA.

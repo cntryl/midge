@@ -258,7 +258,9 @@ mod tests {
 
     #[test]
     fn should_calculate_correct_bit_size() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let size_100 = BloomWriter::calculate_bit_size(100, 0.01);
         let size_1000 = BloomWriter::calculate_bit_size(1000, 0.01);
 
@@ -291,18 +293,26 @@ mod tests {
         // Arrange
         let mut filter = BloomWriter::new(100, 0.01);
 
-        // Act & Assert
+        // Act
+        let mut counts = Vec::new();
         for i in 0..10 {
             let before = filter.key_count();
             filter.insert(format!("key{}", i).as_bytes());
             let after = filter.key_count();
+            counts.push((before, after));
+        }
+
+        // Assert
+        for (before, after) in counts {
             assert_eq!(after, before + 1, "Key count should increase by 1");
         }
     }
 
     #[test]
     fn should_have_zero_key_count_when_empty() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let filter = BloomWriter::new(100, 0.01);
 
         // Assert
@@ -342,7 +352,9 @@ mod tests {
 
     #[test]
     fn should_calculate_bit_size_monotonically_increases() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let size_10 = BloomWriter::calculate_bit_size(10, 0.01);
         let size_100 = BloomWriter::calculate_bit_size(100, 0.01);
         let size_1000 = BloomWriter::calculate_bit_size(1000, 0.01);
@@ -356,7 +368,9 @@ mod tests {
 
     #[test]
     fn should_have_minimum_bit_size_of_64() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let size_1 = BloomWriter::calculate_bit_size(1, 0.01);
         let size_0 = BloomWriter::calculate_bit_size(0, 0.01);
 
@@ -411,7 +425,9 @@ mod tests {
 
     #[test]
     fn should_distinguish_different_false_positive_rates() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let size_fpr_001 = BloomWriter::calculate_bit_size(100, 0.001);
         let size_fpr_01 = BloomWriter::calculate_bit_size(100, 0.01);
         let size_fpr_1 = BloomWriter::calculate_bit_size(100, 0.1);
@@ -469,7 +485,9 @@ mod tests {
 
     #[test]
     fn should_have_adaptive_k_selection() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let writer_small = BloomWriter::new(10, 0.01);
         let writer_large = BloomWriter::new(10000, 0.01);
 
@@ -482,7 +500,9 @@ mod tests {
 
     #[test]
     fn should_handle_fpr_values_respecting_extreme_cases() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let size_0 = BloomWriter::calculate_bit_size(100, 0.0001); // Very low FPR
         let size_1 = BloomWriter::calculate_bit_size(100, 0.99); // Very high FPR
 

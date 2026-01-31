@@ -245,8 +245,13 @@ mod tests {
 
     #[test]
     fn should_return_bytes_consumed() {
+        // Arrange
         let encoded = encode(b"key", 0u16, Some(b"val"), 42, EntryType::Put);
+
+        // Act
         let (entry, consumed) = decode(&encoded, 0).unwrap();
+
+        // Assert
         assert_eq!(entry.bytes_consumed, encoded.len());
         assert_eq!(consumed, encoded.len());
     }

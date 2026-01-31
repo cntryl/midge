@@ -77,7 +77,9 @@ mod tests {
 
     #[test]
     fn should_create_cache_key_with_values() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let key = CacheKey::for_data(42, 1024);
 
         // Assert
@@ -88,7 +90,9 @@ mod tests {
 
     #[test]
     fn should_create_data_block_key() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let key = CacheKey::for_data(1, 100);
 
         // Assert
@@ -97,7 +101,9 @@ mod tests {
 
     #[test]
     fn should_create_index_block_key() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let key = CacheKey::for_index(1, 100);
 
         // Assert
@@ -106,7 +112,9 @@ mod tests {
 
     #[test]
     fn should_create_filter_block_key() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let key = CacheKey::for_filter(1, 100);
 
         // Assert
@@ -119,6 +127,8 @@ mod tests {
         let key1 = CacheKey::for_data(1, 100);
         let key2 = CacheKey::for_data(2, 100);
 
+        // Act
+
         // Assert
         assert_ne!(key1, key2);
     }
@@ -128,6 +138,8 @@ mod tests {
         // Arrange
         let key1 = CacheKey::for_data(1, 100);
         let key2 = CacheKey::for_data(1, 200);
+
+        // Act
 
         // Assert
         assert_ne!(key1, key2);
@@ -139,6 +151,8 @@ mod tests {
         let key1 = CacheKey::for_data(1, 100);
         let key2 = CacheKey::for_index(1, 100);
 
+        // Act
+
         // Assert
         assert_ne!(key1, key2);
     }
@@ -148,6 +162,8 @@ mod tests {
         // Arrange
         let key1 = CacheKey::for_data(1, 100);
         let key2 = CacheKey::for_data(1, 100);
+
+        // Act
 
         // Assert
         assert_eq!(key1, key2);
@@ -235,7 +251,9 @@ mod tests {
 
     #[test]
     fn should_handle_max_u64_values() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let key = CacheKey::for_data(u64::MAX, u64::MAX);
 
         // Assert
@@ -246,7 +264,9 @@ mod tests {
 
     #[test]
     fn should_handle_zero_values() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let key = CacheKey::for_data(0, 0);
 
         // Assert

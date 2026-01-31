@@ -194,12 +194,15 @@ mod tests {
         // Arrange
         let counter = AdmissionCounter::new(1, 1000);
 
-        // Act & Assert - all keys hash to same cell
+        // Act - all keys hash to same cell
         counter.record_access(b"key1");
-        assert!(counter.estimate(b"key1"));
         counter.record_access(b"key2");
-        assert!(counter.estimate(b"key1"));
-        assert!(counter.estimate(b"key2"));
+        let key1_admitted = counter.estimate(b"key1");
+        let key2_admitted = counter.estimate(b"key2");
+
+        // Assert
+        assert!(key1_admitted);
+        assert!(key2_admitted);
     }
 
     #[test]

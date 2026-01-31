@@ -77,8 +77,13 @@ mod tests {
 
     #[test]
     fn should_create_node() {
-        // Arrange & Act
-        let node = TrieNode::new(0, b"test".to_vec(), Some(42));
+        // Arrange
+        let prefix_len = 0;
+        let key_delta = b"test".to_vec();
+        let block_id = Some(42);
+
+        // Act
+        let node = TrieNode::new(prefix_len, key_delta, block_id);
 
         // Assert
         assert_eq!(node.prefix_len, 0);
@@ -89,8 +94,13 @@ mod tests {
 
     #[test]
     fn should_create_root_node() {
-        // Arrange & Act
-        let node = TrieNode::new(0, Vec::new(), None);
+        // Arrange
+        let prefix_len = 0;
+        let key_delta = Vec::new();
+        let block_id = None;
+
+        // Act
+        let node = TrieNode::new(prefix_len, key_delta, block_id);
 
         // Assert
         assert_eq!(node.prefix_len, 0);
@@ -101,8 +111,13 @@ mod tests {
 
     #[test]
     fn should_create_internal_node_with_prefix() {
-        // Arrange & Act
-        let node = TrieNode::new(5, b"delta".to_vec(), None);
+        // Arrange
+        let prefix_len = 5;
+        let key_delta = b"delta".to_vec();
+        let block_id = None;
+
+        // Act
+        let node = TrieNode::new(prefix_len, key_delta, block_id);
 
         // Assert
         assert_eq!(node.prefix_len, 5);
@@ -113,8 +128,13 @@ mod tests {
 
     #[test]
     fn should_create_leaf_node_with_block_id() {
-        // Arrange & Act
-        let node = TrieNode::new(10, b"suffix".to_vec(), Some(999));
+        // Arrange
+        let prefix_len = 10;
+        let key_delta = b"suffix".to_vec();
+        let block_id = Some(999);
+
+        // Act
+        let node = TrieNode::new(prefix_len, key_delta, block_id);
 
         // Assert
         assert_eq!(node.prefix_len, 10);
@@ -125,8 +145,13 @@ mod tests {
 
     #[test]
     fn should_create_node_with_large_block_id() {
-        // Arrange & Act
-        let node = TrieNode::new(0, b"key".to_vec(), Some(u32::MAX));
+        // Arrange
+        let prefix_len = 0;
+        let key_delta = b"key".to_vec();
+        let block_id = Some(u32::MAX);
+
+        // Act
+        let node = TrieNode::new(prefix_len, key_delta, block_id);
 
         // Assert
         assert_eq!(node.block_id, Some(u32::MAX));
@@ -229,15 +254,15 @@ mod tests {
         node.add_child(TrieEdge::new(b'b', 1));
         node.add_child(TrieEdge::new(b'c', 2));
 
-        // Act & Assert
-        assert!(node.find_child(b'a').is_some());
-        assert_eq!(node.find_child(b'a').unwrap().child_index, 0);
+        // Act
+        let a = node.find_child(b'a').map(|e| e.child_index);
+        let b = node.find_child(b'b').map(|e| e.child_index);
+        let c = node.find_child(b'c').map(|e| e.child_index);
 
-        assert!(node.find_child(b'b').is_some());
-        assert_eq!(node.find_child(b'b').unwrap().child_index, 1);
-
-        assert!(node.find_child(b'c').is_some());
-        assert_eq!(node.find_child(b'c').unwrap().child_index, 2);
+        // Assert
+        assert_eq!(a, Some(0));
+        assert_eq!(b, Some(1));
+        assert_eq!(c, Some(2));
     }
 
     #[test]
@@ -247,22 +272,31 @@ mod tests {
         node.add_child(TrieEdge::new(b'a', 0));
         node.add_child(TrieEdge::new(b'b', 1));
 
-        // Act & Assert
-        assert!(node.find_child(b'z').is_none());
-        assert!(node.find_child(b'c').is_none());
-        assert!(node.find_child(0).is_none());
+        // Act
+        let z = node.find_child(b'z');
+        let c = node.find_child(b'c');
+        let zero = node.find_child(0);
+
+        // Assert
+        assert!(z.is_none());
+        assert!(c.is_none());
+        assert!(zero.is_none());
     }
 
     #[test]
-    fn should_find_first_and_last_children() {
+    fn should_find_first_last_children() {
         // Arrange
         let mut node = TrieNode::new(0, b"root".to_vec(), None);
         node.add_child(TrieEdge::new(0, 0)); // Minimum byte value
         node.add_child(TrieEdge::new(255, 1)); // Maximum byte value
 
-        // Act & Assert
-        assert!(node.find_child(0).is_some());
-        assert!(node.find_child(255).is_some());
+        // Act
+        let first = node.find_child(0);
+        let last = node.find_child(255);
+
+        // Assert
+        assert!(first.is_some());
+        assert!(last.is_some());
     }
 
     #[test]
@@ -271,15 +305,24 @@ mod tests {
         let leaf_node = TrieNode::new(0, b"leaf".to_vec(), Some(42));
         let internal_node = TrieNode::new(0, b"internal".to_vec(), None);
 
-        // Act & Assert
-        assert!(leaf_node.is_leaf());
-        assert!(!internal_node.is_leaf());
+        // Act
+        let leaf_is_leaf = leaf_node.is_leaf();
+        let internal_is_leaf = internal_node.is_leaf();
+
+        // Assert
+        assert!(leaf_is_leaf);
+        assert!(!internal_is_leaf);
     }
 
     #[test]
     fn should_identify_leaf_with_block_id_zero() {
-        // Arrange & Act
-        let node = TrieNode::new(0, b"key".to_vec(), Some(0));
+        // Arrange
+        let prefix_len = 0;
+        let key_delta = b"key".to_vec();
+        let block_id = Some(0);
+
+        // Act
+        let node = TrieNode::new(prefix_len, key_delta, block_id);
 
         // Assert
         assert!(node.is_leaf()); // Some(0) is still a leaf
@@ -316,9 +359,15 @@ mod tests {
 
     #[test]
     fn should_create_edge_with_valid_indices() {
-        // Arrange & Act
-        let edge = TrieEdge::new(b'x', 0);
-        let edge_max = TrieEdge::new(b'y', u32::MAX);
+        // Arrange
+        let first_byte_min = b'x';
+        let child_index_min = 0;
+        let first_byte_max = b'y';
+        let child_index_max = u32::MAX;
+
+        // Act
+        let edge = TrieEdge::new(first_byte_min, child_index_min);
+        let edge_max = TrieEdge::new(first_byte_max, child_index_max);
 
         // Assert
         assert_eq!(edge.first_byte, b'x');

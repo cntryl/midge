@@ -209,7 +209,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn should_acquire_and_release_lease_when_no_contention() {
+    fn should_acquire_release_lease_when_no_contention() {
         let temp_dir = tempfile::tempdir().unwrap();
         let lease = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf()));
 

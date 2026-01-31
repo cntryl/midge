@@ -23,7 +23,7 @@ The engine integrates like a library, not a service.
 
 ## Actor-Owned Core
 
-A single **EngineActor** owns all mutable engine state:
+A single **EventLoop** with coordinated actors owns all mutable engine state:
 
 - sequence numbers and visibility
 - memtables and immutables
@@ -56,8 +56,6 @@ operation
 This applies uniformly to:
 
 - Put / Delete / DeleteRange
-- Merge
-- WriteBatch
 - Transaction commit
 
 There are no side paths, fast paths, or hidden mutations.
@@ -66,25 +64,28 @@ There are no side paths, fast paths, or hidden mutations.
 
 ### Core KV
 
-- Get / Range / Prefix
+- Get (point reads)
 - Put
 - Delete
 - DeleteRange (range tombstones)
+- Scan (range queries via Query builder with prefix, start/end bounds, limits, direction)
 
-### Atomic Batches
+### Atomic Transactions
 
-- Multi-key atomic visibility
+- Multi-operation atomic commits via Transaction
+- ReadOnly and ReadWrite modes
+- Snapshot isolation at transaction start
 - Single commit boundary
 - WAL-backed durability
 
-### Transactions (LWW-based Isolation)
+### Transaction Modes
 
-- Last-Write-Wins isolation with snapshot support
-- Optimistic conflict detection
-- Actor-serialized commit
+- ReadOnly: snapshot-isolated reads
+- ReadWrite: atomic writes with snapshot-based reads
+- Actor-serialized commits
 - No long-lived locks
 
-Snapshots are first-class and enforced by seqno visibility.
+Snapshots are captured at transaction start and enforced by sequence number visibility.
 
 ## Storage Modes & Source of Truth
 
@@ -115,7 +116,7 @@ The engine supports **three explicit storage modes**, each with a single authori
 
 - WAL appends locally for latency
 - Upload to cloud storage is actor-scheduled
-- Durability levels are explicit (memory / local / cloud-ack)
+- Durability policies are explicit (Strict / Batched / CloudMirrored / CloudFirst / BestEffort)
 - Recovery is driven by:
 
   - manifest
@@ -303,12 +304,12 @@ The principle: **Midge is the storage layer you can reason about and test.**
 
 ## Concrete Example: A Write and Its State Transitions
 
-Here's what happens when an application calls `put("user:42", value)`:
+Here's what happens when an application calls `put` within a transaction:
 
 ```
-1. Application calls: engine.put("user:42", value)
+1. Application creates transaction and calls: txn.put("user:42", value)
 
-2. EngineActor receives Put message
+2. EventLoop receives ApplyTransaction message
    - Assign seqno (e.g., 1005)
    - Check write stall conditions
 
@@ -343,72 +344,19 @@ If we replay the same sequence of inputs, we get the same sequence of outputs.
 
 ### Initialization
 
-```rust
-// Application creates engine with config
-let config = EngineConfig {
-    storage_mode: StorageMode::Cloud {
-        bucket: "my-db-bucket",
-        provider: CloudProvider::S3,
-    },
-    write_buffer_size: 64 * MB,
-    cache_size: 512 * MB,
-    compaction_levels: 10,
-};
+Applications create an engine with explicit configuration for storage mode, write buffer size, cache size, and compaction levels. The storage backend (memory, local, or cloud) is specified directly.
 
-let engine = Engine::open(config)?;
-```
+### Write Operations
 
-### Write Loop
-
-```rust
-// Application's request handler
-loop {
-    let req = receive_request();
-
-    // Single, synchronous call
-    let result = engine.put(&req.key, &req.value);
-
-    match result {
-        Ok(seqno) => {
-            // Durability level indicates where data is
-            println!("Committed at seqno {}", seqno);
-        }
-        Err(WriteStall) => {
-            // Backpressure: memtable full, compaction lagging
-            // Application decides: retry, drop, or wait
-        }
-        Err(e) => {
-            // Permanent failure
-        }
-    }
-}
-```
+All write operations are synchronous. Writes are committed via Transaction with explicit WriteOptions (sync, buffered, best_effort, cloud_strict). The engine may return backpressure signals (write stalls) when the memtable queue is full or compaction is lagging, allowing the application to decide how to handle the situation.
 
 ### Snapshots & Iteration
 
-```rust
-// Get a snapshot at a known seqno
-let snap = engine.snapshot(seqno_1000)?;
-
-// Iterate consistently
-for item in snap.iter(prefix)? {
-    process(item);
-}
-
-// Snapshot is released when dropped
-drop(snap);
-```
+Snapshots provide consistent point-in-time views at specific sequence numbers. Iteration is consistent within a snapshot and supports prefix-based scanning. Snapshots are released when dropped.
 
 ### Shutdown
 
-```rust
-// Explicit graceful shutdown
-engine.flush_cf(&cf)?;  // Flush all memtables
-engine.compact()?; // Optional: run compaction
-engine.close()?;   // Close all handles, sync manifests
-```
-
-The API is **simple, synchronous, and explicit**. No magic.
+Graceful shutdown involves explicitly flushing memtables, optionally running compaction, and closing all handles with manifest synchronization. The API is **simple, synchronous, and explicit**. No magic.
 
 ## Why This Isn't RocksDB
 
@@ -455,7 +403,7 @@ The API is **simple, synchronous, and explicit**. No magic.
 
 Every component exposes its state:
 
-### EngineActor Metrics
+### Runtime Metrics
 
 - Seqno assignment rate
 - Memtable size and count
@@ -525,9 +473,9 @@ These layers exist and must maintain their invariants:
 
 User-facing engine interface (get, put, range, snapshot, etc).
 
-### Core Actor
+### Core Runtime
 
-EngineActor: sequences all mutations, owns state.
+EventLoop with specialized actors: sequences all mutations, owns state.
 
 ### Memtable & Immutable Layers
 

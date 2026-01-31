@@ -139,7 +139,12 @@ mod tests {
 
     #[test]
     fn should_create_balanced_config() {
+        // Arrange
+
+        // Act
         let config = TieredBloomConfig::balanced();
+
+        // Assert
         assert_eq!(config.l0_fpr, 0.001);
         assert_eq!(config.l1_fpr, 0.01);
         assert_eq!(config.l2_plus_fpr, 0.05);
@@ -147,7 +152,12 @@ mod tests {
 
     #[test]
     fn should_get_fpr_by_level() {
+        // Arrange
+
+        // Act
         let config = TieredBloomConfig::balanced();
+
+        // Assert
         assert_eq!(config.fpr_for_level(0), 0.001);
         assert_eq!(config.fpr_for_level(1), 0.01);
         assert_eq!(config.fpr_for_level(2), 0.05);
@@ -156,10 +166,14 @@ mod tests {
 
     #[test]
     fn should_estimate_space_savings() {
+        // Arrange
+
+        // Act
         let config = TieredBloomConfig::balanced();
         let (saved, pct) = config.estimate_space_savings_vs_uniform(1000, 10000, 100000);
 
         // Tiered should save space by having higher FPR on larger levels
+        // Assert
         assert!(saved > 0, "Should save bits with tiered config");
         assert!(pct > 0.0, "Should calculate positive percentage");
         assert!(pct < 100.0, "Savings should be reasonable");
@@ -167,8 +181,13 @@ mod tests {
 
     #[test]
     fn should_display_config() {
+        // Arrange
+
+        // Act
         let config = TieredBloomConfig::balanced();
         let display = format!("{}", config);
+
+        // Assert
         assert!(display.contains("L0"));
         assert!(display.contains("L1"));
         assert!(display.contains("L2+"));
@@ -176,7 +195,12 @@ mod tests {
 
     #[test]
     fn should_have_uniform_option() {
+        // Arrange
+
+        // Act
         let config = TieredBloomConfig::uniform(0.02);
+
+        // Assert
         assert_eq!(config.l0_fpr, 0.02);
         assert_eq!(config.l1_fpr, 0.02);
         assert_eq!(config.l2_plus_fpr, 0.02);

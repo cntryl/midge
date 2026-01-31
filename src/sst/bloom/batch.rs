@@ -134,21 +134,29 @@ mod tests {
 
     #[test]
     fn should_calculate_pass_rate() {
+        // Arrange
         let mut results = BatchBloomResults::new(10);
         results.positive_count = 7;
         results.results = vec![0, 0, 0, 0, 0, 0, 0, 1, 1, 1];
 
+        // Act
         let rate = results.pass_rate();
+
+        // Assert
         assert!((rate - 0.7).abs() < 0.001);
     }
 
     #[test]
     fn should_check_result_type() {
+        // Arrange
         let mut results = BatchBloomResults::new(3);
         results.results[0] = 0;
         results.results[1] = 1;
         results.results[2] = 2;
 
+        // Act
+
+        // Assert
         assert!(results.is_positive(0));
         assert!(results.is_negative(1));
         assert!(!results.is_positive(1));

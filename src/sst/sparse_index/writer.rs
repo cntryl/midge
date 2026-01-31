@@ -156,7 +156,9 @@ mod tests {
 
     #[test]
     fn should_create_with_default_sample_rate() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let writer = SparseIndexWriter::new();
 
         // Assert
@@ -166,8 +168,11 @@ mod tests {
 
     #[test]
     fn should_create_with_custom_sample_rate() {
-        // Arrange & Act
-        let writer = SparseIndexWriter::with_sample_rate(8);
+        // Arrange
+        let sample_rate = 8;
+
+        // Act
+        let writer = SparseIndexWriter::with_sample_rate(sample_rate);
 
         // Assert
         assert_eq!(writer.sample_rate, 8);
@@ -175,8 +180,11 @@ mod tests {
 
     #[test]
     fn should_enforce_minimum_sample_rate() {
-        // Arrange & Act
-        let writer = SparseIndexWriter::with_sample_rate(0);
+        // Arrange
+        let sample_rate = 0;
+
+        // Act
+        let writer = SparseIndexWriter::with_sample_rate(sample_rate);
 
         // Assert - should enforce minimum of 1
         assert_eq!(writer.sample_rate, 1);
@@ -271,7 +279,9 @@ mod tests {
 
     #[test]
     fn should_create_via_default() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let writer = SparseIndexWriter::default();
 
         // Assert

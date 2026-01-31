@@ -194,7 +194,12 @@ mod tests {
 
     #[test]
     fn should_create_new_metrics() {
+        // Arrange
+
+        // Act
         let metrics = ReadAmpMetrics::new();
+
+        // Assert
         assert_eq!(metrics.reads_total(), 0);
         assert_eq!(metrics.ssts_touched_total(), 0);
         assert_eq!(metrics.avg_ssts_per_read(), 0.0);
@@ -202,29 +207,41 @@ mod tests {
 
     #[test]
     fn should_record_read_operations() {
+        // Arrange
         let metrics = ReadAmpMetrics::new();
 
+        // Act
         metrics.record_read(3, 1, 5);
-        assert_eq!(metrics.reads_total(), 1);
-        assert_eq!(metrics.ssts_touched_total(), 3);
-        assert_eq!(metrics.l0_ssts_touched_total(), 1);
-        assert_eq!(metrics.blocks_read_total(), 5);
-
+        let after_first = (
+            metrics.reads_total(),
+            metrics.ssts_touched_total(),
+            metrics.l0_ssts_touched_total(),
+            metrics.blocks_read_total(),
+        );
         metrics.record_read(2, 0, 3);
-        assert_eq!(metrics.reads_total(), 2);
-        assert_eq!(metrics.ssts_touched_total(), 5);
-        assert_eq!(metrics.l0_ssts_touched_total(), 1);
-        assert_eq!(metrics.blocks_read_total(), 8);
+        let after_second = (
+            metrics.reads_total(),
+            metrics.ssts_touched_total(),
+            metrics.l0_ssts_touched_total(),
+            metrics.blocks_read_total(),
+        );
+
+        // Assert
+        assert_eq!(after_first, (1, 3, 1, 5));
+        assert_eq!(after_second, (2, 5, 1, 8));
     }
 
     #[test]
     fn should_calculate_avg_ssts_per_read() {
+        // Arrange
         let metrics = ReadAmpMetrics::new();
 
+        // Act
         metrics.record_read(4, 2, 10);
         metrics.record_read(2, 1, 5);
         metrics.record_read(6, 3, 15);
 
+        // Assert
         assert_eq!(metrics.avg_ssts_per_read(), 4.0); // (4+2+6)/3 = 4.0
         assert_eq!(metrics.avg_l0_ssts_per_read(), 2.0); // (2+1+3)/3 = 2.0
         assert_eq!(metrics.avg_blocks_per_read(), 10.0); // (10+5+15)/3 = 10.0
@@ -232,17 +249,22 @@ mod tests {
 
     #[test]
     fn should_calculate_l0_overlap_rate() {
+        // Arrange
         let metrics = ReadAmpMetrics::new();
 
+        // Act
         metrics.record_read(10, 8, 20); // 80% L0
 
+        // Assert
         assert_eq!(metrics.l0_overlap_rate(), 0.8);
     }
 
     #[test]
     fn should_record_budget_violations() {
+        // Arrange
         let metrics = ReadAmpMetrics::new();
 
+        // Act
         // First read: 10 SSTs (>5 limit), 30 blocks (>20 limit) - both violations
         metrics.record_read(10, 5, 30);
 
@@ -252,6 +274,7 @@ mod tests {
         // Third read: 2 SSTs (ok), 50 blocks (>20 limit) - block violation only
         metrics.record_read(2, 1, 50);
 
+        // Assert
         assert_eq!(metrics.reads_total(), 3);
         assert_eq!(metrics.sst_budget_violation_rate(), 1.0 / 3.0); // 1/3
         assert_eq!(metrics.block_budget_violation_rate(), 2.0 / 3.0); // 2/3
@@ -259,8 +282,12 @@ mod tests {
 
     #[test]
     fn should_handle_zero_reads_gracefully() {
+        // Arrange
         let metrics = ReadAmpMetrics::new();
 
+        // Act
+
+        // Assert
         assert_eq!(metrics.avg_ssts_per_read(), 0.0);
         assert_eq!(metrics.l0_overlap_rate(), 0.0);
         assert_eq!(metrics.sst_budget_violation_rate(), 0.0);
@@ -268,13 +295,16 @@ mod tests {
 
     #[test]
     fn should_reset_metrics() {
+        // Arrange
         let metrics = ReadAmpMetrics::new();
 
+        // Act
         metrics.record_read(5, 2, 10);
         metrics.record_sst_budget_violation();
 
         metrics.reset();
 
+        // Assert
         assert_eq!(metrics.reads_total(), 0);
         assert_eq!(metrics.ssts_touched_total(), 0);
         assert_eq!(metrics.avg_ssts_per_read(), 0.0);
@@ -282,11 +312,14 @@ mod tests {
 
     #[test]
     fn should_clone_metrics() {
+        // Arrange
         let metrics = ReadAmpMetrics::new();
         metrics.record_read(5, 2, 10);
 
+        // Act
         let cloned = metrics.clone();
 
+        // Assert
         assert_eq!(cloned.reads_total(), 1);
         assert_eq!(cloned.ssts_touched_total(), 5);
         assert_eq!(cloned.l0_ssts_touched_total(), 2);

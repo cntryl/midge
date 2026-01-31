@@ -156,7 +156,9 @@ mod tests {
 
     #[test]
     fn should_initialize_all_metrics_to_zero() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let metrics = CacheMetrics::new();
 
         // Assert
@@ -210,10 +212,16 @@ mod tests {
         // Arrange
         let metrics = CacheMetrics::new();
 
-        // Act & Assert
-        for i in 1..=10 {
+        // Act
+        let mut values = Vec::new();
+        for _ in 0..10 {
             metrics.record_hit();
-            assert_eq!(metrics.hit_count(), i);
+            values.push(metrics.hit_count());
+        }
+
+        // Assert
+        for (i, value) in values.into_iter().enumerate() {
+            assert_eq!(value, (i as u64) + 1);
         }
     }
 
@@ -222,10 +230,16 @@ mod tests {
         // Arrange
         let metrics = CacheMetrics::new();
 
-        // Act & Assert
-        for i in 1..=10 {
+        // Act
+        let mut values = Vec::new();
+        for _ in 0..10 {
             metrics.record_miss();
-            assert_eq!(metrics.miss_count(), i);
+            values.push(metrics.miss_count());
+        }
+
+        // Assert
+        for (i, value) in values.into_iter().enumerate() {
+            assert_eq!(value, (i as u64) + 1);
         }
     }
 
@@ -234,10 +248,16 @@ mod tests {
         // Arrange
         let metrics = CacheMetrics::new();
 
-        // Act & Assert
-        for i in 1..=10 {
+        // Act
+        let mut values = Vec::new();
+        for _ in 0..10 {
             metrics.record_eviction();
-            assert_eq!(metrics.eviction_count(), i);
+            values.push(metrics.eviction_count());
+        }
+
+        // Assert
+        for (i, value) in values.into_iter().enumerate() {
+            assert_eq!(value, (i as u64) + 1);
         }
     }
 
@@ -258,10 +278,16 @@ mod tests {
         // Arrange
         let metrics = CacheMetrics::new();
 
-        // Act & Assert
-        for i in 1..=5 {
+        // Act
+        let mut values = Vec::new();
+        for _ in 0..5 {
             metrics.add_memory(1000);
-            assert_eq!(metrics.memory_bytes(), i * 1000);
+            values.push(metrics.memory_bytes());
+        }
+
+        // Assert
+        for (i, value) in values.into_iter().enumerate() {
+            assert_eq!(value, ((i as u64) + 1) * 1000);
         }
     }
 
@@ -310,7 +336,9 @@ mod tests {
 
     #[test]
     fn should_have_default_instance() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let metrics = CacheMetrics::default();
 
         // Assert

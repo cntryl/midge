@@ -169,7 +169,9 @@ mod tests {
 
     #[test]
     fn should_create_new_builder() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let builder = TrieBuilder::new();
 
         // Assert
@@ -178,7 +180,9 @@ mod tests {
 
     #[test]
     fn should_create_default_builder() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let builder = TrieBuilder::default();
 
         // Assert
@@ -422,13 +426,15 @@ mod tests {
         let mut builder = TrieBuilder::new();
         let initial = builder.node_count();
 
-        // Act & Assert
+        // Act
         builder.add_key(b"apple", 0).unwrap();
-        assert!(builder.node_count() > initial);
-
         let after_first = builder.node_count();
         builder.add_key(b"banana", 1).unwrap();
-        assert!(builder.node_count() >= after_first);
+        let after_second = builder.node_count();
+
+        // Assert
+        assert!(after_first > initial);
+        assert!(after_second >= after_first);
     }
 
     #[test]

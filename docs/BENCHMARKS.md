@@ -1,19 +1,70 @@
 # Benchmarks
 
-## Cold vs warm cache
+This repo uses [Criterion](https://bheisler.github.io/criterion.rs/book/) for micro- and subsystem-level benchmarking.
 
-- **Cold cache**: Each run starts with caches empty (block cache, OS page cache, and any internal read-ahead). This emphasizes IO and data-structure rebuild costs.
-- **Warm cache**: Caches are pre-filled with the same data before timing. This emphasizes CPU work and data-structure traversal rather than IO.
-- **Why it matters**: Cold runs highlight worst-case latency and steady-state recovery behavior; warm runs show best-case hot-path performance. Compare both when evaluating regressions.
+## Running benchmarks
 
-## Bloom build cost
+- Run the whole suite:
 
-- Bloom filter construction is proportional to the number of keys and requires hashing each key.
-- The cost is dominated by: key iteration, hashing work, and writing the bitset.
-- Large blooms (e.g., 1M keys) can dominate total subsystem time. Treat these as build-time costs that amortize over many reads.
+  ```bash
+  cargo bench
+  ```
 
-## Cloud vs local durability
+- Run a single benchmark target:
 
-- **Local durability**: WAL/fsync costs are mostly device latency; once fsync completes, data is stable on local storage.
-- **Cloud durability**: Costs include network latency, request batching, and provider consistency guarantees. Latency variance is higher and tail latency is more important.
-- Benchmarks that target durability should separate these modes because they reflect different sources of latency and failure recovery behavior.
+  ```bash
+  cargo bench --bench tier1_hotpath_api
+  ```
+
+- Run with filters (Criterion):
+
+  ```bash
+  cargo bench --bench tier1_hotpath_api -- "get"
+  ```
+
+## Benchmark layout
+
+Benchmarks live in `benches/` and are organized by "tiers":
+
+- **Tier 1 (hotpath)**: tight inner-loop microbenchmarks of critical components.
+- **Tier 2 (subsystem)**: measures end-to-end behavior for a subsystem.
+- **Tier 3/4 (system/workloads)**: larger scenarios closer to real workloads.
+
+Common Criterion configuration helpers live in `benches/criterion_helper.rs`.
+
+## Rules (important)
+
+To keep results stable and meaningful:
+
+- Precompute all data outside `b.iter(|| ...)`.
+- No allocations, I/O, or RNG inside the hot loop.
+- Use deterministic seeds when randomness is required.
+- Use `black_box` on inputs/outputs when relevant.
+- Prefer `group.sampling_mode(SamplingMode::Flat)` and `group.throughput(...)` (see `benches/criterion_helper.rs`).
+
+## Interpreting results
+
+- Prefer comparing **relative changes** on the same machine.
+- If numbers move a lot run-to-run, look for:
+  - warmup effects (disk cache / allocator)
+  - background system load
+  - cloud/local filesystem variability
+
+## Common workflows
+
+- Validate correctness first:
+
+  ```bash
+  cargo test
+  ```
+
+- Then benchmark targeted code:
+
+  ```bash
+  cargo bench --bench tier1_hotpath_memtable
+  ```
+
+## Notes for contributors
+
+- If you introduce a new hotpath, consider adding a Tier 1 benchmark.
+- Keep benchmark names descriptive and stable; they become part of long-term performance tracking.
