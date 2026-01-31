@@ -8,8 +8,12 @@ use std::time::Duration;
 
 #[test]
 fn should_return_write_stall_when_memory_budget_exceeded() {
+    // Arrange
     // Memory mode doesn't have meaningful backpressure (everything stays in memory)
     // so we only test durable modes where flush/compaction creates actual pressure.
+
+    // Act
+    let results = std::cell::RefCell::new(Vec::<(String, bool)>::new());
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         let mut opts = opts;
         // Use a smaller budget to trigger stall faster.
@@ -40,12 +44,23 @@ fn should_return_write_stall_when_memory_budget_exceeded() {
             }
         }
 
-        assert!(write_stall_observed, "Expected WriteStall in mode {}", mode);
+        results
+            .borrow_mut()
+            .push((mode.to_string(), write_stall_observed));
     });
+
+    // Assert
+    for (mode, write_stall_observed) in results.into_inner() {
+        assert!(write_stall_observed, "Expected WriteStall in mode {}", mode);
+    }
 }
 
 #[test]
 fn should_succeed_after_backoff_when_write_stall_cleared() {
+    // Arrange
+
+    // Act
+    let results = std::cell::RefCell::new(Vec::<(String, bool, bool)>::new());
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         let mut opts = opts;
         // Use 1MB budget for faster stall detection
@@ -54,7 +69,7 @@ fn should_succeed_after_backoff_when_write_stall_cleared() {
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Hit first stall
-        let mut first_stall_at = None;
+        let mut first_stall_observed = false;
         for i in 0..5000 {
             let key = format!("key_{:06}", i);
             let value = vec![0u8; 1024];
@@ -67,14 +82,12 @@ fn should_succeed_after_backoff_when_write_stall_cleared() {
             match engine.commit(txn, WriteOptions::buffered()) {
                 Ok(()) => {}
                 Err(MidgeError::WriteStall(_)) => {
-                    first_stall_at = Some(i);
+                    first_stall_observed = true;
                     break;
                 }
                 Err(e) => panic!("unexpected: {:?}", e),
             }
         }
-
-        assert!(first_stall_at.is_some(), "Expected stall in mode {}", mode);
 
         // Wait for stall to clear (compaction, etc.)
         std::thread::sleep(Duration::from_millis(100));
@@ -88,21 +101,34 @@ fn should_succeed_after_backoff_when_write_stall_cleared() {
         txn.put(key.as_bytes().to_vec(), value.clone(), None)
             .expect("put");
 
-        // Should either succeed or hit another stall, but not panic
-        match engine.commit(txn, WriteOptions::buffered()) {
-            Ok(()) => {
-                // Success - stall was cleared
-            }
-            Err(MidgeError::WriteStall(_)) => {
-                // Another stall occurred; acceptable
-            }
+        let second_write_ok_or_stall = match engine.commit(txn, WriteOptions::buffered()) {
+            Ok(()) => true,
+            Err(MidgeError::WriteStall(_)) => true,
             Err(e) => panic!("unexpected error: {:?}", e),
-        }
+        };
+
+        results
+            .borrow_mut()
+            .push((mode.to_string(), first_stall_observed, second_write_ok_or_stall));
     });
+
+    // Assert
+    for (mode, first_stall_observed, second_write_ok_or_stall) in results.into_inner() {
+        assert!(first_stall_observed, "Expected stall in mode {}", mode);
+        assert!(
+            second_write_ok_or_stall,
+            "Expected success or stall (not error) in mode {}",
+            mode
+        );
+    }
 }
 
 #[test]
 fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
+    // Arrange
+
+    // Act
+    let results = std::cell::RefCell::new(Vec::<(String, u64)>::new());
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let mut opts = opts;
         opts = opts.memory_budget(512 * 1024); // 512KB instead of 2MB for faster backpressure trigger
@@ -157,17 +183,26 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
         shutdown.store(true, Ordering::Relaxed);
         let (_total_writes, total_stalls) = handle.join().expect("panic");
 
-        // CloudFirst uses a different backpressure mechanism (cloud_write_queue size)
-        // rather than memory budget, so skip the stall assertion for cloud mode.
-        // Memory mode doesn't have meaningful backpressure (everything stays in memory).
+        results.borrow_mut().push((mode.to_string(), total_stalls));
+    });
+
+    // Assert
+    // CloudFirst uses a different backpressure mechanism (cloud_write_queue size)
+    // rather than memory budget, so skip the stall assertion for cloud mode.
+    // Memory mode doesn't have meaningful backpressure (everything stays in memory).
+    for (mode, total_stalls) in results.into_inner() {
         if mode == "local" {
             assert!(total_stalls > 0, "Expected stalls in mode {}", mode);
         }
-    });
+    }
 }
 
 #[test]
 fn should_handle_concurrent_writes_with_consistent_backpressure() {
+    // Arrange
+
+    // Act
+    let results = std::cell::RefCell::new(Vec::<(String, u64)>::new());
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let mut opts = opts;
         opts = opts.memory_budget(4 * 1024 * 1024);
@@ -226,8 +261,13 @@ fn should_handle_concurrent_writes_with_consistent_backpressure() {
             _total_stalls += stalls;
         }
 
+        results.borrow_mut().push((mode.to_string(), total_writes));
+    });
+
+    // Assert
+    for (mode, total_writes) in results.into_inner() {
         if !mode.eq("memory") {
             assert!(total_writes > 0, "should have writes in mode {}", mode);
         }
-    });
+    }
 }

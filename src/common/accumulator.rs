@@ -90,12 +90,19 @@ mod tests {
 
     #[test]
     fn should_notify_waiters_on_flush() {
+        // Arrange
         let acc: Accumulator<u64, u64> = Accumulator::new();
         let rx1 = acc.submit_async(1);
         let rx2 = acc.submit_async(2);
+
+        // Act
         let ran = acc.flush_now(|batch| batch.len() as u64);
+        let v1 = rx1.recv().unwrap();
+        let v2 = rx2.recv().unwrap();
+
+        // Assert
         assert_eq!(ran, 2);
-        assert_eq!(rx1.recv().unwrap(), 2);
-        assert_eq!(rx2.recv().unwrap(), 2);
+        assert_eq!(v1, 2);
+        assert_eq!(v2, 2);
     }
 }

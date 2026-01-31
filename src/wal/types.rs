@@ -295,32 +295,42 @@ mod tests {
     fn should_wire_format_all_operation_kinds() {
         // Arrange (implicit - no setup needed)
 
-        // Act & Assert
-        assert_eq!(WalOpKind::Put.to_wire_format(), 0);
-        assert_eq!(WalOpKind::Insert.to_wire_format(), 1);
-        assert_eq!(WalOpKind::Delete.to_wire_format(), 2);
-        assert_eq!(WalOpKind::DeleteRange.to_wire_format(), 3);
-        assert_eq!(WalOpKind::TxnBegin.to_wire_format(), 4);
-        assert_eq!(WalOpKind::TxnCommit.to_wire_format(), 5);
+        // Act
+        let put = WalOpKind::Put.to_wire_format();
+        let insert = WalOpKind::Insert.to_wire_format();
+        let delete = WalOpKind::Delete.to_wire_format();
+        let delete_range = WalOpKind::DeleteRange.to_wire_format();
+        let txn_begin = WalOpKind::TxnBegin.to_wire_format();
+        let txn_commit = WalOpKind::TxnCommit.to_wire_format();
+
+        // Assert
+        assert_eq!(put, 0);
+        assert_eq!(insert, 1);
+        assert_eq!(delete, 2);
+        assert_eq!(delete_range, 3);
+        assert_eq!(txn_begin, 4);
+        assert_eq!(txn_commit, 5);
     }
 
     #[test]
     fn should_parse_wire_format_for_all_kinds() {
         // Arrange (implicit - no setup needed)
 
-        // Act & Assert
-        assert_eq!(WalOpKind::from_wire_format(0).unwrap(), WalOpKind::Put);
-        assert_eq!(WalOpKind::from_wire_format(1).unwrap(), WalOpKind::Insert);
-        assert_eq!(WalOpKind::from_wire_format(2).unwrap(), WalOpKind::Delete);
-        assert_eq!(
-            WalOpKind::from_wire_format(3).unwrap(),
-            WalOpKind::DeleteRange
-        );
-        assert_eq!(WalOpKind::from_wire_format(4).unwrap(), WalOpKind::TxnBegin);
-        assert_eq!(
-            WalOpKind::from_wire_format(5).unwrap(),
-            WalOpKind::TxnCommit
-        );
+        // Act
+        let put = WalOpKind::from_wire_format(0).unwrap();
+        let insert = WalOpKind::from_wire_format(1).unwrap();
+        let delete = WalOpKind::from_wire_format(2).unwrap();
+        let delete_range = WalOpKind::from_wire_format(3).unwrap();
+        let txn_begin = WalOpKind::from_wire_format(4).unwrap();
+        let txn_commit = WalOpKind::from_wire_format(5).unwrap();
+
+        // Assert
+        assert_eq!(put, WalOpKind::Put);
+        assert_eq!(insert, WalOpKind::Insert);
+        assert_eq!(delete, WalOpKind::Delete);
+        assert_eq!(delete_range, WalOpKind::DeleteRange);
+        assert_eq!(txn_begin, WalOpKind::TxnBegin);
+        assert_eq!(txn_commit, WalOpKind::TxnCommit);
     }
 
     #[test]
