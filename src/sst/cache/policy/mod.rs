@@ -68,34 +68,40 @@ mod tests {
 
     #[test]
     fn should_create_lru_policy() {
-        // Arrange & Act
+        // Arrange
+        let key = CacheKey::for_data(1, 0);
+
+        // Act
         let policy = CachePolicyType::Lru.create();
+        policy.on_access(key);
 
         // Assert - trait object should work
-        let key = CacheKey::for_data(1, 0);
-        policy.on_access(key);
         // Should not panic
     }
 
     #[test]
     fn should_create_tinylfu_policy() {
-        // Arrange & Act
+        // Arrange
+        let key = CacheKey::for_data(1, 0);
+
+        // Act
         let policy = CachePolicyType::TinyLfu.create();
+        policy.on_access(key);
 
         // Assert
-        let key = CacheKey::for_data(1, 0);
-        policy.on_access(key);
         // Should not panic
     }
 
     #[test]
     fn should_create_clockpro_policy() {
-        // Arrange & Act
+        // Arrange
+        let key = CacheKey::for_data(1, 0);
+
+        // Act
         let policy = CachePolicyType::ClockPro.create();
+        policy.on_access(key);
 
         // Assert
-        let key = CacheKey::for_data(1, 0);
-        policy.on_access(key);
         // Should not panic
     }
 
@@ -152,7 +158,8 @@ mod tests {
         ];
         let keys: Vec<CacheKey> = (0..10).map(|i| CacheKey::for_data(i, 0)).collect();
 
-        // Act & Assert - all policies should handle the same sequence
+        // Act - all policies should handle the same sequence
+        let mut victims_after_clear = Vec::new();
         for policy_type in &policy_types {
             let policy = policy_type.create();
 
@@ -170,7 +177,12 @@ mod tests {
 
             // Clear
             policy.clear();
-            assert_eq!(policy.pick_victim(&[]), None);
+            victims_after_clear.push(policy.pick_victim(&[]));
+        }
+
+        // Assert
+        for victim in victims_after_clear {
+            assert_eq!(victim, None);
         }
     }
 
@@ -226,7 +238,7 @@ mod tests {
             policy.clear();
         }
 
-        // Act & Assert
+        // Act
         let lru = CachePolicyType::Lru.create();
         use_policy(&*lru);
 
@@ -235,6 +247,8 @@ mod tests {
 
         let clockpro = CachePolicyType::ClockPro.create();
         use_policy(&*clockpro);
+
+        // Assert
     }
 
     #[test]
@@ -246,7 +260,8 @@ mod tests {
             CachePolicyType::ClockPro.create(),
         ];
 
-        // Act & Assert
+        // Act
+        let mut victims_after_clear = Vec::new();
         for policy in &policies {
             // Add keys in order
             let keys: Vec<CacheKey> = (0..5).map(|i| CacheKey::for_data(i, 0)).collect();
@@ -261,7 +276,12 @@ mod tests {
             policy.clear();
 
             // After clear, should have no victims
-            assert_eq!(policy.pick_victim(&[]), None);
+            victims_after_clear.push(policy.pick_victim(&[]));
+        }
+
+        // Assert
+        for victim in victims_after_clear {
+            assert_eq!(victim, None);
         }
     }
 }

@@ -328,11 +328,17 @@ mod tests {
 
     #[test]
     fn should_convert_u8_to_index_kind() {
-        // Arrange & Act & Assert
-        assert_eq!(IndexKind::from_u8(0), Some(IndexKind::Sparse));
-        assert_eq!(IndexKind::from_u8(1), Some(IndexKind::Trie));
-        assert_eq!(IndexKind::from_u8(2), None);
-        assert_eq!(IndexKind::from_u8(255), None);
+        // Arrange
+        let inputs = [0u8, 1u8, 2u8, 255u8];
+
+        // Act
+        let results = inputs.map(IndexKind::from_u8);
+
+        // Assert
+        assert_eq!(results[0], Some(IndexKind::Sparse));
+        assert_eq!(results[1], Some(IndexKind::Trie));
+        assert_eq!(results[2], None);
+        assert_eq!(results[3], None);
     }
 
     #[test]
@@ -351,10 +357,19 @@ mod tests {
 
     #[test]
     fn should_be_comparable() {
-        // Arrange & Act & Assert
-        assert_eq!(IndexKind::Sparse, IndexKind::Sparse);
-        assert_eq!(IndexKind::Trie, IndexKind::Trie);
-        assert_ne!(IndexKind::Sparse, IndexKind::Trie);
+        // Arrange
+        let sparse = IndexKind::Sparse;
+        let trie = IndexKind::Trie;
+
+        // Act
+        let sparse_eq_sparse = sparse == sparse;
+        let trie_eq_trie = trie == trie;
+        let sparse_ne_trie = sparse != trie;
+
+        // Assert
+        assert!(sparse_eq_sparse);
+        assert!(trie_eq_trie);
+        assert!(sparse_ne_trie);
     }
 
     #[test]

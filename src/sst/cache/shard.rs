@@ -474,7 +474,9 @@ mod tests {
 
     #[test]
     fn should_start_empty() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
 
         // Assert
@@ -520,11 +522,17 @@ mod tests {
         // Arrange
         let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
 
-        // Act & Assert
+        // Act
+        let mut lens = Vec::new();
         for i in 0..10 {
             let key = CacheKey::for_data(i, 0);
             shard.put_sync(key, Bytes::from(format!("data_{}", i).into_bytes()));
-            assert_eq!(shard.len(), (i + 1) as usize);
+            lens.push(shard.len());
+        }
+
+        // Assert
+        for (i, len) in lens.into_iter().enumerate() {
+            assert_eq!(len, i + 1);
         }
     }
 
@@ -552,14 +560,18 @@ mod tests {
         let shard_lru = CacheShard::new(1000, CachePolicyType::Lru);
         let shard_tinyfu = CacheShard::new(1000, CachePolicyType::TinyLfu);
 
-        // Act & Assert (both should work, just with different eviction strategies)
+        // Act (both should work, just with different eviction strategies)
         for i in 0..5 {
             let key = CacheKey::for_data(i, 0);
             shard_lru.put_sync(key, Bytes::from(format!("data{}", i).into_bytes()));
             shard_tinyfu.put_sync(key, Bytes::from(format!("data{}", i).into_bytes()));
         }
-        assert_eq!(shard_lru.len(), 5);
-        assert_eq!(shard_tinyfu.len(), 5);
+        let lru_len = shard_lru.len();
+        let tinylfu_len = shard_tinyfu.len();
+
+        // Assert
+        assert_eq!(lru_len, 5);
+        assert_eq!(tinylfu_len, 5);
     }
 
     #[test]

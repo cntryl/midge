@@ -52,8 +52,10 @@ mod tests {
 
     #[test]
     fn should_create_value_with_data() {
-        // Arrange & Act
+        // Arrange
         let data = Bytes::from(&b"test data"[..]);
+
+        // Act
         let value = CacheValue::new(data.clone());
 
         // Assert
@@ -133,11 +135,18 @@ mod tests {
         let data = Bytes::from(&b"test"[..]);
         let value = CacheValue::new(data);
 
-        // Act & Assert
-        for i in 1..=5 {
+        // Act
+        let mut counts = Vec::new();
+        for _ in 0..5 {
             let count = value.increment_access();
-            assert_eq!(count, i);
-            assert_eq!(value.access_count(), i);
+            counts.push((count, value.access_count()));
+        }
+
+        // Assert
+        for (i, (returned, stored)) in counts.into_iter().enumerate() {
+            let expected = (i as u64) + 1;
+            assert_eq!(returned, expected);
+            assert_eq!(stored, expected);
         }
     }
 

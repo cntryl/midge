@@ -154,7 +154,9 @@ mod tests {
         // Arrange
         let cache = BlockCache::new(1024 * 1024, 16, CachePolicyType::Lru);
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert_eq!(cache.num_shards(), 16);
         assert!(cache.is_empty());
     }
@@ -266,7 +268,9 @@ mod tests {
 
     #[test]
     fn should_support_different_policies() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let lru_cache = BlockCache::new(1024, 1, CachePolicyType::Lru);
         let tinylfu_cache = BlockCache::new(1024, 1, CachePolicyType::TinyLfu);
         let clockpro_cache = BlockCache::new(1024, 1, CachePolicyType::ClockPro);

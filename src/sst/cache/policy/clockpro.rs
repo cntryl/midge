@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn should_have_default_instance() {
-        // Arrange & Act
+        // Arrange
         let policy = ClockProPolicy::default();
 
         // Act
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn should_create_with_custom_capacity() {
-        // Arrange & Act
+        // Arrange
         let policy = ClockProPolicy::with_capacity(512);
 
         // Act
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn should_handle_small_capacity() {
-        // Arrange & Act
+        // Arrange
         let policy = ClockProPolicy::with_capacity(1); // Very small
 
         // Act

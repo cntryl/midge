@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn should_have_default_instance() {
-        // Arrange & Act
+        // Arrange
         let policy = LruPolicy::default();
 
         // Act

@@ -359,17 +359,19 @@ mod tests {
 
     #[test]
     fn should_increase_fpr_with_more_keys() {
-        // Arrange & Act
+        // Arrange
         let mut writer_low = BloomWriter::new(100, 0.01);
         for i in 0..10 {
             writer_low.insert(format!("key{}", i).as_bytes());
         }
-        let fpr_low = writer_low.finish().estimated_fpr();
 
         let mut writer_high = BloomWriter::new(100, 0.01);
         for i in 0..100 {
             writer_high.insert(format!("key{}", i).as_bytes());
         }
+
+        // Act
+        let fpr_low = writer_low.finish().estimated_fpr();
         let fpr_high = writer_high.finish().estimated_fpr();
 
         // Assert
@@ -684,8 +686,11 @@ mod tests {
         let mut serialized = writer.serialize();
         serialized[8] = 0;
 
-        // Act & Assert
-        assert!(BloomReader::deserialize(&serialized).is_err());
+        // Act
+        let result = BloomReader::deserialize(&serialized);
+
+        // Assert
+        assert!(result.is_err());
     }
 
     #[test]
@@ -726,8 +731,11 @@ mod tests {
         let mut serialized = writer.serialize();
         serialized[8] = 9; // k=9 is out of range
 
-        // Act & Assert
-        assert!(BloomReader::deserialize(&serialized).is_err());
+        // Act
+        let result = BloomReader::deserialize(&serialized);
+
+        // Assert
+        assert!(result.is_err());
     }
 
     #[test]

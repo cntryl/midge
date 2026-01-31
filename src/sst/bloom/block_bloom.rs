@@ -158,7 +158,9 @@ mod tests {
 
     #[test]
     fn should_create_empty_block_bloom() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let filter = BlockBloomFilter::new();
 
         // Assert
@@ -217,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn should_check_key_in_correct_block() {
+    fn should_return_might_be_present_for_key_in_own_block() {
         // Arrange
         let mut filter = BlockBloomFilter::new();
 
@@ -231,23 +233,37 @@ mod tests {
         bloom1.insert(b"key1");
         filter.add_block_bloom(&bloom1);
 
-        // Act & Assert
-        assert_eq!(
-            filter.might_contain_in_block(0, b"key0"),
-            BloomTestResult::MightBePresent
-        );
-        assert_eq!(
-            filter.might_contain_in_block(0, b"key1"),
-            BloomTestResult::DefinitelyNotPresent
-        );
-        assert_eq!(
-            filter.might_contain_in_block(1, b"key1"),
-            BloomTestResult::MightBePresent
-        );
-        assert_eq!(
-            filter.might_contain_in_block(1, b"key0"),
-            BloomTestResult::DefinitelyNotPresent
-        );
+        // Act
+        let r0_key0 = filter.might_contain_in_block(0, b"key0");
+        let r1_key1 = filter.might_contain_in_block(1, b"key1");
+
+        // Assert
+        assert_eq!(r0_key0, BloomTestResult::MightBePresent);
+        assert_eq!(r1_key1, BloomTestResult::MightBePresent);
+    }
+
+    #[test]
+    fn should_return_definitely_not_present_for_key_in_other_block() {
+        // Arrange
+        let mut filter = BlockBloomFilter::new();
+
+        // Block 0: contains "key0"
+        let mut bloom0 = BloomWriter::with_defaults(100);
+        bloom0.insert(b"key0");
+        filter.add_block_bloom(&bloom0);
+
+        // Block 1: contains "key1"
+        let mut bloom1 = BloomWriter::with_defaults(100);
+        bloom1.insert(b"key1");
+        filter.add_block_bloom(&bloom1);
+
+        // Act
+        let r0_key1 = filter.might_contain_in_block(0, b"key1");
+        let r1_key0 = filter.might_contain_in_block(1, b"key0");
+
+        // Assert
+        assert_eq!(r0_key1, BloomTestResult::DefinitelyNotPresent);
+        assert_eq!(r1_key0, BloomTestResult::DefinitelyNotPresent);
     }
 
     #[test]

@@ -126,7 +126,9 @@ mod tests {
 
     #[test]
     fn should_create_range_filter() {
-        // Arrange, Act
+        // Arrange
+
+        // Act
         let filter = RangeFilter::new(b"key1".to_vec(), b"key9".to_vec());
 
         // Assert
@@ -138,7 +140,9 @@ mod tests {
 
     #[test]
     fn should_reject_invalid_range() {
-        // Arrange, Act
+        // Arrange
+
+        // Act
         let result = RangeFilter::new(b"key9".to_vec(), b"key1".to_vec());
 
         // Assert
@@ -147,7 +151,9 @@ mod tests {
 
     #[test]
     fn should_allow_equal_min_max() {
-        // Arrange, Act
+        // Arrange
+
+        // Act
         let result = RangeFilter::new(b"key5".to_vec(), b"key5".to_vec());
 
         // Assert
@@ -165,13 +171,21 @@ mod tests {
         // key20 = [107, 101, 121, 50, 48]
         // So lexicographically: key10 < key15 < key20
 
+        // Act
+        let partial_overlap_after = filter.overlaps_with(b"key15", b"key25");
+        let partial_overlap_before = filter.overlaps_with(b"key05", b"key15");
+        let exact_match = filter.overlaps_with(b"key10", b"key20");
+        let contained = filter.overlaps_with(b"key12", b"key18");
+        let before = filter.overlaps_with(b"key01", b"key09");
+        let after = filter.overlaps_with(b"key21", b"key30");
+
         // Assert - various overlap cases
-        assert!(filter.overlaps_with(b"key15", b"key25")); // Partial overlap: key15..key25 overlaps key10..key20
-        assert!(filter.overlaps_with(b"key05", b"key15")); // Partial overlap: key05..key15 overlaps key10..key20
-        assert!(filter.overlaps_with(b"key10", b"key20")); // Exact match
-        assert!(filter.overlaps_with(b"key12", b"key18")); // Contained: key12..key18 inside key10..key20
-        assert!(!filter.overlaps_with(b"key01", b"key09")); // Before: key01..key09 does not overlap key10..key20
-        assert!(!filter.overlaps_with(b"key21", b"key30")); // After: key21..key30 does not overlap key10..key20
+        assert!(partial_overlap_after); // Partial overlap: key15..key25 overlaps key10..key20
+        assert!(partial_overlap_before); // Partial overlap: key05..key15 overlaps key10..key20
+        assert!(exact_match); // Exact match
+        assert!(contained); // Contained: key12..key18 inside key10..key20
+        assert!(!before); // Before: key01..key09 does not overlap key10..key20
+        assert!(!after); // After: key21..key30 does not overlap key10..key20
     }
 
     #[test]
@@ -179,12 +193,19 @@ mod tests {
         // Arrange
         let filter = RangeFilter::new(b"key10".to_vec(), b"key20".to_vec()).unwrap();
 
+        // Act
+        let is_min = filter.contains_point(b"key10");
+        let is_max = filter.contains_point(b"key20");
+        let is_inside = filter.contains_point(b"key15");
+        let is_before = filter.contains_point(b"key9");
+        let is_after = filter.contains_point(b"key21");
+
         // Assert
-        assert!(filter.contains_point(b"key10")); // Min
-        assert!(filter.contains_point(b"key20")); // Max
-        assert!(filter.contains_point(b"key15")); // Inside
-        assert!(!filter.contains_point(b"key9")); // Before
-        assert!(!filter.contains_point(b"key21")); // After
+        assert!(is_min); // Min
+        assert!(is_max); // Max
+        assert!(is_inside); // Inside
+        assert!(!is_before); // Before
+        assert!(!is_after); // After
     }
 
     #[test]
