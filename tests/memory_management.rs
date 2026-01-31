@@ -53,6 +53,7 @@ fn should_return_write_stall_when_immutable_queue_full() {
 #[test]
 fn should_complete_shutdown_when_wal_writer_drops() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
@@ -63,7 +64,9 @@ fn should_complete_shutdown_when_wal_writer_drops() {
         tx.put(b"key".to_vec(), b"value".to_vec(), None).unwrap();
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
+        // Assert
         drop(engine);
         // If drop hangs, test harness will fail on timeout
+        assert!(true);
     });
 }

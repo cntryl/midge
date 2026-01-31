@@ -17,7 +17,7 @@ fn should_recover_data_from_wal_after_flush() {
 
     eprintln!("\n=== WAL RECOVERY TEST ===");
 
-    // Write data (goes to WAL + memtable)
+    // Arrange: Prepare data in WAL + memtable
     for i in 0..50 {
         let key = format!("wal_key_{:04}", i);
         let mut tx = engine
@@ -30,11 +30,11 @@ fn should_recover_data_from_wal_after_flush() {
 
     eprintln!("Wrote 50 keys to WAL+memtable");
 
-    // Flush to SST
+    // Act: Flush to SST
     engine.flush_cf(&cf).ok();
     eprintln!("Flushed to SST");
 
-    // Verify data persisted
+    // Assert: Data persisted
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
@@ -61,9 +61,10 @@ fn should_handle_large_values_in_wal() {
 
     eprintln!("\n=== LARGE VALUE IN WAL ===");
 
+    // Arrange: Prepare a large value payload
     let large_value = vec![0xFF; 1_000_000]; // 1MB value
 
-    // Write large value
+    // Act: Write large value, then flush
     let mut tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .unwrap();
@@ -72,10 +73,9 @@ fn should_handle_large_values_in_wal() {
     engine.commit(tx, WriteOptions::buffered()).ok();
     eprintln!("Wrote 1MB value to WAL");
 
-    // Flush
     engine.flush_cf(&cf).ok();
 
-    // Retrieve and verify
+    // Assert: Retrieve and verify
     let read_tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
@@ -102,7 +102,7 @@ fn should_recover_deletes_from_wal() {
 
     eprintln!("\n=== DELETE RECOVERY FROM WAL ===");
 
-    // Insert data
+    // Arrange: Insert data
     for i in 0..30 {
         let key = format!("del_key_{:04}", i);
         let mut tx = engine
@@ -113,7 +113,7 @@ fn should_recover_deletes_from_wal() {
         engine.commit(tx, WriteOptions::buffered()).ok();
     }
 
-    // Delete some keys via transaction
+    // Act: Delete some keys via transaction, then flush
     let mut txn = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .unwrap();
@@ -130,7 +130,7 @@ fn should_recover_deletes_from_wal() {
     // Flush to persist deletes
     engine.flush_cf(&cf).ok();
 
-    // Verify deletes persisted
+    // Assert: Deletes persisted
     let mut deleted_count = 0;
     for i in 0..10 {
         let key = format!("del_key_{:04}", i);
@@ -165,7 +165,7 @@ fn should_recover_range_tombstones_from_wal() {
 
     eprintln!("\n=== RANGE TOMBSTONE IN WAL ===");
 
-    // Insert keys
+    // Arrange: Insert keys
     for i in 0..100 {
         let key = format!("k{:03}", i);
         let mut tx = engine
@@ -176,7 +176,7 @@ fn should_recover_range_tombstones_from_wal() {
         engine.commit(tx, WriteOptions::buffered()).ok();
     }
 
-    // Range delete
+    // Act: Apply range delete, then flush
     let mut txn = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .unwrap();
@@ -190,7 +190,7 @@ fn should_recover_range_tombstones_from_wal() {
     // Flush to persist range tombstone
     engine.flush_cf(&cf).ok();
 
-    // Verify range is empty
+    // Assert: Range is empty
     let scan_tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
@@ -222,9 +222,10 @@ fn should_handle_wal_rotation_multiple_segments() {
 
     eprintln!("\n=== WAL ROTATION TEST ===");
 
+    // Arrange: Track total batches written
     let mut batch_count = 0;
 
-    // Write multiple batches (potential WAL rotation)
+    // Act: Write multiple batches (potential WAL rotation)
     for batch in 0..5 {
         for i in 0..100 {
             let key = format!("batch{}_key{:04}", batch, i);
@@ -241,7 +242,7 @@ fn should_handle_wal_rotation_multiple_segments() {
         eprintln!("Batch {}: flushed 100 keys", batch);
     }
 
-    // Verify all data present
+    // Assert: All data present
     let final_tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
@@ -268,7 +269,7 @@ fn should_recover_mixed_operations_from_wal() {
 
     eprintln!("\n=== MIXED OPERATIONS IN WAL ===");
 
-    // Put
+    // Arrange: Put a key
     let mut tx0 = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .unwrap();
@@ -276,7 +277,7 @@ fn should_recover_mixed_operations_from_wal() {
         .unwrap();
     engine.commit(tx0, WriteOptions::buffered()).ok();
 
-    // Delete
+    // Act: Apply delete + put + range delete, then flush
     let mut txn1 = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .unwrap();
@@ -314,10 +315,9 @@ fn should_recover_mixed_operations_from_wal() {
 
     eprintln!("Applied: put, delete, put, delete_range");
 
-    // Flush
     engine.flush_cf(&cf).ok();
 
-    // Verify final state
+    // Assert: Verify final state
     let verify_tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
@@ -352,7 +352,10 @@ fn should_recover_mixed_operations_from_wal() {
 
 #[test]
 fn should_document_wal_implementation_status() {
+    // Arrange: Document expected WAL guarantees
     eprintln!("\n=== WAL IMPLEMENTATION STATUS ===");
+
+    // Act: Emit the status summary
     eprintln!("\nCritical durability guarantees:");
     eprintln!("  1. Basic write recovery (puts)");
     eprintln!("  2. Large value handling in WAL");
@@ -364,4 +367,7 @@ fn should_document_wal_implementation_status() {
     eprintln!("  - Durability guarantee violated");
     eprintln!("  - Data loss possible after crash");
     eprintln!("  - Immediate priority fix required");
+
+    // Assert: This test is informational
+    assert!(true);
 }

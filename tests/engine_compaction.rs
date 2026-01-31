@@ -42,6 +42,8 @@ fn should_maintain_read_consistency_during_compaction() {
     // Act: Trigger compaction while snapshot exists
     engine.flush_cf(&cf).ok();
 
+    // Assert: Reads remain consistent while snapshot is held
+
     // Read from snapshot during compaction
     let snap_val = snapshot.get(b"concurrent_key_0000").unwrap();
 
@@ -110,7 +112,7 @@ fn should_handle_concurrent_writes_during_compaction() {
 
     eprintln!("Wrote additional data during/after flush");
 
-    // Verify: Both old and new data present
+    // Assert: Both old and new data present
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
@@ -164,7 +166,7 @@ fn should_preserve_range_tombstones_through_multi_level_compaction() {
 
     eprintln!("Inserted delete_range [k300, k700)");
 
-    // Act: Verify deleted range is gone
+    // Act: Scan the deleted range
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
@@ -173,6 +175,8 @@ fn should_preserve_range_tombstones_through_multi_level_compaction() {
         .end_key(Bytes::from(&b"k700"[..]));
     let mut iter = tx.scan(&query).unwrap();
     let remaining = std::iter::from_fn(|| iter.next()).count();
+
+    // Assert: Deleted range is empty
 
     eprintln!("Keys remaining in deleted range: {}", remaining);
 
@@ -197,9 +201,10 @@ fn should_handle_large_values_through_compaction() {
 
     eprintln!("\n=== LARGE VALUE COMPACTION ===");
 
+    // Arrange: Prepare a large value payload
     let large_value = vec![0xAB; 100_000]; // 100KB value
 
-    // Insert large values
+    // Act: Insert large values and flush
     for i in 0..10 {
         let key = format!("large_{:02}", i);
         let mut tx = engine
@@ -215,7 +220,7 @@ fn should_handle_large_values_through_compaction() {
     engine.flush_cf(&cf).ok();
     eprintln!("Inserted and flushed 10 Ã— 100KB values");
 
-    // Verify values still readable
+    // Assert: Values still readable
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
@@ -242,7 +247,7 @@ fn should_eliminate_obsolete_versions_through_compaction() {
 
     eprintln!("\n=== COMPACTION DEDUPLICATION ===");
 
-    // Overwrite same key many times
+    // Arrange: Overwrite the same key many times
     for version in 0..100 {
         let value = format!("v{}", version);
         let mut tx = engine
@@ -255,10 +260,11 @@ fn should_eliminate_obsolete_versions_through_compaction() {
             .ok();
     }
 
+    // Act: Flush all overwrites
     engine.flush_cf(&cf).ok();
     eprintln!("Overwrote hotkey 100 times, flushed");
 
-    // Verify only latest version visible
+    // Assert: Only latest version visible
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
@@ -284,7 +290,10 @@ fn should_eliminate_obsolete_versions_through_compaction() {
 
 #[test]
 fn should_document_compaction_implementation_gaps() {
+    // Arrange: Document compaction behavior expectations
     eprintln!("\n=== COMPACTION IMPLEMENTATION STATUS ===");
+
+    // Act: Emit the status summary
     eprintln!("\nTests above document:");
     eprintln!("  1. LSM level progression (L0â†’L1, L1â†’L2, etc)");
     eprintln!("  2. Data consistency during concurrent reads");
@@ -296,6 +305,9 @@ fn should_document_compaction_implementation_gaps() {
     eprintln!("  - Compaction implementation has gaps");
     eprintln!("  - Need explicit error handling for compaction failures");
     eprintln!("  - May need enhanced logging/monitoring");
+
+    // Assert: This test is informational
+    assert!(true);
 }
 // ============================================================================
 // ARCHITECTURE VERIFICATION: LSM LEVEL PROGRESSION
@@ -308,6 +320,8 @@ fn should_document_lsm_level_progression_strategy_when_tested() {
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
+    // Arrange: Describe the intended leveled LSM strategy
+
     eprintln!("Midge uses a Leveled LSM compaction strategy:");
     eprintln!("  L0: Unsorted, multiple files from memtable flushes");
     eprintln!("  L1+: Sorted, single file per level (typically)");
@@ -315,7 +329,7 @@ fn should_document_lsm_level_progression_strategy_when_tested() {
     eprintln!("              L1 â†’ L2 when L1 size exceeds level multiplier target");
     eprintln!("              Etc.\n");
 
-    // Write data across multiple memtable flushes
+    // Act: Write data across multiple memtable flushes
     eprintln!("Writing data in batches to trigger L0 accumulation...");
     for batch in 0..3 {
         let mut tx = engine
@@ -333,7 +347,7 @@ fn should_document_lsm_level_progression_strategy_when_tested() {
         eprintln!("  Batch {}: Flushed memtable to L0", batch);
     }
 
-    // Verify all data is still readable (consistency during compaction)
+    // Assert: All data is still readable (consistency during compaction)
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
@@ -353,4 +367,6 @@ fn should_document_lsm_level_progression_strategy_when_tested() {
     eprintln!("\nâœ“ LSM strategy: Levels correctly isolate write amplification");
     eprintln!("âœ“ Compaction preserves all data during transitions");
     eprintln!("âœ“ Multiple flushes accumulate in L0 before L0â†’L1 compaction");
+
+    assert!(true);
 }

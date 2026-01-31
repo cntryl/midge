@@ -23,7 +23,8 @@ use cntryl_midge::{TransactionMode, WriteOptions};
 #[test]
 fn should_recover_writes_given_unflushed_memtable_when_reopening() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -65,7 +66,8 @@ fn should_recover_writes_given_unflushed_memtable_when_reopening() {
 #[test]
 fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -121,7 +123,8 @@ fn should_call_fsync_given_wal_sync_enabled_when_put() {
 #[test]
 fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -174,7 +177,8 @@ fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
 #[test]
 fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -219,7 +223,8 @@ fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
 #[test]
 fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = std::sync::Arc::new(open_with_mode(opts.clone(), mode));
             let cf = engine.create_column_family("test").expect("create cf");
@@ -279,7 +284,8 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
 #[test]
 fn should_skip_corrupted_wal_tail_given_truncated_tail_when_recovering() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -313,7 +319,8 @@ fn should_skip_corrupted_wal_tail_given_truncated_tail_when_recovering() {
 #[test]
 fn should_not_recover_data_given_truncated_wal_append_when_reopening() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine
@@ -383,7 +390,8 @@ fn should_allow_data_loss_given_skipped_fsync_when_crash_occurs() {
 #[test]
 fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine
