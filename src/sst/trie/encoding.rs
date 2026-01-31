@@ -421,16 +421,17 @@ mod tests {
 
     #[test]
     fn should_reject_invalid_child_indices() {
-        // This test ensures that out-of-bounds child indices are handled
-        // Create a parent node with edge pointing beyond node count
+        // Arrange
         let mut parent = TrieNode::new(0, b"parent".to_vec(), None);
         parent.add_child(TrieEdge::new(b'a', 999)); // Index way out of bounds
 
+        // Act
         let encoded = encode_trie(&[parent]);
         let decoded = decode_trie(&encoded).unwrap();
+        let child_index = decoded[0].children[0].child_index;
 
-        // Assert - should decode successfully but has invalid reference
-        assert_eq!(decoded[0].children[0].child_index, 999);
+        // Assert
+        assert_eq!(child_index, 999);
     }
 
     #[test]
