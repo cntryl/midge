@@ -191,9 +191,11 @@ mod tests {
 
     #[test]
     fn should_renew_lease_periodically_when_healthy() {
+        // Arrange
         let mock = Arc::new(MockLease::new());
         let mut heartbeat = LeaseHeartbeat::new(mock.clone() as Arc<dyn PrimaryLease>);
 
+        // Act
         heartbeat.start();
 
         // Wait up to a reasonable timeout for several renewals to happen.
@@ -206,19 +208,25 @@ mod tests {
         heartbeat.stop();
 
         let renewal_count = mock.get_renewal_count();
+
+        let is_healthy = heartbeat.is_healthy();
+
+        // Assert
         assert!(
             renewal_count >= 3,
             "expected at least 3 renewals within timeout, got {}",
             renewal_count
         );
-        assert!(heartbeat.is_healthy());
+        assert!(is_healthy);
     }
 
     #[test]
     fn should_mark_unhealthy_when_renewal_fails() {
+        // Arrange
         let mock = Arc::new(MockLease::new());
         let mut heartbeat = LeaseHeartbeat::new(mock.clone() as Arc<dyn PrimaryLease>);
 
+        // Act
         heartbeat.start();
         std::thread::sleep(Duration::from_millis(200)); // Let it succeed once
 
@@ -231,8 +239,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
+        let is_healthy = heartbeat.is_healthy();
+
+        // Assert
+
         assert!(
-            !heartbeat.is_healthy(),
+            !is_healthy,
             "expected heartbeat to be unhealthy after renewal failure"
         );
         heartbeat.stop();

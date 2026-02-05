@@ -83,8 +83,10 @@ mod tests {
         let fs = Arc::new(crate::io::MockFs::new());
         let factory = FsWalFactoryIo::new(fs);
 
-        // Act & Assert - reader creation may fail if file doesn't exist, which is expected
+        // Act
         let result = factory.create_reader("wal.log");
+
+        // Assert
         assert!(result.is_err()); // File doesn't exist in mock
         Ok(())
     }

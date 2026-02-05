@@ -56,6 +56,7 @@ fn should_track_l0_sst_reads() -> MidgeResult<()> {
     }
 
     // Act: Read keys that require checking multiple L0 files
+    // Assert: Reads succeed across multiple L0 files
     for batch in 0..3 {
         let key = format!("batch{}_key0", batch);
         let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;

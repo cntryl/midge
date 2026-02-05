@@ -12,19 +12,19 @@ use cntryl_midge::testkit::*;
 
 /// should_commit_large_transaction_given_many_writes_exceeding_memory_limit
 /// Verify all writes commit despite spill triggered by small memory limit
-/// Act: Write 1000 keys with small memory budget, commit
+/// Act: Write 100 keys with small memory budget, commit
 /// Assert: All keys persisted despite spilling to disk
 #[test]
 fn should_commit_large_transaction_given_many_writes_exceeding_memory_limit() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange: Force spill with constrained memory budget
+        // Arrange
         let mut opts = opts;
         opts = opts.memory_budget(256 * 1024); // 256KB limit
 
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
-        // Act: Write many keys exceeding memory limit
+        // Act
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin_tx");
@@ -38,7 +38,7 @@ fn should_commit_large_transaction_given_many_writes_exceeding_memory_limit() {
             .commit(tx, cntryl_midge::WriteOptions::buffered())
             .expect("commit");
 
-        // Assert: All committed despite spill
+        // Assert
         let tx_read = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
@@ -65,12 +65,14 @@ fn should_commit_large_transaction_given_many_writes_exceeding_memory_limit() {
 #[test]
 fn should_handle_very_large_transaction_given_multiple_spills_when_persisted() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let mut opts = opts;
         opts = opts.memory_budget(128 * 1024); // 128KB - multiple spills
 
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
+        // Act
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin_tx");
@@ -84,6 +86,7 @@ fn should_handle_very_large_transaction_given_multiple_spills_when_persisted() {
             .commit(tx, cntryl_midge::WriteOptions::buffered())
             .expect("commit");
 
+        // Assert
         let tx_read = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
@@ -100,12 +103,14 @@ fn should_handle_very_large_transaction_given_multiple_spills_when_persisted() {
 #[test]
 fn should_preserve_data_integrity_given_large_transaction_with_specific_values() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let mut opts = opts;
         opts = opts.memory_budget(256 * 1024);
 
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
+        // Act
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin_tx");
@@ -119,6 +124,7 @@ fn should_preserve_data_integrity_given_large_transaction_with_specific_values()
             .commit(tx, cntryl_midge::WriteOptions::buffered())
             .expect("commit");
 
+        // Assert
         let tx_read = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
@@ -142,12 +148,14 @@ fn should_preserve_data_integrity_given_large_transaction_with_specific_values()
 #[test]
 fn should_preserve_key_order_given_large_transaction_when_iterating() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let mut opts = opts;
         opts = opts.memory_budget(128 * 1024);
 
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
+        // Act
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin_tx");
@@ -160,6 +168,7 @@ fn should_preserve_key_order_given_large_transaction_when_iterating() {
             .commit(tx, cntryl_midge::WriteOptions::buffered())
             .expect("commit");
 
+        // Assert
         let tx_read = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
@@ -181,12 +190,14 @@ fn should_preserve_key_order_given_large_transaction_when_iterating() {
 #[test]
 fn should_rollback_spilled_transaction_given_drop_without_commit() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let mut opts = opts;
         opts = opts.memory_budget(256 * 1024);
 
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
+        // Act
         {
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -198,6 +209,7 @@ fn should_rollback_spilled_transaction_given_drop_without_commit() {
             }
         }
 
+        // Assert
         let tx_read = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
@@ -211,12 +223,14 @@ fn should_rollback_spilled_transaction_given_drop_without_commit() {
 #[test]
 fn should_cleanup_spill_files_given_transaction_rollback_when_finalizing() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let mut opts = opts;
         opts = opts.memory_budget(100 * 1024);
 
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
+        // Act
         {
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -238,6 +252,7 @@ fn should_cleanup_spill_files_given_transaction_rollback_when_finalizing() {
             .commit(tx_write, cntryl_midge::WriteOptions::buffered())
             .expect("commit");
 
+        // Assert
         let tx_read = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
@@ -255,10 +270,12 @@ fn should_cleanup_spill_files_given_transaction_rollback_when_finalizing() {
 #[test]
 fn should_rollback_uncommitted_spill_given_restart_before_commit() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let opts_clone = opts.clone();
         let mut opts = opts.clone();
         opts = opts.memory_budget(100 * 1024);
 
+        // Act
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -273,6 +290,7 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
             }
         }
 
+        // Assert
         {
             let engine = open_with_mode(opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -291,10 +309,12 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
 #[test]
 fn should_recover_committed_spill_given_restart_after_commit() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let opts_clone = opts.clone();
         let mut opts = opts.clone();
         opts = opts.memory_budget(100 * 1024);
 
+        // Act
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -312,6 +332,7 @@ fn should_recover_committed_spill_given_restart_after_commit() {
                 .expect("commit");
         }
 
+            // Assert
         {
             let engine = open_with_mode(opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -334,12 +355,14 @@ fn should_recover_committed_spill_given_restart_after_commit() {
 #[test]
 fn should_not_starve_foreground_writes_given_background_spill_activity() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let mut opts = opts;
         opts = opts.memory_budget(256 * 1024);
 
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
+        // Act
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin_tx");
@@ -362,6 +385,7 @@ fn should_not_starve_foreground_writes_given_background_spill_activity() {
             .commit(tx, cntryl_midge::WriteOptions::buffered())
             .expect("commit");
 
+        // Assert
         let tx_read = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
@@ -379,11 +403,13 @@ fn should_not_starve_foreground_writes_given_background_spill_activity() {
 #[test]
 fn should_handle_concurrent_large_transactions_given_memory_pressure() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let mut opts = opts;
         opts = opts.memory_budget(256 * 1024);
 
         let engine = std::sync::Arc::new(open_with_mode(opts, mode));
 
+        // Act
         let engine_clone = std::sync::Arc::clone(&engine);
         let t1 = std::thread::spawn(move || {
             let cf = engine_clone
@@ -423,6 +449,7 @@ fn should_handle_concurrent_large_transactions_given_memory_pressure() {
         t1.join().expect("t1 join");
         t2.join().expect("t2 join");
 
+        // Assert
         let cf = engine.create_column_family("test").expect("create cf");
         let tx_read = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -447,12 +474,14 @@ fn should_handle_concurrent_large_transactions_given_memory_pressure() {
 #[test]
 fn should_handle_transaction_with_tiny_memory_limit_given_forced_spill() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let mut opts = opts;
         opts = opts.memory_budget(32 * 1024); // 32KB - reasonable limit
 
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
+        // Act
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin_tx");
@@ -466,6 +495,7 @@ fn should_handle_transaction_with_tiny_memory_limit_given_forced_spill() {
             .commit(tx, cntryl_midge::WriteOptions::buffered())
             .expect("commit");
 
+        // Assert
         let tx_read = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
@@ -479,12 +509,14 @@ fn should_handle_transaction_with_tiny_memory_limit_given_forced_spill() {
 #[test]
 fn should_handle_mixed_value_sizes_in_spilled_transaction_when_committed() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let mut opts = opts;
         opts = opts.memory_budget(128 * 1024);
 
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
+        // Act
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin_tx");
@@ -503,6 +535,7 @@ fn should_handle_mixed_value_sizes_in_spilled_transaction_when_committed() {
             .commit(tx, cntryl_midge::WriteOptions::buffered())
             .expect("commit");
 
+        // Assert
         let tx_read = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
@@ -529,11 +562,13 @@ fn should_handle_mixed_value_sizes_in_spilled_transaction_when_committed() {
 /// Verify memory-only mode doesn't create spill files
 #[test]
 fn should_not_create_disk_artifacts_given_large_transaction_when_memory_mode() {
+    // Arrange
     let opts = memory_opts();
 
     let engine = open_with_mode(opts, "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
+    // Act
     let mut tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .expect("begin_tx");
@@ -546,6 +581,7 @@ fn should_not_create_disk_artifacts_given_large_transaction_when_memory_mode() {
         .commit(tx, cntryl_midge::WriteOptions::buffered())
         .expect("commit");
 
+    // Assert
     let tx_read = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin_tx");

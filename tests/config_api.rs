@@ -19,7 +19,9 @@ use std::path::PathBuf;
 
 #[test]
 fn should_build_config_given_minimal_defaults_when_only_path_provided() {
-    // Arrange & Act
+    // Arrange
+
+    // Act
     let opts = OpenOptions::in_memory().build();
 
     // Assert
@@ -35,7 +37,9 @@ fn should_build_config_given_minimal_defaults_when_only_path_provided() {
 
 #[test]
 fn should_set_goal_given_latency_when_optimizing_for_p99() {
-    // Arrange & Act
+    // Arrange
+
+    // Act
     let opts = OpenOptions::in_memory().goal(Goal::Latency).build();
 
     // Assert
@@ -48,7 +52,9 @@ fn should_set_goal_given_latency_when_optimizing_for_p99() {
 
 #[test]
 fn should_set_goal_given_throughput_when_optimizing_for_bulk_writes() {
-    // Arrange & Act
+    // Arrange
+
+    // Act
     let opts = OpenOptions::in_memory().goal(Goal::Throughput).build();
 
     // Assert
@@ -61,7 +67,9 @@ fn should_set_goal_given_throughput_when_optimizing_for_bulk_writes() {
 
 #[test]
 fn should_set_goal_given_cost_when_minimizing_resources() {
-    // Arrange & Act
+    // Arrange
+
+    // Act
     let opts = OpenOptions::in_memory().goal(Goal::Economy).build();
 
     // Assert
@@ -95,7 +103,9 @@ fn should_respect_memory_budget_given_explicit_bytes_when_configured() {
 
 #[test]
 fn should_use_auto_memory_given_no_explicit_budget_when_default() {
-    // Arrange & Act
+    // Arrange
+
+    // Act
     let opts = OpenOptions::in_memory().build();
 
     // Assert
@@ -175,7 +185,9 @@ fn should_optimize_params_given_range_scan_profile_when_configured() {
 
 #[test]
 fn should_derive_consistent_params_given_all_knobs_set_when_building() {
-    // Arrange & Act
+    // Arrange
+
+    // Act
     let opts = OpenOptions::in_memory()
         .goal(Goal::Throughput)
         .memory_budget(MemoryBudget::Bytes(1024 * 1024 * 1024)) // 1GB
@@ -222,7 +234,9 @@ fn should_derive_different_params_given_latency_vs_throughput_when_comparing() {
 
 #[test]
 fn should_provide_getter_access_given_derived_params_when_querying() {
-    // Arrange & Act
+    // Arrange
+
+    // Act
     let opts = OpenOptions::in_memory().build();
 
     // Assert - all getters should return positive values
@@ -240,7 +254,9 @@ fn should_provide_getter_access_given_derived_params_when_querying() {
 
 #[test]
 fn should_store_path_given_relative_path_when_building() {
-    // Arrange & Act
+    // Arrange
+
+    // Act
     let opts = OpenOptions::local("./relative/path").build();
 
     // Assert
@@ -254,7 +270,9 @@ fn should_store_path_given_relative_path_when_building() {
 
 #[test]
 fn should_store_path_given_absolute_path_when_building() {
-    // Arrange & Act
+    // Arrange
+
+    // Act
     let opts = OpenOptions::local("/absolute/path/to/db").build();
 
     // Assert
@@ -291,7 +309,9 @@ fn should_clone_options_preserving_all_settings_given_configured_opts_when_cloni
 
 #[test]
 fn should_use_sensible_defaults_given_no_configuration_when_using_default() {
-    // Arrange & Act
+    // Arrange
+
+    // Act
     let opts = OpenOptions::in_memory();
 
     // Assert

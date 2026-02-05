@@ -210,49 +210,63 @@ mod tests {
 
     #[test]
     fn should_acquire_release_lease_when_no_contention() {
+        // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
         let lease = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf()));
 
+        // Act
         let _guard = lease.try_acquire().unwrap();
-        assert!(lease.acquired.load(Ordering::Acquire));
-
-        // Explicitly release via the PrimaryLease interface
+        let acquired_before_release = lease.acquired.load(Ordering::Acquire);
         lease.release().unwrap();
-        assert!(!lease.acquired.load(Ordering::Acquire));
+        let acquired_after_release = lease.acquired.load(Ordering::Acquire);
+
+        // Assert
+        assert!(acquired_before_release);
+        assert!(!acquired_after_release);
     }
 
     #[test]
     fn should_fail_acquisition_when_lease_already_held() {
+        // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
         let lease1 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf()));
         let lease2 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf()));
 
+        // Act
         let _guard1 = lease1.try_acquire().unwrap();
-
-        // Second acquisition should fail
         let result = lease2.try_acquire();
+
+        // Assert
         assert!(matches!(result, Err(LeaseError::AcquisitionFailed(_))));
     }
 
     #[test]
     fn should_acquire_after_release_when_lease_freed() {
+        // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
         let lease1 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf()));
         let lease2 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf()));
 
+        // Act
         let _guard1 = lease1.try_acquire().unwrap();
         lease1.release().unwrap();
-
-        // Second acquisition should succeed
         let _guard2 = lease2.try_acquire().unwrap();
+
+        // Assert
+        assert!(lease2.acquired.load(Ordering::Acquire));
     }
 
     #[test]
     fn should_renew_successfully_when_lease_held() {
+        // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
         let lease = FileSystemLease::new(temp_dir.path().to_path_buf());
 
+        // Act
         let _guard = lease.try_acquire().unwrap();
-        assert!(lease.renew().is_ok());
+        let result = lease.renew();
+
+        // Assert
+        assert!(result.is_ok());
     }
 }

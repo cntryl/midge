@@ -391,11 +391,17 @@ mod tests {
         let ok_outcome: CloudOutcome<String> = CloudOutcome::Ok("success".into());
         let err_outcome: CloudOutcome<String> = CloudOutcome::Err("failure".into());
 
-        // Act & Assert
-        assert!(ok_outcome.is_ok());
-        assert!(!ok_outcome.is_err());
-        assert!(!err_outcome.is_ok());
-        assert!(err_outcome.is_err());
+        // Act
+        let ok_is_ok = ok_outcome.is_ok();
+        let ok_is_err = ok_outcome.is_err();
+        let err_is_ok = err_outcome.is_ok();
+        let err_is_err = err_outcome.is_err();
+
+        // Assert
+        assert!(ok_is_ok);
+        assert!(!ok_is_err);
+        assert!(!err_is_ok);
+        assert!(err_is_err);
     }
 
     #[test]
@@ -446,9 +452,13 @@ mod tests {
 
     #[test]
     fn should_handle_metadata_with_boundary_sizes() {
-        // Arrange & Act
-        let zero_size = ObjectMetadata::new(0, "zero".into(), 100);
-        let max_size = ObjectMetadata::new(u64::MAX, "max".into(), 200);
+        // Arrange
+        let zero_etag = "zero".to_string();
+        let max_etag = "max".to_string();
+
+        // Act
+        let zero_size = ObjectMetadata::new(0, zero_etag, 100);
+        let max_size = ObjectMetadata::new(u64::MAX, max_etag, 200);
 
         // Assert
         assert_eq!(zero_size.size, 0);
@@ -457,8 +467,11 @@ mod tests {
 
     #[test]
     fn should_handle_metadata_with_empty_etag() {
-        // Arrange & Act
-        let metadata = ObjectMetadata::new(100, String::new(), 1000);
+        // Arrange
+        let empty_etag = String::new();
+
+        // Act
+        let metadata = ObjectMetadata::new(100, empty_etag, 1000);
 
         // Assert
         assert_eq!(metadata.etag, "");
@@ -796,8 +809,10 @@ mod tests {
 
     #[test]
     fn should_dispatch_all_cloud_operations_successfully() {
-        // Arrange & Act
+        // Arrange
         let storage = CloudStorage::with_mock();
+
+        // Act
 
         // Put operation
         let (tx, _rx) = mpsc::channel();
@@ -823,8 +838,9 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         storage.submit_get_range("f5".into(), 0, Some(100), tx);
 
-        // Assert - just verify that all methods can be called without panic
-        // The actual event handling is tested elsewhere
+        // Assert
+        // Smoke test: just verify all methods can be called without panic.
+        assert!(true);
     }
 
     #[test]

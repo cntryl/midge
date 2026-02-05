@@ -22,24 +22,6 @@
 //! WAL Flow: local write → enqueue_wal_segment() → process_uploads() → CloudAck
 //!
 //! # Usage
-//!
-//! ```ignore
-//! use midge::storage::hybrid::{
-//!     HybridStorage, StorageBudgetPolicy, StorageBudgetActor, StorageBudgetEvent
-//! };
-//!
-//! let policy = StorageBudgetPolicy::new(1024 * 1024 * 1024); // 1 GB
-//! let mut actor = StorageBudgetActor::new(policy);
-//!
-//! // Try to reserve space for a flush
-//! match actor.handle_event(StorageBudgetEvent::ReserveForFlush { est_size: 100_000 }) {
-//!     Some(ReservationResult::Ok) => { /* proceed with flush */ },
-//!     Some(ReservationResult::WaitForCloudUpload) => { /* wait */ },
-//!     Some(ReservationResult::WaitForCompaction) => { /* trigger compaction */ },
-//!     Some(ReservationResult::RejectNoSpace) => { /* backpressure */ },
-//!     None => { /* no reservation needed */ },
-//! }
-//! ```
 
 pub mod actor;
 pub mod backend;

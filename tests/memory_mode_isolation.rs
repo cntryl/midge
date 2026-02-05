@@ -19,6 +19,7 @@ use cntryl_midge::{TransactionMode, WriteOptions};
 
 #[test]
 fn should_not_create_filesystem_artifacts_when_memory_mode() {
+    // Arrange
     // Memory mode only test
     let opts = opts_for_mode("memory");
 
@@ -125,6 +126,7 @@ fn should_isolate_data_given_multiple_memory_engines_when_separate_instances() {
 
 #[test]
 fn should_handle_many_writes_efficiently_when_writing_100_keys() {
+    // Arrange
     // Memory mode only test
     let opts = opts_for_mode("memory");
     let engine = open_with_mode(opts, "memory");
@@ -189,6 +191,7 @@ fn should_handle_many_deletes_efficiently_when_deleting_50_keys() {
 
 #[test]
 fn should_handle_mixed_operations_efficiently_when_put_delete_overwrite() {
+    // Arrange
     // Memory mode only test
     let opts = opts_for_mode("memory");
     let engine = open_with_mode(opts, "memory");

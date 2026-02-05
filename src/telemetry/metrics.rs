@@ -573,40 +573,52 @@ mod tests {
 
     #[test]
     fn should_record_metrics_atomically() {
+        // Arrange
         let config = TelemetryConfig::default().with_enabled(true);
         let metrics = Metrics::new(&config).unwrap();
 
+        // Act
         metrics.record_put();
         metrics.record_put();
         metrics.record_delete();
 
         let snap = metrics.snapshot();
+
+        // Assert
         assert_eq!(snap.puts, 2);
         assert_eq!(snap.deletes, 1);
     }
 
     #[test]
     fn should_calculate_cache_hit_ratio() {
+        // Arrange
         let config = TelemetryConfig::default().with_enabled(true);
         let metrics = Metrics::new(&config).unwrap();
 
+        // Act
         metrics.record_cache_hit();
         metrics.record_cache_hit();
         metrics.record_cache_miss();
 
         let snap = metrics.snapshot();
+
+        // Assert
         assert!((snap.cache_hit_ratio() - (2.0 / 3.0)).abs() < 0.001);
     }
 
     #[test]
     fn should_not_record_when_disabled() {
+        // Arrange
         let config = TelemetryConfig::default().with_enabled(false);
         let metrics = Metrics::new(&config).unwrap();
 
+        // Act
         metrics.record_put();
         metrics.record_put();
 
         let snap = metrics.snapshot();
+
+        // Assert
         assert_eq!(snap.puts, 0);
     }
 }

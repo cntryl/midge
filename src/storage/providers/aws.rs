@@ -85,20 +85,31 @@ impl AwsS3Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn should_create_aws_provider_with_keys() {
+        // Arrange
+
+        // Act
         let provider = AwsS3Provider::new(
             "my-bucket".into(),
             "us-east-1".into(),
             "AKIAIOSFODNN7EXAMPLE".into(),
             "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
         );
-        let _ = provider.inner();
+
+        let backend = provider.inner().backend();
+
+        // Assert
+        assert!(Arc::strong_count(&backend) >= 1);
     }
 
     #[test]
     fn should_create_aws_provider_with_session_token() {
+        // Arrange
+
+        // Act
         let provider = AwsS3Provider::with_session_token(
             "my-bucket".into(),
             "us-west-2".into(),
@@ -106,18 +117,29 @@ mod tests {
             "wJalrXUtnFEMI/K7MDENG/bPxRfiCYTEMPORARY".into(),
             "AQoDYXdzEJr...<token_omitted>".into(),
         );
-        let _ = provider.inner();
+
+        let backend = provider.inner().backend();
+
+        // Assert
+        assert!(Arc::strong_count(&backend) >= 1);
     }
 
     #[test]
     fn should_create_aws_provider_from_credentials() {
+        // Arrange
         let creds = AwsCredentials {
             access_key: "AKIAIOSFODNN7EXAMPLE".into(),
             secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
             region: "eu-west-1".into(),
             session_token: None,
         };
+
+        // Act
         let provider = AwsS3Provider::from_credentials("my-bucket".into(), creds);
-        let _ = provider.inner();
+
+        let backend = provider.inner().backend();
+
+        // Assert
+        assert!(Arc::strong_count(&backend) >= 1);
     }
 }

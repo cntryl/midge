@@ -49,29 +49,50 @@ impl WasabiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn should_create_wasabi_provider() {
+        // Arrange
+
+        // Act
         let provider = WasabiProvider::new(
             "my-bucket".into(),
             "us-east-1".into(),
             "wasabi-access-key".into(),
             "wasabi-secret-key".into(),
         );
-        let _ = provider.inner();
+
+        let backend = provider.inner().backend();
+
+        // Assert
+        assert!(Arc::strong_count(&backend) >= 1);
     }
 
     #[test]
     fn should_support_different_regions() {
+        // Arrange
         let regions = vec!["us-east-1", "us-west-1", "eu-west-1", "ap-northeast-1"];
-        for region in regions {
-            let provider = WasabiProvider::new(
-                "bucket".into(),
-                region.into(),
-                "key".into(),
-                "secret".into(),
-            );
-            let _ = provider.inner();
+
+        // Act
+        let backend_ref_counts: Vec<usize> = regions
+            .iter()
+            .map(|region| {
+                let provider = WasabiProvider::new(
+                    "bucket".into(),
+                    (*region).into(),
+                    "key".into(),
+                    "secret".into(),
+                );
+                let backend = provider.inner().backend();
+                Arc::strong_count(&backend)
+            })
+            .collect();
+
+        // Assert
+        assert_eq!(backend_ref_counts.len(), regions.len());
+        for count in backend_ref_counts {
+            assert!(count >= 1);
         }
     }
 }

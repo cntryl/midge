@@ -113,20 +113,28 @@ mod tests {
 
     #[test]
     fn should_clamp_sample_rate() {
-        let config = TelemetryConfig::new().with_sample_rate(1.5);
-        assert_eq!(config.trace_sample_rate, 1.0);
+        // Arrange
 
-        let config = TelemetryConfig::new().with_sample_rate(-0.5);
-        assert_eq!(config.trace_sample_rate, 0.0);
+        // Act
+        let high = TelemetryConfig::new().with_sample_rate(1.5);
+        let low = TelemetryConfig::new().with_sample_rate(-0.5);
+
+        // Assert
+        assert_eq!(high.trace_sample_rate, 1.0);
+        assert_eq!(low.trace_sample_rate, 0.0);
     }
 
     #[test]
     fn should_set_otlp_config() {
-        let config = TelemetryConfig::new().with_otlp("http://localhost:4317".to_string());
-        assert!(config.otlp_config.is_some());
-        assert_eq!(
-            config.otlp_config.unwrap().endpoint,
-            "http://localhost:4317"
-        );
+        // Arrange
+        let endpoint = "http://localhost:4317".to_string();
+
+        // Act
+        let config = TelemetryConfig::new().with_otlp(endpoint.clone());
+        let otlp = config.otlp_config;
+
+        // Assert
+        assert!(otlp.is_some());
+        assert_eq!(otlp.unwrap().endpoint, endpoint);
     }
 }

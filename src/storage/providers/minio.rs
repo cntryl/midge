@@ -49,45 +49,73 @@ impl MinioProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn should_create_minio_provider_local() {
+        // Arrange
+
+        // Act
         let provider = MinioProvider::new(
             "my-bucket".into(),
             "http://localhost:9000".into(),
             "minioadmin".into(),
             "minioadmin".into(),
         );
-        let _ = provider.inner();
+
+        let backend = provider.inner().backend();
+
+        // Assert
+        assert!(Arc::strong_count(&backend) >= 1);
     }
 
     #[test]
     fn should_create_minio_provider_remote() {
+        // Arrange
+
+        // Act
         let provider = MinioProvider::new(
             "data-bucket".into(),
             "https://minio.example.com".into(),
             "access-key-id".into(),
             "secret-access-key".into(),
         );
-        let _ = provider.inner();
+
+        let backend = provider.inner().backend();
+
+        // Assert
+        assert!(Arc::strong_count(&backend) >= 1);
     }
 
     #[test]
     fn should_support_different_endpoints() {
+        // Arrange
         let endpoints = vec![
             "http://localhost:9000",
             "http://minio:9000",
             "https://minio.example.com",
             "https://s3.minio.io",
         ];
-        for endpoint in endpoints {
-            let provider = MinioProvider::new(
-                "bucket".into(),
-                endpoint.into(),
-                "key".into(),
-                "secret".into(),
-            );
-            let _ = provider.inner();
+
+        // Act
+        let backend_ref_counts: Vec<usize> = endpoints
+            .iter()
+            .map(|endpoint| {
+                let provider = MinioProvider::new(
+                    "bucket".into(),
+                    (*endpoint).into(),
+                    "key".into(),
+                    "secret".into(),
+                );
+                let backend = provider.inner().backend();
+                Arc::strong_count(&backend)
+            })
+            .collect();
+
+        // Assert
+        assert_eq!(backend_ref_counts.len(), endpoints.len());
+        for count in backend_ref_counts {
+            assert!(count >= 1);
         }
     }
 }

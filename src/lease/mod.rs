@@ -21,13 +21,6 @@
 //! ## Usage
 //!
 //! Lease acquisition MUST occur before engine initialization:
-//!
-//! ```ignore
-//! let lease = acquire_lease(storage_config)?;
-//! let _guard = lease.try_acquire()?;  // Fails if another instance holds lease
-//! let engine = Engine::open(opts)?;
-//! // Start heartbeat loop
-//! ```
 
 mod cloud;
 mod filesystem;

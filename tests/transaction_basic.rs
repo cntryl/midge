@@ -530,7 +530,8 @@ fn should_allow_operations_given_previous_commit_failed_when_disk_full() {
 #[test]
 fn should_persist_transaction_given_commit_when_crash_after() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -558,7 +559,8 @@ fn should_persist_transaction_given_commit_when_crash_after() {
 #[test]
 fn should_not_persist_transaction_given_abort_when_crash_after() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -586,7 +588,8 @@ fn should_not_persist_transaction_given_abort_when_crash_after() {
 #[test]
 fn should_recover_committed_transactions_given_wal_replay_when_restart() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");

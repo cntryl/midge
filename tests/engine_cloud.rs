@@ -14,12 +14,16 @@ use cntryl_midge::testkit::*;
 fn should_support_cloud_backed_storage() {
     eprintln!("\n=== CLOUD STORAGE BASIC OPERATION ===");
 
+    // Arrange
     // Note: Cloud mode requires S3 mock or compatible backend
     // Default testkit may not support cloud mode yet
     // This test documents the expected behavior
 
+    // Act
     let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
+
+    // Assert
     eprintln!("Cloud storage engine initialized with CF id: {:?}", cf.id());
     eprintln!("âœ“ Cloud backend accessible");
 }
@@ -32,9 +36,11 @@ fn should_support_cloud_backed_storage() {
 fn should_persist_data_to_cloud_storage() {
     eprintln!("\n=== CLOUD READ-WRITE TEST ===");
 
+    // Arrange
     let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
 
+    // Act
     // Write to cloud
     let mut tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -75,6 +81,8 @@ fn should_persist_data_to_cloud_storage() {
             eprintln!("  (Cloud backend may not be configured for tests)");
         }
     }
+
+    // Assert
 }
 
 // ============================================================================
@@ -85,10 +93,12 @@ fn should_persist_data_to_cloud_storage() {
 fn should_support_transactions_with_cloud_storage() {
     eprintln!("\n=== CLOUD TRANSACTION TEST ===");
 
+    // Arrange
     let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 
+    // Act
     // Transaction on cloud
     let mut txn = engine
         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
@@ -125,6 +135,8 @@ fn should_support_transactions_with_cloud_storage() {
             eprintln!("âœ— Cloud transaction put failed: {}", e);
         }
     }
+
+    // Assert
 }
 
 // ============================================================================
@@ -135,9 +147,11 @@ fn should_support_transactions_with_cloud_storage() {
 fn should_support_range_scans_on_cloud() {
     eprintln!("\n=== CLOUD RANGE SCAN TEST ===");
 
+    // Arrange
     let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
 
+    // Act
     // Insert range of keys
     for i in 0..20 {
         let key = format!("cloud_scan_{:02}", i);
@@ -179,6 +193,8 @@ fn should_support_range_scans_on_cloud() {
             eprintln!("âœ— Cloud scan failed: {}", e);
         }
     }
+
+    // Assert
 }
 
 // ============================================================================
@@ -189,9 +205,11 @@ fn should_support_range_scans_on_cloud() {
 fn should_support_snapshots_on_cloud_data() {
     eprintln!("\n=== CLOUD SNAPSHOT TEST ===");
 
+    // Arrange
     let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
 
+    // Act
     // Write initial data
     let mut tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -244,6 +262,8 @@ fn should_support_snapshots_on_cloud_data() {
             eprintln!("âœ— Snapshot isolation violated on cloud");
         }
     }
+
+    // Assert
 }
 
 // ============================================================================
@@ -254,10 +274,12 @@ fn should_support_snapshots_on_cloud_data() {
 fn should_support_deletes_on_cloud() {
     eprintln!("\n=== CLOUD DELETE TEST ===");
 
+    // Arrange
     let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 
+    // Act
     // Write
     let mut tx = engine
         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
@@ -299,6 +321,8 @@ fn should_support_deletes_on_cloud() {
             eprintln!("âœ— Cloud read error: {}", e);
         }
     }
+
+    // Assert
 }
 
 // ============================================================================
@@ -309,9 +333,11 @@ fn should_support_deletes_on_cloud() {
 fn should_support_hybrid_local_cloud_storage() {
     eprintln!("\n=== HYBRID LOCAL+CLOUD TEST ===");
 
+    // Arrange
     // Test if hybrid mode works (local cache + cloud backing)
     // This tests the expected hybrid storage architecture
 
+    // Act
     eprintln!("Hybrid mode would combine:");
     eprintln!("  - Local SSD for hot data (L0-L2)");
     eprintln!("  - Cloud storage for cold data (L3+)");
@@ -320,6 +346,8 @@ fn should_support_hybrid_local_cloud_storage() {
     eprintln!("  - Fast local access for recent data");
     eprintln!("  - Unlimited cloud storage for archived data");
     eprintln!("  - Cost-effective scaling");
+
+    // Assert
 }
 
 // ============================================================================
@@ -329,6 +357,10 @@ fn should_support_hybrid_local_cloud_storage() {
 #[test]
 fn should_document_cloud_storage_implementation_status() {
     eprintln!("\n=== CLOUD STORAGE IMPLEMENTATION STATUS ===");
+
+    // Arrange
+
+    // Act
     eprintln!("\nCritical cloud features:");
     eprintln!("  1. Basic cloud read/write operations");
     eprintln!("  2. Transaction support on cloud");
@@ -346,6 +378,8 @@ fn should_document_cloud_storage_implementation_status() {
     eprintln!("  - Check cloud backend availability");
     eprintln!("  - Verify cloud credentials/config");
     eprintln!("  - Review cloud API integration");
+
+    // Assert
 }
 // ============================================================================
 // ARCHITECTURE VERIFICATION TESTS (High Priority)
@@ -355,11 +389,13 @@ fn should_document_cloud_storage_implementation_status() {
 fn should_respect_wal_cloud_separation_given_hybrid_storage_when_cloud_first_enabled() {
     eprintln!("\n=== ARCHITECTURE: WAL CLOUD SEPARATION ===");
 
+    // Arrange
     // Verify that WAL and SST uploads follow different paths:
     // - SSTs use submit_write() and cloud upload automatically
     // - WAL segments use enqueue_wal_segment() + separate upload pipeline
     // - Non-SST metadata files DO NOT cloud upload
 
+    // Act
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
@@ -376,6 +412,7 @@ fn should_respect_wal_cloud_separation_given_hybrid_storage_when_cloud_first_ena
     // Flush to create SST (in real implementation, would verify cloud upload path)
     // For now, verify engine accepts operations without panic
 
+    // Assert
     eprintln!("âœ“ Hybrid storage accepts operations");
     eprintln!("âœ“ WAL and SST paths are logically separated");
     eprintln!("âœ“ No cross-path corruption detected");
@@ -385,6 +422,7 @@ fn should_respect_wal_cloud_separation_given_hybrid_storage_when_cloud_first_ena
 fn should_preserve_lww_semantics_across_all_storage_modes_when_verified() {
     eprintln!("\n=== ARCHITECTURE: LWW CONSISTENCY ACROSS MODES ===");
 
+    // Arrange
     // Verify Last-Write-Wins semantics are consistent across:
     // 1. Memory mode
     // 2. LocalDisk mode
@@ -393,6 +431,7 @@ fn should_preserve_lww_semantics_across_all_storage_modes_when_verified() {
 
     let modes = vec!["memory", "local"];
 
+    // Act
     for mode in modes {
         let engine = open_with_mode(opts_for_mode(mode), mode);
         let cf = engine.create_column_family("test").expect("create cf");
@@ -415,6 +454,7 @@ fn should_preserve_lww_semantics_across_all_storage_modes_when_verified() {
             .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
 
+        // Assert
         // Verify we get last write
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -437,9 +477,11 @@ fn should_preserve_lww_semantics_across_all_storage_modes_when_verified() {
 fn should_isolate_column_family_writes_across_storage_modes_when_cloud_backed() {
     eprintln!("\n=== ARCHITECTURE: CF ISOLATION IN CLOUD MODE ===");
 
+    // Arrange
     // Verify column families remain isolated even when backed by cloud storage
     // This is critical for multi-tenant scenarios
 
+    // Act
     for mode in &["memory", "local"] {
         let engine = open_with_mode(opts_for_mode(mode), mode);
         let cf_default = engine.create_column_family("test").expect("create cf");
@@ -454,6 +496,7 @@ fn should_isolate_column_family_writes_across_storage_modes_when_cloud_backed() 
             .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
 
+        // Assert
         // Verify isolation in default CF
         let tx = engine
             .begin_tx(cf_default.id(), cntryl_midge::TransactionMode::ReadOnly)

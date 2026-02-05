@@ -306,7 +306,8 @@ fn should_persist_keys_across_delete_range_with_restart_when_durable() {
     // Note: Only test with durable storage modes (local, cloud).
     // Memory mode doesn't persist.
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
-        // Arrange & Act
+        // Arrange
+        // Act
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -338,7 +339,7 @@ fn should_persist_keys_across_delete_range_with_restart_when_durable() {
             let _ = cf;
         }
 
-        // Reopen and assert
+        // Assert
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 

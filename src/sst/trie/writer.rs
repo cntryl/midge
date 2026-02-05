@@ -68,7 +68,9 @@ mod tests {
 
     #[test]
     fn should_create_enabled_writer() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let writer = TrieWriter::new(true);
 
         // Assert
@@ -77,7 +79,9 @@ mod tests {
 
     #[test]
     fn should_create_disabled_writer() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let writer = TrieWriter::new(false);
 
         // Assert
@@ -86,7 +90,9 @@ mod tests {
 
     #[test]
     fn should_create_default_writer() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let writer = TrieWriter::default();
 
         // Assert

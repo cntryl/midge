@@ -87,7 +87,8 @@ fn should_not_expire_key_given_zero_ttl_when_zero_means_infinite() {
 #[test]
 fn should_persist_ttl_metadata_given_restart_when_reopening() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -114,7 +115,8 @@ fn should_persist_ttl_metadata_given_restart_when_reopening() {
 #[test]
 fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine

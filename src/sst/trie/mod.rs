@@ -67,10 +67,21 @@ mod lcp_tests {
 
     #[test]
     fn should_compute_lcp_correctly() {
-        assert_eq!(lcp(b"abc", b"abd"), 2);
-        assert_eq!(lcp(b"test", b"test"), 4);
-        assert_eq!(lcp(b"hello", b"world"), 0);
-        assert_eq!(lcp(b"prefix_a", b"prefix_b"), 7);
-        assert_eq!(lcp(b"", b"anything"), 0);
+        // Arrange
+        let cases = [
+            (b"abc".as_slice(), b"abd".as_slice(), 2),
+            (b"test".as_slice(), b"test".as_slice(), 4),
+            (b"hello".as_slice(), b"world".as_slice(), 0),
+            (b"prefix_a".as_slice(), b"prefix_b".as_slice(), 7),
+            (b"".as_slice(), b"anything".as_slice(), 0),
+        ];
+
+        // Act
+        let results: Vec<usize> = cases.iter().map(|(a, b, _)| lcp(a, b)).collect();
+
+        // Assert
+        for ((_, _, expected), actual) in cases.iter().zip(results) {
+            assert_eq!(actual, *expected);
+        }
     }
 }

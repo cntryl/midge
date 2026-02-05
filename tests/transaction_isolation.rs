@@ -813,9 +813,11 @@ fn should_recover_snapshot_view_after_engine_restart() {
 fn should_document_verify_lww_as_isolation_model_when_testing() {
     eprintln!("\n=== ARCHITECTURE: MIDGE ISOLATION MODEL IS LAST-WRITE-WINS (LWW) ===\n");
 
+    // Arrange
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         eprintln!("Verifying LWW semantics in {} mode...", mode);
 
+        // Act
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
@@ -845,6 +847,8 @@ fn should_document_verify_lww_as_isolation_model_when_testing() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
         let final_value = read_tx.get(b"key").unwrap();
+
+        // Assert
         assert!(final_value.is_some(), "One of the writes should be visible");
         eprintln!(
             "    Both writes processed: last one visible = {:?}",

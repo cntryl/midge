@@ -151,14 +151,20 @@ mod tests {
 
     #[test]
     fn should_create_span_with_attributes() {
+        // Arrange
+
+        // Act
         let span = MidgeSpan::new("put_operation")
             .with_operation(OperationType::Put)
             .with_cf(0)
             .with_key_size(32)
             .with_value_size(1024);
 
+        let attr_len = span.attributes.len();
+
+        // Assert
         assert_eq!(span.name, "put_operation");
-        assert_eq!(span.attributes.len(), 4);
+        assert_eq!(attr_len, 4);
     }
 
     #[test]

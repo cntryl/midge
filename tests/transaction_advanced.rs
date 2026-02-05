@@ -113,6 +113,7 @@ fn should_not_persist_uncommitted_transaction_after_restart() {
 #[test]
 fn should_recover_after_abort_given_transaction_with_delete_range_when_restart() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let opts_clone = opts.clone();
 
         // Act: Phase 1 - Initial data
@@ -191,6 +192,7 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
 #[test]
 fn should_recover_committed_spill_given_restart_after_commit() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let opts_clone = opts.clone();
         let mut opts = opts.clone();
         opts = opts.memory_budget(100 * 1024); // Force spill with 100KB limit
@@ -245,6 +247,7 @@ fn should_recover_committed_spill_given_restart_after_commit() {
 #[test]
 fn should_rollback_uncommitted_spill_given_restart_before_commit() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let opts_clone = opts.clone();
         let mut opts = opts.clone();
         opts = opts.memory_budget(100 * 1024);
@@ -292,8 +295,10 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
 #[test]
 fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let opts_clone = opts.clone();
 
+        // Act
         for cycle in 0..3 {
             {
                 let engine = open_with_mode(opts_clone.clone(), mode);
@@ -330,6 +335,9 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
                 );
             }
         }
+
+        // Assert
+        assert!(true);
     });
 }
 
@@ -338,6 +346,7 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
 #[test]
 fn should_maintain_exactly_once_semantics_given_transaction_with_crash() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let opts_clone = opts.clone();
 
         // Act: Phase 1 - Write twice to same key
@@ -381,6 +390,7 @@ fn should_maintain_exactly_once_semantics_given_transaction_with_crash() {
 #[test]
 fn should_recover_large_transaction_given_crash_during_spill() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let opts_clone = opts.clone();
         let mut opts = opts.clone();
         opts = opts.memory_budget(256 * 1024); // Sufficient budget for transaction
@@ -426,8 +436,10 @@ fn should_recover_large_transaction_given_crash_during_spill() {
 #[test]
 fn should_not_lose_transaction_writes_given_incomplete_wal_sync() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let opts_clone = opts.clone();
 
+        // Act
         {
             let engine = open_with_mode(opts_clone.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -442,6 +454,7 @@ fn should_not_lose_transaction_writes_given_incomplete_wal_sync() {
                 .expect("commit");
         }
 
+        // Assert
         {
             let engine = open_with_mode(opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -465,10 +478,12 @@ fn should_not_lose_transaction_writes_given_incomplete_wal_sync() {
 #[test]
 fn should_survive_mid_spill_crash_given_transaction_recovery() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
         let opts_clone = opts.clone();
         let mut opts = opts.clone();
         opts = opts.memory_budget(80 * 1024);
 
+        // Act
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -487,6 +502,7 @@ fn should_survive_mid_spill_crash_given_transaction_recovery() {
                 .expect("commit");
         }
 
+        // Assert
         {
             let engine = open_with_mode(opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");

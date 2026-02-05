@@ -159,12 +159,15 @@ impl crate::storage::cloud::CloudBackend for GcsProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     // =========== GcsProvider Creation Tests ===========
 
     #[test]
     fn should_create_gcs_provider() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let provider = GcsProvider::new("my-bucket".to_string(), "my-project".to_string());
 
         // Assert
@@ -174,7 +177,9 @@ mod tests {
 
     #[test]
     fn should_create_provider_with_different_bucket_names() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let provider = GcsProvider::new("prod-bucket".to_string(), "prod-project".to_string());
 
         // Assert
@@ -184,7 +189,9 @@ mod tests {
 
     #[test]
     fn should_handle_empty_bucket_name() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let provider = GcsProvider::new("".to_string(), "project".to_string());
 
         // Assert
@@ -194,7 +201,9 @@ mod tests {
 
     #[test]
     fn should_handle_empty_project_id() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let provider = GcsProvider::new("bucket".to_string(), "".to_string());
 
         // Assert
@@ -208,40 +217,92 @@ mod tests {
     fn should_accept_put_operation() {
         // Arrange
         let provider = GcsProvider::new("bucket".to_string(), "project".to_string());
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
 
-        // Act - Just verify it doesn't panic
+        // Act
         provider.submit_put("key".into(), vec![1, 2, 3], tx);
+
+        let event = rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("expected a CloudEvent");
+
+        // Assert
+        match event {
+            CloudEvent::PutComplete { key, result } => {
+                assert_eq!(key, "key");
+                assert!(matches!(result, CloudOutcome::Ok(())));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]
     fn should_accept_get_operation() {
         // Arrange
         let provider = GcsProvider::new("bucket".to_string(), "project".to_string());
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
 
-        // Act - Just verify it doesn't panic
+        // Act
         provider.submit_get("key".into(), tx);
+
+        let event = rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("expected a CloudEvent");
+
+        // Assert
+        match event {
+            CloudEvent::GetComplete { key, result } => {
+                assert_eq!(key, "key");
+                assert!(matches!(result, CloudOutcome::Ok(data) if data.is_empty()));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]
     fn should_accept_delete_operation() {
         // Arrange
         let provider = GcsProvider::new("bucket".to_string(), "project".to_string());
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
 
-        // Act - Just verify it doesn't panic
+        // Act
         provider.submit_delete("key".into(), tx);
+
+        let event = rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("expected a CloudEvent");
+
+        // Assert
+        match event {
+            CloudEvent::DeleteComplete { key, result } => {
+                assert_eq!(key, "key");
+                assert!(matches!(result, CloudOutcome::Ok(())));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]
     fn should_accept_list_operation() {
         // Arrange
         let provider = GcsProvider::new("bucket".to_string(), "project".to_string());
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
 
-        // Act - Just verify it doesn't panic
+        // Act
         provider.submit_list("prefix".into(), tx);
+
+        let event = rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("expected a CloudEvent");
+
+        // Assert
+        match event {
+            CloudEvent::ListComplete { prefix, result } => {
+                assert_eq!(prefix, "prefix");
+                assert!(matches!(result, CloudOutcome::Ok(keys) if keys.is_empty()));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     // =========== GcsProvider Edge Cases ===========
@@ -250,18 +311,38 @@ mod tests {
     fn should_handle_multiple_operations_sequentially() {
         // Arrange
         let provider = GcsProvider::new("bucket".to_string(), "project".to_string());
+        let keys: Vec<String> = (0..5).map(|i| format!("key{i}")).collect();
 
-        // Act - Execute multiple operations
-        for i in 0..5 {
-            let (tx, _rx) = std::sync::mpsc::channel();
-            let key = format!("key{}", i);
-            provider.submit_put(key, vec![i as u8], tx);
+        // Act
+        let events: Vec<CloudEvent> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                provider.submit_put(key.clone(), vec![i as u8], tx);
+                rx.recv_timeout(Duration::from_millis(100))
+                    .expect("expected a CloudEvent")
+            })
+            .collect();
+
+        // Assert
+        assert_eq!(events.len(), keys.len());
+        for (expected_key, event) in keys.iter().zip(events.into_iter()) {
+            match event {
+                CloudEvent::PutComplete { key, result } => {
+                    assert_eq!(&key, expected_key);
+                    assert!(matches!(result, CloudOutcome::Ok(())));
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
         }
     }
 
     #[test]
     fn should_handle_special_characters_in_bucket() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let provider = GcsProvider::new("my-bucket-123".to_string(), "my_project-123".to_string());
 
         // Assert
