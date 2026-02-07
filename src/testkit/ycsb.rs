@@ -248,7 +248,7 @@ pub fn deterministic_u64(seed: u64, client_id: usize, op_index: u64, draw_index:
 /// - Cancellation-aware via the shared `stop` flag
 pub fn retry_write_stall<F>(
     engine: &MidgeEngine,
-    cf_id: u32,
+    cf_id: crate::engine::ColumnFamilyId,
     stop: &AtomicBool,
     mut op: F,
 ) -> MidgeResult<()>

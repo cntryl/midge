@@ -231,7 +231,11 @@ impl ManifestActor {
     }
 
     /// Drop a column family (soft delete for durability)
-    pub fn drop_column_family(&mut self, state: &mut RuntimeState, cf_id: u32) -> MidgeResult<()> {
+    pub fn drop_column_family(
+        &mut self,
+        state: &mut RuntimeState,
+        cf_id: crate::engine::ColumnFamilyId,
+    ) -> MidgeResult<()> {
         // Prevent dropping default CF
         if cf_id == 0 {
             return Err(crate::common::MidgeError::InvalidArgument(

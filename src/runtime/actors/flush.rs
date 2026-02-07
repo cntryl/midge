@@ -47,7 +47,7 @@ impl FlushActor {
     pub fn handle_flush(
         &mut self,
         state: &mut RuntimeState,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<String> {
         // In memory mode, flushes are no-ops (everything stays in memory)
@@ -66,19 +66,19 @@ impl FlushActor {
                     // Proceed with flush
                 }
                 crate::storage::hybrid::actor::ReservationResult::WaitForCloudUpload => {
-                    tracing::warn!(cf_id, "Flush blocked: waiting for cloud upload");
+                    tracing::warn!(cf_id = cf_id, "Flush blocked: waiting for cloud upload");
                     return Err(MidgeError::Internal(
                         "Flush blocked: waiting for cloud upload".to_string(),
                     ));
                 }
                 crate::storage::hybrid::actor::ReservationResult::WaitForCompaction => {
-                    tracing::warn!(cf_id, "Flush blocked: waiting for compaction");
+                    tracing::warn!(cf_id = cf_id, "Flush blocked: waiting for compaction");
                     return Err(MidgeError::Internal(
                         "Flush blocked: waiting for compaction".to_string(),
                     ));
                 }
                 crate::storage::hybrid::actor::ReservationResult::RejectNoSpace => {
-                    tracing::error!(cf_id, "Flush rejected: no disk space available");
+                    tracing::error!(cf_id = cf_id, "Flush rejected: no disk space available");
                     return Err(MidgeError::Internal("No disk space available".to_string()));
                 }
             }
@@ -149,14 +149,14 @@ impl FlushActor {
 
         self.in_progress += 1;
 
-        tracing::info!(cf_id, sst_name = %sst_name, "Flush started");
+        tracing::info!(cf_id = cf_id, sst_name = %sst_name, "Flush started");
 
         // Write frozen memtable to SST file (blocking for now; could be async)
         let write_start = std::time::Instant::now();
         self.write_memtable_to_sst(&frozen, &sst_path)?;
         let write_ns = write_start.elapsed().as_nanos();
 
-        tracing::info!(cf_id, sst_name = %sst_name, write_ms = (write_ns as f64) / 1_000_000.0, "SST file written");
+        tracing::info!(cf_id = cf_id, sst_name = %sst_name, write_ms = (write_ns as f64) / 1_000_000.0, "SST file written");
 
         // Signal flush completion to SBA if available
         if let Some(hybrid) = sba {
@@ -167,7 +167,7 @@ impl FlushActor {
         // Queue SST for cloud upload if using cloud-backed storage
         if sba.is_some() {
             state.cloud.pending_uploads.push(sst_name.clone());
-            tracing::debug!(cf_id, sst_name = %sst_name, "SST queued for cloud upload");
+            tracing::debug!(cf_id = cf_id, sst_name = %sst_name, "SST queued for cloud upload");
         }
 
         Ok(sst_name)
@@ -213,7 +213,7 @@ impl FlushActor {
     pub fn handle_flush_complete(
         &mut self,
         state: &mut RuntimeState,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         sst_name: &str,
         sequence: u64,
     ) {
@@ -234,7 +234,7 @@ impl FlushActor {
 
         self.in_progress = self.in_progress.saturating_sub(1);
 
-        tracing::info!(cf_id, sst_name, sequence, "Flush completed");
+        tracing::info!(cf_id = cf_id, sst_name, sequence, "Flush completed");
     }
 }
 

@@ -33,25 +33,10 @@ pub use api::{
     TransactionMode, Value, WorkloadProfile, WriteOptions,
 };
 /// Registry of column families, keyed by column family ID
-type ColumnFamilyRegistry = dashmap::DashMap<u32, ColumnFamilyHandle>;
+type ColumnFamilyRegistry = dashmap::DashMap<ColumnFamilyId, ColumnFamilyHandle>;
 
-/// Column family identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ColumnFamilyId(pub u32);
-
-impl ColumnFamilyId {
-    pub const DEFAULT: Self = Self(0);
-
-    pub fn as_u32(&self) -> u32 {
-        self.0
-    }
-}
-
-impl Default for ColumnFamilyId {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
+/// Column family identifier — simple u32 alias.
+pub type ColumnFamilyId = u32;
 
 /// Column family handle for API operations
 #[derive(Debug, Clone)]
@@ -146,7 +131,7 @@ pub struct Engine {
     /// Lease heartbeat (keeps lease renewed)
     _lease_heartbeat: Option<std::sync::Mutex<crate::lease::LeaseHeartbeat>>,
     /// Per-CF ingest coordinators for write batching
-    ingest_coordinators: dashmap::DashMap<u32, Arc<ingest::IngestCoordinator>>,
+    ingest_coordinators: dashmap::DashMap<ColumnFamilyId, Arc<ingest::IngestCoordinator>>,
 }
 
 impl Drop for Engine {
@@ -329,9 +314,8 @@ impl Engine {
 
         let column_families = dashmap::DashMap::new();
         // Ensure default column family is always present
-        let default_handle =
-            ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
-        column_families.insert(default_handle.id().as_u32(), default_handle);
+        let default_handle = ColumnFamilyHandle::new(0, "default".to_string());
+        column_families.insert(default_handle.id(), default_handle);
 
         // Initialize ingest coordinators
         let ingest_coordinators = dashmap::DashMap::new();
@@ -357,8 +341,7 @@ impl Engine {
         let manifest = crate::metadata::ManifestPersistence::load(&db_path).unwrap_or_default();
         for cf_meta in &manifest.column_families {
             if cf_meta.id != 0 && cf_meta.deleted_at.is_none() {
-                let handle =
-                    ColumnFamilyHandle::new(ColumnFamilyId(cf_meta.id), cf_meta.name.clone());
+                let handle = ColumnFamilyHandle::new(cf_meta.id, cf_meta.name.clone());
                 column_families.insert(cf_meta.id, handle);
 
                 // Start coordinator for loaded CF
@@ -597,7 +580,7 @@ impl Engine {
             .runtime_handle
             .send_and_wait(RuntimeMsg::FlushMemtable {
                 request_id: next_request_id(),
-                cf_id: cf.id.0,
+                cf_id: cf.id(),
             })?;
 
         match response {
@@ -655,7 +638,7 @@ impl Engine {
                 .runtime_handle
                 .send_and_wait(RuntimeMsg::CaptureReadSnapshot {
                     request_id: next_request_id(),
-                    cf_id: cf_id.as_u32(),
+                    cf_id,
                     sequence: start_sequence,
                 }) {
                 Ok(RuntimeResponse::ReadSnapshot { snapshot, .. }) => Some(snapshot),
@@ -712,9 +695,9 @@ impl Engine {
                 api::WriteIntent::Put { cf_id, .. }
                 | api::WriteIntent::Insert { cf_id, .. }
                 | api::WriteIntent::Delete { cf_id, .. }
-                | api::WriteIntent::DeleteRange { cf_id, .. } => cf_id.as_u32(),
+                | api::WriteIntent::DeleteRange { cf_id, .. } => *cf_id,
             })
-            .unwrap_or(ColumnFamilyId::DEFAULT.as_u32());
+            .unwrap_or(0);
 
         // PHASE 2.2: Route all writes through ingest batching
         //
@@ -746,7 +729,7 @@ impl Engine {
                     ttl_seconds,
                     ..
                 } => coordinator.submit_write(
-                    cf_id.as_u32(),
+                    *cf_id,
                     key.clone(),
                     Some(value.clone()),
                     *ttl_seconds,
@@ -759,14 +742,14 @@ impl Engine {
                     ttl_seconds,
                     ..
                 } => coordinator.submit_write(
-                    cf_id.as_u32(),
+                    *cf_id,
                     key.clone(),
                     Some(value.clone()),
                     *ttl_seconds,
                     true,
                 )?,
                 api::WriteIntent::Delete { cf_id, key, .. } => {
-                    coordinator.submit_write(cf_id.as_u32(), key.clone(), None, None, false)?
+                    coordinator.submit_write(*cf_id, key.clone(), None, None, false)?
                 }
                 api::WriteIntent::DeleteRange {
                     cf_id,
@@ -779,7 +762,7 @@ impl Engine {
                         self.runtime_handle
                             .send_and_wait(RuntimeMsg::WalAppendDeleteRange {
                                 request_id: next_request_id(),
-                                cf_id: cf_id.as_u32(),
+                                cf_id: *cf_id,
                                 start_key: start_key.clone(),
                                 end_key: end_key.clone(),
                             })?;
@@ -812,7 +795,11 @@ impl Engine {
     /// Wait for a write stall to clear for `cf_id`.
     ///
     /// Returns `Ok(true)` if the stall cleared within `timeout`, `Ok(false)` on timeout.
-    pub fn wait_for_write_stall_clear(&self, cf_id: u32, timeout: Duration) -> MidgeResult<bool> {
+    pub fn wait_for_write_stall_clear(
+        &self,
+        cf_id: ColumnFamilyId,
+        timeout: Duration,
+    ) -> MidgeResult<bool> {
         let request_id = next_request_id();
 
         let msg = RuntimeMsg::WaitForWriteStallClear { request_id, cf_id };
@@ -853,7 +840,7 @@ impl Engine {
     ) -> MidgeResult<Option<bytes::Bytes>> {
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::Read {
             request_id: next_request_id(),
-            cf_id: cf_id.as_u32(),
+            cf_id,
             key: key.to_vec(),
             sequence,
             requested_durability: api::Durability::Steady,
@@ -878,7 +865,7 @@ impl Engine {
     ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::RangeScan {
             request_id: next_request_id(),
-            cf_id: cf_id.as_u32(),
+            cf_id,
             start: start.to_vec(),
             end: end.to_vec(),
             sequence,
@@ -921,7 +908,7 @@ impl Engine {
 
         match response {
             RuntimeResponse::ColumnFamilyCreated { cf_id, .. } => {
-                let handle = ColumnFamilyHandle::new(ColumnFamilyId(cf_id), name.to_string());
+                let handle = ColumnFamilyHandle::new(cf_id, name.to_string());
                 // Register CF in local registry
                 self.column_families.insert(cf_id, handle.clone());
 
@@ -931,13 +918,10 @@ impl Engine {
                     self.runtime_handle.clone(),
                 ));
                 self.ingest_coordinators.insert(cf_id, coordinator);
-
-                // Persist manifest to disk
-                let _persist_response =
-                    self.runtime_handle
-                        .send_and_wait(RuntimeMsg::ManifestPersist {
-                            request_id: next_request_id(),
-                        })?;
+                self.runtime_handle
+                    .send_and_wait(RuntimeMsg::ManifestPersist {
+                        request_id: next_request_id(),
+                    })?;
 
                 Ok(handle)
             }
@@ -954,7 +938,7 @@ impl Engine {
         let response = self.runtime_handle.send_and_wait_filtered(
             RuntimeMsg::ManifestDropColumnFamily {
                 request_id: next_request_id(),
-                cf_id: cf_id.as_u32(),
+                cf_id,
             },
             |resp| {
                 matches!(
@@ -967,12 +951,12 @@ impl Engine {
         match response {
             RuntimeResponse::Ok { .. } => {
                 // Shutdown coordinator for this CF
-                if let Some((_, coordinator)) = self.ingest_coordinators.remove(&cf_id.as_u32()) {
+                if let Some((_, coordinator)) = self.ingest_coordinators.remove(&cf_id) {
                     coordinator.shutdown();
                 }
 
                 // Remove from local registry
-                self.column_families.remove(&cf_id.as_u32());
+                self.column_families.remove(&cf_id);
 
                 // Persist manifest to disk
                 let _persist_response =
@@ -1075,53 +1059,29 @@ mod tests {
     // ============================================================================
 
     #[test]
-    fn should_create_default_column_family_id_with_zero() {
+    fn should_use_zero_as_default_column_family_id() {
         // Arrange / Act
-        let cf_id = ColumnFamilyId::DEFAULT;
+        let cf_id: ColumnFamilyId = 0;
 
         // Assert
-        assert_eq!(cf_id.as_u32(), 0);
-    }
-
-    #[test]
-    fn should_return_zero_for_default_column_family_as_u32() {
-        // Arrange
-        let cf_id = ColumnFamilyId::DEFAULT;
-
-        // Act
-        let value = cf_id.as_u32();
-
-        // Assert
-        assert_eq!(value, 0);
-    }
-
-    #[test]
-    fn should_implement_default_trait_for_column_family_id() {
-        // Arrange / Act
-        let cf_id = ColumnFamilyId::default();
-
-        // Assert: default should be same as DEFAULT constant
-        assert_eq!(cf_id, ColumnFamilyId::DEFAULT);
+        assert_eq!(cf_id, 0);
     }
 
     #[test]
     fn should_preserve_custom_column_family_id_value() {
         // Arrange
-        let custom_id = 42u32;
-
-        // Act
-        let cf_id = ColumnFamilyId(custom_id);
+        let custom_id: ColumnFamilyId = 42;
 
         // Assert
-        assert_eq!(cf_id.as_u32(), custom_id);
+        assert_eq!(custom_id, 42);
     }
 
     #[test]
     fn should_support_column_family_id_equality() {
         // Arrange
-        let id1 = ColumnFamilyId(5);
-        let id2 = ColumnFamilyId(5);
-        let id3 = ColumnFamilyId(6);
+        let id1: ColumnFamilyId = 5;
+        let id2: ColumnFamilyId = 5;
+        let id3: ColumnFamilyId = 6;
 
         // Assert
         assert_eq!(id1, id2);
@@ -1133,7 +1093,7 @@ mod tests {
         // Arrange
         use std::collections::HashMap;
         let mut map = HashMap::new();
-        let id = ColumnFamilyId(10);
+        let id: ColumnFamilyId = 10;
 
         // Act
         map.insert(id, "value");
@@ -1149,7 +1109,7 @@ mod tests {
     #[test]
     fn should_create_column_family_handle_with_id_and_name() {
         // Arrange
-        let cf_id = ColumnFamilyId(5);
+        let cf_id: ColumnFamilyId = 5;
         let name = "my_cf".to_string();
 
         // Act
@@ -1163,19 +1123,19 @@ mod tests {
     #[test]
     fn should_preserve_column_family_handle_identity() {
         // Arrange
-        let cf_id = ColumnFamilyId(10);
+        let cf_id: ColumnFamilyId = 10;
         let name = "test_cf".to_string();
         let handle = ColumnFamilyHandle::new(cf_id, name);
 
         // Assert: id() and name() return exact values
-        assert_eq!(handle.id().as_u32(), 10);
+        assert_eq!(handle.id(), 10);
         assert_eq!(handle.name(), "test_cf");
     }
 
     #[test]
     fn should_clone_column_family_handle() {
         // Arrange
-        let handle1 = ColumnFamilyHandle::new(ColumnFamilyId(7), "cf".to_string());
+        let handle1 = ColumnFamilyHandle::new(7, "cf".to_string());
 
         // Act
         let handle2 = handle1.clone();
@@ -1188,7 +1148,7 @@ mod tests {
     #[test]
     fn should_support_empty_column_family_name() {
         // Arrange / Act
-        let handle = ColumnFamilyHandle::new(ColumnFamilyId(1), "".to_string());
+        let handle = ColumnFamilyHandle::new(1, "".to_string());
 
         // Assert
         assert_eq!(handle.name(), "");
@@ -1200,7 +1160,7 @@ mod tests {
         let unicode_name = "数据_测试".to_string();
 
         // Act
-        let handle = ColumnFamilyHandle::new(ColumnFamilyId(1), unicode_name.clone());
+        let handle = ColumnFamilyHandle::new(1, unicode_name.clone());
 
         // Assert
         assert_eq!(handle.name(), unicode_name);
@@ -1213,31 +1173,25 @@ mod tests {
     #[test]
     fn should_handle_maximum_column_family_id() {
         // Arrange / Act
-        let max_id = ColumnFamilyId(u32::MAX);
+        let max_id: ColumnFamilyId = u32::MAX;
 
         // Assert
-        assert_eq!(max_id.as_u32(), u32::MAX);
+        assert_eq!(max_id, u32::MAX);
     }
 
     #[test]
     fn should_handle_zero_column_family_id() {
         // Arrange / Act
-        let zero_id = ColumnFamilyId(0);
+        let zero_id: ColumnFamilyId = 0;
 
         // Assert
-        assert_eq!(zero_id.as_u32(), 0);
-        assert_eq!(zero_id, ColumnFamilyId::DEFAULT);
+        assert_eq!(zero_id, 0);
     }
 
     #[test]
     fn should_distinguish_between_different_column_family_ids() {
         // Arrange
-        let id_vec = [
-            ColumnFamilyId(0),
-            ColumnFamilyId(1),
-            ColumnFamilyId(100),
-            ColumnFamilyId(u32::MAX),
-        ];
+        let id_vec: [ColumnFamilyId; 4] = [0, 1, 100, u32::MAX];
 
         // Act
         let unique_count = id_vec
@@ -1268,20 +1222,6 @@ mod tests {
             .expect("memory compact_all should succeed");
     }
 
-    #[test]
-    fn should_copy_column_family_id() {
-        // Arrange
-        let id1 = ColumnFamilyId(42);
-
-        // Act
-        let id2 = id1; // Copy trait implemented
-        let id3 = id1;
-
-        // Assert: all are equal
-        assert_eq!(id1, id2);
-        assert_eq!(id2, id3);
-    }
-
     // ============================================================================
     // Tests for ColumnFamilyHandle creation invariants
     // ============================================================================
@@ -1289,19 +1229,19 @@ mod tests {
     #[test]
     fn should_create_handle_for_default_column_family() {
         // Arrange / Act
-        let handle = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
+        let handle = ColumnFamilyHandle::new(0, "default".to_string());
 
         // Assert
-        assert_eq!(handle.id(), ColumnFamilyId::DEFAULT);
+        assert_eq!(handle.id(), 0);
         assert_eq!(handle.name(), "default");
     }
 
     #[test]
     fn should_create_multiple_handles_with_different_ids() {
         // Arrange / Act
-        let handle1 = ColumnFamilyHandle::new(ColumnFamilyId(1), "cf1".to_string());
-        let handle2 = ColumnFamilyHandle::new(ColumnFamilyId(2), "cf2".to_string());
-        let handle3 = ColumnFamilyHandle::new(ColumnFamilyId(3), "cf3".to_string());
+        let handle1 = ColumnFamilyHandle::new(1, "cf1".to_string());
+        let handle2 = ColumnFamilyHandle::new(2, "cf2".to_string());
+        let handle3 = ColumnFamilyHandle::new(3, "cf3".to_string());
 
         // Assert: all distinct
         assert_ne!(handle1.id(), handle2.id());
@@ -1312,7 +1252,7 @@ mod tests {
     #[test]
     fn should_preserve_handle_identity_after_clone() {
         // Arrange
-        let original = ColumnFamilyHandle::new(ColumnFamilyId(99), "original_name".to_string());
+        let original = ColumnFamilyHandle::new(99, "original_name".to_string());
 
         // Act
         let cloned = original.clone();
@@ -1322,7 +1262,7 @@ mod tests {
         assert_eq!(original.name(), cloned.name());
 
         // And original still works
-        assert_eq!(original.id().as_u32(), 99);
+        assert_eq!(original.id(), 99);
     }
 
     // ============================================================================
@@ -1330,22 +1270,9 @@ mod tests {
     // ============================================================================
 
     #[test]
-    fn should_format_column_family_id_for_debug() {
-        // Arrange
-        let id = ColumnFamilyId(42);
-
-        // Act
-        let debug_str = format!("{:?}", id);
-
-        // Assert: should be debuggable
-        assert!(!debug_str.is_empty());
-        assert!(debug_str.contains("42"));
-    }
-
-    #[test]
     fn should_format_column_family_handle_for_debug() {
         // Arrange
-        let handle = ColumnFamilyHandle::new(ColumnFamilyId(5), "test".to_string());
+        let handle = ColumnFamilyHandle::new(5, "test".to_string());
 
         // Act
         let debug_str = format!("{:?}", handle);
@@ -1365,12 +1292,12 @@ mod tests {
         let mut map: HashMap<ColumnFamilyId, String> = HashMap::new();
 
         // Act
-        map.insert(ColumnFamilyId(1), "cf1".to_string());
-        map.insert(ColumnFamilyId(2), "cf2".to_string());
+        map.insert(1, "cf1".to_string());
+        map.insert(2, "cf2".to_string());
 
         // Assert
-        assert_eq!(map.get(&ColumnFamilyId(1)), Some(&"cf1".to_string()));
-        assert_eq!(map.get(&ColumnFamilyId(2)), Some(&"cf2".to_string()));
+        assert_eq!(map.get(&1), Some(&"cf1".to_string()));
+        assert_eq!(map.get(&2), Some(&"cf2".to_string()));
     }
 
     #[test]
@@ -1378,41 +1305,13 @@ mod tests {
         // Arrange
         // Act
         let handles = [
-            ColumnFamilyHandle::new(ColumnFamilyId(0), "default".to_string()),
-            ColumnFamilyHandle::new(ColumnFamilyId(1), "secondary".to_string()),
+            ColumnFamilyHandle::new(0, "default".to_string()),
+            ColumnFamilyHandle::new(1, "secondary".to_string()),
         ];
 
         // Assert
         assert_eq!(handles.len(), 2);
         assert_eq!(handles[0].name(), "default");
         assert_eq!(handles[1].name(), "secondary");
-    }
-
-    #[test]
-    fn should_enforce_eq_implementation_for_column_family_id() {
-        // Arrange
-        let id1 = ColumnFamilyId(5);
-        let id2 = ColumnFamilyId(5);
-
-        // Act & Assert: Eq trait enforced
-        assert!(id1 == id2);
-        assert!(!(id1 != id2));
-    }
-
-    #[test]
-    fn should_enforce_hash_implementation_for_column_family_id() {
-        // Arrange
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let id = ColumnFamilyId(42);
-        let mut hasher = DefaultHasher::new();
-
-        // Act
-        id.hash(&mut hasher);
-        let hash_value = hasher.finish();
-
-        // Assert: should be hashable without panicking
-        assert_ne!(hash_value, 0); // Just verify it produced a hash
     }
 }

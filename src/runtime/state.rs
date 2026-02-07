@@ -100,7 +100,7 @@ impl RuntimeState {
     /// Returns true if:
     /// - Immutable memtables queue is at capacity
     /// - Total memtable memory exceeds threshold
-    pub fn should_stall_writes(&self, cf_id: u32) -> bool {
+    pub fn should_stall_writes(&self, cf_id: crate::engine::ColumnFamilyId) -> bool {
         if let Some(cf_state) = self.column_families.get(&cf_id) {
             if cf_state.immutable_memtables.len() >= self.max_immutable_memtables {
                 return true;
@@ -764,11 +764,14 @@ impl RuntimeState {
             .count()
     }
 
-    pub fn get_cf(&self, cf_id: u32) -> Option<&ColumnFamilyState> {
+    pub fn get_cf(&self, cf_id: crate::engine::ColumnFamilyId) -> Option<&ColumnFamilyState> {
         self.column_families.get(&cf_id)
     }
 
-    pub fn get_cf_mut(&mut self, cf_id: u32) -> Option<&mut ColumnFamilyState> {
+    pub fn get_cf_mut(
+        &mut self,
+        cf_id: crate::engine::ColumnFamilyId,
+    ) -> Option<&mut ColumnFamilyState> {
         self.column_families.get_mut(&cf_id)
     }
 

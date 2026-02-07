@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 /// Parameters for WAL append operation
 pub struct AppendParams {
     pub request_id: u64,
-    pub cf_id: u32,
+    pub cf_id: crate::engine::ColumnFamilyId,
     pub key: Bytes,
     pub value: Option<Bytes>,
     pub insert_only: bool,
@@ -396,7 +396,7 @@ impl WalActor {
             }
         }
 
-        tracing::trace!(cf_id, sequence, policy = ?self.durability_policy, "WAL append");
+        tracing::trace!(cf_id = cf_id, sequence, policy = ?self.durability_policy, "WAL append");
 
         // Optional tracing for append averages
         if std::env::var_os("MIDGE_TRACE_WAL_APPEND").is_some()
@@ -584,7 +584,7 @@ impl WalActor {
             }
         }
 
-        tracing::trace!(cf_id, sequence, policy = ?self.durability_policy, "WAL append_delete_range");
+        tracing::trace!(cf_id = cf_id, sequence, policy = ?self.durability_policy, "WAL append_delete_range");
 
         let deferred = matches!(
             self.durability_policy,
@@ -954,7 +954,12 @@ impl WalActor {
     }
 
     /// Checks current in-memory view (active + immutable memtables) for existence
-    fn key_exists(&self, state: &RuntimeState, cf_id: u32, key: &[u8]) -> bool {
+    fn key_exists(
+        &self,
+        state: &RuntimeState,
+        cf_id: crate::engine::ColumnFamilyId,
+        key: &[u8],
+    ) -> bool {
         if let Some(cf_state) = state.column_families.get(&cf_id) {
             if let Ok(Some(_)) = cf_state.memtable.get(key) {
                 return true;
@@ -968,7 +973,12 @@ impl WalActor {
         false
     }
 
-    fn key_exists_or_pending(&self, state: &RuntimeState, cf_id: u32, key: &[u8]) -> bool {
+    fn key_exists_or_pending(
+        &self,
+        state: &RuntimeState,
+        cf_id: crate::engine::ColumnFamilyId,
+        key: &[u8],
+    ) -> bool {
         if self.key_exists(state, cf_id, key) {
             return true;
         }
@@ -985,7 +995,7 @@ impl WalActor {
         &self,
         state: &mut RuntimeState,
         sequence: u64,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         key: &[u8],
         value: &Option<Bytes>,
         expiration: Option<u64>,

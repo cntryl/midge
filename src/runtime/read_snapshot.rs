@@ -18,7 +18,7 @@ type MemtableRangeResult = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 #[derive(Clone)]
 pub struct ReadSnapshot {
     /// CF ID
-    pub cf_id: u32,
+    pub cf_id: crate::engine::ColumnFamilyId,
     /// Active memtable snapshot
     pub memtable: Arc<SkipListMemtable>,
     /// Immutable memtables (newest to oldest)
@@ -37,7 +37,7 @@ impl ReadSnapshot {
         sst_files: Vec<FileMeta>,
         sst_dir: std::path::PathBuf,
     ) -> Self {
-        // Extract cf_id from first SST file or default to 0
+        // Extract cf_id from first SST file or default to DEFAULT
         let cf_id = sst_files.first().map(|f| f.cf_id).unwrap_or(0);
         Self {
             cf_id,

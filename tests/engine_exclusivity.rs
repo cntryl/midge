@@ -183,8 +183,7 @@ fn should_reject_writes_if_lease_becomes_unhealthy() {
 
     // Act
 
-    // Assert
-    assert!(true, "placeholder test");
+    // Assert: Placeholder for future validation when lease expiry simulation is available
 }
 
 #[test]

@@ -67,6 +67,5 @@ fn should_complete_shutdown_when_wal_writer_drops() {
         // Assert
         drop(engine);
         // If drop hangs, test harness will fail on timeout
-        assert!(true);
     });
 }

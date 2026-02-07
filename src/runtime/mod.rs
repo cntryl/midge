@@ -77,7 +77,7 @@ pub struct CompactionPlan {
     pub input_files: Vec<String>,
     pub source_level: u32,
     pub target_level: u32,
-    pub cf_id: u32,
+    pub cf_id: crate::engine::ColumnFamilyId,
 }
 
 /// Simplified file metadata for message passing.
@@ -86,7 +86,7 @@ pub struct FileMeta {
     pub name: String,
     pub level: u32,
     pub size_bytes: u64,
-    pub cf_id: u32,
+    pub cf_id: crate::engine::ColumnFamilyId,
     pub smallest_key: Option<Vec<u8>>,
     pub largest_key: Option<Vec<u8>>,
     pub smallest_seq: Option<u64>,
@@ -100,14 +100,14 @@ pub struct FileMeta {
 #[derive(Debug, Clone)]
 pub enum TransactionOp {
     Put {
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         key: Vec<u8>,
         value: Vec<u8>,
         ttl_seconds: Option<u64>,
         insert_only: bool,
     },
     Delete {
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         key: Vec<u8>,
     },
 }
@@ -116,9 +116,15 @@ pub enum TransactionOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IntentLogEntry {
     /// Seqno allocated
-    SeqnoAllocated { seqno: u64, cf_id: u32 },
+    SeqnoAllocated {
+        seqno: u64,
+        cf_id: crate::engine::ColumnFamilyId,
+    },
     /// Flush plan created
-    FlushPlanned { cf_id: u32, seqno_range: (u64, u64) },
+    FlushPlanned {
+        cf_id: crate::engine::ColumnFamilyId,
+        seqno_range: (u64, u64),
+    },
     /// Compaction plan created
     CompactionPlanned {
         input_files: Vec<String>,
@@ -144,11 +150,14 @@ pub enum IntentLogEntry {
 pub enum RuntimeMsg {
     // === Flush Actor ===
     /// Request memtable flush for a column family.
-    FlushMemtable { request_id: u64, cf_id: u32 },
+    FlushMemtable {
+        request_id: u64,
+        cf_id: crate::engine::ColumnFamilyId,
+    },
     /// Memtable flush completed.
     FlushComplete {
         request_id: u64,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         sst_name: String,
         sequence: u64,
     },
@@ -172,7 +181,7 @@ pub enum RuntimeMsg {
     /// Append record to WAL.
     WalAppend {
         request_id: u64,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         key: Vec<u8>,
         value: Option<Vec<u8>>,
         ttl_seconds: Option<u64>, // TTL in seconds, None means no expiration
@@ -182,7 +191,7 @@ pub enum RuntimeMsg {
     /// Append delete range tombstone to WAL.
     WalAppendDeleteRange {
         request_id: u64,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
     },
@@ -238,7 +247,10 @@ pub enum RuntimeMsg {
     /// Create a new column family.
     ManifestCreateColumnFamily { request_id: u64, name: String },
     /// Drop a column family (soft delete).
-    ManifestDropColumnFamily { request_id: u64, cf_id: u32 },
+    ManifestDropColumnFamily {
+        request_id: u64,
+        cf_id: crate::engine::ColumnFamilyId,
+    },
 
     /// Begin an ingest barrier: prevent new compactions, bump ingest epoch,
     /// and wait until in-flight compactions drain.
@@ -273,7 +285,7 @@ pub enum RuntimeMsg {
     /// durability_waiters until the frontier advances.
     Read {
         request_id: u64,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         key: Vec<u8>,
         sequence: u64, // Read at this sequence number or earlier.
         requested_durability: crate::engine::api::Durability, // Durability level requested
@@ -285,7 +297,7 @@ pub enum RuntimeMsg {
     /// the scan must not return data with seqno > local_durable_seq.
     RangeScan {
         request_id: u64,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         start: Vec<u8>,
         end: Vec<u8>,
         sequence: u64, // Read at this sequence number or earlier.
@@ -309,7 +321,7 @@ pub enum RuntimeMsg {
     /// allowing transactions to execute reads directly without message passing.
     CaptureReadSnapshot {
         request_id: u64,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         sequence: u64,
     },
 
@@ -325,13 +337,19 @@ pub enum RuntimeMsg {
 
     /// Check if writes should be stalled for a column family.
     /// Used by Engine::commit() to expose backpressure before accepting writes.
-    CheckWriteStall { request_id: u64, cf_id: u32 },
+    CheckWriteStall {
+        request_id: u64,
+        cf_id: crate::engine::ColumnFamilyId,
+    },
 
     /// Block until writes are no longer stalled for `cf_id`.
     ///
     /// Responds immediately if not stalled; otherwise the response is held
     /// until a stall-clearing event occurs (e.g. flush completion).
-    WaitForWriteStallClear { request_id: u64, cf_id: u32 },
+    WaitForWriteStallClear {
+        request_id: u64,
+        cf_id: crate::engine::ColumnFamilyId,
+    },
 
     /// Best-effort cancel for a previous `WaitForWriteStallClear` request.
     ///
@@ -485,7 +503,7 @@ pub enum RuntimeResponse {
     },
     ColumnFamilyCreated {
         request_id: u64,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
     },
     ReadAmpMetricsSnapshot {
         request_id: u64,
@@ -759,7 +777,7 @@ impl RuntimeHandle {
     ///
     /// Used by Engine::commit() to expose backpressure to clients before
     /// accepting new write transactions.
-    pub fn check_write_stall(&self, cf_id: u32) -> MidgeResult<bool> {
+    pub fn check_write_stall(&self, cf_id: crate::engine::ColumnFamilyId) -> MidgeResult<bool> {
         let response = self.send_and_wait(RuntimeMsg::CheckWriteStall {
             request_id: next_request_id(),
             cf_id,

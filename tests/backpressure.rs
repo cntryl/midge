@@ -107,9 +107,11 @@ fn should_succeed_after_backoff_when_write_stall_cleared() {
             Err(e) => panic!("unexpected error: {:?}", e),
         };
 
-        results
-            .borrow_mut()
-            .push((mode.to_string(), first_stall_observed, second_write_ok_or_stall));
+        results.borrow_mut().push((
+            mode.to_string(),
+            first_stall_observed,
+            second_write_ok_or_stall,
+        ));
     });
 
     // Assert

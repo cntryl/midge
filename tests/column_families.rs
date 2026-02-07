@@ -4,7 +4,6 @@
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
-use cntryl_midge::ColumnFamilyId;
 use std::sync::Arc;
 
 // ============================================================================
@@ -22,7 +21,7 @@ fn should_create_column_family_given_valid_name_when_engine_open() {
 
         // Assert
         assert_eq!(cf.name(), "test_cf");
-        assert_ne!(cf.id().as_u32(), 0); // Not default CF
+        assert_ne!(cf.id(), 0); // Not default CF
     });
 }
 
@@ -41,8 +40,8 @@ fn should_create_multiple_column_families_given_unique_names_when_engine_open() 
         assert_eq!(cf1.name(), "cf1");
         assert_eq!(cf2.name(), "cf2");
         assert_eq!(cf3.name(), "cf3");
-        assert_ne!(cf1.id().as_u32(), cf2.id().as_u32());
-        assert_ne!(cf2.id().as_u32(), cf3.id().as_u32());
+        assert_ne!(cf1.id(), cf2.id());
+        assert_ne!(cf2.id(), cf3.id());
     });
 }
 
@@ -150,7 +149,7 @@ fn should_fail_drop_default_column_family_given_drop_request_when_default_cf() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
-        let default_cf_id = ColumnFamilyId::DEFAULT;
+        let default_cf_id = 0;
 
         // Act
         let result = engine.drop_column_family(default_cf_id);
@@ -667,7 +666,7 @@ fn should_get_default_column_family_given_fresh_engine_when_querying() {
 
         // Assert
         assert_eq!(cf.name(), "default");
-        assert_eq!(cf.id().as_u32(), 0);
+        assert_eq!(cf.id(), 0);
     });
 }
 

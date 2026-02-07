@@ -37,7 +37,7 @@ pub enum DurabilityWaiter {
     },
     Read {
         request_id: u64,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         key: Vec<u8>,
         sequence: u64,
         #[allow(dead_code)]
@@ -45,7 +45,7 @@ pub enum DurabilityWaiter {
     },
     RangeScan {
         request_id: u64,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         start: Vec<u8>,
         end: Vec<u8>,
         sequence: u64,

@@ -34,7 +34,7 @@ const INGEST_QUEUE_DEPTH: usize = 4096;
 
 /// Write intent submitted to ingest coordinator
 pub(crate) struct WriteIntent {
-    pub cf_id: u32,
+    pub cf_id: crate::engine::ColumnFamilyId,
     pub key: Vec<u8>,
     pub value: Option<Vec<u8>>,
     pub ttl_seconds: Option<u64>,
@@ -110,7 +110,7 @@ impl WriteBatch {
 
 /// Per-CF ingest coordinator
 pub(crate) struct IngestCoordinator {
-    cf_id: u32,
+    cf_id: crate::engine::ColumnFamilyId,
     write_tx: Sender<WriteIntent>,
     stop_tx: Sender<()>,
     thread_handle: Option<thread::JoinHandle<()>>,
@@ -121,7 +121,7 @@ pub(crate) struct IngestCoordinator {
 
 impl IngestCoordinator {
     /// Create and start an ingest coordinator for a column family
-    pub fn new(cf_id: u32, runtime: RuntimeHandle) -> Self {
+    pub fn new(cf_id: crate::engine::ColumnFamilyId, runtime: RuntimeHandle) -> Self {
         let (write_tx, write_rx) = bounded(INGEST_QUEUE_DEPTH);
         let (stop_tx, stop_rx) = bounded(1);
         let stall_flag = Arc::new(AtomicBool::new(false));
@@ -153,7 +153,7 @@ impl IngestCoordinator {
     /// Returns WriteStall if queue is full (backpressure), or the sequence number on success.
     pub fn submit_write(
         &self,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         key: Vec<u8>,
         value: Option<Vec<u8>>,
         ttl_seconds: Option<u64>,
@@ -187,7 +187,7 @@ impl IngestCoordinator {
 
     /// Ingest loop: batches writes and commits them
     fn ingest_loop(
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         runtime: RuntimeHandle,
         write_rx: Receiver<WriteIntent>,
         stop_rx: Receiver<()>,
@@ -253,7 +253,7 @@ impl IngestCoordinator {
     /// Commit a batch as a single transaction
     fn commit_batch(
         runtime: &RuntimeHandle,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         batch: &mut WriteBatch,
         stall_flag: &AtomicBool,
     ) {

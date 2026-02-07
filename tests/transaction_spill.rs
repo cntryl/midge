@@ -332,7 +332,7 @@ fn should_recover_committed_spill_given_restart_after_commit() {
                 .expect("commit");
         }
 
-            // Assert
+        // Assert
         {
             let engine = open_with_mode(opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");

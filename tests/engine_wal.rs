@@ -369,5 +369,4 @@ fn should_document_wal_implementation_status() {
     eprintln!("  - Immediate priority fix required");
 
     // Assert: This test is informational
-    assert!(true);
 }

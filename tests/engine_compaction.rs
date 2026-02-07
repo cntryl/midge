@@ -307,7 +307,6 @@ fn should_document_compaction_implementation_gaps() {
     eprintln!("  - May need enhanced logging/monitoring");
 
     // Assert: This test is informational
-    assert!(true);
 }
 // ============================================================================
 // ARCHITECTURE VERIFICATION: LSM LEVEL PROGRESSION
@@ -367,6 +366,4 @@ fn should_document_lsm_level_progression_strategy_when_tested() {
     eprintln!("\nâœ“ LSM strategy: Levels correctly isolate write amplification");
     eprintln!("âœ“ Compaction preserves all data during transitions");
     eprintln!("âœ“ Multiple flushes accumulate in L0 before L0â†’L1 compaction");
-
-    assert!(true);
 }

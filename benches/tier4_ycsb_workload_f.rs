@@ -52,7 +52,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         .expect("begin");
                     let _old = tx.get(&k[..]).expect("warmup get");
                     let v = ycsb::make_value((op_index % 251) as u8);
-                    ycsb::retry_write_stall(e, cf_id.as_u32(), stop.as_ref(), || {
+                    ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
                         let mut tx = e
                             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                             .expect("begin");
@@ -93,7 +93,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                     let _old = tx.get(&k[..]).expect("measured get");
                     drop(tx);
                     let v = ycsb::make_value((op_index % 251) as u8);
-                    ycsb::retry_write_stall(e, cf_id.as_u32(), stop.as_ref(), || {
+                    ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
                         let mut tx = e
                             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                             .expect("measured begin");

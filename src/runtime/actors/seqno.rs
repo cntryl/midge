@@ -27,7 +27,7 @@ impl SeqnoAllocActor {
     /// Returns a new unique seqno and logs it in the intent log.
     pub fn alloc_seqno(
         state: &mut RuntimeState,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
     ) -> MidgeResult<(u64, RuntimeResponse)> {
         // Check if write is stalled due to explicit flag
         if state.write_stalled {

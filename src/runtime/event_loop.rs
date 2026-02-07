@@ -61,9 +61,9 @@ pub struct EventLoop {
     worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
 
     /// Waiters blocked on write stall clearing (request_id -> cf_id).
-    write_stall_waiters: HashMap<u64, u32>,
+    write_stall_waiters: HashMap<u64, crate::engine::ColumnFamilyId>,
     /// FIFO queues of waiters per CF.
-    write_stall_waiter_queues: HashMap<u32, VecDeque<u64>>,
+    write_stall_waiter_queues: HashMap<crate::engine::ColumnFamilyId, VecDeque<u64>>,
 }
 
 impl EventLoop {
@@ -191,7 +191,8 @@ impl EventLoop {
 
     fn wake_write_stall_waiters(&mut self) {
         // Avoid borrowing issues by snapshotting keys.
-        let cf_ids: Vec<u32> = self.write_stall_waiter_queues.keys().copied().collect();
+        let cf_ids: Vec<crate::engine::ColumnFamilyId> =
+            self.write_stall_waiter_queues.keys().copied().collect();
 
         for cf_id in cf_ids {
             if self.state.should_stall_writes(cf_id) {
@@ -964,7 +965,10 @@ impl EventLoop {
     }
 
     /// Create an immutable read snapshot for a column family
-    fn create_read_snapshot(&self, cf_id: u32) -> Option<super::ReadSnapshot> {
+    fn create_read_snapshot(
+        &self,
+        cf_id: crate::engine::ColumnFamilyId,
+    ) -> Option<super::ReadSnapshot> {
         let cf_state = self.state.column_families.get(&cf_id)?;
 
         // Collect SST metadata for this CF
@@ -1007,7 +1011,7 @@ impl EventLoop {
     fn handle_msg_read(
         &self,
         request_id: u64,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         key: Vec<u8>,
         sequence: u64,
         requested_durability: crate::engine::api::Durability,
@@ -1053,7 +1057,7 @@ impl EventLoop {
     fn handle_msg_range_scan(
         &self,
         request_id: u64,
-        cf_id: u32,
+        cf_id: crate::engine::ColumnFamilyId,
         start: Vec<u8>,
         end: Vec<u8>,
         sequence: u64,
@@ -2389,7 +2393,12 @@ impl EventLoop {
     }
 
     /// Local read path: memtable → immutable memtables → [SST TODO]
-    fn handle_read(&self, cf_id: u32, key: &[u8], seq: u64) -> Option<Vec<u8>> {
+    fn handle_read(
+        &self,
+        cf_id: crate::engine::ColumnFamilyId,
+        key: &[u8],
+        seq: u64,
+    ) -> Option<Vec<u8>> {
         let cf_state = self.state.column_families.get(&cf_id)?;
 
         // Simple get logic

@@ -336,8 +336,7 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
             }
         }
 
-        // Assert
-        assert!(true);
+        // Assert: No additional check required.
     });
 }
 

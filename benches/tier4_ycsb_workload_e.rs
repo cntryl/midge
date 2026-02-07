@@ -48,7 +48,7 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         let key_id = INITIAL_KEYS as u64 + ((client_id as u64) << 32) + op_index;
                         let k = ycsb::make_key(key_id);
                         let v = ycsb::make_value((op_index % 251) as u8);
-                        ycsb::retry_write_stall(e, cf_id.as_u32(), stop.as_ref(), || {
+                        ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
                             let mut tx = e
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("begin");
@@ -98,7 +98,7 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         let key_id = INITIAL_KEYS as u64 + ((client_id as u64) << 32) + op_index;
                         let k = ycsb::make_key(key_id);
                         let v = ycsb::make_value((op_index % 251) as u8);
-                        ycsb::retry_write_stall(e, cf_id.as_u32(), stop.as_ref(), || {
+                        ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
                             let mut tx = e
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("measured begin");

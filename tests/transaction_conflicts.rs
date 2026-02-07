@@ -890,8 +890,7 @@ fn should_maintain_transaction_isolation_under_stress() {
         // Act
         // Test transaction isolation under concurrent load
 
-        // Assert
-        assert!(true);
+        // Assert: concurrency executed without panicking
     });
 }
 

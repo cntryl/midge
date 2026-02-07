@@ -95,7 +95,7 @@ impl MidgeSpan {
     }
 
     /// Add column family
-    pub fn with_cf(self, cf_id: u32) -> Self {
+    pub fn with_cf(self, cf_id: crate::engine::ColumnFamilyId) -> Self {
         self.with_attr("db.column_family", cf_id.to_string())
     }
 
