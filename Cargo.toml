@@ -193,6 +193,11 @@ name = "tier1_hotpath_singleflight"
 path = "benches/tier1_hotpath_singleflight.rs"
 harness = false
 
+[[bench]]
+name = "tier1_hotpath_compression"
+path = "benches/tier1_hotpath_compression.rs"
+harness = false
+
 # =============================================================================
 # Benchmarks — Tier 2: Subsystem (<8s)
 # =============================================================================
@@ -230,4 +235,9 @@ harness = false
 [[bench]]
 name = "tier2_subsystem_read_amplification"
 path = "benches/tier2_subsystem_read_amplification.rs"
+harness = false
+
+[[bench]]
+name = "tier2_subsystem_compression"
+path = "benches/tier2_subsystem_compression.rs"
 harness = false
