@@ -12,7 +12,6 @@
 //! The API remains backward compatible with the original batch helpers.
 
 use crate::common::MidgeResult;
-use crate::compaction::merge::MergeEntry;
 use crate::sst::traits::SstFactory;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -38,20 +37,6 @@ pub struct CompactionVersion {
     pub value: Option<Vec<u8>>,
     /// Expiration time in seconds since epoch (optional)
     pub expiration: Option<u64>,
-}
-
-/// Adapter that converts `MergeEntry` into `CompactionVersion`.
-///
-/// This bridges the streaming merge iterator to the compaction version abstraction,
-/// allowing the merge pipeline to feed directly into version filtering/writing.
-pub fn merge_entry_to_version(entry: &MergeEntry) -> CompactionVersion {
-    CompactionVersion {
-        key: entry.key.to_vec(),
-        seq: entry.seq,
-        is_tombstone: false, // TODO: wire is_tombstone from MergeEntry when SST reader is ready
-        value: Some(entry.value.to_vec()),
-        expiration: None, // TODO: wire expiration from SST reader when available
-    }
 }
 
 /// Stream-based deduplicator: yields only the first (highest-seq) version per key.

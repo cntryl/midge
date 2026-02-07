@@ -25,7 +25,6 @@ use std::time::Duration;
 static IN_MEMORY_OPEN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) mod api;
-mod context;
 mod ingest;
 
 pub use api::{

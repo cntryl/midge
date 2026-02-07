@@ -231,6 +231,15 @@ pub fn append_edit(db_path: &Path, edit: &ManifestEdit) -> MidgeResult<()> {
     append_edit_with_fs(&fs, edit)
 }
 
+/// Convenience wrapper: replay journal via a RealFs created from db_path (backwards compatible)
+pub fn replay_journal(db_path: &Path) -> MidgeResult<Vec<ManifestEdit>> {
+    let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
+        std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
+            crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e))
+        })?);
+    replay_journal_with_fs(&fs)
+}
+
 /// Replay a journal file at db_path. Returns Vec<ManifestEdit> in order.
 /// Stops cleanly on partial or corrupt tail record (returns edits up to that point).
 pub fn replay_journal_with_fs(
@@ -343,15 +352,6 @@ pub fn replay_journal_with_fs(
     }
 
     Ok(edits)
-}
-
-/// Convenience wrapper: replay using RealFs created from db_path
-pub fn replay_journal(db_path: &Path) -> MidgeResult<Vec<ManifestEdit>> {
-    let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
-        std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
-            crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e))
-        })?);
-    replay_journal_with_fs(&fs)
 }
 
 /// Append a batch of edits as a single TLV record using the provided Fs (preferred).
@@ -509,15 +509,6 @@ pub fn append_fsync_marker_with_fs(
     Ok(())
 }
 
-/// Convenience wrapper: append via a RealFs created from db_path (backwards compatible)
-pub fn append_fsync_marker(db_path: &Path, last_seq: u64) -> MidgeResult<()> {
-    let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
-        std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
-            crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e))
-        })?);
-    append_fsync_marker_with_fs(&fs, last_seq)
-}
-
 /// Truncate or rotate journal after snapshot using provided Fs.
 pub fn truncate_journal_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> MidgeResult<()> {
     use crate::io::traits::{FsPath, OpenMode, OpenOptions};
@@ -538,15 +529,6 @@ pub fn truncate_journal_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) 
         .map_err(crate::common::MidgeError::from)?;
 
     Ok(())
-}
-
-/// Convenience wrapper: truncate via a RealFs created from db_path
-pub fn truncate_journal(db_path: &Path) -> MidgeResult<()> {
-    let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
-        std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
-            crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e))
-        })?);
-    truncate_journal_with_fs(&fs)
 }
 
 #[cfg(test)]

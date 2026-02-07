@@ -27,20 +27,30 @@
 // Foundation - no dependencies
 pub mod common;
 
-// Internal modules - implementation details (NOT part of public API)
+// Internal modules — items in these private modules may not be reached from the
+// public API surface but are intentionally retained as tested infrastructure.
+// They participate in internal subsystems (compaction, runtime actors, telemetry,
+// storage orchestration) and are exercised by unit tests within each module.
+#[allow(dead_code)]
 mod compaction;
+#[allow(dead_code)]
 mod io;
 pub mod iterators;
+#[allow(dead_code)]
 mod lease;
+#[allow(dead_code)]
 mod metadata;
-mod metrics;
+#[allow(dead_code)]
 mod runtime;
 pub mod sst;
+#[allow(dead_code)]
 mod storage;
+#[allow(dead_code)]
 mod telemetry;
 pub mod wal;
 
-// Main engine (canonical public API)
+// Main engine (canonical public API — re-exported below)
+#[allow(dead_code)]
 mod engine;
 
 // Test support (public for testkit when testing, otherwise acts as private module)

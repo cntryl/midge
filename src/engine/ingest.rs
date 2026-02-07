@@ -87,12 +87,6 @@ impl WriteBatch {
         self.intents.push(intent);
     }
 
-    fn should_flush(&self) -> bool {
-        self.intents.len() >= MAX_BATCH_OPS
-            || self.total_bytes >= MAX_BATCH_BYTES
-            || self.first_enqueued.elapsed() >= MAX_BATCH_DELAY
-    }
-
     fn is_empty(&self) -> bool {
         self.intents.is_empty()
     }

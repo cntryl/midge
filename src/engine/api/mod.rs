@@ -14,12 +14,6 @@ mod write_options;
 pub mod iterator;
 pub mod query;
 
-// Internal-only legacy/advanced modules (kept crate-private)
-pub(crate) mod errors;
-pub(crate) mod results;
-pub(crate) mod traits;
-pub(crate) mod types;
-
 pub use iterator::{Direction, Iterator as ScanIterator};
 pub use kv::{Key, Value};
 pub use options::{Goal, MemoryBudget, OpenOptions, Storage, WorkloadProfile};

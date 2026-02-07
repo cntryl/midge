@@ -75,8 +75,7 @@ pub struct EventLoop {
     /// Waiters blocked on write stall clearing (request_id -> cf_id).
     pub(super) write_stall_waiters: HashMap<u64, crate::engine::ColumnFamilyId>,
     /// FIFO queues of waiters per CF.
-    pub(super) write_stall_waiter_queues:
-        HashMap<crate::engine::ColumnFamilyId, VecDeque<u64>>,
+    pub(super) write_stall_waiter_queues: HashMap<crate::engine::ColumnFamilyId, VecDeque<u64>>,
 }
 
 impl EventLoop {

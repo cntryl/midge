@@ -332,14 +332,6 @@ impl SstFileIo {
         Ok(result)
     }
 
-    fn scan_block(
-        &self,
-        handle: &BlockHandle,
-    ) -> MidgeResult<Vec<(bytes::Bytes, Option<bytes::Bytes>)>> {
-        let block_data = self.read_block(handle)?;
-        self.scan_block_from_bytes(&block_data)
-    }
-
     fn scan_block_from_bytes(
         &self,
         block_data: &bytes::Bytes,

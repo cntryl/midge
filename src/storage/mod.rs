@@ -166,8 +166,6 @@ pub(crate) use local_fs_storage::LocalFsStorage;
 
 pub use hybrid::backend::HybridStorage;
 
-use crate::common::MidgeResult;
-
 // COPILOT: CLOUD-DURABLE STORAGE RULES
 //
 // Storage subsystem must support CloudFirst durability for WAL and SST.
@@ -265,22 +263,6 @@ pub enum StorageOutcome<T: Clone> {
 }
 
 impl<T: Clone> StorageOutcome<T> {
-    /// Convert from MidgeResult to StorageOutcome
-    pub fn from_result(r: MidgeResult<T>) -> Self {
-        match r {
-            Ok(v) => StorageOutcome::Ok(v),
-            Err(e) => StorageOutcome::Err(format!("{:?}", e)),
-        }
-    }
-
-    /// Convert StorageOutcome to MidgeResult
-    pub fn into_result(self) -> MidgeResult<T> {
-        match self {
-            StorageOutcome::Ok(v) => Ok(v),
-            StorageOutcome::Err(e) => Err(crate::common::MidgeError::Internal(e)),
-        }
-    }
-
     /// Check if this is an Ok outcome
     pub fn is_ok(&self) -> bool {
         matches!(self, StorageOutcome::Ok(_))

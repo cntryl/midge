@@ -164,20 +164,6 @@ impl BloomReader {
         results.negative_count = negative_count;
         results
     }
-
-    /// Calculate bit index using double-hashing (Kirsch–Mitzenmacher)
-    /// combined = h1 + i * h2, then mod num_bits
-    fn compute_bit_index(key: &[u8], i: usize, num_bits: usize) -> usize {
-        let h1 = Self::hash64(key, SEED1);
-        let h2 = Self::hash64(key, SEED2);
-        let combined = h1.wrapping_add((i as u64).wrapping_mul(h2));
-        (combined % (num_bits as u64)) as usize
-    }
-
-    /// Hash using xxHash3 (must match writer)
-    fn hash64(key: &[u8], seed: u64) -> u64 {
-        xxh3_64_with_seed(key, seed)
-    }
 }
 
 #[cfg(test)]

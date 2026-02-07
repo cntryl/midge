@@ -10,28 +10,28 @@ pub type Key = Bytes;
 /// Value type alias
 pub type Value = Bytes;
 
-/// Key-value pair
+/// A key-value pair
 pub type KvPair = (Key, Value);
 
-/// Optional value (None means deleted/not found)
+/// An optional value (used for point lookups that may miss)
 pub type OptionalValue = Option<Value>;
 
-/// Create a Key from a byte slice (copies data)
+/// Create a [`Key`] from a byte slice.
 pub fn key(slice: &[u8]) -> Key {
     Bytes::copy_from_slice(slice)
 }
 
-/// Create a Value from a byte slice (copies data)
+/// Create a [`Value`] from a byte slice.
 pub fn value(slice: &[u8]) -> Value {
     Bytes::copy_from_slice(slice)
 }
 
-/// Create a Key from an owned byte vector (zero-copy)
+/// Create a [`Key`] from an owned `Vec<u8>`.
 pub fn key_owned(vec: Vec<u8>) -> Key {
     Bytes::from(vec)
 }
 
-/// Create a Value from an owned byte vector (zero-copy)
+/// Create a [`Value`] from an owned `Vec<u8>`.
 pub fn value_owned(vec: Vec<u8>) -> Value {
     Bytes::from(vec)
 }

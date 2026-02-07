@@ -4,11 +4,11 @@
 //! `complete_durability_waiters` helper that deduplicates the waiter-completion
 //! pattern used by cloud ack, WAL sync, and forced sync code paths.
 
-use super::EventLoop;
 use super::super::durability::DurabilityWaiter;
-use super::super::RuntimeResponse;
-use crossbeam::channel::Receiver;
 use super::super::RuntimeMsg;
+use super::super::RuntimeResponse;
+use super::EventLoop;
+use crossbeam::channel::Receiver;
 
 /// Describes the source of a durability completion so the shared helper
 /// can apply the correct side-effects (confirm variant, barrier clearing,
@@ -143,10 +143,7 @@ impl EventLoop {
                     requested_durability: _,
                 } => {
                     let value = self.handle_read(cf_id, &key, sequence);
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::ReadValue { request_id, value },
-                    );
+                    self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
                 }
                 DurabilityWaiter::RangeScan {
                     request_id,

@@ -14,13 +14,13 @@ impl ManifestPersistence {
     /// Manifest file name
     const MANIFEST_FILE: &'static str = "manifest.yaml";
 
-    /// Get the manifest file path given a database path
+    /// Snapshot file name
+    const MANIFEST_SNAPSHOT: &'static str = "manifest.snapshot";
+
+    /// Get the manifest file path
     pub fn manifest_path(db_path: &Path) -> PathBuf {
         db_path.join(Self::MANIFEST_FILE)
     }
-
-    /// Snapshot file name
-    const MANIFEST_SNAPSHOT: &'static str = "manifest.snapshot";
 
     /// Get the manifest snapshot path
     pub fn manifest_snapshot_path(db_path: &Path) -> PathBuf {

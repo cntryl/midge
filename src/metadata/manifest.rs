@@ -108,11 +108,6 @@ impl FileMeta {
     pub fn get_read_count(&self) -> u64 {
         self.read_count.load(Ordering::Relaxed)
     }
-
-    /// Reset read counter (useful after compaction)
-    pub fn reset_read_count(&self) {
-        self.read_count.store(0, Ordering::Relaxed);
-    }
 }
 
 impl Manifest {

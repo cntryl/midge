@@ -83,16 +83,6 @@ pub struct HybridStorage {
 }
 
 impl HybridStorage {
-    /// Create a new hybrid storage with local and cloud backends and default policy
-    pub fn new(local: Arc<dyn StorageBackend>, cloud: Arc<dyn StorageBackend>) -> Self {
-        Self::with_policy_and_event_sender(
-            local,
-            cloud,
-            policy::StorageBudgetPolicy::default(),
-            None,
-        )
-    }
-
     /// Create a new hybrid storage with an external event sender.
     ///
     /// When `external_event_tx` is provided, CloudAck/CloudFail will be sent to it

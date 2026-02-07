@@ -3,9 +3,9 @@
 //! Contains `drain_pending_writes` (opportunistic write coalescing for group commit)
 //! and `wake_write_stall_waiters` (backpressure release).
 
-use super::EventLoop;
 use super::super::durability::DurabilityWaiter;
 use super::super::{RuntimeMsg, RuntimeResponse};
+use super::EventLoop;
 use crossbeam::channel::{Receiver, TryRecvError};
 
 impl EventLoop {

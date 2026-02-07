@@ -5,7 +5,6 @@
 
 pub mod config;
 pub mod metrics;
-pub mod spans;
 
 pub use config::TelemetryConfig;
 pub use metrics::Metrics;

@@ -460,10 +460,11 @@ mod tests {
 
     #[test]
     fn should_create_bearer_token_credential() {
-        // Arrange & Act
-        let cred = GcsCredential::BearerToken {
-            token: "ya29.example".into(),
-        };
+        // Arrange
+        let token = "ya29.example".to_string();
+
+        // Act
+        let cred = GcsCredential::BearerToken { token };
 
         // Assert
         match cred {
@@ -474,11 +475,12 @@ mod tests {
 
     #[test]
     fn should_create_hmac_key_credential() {
-        // Arrange & Act
-        let cred = GcsCredential::HmacKey {
-            access_id: "GOOG123".into(),
-            secret: "secret456".into(),
-        };
+        // Arrange
+        let access_id = "GOOG123".to_string();
+        let secret = "secret456".to_string();
+
+        // Act
+        let cred = GcsCredential::HmacKey { access_id, secret };
 
         // Assert
         match cred {
@@ -494,11 +496,16 @@ mod tests {
 
     #[test]
     fn should_create_provider_with_bearer_token() {
-        // Arrange & Act
+        // Arrange
+        let bucket = "my-bucket";
+        let project = "my-project";
+        let token = "ya29.token";
+
+        // Act
         let provider = GcsProvider::with_bearer_token(
-            "my-bucket".into(),
-            "my-project".into(),
-            "ya29.token".into(),
+            bucket.into(),
+            project.into(),
+            token.into(),
         );
 
         // Assert
@@ -512,12 +519,18 @@ mod tests {
 
     #[test]
     fn should_create_provider_with_hmac_key() {
-        // Arrange & Act
+        // Arrange
+        let bucket = "my-bucket";
+        let project = "my-project";
+        let access_id = "GOOG123";
+        let secret = "secret";
+
+        // Act
         let provider = GcsProvider::with_hmac_key(
-            "my-bucket".into(),
-            "my-project".into(),
-            "GOOG123".into(),
-            "secret".into(),
+            bucket.into(),
+            project.into(),
+            access_id.into(),
+            secret.into(),
         );
 
         // Assert
@@ -530,8 +543,12 @@ mod tests {
 
     #[test]
     fn should_default_to_bearer_token_with_new() {
-        // Arrange & Act
-        let provider = GcsProvider::new("bucket".into(), "project".into());
+        // Arrange
+        let bucket = "bucket";
+        let project = "project";
+
+        // Act
+        let provider = GcsProvider::new(bucket.into(), project.into());
 
         // Assert
         assert!(matches!(
@@ -542,8 +559,12 @@ mod tests {
 
     #[test]
     fn should_handle_empty_bucket_name() {
-        // Arrange & Act
-        let provider = GcsProvider::new("".into(), "project".into());
+        // Arrange
+        let bucket = "";
+        let project = "project";
+
+        // Act
+        let provider = GcsProvider::new(bucket.into(), project.into());
 
         // Assert
         assert_eq!(provider.bucket(), "");
@@ -552,8 +573,12 @@ mod tests {
 
     #[test]
     fn should_handle_empty_project_id() {
-        // Arrange & Act
-        let provider = GcsProvider::new("bucket".into(), "".into());
+        // Arrange
+        let bucket = "bucket";
+        let project = "";
+
+        // Act
+        let provider = GcsProvider::new(bucket.into(), project.into());
 
         // Assert
         assert_eq!(provider.bucket(), "bucket");
@@ -562,8 +587,12 @@ mod tests {
 
     #[test]
     fn should_handle_special_characters_in_bucket() {
-        // Arrange & Act
-        let provider = GcsProvider::new("my-bucket-123".into(), "my_project-123".into());
+        // Arrange
+        let bucket = "my-bucket-123";
+        let project = "my_project-123";
+
+        // Act
+        let provider = GcsProvider::new(bucket.into(), project.into());
 
         // Assert
         assert_eq!(provider.bucket(), "my-bucket-123");

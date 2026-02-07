@@ -34,7 +34,10 @@ impl StorageBackend for MockStorage {
 
         let event = StorageEvent::ReadComplete {
             key,
-            result: StorageOutcome::from_result(result),
+            result: match result {
+                Ok(v) => StorageOutcome::Ok(v),
+                Err(e) => StorageOutcome::Err(format!("{:?}", e)),
+            },
         };
         let _ = callback.send(event);
     }

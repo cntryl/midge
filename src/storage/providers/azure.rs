@@ -534,10 +534,11 @@ mod tests {
 
     #[test]
     fn should_create_shared_key_credential() {
-        // Arrange & Act
-        let cred = AzureCredential::SharedKey {
-            account_key: "mykey".to_string(),
-        };
+        // Arrange
+        let account_key = "mykey".to_string();
+
+        // Act
+        let cred = AzureCredential::SharedKey { account_key };
 
         // Assert
         match cred {
@@ -548,10 +549,11 @@ mod tests {
 
     #[test]
     fn should_create_sas_token_credential() {
-        // Arrange & Act
-        let cred = AzureCredential::SasToken {
-            token: "token123".to_string(),
-        };
+        // Arrange
+        let token = "token123".to_string();
+
+        // Act
+        let cred = AzureCredential::SasToken { token };
 
         // Assert
         match cred {
@@ -564,11 +566,16 @@ mod tests {
 
     #[test]
     fn should_create_provider_with_shared_key() {
-        // Arrange & Act
+        // Arrange
+        let account = "myaccount";
+        let container = "mycontainer";
+        let key = "accountkey123";
+
+        // Act
         let provider = AzureProvider::with_shared_key(
-            "myaccount".into(),
-            "mycontainer".into(),
-            "accountkey123".into(),
+            account.into(),
+            container.into(),
+            key.into(),
         );
 
         // Assert
@@ -582,11 +589,16 @@ mod tests {
 
     #[test]
     fn should_create_provider_with_sas_token() {
-        // Arrange & Act
+        // Arrange
+        let account = "myaccount";
+        let container = "mycontainer";
+        let sas_token = "sv=2021-06-08&ss=b&srt=sco";
+
+        // Act
         let provider = AzureProvider::with_sas_token(
-            "myaccount".into(),
-            "mycontainer".into(),
-            "sv=2021-06-08&ss=b&srt=sco".into(),
+            account.into(),
+            container.into(),
+            sas_token.into(),
         );
 
         // Assert
@@ -599,11 +611,14 @@ mod tests {
 
     #[test]
     fn should_normalize_sas_token_with_question_mark() {
-        // Arrange & Act
+        // Arrange
+        let sas_token = "?sv=2021-06-08&ss=b";
+
+        // Act
         let provider = AzureProvider::with_sas_token(
             "account".into(),
             "container".into(),
-            "?sv=2021-06-08&ss=b".into(),
+            sas_token.into(),
         );
 
         // Assert
@@ -618,11 +633,14 @@ mod tests {
 
     #[test]
     fn should_normalize_sas_token_without_question_mark() {
-        // Arrange & Act
+        // Arrange
+        let sas_token = "sv=2021-06-08&ss=b";
+
+        // Act
         let provider = AzureProvider::with_sas_token(
             "account".into(),
             "container".into(),
-            "sv=2021-06-08&ss=b".into(),
+            sas_token.into(),
         );
 
         // Assert
@@ -634,8 +652,12 @@ mod tests {
 
     #[test]
     fn should_default_to_shared_key_with_new() {
-        // Arrange & Act
-        let provider = AzureProvider::new("account".into(), "container".into());
+        // Arrange
+        let account = "account";
+        let container = "container";
+
+        // Act
+        let provider = AzureProvider::new(account.into(), container.into());
 
         // Assert
         assert!(matches!(
@@ -646,8 +668,12 @@ mod tests {
 
     #[test]
     fn should_handle_empty_account_name() {
-        // Arrange & Act
-        let provider = AzureProvider::new("".into(), "container".into());
+        // Arrange
+        let account = "";
+        let container = "container";
+
+        // Act
+        let provider = AzureProvider::new(account.into(), container.into());
 
         // Assert
         assert_eq!(provider.account_name(), "");
@@ -656,8 +682,12 @@ mod tests {
 
     #[test]
     fn should_handle_empty_container_name() {
-        // Arrange & Act
-        let provider = AzureProvider::new("account".into(), "".into());
+        // Arrange
+        let account = "account";
+        let container = "";
+
+        // Act
+        let provider = AzureProvider::new(account.into(), container.into());
 
         // Assert
         assert_eq!(provider.account_name(), "account");
@@ -666,8 +696,12 @@ mod tests {
 
     #[test]
     fn should_handle_special_characters_in_names() {
-        // Arrange & Act
-        let provider = AzureProvider::new("my-account-123".into(), "my-container-456".into());
+        // Arrange
+        let account = "my-account-123";
+        let container = "my-container-456";
+
+        // Act
+        let provider = AzureProvider::new(account.into(), container.into());
 
         // Assert
         assert_eq!(provider.account_name(), "my-account-123");
@@ -676,9 +710,13 @@ mod tests {
 
     #[test]
     fn should_create_provider_with_different_shared_keys() {
-        // Arrange & Act
-        let p1 = AzureProvider::with_shared_key("a1".into(), "c1".into(), "k1".into());
-        let p2 = AzureProvider::with_shared_key("a2".into(), "c2".into(), "k2".into());
+        // Arrange
+        let (a1, c1, k1) = ("a1", "c1", "k1");
+        let (a2, c2, k2) = ("a2", "c2", "k2");
+
+        // Act
+        let p1 = AzureProvider::with_shared_key(a1.into(), c1.into(), k1.into());
+        let p2 = AzureProvider::with_shared_key(a2.into(), c2.into(), k2.into());
 
         // Assert
         assert_ne!(p1.account_name(), p2.account_name());

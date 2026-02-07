@@ -186,20 +186,11 @@ impl PrimaryLease for FileSystemLease {
     }
 }
 
-impl FileSystemLease {
-    /// Create a clone suitable for embedding in the guard's release callback.
-    fn clone_for_guard(&self) -> Self {
-        Self {
-            fs: Arc::clone(&self.fs),
-            lease_file_path: self.lease_file_path.clone(),
-            holder_id: self.holder_id.clone(),
-            lock_file: Mutex::new(None), // Not cloning the file handle
-            acquired: AtomicBool::new(self.acquired.load(Ordering::Acquire)),
-        }
-    }
-}
-
-// Safety: FileSystemLease uses interior mutability correctly
+// SAFETY: FileSystemLease is Send + Sync because:
+// - The `fs` field is `Arc<dyn Fs>` which is Send + Sync by construction.
+// - The `lease_file_path` and `holder_id` are immutable after construction.
+// - The `lock_file` uses `Mutex` for interior mutability with proper synchronization.
+// - The `acquired` flag uses `AtomicBool` for lock-free thread-safe access.
 unsafe impl Send for FileSystemLease {}
 unsafe impl Sync for FileSystemLease {}
 

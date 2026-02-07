@@ -184,10 +184,15 @@ impl SkipList {
         while level > 0 {
             let l = level - 1;
 
+            // SAFETY: `pred` is a valid Shared pointer obtained from the head sentinel
+            // or from a previous Acquire load. The epoch guard ensures the node is not
+            // reclaimed while we hold a reference.
             let pred_ref = unsafe { pred.deref() };
             let mut curr = pred_ref.forward[l].load(AO::Acquire, guard);
 
             // Advance while current.key < target.
+            // SAFETY: `curr` was loaded with Acquire ordering under the epoch guard,
+            // so if non-null it points to a valid, pinned Node.
             while let Some(curr_ref) = unsafe { curr.as_ref() } {
                 match Self::cmp_key(&curr_ref.key, key) {
                     Ordering::Less => {
@@ -212,9 +217,12 @@ impl SkipList {
 
         while level > 0 {
             let l = level - 1;
+            // SAFETY: Same invariant as find() — pred was obtained from a valid
+            // Shared and the epoch guard prevents reclamation.
             let pred_ref = unsafe { pred.deref() };
             let mut curr = pred_ref.forward[l].load(AO::Acquire, guard);
 
+            // SAFETY: curr was loaded with Acquire under the epoch guard.
             while let Some(curr_ref) = unsafe { curr.as_ref() } {
                 match Self::cmp_key(&curr_ref.key, key) {
                     Ordering::Less => {
@@ -246,6 +254,8 @@ impl SkipList {
         guard: &'g Guard,
     ) -> Option<&'g VersionNode> {
         let mut v = versions_head.load(AO::Acquire, guard);
+        // SAFETY: v was loaded with Acquire under the epoch guard. Version nodes
+        // are never physically freed while the guard is pinned.
         while let Some(vn) = unsafe { v.as_ref() } {
             if vn.seq < snapshot_seq {
                 return Some(vn);
@@ -265,6 +275,7 @@ impl SkipList {
         let guard = &epoch::pin();
         let node_ptr = self.find_node(key, guard);
 
+        // SAFETY: node_ptr was returned by find_node under the epoch guard.
         if let Some(node) = unsafe { node_ptr.as_ref() } {
             if node.key.as_ref() == key {
                 if let Some(vn) = Self::visible_version(&node.versions_head, snapshot_seq, guard) {
@@ -290,6 +301,7 @@ impl SkipList {
         let guard = &epoch::pin();
         let node_ptr = self.find_node(key, guard);
 
+        // SAFETY: node_ptr was returned by find_node under the epoch guard.
         if let Some(node) = unsafe { node_ptr.as_ref() } {
             if node.key.as_ref() == key {
                 if let Some(vn) = Self::visible_version(&node.versions_head, snapshot_seq, guard) {
@@ -335,6 +347,7 @@ impl SkipList {
         self.find(&key, guard, &mut preds, &mut succs);
 
         // Case 1: Key exists – prepend new version to the version chain.
+        // SAFETY: succs[0] was populated by find() under the epoch guard.
         if let Some(curr) = unsafe { succs[0].as_ref() } {
             if curr.key == key {
                 loop {
@@ -378,9 +391,9 @@ impl SkipList {
 
             // Re-check if the key was inserted by another thread while we were preparing.
             // If so, append to the existing node's version chain instead of inserting a new node.
+            // SAFETY: succs[0] was refreshed by find() under this guard.
             if let Some(curr) = unsafe { succs[0].as_ref() } {
                 if curr.key == key {
-                    // Key now exists; prepend version to existing node's chain.
                     loop {
                         let curr_head = curr.versions_head.load(AO::Acquire, guard);
                         let new_ver = Owned::new(VersionNode {
@@ -408,6 +421,7 @@ impl SkipList {
                 }
             }
 
+            // SAFETY: preds[0] was set by find() and is a valid pinned pointer.
             let pred0 = unsafe { preds[0].deref() };
             let succ0 = succs[0];
 
@@ -416,13 +430,15 @@ impl SkipList {
             let new_node = Owned::new(Node::new(key.clone(), first_ver, node_level));
             let new_ptr = new_node.into_shared(guard);
 
-            // Set level-0 forward pointer to current successor.
+            // SAFETY: new_ptr was just created via into_shared with this guard;
+            // it is valid and exclusively owned until the CAS publishes it.
             unsafe { new_ptr.deref() }.forward[0].store(succ0, AO::Relaxed);
 
             // Validate window and splice at level 0.
             let pred_next0 = pred0.forward[0].load(AO::Acquire, guard);
             if pred_next0 != succ0 {
-                // Window changed; discard and retry.
+                // SAFETY: new_ptr is not yet published; we are the sole owner.
+                // defer_destroy schedules reclamation after all pinned guards unpin.
                 unsafe { guard.defer_destroy(new_ptr) };
                 continue;
             }
@@ -431,7 +447,7 @@ impl SkipList {
             {
                 Ok(_) => break new_ptr, // level 0 inserted
                 Err(_) => {
-                    // CAS failed; discard node and retry.
+                    // SAFETY: CAS failed so new_ptr was never published.
                     unsafe { guard.defer_destroy(new_ptr) };
                     continue;
                 }
@@ -442,9 +458,12 @@ impl SkipList {
         for l in 1..node_level {
             loop {
                 self.find(&key, guard, &mut preds, &mut succs);
+                // SAFETY: preds[l] was set by find() under this guard.
                 let pred = unsafe { preds[l].deref() };
                 let succ = succs[l];
 
+                // SAFETY: new_ptr was successfully published at level 0 and is
+                // valid for the lifetime of this guard.
                 unsafe { new_ptr.deref() }.forward[l].store(succ, AO::Relaxed);
                 let pred_next = pred.forward[l].load(AO::Acquire, guard);
                 if pred_next != succ {
@@ -497,6 +516,7 @@ impl SkipList {
             succs[0]
         };
 
+        // SAFETY: curr was loaded with Acquire under the epoch guard.
         while let Some(node) = unsafe { curr.as_ref() } {
             // Check end boundary.
             if let Some(end_key) = end {
@@ -538,6 +558,7 @@ impl SkipList {
             succs[0]
         };
 
+        // SAFETY: curr was loaded with Acquire under the epoch guard.
         while let Some(node) = unsafe { curr.as_ref() } {
             if let Some(end_key) = end {
                 if node.key.as_ref() >= end_key {
@@ -567,8 +588,11 @@ impl SkipList {
 
         let mut curr = self.head.forward[0].load(AO::Acquire, guard);
 
+        // SAFETY: All pointer dereferences below are under the epoch guard.
+        // Nodes loaded with Acquire are valid while the guard is pinned.
         while let Some(node) = unsafe { curr.as_ref() } {
             let mut vn_ptr = node.versions_head.load(AO::Acquire, guard);
+            // SAFETY: vn_ptr was loaded with Acquire under the guard.
             while let Some(vn) = unsafe { vn_ptr.as_ref() } {
                 let is_tomb = vn.val.is_none();
                 out.push((
@@ -608,6 +632,7 @@ impl SkipList {
             succs[0]
         };
 
+        // SAFETY: curr was loaded with Acquire under the epoch guard.
         while let Some(node) = unsafe { curr.as_ref() } {
             if let Some(end_key) = end {
                 if node.key.as_ref() >= end_key {
@@ -637,6 +662,7 @@ impl SkipList {
         let mut keys = Vec::with_capacity(128);
 
         let mut curr = self.head.forward[0].load(AO::Acquire, guard);
+        // SAFETY: curr was loaded with Acquire under the epoch guard.
         while let Some(node) = unsafe { curr.as_ref() } {
             keys.push(node.key.clone());
             curr = node.forward[0].load(AO::Acquire, guard);

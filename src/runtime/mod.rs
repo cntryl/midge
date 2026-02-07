@@ -8,18 +8,14 @@
 //! - **EventLoop**: Receives messages and dispatches to actors
 //! - **State**: Centralized mutable state owned by runtime
 //! - **Actors**: Stateless handlers that process messages and return state updates
-//! - **Scheduler**: Prioritizes and batches work
-//! - **Dispatcher**: Routes messages to appropriate actors
+//! - **Actors**: Stateless handlers that process messages and return state updates
 
 pub mod actors;
-pub mod dispatch;
 pub mod durability;
 pub mod event_loop;
 pub mod intent_persistence;
 pub mod read_snapshot;
-pub mod scheduler;
 pub mod state;
-pub mod task;
 
 pub use event_loop::EventLoop;
 pub use intent_persistence::IntentPersistence;

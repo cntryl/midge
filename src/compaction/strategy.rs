@@ -23,6 +23,7 @@ pub struct CompactionPlan {
 }
 
 impl CompactionPlan {
+    /// Create a new compaction plan for the given column family and level range.
     pub fn new(cf_id: u32, source_level: u32, target_level: u32) -> Self {
         Self {
             input_files: Vec::new(),
@@ -83,34 +84,6 @@ impl Compactor {
 
     /// Check if compaction should be triggered based on read amplification.
     ///
-    /// **Priority 1: L0 overlap control**
-    /// Returns true if:
-    /// - L0 file count exceeds threshold (causes excessive overlap)
-    /// - Average reads per operation suggests high L0 fanout
-    ///
-    /// This is the **highest priority** trigger for read amp control.
-    pub fn should_compact_for_read_amp(
-        &self,
-        files: &[FileMeta],
-        cf_id: u32,
-        avg_ssts_per_read: f64,
-    ) -> bool {
-        let cf_files: Vec<&FileMeta> = files.iter().filter(|f| f.cf_id == cf_id).collect();
-        let l0_count = cf_files.iter().filter(|f| f.level == 0).count();
-
-        // Aggressive L0 threshold: compact when L0 starts causing fanout
-        if l0_count >= 3 {
-            return true;
-        }
-
-        // Read amp threshold: if point reads touch >3 SSTs on average, compact L0
-        if avg_ssts_per_read > 3.0 && l0_count > 0 {
-            return true;
-        }
-
-        false
-    }
-
     /// Pick compaction using leveled strategy:
     ///   1. Check L0 → L1 first.
     ///   2. Check L1+ levels for size-overflow.

@@ -25,14 +25,6 @@ impl StorageBudgetPolicy {
         }
     }
 
-    /// Set custom watermarks
-    pub fn with_watermarks(mut self, high: u32, critical: u32, emergency: u32) -> Self {
-        self.high_watermark_percent = high;
-        self.critical_watermark_percent = critical;
-        self.emergency_watermark_percent = emergency;
-        self
-    }
-
     /// Check if we're in high watermark territory
     pub fn is_high_watermark(&self, usage_percent: u32) -> bool {
         usage_percent >= self.high_watermark_percent
@@ -62,17 +54,6 @@ impl Default for StorageBudgetPolicy {
     }
 }
 
-/// Eviction strategy for local SST replicas
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum EvictionStrategy {
-    /// Least Recently Used
-    #[default]
-    Lru,
-    /// FIFO (oldest first)
-    Fifo,
-    /// Random eviction
-    Random,
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,41 +126,6 @@ mod tests {
     }
 
     #[test]
-    fn should_customize_watermarks() {
-        // Arrange
-        let high = 80;
-        let critical = 85;
-        let emergency = 90;
-
-        // Act
-        let policy = StorageBudgetPolicy::new(1024 * 1024).with_watermarks(80, 85, 90);
-
-        // Assert
-        assert_eq!(policy.high_watermark_percent, high);
-        assert_eq!(policy.critical_watermark_percent, critical);
-        assert_eq!(policy.emergency_watermark_percent, emergency);
-    }
-
-    #[test]
-    fn should_calculate_bytes_until_high_watermark() {
-        // Arrange
-        let policy = StorageBudgetPolicy::new(1000); // 1000 bytes, high at 90%
-
-        // Act
-        let remaining_at_0 = policy.bytes_until_high_watermark(0);
-        let remaining_at_450 = policy.bytes_until_high_watermark(450);
-        let remaining_at_threshold = policy.bytes_until_high_watermark(900);
-        let remaining_over_threshold = policy.bytes_until_high_watermark(950);
-
-        // Assert
-        // High threshold = 900 bytes
-        assert_eq!(remaining_at_0, 900); // 900 bytes free
-        assert_eq!(remaining_at_450, 450); // 450 bytes free
-        assert_eq!(remaining_at_threshold, 0); // At threshold
-        assert_eq!(remaining_over_threshold, -50); // Over threshold
-    }
-
-    #[test]
     fn should_return_default_policy() {
         // Arrange
 
@@ -189,18 +135,5 @@ mod tests {
         // Assert
         assert_eq!(policy.max_local_bytes, 2 * 1024 * 1024 * 1024); // 2 GB
         assert_eq!(policy.high_watermark_percent, 90);
-    }
-
-    #[test]
-    fn should_have_eviction_strategies_with_default() {
-        // Arrange
-
-        // Act
-        let default_strategy = EvictionStrategy::default();
-
-        // Assert
-        assert_eq!(default_strategy, EvictionStrategy::Lru);
-        assert_ne!(EvictionStrategy::Lru, EvictionStrategy::Fifo);
-        assert_ne!(EvictionStrategy::Fifo, EvictionStrategy::Random);
     }
 }

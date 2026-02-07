@@ -103,7 +103,12 @@ mod tests {
         // Create mock storage backends for testing
         let local = Arc::new(crate::testkit::MockStorage::new());
         let cloud = Arc::new(crate::testkit::MockStorage::new());
-        let hybrid = Arc::new(HybridStorage::new(local, cloud));
+        let hybrid = Arc::new(HybridStorage::with_policy_and_event_sender(
+            local,
+            cloud,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            None,
+        ));
         let actor = EvictionActor::new(Arc::clone(&hybrid));
         (actor, hybrid)
     }

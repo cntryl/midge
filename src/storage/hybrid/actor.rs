@@ -7,7 +7,7 @@
 //! - Coordinate cloud uploads and local eviction
 //! - Signal backpressure to the engine
 
-use super::policy::{EvictionStrategy, StorageBudgetPolicy};
+use super::policy::StorageBudgetPolicy;
 use super::state::DiskState;
 use std::collections::VecDeque;
 
@@ -27,8 +27,6 @@ pub enum ReservationResult {
 /// Events for the Storage Budget Actor
 #[derive(Debug, Clone)]
 pub enum StorageBudgetEvent {
-    /// Query current disk state
-    QuerySpace { respond_to: String },
     /// Try to reserve space for a flush; include estimated size
     ReserveForFlush { est_size: u64 },
     /// A flush completed with actual size
@@ -39,17 +37,12 @@ pub enum StorageBudgetEvent {
     CompactionPlanned { input_sizes: Vec<u64> },
     /// Compaction finished with output sizes
     CompactionCompleted { output_sizes: Vec<u64> },
-    /// External signal: WAL grew by this amount
-    WalGrew { bytes: u64 },
-    /// External signal: SST was deleted locally
-    LocalSSTPurged { bytes: u64 },
 }
 
 /// Storage Budget Actor
 pub struct StorageBudgetActor {
     policy: StorageBudgetPolicy,
     disk_state: DiskState,
-    eviction_strategy: EvictionStrategy,
     /// Queue of SST IDs waiting for upload (FIFO for LRU/FIFO strategies)
     pending_evictions: VecDeque<(u64, u64)>, // (sst_id, size)
     /// Last reported watermark state
@@ -69,29 +62,14 @@ impl StorageBudgetActor {
         Self {
             policy,
             disk_state: DiskState::new(),
-            eviction_strategy: EvictionStrategy::Lru,
             pending_evictions: VecDeque::new(),
             last_watermark_state: WatermarkState::Normal,
         }
     }
 
-    pub fn with_eviction_strategy(mut self, strategy: EvictionStrategy) -> Self {
-        self.eviction_strategy = strategy;
-        self
-    }
-
     /// Handle an incoming event
     pub fn handle_event(&mut self, event: StorageBudgetEvent) -> Option<ReservationResult> {
         match event {
-            StorageBudgetEvent::QuerySpace { .. } => {
-                tracing::info!(
-                    usage_percent = self.disk_state.usage_percent(self.policy.max_local_bytes),
-                    used_bytes = self.disk_state.total_committed(),
-                    max_bytes = self.policy.max_local_bytes,
-                    "Space query"
-                );
-                None
-            }
             StorageBudgetEvent::ReserveForFlush { est_size } => {
                 self.try_reserve_for_flush(est_size)
             }
@@ -112,15 +90,6 @@ impl StorageBudgetActor {
             }
             StorageBudgetEvent::CompactionCompleted { output_sizes } => {
                 self.complete_compaction(&output_sizes);
-                None
-            }
-            StorageBudgetEvent::WalGrew { bytes } => {
-                self.disk_state.wal_bytes = self.disk_state.wal_bytes.saturating_add(bytes);
-                self.check_watermarks();
-                None
-            }
-            StorageBudgetEvent::LocalSSTPurged { bytes } => {
-                self.disk_state.sst_bytes = self.disk_state.sst_bytes.saturating_sub(bytes);
                 None
             }
         }

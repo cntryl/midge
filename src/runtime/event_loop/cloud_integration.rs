@@ -3,8 +3,8 @@
 //! Handles CloudFirst WAL flush, cloud upload ack/fail events,
 //! and hybrid storage polling/push-channel draining.
 
-use super::EventLoop;
 use super::durability_sync::CompletionSource;
+use super::EventLoop;
 use crossbeam::channel::TryRecvError;
 use std::time::Instant;
 
@@ -92,7 +92,8 @@ impl EventLoop {
                 for w in waiters {
                     let request_id = match w {
                         super::super::durability::DurabilityWaiter::WalAppend {
-                            request_id, ..
+                            request_id,
+                            ..
                         }
                         | super::super::durability::DurabilityWaiter::ConfirmWalAppend {
                             request_id,
@@ -104,9 +105,7 @@ impl EventLoop {
                         | super::super::durability::DurabilityWaiter::ConfirmTransactionApply {
                             request_id,
                         }
-                        | super::super::durability::DurabilityWaiter::Read {
-                            request_id, ..
-                        }
+                        | super::super::durability::DurabilityWaiter::Read { request_id, .. }
                         | super::super::durability::DurabilityWaiter::RangeScan {
                             request_id,
                             ..
