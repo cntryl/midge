@@ -7,22 +7,35 @@ use std::sync::Arc;
 
 use crate::io::Fs;
 
+use crate::sst::compression::CompressionPolicy;
+
 /// SST factory that uses io::Fs abstraction
 /// Allows using different filesystem implementations (Real, Mock, Chaos) for testing
 pub struct FsSstFactoryIo {
     fs: Arc<dyn Fs>,
     block_size: usize,
+    compression_policy: CompressionPolicy,
 }
 
 impl FsSstFactoryIo {
     /// Create a new factory with a custom filesystem implementation
     pub fn new(fs: Arc<dyn Fs>, block_size: usize) -> Self {
-        Self { fs, block_size }
+        Self {
+            fs,
+            block_size,
+            compression_policy: CompressionPolicy::default(),
+        }
     }
 
     /// Create with custom block size
     pub fn with_block_size(mut self, block_size: usize) -> Self {
         self.block_size = block_size;
+        self
+    }
+
+    /// Set the compression policy for SST blocks produced by this factory.
+    pub fn with_compression_policy(mut self, policy: CompressionPolicy) -> Self {
+        self.compression_policy = policy;
         self
     }
 
@@ -44,16 +57,17 @@ impl FsSstFactoryIo {
     }
 }
 
-/// Simple in-memory SST writer for now
-/// Used when the factory needs to create a writer but SST writing is still in progress
+/// Simple in-memory SST writer that applies block-level compression.
 struct InMemorySstWriter {
     entries: Vec<(Vec<u8>, Vec<u8>)>,
+    compression_policy: CompressionPolicy,
 }
 
 impl InMemorySstWriter {
-    fn new() -> Self {
+    fn new(compression_policy: CompressionPolicy) -> Self {
         Self {
             entries: Vec::new(),
+            compression_policy,
         }
     }
 }
@@ -65,23 +79,31 @@ impl DynSstWriter for InMemorySstWriter {
     }
 
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
-        // Simple serialization: concatenate all entries
-        let mut result = Vec::new();
-        for (k, v) in self.entries {
-            result.extend_from_slice(&[k.len() as u8]);
-            result.extend_from_slice(&k);
-            result.extend_from_slice(&[v.len() as u8]);
-            result.extend_from_slice(&v);
+        use crate::sst::compression;
+
+        // Serialize entries into a raw block
+        let mut raw_block = Vec::new();
+        for (k, v) in &self.entries {
+            raw_block.extend_from_slice(&[k.len() as u8]);
+            raw_block.extend_from_slice(k);
+            raw_block.extend_from_slice(&[v.len() as u8]);
+            raw_block.extend_from_slice(v);
         }
-        Ok(result)
+
+        // Apply compression + trailer
+        let compressed =
+            compression::compress_block_with_trailer(&raw_block, &self.compression_policy)?;
+
+        Ok(compressed.to_vec())
     }
 }
 
 impl SstFactory for FsSstFactoryIo {
     /// Create a new SST writer
     fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>> {
-        // Use in-memory writer for now - SST writing is in progress
-        Ok(Box::new(InMemorySstWriter::new()))
+        Ok(Box::new(InMemorySstWriter::new(
+            self.compression_policy.clone(),
+        )))
     }
 
     /// Open an existing SST file

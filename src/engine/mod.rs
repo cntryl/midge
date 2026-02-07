@@ -250,6 +250,7 @@ impl Engine {
                     wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
                     hybrid_storage: Some(cloud.hybrid_storage),
                     hybrid_storage_events: Some(cloud.events),
+                    compression_policy: opts.compression_policy.clone(),
                     ..Default::default()
                 };
 
@@ -262,6 +263,7 @@ impl Engine {
                 let config = crate::runtime::RuntimeConfig {
                     wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
                     wal_batch_config: batch_config,
+                    compression_policy: opts.compression_policy.clone(),
                     ..Default::default()
                 };
 

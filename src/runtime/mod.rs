@@ -39,6 +39,7 @@ pub struct RuntimeConfig {
     pub wal_batch_config: BatchConfig,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
+    pub compression_policy: crate::sst::compression::CompressionPolicy,
 }
 
 impl Default for RuntimeConfig {
@@ -48,6 +49,7 @@ impl Default for RuntimeConfig {
             wal_batch_config: BatchConfig::default(),
             hybrid_storage: None,
             hybrid_storage_events: None,
+            compression_policy: crate::sst::compression::CompressionPolicy::default(),
         }
     }
 }

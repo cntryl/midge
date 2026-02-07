@@ -21,13 +21,18 @@ pub struct FlushActor {
 }
 
 impl FlushActor {
-    pub fn new(sst_dir: &Path, memory_mode: bool) -> MidgeResult<Self> {
+    pub fn new(
+        sst_dir: &Path,
+        memory_mode: bool,
+        compression_policy: crate::sst::compression::CompressionPolicy,
+    ) -> MidgeResult<Self> {
         let sst_factory: Option<std::sync::Arc<dyn crate::sst::SstFactory>> = if memory_mode {
             None // Don't create factory in memory mode
         } else {
             let fs = std::sync::Arc::new(crate::io::RealFs::new(sst_dir)?);
             Some(std::sync::Arc::new(
-                crate::sst::FsSstFactoryIo::new(fs, 64 * 1024), // 64KB block size
+                crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
+                    .with_compression_policy(compression_policy),
             ))
         };
         Ok(Self {
@@ -244,7 +249,11 @@ mod tests {
     use std::path::PathBuf;
 
     fn create_test_flush_actor() -> MidgeResult<FlushActor> {
-        FlushActor::new(&PathBuf::from("/tmp"), false)
+        FlushActor::new(
+            &PathBuf::from("/tmp"),
+            false,
+            crate::sst::compression::CompressionPolicy::default(),
+        )
     }
 
     #[test]

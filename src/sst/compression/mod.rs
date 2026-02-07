@@ -301,13 +301,35 @@ pub fn compress_block(
 }
 
 fn compress_with_algo(data: &[u8], algo: CompressionAlgo) -> MidgeResult<(Bytes, CompressionAlgo)> {
-    if algo == CompressionAlgo::None {
-        return Ok((Bytes::copy_from_slice(data), CompressionAlgo::None));
-    }
+    match algo {
+        CompressionAlgo::None => Ok((Bytes::copy_from_slice(data), CompressionAlgo::None)),
 
-    // TODO: Implement actual compression
-    // For now, fallback to None
-    Ok((Bytes::copy_from_slice(data), CompressionAlgo::None))
+        CompressionAlgo::Lz4 => {
+            let compressed = lz4_flex::compress_prepend_size(data);
+            Ok((Bytes::from(compressed), CompressionAlgo::Lz4))
+        }
+
+        CompressionAlgo::Zstd3 => {
+            let compressed = zstd::bulk::compress(data, 3).map_err(|e| {
+                crate::common::MidgeError::Internal(format!("zstd(3) compress failed: {e}"))
+            })?;
+            Ok((Bytes::from(compressed), CompressionAlgo::Zstd3))
+        }
+
+        CompressionAlgo::Zstd9 => {
+            let compressed = zstd::bulk::compress(data, 9).map_err(|e| {
+                crate::common::MidgeError::Internal(format!("zstd(9) compress failed: {e}"))
+            })?;
+            Ok((Bytes::from(compressed), CompressionAlgo::Zstd9))
+        }
+
+        CompressionAlgo::Zlib | CompressionAlgo::Snappy => {
+            Err(crate::common::MidgeError::NotSupported(format!(
+                "compression algorithm {:?} not available (missing dependency)",
+                algo
+            )))
+        }
+    }
 }
 
 fn compress_adaptive(
@@ -343,13 +365,130 @@ fn compress_adaptive(
     Ok((best_compressed, best_algo))
 }
 
-/// Decompress block data based on compression type
+/// Decompress block data based on compression type.
 pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult<Bytes> {
     match algo {
         CompressionAlgo::None => Ok(Bytes::copy_from_slice(compressed)),
-        _ => {
-            // TODO: Implement actual decompression
-            Ok(Bytes::copy_from_slice(compressed))
+
+        CompressionAlgo::Lz4 => {
+            let decompressed = lz4_flex::decompress_size_prepended(compressed).map_err(|e| {
+                crate::common::MidgeError::Corruption(format!("LZ4 decompression failed: {e}"))
+            })?;
+            Ok(Bytes::from(decompressed))
+        }
+
+        CompressionAlgo::Zstd3 | CompressionAlgo::Zstd9 => {
+            // Zstd frame header contains the decompressed size; pass a generous
+            // upper-bound capacity as fallback for frames without a content-size
+            // field.  MAX_BLOCK_SIZE is the documented upper limit for a single
+            // block.
+            let decompressed = zstd::bulk::decompress(compressed, MAX_BLOCK_SIZE).map_err(|e| {
+                crate::common::MidgeError::Corruption(format!("Zstd decompression failed: {e}"))
+            })?;
+            Ok(Bytes::from(decompressed))
+        }
+
+        CompressionAlgo::Zlib | CompressionAlgo::Snappy => {
+            Err(crate::common::MidgeError::NotSupported(format!(
+                "decompression algorithm {:?} not available (missing dependency)",
+                algo
+            )))
+        }
+    }
+}
+
+/// Compress block data and append a trailer (`[compressed_data][algo:u8][crc32c:u32 LE]`).
+///
+/// CRC32C covers `compressed_data + compression_type`.
+pub fn compress_block_with_trailer(data: &[u8], policy: &CompressionPolicy) -> MidgeResult<Bytes> {
+    let (compressed, algo) = compress_block(data, policy)?;
+
+    let algo_byte = algo.to_u8();
+    let mut out = Vec::with_capacity(compressed.len() + BLOCK_TRAILER_SIZE);
+    out.extend_from_slice(&compressed);
+    out.push(algo_byte);
+
+    // CRC32C over compressed_data + compression_type
+    let crc = crc32c::crc32c(&out);
+    out.extend_from_slice(&crc.to_le_bytes());
+
+    Ok(Bytes::from(out))
+}
+
+/// Strip the block trailer, verify CRC32C, and decompress.
+///
+/// Input layout: `[compressed_data][algo:u8][crc32c:u32 LE]`
+pub fn decompress_block_with_trailer(block: &[u8]) -> MidgeResult<Bytes> {
+    if block.len() < BLOCK_TRAILER_SIZE {
+        return Err(crate::common::MidgeError::Corruption(
+            "block too small for trailer".into(),
+        ));
+    }
+
+    let data_plus_algo_len = block.len() - 4; // everything except CRC
+    let compressed_data_len = block.len() - BLOCK_TRAILER_SIZE;
+
+    // Extract trailer fields
+    let algo_byte = block[compressed_data_len];
+    let stored_crc = u32::from_le_bytes([
+        block[data_plus_algo_len],
+        block[data_plus_algo_len + 1],
+        block[data_plus_algo_len + 2],
+        block[data_plus_algo_len + 3],
+    ]);
+
+    // Verify CRC32C over compressed_data + algo byte
+    let computed_crc = crc32c::crc32c(&block[..data_plus_algo_len]);
+    if computed_crc != stored_crc {
+        return Err(crate::common::MidgeError::Corruption(format!(
+            "block CRC32C mismatch: stored {:#010x}, computed {:#010x}",
+            stored_crc, computed_crc
+        )));
+    }
+
+    let algo = CompressionAlgo::from_u8(algo_byte).ok_or_else(|| {
+        crate::common::MidgeError::Corruption(format!(
+            "unknown compression algorithm code: {}",
+            algo_byte
+        ))
+    })?;
+
+    decompress_block(&block[..compressed_data_len], algo)
+}
+
+/// Compress a WAL record value using LZ4 (fast, latency-optimal).
+///
+/// Returns `(compressed_value, compression_algo_byte)` or `(original_value, None)`
+/// if the value is too small to benefit from compression.
+pub fn compress_wal_value(value: &[u8]) -> (Bytes, Option<u8>) {
+    if value.len() < MIN_COMPRESS_SIZE {
+        return (Bytes::copy_from_slice(value), None);
+    }
+
+    let compressed = lz4_flex::compress_prepend_size(value);
+
+    // Only use compression if it actually saves space
+    if compressed.len() >= value.len() {
+        return (Bytes::copy_from_slice(value), None);
+    }
+
+    (Bytes::from(compressed), Some(CompressionAlgo::Lz4.to_u8()))
+}
+
+/// Decompress a WAL record value based on the compression byte.
+///
+/// If `compression` is `None` or `Some(0)` (None algo), the value is returned as-is.
+pub fn decompress_wal_value(value: &[u8], compression: Option<u8>) -> MidgeResult<Bytes> {
+    match compression {
+        None | Some(0) => Ok(Bytes::copy_from_slice(value)),
+        Some(algo_byte) => {
+            let algo = CompressionAlgo::from_u8(algo_byte).ok_or_else(|| {
+                crate::common::MidgeError::Corruption(format!(
+                    "unknown WAL compression algorithm code: {}",
+                    algo_byte
+                ))
+            })?;
+            decompress_block(value, algo)
         }
     }
 }
@@ -662,10 +801,14 @@ mod tests {
         let data = vec![3u8; 1024];
 
         // Act
-        let (_compressed, algo) = compress_block(&data, &policy).unwrap();
+        let (compressed, algo) = compress_block(&data, &policy).unwrap();
 
-        // Assert - returns None until implemented
-        assert_eq!(algo, CompressionAlgo::None);
+        // Assert - LZ4 compression is now implemented
+        assert_eq!(algo, CompressionAlgo::Lz4);
+        assert_ne!(compressed.as_ref(), data.as_slice());
+        // Roundtrip
+        let decompressed = decompress_block(&compressed, algo).unwrap();
+        assert_eq!(decompressed.as_ref(), data.as_slice());
     }
 
     #[test]
@@ -675,10 +818,14 @@ mod tests {
         let data = vec![4u8; 1024];
 
         // Act
-        let (_compressed, algo) = compress_block(&data, &policy).unwrap();
+        let (compressed, algo) = compress_block(&data, &policy).unwrap();
 
-        // Assert - returns None until implemented
-        assert_eq!(algo, CompressionAlgo::None);
+        // Assert - Zstd3 compression is now implemented
+        assert_eq!(algo, CompressionAlgo::Zstd3);
+        assert_ne!(compressed.as_ref(), data.as_slice());
+        // Roundtrip
+        let decompressed = decompress_block(&compressed, algo).unwrap();
+        assert_eq!(decompressed.as_ref(), data.as_slice());
     }
 
     #[test]
@@ -688,10 +835,14 @@ mod tests {
         let data = vec![5u8; 2048];
 
         // Act
-        let (_compressed, algo) = compress_block(&data, &policy).unwrap();
+        let (compressed, algo) = compress_block(&data, &policy).unwrap();
 
-        // Assert - returns None until implemented
-        assert_eq!(algo, CompressionAlgo::None);
+        // Assert - Zstd9 compression is now implemented
+        assert_eq!(algo, CompressionAlgo::Zstd9);
+        assert_ne!(compressed.as_ref(), data.as_slice());
+        // Roundtrip
+        let decompressed = decompress_block(&compressed, algo).unwrap();
+        assert_eq!(decompressed.as_ref(), data.as_slice());
     }
 
     #[test]
@@ -700,11 +851,11 @@ mod tests {
         let policy = CompressionPolicy::Fixed(CompressionAlgo::Zlib);
         let data = vec![6u8; 1024];
 
-        // Act
-        let (_compressed, algo) = compress_block(&data, &policy).unwrap();
+        // Act - Zlib is not supported
+        let result = compress_block(&data, &policy);
 
-        // Assert - returns None until implemented
-        assert_eq!(algo, CompressionAlgo::None);
+        // Assert
+        assert!(result.is_err());
     }
 
     #[test]
@@ -818,63 +969,69 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_decompress_lz4_unimplemented() {
+    fn should_roundtrip_decompress_lz4() {
         // Arrange
-        let data = b"uncompressed fallback";
+        let original = b"hello world this is some test data for lz4 roundtrip";
+        let (compressed, algo) = compress_with_algo(original, CompressionAlgo::Lz4).unwrap();
+        assert_eq!(algo, CompressionAlgo::Lz4);
 
-        // Act - should fallback to passthrough since not implemented
-        let decompressed = decompress_block(data, CompressionAlgo::Lz4).unwrap();
+        // Act
+        let decompressed = decompress_block(&compressed, CompressionAlgo::Lz4).unwrap();
 
         // Assert
-        assert_eq!(decompressed.as_ref(), data);
+        assert_eq!(decompressed.as_ref(), original.as_slice());
     }
 
     #[test]
-    fn should_handle_decompress_zstd3_unimplemented() {
+    fn should_roundtrip_decompress_zstd3() {
         // Arrange
-        let data = b"uncompressed fallback";
+        let original = b"hello world this is some test data for zstd3 roundtrip";
+        let (compressed, algo) = compress_with_algo(original, CompressionAlgo::Zstd3).unwrap();
+        assert_eq!(algo, CompressionAlgo::Zstd3);
 
         // Act
-        let decompressed = decompress_block(data, CompressionAlgo::Zstd3).unwrap();
+        let decompressed = decompress_block(&compressed, CompressionAlgo::Zstd3).unwrap();
 
         // Assert
-        assert_eq!(decompressed.as_ref(), data);
+        assert_eq!(decompressed.as_ref(), original.as_slice());
     }
 
     #[test]
-    fn should_handle_decompress_zstd9_unimplemented() {
+    fn should_roundtrip_decompress_zstd9() {
         // Arrange
-        let data = b"uncompressed fallback";
+        let original = b"hello world this is some test data for zstd9 roundtrip";
+        let (compressed, algo) = compress_with_algo(original, CompressionAlgo::Zstd9).unwrap();
+        assert_eq!(algo, CompressionAlgo::Zstd9);
 
         // Act
-        let decompressed = decompress_block(data, CompressionAlgo::Zstd9).unwrap();
+        let decompressed = decompress_block(&compressed, CompressionAlgo::Zstd9).unwrap();
 
         // Assert
-        assert_eq!(decompressed.as_ref(), data);
+        assert_eq!(decompressed.as_ref(), original.as_slice());
     }
 
     #[test]
-    fn should_handle_decompress_zlib_unimplemented() {
+    fn should_reject_decompress_zlib() {
         // Arrange
-        let data = b"uncompressed fallback";
+        let data = b"some data";
 
         // Act
-        let decompressed = decompress_block(data, CompressionAlgo::Zlib).unwrap();
+        let result = decompress_block(data, CompressionAlgo::Zlib);
 
         // Assert
-        assert_eq!(decompressed.as_ref(), data);
+        assert!(result.is_err());
     }
 
     #[test]
-    fn should_handle_decompress_snappy_unimplemented() {
+    fn should_reject_decompress_snappy() {
         // Arrange
-        let data = b"uncompressed fallback";
+        let data = b"some data";
 
         // Act
-        let decompressed = decompress_block(data, CompressionAlgo::Snappy).unwrap();
+        let result = decompress_block(data, CompressionAlgo::Snappy);
 
         // Assert
-        assert_eq!(decompressed.as_ref(), data);
+        assert!(result.is_err());
     }
 
     #[test]

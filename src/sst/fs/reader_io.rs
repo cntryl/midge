@@ -184,7 +184,30 @@ impl SstFileIo {
             return Err(MidgeError::Corruption("Block data truncated".into()));
         }
 
-        Ok(bytes::Bytes::copy_from_slice(&buffer[4..4 + len]))
+        let raw = &buffer[4..4 + len];
+        Self::decompress_raw_block(raw)
+    }
+
+    /// Decompress a raw block payload, stripping the block trailer if present.
+    ///
+    /// Blocks with a valid trailer (`[data][algo:u8][crc32c:u32]`) are verified
+    /// and decompressed.  Legacy blocks without a trailer (pre-v1.0.0) are
+    /// returned as-is for backward compatibility.
+    fn decompress_raw_block(raw: &[u8]) -> MidgeResult<bytes::Bytes> {
+        use crate::sst::compression;
+
+        // A block must be at least BLOCK_TRAILER_SIZE bytes to contain a
+        // trailer.  Shorter payloads are legacy / uncompressed.
+        if raw.len() < compression::BLOCK_TRAILER_SIZE {
+            return Ok(bytes::Bytes::copy_from_slice(raw));
+        }
+
+        // Attempt trailer-based decompression.  If the CRC check fails this
+        // may be a legacy block without a trailer so fall back to raw bytes.
+        match compression::decompress_block_with_trailer(raw) {
+            Ok(decompressed) => Ok(decompressed),
+            Err(_) => Ok(bytes::Bytes::copy_from_slice(raw)),
+        }
     }
 
     /// Readahead window size: read up to this many blocks in a single IO operation
@@ -262,7 +285,8 @@ impl SstFileIo {
                 return Err(MidgeError::Corruption("Block data truncated".into()));
             }
 
-            result.push(bytes::Bytes::copy_from_slice(&block_slice[4..4 + len]));
+            let raw = &block_slice[4..4 + len];
+            result.push(Self::decompress_raw_block(raw)?);
         }
 
         Ok(result)

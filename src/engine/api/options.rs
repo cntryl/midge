@@ -25,6 +25,8 @@
 
 use std::path::PathBuf;
 
+use crate::sst::compression::{CompressionAlgo, CompressionPolicy};
+
 /// Storage backend specification - MUST be explicit
 ///
 /// This enum enforces unambiguous storage selection. There are NO defaults,
@@ -198,6 +200,9 @@ pub struct OpenOptions {
     /// L0 compaction trigger (derived)
     pub(crate) l0_compaction_trigger: usize,
 
+    /// Compression policy for SST blocks (derived from Goal)
+    pub(crate) compression_policy: CompressionPolicy,
+
     /// Optional WAL batch configuration (from testkit for batched durability mode)
     pub(crate) wal_batch_config: Option<crate::wal::policy::BatchConfig>,
 }
@@ -221,6 +226,7 @@ impl OpenOptions {
             block_cache_size: 128 * 1024 * 1024,
             wal_buffer_size: 256 * 1024,
             l0_compaction_trigger: 4,
+            compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
         }
     }
@@ -243,6 +249,7 @@ impl OpenOptions {
             block_cache_size: 128 * 1024 * 1024,
             wal_buffer_size: 256 * 1024,
             l0_compaction_trigger: 4,
+            compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
         }
     }
@@ -280,6 +287,7 @@ impl OpenOptions {
             block_cache_size: 128 * 1024 * 1024,
             wal_buffer_size: 256 * 1024,
             l0_compaction_trigger: 4,
+            compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
         }
     }
@@ -369,6 +377,20 @@ impl OpenOptions {
             _ => 4,                                // Default
         };
 
+        // Derive compression policy from goal
+        //   Latency  → fast codec, minimal CPU overhead
+        //   Throughput → adaptive, try a few codecs per block
+        //   Economy  → max compression ratio
+        self.compression_policy = match self.goal {
+            Goal::Latency => CompressionPolicy::Fixed(CompressionAlgo::Lz4),
+            Goal::Throughput => CompressionPolicy::Adaptive {
+                min_savings_bytes: 256,
+                min_ratio: 1.05,
+                check_algorithms: vec![CompressionAlgo::Lz4, CompressionAlgo::Zstd3],
+            },
+            Goal::Economy => CompressionPolicy::Fixed(CompressionAlgo::Zstd9),
+        };
+
         self
     }
 
@@ -402,6 +424,11 @@ impl OpenOptions {
     /// Get derived L0 compaction trigger
     pub fn l0_compaction_trigger(&self) -> usize {
         self.l0_compaction_trigger
+    }
+
+    /// Get derived compression policy
+    pub fn compression_policy(&self) -> &CompressionPolicy {
+        &self.compression_policy
     }
 }
 

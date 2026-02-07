@@ -94,14 +94,21 @@ impl EventLoop {
         let sst_factory = if memory_mode {
             // Use in-memory MockFs for SST factory in memory mode
             let fs = Arc::new(crate::io::MockFs::new());
-            Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024))
+            Arc::new(
+                crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
+                    .with_compression_policy(config.compression_policy.clone()),
+            )
         } else {
             let fs = Arc::new(crate::io::RealFs::new(&sst_dir)?);
-            Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)) // 64KB block size
+            Arc::new(
+                crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
+                    .with_compression_policy(config.compression_policy.clone()),
+            )
         };
 
         // Create actors - they handle memory_mode internally
-        let flush_actor = FlushActor::new(&sst_dir, memory_mode)?;
+        let flush_actor =
+            FlushActor::new(&sst_dir, memory_mode, config.compression_policy.clone())?;
         let wal_actor = WalActor::new(
             wal_dir,
             config.wal_durability_policy,

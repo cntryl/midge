@@ -170,8 +170,17 @@ pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
 
     if let Some(v) = &record.value {
         if !v.is_empty() {
-            put_tlv(&mut buf, tags::VALUE, v);
+            // Compress value if large enough to benefit
+            let (write_val, comp_byte) = crate::sst::compression::compress_wal_value(v);
+            put_tlv(&mut buf, tags::VALUE, &write_val);
+            if let Some(cb) = comp_byte {
+                put_u8(&mut buf, tags::COMPRESSION, cb);
+            } else if let Some(c) = record.compression {
+                put_u8(&mut buf, tags::COMPRESSION, c);
+            }
         }
+    } else if let Some(c) = record.compression {
+        put_u8(&mut buf, tags::COMPRESSION, c);
     }
 
     if let Some(exp) = record.expiration {
@@ -182,9 +191,6 @@ pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
     }
     if let Some(txn_id) = record.txn_id {
         put_u64(&mut buf, tags::TXN_ID, txn_id);
-    }
-    if let Some(c) = record.compression {
-        put_u8(&mut buf, tags::COMPRESSION, c);
     }
 
     Ok(buf.freeze())
@@ -293,6 +299,9 @@ pub fn decode_view<'a>(data: &'a [u8]) -> MidgeResult<WalRecordView<'a>> {
 /// Compatibility adapter: decode into owned `WalRecord`.
 ///
 /// This allocates for key/value/range_end. Prefer [`decode_view`] in hot paths.
+///
+/// If the record carries a `COMPRESSION` tag, the value is transparently
+/// decompressed before being returned.
 pub fn decode(bytes: impl Buf) -> MidgeResult<WalRecord> {
     // WAL frames must be contiguous; enforce this.
     let data = bytes.chunk();
@@ -302,16 +311,26 @@ pub fn decode(bytes: impl Buf) -> MidgeResult<WalRecord> {
 
     let view = decode_view(data)?;
 
+    // Decompress value if a compression tag is present
+    let value = match view.value {
+        Some(raw_val) => {
+            let decompressed =
+                crate::sst::compression::decompress_wal_value(raw_val, view.compression)?;
+            Some(decompressed)
+        }
+        None => None,
+    };
+
     Ok(WalRecord {
         cf_id: view.cf_id,
         op: view.op,
         key: Bytes::copy_from_slice(view.key),
-        value: view.value.map(Bytes::copy_from_slice),
+        value,
         seq: view.seq,
         expiration: view.expiration,
         range_end: view.range_end.map(Bytes::copy_from_slice),
         txn_id: view.txn_id,
-        compression: view.compression,
+        compression: None, // Decompressed — no longer carries a compression tag
     })
 }
 
