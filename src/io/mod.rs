@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Base I/O subsystem - domain-agnostic filesystem abstraction
 //!
 //! This is the foundation for all filesystem interactions in Midge:

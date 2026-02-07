@@ -1,235 +1,529 @@
 //! Azure Blob Storage Provider
 //!
-//! Lean implementation using direct REST API (no SDK dependency)
-//! - SAS token or shared key authentication
-//! - Non-blocking callback-based API
-//! - Suitable for async runtime integration
+//! Production implementation using direct REST API (no SDK dependency):
+//! - Shared Key authentication (HMAC-SHA256 over canonicalized headers)
+//! - SAS token authentication (pre-signed query string)
+//! - Non-blocking callback-based API via `CloudExecutor`
+//! - All operations routed through the same `CloudBackend` trait as S3
 
-use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
+use crate::common::{MidgeError, MidgeResult};
+use crate::storage::cloud::{
+    CloudBackend, CloudCallback, CloudEvent, CloudExecutor, CloudOutcome, CloudRequest,
+    CloudResponse, CloudSigner, ObjectMetadata,
+};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as Base64Engine};
+use chrono::Utc;
+use hmac::{Hmac, Mac};
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use reqwest::Method;
+use sha2::Sha256;
+use std::sync::Arc;
 
-/// Azure authentication credentials
+const ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'<')
+    .add(b'>')
+    .add(b'`')
+    .add(b'#')
+    .add(b'?')
+    .add(b'{')
+    .add(b'}');
+
+// ---------------------------------------------------------------------------
+// Credentials
+// ---------------------------------------------------------------------------
+
+/// Azure authentication credentials.
 #[derive(Debug, Clone)]
 pub enum AzureCredential {
-    /// Shared key (account name + key) - for primary/secondary key auth
+    /// Shared key (account name + account key) — HMAC-SHA256 signing.
     SharedKey { account_key: String },
-    /// SAS token - pre-signed request token
+    /// SAS token — pre-signed query string appended to every URL.
     SasToken { token: String },
-    /// Connection string - for backward compatibility
-    ConnectionString { connection_string: String },
-    /// Managed identity - no explicit credentials needed (would use system auth)
-    ManagedIdentity,
 }
 
-/// Azure Blob Storage provider
+// ---------------------------------------------------------------------------
+// Public provider
+// ---------------------------------------------------------------------------
+
+/// Azure Blob Storage provider.
 ///
-/// Lightweight implementation that sends responses via callbacks.
-/// Full async HTTP implementation can be added via feature flag without SDK dependency.
-///
-/// Full implementation will use:
-/// - Direct REST API calls (no Azure SDK)
-/// - SAS token or shared key authentication
-/// - reqwest for async HTTP client
-/// - tokio for async task spawning
+/// Wraps an [`AzureBackend`] that sends real HTTP requests via
+/// [`CloudExecutor`]. Follows the same architecture as [`S3Provider`].
 pub struct AzureProvider {
-    #[allow(dead_code)]
+    backend: Arc<dyn CloudBackend>,
     account_name: String,
-    #[allow(dead_code)]
     container: String,
-    #[allow(dead_code)]
     credential: AzureCredential,
 }
 
 impl AzureProvider {
-    /// Create a new Azure Blob Storage provider with shared key authentication
-    ///
-    /// # Arguments
-    /// * `account_name` - Azure storage account name
-    /// * `container` - Blob container name
-    /// * `account_key` - Primary or secondary account key
+    /// Create provider with Shared Key authentication.
     pub fn with_shared_key(account_name: String, container: String, account_key: String) -> Self {
-        Self {
-            account_name,
-            container,
-            credential: AzureCredential::SharedKey { account_key },
-        }
-    }
-
-    /// Create a new Azure Blob Storage provider with SAS token authentication
-    ///
-    /// # Arguments
-    /// * `account_name` - Azure storage account name
-    /// * `container` - Blob container name
-    /// * `sas_token` - SAS token (with ? prefix or without)
-    pub fn with_sas_token(account_name: String, container: String, sas_token: String) -> Self {
-        // Normalize token - ensure it doesn't start with ?
-        let token = if let Some(stripped) = sas_token.strip_prefix('?') {
-            stripped.to_string()
-        } else {
-            sas_token
+        let credential = AzureCredential::SharedKey {
+            account_key: account_key.clone(),
         };
+        let signer: Option<Arc<dyn CloudSigner>> = Some(Arc::new(SharedKeySigner::new(
+            account_name.clone(),
+            account_key,
+        )));
+        let executor = CloudExecutor::new(signer);
+        let backend = Arc::new(AzureBackend::new(
+            account_name.clone(),
+            container.clone(),
+            None, // no SAS — signer handles auth
+            executor,
+        ));
         Self {
+            backend,
             account_name,
             container,
-            credential: AzureCredential::SasToken { token },
+            credential,
         }
     }
 
-    /// Create a new Azure Blob Storage provider with connection string
-    ///
-    /// # Arguments
-    /// * `account_name` - Azure storage account name
-    /// * `container` - Blob container name
-    /// * `connection_string` - Connection string (for parsing credentials)
-    pub fn with_connection_string(
+    /// Create provider with SAS token authentication.
+    pub fn with_sas_token(account_name: String, container: String, sas_token: String) -> Self {
+        // Normalise: strip leading '?' if present.
+        let token = sas_token
+            .strip_prefix('?')
+            .unwrap_or(&sas_token)
+            .to_string();
+        let credential = AzureCredential::SasToken {
+            token: token.clone(),
+        };
+        let executor = CloudExecutor::new(None); // SAS goes on the URL, no signer
+        let backend = Arc::new(AzureBackend::new(
+            account_name.clone(),
+            container.clone(),
+            Some(token),
+            executor,
+        ));
+        Self {
+            backend,
+            account_name,
+            container,
+            credential,
+        }
+    }
+
+    /// Legacy constructor — defaults to shared key with an empty key.
+    /// Callers should prefer `with_shared_key` or `with_sas_token`.
+    pub fn new(account_name: String, container: String) -> Self {
+        Self::with_shared_key(account_name, container, String::new())
+    }
+
+    /// Get the underlying cloud backend for use with `CloudStorage`.
+    pub fn backend(&self) -> Arc<dyn CloudBackend> {
+        Arc::clone(&self.backend)
+    }
+
+    /// Expose account name for tests.
+    #[cfg(test)]
+    pub(crate) fn account_name(&self) -> &str {
+        &self.account_name
+    }
+
+    /// Expose container for tests.
+    #[cfg(test)]
+    pub(crate) fn container(&self) -> &str {
+        &self.container
+    }
+
+    /// Expose credential for tests.
+    #[cfg(test)]
+    pub(crate) fn credential(&self) -> &AzureCredential {
+        &self.credential
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backend (private — implements CloudBackend)
+// ---------------------------------------------------------------------------
+
+struct AzureBackend {
+    account_name: String,
+    container: String,
+    /// If present, appended as `?{sas_token}` to every URL.
+    sas_token: Option<String>,
+    executor: CloudExecutor,
+}
+
+impl AzureBackend {
+    fn new(
         account_name: String,
         container: String,
-        connection_string: String,
+        sas_token: Option<String>,
+        executor: CloudExecutor,
     ) -> Self {
         Self {
             account_name,
             container,
-            credential: AzureCredential::ConnectionString { connection_string },
+            sas_token,
+            executor,
         }
     }
 
-    /// Create a new Azure Blob Storage provider with managed identity authentication
-    ///
-    /// # Arguments
-    /// * `account_name` - Azure storage account name
-    /// * `container` - Blob container name
-    pub fn with_managed_identity(account_name: String, container: String) -> Self {
-        Self {
-            account_name,
-            container,
-            credential: AzureCredential::ManagedIdentity,
+    /// Base URL: `https://{account}.blob.core.windows.net/{container}`
+    fn base_url(&self) -> String {
+        format!(
+            "https://{}.blob.core.windows.net/{}",
+            self.account_name, self.container
+        )
+    }
+
+    fn canonical_key(&self, key: &str) -> String {
+        key.split('/')
+            .map(|seg| utf8_percent_encode(seg, ENCODE_SET).to_string())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// Object URL, with optional SAS token.
+    fn object_url(&self, key: &str) -> String {
+        let base = format!("{}/{}", self.base_url(), self.canonical_key(key));
+        match &self.sas_token {
+            Some(tok) => format!("{}?{}", base, tok),
+            None => base,
         }
     }
 
-    /// Legacy constructor - defaults to managed identity (no explicit credentials)
-    /// Use the `with_*` methods for explicit credential types
-    pub fn new(account_name: String, container: String) -> Self {
-        Self::with_managed_identity(account_name, container)
-    }
-
-    /// Submit a PUT operation (stub)
-    #[allow(dead_code)]
-    pub fn submit_put(&self, key: String, _data: Vec<u8>, callback: CloudCallback) {
-        // TODO: Implement async PUT with SAS or shared key signing
-        // For now, send success
-        let event = CloudEvent::PutComplete {
-            key,
-            result: CloudOutcome::Ok(()),
-        };
-        let _ = callback.send(event);
-    }
-
-    /// Submit a GET operation (stub)
-    #[allow(dead_code)]
-    pub fn submit_get(&self, key: String, callback: CloudCallback) {
-        // TODO: Implement async GET with SAS or shared key signing
-        // For now, send empty data
-        let event = CloudEvent::GetComplete {
-            key,
-            result: CloudOutcome::Ok(Vec::new()),
-        };
-        let _ = callback.send(event);
-    }
-
-    /// Submit a DELETE operation (stub)
-    #[allow(dead_code)]
-    pub fn submit_delete(&self, key: String, callback: CloudCallback) {
-        // TODO: Implement async DELETE with SAS or shared key signing
-        // For now, send success
-        let event = CloudEvent::DeleteComplete {
-            key,
-            result: CloudOutcome::Ok(()),
-        };
-        let _ = callback.send(event);
-    }
-
-    /// Submit a LIST operation (stub)
-    #[allow(dead_code)]
-    pub fn submit_list(&self, prefix: String, callback: CloudCallback) {
-        // TODO: Implement async LIST with SAS or shared key signing
-        // For now, send empty list
-        let event = CloudEvent::ListComplete {
-            prefix,
-            result: CloudOutcome::Ok(Vec::new()),
-        };
-        let _ = callback.send(event);
+    /// List URL — uses Azure's `restype=container&comp=list&prefix=...`.
+    fn list_url(&self, prefix: &str) -> String {
+        let base = format!(
+            "{}?restype=container&comp=list&prefix={}",
+            self.base_url(),
+            urlencoding::encode(prefix)
+        );
+        match &self.sas_token {
+            Some(tok) => format!("{}&{}", base, tok),
+            None => base,
+        }
     }
 }
 
-impl crate::storage::cloud::CloudBackend for AzureProvider {
-    fn submit_put(&self, key: String, _data: Vec<u8>, callback: CloudCallback) {
-        // Lightweight PUT: just acknowledge receipt
-        // Real implementation would send to Azure via REST API
-        let event = CloudEvent::PutComplete {
-            key,
-            result: CloudOutcome::Ok(()),
+impl CloudBackend for AzureBackend {
+    fn submit_put(&self, key: String, data: Vec<u8>, callback: CloudCallback) {
+        let url = self.object_url(&key);
+        let len = data.len();
+        let request = CloudRequest::new(Method::PUT, url)
+            .with_body(data)
+            .with_header("x-ms-blob-type", "BlockBlob")
+            .with_header("Content-Length", len.to_string());
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
+            Ok(resp) if resp.status < 400 => CloudEvent::PutComplete {
+                key: ctx,
+                result: CloudOutcome::Ok(()),
+            },
+            Ok(resp) => CloudEvent::PutComplete {
+                key: ctx,
+                result: CloudOutcome::Err(format!("Azure PUT status {}", resp.status)),
+            },
+            Err(err) => CloudEvent::PutComplete {
+                key: ctx,
+                result: CloudOutcome::Err(format!("{:?}", err)),
+            },
         };
-        let _ = callback.send(event);
+        self.executor.spawn_request(request, key, callback, mapper);
     }
 
     fn submit_get(&self, key: String, callback: CloudCallback) {
-        // Lightweight GET: return empty (stub)
-        // Real implementation would fetch from Azure via REST API
-        let event = CloudEvent::GetComplete {
-            key,
-            result: CloudOutcome::Ok(Vec::new()),
+        let url = self.object_url(&key);
+        let request = CloudRequest::new(Method::GET, url);
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
+            Ok(resp) if resp.status == 200 => CloudEvent::GetComplete {
+                key: ctx,
+                result: CloudOutcome::Ok(resp.body),
+            },
+            Ok(resp) if resp.status == 404 => CloudEvent::GetComplete {
+                key: ctx,
+                result: CloudOutcome::Err("not found".into()),
+            },
+            Ok(resp) => CloudEvent::GetComplete {
+                key: ctx,
+                result: CloudOutcome::Err(format!("Azure GET status {}", resp.status)),
+            },
+            Err(err) => CloudEvent::GetComplete {
+                key: ctx,
+                result: CloudOutcome::Err(format!("{:?}", err)),
+            },
         };
-        let _ = callback.send(event);
+        self.executor.spawn_request(request, key, callback, mapper);
     }
 
     fn submit_get_range(
         &self,
         key: String,
-        _start: u64,
-        _end: Option<u64>,
+        start: u64,
+        end: Option<u64>,
         callback: CloudCallback,
     ) {
-        // Lightweight GET_RANGE: return empty (stub)
-        // Real implementation would fetch range from Azure via REST API
-        let event = CloudEvent::GetRangeComplete {
-            key,
-            start: _start,
-            end: _end,
-            result: CloudOutcome::Ok(Vec::new()),
+        let url = self.object_url(&key);
+        let range = match end {
+            Some(e) => format!("bytes={}-{}", start, e.saturating_sub(1)),
+            None => format!("bytes={}-", start),
         };
-        let _ = callback.send(event);
+        let request = CloudRequest::new(Method::GET, url).with_header("x-ms-range", range);
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
+            Ok(resp) if resp.status == 206 || resp.status == 200 => {
+                CloudEvent::GetRangeComplete {
+                    key: ctx,
+                    start,
+                    end,
+                    result: CloudOutcome::Ok(resp.body),
+                }
+            }
+            Ok(resp) => CloudEvent::GetRangeComplete {
+                key: ctx,
+                start,
+                end,
+                result: CloudOutcome::Err(format!("Azure GET_RANGE status {}", resp.status)),
+            },
+            Err(err) => CloudEvent::GetRangeComplete {
+                key: ctx,
+                start,
+                end,
+                result: CloudOutcome::Err(format!("{:?}", err)),
+            },
+        };
+        self.executor.spawn_request(request, key, callback, mapper);
     }
 
     fn submit_delete(&self, key: String, callback: CloudCallback) {
-        // Lightweight DELETE: just acknowledge
-        // Real implementation would delete from Azure via REST API
-        let event = CloudEvent::DeleteComplete {
-            key,
-            result: CloudOutcome::Ok(()),
+        let url = self.object_url(&key);
+        let request = CloudRequest::new(Method::DELETE, url);
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
+            Ok(resp) if resp.status < 400 => CloudEvent::DeleteComplete {
+                key: ctx,
+                result: CloudOutcome::Ok(()),
+            },
+            Ok(resp) => CloudEvent::DeleteComplete {
+                key: ctx,
+                result: CloudOutcome::Err(format!("Azure DELETE status {}", resp.status)),
+            },
+            Err(err) => CloudEvent::DeleteComplete {
+                key: ctx,
+                result: CloudOutcome::Err(format!("{:?}", err)),
+            },
         };
-        let _ = callback.send(event);
+        self.executor.spawn_request(request, key, callback, mapper);
     }
 
     fn submit_list(&self, prefix: String, callback: CloudCallback) {
-        // Lightweight LIST: return empty (stub)
-        // Real implementation would list from Azure via REST API
-        let event = CloudEvent::ListComplete {
-            prefix,
-            result: CloudOutcome::Ok(Vec::new()),
+        let url = self.list_url(&prefix);
+        let request = CloudRequest::new(Method::GET, url);
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
+            Ok(resp) if resp.status == 200 => {
+                let body = String::from_utf8_lossy(&resp.body);
+                let mut items = Vec::new();
+                // Azure LIST XML: <Name>key</Name>
+                for line in body.lines() {
+                    if let Some(start) = line.find("<Name>") {
+                        if let Some(end) = line.find("</Name>") {
+                            items.push(line[start + 6..end].to_string());
+                        }
+                    }
+                }
+                CloudEvent::ListComplete {
+                    prefix: ctx,
+                    result: CloudOutcome::Ok(items),
+                }
+            }
+            Ok(resp) => CloudEvent::ListComplete {
+                prefix: ctx,
+                result: CloudOutcome::Err(format!("Azure LIST status {}", resp.status)),
+            },
+            Err(err) => CloudEvent::ListComplete {
+                prefix: ctx,
+                result: CloudOutcome::Err(format!("{:?}", err)),
+            },
         };
-        let _ = callback.send(event);
+        self.executor
+            .spawn_request(request, prefix.clone(), callback, mapper);
     }
 
     fn submit_head(&self, key: String, callback: CloudCallback) {
-        // Lightweight HEAD: return stub metadata
-        // Real implementation would fetch metadata from Azure via REST API
-        let metadata = crate::storage::cloud::ObjectMetadata::new(0, "stub-etag".into(), 0);
-        let event = CloudEvent::HeadComplete {
-            key,
-            result: CloudOutcome::Ok(metadata),
+        let url = self.object_url(&key);
+        let request = CloudRequest::new(Method::HEAD, url);
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
+            Ok(resp) if resp.status == 200 => {
+                let size = resp
+                    .headers
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, v)| v.parse().ok())
+                    .unwrap_or(0);
+                let etag = resp
+                    .headers
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case("etag"))
+                    .map(|(_, v)| v.trim_matches('"').to_string())
+                    .unwrap_or_default();
+                let metadata = ObjectMetadata::new(size, etag, 0);
+                CloudEvent::HeadComplete {
+                    key: ctx,
+                    result: CloudOutcome::Ok(metadata),
+                }
+            }
+            Ok(resp) => CloudEvent::HeadComplete {
+                key: ctx,
+                result: CloudOutcome::Err(format!("Azure HEAD status {}", resp.status)),
+            },
+            Err(err) => CloudEvent::HeadComplete {
+                key: ctx,
+                result: CloudOutcome::Err(format!("{:?}", err)),
+            },
         };
-        let _ = callback.send(event);
+        self.executor.spawn_request(request, key, callback, mapper);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Shared Key Signer — Azure Storage Services Signature (version 2)
+//
+// Reference: https://learn.microsoft.com/en-us/rest/api/storageservices/
+//            authorize-with-shared-key
+// ---------------------------------------------------------------------------
+
+struct SharedKeySigner {
+    account_name: String,
+    /// Base64-decoded account key (raw bytes for HMAC-SHA256).
+    decoded_key: Vec<u8>,
+}
+
+impl SharedKeySigner {
+    fn new(account_name: String, account_key_base64: String) -> Self {
+        let decoded_key = BASE64.decode(&account_key_base64).unwrap_or_default();
+        Self {
+            account_name,
+            decoded_key,
+        }
+    }
+
+    /// Build the string-to-sign per Azure Shared Key for Blob/Queue.
+    ///
+    /// See: <https://learn.microsoft.com/en-us/rest/api/storageservices/authorize-with-shared-key>
+    ///
+    /// Layout:
+    /// ```text
+    /// VERB\n
+    /// Content-Encoding\n
+    /// Content-Language\n
+    /// Content-Length\n
+    /// Content-MD5\n
+    /// Content-Type\n
+    /// Date\n
+    /// If-Modified-Since\n
+    /// If-Match\n
+    /// If-None-Match\n
+    /// If-Unmodified-Since\n
+    /// Range\n
+    /// CanonicalizedHeaders\n
+    /// CanonicalizedResource
+    /// ```
+    fn string_to_sign(
+        &self,
+        method: &str,
+        headers: &[(String, String)],
+        url: &url::Url,
+        content_length: Option<usize>,
+    ) -> String {
+        let hdr = |name: &str| -> String {
+            headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+
+        let content_len_str = match content_length {
+            Some(0) | None => String::new(),
+            Some(n) => n.to_string(),
+        };
+
+        // Canonicalized x-ms-* headers, sorted, colon-separated.
+        let mut x_ms: Vec<(String, String)> = headers
+            .iter()
+            .filter(|(n, _)| n.starts_with("x-ms-"))
+            .map(|(n, v)| (n.to_lowercase(), v.trim().to_string()))
+            .collect();
+        x_ms.sort_by(|a, b| a.0.cmp(&b.0));
+        let canonical_headers: String = x_ms
+            .iter()
+            .map(|(k, v)| format!("{}:{}\n", k, v))
+            .collect();
+
+        // Canonicalized resource: /{account}/{path}?{sorted-query-params}
+        let path = url.path();
+        let mut canonical_resource = format!("/{}{}", self.account_name, path);
+        let mut query_pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(k, v)| (k.to_lowercase(), v.to_string()))
+            .collect();
+        query_pairs.sort();
+        for (k, v) in &query_pairs {
+            canonical_resource.push_str(&format!("\n{}:{}", k, v));
+        }
+
+        format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}",
+            method,
+            hdr("Content-Encoding"),
+            hdr("Content-Language"),
+            content_len_str,
+            hdr("Content-MD5"),
+            hdr("Content-Type"),
+            hdr("Date"),
+            hdr("If-Modified-Since"),
+            hdr("If-Match"),
+            hdr("If-None-Match"),
+            hdr("If-Unmodified-Since"),
+            hdr("Range"),
+            canonical_headers,
+            canonical_resource,
+        )
+    }
+}
+
+impl CloudSigner for SharedKeySigner {
+    fn sign(&self, request: &mut CloudRequest) -> MidgeResult<()> {
+        let url = url::Url::parse(&request.url)
+            .map_err(|e| MidgeError::InvalidArgument(format!("url parse: {}", e)))?;
+
+        // Ensure mandatory x-ms-* headers.
+        let now = Utc::now();
+        let date = now.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+
+        // Remove any stale date / version headers.
+        request.headers.retain(|(n, _)| {
+            !n.eq_ignore_ascii_case("x-ms-date") && !n.eq_ignore_ascii_case("x-ms-version")
+        });
+        request.headers.push(("x-ms-date".into(), date));
+        request
+            .headers
+            .push(("x-ms-version".into(), "2024-11-04".into()));
+
+        let content_length = request.body.as_ref().map(|b| b.len());
+
+        let sts =
+            self.string_to_sign(request.method.as_str(), &request.headers, &url, content_length);
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(&self.decoded_key)
+            .map_err(|_| MidgeError::Internal("hmac init failed".into()))?;
+        mac.update(sts.as_bytes());
+        let signature = BASE64.encode(mac.finalize().into_bytes());
+
+        let auth = format!("SharedKey {}:{}", self.account_name, signature);
+        request.headers.push(("Authorization".into(), auth));
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -240,160 +534,80 @@ mod tests {
 
     #[test]
     fn should_create_shared_key_credential() {
-        // Arrange
-        // (no setup required)
-
-        // Act
+        // Arrange & Act
         let cred = AzureCredential::SharedKey {
             account_key: "mykey".to_string(),
         };
 
         // Assert
         match cred {
-            AzureCredential::SharedKey { account_key } => {
-                assert_eq!(account_key, "mykey");
-            }
+            AzureCredential::SharedKey { account_key } => assert_eq!(account_key, "mykey"),
             _ => panic!("Expected SharedKey credential"),
         }
     }
 
     #[test]
     fn should_create_sas_token_credential() {
-        // Arrange
-        // (no setup required)
-
-        // Act
+        // Arrange & Act
         let cred = AzureCredential::SasToken {
             token: "token123".to_string(),
         };
 
         // Assert
         match cred {
-            AzureCredential::SasToken { token } => {
-                assert_eq!(token, "token123");
-            }
+            AzureCredential::SasToken { token } => assert_eq!(token, "token123"),
             _ => panic!("Expected SasToken credential"),
         }
     }
 
-    #[test]
-    fn should_create_connection_string_credential() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let cred = AzureCredential::ConnectionString {
-            connection_string: "DefaultEndpointsProtocol=https;...".to_string(),
-        };
-
-        // Assert
-        match cred {
-            AzureCredential::ConnectionString { connection_string } => {
-                assert!(connection_string.contains("DefaultEndpoints"));
-            }
-            _ => panic!("Expected ConnectionString credential"),
-        }
-    }
-
-    #[test]
-    fn should_create_managed_identity_credential() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let cred = AzureCredential::ManagedIdentity;
-
-        // Assert
-        match cred {
-            AzureCredential::ManagedIdentity => {} // OK
-            _ => panic!("Expected ManagedIdentity credential"),
-        }
-    }
-
-    // =========== AzureProvider With Shared Key Tests ===========
+    // =========== AzureProvider Construction Tests ===========
 
     #[test]
     fn should_create_provider_with_shared_key() {
-        // Arrange
-        // (no setup required)
-
-        // Act
+        // Arrange & Act
         let provider = AzureProvider::with_shared_key(
-            "myaccount".to_string(),
-            "mycontainer".to_string(),
-            "accountkey123".to_string(),
+            "myaccount".into(),
+            "mycontainer".into(),
+            "accountkey123".into(),
         );
 
         // Assert
-        assert_eq!(provider.account_name, "myaccount");
-        assert_eq!(provider.container, "mycontainer");
-        match &provider.credential {
-            AzureCredential::SharedKey { account_key } => {
-                assert_eq!(account_key, "accountkey123");
-            }
-            _ => panic!("Expected SharedKey credential"),
-        }
+        assert_eq!(provider.account_name(), "myaccount");
+        assert_eq!(provider.container(), "mycontainer");
+        assert!(matches!(
+            provider.credential(),
+            AzureCredential::SharedKey { .. }
+        ));
     }
-
-    #[test]
-    fn should_create_provider_with_different_shared_keys() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let provider1 = AzureProvider::with_shared_key(
-            "account1".to_string(),
-            "container1".to_string(),
-            "key1".to_string(),
-        );
-        let provider2 = AzureProvider::with_shared_key(
-            "account2".to_string(),
-            "container2".to_string(),
-            "key2".to_string(),
-        );
-
-        // Assert
-        assert_ne!(provider1.account_name, provider2.account_name);
-    }
-
-    // =========== AzureProvider With SAS Token Tests ===========
 
     #[test]
     fn should_create_provider_with_sas_token() {
-        // Arrange
-        // (no setup required)
-
-        // Act
+        // Arrange & Act
         let provider = AzureProvider::with_sas_token(
-            "myaccount".to_string(),
-            "mycontainer".to_string(),
-            "sv=2021-06-08&ss=b&srt=sco&sp=rwdlac&se=2024-12-31T23:59:59Z".to_string(),
+            "myaccount".into(),
+            "mycontainer".into(),
+            "sv=2021-06-08&ss=b&srt=sco".into(),
         );
 
         // Assert
-        assert_eq!(provider.account_name, "myaccount");
-        match &provider.credential {
-            AzureCredential::SasToken { token } => {
-                assert!(token.contains("sv="));
-            }
+        assert_eq!(provider.account_name(), "myaccount");
+        match provider.credential() {
+            AzureCredential::SasToken { token } => assert!(token.contains("sv=")),
             _ => panic!("Expected SasToken credential"),
         }
     }
 
     #[test]
     fn should_normalize_sas_token_with_question_mark() {
-        // Arrange
-        // (no setup required)
-
-        // Act
+        // Arrange & Act
         let provider = AzureProvider::with_sas_token(
-            "account".to_string(),
-            "container".to_string(),
-            "?sv=2021-06-08&ss=b".to_string(),
+            "account".into(),
+            "container".into(),
+            "?sv=2021-06-08&ss=b".into(),
         );
 
         // Assert
-        match &provider.credential {
+        match provider.credential() {
             AzureCredential::SasToken { token } => {
                 assert!(!token.starts_with('?'));
                 assert!(token.contains("sv="));
@@ -404,362 +618,204 @@ mod tests {
 
     #[test]
     fn should_normalize_sas_token_without_question_mark() {
-        // Arrange
-        // (no setup required)
-
-        // Act
+        // Arrange & Act
         let provider = AzureProvider::with_sas_token(
-            "account".to_string(),
-            "container".to_string(),
-            "sv=2021-06-08&ss=b".to_string(),
+            "account".into(),
+            "container".into(),
+            "sv=2021-06-08&ss=b".into(),
         );
 
         // Assert
-        match &provider.credential {
-            AzureCredential::SasToken { token } => {
-                assert_eq!(token, "sv=2021-06-08&ss=b");
-            }
+        match provider.credential() {
+            AzureCredential::SasToken { token } => assert_eq!(token, "sv=2021-06-08&ss=b"),
             _ => panic!("Expected SasToken credential"),
         }
     }
 
-    // =========== AzureProvider With Connection String Tests ===========
-
     #[test]
-    fn should_create_provider_with_connection_string() {
-        // Arrange
-        let conn_str = "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=mykey;EndpointSuffix=core.windows.net".to_string();
-
-        // Act
-        let provider = AzureProvider::with_connection_string(
-            "myaccount".to_string(),
-            "mycontainer".to_string(),
-            conn_str.clone(),
-        );
+    fn should_default_to_shared_key_with_new() {
+        // Arrange & Act
+        let provider = AzureProvider::new("account".into(), "container".into());
 
         // Assert
-        assert_eq!(provider.account_name, "myaccount");
-        match &provider.credential {
-            AzureCredential::ConnectionString { connection_string } => {
-                assert_eq!(connection_string, &conn_str);
-            }
-            _ => panic!("Expected ConnectionString credential"),
-        }
-    }
-
-    // =========== AzureProvider With Managed Identity Tests ===========
-
-    #[test]
-    fn should_create_provider_with_managed_identity() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let provider = AzureProvider::with_managed_identity(
-            "myaccount".to_string(),
-            "mycontainer".to_string(),
-        );
-
-        // Assert
-        assert_eq!(provider.account_name, "myaccount");
-        match &provider.credential {
-            AzureCredential::ManagedIdentity => {} // OK
-            _ => panic!("Expected ManagedIdentity credential"),
-        }
-    }
-
-    #[test]
-    fn should_default_to_managed_identity_with_new() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let provider = AzureProvider::new("account".to_string(), "container".to_string());
-
-        // Assert
-        match &provider.credential {
-            AzureCredential::ManagedIdentity => {} // OK
-            _ => panic!("Expected ManagedIdentity credential as default"),
-        }
-    }
-
-    // =========== AzureProvider General Tests ===========
-
-    #[test]
-    fn should_handle_empty_account_name() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let provider = AzureProvider::new("".to_string(), "container".to_string());
-
-        // Assert
-        assert_eq!(provider.account_name, "");
-        assert_eq!(provider.container, "container");
-    }
-
-    #[test]
-    fn should_handle_empty_container_name() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let provider = AzureProvider::new("account".to_string(), "".to_string());
-
-        // Assert
-        assert_eq!(provider.account_name, "account");
-        assert_eq!(provider.container, "");
-    }
-
-    #[test]
-    fn should_handle_special_characters_in_names() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let provider =
-            AzureProvider::new("my-account-123".to_string(), "my-container-456".to_string());
-
-        // Assert
-        assert_eq!(provider.account_name, "my-account-123");
-        assert_eq!(provider.container, "my-container-456");
-    }
-
-    // =========== AzureProvider CloudBackend Trait Tests ===========
-
-    #[test]
-    fn should_accept_put_operation_with_shared_key() {
-        // Arrange
-        let provider = AzureProvider::with_shared_key(
-            "account".to_string(),
-            "container".to_string(),
-            "key".to_string(),
-        );
-        let (tx, _rx) = std::sync::mpsc::channel();
-
-        // Act
-        provider.submit_put("key".into(), vec![1, 2, 3], tx);
-
-        // Assert
-        // (no assertion required; verifying it doesn't panic)
-    }
-
-    #[test]
-    fn should_accept_put_operation_with_sas_token() {
-        // Arrange
-        let provider = AzureProvider::with_sas_token(
-            "account".to_string(),
-            "container".to_string(),
-            "token123".to_string(),
-        );
-        let (tx, _rx) = std::sync::mpsc::channel();
-
-        // Act
-        provider.submit_put("key".into(), vec![1, 2, 3], tx);
-
-        // Assert
-        // (no assertion required; verifying it doesn't panic)
-    }
-
-    #[test]
-    fn should_accept_put_operation_with_managed_identity() {
-        // Arrange
-        let provider =
-            AzureProvider::with_managed_identity("account".to_string(), "container".to_string());
-        let (tx, _rx) = std::sync::mpsc::channel();
-
-        // Act
-        provider.submit_put("key".into(), vec![1, 2, 3], tx);
-
-        // Assert
-        // (no assertion required; verifying it doesn't panic)
-    }
-
-    #[test]
-    fn should_accept_get_operation() {
-        // Arrange
-        let provider = AzureProvider::new("account".to_string(), "container".to_string());
-        let (tx, _rx) = std::sync::mpsc::channel();
-
-        // Act
-        provider.submit_get("key".into(), tx);
-
-        // Assert
-        // (no assertion required; verifying it doesn't panic)
-    }
-
-    #[test]
-    fn should_accept_delete_operation() {
-        // Arrange
-        let provider = AzureProvider::new("account".to_string(), "container".to_string());
-        let (tx, _rx) = std::sync::mpsc::channel();
-
-        // Act
-        provider.submit_delete("key".into(), tx);
-
-        // Assert
-        // (no assertion required; verifying it doesn't panic)
-    }
-
-    #[test]
-    fn should_accept_list_operation() {
-        // Arrange
-        let provider = AzureProvider::new("account".to_string(), "container".to_string());
-        let (tx, _rx) = std::sync::mpsc::channel();
-
-        // Act
-        provider.submit_list("prefix".into(), tx);
-
-        // Assert
-        // (no assertion required; verifying it doesn't panic)
-    }
-
-    #[test]
-    fn should_accept_head_operation() {
-        // Arrange
-        let provider = AzureProvider::new("account".to_string(), "container".to_string());
-        let (tx, _rx) = std::sync::mpsc::channel();
-
-        // Act
-        provider.submit_head("key".into(), tx);
-
-        // Assert
-        // (no assertion required; verifying it doesn't panic)
-    }
-
-    #[test]
-    fn should_accept_get_range_operation() {
-        // Arrange
-        let provider = AzureProvider::new("account".to_string(), "container".to_string());
-        let (tx, _rx) = std::sync::mpsc::channel();
-
-        // Act
-        provider.submit_get_range("key".into(), 0, Some(1024), tx);
-
-        // Assert
-        // (no assertion required; verifying it doesn't panic)
-    }
-
-    #[test]
-    fn should_handle_multiple_operations_sequentially() {
-        // Arrange
-        let provider = AzureProvider::new("account".to_string(), "container".to_string());
-
-        // Act - Execute multiple operations
-        for i in 0..5 {
-            let (tx, _rx) = std::sync::mpsc::channel();
-            let key = format!("key{}", i);
-            provider.submit_put(key, vec![i as u8], tx);
-        }
-
-        // Assert
-        // (no assertion required; verifying no panics during multiple operations)
-    }
-
-    #[test]
-    fn should_handle_multiple_credential_types() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let sk =
-            AzureProvider::with_shared_key("a".to_string(), "c".to_string(), "key".to_string());
-        let sas =
-            AzureProvider::with_sas_token("a".to_string(), "c".to_string(), "token".to_string());
-        let mi = AzureProvider::with_managed_identity("a".to_string(), "c".to_string());
-        let cs = AzureProvider::with_connection_string(
-            "a".to_string(),
-            "c".to_string(),
-            "connstr".to_string(),
-        );
-
-        // Assert
-        assert!(matches!(&sk.credential, AzureCredential::SharedKey { .. }));
-        assert!(matches!(&sas.credential, AzureCredential::SasToken { .. }));
-        assert!(matches!(&mi.credential, AzureCredential::ManagedIdentity));
         assert!(matches!(
-            &cs.credential,
-            AzureCredential::ConnectionString { .. }
+            provider.credential(),
+            AzureCredential::SharedKey { .. }
         ));
     }
 
     #[test]
-    fn should_handle_large_data_in_put() {
-        // Arrange
-        let provider = AzureProvider::new("account".to_string(), "container".to_string());
-        let (tx, rx) = std::sync::mpsc::channel();
-        let large_data = vec![42u8; 1_000_000];
-
-        // Act
-        provider.submit_put("largefile".into(), large_data.clone(), tx);
-        let event = rx.recv().unwrap();
+    fn should_handle_empty_account_name() {
+        // Arrange & Act
+        let provider = AzureProvider::new("".into(), "container".into());
 
         // Assert
-        match event {
-            CloudEvent::PutComplete { result, .. } => {
-                assert!(result.is_ok());
-            }
-            _ => panic!("Expected PutComplete"),
-        }
+        assert_eq!(provider.account_name(), "");
+        assert_eq!(provider.container(), "container");
     }
 
     #[test]
-    fn should_send_callback_event_on_put() {
-        // Arrange
-        let provider = AzureProvider::new("account".to_string(), "container".to_string());
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        // Act
-        provider.submit_put("key".into(), vec![1, 2, 3], tx);
-        let event = rx.recv().unwrap();
+    fn should_handle_empty_container_name() {
+        // Arrange & Act
+        let provider = AzureProvider::new("account".into(), "".into());
 
         // Assert
-        match event {
-            CloudEvent::PutComplete { key, result } => {
-                assert_eq!(key, "key");
-                assert!(result.is_ok());
-            }
-            _ => panic!("Expected PutComplete event"),
-        }
+        assert_eq!(provider.account_name(), "account");
+        assert_eq!(provider.container(), "");
     }
 
     #[test]
-    fn should_send_callback_event_on_get() {
-        // Arrange
-        let provider = AzureProvider::new("account".to_string(), "container".to_string());
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        // Act
-        provider.submit_get("key".into(), tx);
-        let event = rx.recv().unwrap();
+    fn should_handle_special_characters_in_names() {
+        // Arrange & Act
+        let provider = AzureProvider::new("my-account-123".into(), "my-container-456".into());
 
         // Assert
-        match event {
-            CloudEvent::GetComplete { key, result } => {
-                assert_eq!(key, "key");
-                assert!(result.is_ok());
-            }
-            _ => panic!("Expected GetComplete event"),
-        }
+        assert_eq!(provider.account_name(), "my-account-123");
+        assert_eq!(provider.container(), "my-container-456");
     }
 
     #[test]
-    fn should_send_callback_event_on_head() {
-        // Arrange
-        let provider = AzureProvider::new("account".to_string(), "container".to_string());
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        // Act
-        provider.submit_head("key".into(), tx);
-        let event = rx.recv().unwrap();
+    fn should_create_provider_with_different_shared_keys() {
+        // Arrange & Act
+        let p1 = AzureProvider::with_shared_key("a1".into(), "c1".into(), "k1".into());
+        let p2 = AzureProvider::with_shared_key("a2".into(), "c2".into(), "k2".into());
 
         // Assert
-        match event {
-            CloudEvent::HeadComplete { key, result } => {
-                assert_eq!(key, "key");
-                assert!(result.is_ok());
-            }
-            _ => panic!("Expected HeadComplete event"),
-        }
+        assert_ne!(p1.account_name(), p2.account_name());
+    }
+
+    // =========== AzureBackend URL Tests ===========
+
+    #[test]
+    fn should_build_correct_base_url() {
+        // Arrange
+        let backend = AzureBackend::new(
+            "myaccount".into(),
+            "mycontainer".into(),
+            None,
+            make_noop_executor(),
+        );
+
+        // Act
+        let url = backend.base_url();
+
+        // Assert
+        assert_eq!(url, "https://myaccount.blob.core.windows.net/mycontainer");
+    }
+
+    #[test]
+    fn should_build_correct_object_url_without_sas() {
+        // Arrange
+        let backend =
+            AzureBackend::new("acct".into(), "ctr".into(), None, make_noop_executor());
+
+        // Act
+        let url = backend.object_url("path/to/blob");
+
+        // Assert
+        assert_eq!(url, "https://acct.blob.core.windows.net/ctr/path/to/blob");
+    }
+
+    #[test]
+    fn should_append_sas_token_to_object_url() {
+        // Arrange
+        let backend = AzureBackend::new(
+            "acct".into(),
+            "ctr".into(),
+            Some("sv=2021&sig=abc".into()),
+            make_noop_executor(),
+        );
+
+        // Act
+        let url = backend.object_url("myblob");
+
+        // Assert
+        assert!(url.contains("?sv=2021&sig=abc"));
+    }
+
+    #[test]
+    fn should_build_correct_list_url() {
+        // Arrange
+        let backend =
+            AzureBackend::new("acct".into(), "ctr".into(), None, make_noop_executor());
+
+        // Act
+        let url = backend.list_url("wal/");
+
+        // Assert
+        assert!(url.contains("restype=container"));
+        assert!(url.contains("comp=list"));
+        assert!(url.contains("prefix=wal%2F"));
+    }
+
+    // =========== SharedKeySigner Tests ===========
+
+    #[test]
+    fn should_add_authorization_header_when_signing() {
+        // Arrange
+        let signer = SharedKeySigner::new(
+            "devstoreaccount1".into(),
+            "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==".into(),
+        );
+        let mut request = CloudRequest::new(
+            Method::PUT,
+            "https://devstoreaccount1.blob.core.windows.net/mycontainer/myblob".into(),
+        );
+
+        // Act
+        let result = signer.sign(&mut request);
+
+        // Assert
+        assert!(result.is_ok());
+        let has_auth = request
+            .headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("Authorization"));
+        assert!(has_auth, "should have Authorization header");
+    }
+
+    #[test]
+    fn should_include_xms_date_header_when_signing() {
+        // Arrange
+        let signer = SharedKeySigner::new("acct".into(), "dGVzdA==".into());
+        let mut request = CloudRequest::new(
+            Method::GET,
+            "https://acct.blob.core.windows.net/ctr/blob".into(),
+        );
+
+        // Act
+        let _ = signer.sign(&mut request);
+
+        // Assert
+        let has_date = request.headers.iter().any(|(n, _)| n == "x-ms-date");
+        assert!(has_date, "should have x-ms-date header");
+    }
+
+    #[test]
+    fn should_include_xms_version_header_when_signing() {
+        // Arrange
+        let signer = SharedKeySigner::new("acct".into(), "dGVzdA==".into());
+        let mut request = CloudRequest::new(
+            Method::GET,
+            "https://acct.blob.core.windows.net/ctr/blob".into(),
+        );
+
+        // Act
+        let _ = signer.sign(&mut request);
+
+        // Assert
+        let version = request
+            .headers
+            .iter()
+            .find(|(n, _)| n == "x-ms-version")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(version, Some("2024-11-04"));
+    }
+
+    // =========== Helper ===========
+
+    /// Create a no-op executor for URL-building tests (no signer).
+    fn make_noop_executor() -> CloudExecutor {
+        CloudExecutor::new(None)
     }
 }

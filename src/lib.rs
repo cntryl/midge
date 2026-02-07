@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Midge - High-performance embedded LSM-tree database
 //!
 //! # Architecture

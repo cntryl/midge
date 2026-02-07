@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Testing utilities.
 //!
 //! Keep `testkit` organized: types/config live in `config`, mocks in `storage_mock`,

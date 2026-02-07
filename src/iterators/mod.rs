@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Iterator abstraction
 //!
 //! Generic iterator traits for traversing key-value data

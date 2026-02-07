@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Metadata - manifest and version management
 //!
 //! Tracks SST files, levels, and version history

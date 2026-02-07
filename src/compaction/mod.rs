@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub mod executor;
 pub mod merge;
 pub mod planner;

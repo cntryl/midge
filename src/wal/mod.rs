@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Write-Ahead Log (WAL) subsystem
 //!
 //! Provides durable write-ahead logging with filesystem implementations.

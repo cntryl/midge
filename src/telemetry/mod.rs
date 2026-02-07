@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! OpenTelemetry instrumentation for Midge
 //!
 //! Provides tracing, metrics, and structured logging with semantic attributes.

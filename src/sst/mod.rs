@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 // == COPILOT MASTER RULES FOR SST SUBSYSTEM ==========================================
 // These rules define the authoritative architecture for Midge SSTs. All completions
 // touching SST encoding, blocks, builders, iterators, index files, filters, or table

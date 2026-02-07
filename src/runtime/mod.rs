@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Runtime - Actor-based background task execution
 //!
 //! Deterministic actor framework for compaction, flushing, WAL, cloud ops, GC, and manifest.
