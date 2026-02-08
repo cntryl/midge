@@ -33,6 +33,7 @@ use super::actors::{
 };
 use super::durability::{DurabilityCoordinator, DurabilityWaiter};
 use super::read_snapshot::ReadSnapshot;
+use super::snapshot_cache::{CfSnapshotData, PublishedSnapshot, SnapshotCache};
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
 
@@ -76,6 +77,8 @@ pub struct EventLoop {
     pub(super) write_stall_waiters: HashMap<u64, crate::engine::ColumnFamilyId>,
     /// FIFO queues of waiters per CF.
     pub(super) write_stall_waiter_queues: HashMap<crate::engine::ColumnFamilyId, VecDeque<u64>>,
+    /// Lock-free snapshot cache shared with Engine for read-path bypass.
+    pub(super) snapshot_cache: Option<Arc<SnapshotCache>>,
 }
 
 impl EventLoop {
@@ -145,6 +148,7 @@ impl EventLoop {
 
             write_stall_waiters: HashMap::new(),
             write_stall_waiter_queues: HashMap::new(),
+            snapshot_cache: None,
         };
 
         if let Some(storage) = config.hybrid_storage {
@@ -157,6 +161,52 @@ impl EventLoop {
     pub fn set_hybrid_storage(&mut self, storage: Arc<crate::storage::HybridStorage>) {
         self.eviction_actor = Some(EvictionActor::new(storage.clone()));
         self.hybrid_storage = Some(storage);
+    }
+
+    /// Set the snapshot cache for read-path bypass.
+    pub fn set_snapshot_cache(&mut self, cache: Arc<SnapshotCache>) {
+        self.snapshot_cache = Some(cache);
+        // Publish initial snapshot from current state
+        self.publish_snapshot();
+    }
+
+    /// Publish current state to the lock-free snapshot cache.
+    ///
+    /// Called after writes, flushes, and CF lifecycle events so that
+    /// `begin_tx` can capture snapshots without event loop round-trip.
+    #[inline]
+    pub(super) fn publish_snapshot(&self) {
+        let Some(cache) = &self.snapshot_cache else {
+            return;
+        };
+
+        let mut cf_snapshots = std::collections::HashMap::new();
+        for (&cf_id, cf_state) in &self.state.column_families {
+            let cf_files: Vec<_> = self
+                .state
+                .manifest
+                .files
+                .iter()
+                .filter(|f| f.cf_id == cf_id)
+                .cloned()
+                .collect();
+            cf_snapshots.insert(
+                cf_id,
+                CfSnapshotData {
+                    snapshot: Arc::new(ReadSnapshot::new(
+                        cf_state.memtable.clone(),
+                        cf_state.immutable_memtables.clone(),
+                        cf_files,
+                        self.state.sst_dir.clone(),
+                    )),
+                },
+            );
+        }
+
+        cache.publish(PublishedSnapshot {
+            sequence: self.state.sequence,
+            cf_snapshots,
+        });
     }
 
     /// Helper: deliver a RuntimeResponse to the requester via the router.
@@ -190,44 +240,41 @@ impl EventLoop {
             // preserve FIFO semantics.
             let msg = if let Some(pending) = self.pending_msg.take() {
                 Some(pending)
+            } else if let Some(storage_rx) = &self.hybrid_storage_events {
+                crossbeam::channel::select! {
+                    recv(msg_rx) -> msg => msg.ok(),
+                    recv(storage_rx) -> ev => {
+                        if let Ok(ev) = ev {
+                            self.handle_storage_event(ev);
+                        }
+                        // Continue the loop; we didn't consume a RuntimeMsg.
+                        continue;
+                    },
+                    default(timeout) => {
+                        // 🔑 CRITICAL: Drive durability progress on idle ticks
+                        // If waiters exist but no new messages, sync them now
+                        self.sync_batched_wal_if_needed(&msg_rx);
+
+                        self.maybe_flush_cloudfirst_wal();
+                        self.tick_hybrid_storage();
+                        // Drain any push-channel events that arrived between ticks.
+                        self.drain_hybrid_storage_events();
+                        continue;
+                    }
+                }
             } else {
-                let storage_rx_opt = self.hybrid_storage_events.clone();
-                if let Some(storage_rx) = storage_rx_opt {
-                    crossbeam::channel::select! {
-                        recv(msg_rx) -> msg => msg.ok(),
-                        recv(storage_rx) -> ev => {
-                            if let Ok(ev) = ev {
-                                self.handle_storage_event(ev);
-                            }
-                            // Continue the loop; we didn't consume a RuntimeMsg.
-                            continue;
-                        },
-                        default(timeout) => {
-                            // 🔑 CRITICAL: Drive durability progress on idle ticks
-                            // If waiters exist but no new messages, sync them now
-                            self.sync_batched_wal_if_needed(&msg_rx);
+                match msg_rx.recv_timeout(timeout) {
+                    Ok(msg) => Some(msg),
+                    Err(RecvTimeoutError::Timeout) => {
+                        // 🔑 CRITICAL: Drive durability progress on idle ticks
+                        // If waiters exist but no new messages, sync them now
+                        self.sync_batched_wal_if_needed(&msg_rx);
 
-                            self.maybe_flush_cloudfirst_wal();
-                            self.tick_hybrid_storage();
-                            // Drain any push-channel events that arrived between ticks.
-                            self.drain_hybrid_storage_events();
-                            continue;
-                        }
+                        self.maybe_flush_cloudfirst_wal();
+                        self.tick_hybrid_storage();
+                        continue;
                     }
-                } else {
-                    match msg_rx.recv_timeout(timeout) {
-                        Ok(msg) => Some(msg),
-                        Err(RecvTimeoutError::Timeout) => {
-                            // 🔑 CRITICAL: Drive durability progress on idle ticks
-                            // If waiters exist but no new messages, sync them now
-                            self.sync_batched_wal_if_needed(&msg_rx);
-
-                            self.maybe_flush_cloudfirst_wal();
-                            self.tick_hybrid_storage();
-                            continue;
-                        }
-                        Err(RecvTimeoutError::Disconnected) => None,
-                    }
+                    Err(RecvTimeoutError::Disconnected) => None,
                 }
             };
 
@@ -686,6 +733,10 @@ impl EventLoop {
                             .append_transaction(&mut self.state, request_id, ops)
                         {
                             Ok((last_sequence, op_count, deferred)) => {
+                                // Publish snapshot BEFORE responding so that
+                                // the caller's next begin_tx sees the write.
+                                self.publish_snapshot();
+
                                 if self.should_ack_immediately(deferred) {
                                     if self.wal_actor.is_cloud_first() {
                                         // Accepted but not yet cloud-durable; confirm later on CloudAck.
@@ -802,6 +853,7 @@ impl EventLoop {
                         sequence,
                     );
                     self.wake_write_stall_waiters();
+                    self.publish_snapshot();
                     self.respond(request_id, RuntimeResponse::Ok { request_id });
                 }
 
@@ -1131,6 +1183,9 @@ impl EventLoop {
                     );
                     match result {
                         Ok((seq, deferred)) => {
+                            // Publish snapshot BEFORE responding.
+                            self.publish_snapshot();
+
                             if self.should_ack_immediately(deferred) {
                                 if self.wal_actor.is_cloud_first() {
                                     // Background CloudFirst: confirm sequences immediately after local WAL write.
@@ -1204,6 +1259,9 @@ impl EventLoop {
                     );
                     match result {
                         Ok((seq, deferred)) => {
+                            // Publish snapshot BEFORE responding.
+                            self.publish_snapshot();
+
                             if self.should_ack_immediately(deferred) {
                                 if self.wal_actor.is_cloud_first() {
                                     // Background CloudFirst: confirm sequences immediately after local WAL write.
@@ -1413,6 +1471,7 @@ impl EventLoop {
                             request_id,
                             error: crate::common::MidgeError::Internal(e.to_string()),
                         });
+                    self.publish_snapshot();
                     self.respond(request_id, resp);
                 }
 

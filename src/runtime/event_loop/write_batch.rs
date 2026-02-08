@@ -84,6 +84,9 @@ impl EventLoop {
 
                     match result {
                         Ok((seq, deferred)) => {
+                            // Publish snapshot BEFORE responding.
+                            self.publish_snapshot();
+
                             if self.should_ack_immediately(deferred) {
                                 if deferred {
                                     self.maybe_queue_confirm_only_waiter(
@@ -137,6 +140,9 @@ impl EventLoop {
 
                     match result {
                         Ok((seq, deferred)) => {
+                            // Publish snapshot BEFORE responding.
+                            self.publish_snapshot();
+
                             if self.should_ack_immediately(deferred) {
                                 if deferred {
                                     self.maybe_queue_confirm_only_waiter(
@@ -180,6 +186,9 @@ impl EventLoop {
                         .append_transaction(&mut self.state, request_id, ops)
                     {
                         Ok((last_sequence, op_count, deferred)) => {
+                            // Publish snapshot BEFORE responding so callers see the write.
+                            self.publish_snapshot();
+
                             if self.should_ack_immediately(deferred) {
                                 if deferred {
                                     self.maybe_queue_confirm_only_waiter(

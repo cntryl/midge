@@ -629,24 +629,17 @@ impl Engine {
 
         let txn_id = self
             .next_snapshot_id
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let fallback_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
-        let request_id = next_request_id();
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Combined begin-transaction: fetch sequence + capture snapshot in one round-trip.
-        let (start_sequence, read_snapshot) = match self
-            .runtime_handle
-            .send_and_wait(RuntimeMsg::BeginTransaction {
-                request_id,
-                cf_id,
-            }) {
-            Ok(RuntimeResponse::BeginTransactionResult {
-                start_sequence,
-                snapshot,
-                ..
-            }) => (start_sequence, snapshot),
-            _ => (fallback_sequence + 1, None),
-        };
+        // Fast path: read snapshot from lock-free ArcSwap cache (no event loop round-trip).
+        let cache_guard = self.runtime_handle.snapshot_cache.load();
+        let start_sequence = cache_guard.sequence + 1;
+        let read_snapshot = cache_guard
+            .cf_snapshots
+            .get(&cf_id)
+            .map(|data| data.snapshot.clone());
+        // Drop the guard ASAP to avoid holding the ArcSwap lease.
+        drop(cache_guard);
 
         Ok(api::Transaction::new(
             self.runtime_handle.clone(),
@@ -734,7 +727,11 @@ impl Engine {
                     ttl_seconds,
                     ..
                 } => batch_intents.push(ingest::BatchWriteOp {
-                    cf_id, key, value: Some(value), ttl_seconds, insert_only: false,
+                    cf_id,
+                    key,
+                    value: Some(value),
+                    ttl_seconds,
+                    insert_only: false,
                 }),
                 api::WriteIntent::Insert {
                     cf_id,
@@ -743,11 +740,19 @@ impl Engine {
                     ttl_seconds,
                     ..
                 } => batch_intents.push(ingest::BatchWriteOp {
-                    cf_id, key, value: Some(value), ttl_seconds, insert_only: true,
+                    cf_id,
+                    key,
+                    value: Some(value),
+                    ttl_seconds,
+                    insert_only: true,
                 }),
                 api::WriteIntent::Delete { cf_id, key, .. } => {
                     batch_intents.push(ingest::BatchWriteOp {
-                        cf_id, key, value: None, ttl_seconds: None, insert_only: false,
+                        cf_id,
+                        key,
+                        value: None,
+                        ttl_seconds: None,
+                        insert_only: false,
                     })
                 }
                 api::WriteIntent::DeleteRange {

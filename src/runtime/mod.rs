@@ -15,6 +15,7 @@ pub mod durability;
 pub mod event_loop;
 pub mod intent_persistence;
 pub mod read_snapshot;
+pub mod snapshot_cache;
 pub mod state;
 
 pub use event_loop::EventLoop;
@@ -28,9 +29,9 @@ use crate::wal::policy::BatchConfig;
 use crate::wal::DurabilityPolicy;
 use bytes::Bytes;
 use crossbeam::channel::{self, Receiver, Sender};
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 /// Runtime configuration for wiring durability/storage behavior.
@@ -62,8 +63,11 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 ///
 /// Callers should always use this when constructing `RuntimeMsg` values
 /// that expect a response.
+///
+/// Uses `Relaxed` ordering because request IDs only need uniqueness,
+/// not cross-thread ordering guarantees.
 pub(crate) fn next_request_id() -> u64 {
-    NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst)
+    NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 use serde::{Deserialize, Serialize};
@@ -599,17 +603,18 @@ impl RuntimeResponse {
 
 /// ResponseRouter - per-request routing using oneshot-style channels.
 ///
-/// Copilot: this is the ONLY place where responses are matched to request_ids.
-/// Do not invent global response_rx or other routing mechanisms.
+/// Uses `DashMap` for lock-free concurrent access, eliminating the
+/// `Mutex<HashMap>` contention point between caller threads (register)
+/// and the event loop thread (complete).
 #[derive(Debug)]
 pub(crate) struct ResponseRouter {
-    pending: Mutex<HashMap<u64, Sender<RuntimeResponse>>>,
+    pending: DashMap<u64, Sender<RuntimeResponse>>,
 }
 
 impl ResponseRouter {
     pub fn new() -> Self {
         Self {
-            pending: Mutex::new(HashMap::new()),
+            pending: DashMap::new(),
         }
     }
 
@@ -618,11 +623,7 @@ impl ResponseRouter {
     /// Returns a receiver that will yield exactly one `RuntimeResponse`.
     pub fn register(&self, request_id: u64) -> Receiver<RuntimeResponse> {
         let (tx, rx) = channel::bounded(1);
-        let mut guard = self
-            .pending
-            .lock()
-            .expect("ResponseRouter::pending poisoned");
-        guard.insert(request_id, tx);
+        self.pending.insert(request_id, tx);
         rx
     }
 
@@ -631,15 +632,7 @@ impl ResponseRouter {
     /// If no pending entry exists, logs a warning and drops the response.
     pub fn complete(&self, response: RuntimeResponse) {
         let request_id = response.request_id();
-        let tx_opt = {
-            let mut guard = self
-                .pending
-                .lock()
-                .expect("ResponseRouter::pending poisoned");
-            guard.remove(&request_id)
-        };
-
-        if let Some(tx) = tx_opt {
+        if let Some((_, tx)) = self.pending.remove(&request_id) {
             let _ = tx.send(response);
         } else {
             tracing::warn!(
@@ -653,11 +646,7 @@ impl ResponseRouter {
     ///
     /// Used by timeout-based waits so callers can abandon a request cleanly.
     pub fn unregister(&self, request_id: u64) {
-        let mut guard = self
-            .pending
-            .lock()
-            .expect("ResponseRouter::pending poisoned");
-        let _ = guard.remove(&request_id);
+        let _ = self.pending.remove(&request_id);
     }
 }
 
@@ -672,6 +661,10 @@ impl ResponseRouter {
 pub struct RuntimeHandle {
     msg_tx: Sender<RuntimeMsg>,
     router: Arc<ResponseRouter>,
+    /// Lock-free snapshot cache for read-path bypass.
+    ///
+    /// Allows `begin_tx` to capture a read snapshot without event loop round-trip.
+    pub(crate) snapshot_cache: Arc<snapshot_cache::SnapshotCache>,
 }
 
 impl RuntimeHandle {
@@ -842,9 +835,12 @@ impl Runtime {
             .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
             .unwrap_or(false);
 
+        let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
+
         let handle = RuntimeHandle {
             msg_tx: msg_tx.clone(),
             router: router.clone(),
+            snapshot_cache,
         };
 
         let runtime = Self {
@@ -879,10 +875,13 @@ impl Runtime {
         // Channel to signal successful event loop initialization
         let (init_tx, init_rx) = channel::bounded::<Result<(), String>>(1);
 
+        let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
+
         // Handle for callers to use.
         let handle = RuntimeHandle {
             msg_tx: self.msg_tx.clone(),
             router: router.clone(),
+            snapshot_cache: snapshot_cache.clone(),
         };
 
         let msg_tx_for_loop = self.msg_tx.clone();
@@ -893,6 +892,8 @@ impl Runtime {
             .spawn(move || {
                 match EventLoop::new(state, trace_enabled, router, config, Some(msg_tx_for_loop)) {
                     Ok(mut event_loop) => {
+                        // Share the snapshot cache with the event loop
+                        event_loop.set_snapshot_cache(snapshot_cache);
                         // Signal successful initialization
                         let _ = init_tx.send(Ok(()));
                         event_loop.run(msg_rx);

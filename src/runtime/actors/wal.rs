@@ -324,12 +324,26 @@ impl WalActor {
                 state.wal.local_durable_seq = sequence;
 
                 // Apply to memtable - write is now visible
-                self.apply_to_memtable(state, sequence, cf_id, key.clone(), value.clone(), record.expiration)?;
+                self.apply_to_memtable(
+                    state,
+                    sequence,
+                    cf_id,
+                    key.clone(),
+                    value.clone(),
+                    record.expiration,
+                )?;
             }
             DurabilityPolicy::Batched => {
                 // Apply to memtable immediately, but defer response until fsync completes.
                 // Caller joins the group commit waiter queue; sync completion notifies all.
-                self.apply_to_memtable(state, sequence, cf_id, key.clone(), value.clone(), record.expiration)?;
+                self.apply_to_memtable(
+                    state,
+                    sequence,
+                    cf_id,
+                    key.clone(),
+                    value.clone(),
+                    record.expiration,
+                )?;
                 // Return deferred=true so caller joins group commit
             }
             DurabilityPolicy::CloudMirrored => {
@@ -338,7 +352,14 @@ impl WalActor {
                 state.wal.local_durable_seq = sequence;
 
                 // Apply to memtable - local durability sufficient
-                self.apply_to_memtable(state, sequence, cf_id, key.clone(), value.clone(), record.expiration)?;
+                self.apply_to_memtable(
+                    state,
+                    sequence,
+                    cf_id,
+                    key.clone(),
+                    value.clone(),
+                    record.expiration,
+                )?;
 
                 // Schedule cloud upload of the current WAL segment
                 // The segment has been synced locally; now background-upload to cloud.
@@ -383,7 +404,14 @@ impl WalActor {
                 // Cloud upload runs asynchronously; data must be visible for reads
                 // without waiting for upload completion. This is the key difference
                 // from the old CloudFirst behavior which blocked on cloud confirmation.
-                self.apply_to_memtable(state, sequence, cf_id, key.clone(), value.clone(), record.expiration)?;
+                self.apply_to_memtable(
+                    state,
+                    sequence,
+                    cf_id,
+                    key.clone(),
+                    value.clone(),
+                    record.expiration,
+                )?;
 
                 // Queue write for cloud durability confirmation (used for telemetry/monitoring).
                 // Memtable update happened above; reads don't wait for cloud upload.
@@ -670,28 +698,15 @@ impl WalActor {
         let mut begin_record =
             WalRecord::new_cf(0, WalOpKind::TxnBegin, marker_key.clone(), None, begin_seq);
         begin_record.txn_id = Some(txn_id);
-        if let Some(writer) = &mut self.writer {
-            let a_start = Instant::now();
-            writer.append_record(&begin_record)?;
-            let a_elapsed = a_start.elapsed();
-            self.append_calls += 1;
-            self.append_total += a_elapsed;
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics()
-                    .record_wal_append(begin_record.estimated_size() as u64);
-                t.metrics().record_wal_append_count();
-                t.metrics()
-                    .record_wal_append_ns(a_elapsed.as_nanos() as u64);
-            }
-        }
 
-        state.wal.pending_writes += 1;
-        self.pending_sync_count += 1;
-        self.bytes_since_sync += begin_record.estimated_size();
+        // Pre-allocate WAL records batch: begin + N ops + commit
+        let mut wal_records: Vec<WalRecord> = Vec::with_capacity(ops_count + 2);
+        wal_records.push(begin_record);
 
         let mut apply_ops: Vec<TransactionApplyOp> = Vec::with_capacity(ops_count);
+        let mut total_wal_bytes: usize = 0;
 
-        // Now write op records using deterministic sequences
+        // Build op records using deterministic sequences
         for (i, op) in ops.into_iter().enumerate() {
             let seq = first_op_seq + i as u64;
             match op {
@@ -702,7 +717,6 @@ impl WalActor {
                     ttl_seconds,
                     insert_only,
                 } => {
-                    // key and value are already Bytes — no conversion needed.
                     let op_kind = if insert_only {
                         WalOpKind::Insert
                     } else {
@@ -718,33 +732,17 @@ impl WalActor {
                             seq,
                             ttl,
                         ),
-                        _ => WalRecord::new_cf(
-                            cf_id,
-                            op_kind,
-                            key.clone(),
-                            Some(value.clone()),
-                            seq,
-                        ),
+                        _ => {
+                            WalRecord::new_cf(cf_id, op_kind, key.clone(), Some(value.clone()), seq)
+                        }
                     };
                     record.txn_id = Some(txn_id);
-
-                    if let Some(writer) = &mut self.writer {
-                        let a_start = Instant::now();
-                        writer.append_record(&record)?;
-                        let a_elapsed = a_start.elapsed();
-                        self.append_calls += 1;
-                        self.append_total += a_elapsed;
-                    }
 
                     // Log seq allocation for this CF (deferred)
                     state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
                         seqno: seq,
                         cf_id,
                     });
-
-                    state.wal.pending_writes += 1;
-                    self.pending_sync_count += 1;
-                    self.bytes_since_sync += record.estimated_size();
 
                     apply_ops.push(TransactionApplyOp::Put {
                         cf_id,
@@ -753,20 +751,13 @@ impl WalActor {
                         expiration: record.expiration,
                         sequence: seq,
                     });
+
+                    wal_records.push(record);
                 }
                 crate::runtime::TransactionOp::Delete { cf_id, key } => {
-                    // key is already Bytes — no conversion needed.
                     let mut record =
                         WalRecord::new_cf(cf_id, WalOpKind::Delete, key.clone(), None, seq);
                     record.txn_id = Some(txn_id);
-
-                    if let Some(writer) = &mut self.writer {
-                        let a_start = Instant::now();
-                        writer.append_record(&record)?;
-                        let a_elapsed = a_start.elapsed();
-                        self.append_calls += 1;
-                        self.append_total += a_elapsed;
-                    }
 
                     // Log seq allocation for this CF (deferred)
                     state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
@@ -774,47 +765,49 @@ impl WalActor {
                         cf_id,
                     });
 
-                    state.wal.pending_writes += 1;
-                    self.pending_sync_count += 1;
-                    self.bytes_since_sync += record.estimated_size();
-
                     apply_ops.push(TransactionApplyOp::Delete {
                         cf_id,
                         key,
                         sequence: seq,
                     });
+
+                    wal_records.push(record);
                 }
             }
         }
-
-        // NOTE: We intentionally skip persist_intent_log() here for Batched mode.
-        // SeqnoAllocated entries are transient and recoverable from WAL replay.
-        // Calling fsync per-transaction destroys throughput (40 KB/s vs MB/s).
-        // Intent log is persisted at memtable flush boundaries for manifest entries.
 
         // Write commit record
         let last_sequence = commit_seq;
         let mut commit_record =
             WalRecord::new_cf(0, WalOpKind::TxnCommit, marker_key, None, commit_seq);
         commit_record.txn_id = Some(txn_id);
+        wal_records.push(commit_record);
+
+        // Compute total WAL bytes for bookkeeping
+        for r in &wal_records {
+            total_wal_bytes += r.estimated_size();
+        }
+
+        // Single batched WAL write — one writer lock acquisition, one buffer flush
         if let Some(writer) = &mut self.writer {
             let a_start = Instant::now();
-            writer.append_record(&commit_record)?;
+            writer.append_batch(&wal_records)?;
             let a_elapsed = a_start.elapsed();
             self.append_calls += 1;
             self.append_total += a_elapsed;
             if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics()
-                    .record_wal_append(commit_record.estimated_size() as u64);
+                t.metrics().record_wal_append(total_wal_bytes as u64);
                 t.metrics().record_wal_append_count();
                 t.metrics()
                     .record_wal_append_ns(a_elapsed.as_nanos() as u64);
             }
         }
 
-        state.wal.pending_writes += 1;
-        self.pending_sync_count += 1;
-        self.bytes_since_sync += commit_record.estimated_size();
+        // Update bookkeeping (single update for entire batch)
+        let record_count = wal_records.len();
+        state.wal.pending_writes += record_count;
+        self.pending_sync_count += record_count;
+        self.bytes_since_sync += total_wal_bytes;
 
         // Apply durability policy (single sync for the whole batch, where relevant).
         match self.durability_policy {
@@ -1008,12 +1001,10 @@ impl WalActor {
         if let Some(cf_state) = state.column_families.get(&cf_id) {
             let prev = cf_state.memtable.size_bytes();
             if let Some(val) = value {
-                cf_state.memtable.as_ref().put_bytes_with_seq(
-                    key,
-                    val,
-                    sequence,
-                    expiration,
-                )?;
+                cf_state
+                    .memtable
+                    .as_ref()
+                    .put_bytes_with_seq(key, val, sequence, expiration)?;
             } else {
                 cf_state
                     .memtable
