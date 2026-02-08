@@ -639,6 +639,36 @@ impl EventLoop {
                     }
                 }
 
+                RuntimeMsg::BeginTransaction { request_id, cf_id } => {
+                    let start_sequence = self.state.sequence + 1;
+                    let snapshot = if let Some(cf_state) = self.state.column_families.get(&cf_id) {
+                        let cf_files: Vec<_> = self
+                            .state
+                            .manifest
+                            .files
+                            .iter()
+                            .filter(|f| f.cf_id == cf_id)
+                            .cloned()
+                            .collect();
+                        Some(Arc::new(ReadSnapshot::new(
+                            cf_state.memtable.clone(),
+                            cf_state.immutable_memtables.clone(),
+                            cf_files,
+                            self.state.sst_dir.clone(),
+                        )))
+                    } else {
+                        None
+                    };
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::BeginTransactionResult {
+                            request_id,
+                            start_sequence,
+                            snapshot,
+                        },
+                    );
+                }
+
                 RuntimeMsg::ApplyTransaction { request_id, ops } => {
                     if self.wal_actor.is_cloud_first() && self.hybrid_storage.is_none() {
                         self.respond(

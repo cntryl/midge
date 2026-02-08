@@ -14,6 +14,7 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::{next_request_id, RuntimeHandle, RuntimeMsg, RuntimeResponse, TransactionOp};
+use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -35,8 +36,8 @@ const INGEST_QUEUE_DEPTH: usize = 4096;
 /// Write intent submitted to ingest coordinator
 pub(crate) struct WriteIntent {
     pub cf_id: crate::engine::ColumnFamilyId,
-    pub key: Vec<u8>,
-    pub value: Option<Vec<u8>>,
+    pub key: Bytes,
+    pub value: Option<Bytes>,
     pub ttl_seconds: Option<u64>,
     pub insert_only: bool,
     /// Oneshot channel to send result back to caller
@@ -102,6 +103,15 @@ impl WriteBatch {
     }
 }
 
+/// A single write op for batch submission to the ingest coordinator.
+pub(crate) struct BatchWriteOp {
+    pub cf_id: crate::engine::ColumnFamilyId,
+    pub key: Vec<u8>,
+    pub value: Option<Vec<u8>>,
+    pub ttl_seconds: Option<u64>,
+    pub insert_only: bool,
+}
+
 /// Per-CF ingest coordinator
 pub(crate) struct IngestCoordinator {
     cf_id: crate::engine::ColumnFamilyId,
@@ -156,8 +166,8 @@ impl IngestCoordinator {
         let (result_tx, result_rx) = crossbeam::channel::bounded(1);
         let intent = WriteIntent {
             cf_id,
-            key,
-            value,
+            key: Bytes::from(key),
+            value: value.map(Bytes::from),
             ttl_seconds,
             insert_only,
             result_tx,
@@ -177,6 +187,73 @@ impl IngestCoordinator {
         result_rx
             .recv()
             .map_err(|_| MidgeError::Internal("Ingest loop died".to_string()))?
+    }
+
+    /// Submit a batch of write intents as a single atomic transaction.
+    ///
+    /// Bypasses the per-intent ingest queue and sends directly to the runtime
+    /// as an `ApplyTransaction` message. This avoids queue overflow for large
+    /// batches (e.g., bulk load) and eliminates per-op channel allocation.
+    pub fn submit_batch(
+        &self,
+        runtime: &RuntimeHandle,
+        intents: Vec<BatchWriteOp>,
+    ) -> MidgeResult<u64> {
+        if intents.is_empty() {
+            return Ok(0);
+        }
+
+        // Fast path: check cached stall flag
+        if self.stall_flag.load(Ordering::Acquire) {
+            if let Ok(true) = runtime.check_write_stall(self.cf_id) {
+                return Err(MidgeError::WriteStall(format!(
+                    "Memory budget exceeded for CF {}",
+                    self.cf_id
+                )));
+            }
+            self.stall_flag.store(false, Ordering::Release);
+        }
+
+        // Convert to TransactionOps with a single Bytes conversion per key/value
+        let ops: Vec<TransactionOp> = intents
+            .into_iter()
+            .map(|op| {
+                if let Some(value) = op.value {
+                    TransactionOp::Put {
+                        cf_id: op.cf_id,
+                        key: Bytes::from(op.key),
+                        value: Bytes::from(value),
+                        ttl_seconds: op.ttl_seconds,
+                        insert_only: op.insert_only,
+                    }
+                } else {
+                    TransactionOp::Delete {
+                        cf_id: op.cf_id,
+                        key: Bytes::from(op.key),
+                    }
+                }
+            })
+            .collect();
+
+        let request_id = next_request_id();
+        let result = runtime
+            .send_and_wait(RuntimeMsg::ApplyTransaction { request_id, ops })
+            .and_then(|resp| match resp {
+                RuntimeResponse::TransactionApplied {
+                    last_sequence,
+                    write_stall_hint,
+                    ..
+                } => {
+                    self.stall_flag.store(write_stall_hint, Ordering::Release);
+                    Ok(last_sequence)
+                }
+                RuntimeResponse::Error { error, .. } => Err(error),
+                _ => Err(MidgeError::Internal(
+                    "Unexpected response to ApplyTransaction".to_string(),
+                )),
+            })?;
+
+        Ok(result)
     }
 
     /// Ingest loop: batches writes and commits them

@@ -26,6 +26,7 @@ pub use state::RuntimeState;
 use crate::common::{MidgeError, MidgeResult};
 use crate::wal::policy::BatchConfig;
 use crate::wal::DurabilityPolicy;
+use bytes::Bytes;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -93,18 +94,21 @@ pub struct FileMeta {
 ///
 /// This type lives in the runtime layer so higher layers can submit a
 /// transaction without depending on engine API types.
+///
+/// Uses `Bytes` for zero-copy transfer through the write pipeline:
+/// API → ingest coordinator → event loop → WAL actor → memtable.
 #[derive(Debug, Clone)]
 pub enum TransactionOp {
     Put {
         cf_id: crate::engine::ColumnFamilyId,
-        key: Vec<u8>,
-        value: Vec<u8>,
+        key: Bytes,
+        value: Bytes,
         ttl_seconds: Option<u64>,
         insert_only: bool,
     },
     Delete {
         cf_id: crate::engine::ColumnFamilyId,
-        key: Vec<u8>,
+        key: Bytes,
     },
 }
 
@@ -321,6 +325,16 @@ pub enum RuntimeMsg {
         sequence: u64,
     },
 
+    /// Combined begin-transaction: atomically fetch current sequence AND capture
+    /// a read snapshot in a single event-loop round-trip.
+    ///
+    /// Replaces the previous two-message pattern (GetCurrentSequence + CaptureReadSnapshot)
+    /// to halve the message-passing overhead of `begin_tx`.
+    BeginTransaction {
+        request_id: u64,
+        cf_id: crate::engine::ColumnFamilyId,
+    },
+
     // === Control ===
     /// Shutdown the runtime (no request_id; fire-and-forget).
     Shutdown,
@@ -388,6 +402,7 @@ impl RuntimeMsg {
             | GetReadAmpMetrics { request_id }
             | GetCurrentSequence { request_id }
             | CaptureReadSnapshot { request_id, .. }
+            | BeginTransaction { request_id, .. }
             | SetRuntimeConfig { request_id, .. }
             | GetRuntimeConfig { request_id }
             | GetIngestState { request_id }
@@ -434,6 +449,7 @@ impl RuntimeMsg {
             GetReadAmpMetrics { .. } => "GetReadAmpMetrics",
             GetCurrentSequence { .. } => "GetCurrentSequence",
             CaptureReadSnapshot { .. } => "CaptureReadSnapshot",
+            BeginTransaction { .. } => "BeginTransaction",
             SetRuntimeConfig { .. } => "SetRuntimeConfig",
             GetRuntimeConfig { .. } => "GetRuntimeConfig",
             GetIngestState { .. } => "GetIngestState",
@@ -527,6 +543,15 @@ pub enum RuntimeResponse {
         snapshot: Arc<super::runtime::read_snapshot::ReadSnapshot>,
     },
 
+    /// Combined response for BeginTransaction: sequence + snapshot in one round-trip.
+    BeginTransactionResult {
+        request_id: u64,
+        /// Start sequence for the transaction (current_sequence + 1).
+        start_sequence: u64,
+        /// Immutable read snapshot (None if the CF doesn't exist).
+        snapshot: Option<Arc<super::runtime::read_snapshot::ReadSnapshot>>,
+    },
+
     /// Snapshot of runtime configuration for diagnostics and tooling
     RuntimeConfigSnapshot {
         request_id: u64,
@@ -564,6 +589,7 @@ impl RuntimeResponse {
             | RuntimeResponse::ReadAmpMetricsSnapshot { request_id, .. }
             | RuntimeResponse::CurrentSequence { request_id, .. }
             | RuntimeResponse::ReadSnapshot { request_id, .. }
+            | RuntimeResponse::BeginTransactionResult { request_id, .. }
             | RuntimeResponse::RuntimeConfigSnapshot { request_id, .. }
             | RuntimeResponse::IngestState { request_id, .. }
             | RuntimeResponse::WriteStallStatus { request_id, .. } => *request_id,

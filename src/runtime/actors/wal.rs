@@ -324,12 +324,12 @@ impl WalActor {
                 state.wal.local_durable_seq = sequence;
 
                 // Apply to memtable - write is now visible
-                self.apply_to_memtable(state, sequence, cf_id, &key, &value, record.expiration)?;
+                self.apply_to_memtable(state, sequence, cf_id, key.clone(), value.clone(), record.expiration)?;
             }
             DurabilityPolicy::Batched => {
                 // Apply to memtable immediately, but defer response until fsync completes.
                 // Caller joins the group commit waiter queue; sync completion notifies all.
-                self.apply_to_memtable(state, sequence, cf_id, &key, &value, record.expiration)?;
+                self.apply_to_memtable(state, sequence, cf_id, key.clone(), value.clone(), record.expiration)?;
                 // Return deferred=true so caller joins group commit
             }
             DurabilityPolicy::CloudMirrored => {
@@ -338,7 +338,7 @@ impl WalActor {
                 state.wal.local_durable_seq = sequence;
 
                 // Apply to memtable - local durability sufficient
-                self.apply_to_memtable(state, sequence, cf_id, &key, &value, record.expiration)?;
+                self.apply_to_memtable(state, sequence, cf_id, key.clone(), value.clone(), record.expiration)?;
 
                 // Schedule cloud upload of the current WAL segment
                 // The segment has been synced locally; now background-upload to cloud.
@@ -383,7 +383,7 @@ impl WalActor {
                 // Cloud upload runs asynchronously; data must be visible for reads
                 // without waiting for upload completion. This is the key difference
                 // from the old CloudFirst behavior which blocked on cloud confirmation.
-                self.apply_to_memtable(state, sequence, cf_id, &key, &value, record.expiration)?;
+                self.apply_to_memtable(state, sequence, cf_id, key.clone(), value.clone(), record.expiration)?;
 
                 // Queue write for cloud durability confirmation (used for telemetry/monitoring).
                 // Memtable update happened above; reads don't wait for cloud upload.
@@ -400,7 +400,7 @@ impl WalActor {
                 // No fsync, no cloud upload, no group commit.
                 // Data is visible for reads and can be flushed to SST, but not durable on crash before flush.
                 // Safe for bulk loads where re-load is acceptable.
-                self.apply_to_memtable(state, sequence, cf_id, &key, &value, record.expiration)?;
+                self.apply_to_memtable(state, sequence, cf_id, key, value, record.expiration)?;
             }
         }
 
@@ -630,7 +630,7 @@ impl WalActor {
                 ..
             } = op
             {
-                if self.key_exists_or_pending(state, *cf_id, key.as_slice()) {
+                if self.key_exists_or_pending(state, *cf_id, &key[..]) {
                     return Err(MidgeError::InvalidArgument(
                         "key already exists".to_string(),
                     ));
@@ -702,9 +702,7 @@ impl WalActor {
                     ttl_seconds,
                     insert_only,
                 } => {
-                    let key_b = Bytes::from(key);
-                    let value_b = Bytes::from(value);
-
+                    // key and value are already Bytes — no conversion needed.
                     let op_kind = if insert_only {
                         WalOpKind::Insert
                     } else {
@@ -715,16 +713,16 @@ impl WalActor {
                         Some(ttl) if ttl > 0 => WalRecord::new_with_ttl(
                             cf_id,
                             op_kind,
-                            key_b.clone(),
-                            Some(value_b.clone()),
+                            key.clone(),
+                            Some(value.clone()),
                             seq,
                             ttl,
                         ),
                         _ => WalRecord::new_cf(
                             cf_id,
                             op_kind,
-                            key_b.clone(),
-                            Some(value_b.clone()),
+                            key.clone(),
+                            Some(value.clone()),
                             seq,
                         ),
                     };
@@ -750,17 +748,16 @@ impl WalActor {
 
                     apply_ops.push(TransactionApplyOp::Put {
                         cf_id,
-                        key: key_b.to_vec(),
-                        value: value_b.to_vec(),
+                        key,
+                        value,
                         expiration: record.expiration,
                         sequence: seq,
                     });
                 }
                 crate::runtime::TransactionOp::Delete { cf_id, key } => {
-                    let key_b = Bytes::from(key);
-
+                    // key is already Bytes — no conversion needed.
                     let mut record =
-                        WalRecord::new_cf(cf_id, WalOpKind::Delete, key_b.clone(), None, seq);
+                        WalRecord::new_cf(cf_id, WalOpKind::Delete, key.clone(), None, seq);
                     record.txn_id = Some(txn_id);
 
                     if let Some(writer) = &mut self.writer {
@@ -783,7 +780,7 @@ impl WalActor {
 
                     apply_ops.push(TransactionApplyOp::Delete {
                         cf_id,
-                        key: key_b.to_vec(),
+                        key,
                         sequence: seq,
                     });
                 }
@@ -895,8 +892,8 @@ impl WalActor {
                             state,
                             sequence,
                             cf_id,
-                            &key,
-                            &Some(Bytes::from(value)),
+                            key,
+                            Some(value),
                             expiration,
                         )?;
                     }
@@ -905,7 +902,7 @@ impl WalActor {
                         key,
                         sequence,
                     } => {
-                        self.apply_to_memtable(state, sequence, cf_id, &key, &None, None)?;
+                        self.apply_to_memtable(state, sequence, cf_id, key, None, None)?;
                     }
                 }
             }
@@ -935,8 +932,8 @@ impl WalActor {
                             state,
                             sequence,
                             cf_id,
-                            &key,
-                            &Some(Bytes::from(value)),
+                            key,
+                            Some(value),
                             expiration,
                         )?;
                     }
@@ -945,7 +942,7 @@ impl WalActor {
                         key,
                         sequence,
                     } => {
-                        self.apply_to_memtable(state, sequence, cf_id, &key, &None, None)?;
+                        self.apply_to_memtable(state, sequence, cf_id, key, None, None)?;
                     }
                 }
             }
@@ -1004,16 +1001,16 @@ impl WalActor {
         state: &mut RuntimeState,
         sequence: u64,
         cf_id: crate::engine::ColumnFamilyId,
-        key: &[u8],
-        value: &Option<Bytes>,
+        key: Bytes,
+        value: Option<Bytes>,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
         if let Some(cf_state) = state.column_families.get(&cf_id) {
             let prev = cf_state.memtable.size_bytes();
             if let Some(val) = value {
-                cf_state.memtable.as_ref().put_with_seq(
-                    key.to_vec(),
-                    val.to_vec(),
+                cf_state.memtable.as_ref().put_bytes_with_seq(
+                    key,
+                    val,
                     sequence,
                     expiration,
                 )?;
@@ -1021,7 +1018,7 @@ impl WalActor {
                 cf_state
                     .memtable
                     .as_ref()
-                    .delete_with_seq(key.to_vec(), sequence)?;
+                    .delete_bytes_with_seq(key, sequence)?;
             }
             let new = cf_state.memtable.size_bytes();
             let delta = new.saturating_sub(prev);
@@ -1233,8 +1230,8 @@ impl WalActor {
                         state,
                         sequence,
                         cf_id,
-                        &key_bytes,
-                        &value_bytes,
+                        key_bytes,
+                        value_bytes,
                         expiration,
                     )?;
                 }
@@ -1284,8 +1281,8 @@ impl WalActor {
                                     state,
                                     sequence,
                                     cf_id,
-                                    &key,
-                                    &Some(Bytes::from(value)),
+                                    key,
+                                    Some(value),
                                     expiration,
                                 )?;
                             }
@@ -1294,7 +1291,7 @@ impl WalActor {
                                 key,
                                 sequence,
                             } => {
-                                self.apply_to_memtable(state, sequence, cf_id, &key, &None, None)?;
+                                self.apply_to_memtable(state, sequence, cf_id, key, None, None)?;
                             }
                         }
                     }
@@ -1398,15 +1395,15 @@ mod tests {
         let ops = vec![
             crate::runtime::TransactionOp::Put {
                 cf_id: 0,
-                key: b"k1".to_vec(),
-                value: b"v1".to_vec(),
+                key: Bytes::from_static(b"k1"),
+                value: Bytes::from_static(b"v1"),
                 ttl_seconds: None,
                 insert_only: false,
             },
             crate::runtime::TransactionOp::Put {
                 cf_id: 0,
-                key: b"k2".to_vec(),
-                value: b"v2".to_vec(),
+                key: Bytes::from_static(b"k2"),
+                value: Bytes::from_static(b"v2"),
                 ttl_seconds: None,
                 insert_only: false,
             },

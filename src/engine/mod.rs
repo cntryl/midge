@@ -632,29 +632,21 @@ impl Engine {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let fallback_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
         let request_id = next_request_id();
-        // Transaction snapshots should be set to (current_sequence + 1) so that
-        // visible versions are those with seq < start_sequence (strictly less-than).
-        // This ensures a transaction started after sequence N sees writes up to N.
-        let start_sequence = match self
-            .runtime_handle
-            .send_and_wait(RuntimeMsg::GetCurrentSequence { request_id })
-        {
-            Ok(RuntimeResponse::CurrentSequence { sequence, .. }) => sequence + 1,
-            _ => fallback_sequence + 1,
-        };
 
-        // Capture read snapshot synchronously on event loop for consistent reads
-        let read_snapshot =
-            match self
-                .runtime_handle
-                .send_and_wait(RuntimeMsg::CaptureReadSnapshot {
-                    request_id: next_request_id(),
-                    cf_id,
-                    sequence: start_sequence,
-                }) {
-                Ok(RuntimeResponse::ReadSnapshot { snapshot, .. }) => Some(snapshot),
-                _ => None,
-            };
+        // Combined begin-transaction: fetch sequence + capture snapshot in one round-trip.
+        let (start_sequence, read_snapshot) = match self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::BeginTransaction {
+                request_id,
+                cf_id,
+            }) {
+            Ok(RuntimeResponse::BeginTransactionResult {
+                start_sequence,
+                snapshot,
+                ..
+            }) => (start_sequence, snapshot),
+            _ => (fallback_sequence + 1, None),
+        };
 
         Ok(api::Transaction::new(
             self.runtime_handle.clone(),
@@ -718,8 +710,6 @@ impl Engine {
         // Batching reduces event loop contention by grouping concurrent writes into transactions.
         let _use_batching = self.should_use_ingest_batching();
 
-        let mut max_sequence = 0u64;
-
         // Route through ingest coordinator for all modes
         let coordinator = self
             .ingest_coordinators
@@ -731,36 +721,34 @@ impl Engine {
                 ))
             })?;
 
+        // Separate delete-range intents (rare, handled differently) from regular ops
+        let mut batch_intents = Vec::with_capacity(write_intents.len());
+        let mut delete_range_sequence = 0u64;
+
         for intent in write_intents {
-            let sequence = match &intent {
+            match intent {
                 api::WriteIntent::Put {
                     cf_id,
                     key,
                     value,
                     ttl_seconds,
                     ..
-                } => coordinator.submit_write(
-                    *cf_id,
-                    key.clone(),
-                    Some(value.clone()),
-                    *ttl_seconds,
-                    false,
-                )?,
+                } => batch_intents.push(ingest::BatchWriteOp {
+                    cf_id, key, value: Some(value), ttl_seconds, insert_only: false,
+                }),
                 api::WriteIntent::Insert {
                     cf_id,
                     key,
                     value,
                     ttl_seconds,
                     ..
-                } => coordinator.submit_write(
-                    *cf_id,
-                    key.clone(),
-                    Some(value.clone()),
-                    *ttl_seconds,
-                    true,
-                )?,
+                } => batch_intents.push(ingest::BatchWriteOp {
+                    cf_id, key, value: Some(value), ttl_seconds, insert_only: true,
+                }),
                 api::WriteIntent::Delete { cf_id, key, .. } => {
-                    coordinator.submit_write(*cf_id, key.clone(), None, None, false)?
+                    batch_intents.push(ingest::BatchWriteOp {
+                        cf_id, key, value: None, ttl_seconds: None, insert_only: false,
+                    })
                 }
                 api::WriteIntent::DeleteRange {
                     cf_id,
@@ -773,12 +761,14 @@ impl Engine {
                         self.runtime_handle
                             .send_and_wait(RuntimeMsg::WalAppendDeleteRange {
                                 request_id: next_request_id(),
-                                cf_id: *cf_id,
-                                start_key: start_key.clone(),
-                                end_key: end_key.clone(),
+                                cf_id,
+                                start_key,
+                                end_key,
                             })?;
                     match response {
-                        RuntimeResponse::WalAppended { sequence, .. } => sequence,
+                        RuntimeResponse::WalAppended { sequence, .. } => {
+                            delete_range_sequence = delete_range_sequence.max(sequence);
+                        }
                         RuntimeResponse::Error { error, .. } => return Err(error),
                         _ => {
                             return Err(MidgeError::Internal(
@@ -787,7 +777,13 @@ impl Engine {
                         }
                     }
                 }
-            };
+            }
+        }
+
+        // Submit all regular ops as a single batch (one channel alloc, one wait)
+        let mut max_sequence = delete_range_sequence;
+        if !batch_intents.is_empty() {
+            let sequence = coordinator.submit_batch(&self.runtime_handle, batch_intents)?;
             max_sequence = max_sequence.max(sequence);
         }
 

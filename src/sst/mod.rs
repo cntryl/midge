@@ -327,14 +327,20 @@ impl SkipListMemtable {
         seq: u64,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
+        self.put_bytes_with_seq(Bytes::from(key), Bytes::from(value), seq, expiration)
+    }
+
+    /// Put with explicit sequence, accepting pre-allocated Bytes (zero-copy fast path).
+    pub fn put_bytes_with_seq(
+        &self,
+        key: Bytes,
+        value: Bytes,
+        seq: u64,
+        expiration: Option<u64>,
+    ) -> MidgeResult<()> {
         let size_delta = key.len() + value.len() + 16;
-        self.skiplist.upsert_exp(
-            Bytes::from(key),
-            Some(Bytes::from(value)),
-            seq,
-            expiration,
-            OpType::Put,
-        );
+        self.skiplist
+            .upsert_exp(key, Some(value), seq, expiration, OpType::Put);
         self.size_bytes
             .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
         Ok(())
@@ -353,8 +359,13 @@ impl SkipListMemtable {
 
     /// Delete with explicit sequence (tombstone)
     pub fn delete_with_seq(&self, key: Vec<u8>, seq: u64) -> MidgeResult<()> {
+        self.delete_bytes_with_seq(Bytes::from(key), seq)
+    }
+
+    /// Delete with explicit sequence, accepting pre-allocated Bytes (zero-copy fast path).
+    pub fn delete_bytes_with_seq(&self, key: Bytes, seq: u64) -> MidgeResult<()> {
         let size_delta = key.len() + 16;
-        self.skiplist.delete(Bytes::from(key), seq);
+        self.skiplist.delete(key, seq);
         self.size_bytes
             .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
         Ok(())

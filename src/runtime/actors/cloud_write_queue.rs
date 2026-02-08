@@ -51,14 +51,14 @@ pub enum PendingCloudWrite {
 pub enum TransactionApplyOp {
     Put {
         cf_id: crate::engine::ColumnFamilyId,
-        key: Vec<u8>,
-        value: Vec<u8>,
+        key: bytes::Bytes,
+        value: bytes::Bytes,
         expiration: Option<u64>,
         sequence: u64,
     },
     Delete {
         cf_id: crate::engine::ColumnFamilyId,
-        key: Vec<u8>,
+        key: bytes::Bytes,
         sequence: u64,
     },
 }
@@ -275,7 +275,7 @@ impl CloudWriteQueue {
                                 key: p_key,
                                 sequence: _,
                             } => {
-                                if *p_cf == cf_id && p_key.as_slice() == key {
+                                if *p_cf == cf_id && &p_key[..] == key {
                                     return true;
                                 }
                             }

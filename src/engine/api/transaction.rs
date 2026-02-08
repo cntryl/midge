@@ -385,8 +385,8 @@ impl Transaction {
                         ..
                     } => crate::runtime::TransactionOp::Put {
                         cf_id: self.cf_id,
-                        key,
-                        value,
+                        key: bytes::Bytes::from(key),
+                        value: bytes::Bytes::from(value),
                         ttl_seconds,
                         insert_only: false,
                     },
@@ -397,14 +397,14 @@ impl Transaction {
                         ..
                     } => crate::runtime::TransactionOp::Put {
                         cf_id: self.cf_id,
-                        key,
-                        value,
+                        key: bytes::Bytes::from(key),
+                        value: bytes::Bytes::from(value),
                         ttl_seconds,
                         insert_only: true,
                     },
                     WriteIntent::Delete { key, .. } => crate::runtime::TransactionOp::Delete {
                         cf_id: self.cf_id,
-                        key,
+                        key: bytes::Bytes::from(key),
                     },
                     WriteIntent::DeleteRange { .. } => {
                         return Err(MidgeError::InvalidArgument(
