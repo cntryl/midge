@@ -331,10 +331,20 @@ impl Engine {
         // The heartbeat loop renews the lease periodically to maintain exclusivity.
         // If renewal fails, the heartbeat will mark itself unhealthy.
         //
-        // TODO: Monitor heartbeat health and trigger graceful shutdown if lease is lost.
-
         let mut lease_heartbeat = crate::lease::LeaseHeartbeat::new(Arc::clone(&lease));
         lease_heartbeat.start();
+
+        // Check heartbeat health immediately after start to catch early failures.
+        // Subsequent health monitoring is the caller's responsibility via
+        // `Engine::is_primary_lease_healthy()`. Applications should poll this
+        // periodically (e.g., every 10-30 seconds) and trigger graceful shutdown
+        // if the lease is lost. The heartbeat thread itself stops on renewal
+        // failure and marks `is_healthy() == false`.
+        if !lease_heartbeat.is_healthy() {
+            return Err(crate::common::MidgeError::Internal(
+                "lease heartbeat failed immediately after start".to_string(),
+            ));
+        }
 
         tracing::info!(db_path = %db_path.display(), open_ms = start.elapsed().as_secs_f64() * 1000.0, "engine open completed");
 

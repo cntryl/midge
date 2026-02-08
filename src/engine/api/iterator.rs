@@ -17,23 +17,57 @@ pub enum Direction {
     Reverse,
 }
 
+/// Default batch size for lazy-loading iterators.
+const DEFAULT_LAZY_BATCH_SIZE: usize = 256;
+
 /// A range iterator over key-value pairs
 ///
 /// Iterators provide efficient sequential access to the database.
 /// They can be created with various options (direction, bounds, etc).
+///
+/// Supports two modes:
+/// - **Eager**: All results are buffered upfront (used by transaction scans
+///   and snapshot-based reads where the full result set is already available).
+/// - **Lazy**: Results are fetched in batches from a `LazySource`, reducing
+///   memory pressure for large range scans. The lazy source is called to
+///   fetch the next batch when the current buffer is exhausted.
 pub struct Iterator {
-    /// Current position in the iteration
+    /// Current position within the current batch
     position: usize,
-    /// Buffered results (TODO: implement lazy loading)
+    /// Current batch of results
     results: Vec<(Vec<u8>, Vec<u8>)>,
     /// Iteration direction
     direction: Direction,
     /// Whether iteration has completed
     exhausted: bool,
+    /// Optional lazy source for fetching additional batches
+    lazy_source: Option<Box<dyn LazySource>>,
+    /// Batch size for lazy loading
+    lazy_batch_size: usize,
+}
+
+/// Trait for lazy-loading scan results in batches.
+///
+/// Implementations fetch the next batch of key-value pairs from the
+/// underlying storage (memtable + SSTs) without loading the entire
+/// result set into memory.
+pub(crate) trait LazySource: Send {
+    /// Fetch the next batch of results.
+    ///
+    /// `resume_key` is the exclusive lower bound: return pairs with keys
+    /// strictly greater than this. If `None`, start from the beginning.
+    ///
+    /// Returns an empty vec when iteration is complete.
+    fn fetch_batch(
+        &mut self,
+        resume_key: Option<&[u8]>,
+        batch_size: usize,
+        direction: Direction,
+    ) -> Vec<(Vec<u8>, Vec<u8>)>;
 }
 
 impl Iterator {
-    /// Create a new iterator with the given results
+    /// Create a new iterator with the given results (eager mode)
     #[allow(dead_code)] // Used by engine when creating iterators
     pub(crate) fn new(results: Vec<(Vec<u8>, Vec<u8>)>, direction: Direction) -> Self {
         Self {
@@ -41,20 +75,77 @@ impl Iterator {
             results,
             direction,
             exhausted: false,
+            lazy_source: None,
+            lazy_batch_size: DEFAULT_LAZY_BATCH_SIZE,
         }
     }
 
-    /// Create a forward iterator
+    /// Create a lazy-loading iterator with a source for batch fetching.
+    ///
+    /// The first batch is fetched immediately. Subsequent batches are
+    /// fetched on demand when the current buffer is exhausted.
+    #[allow(dead_code)]
+    pub(crate) fn lazy(
+        mut source: Box<dyn LazySource>,
+        direction: Direction,
+        batch_size: usize,
+    ) -> Self {
+        let batch_size = if batch_size == 0 {
+            DEFAULT_LAZY_BATCH_SIZE
+        } else {
+            batch_size
+        };
+        let initial_batch = source.fetch_batch(None, batch_size, direction);
+        let exhausted = initial_batch.is_empty();
+        Self {
+            position: 0,
+            results: initial_batch,
+            direction,
+            exhausted,
+            lazy_source: Some(source),
+            lazy_batch_size: batch_size,
+        }
+    }
+
+    /// Create a forward iterator (eager mode)
     #[allow(dead_code)] // Used by engine when creating iterators
     pub(crate) fn forward(results: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
         Self::new(results, Direction::Forward)
     }
 
-    /// Create a reverse iterator
+    /// Create a reverse iterator (eager mode)
     #[allow(dead_code)] // Used by engine when creating iterators
     pub(crate) fn reverse(mut results: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
         results.reverse();
         Self::new(results, Direction::Reverse)
+    }
+
+    /// Try to load the next batch from the lazy source.
+    ///
+    /// Returns `true` if new results were loaded, `false` if source is
+    /// exhausted or no lazy source is configured.
+    fn try_load_next_batch(&mut self) -> bool {
+        let source = match self.lazy_source.as_mut() {
+            Some(s) => s,
+            None => return false,
+        };
+
+        // Determine resume key from the last element in the current batch
+        let resume_key = if self.results.is_empty() {
+            None
+        } else {
+            self.results.last().map(|(k, _)| k.as_slice())
+        };
+
+        let batch = source.fetch_batch(resume_key, self.lazy_batch_size, self.direction);
+
+        if batch.is_empty() {
+            return false;
+        }
+
+        self.results = batch;
+        self.position = 0;
+        true
     }
 
     /// Get the current key-value pair without advancing
@@ -69,10 +160,18 @@ impl Iterator {
     /// Move to the next key-value pair
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
-        if self.exhausted || self.position >= self.results.len() {
-            self.exhausted = true;
+        if self.exhausted {
             return None;
         }
+
+        if self.position >= self.results.len() {
+            // Try lazy loading
+            if !self.try_load_next_batch() {
+                self.exhausted = true;
+                return None;
+            }
+        }
+
         let pair = self.results[self.position].clone();
         self.position += 1;
         Some(pair)
@@ -80,7 +179,7 @@ impl Iterator {
 
     /// Check if iteration is complete
     pub fn exhausted(&self) -> bool {
-        self.exhausted || self.position >= self.results.len()
+        self.exhausted || (self.position >= self.results.len() && self.lazy_source.is_none())
     }
 
     /// Get the direction of this iterator
@@ -88,7 +187,10 @@ impl Iterator {
         self.direction
     }
 
-    /// Get the count of items remaining
+    /// Get the count of items remaining in the current batch.
+    ///
+    /// For lazy iterators this only reflects the current batch, not
+    /// the total remaining in the underlying data source.
     pub fn remaining(&self) -> usize {
         if self.exhausted {
             0

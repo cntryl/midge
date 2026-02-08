@@ -65,21 +65,12 @@ fn bench_decompress_raw(c: &mut Criterion) {
     let data: Vec<u8> = (0..16 * 1024).map(|i| (i % 64) as u8).collect();
 
     // Precompute compressed payloads for each algo
-    let lz4_compressed = compress_block(
-        &data,
-        &CompressionPolicy::Fixed(CompressionAlgo::Lz4),
-    )
-    .unwrap();
-    let zstd3_compressed = compress_block(
-        &data,
-        &CompressionPolicy::Fixed(CompressionAlgo::Zstd3),
-    )
-    .unwrap();
-    let zstd9_compressed = compress_block(
-        &data,
-        &CompressionPolicy::Fixed(CompressionAlgo::Zstd9),
-    )
-    .unwrap();
+    let lz4_compressed =
+        compress_block(&data, &CompressionPolicy::Fixed(CompressionAlgo::Lz4)).unwrap();
+    let zstd3_compressed =
+        compress_block(&data, &CompressionPolicy::Fixed(CompressionAlgo::Zstd3)).unwrap();
+    let zstd9_compressed =
+        compress_block(&data, &CompressionPolicy::Fixed(CompressionAlgo::Zstd9)).unwrap();
 
     let cases: [(&str, &[u8], CompressionAlgo); 3] = [
         ("lz4", &lz4_compressed.0, CompressionAlgo::Lz4),

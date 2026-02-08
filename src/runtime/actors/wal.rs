@@ -340,7 +340,15 @@ impl WalActor {
                 // Apply to memtable - local durability sufficient
                 self.apply_to_memtable(state, sequence, cf_id, &key, &value, record.expiration)?;
 
-                // TODO: Send CloudUploadWal message to CloudActor
+                // Schedule cloud upload of the current WAL segment
+                // The segment has been synced locally; now background-upload to cloud.
+                self.cloud_write_queue.enqueue_write(
+                    cf_id,
+                    key.to_vec(),
+                    value.as_ref().map(|v| v.to_vec()),
+                    sequence,
+                    record.expiration,
+                );
             }
             DurabilityPolicy::CloudFirst => {
                 // === CRITICAL: Check backpressure before queueing ===

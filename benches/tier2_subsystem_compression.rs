@@ -70,16 +70,12 @@ fn bench_block_compress_sizes(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(size as u64));
 
         for (policy_name, policy) in policies {
-            group.bench_with_input(
-                BenchmarkId::new(*policy_name, size),
-                &data,
-                |b, data| {
-                    b.iter(|| {
-                        let out = compress_block_with_trailer(black_box(data), policy).unwrap();
-                        black_box(out)
-                    })
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(*policy_name, size), &data, |b, data| {
+                b.iter(|| {
+                    let out = compress_block_with_trailer(black_box(data), policy).unwrap();
+                    black_box(out)
+                })
+            });
         }
     }
 

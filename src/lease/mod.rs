@@ -27,6 +27,7 @@ mod filesystem;
 mod heartbeat;
 mod traits;
 
+pub use cloud::{CloudLeaseConfig, CloudStorageLease};
 pub use filesystem::FileSystemLease;
 pub use heartbeat::LeaseHeartbeat;
 pub use traits::{LeaseError, LeaseGuard, PrimaryLease};
@@ -66,12 +67,23 @@ pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseErr
             Ok(Arc::new(FileSystemLease::new(path.clone())))
         }
         Storage::Cloud {
-            local_cache_path, ..
+            local_cache_path,
+            bucket,
+            prefix,
+            endpoint,
+            region,
         } => {
-            // Cloud storage: use cloud lease (future enhancement)
-            // For now, fall back to filesystem lease on the cache directory
-            // TODO: Implement proper cloud blob lease (Azure Blob Lease, S3 conditional writes, etc.)
-            Ok(Arc::new(FileSystemLease::new(local_cache_path.clone())))
+            // Cloud storage: use cloud lease with TTL-based coordination
+            let config = CloudLeaseConfig {
+                bucket: bucket.clone(),
+                prefix: prefix.clone(),
+                endpoint: endpoint.clone(),
+                region: region.clone(),
+            };
+            Ok(Arc::new(CloudStorageLease::new(
+                config,
+                local_cache_path.clone(),
+            )))
         }
     }
 }

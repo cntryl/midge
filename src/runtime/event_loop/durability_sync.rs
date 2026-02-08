@@ -39,9 +39,15 @@ impl EventLoop {
         // CRITICAL: Background CloudFirst must NOT wait for cloud confirmation.
         // Only CloudStrict policy (explicit opt-in) blocks on cloud upload.
         if self.wal_actor.is_cloud_first() {
-            // TODO: Check if WriteOptions::cloud_strict() was used.
-            // For now, always ack immediately (background mode).
-            // CloudStrict implementation requires passing write options through to runtime.
+            // CloudFirst background mode: always ack immediately.
+            // Cloud upload runs asynchronously; commits never block on upload.
+            //
+            // NOTE: WriteOptions::cloud_strict() is handled at the transaction commit
+            // layer (engine/api/transaction.rs) which issues an explicit WalSync +
+            // flush-and-upload sequence. By the time we reach should_ack_immediately,
+            // the commit path has already ensured cloud durability for cloud_strict
+            // writes. Therefore, runtime-level ack policy is always "immediate" for
+            // CloudFirst — the blocking wait happens in the commit path, not here.
             return true;
         }
 

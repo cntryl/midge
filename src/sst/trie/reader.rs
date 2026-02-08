@@ -165,11 +165,150 @@ impl TrieReader {
 
     /// Seek to next key >= target
     ///
-    /// Returns block ID containing the next key.
+    /// Returns the block ID of the node that contains the smallest key
+    /// `>=` `key`. This is used by range scan iterators to find the starting
+    /// block when the exact key may not exist in the trie.
+    ///
+    /// Algorithm:
+    /// 1. Walk down the trie matching as much of `key` as possible.
+    /// 2. If an exact match is found, return its block_id.
+    /// 3. If we diverge (child byte > remaining key byte), the subtree
+    ///    rooted at that child contains the next key — return its leftmost leaf.
+    /// 4. If no child >= remaining byte exists, backtrack to the nearest
+    ///    ancestor that has a successor edge.
     pub fn seek_next(&self, key: &[u8]) -> Option<u32> {
-        // For now, use exact match
-        // TODO: Implement proper seek logic
-        self.find_block(key)
+        if key.is_empty() {
+            // Empty key: return the leftmost leaf in the entire trie
+            return self.leftmost_leaf(self.root_index);
+        }
+
+        // Stack of (node_index, child_position) for backtracking
+        let mut stack: Vec<(usize, usize)> = Vec::new();
+        let mut current_index = self.root_index;
+        let mut matched_len = 0;
+
+        while matched_len < key.len() {
+            let remaining = &key[matched_len..];
+            let node = &self.nodes[current_index];
+
+            // Binary search for the child whose first_byte >= remaining[0]
+            let search_byte = remaining[0];
+            match node
+                .children
+                .binary_search_by_key(&search_byte, |e| e.first_byte)
+            {
+                Ok(idx) => {
+                    // Exact first-byte match found
+                    let edge = &node.children[idx];
+                    let child_index = edge.child_index as usize;
+                    if child_index >= self.nodes.len() {
+                        return None;
+                    }
+
+                    let child = &self.nodes[child_index];
+                    let child_match_len = lcp(&child.key_delta, remaining);
+
+                    if child_match_len == child.key_delta.len() {
+                        // Full match of child's key_delta — continue deeper
+                        stack.push((current_index, idx));
+                        matched_len += child_match_len;
+                        current_index = child_index;
+                    } else if child_match_len == remaining.len() {
+                        // Key is a prefix of child's key_delta.
+                        // child's full key > our key, so child (or its leftmost leaf) is the answer.
+                        return self.leftmost_leaf(child_index);
+                    } else if remaining[child_match_len] < child.key_delta[child_match_len] {
+                        // key < child at divergence point → child subtree contains next key
+                        return self.leftmost_leaf(child_index);
+                    } else {
+                        // key > child at divergence point → need successor of this child
+                        // Try the next sibling edge at this level
+                        return self.find_successor_from_stack(&stack, current_index, idx + 1);
+                    }
+                }
+                Err(insert_pos) => {
+                    // No exact match. insert_pos is where search_byte would be inserted.
+                    // If insert_pos < children.len(), children[insert_pos].first_byte > search_byte.
+                    if insert_pos < node.children.len() {
+                        let next_child_index = node.children[insert_pos].child_index as usize;
+                        if next_child_index < self.nodes.len() {
+                            return self.leftmost_leaf(next_child_index);
+                        }
+                    }
+                    // No child >= search_byte at this level, backtrack
+                    return self.find_successor_from_stack(
+                        &stack,
+                        current_index,
+                        node.children.len(),
+                    );
+                }
+            }
+        }
+
+        // Exact match: we consumed all of key
+        let node = &self.nodes[current_index];
+        if node.block_id.is_some() {
+            return node.block_id;
+        }
+        // Key matched a non-leaf node — the leftmost descendant leaf is >= key
+        self.leftmost_leaf(current_index)
+    }
+
+    /// Find the leftmost (smallest key) leaf in the subtree rooted at `node_index`.
+    fn leftmost_leaf(&self, node_index: usize) -> Option<u32> {
+        self.leftmost_leaf_bounded(node_index, 0)
+    }
+
+    /// Leftmost leaf with depth limit to prevent stack exhaustion.
+    fn leftmost_leaf_bounded(&self, node_index: usize, depth: u32) -> Option<u32> {
+        if depth > 256 || node_index >= self.nodes.len() {
+            return None;
+        }
+
+        let node = &self.nodes[node_index];
+
+        // If this node is a leaf, it's the leftmost
+        if let Some(block_id) = node.block_id {
+            return Some(block_id);
+        }
+
+        // Otherwise, recurse into the first (smallest) child
+        if let Some(edge) = node.children.first() {
+            return self.leftmost_leaf_bounded(edge.child_index as usize, depth + 1);
+        }
+
+        None
+    }
+
+    /// Backtrack through the ancestor stack to find the next successor subtree.
+    fn find_successor_from_stack(
+        &self,
+        stack: &[(usize, usize)],
+        current_node: usize,
+        start_child_pos: usize,
+    ) -> Option<u32> {
+        // First check siblings at the current level
+        let node = &self.nodes[current_node];
+        if start_child_pos < node.children.len() {
+            let next_child = node.children[start_child_pos].child_index as usize;
+            if next_child < self.nodes.len() {
+                return self.leftmost_leaf(next_child);
+            }
+        }
+
+        // Backtrack through ancestors
+        for &(ancestor_index, child_pos) in stack.iter().rev() {
+            let ancestor = &self.nodes[ancestor_index];
+            let next_pos = child_pos + 1;
+            if next_pos < ancestor.children.len() {
+                let next_child = ancestor.children[next_pos].child_index as usize;
+                if next_child < self.nodes.len() {
+                    return self.leftmost_leaf(next_child);
+                }
+            }
+        }
+
+        None
     }
 
     /// Get number of nodes in trie

@@ -43,7 +43,8 @@
 // 7. STORAGE BUDGET ACTOR INTEGRATION
 //    - HybridStorage MUST call budget_actor for:
 //         reserve_for_flush, flush_completed, compaction_planned, compaction_completed.
-//    - Backpressure events MUST be surfaced to the runtime (TODO but expected).
+//    - Backpressure events are surfaced to the runtime via StorageEvent::BackpressureOn/Off,
+//      handled in cloud_integration.rs handle_storage_event.
 //
 // 8. CORRECTNESS GUARANTEES
 //    - Local writes MUST complete before cloud uploads begin.

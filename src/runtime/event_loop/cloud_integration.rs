@@ -125,6 +125,16 @@ impl EventLoop {
                 // Clear any remaining inflight segments
                 self.durability.clear_inflight();
             }
+            crate::storage::StorageEvent::BackpressureOn => {
+                tracing::warn!("storage backpressure activated — pausing flushes");
+                self.state.write_stalled = true;
+            }
+            crate::storage::StorageEvent::BackpressureOff => {
+                tracing::info!("storage backpressure released — resuming normal operation");
+                if self.state.write_stalled {
+                    self.state.write_stalled = false;
+                }
+            }
             _ => {}
         }
     }
