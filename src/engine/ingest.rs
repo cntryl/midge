@@ -265,55 +265,83 @@ impl IngestCoordinator {
         stall_flag: Arc<AtomicBool>,
     ) {
         let mut batch = WriteBatch::new();
-        let recv_timeout = Duration::from_micros(100);
 
         loop {
-            // Check for shutdown signal
-            if stop_rx.try_recv().is_ok() {
-                // Drain remaining writes
-                while let Ok(intent) = write_rx.try_recv() {
-                    batch.add(intent);
+            // When the batch is empty, block until a write arrives or shutdown is
+            // signalled. This avoids the previous 100µs busy-spin that caused
+            // ~10,000 wakeups/sec per CF when idle.
+            let got_write = if batch.is_empty() {
+                crossbeam::channel::select! {
+                    recv(write_rx) -> msg => match msg {
+                        Ok(intent) => {
+                            batch.add(intent);
+                            true
+                        }
+                        Err(_) => {
+                            // write channel disconnected — exit
+                            break;
+                        }
+                    },
+                    recv(stop_rx) -> _ => {
+                        // Shutdown: drain remaining writes
+                        while let Ok(intent) = write_rx.try_recv() {
+                            batch.add(intent);
+                        }
+                        if !batch.is_empty() {
+                            Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
+                        }
+                        break;
+                    },
                 }
+            } else {
+                // Batch has items — use a deadline-bounded select so we flush
+                // within MAX_BATCH_DELAY even if no more writes arrive.
+                let remaining = MAX_BATCH_DELAY.saturating_sub(batch.first_enqueued.elapsed());
+                crossbeam::channel::select! {
+                    recv(write_rx) -> msg => match msg {
+                        Ok(intent) => {
+                            batch.add(intent);
+                            true
+                        }
+                        Err(_) => {
+                            // write channel disconnected — flush & exit
+                            Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
+                            break;
+                        }
+                    },
+                    recv(stop_rx) -> _ => {
+                        while let Ok(intent) = write_rx.try_recv() {
+                            batch.add(intent);
+                        }
+                        if !batch.is_empty() {
+                            Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
+                        }
+                        break;
+                    },
+                    default(remaining) => {
+                        // Batch deadline expired — commit what we have
+                        Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
+                        false
+                    },
+                }
+            };
+
+            if got_write {
+                // Drain additional available writes opportunistically
+                while batch.len() < MAX_BATCH_OPS && batch.total_bytes < MAX_BATCH_BYTES {
+                    match write_rx.try_recv() {
+                        Ok(intent) => batch.add(intent),
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                tracing::debug!(cf_id = cf_id, batch_size = batch.len(), "Committing batch");
+
+                // Commit batch immediately after receiving write(s)
+                // This ensures low latency for all commits
                 if !batch.is_empty() {
                     Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
-                }
-                break;
-            }
-
-            // Receive writes with timeout
-            match write_rx.recv_timeout(recv_timeout) {
-                Ok(intent) => {
-                    batch.add(intent);
-
-                    // Drain additional available writes opportunistically
-                    while batch.len() < MAX_BATCH_OPS && batch.total_bytes < MAX_BATCH_BYTES {
-                        match write_rx.try_recv() {
-                            Ok(intent) => batch.add(intent),
-                            Err(TryRecvError::Empty) => break,
-                            Err(TryRecvError::Disconnected) => break,
-                        }
-                    }
-
-                    tracing::debug!(cf_id = cf_id, batch_size = batch.len(), "Committing batch");
-
-                    // Commit batch immediately after receiving write(s)
-                    // This ensures low latency for all commits
-                    if !batch.is_empty() {
-                        Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
-                    }
-                }
-                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                    // Timeout: commit pending batch if any
-                    if !batch.is_empty() && batch.first_enqueued.elapsed() >= MAX_BATCH_DELAY {
-                        Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
-                    }
-                }
-                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                    // Channel closed: commit final batch and exit
-                    if !batch.is_empty() {
-                        Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
-                    }
-                    break;
                 }
             }
         }

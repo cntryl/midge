@@ -87,10 +87,13 @@ impl WriterRunner {
                         break;
                     }
 
-                    // Periodically wake to re-check shutdown/sync flags.
+                    // Safety-net periodic wake to re-check shutdown/sync flags.
+                    // All enqueue and sync-request paths notify the condvar, so this
+                    // timeout only guards against missed notifications (unlikely).
+                    // 500ms keeps idle CPU near zero while bounding worst-case latency.
                     self.config
                         .queue_cond
-                        .wait_for(&mut q, std::time::Duration::from_millis(10));
+                        .wait_for(&mut q, std::time::Duration::from_millis(500));
                 }
 
                 // Check for shutdown (but still allow pending fsync/flush requests to complete)

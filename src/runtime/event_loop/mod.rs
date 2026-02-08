@@ -222,6 +222,13 @@ impl EventLoop {
 
     /// Main event loop — runs until Shutdown message or channel close.
     pub fn run(&mut self, msg_rx: Receiver<RuntimeMsg>) {
+        // Exponential backoff for idle timeout: start at 5ms, grow to 200ms
+        // when repeatedly timing out with nothing to do. Resets to BASE on
+        // any real message, so latency is unaffected under load.
+        const BASE_IDLE_MS: u64 = 5;
+        const MAX_IDLE_MS: u64 = 200;
+        let mut idle_ms: u64 = BASE_IDLE_MS;
+
         loop {
             // CloudFirst needs fast ticking while callers are blocked waiting for CloudAck.
             // A fixed 5ms recv_timeout creates a hard floor of ~5ms per write.
@@ -229,9 +236,10 @@ impl EventLoop {
                 self.wal_actor.is_cloud_first() && self.wal_actor.has_pending_cloud_writes();
             let timeout = if cloudfirst_draining {
                 // Drain quickly, but avoid a 0-timeout busy-spin.
+                idle_ms = BASE_IDLE_MS; // stay responsive while draining
                 Duration::from_millis(1)
             } else {
-                Duration::from_millis(5)
+                Duration::from_millis(idle_ms)
             };
 
             // Prefer reacting to storage events immediately (no polling floor).
@@ -242,8 +250,12 @@ impl EventLoop {
                 Some(pending)
             } else if let Some(storage_rx) = &self.hybrid_storage_events {
                 crossbeam::channel::select! {
-                    recv(msg_rx) -> msg => msg.ok(),
+                    recv(msg_rx) -> msg => {
+                        idle_ms = BASE_IDLE_MS; // reset on real message
+                        msg.ok()
+                    },
                     recv(storage_rx) -> ev => {
+                        idle_ms = BASE_IDLE_MS; // reset on real event
                         if let Ok(ev) = ev {
                             self.handle_storage_event(ev);
                         }
@@ -259,12 +271,23 @@ impl EventLoop {
                         self.tick_hybrid_storage();
                         // Drain any push-channel events that arrived between ticks.
                         self.drain_hybrid_storage_events();
+
+                        // Back off when truly idle (no pending WAL work, no hybrid storage)
+                        if !self.wal_actor.should_sync_batch()
+                            && !self.wal_actor.has_pending_cloud_writes()
+                            && self.hybrid_storage.is_none()
+                        {
+                            idle_ms = (idle_ms * 2).min(MAX_IDLE_MS);
+                        }
                         continue;
                     }
                 }
             } else {
                 match msg_rx.recv_timeout(timeout) {
-                    Ok(msg) => Some(msg),
+                    Ok(msg) => {
+                        idle_ms = BASE_IDLE_MS; // reset on real message
+                        Some(msg)
+                    }
                     Err(RecvTimeoutError::Timeout) => {
                         // 🔑 CRITICAL: Drive durability progress on idle ticks
                         // If waiters exist but no new messages, sync them now
@@ -272,6 +295,14 @@ impl EventLoop {
 
                         self.maybe_flush_cloudfirst_wal();
                         self.tick_hybrid_storage();
+
+                        // Back off when truly idle
+                        if !self.wal_actor.should_sync_batch()
+                            && !self.wal_actor.has_pending_cloud_writes()
+                            && self.hybrid_storage.is_none()
+                        {
+                            idle_ms = (idle_ms * 2).min(MAX_IDLE_MS);
+                        }
                         continue;
                     }
                     Err(RecvTimeoutError::Disconnected) => None,
