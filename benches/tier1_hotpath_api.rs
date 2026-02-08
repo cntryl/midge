@@ -48,7 +48,10 @@ fn setup_db(name: &str) -> MidgeEngine {
         memtable_size: 1024 * 1024 * 1024, // 1 GiB
         compression: false,
         enable_compaction: false,
-        memory_budget: None,
+        // Explicit large budget to prevent WriteStall in CI where Auto budget
+        // (based on available RAM) can be too small for thousands of iterations
+        // with compaction disabled.
+        memory_budget: Some(4 * 1024 * 1024 * 1024), // 4 GiB
     };
 
     MidgeEngine::open_with_options(opts).unwrap()
