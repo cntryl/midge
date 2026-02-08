@@ -274,6 +274,7 @@ impl EventLoop {
 
                         // Back off when truly idle (no pending WAL work, no hybrid storage)
                         if !self.wal_actor.should_sync_batch()
+                            && !self.wal_actor.has_pending_data()
                             && !self.wal_actor.has_pending_cloud_writes()
                             && self.hybrid_storage.is_none()
                         {
@@ -298,6 +299,7 @@ impl EventLoop {
 
                         // Back off when truly idle
                         if !self.wal_actor.should_sync_batch()
+                            && !self.wal_actor.has_pending_data()
                             && !self.wal_actor.has_pending_cloud_writes()
                             && self.hybrid_storage.is_none()
                         {

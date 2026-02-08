@@ -203,11 +203,20 @@ impl EventLoop {
         // NOTE: Do NOT unconditionally sync just because there are pending writes; that
         // defeats group commit—let the batch window (time/bytes) determine when to sync.
         // Durable waiters will be satisfied when the batch window elapses.
-        let _has_pending_waiters = self.durability.has_pending_waiters();
+        let has_pending_waiters = self.durability.has_pending_waiters();
 
         let should_sync = self.wal_actor.should_sync_batch();
 
         if !should_sync {
+            return;
+        }
+
+        // Skip no-op syncs when truly idle: no buffered data and no waiters.
+        // This prevents the WAL actor from spinning at ~12 Hz doing empty fsyncs
+        // when the engine has no work. Reset the sync timer so the time-based
+        // threshold doesn't immediately re-trigger.
+        if !self.wal_actor.has_pending_data() && !has_pending_waiters {
+            self.wal_actor.reset_sync_timer();
             return;
         }
 

@@ -1144,6 +1144,19 @@ impl WalActor {
         by_bytes || by_time
     }
 
+    /// Returns true if there is any buffered data awaiting sync.
+    pub fn has_pending_data(&self) -> bool {
+        self.bytes_since_sync > 0 || self.pending_sync_count > 0
+    }
+
+    /// Reset the sync timer without performing a sync.
+    ///
+    /// Used when the time-based threshold fires but there is nothing to sync,
+    /// so the timer doesn't immediately re-trigger on the next tick.
+    pub fn reset_sync_timer(&mut self) {
+        self.last_sync_instant = Instant::now();
+    }
+
     /// Rotate to a new WAL segment
     pub fn rotate(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
         let old_segment = state.wal.current_segment_id;
