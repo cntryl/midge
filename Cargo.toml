@@ -29,7 +29,7 @@ parking_lot = "0.12"
 rayon = "1.10"
 
 # Utilities used by stress workloads
-rand = "0.9"
+rand = "0.10"
 hdrhistogram = "7.3"
 
 # Compression
