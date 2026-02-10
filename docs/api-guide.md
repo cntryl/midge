@@ -112,7 +112,7 @@ let opts = OpenOptions::new()
 - Supports IAM roles, instance profiles
 - Provider-agnostic (S3, Azure, GCS, R2, MinIO)
 
-See [CLOUD_SETUP.md](CLOUD_SETUP.md) for detailed cloud configuration.
+See [cloud-setup.md](cloud-setup.md) for detailed cloud configuration.
 
 ## Transactions
 
@@ -497,7 +497,7 @@ let engine = Engine::open(opts)?;  // Reopen - recovers from WAL and manifest
 - Manifest tracks SST files
 - Sequence numbers resume from last checkpoint
 
-See [RECOVERY.md](RECOVERY.md) for recovery guarantees.
+See [recovery.md](recovery.md) for recovery guarantees.
 
 ## Error Handling
 
@@ -626,7 +626,7 @@ println!("L0 overlap rate: {}", metrics.l0_overlap_rate);
 
 ### Performance Tuning
 
-See [PERFORMANCE_TUNING.md](PERFORMANCE_TUNING.md) for detailed tuning guide.
+See [performance-tuning.md](performance-tuning.md) for detailed tuning guide.
 
 **Quick wins:**
 - Use `Goal::Throughput` for write-heavy workloads
@@ -637,7 +637,7 @@ See [PERFORMANCE_TUNING.md](PERFORMANCE_TUNING.md) for detailed tuning guide.
 
 ## Next Steps
 
-- **Cloud deployments**: [CLOUD_SETUP.md](CLOUD_SETUP.md)
-- **Recovery guarantees**: [RECOVERY.md](RECOVERY.md)
-- **Architecture details**: [THE_BIG_IDEA.md](THE_BIG_IDEA.md)
-- **Benchmarks**: [BENCHMARKS.md](BENCHMARKS.md)
+- **Cloud deployments**: [cloud-setup.md](cloud-setup.md)
+- **Recovery guarantees**: [recovery.md](recovery.md)
+- **Architecture details**: [the-big-idea.md](the-big-idea.md)
+- **Benchmarks**: [benchmarks.md](benchmarks.md)
