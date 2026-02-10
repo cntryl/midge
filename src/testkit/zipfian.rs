@@ -3,7 +3,7 @@
 //! This is used by stress/perf workloads that want a stable, deterministic
 //! Zipfian key distribution with a tunable skew parameter.
 
-use rand::RngCore;
+use rand::Rng;
 
 #[derive(Debug, Clone)]
 pub struct ZipfianGenerator {
@@ -61,7 +61,8 @@ impl ZipfianGenerator {
         idx % self.items
     }
 
-    pub fn next<R: RngCore>(&self, rng: &mut R) -> usize {
+    /// Sample the next index using the provided RNG.
+    pub fn next<R: Rng>(&self, rng: &mut R) -> usize {
         self.next_from_u64(&mut || rng.next_u64())
     }
 }

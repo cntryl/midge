@@ -2,7 +2,7 @@
 name = "cntryl-midge"
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.91"
+rust-version = "1.93"
 description = "A high-performance embedded key-value database with LSM-tree storage"
 license = "Apache-2.0"
 repository = "https://github.com/cntryl/midge"
