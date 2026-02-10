@@ -1,6 +1,6 @@
 [package]
 name = "cntryl-midge"
-version = "1.0.0"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.93"
 description = "A high-performance embedded key-value database with LSM-tree storage"
