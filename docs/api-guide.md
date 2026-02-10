@@ -639,5 +639,5 @@ See [performance-tuning.md](performance-tuning.md) for detailed tuning guide.
 
 - **Cloud deployments**: [cloud-setup.md](cloud-setup.md)
 - **Recovery guarantees**: [recovery.md](recovery.md)
-- **Architecture details**: [the-big-idea.md](the-big-idea.md)
+- **Architecture details**: [big-idea.md](big-idea.md)
 - **Benchmarks**: [benchmarks.md](benchmarks.md)

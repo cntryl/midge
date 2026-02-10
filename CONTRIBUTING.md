@@ -55,8 +55,9 @@ cargo bench
 ### Explore the Codebase
 
 Start with these docs:
+
 - [architecture.md](docs/architecture.md) - Technical implementation guide
-- [the-big-idea.md](docs/the-big-idea.md) - Design philosophy
+- [big-idea.md](docs/big-idea.md) - Design philosophy
 - [testing.md](docs/testing.md) - Testing conventions and workflows
 - [benchmarks.md](docs/benchmarks.md) - Benchmarking workflows and rules
 - `.github/copilot-instructions.md` - Development conventions
@@ -72,6 +73,7 @@ git checkout -b fix/issue-123
 ```
 
 **Branch naming:**
+
 - `feature/` - New features
 - `fix/` - Bug fixes
 - `refactor/` - Code refactoring
@@ -123,6 +125,7 @@ cargo fmt
 ```
 
 **Types:**
+
 - `feat:` - New feature
 - `fix:` - Bug fix
 - `refactor:` - Code refactoring
@@ -159,6 +162,7 @@ git push origin feature/my-feature
 ```
 
 Open a Pull Request on GitHub with:
+
 - Clear title describing the change
 - Description of what and why (not just how)
 - Link to related issues
@@ -176,6 +180,7 @@ common/ → io/ → storage/ → wal/, sst/ → metadata/, iterators/
 ```
 
 **How we enforce this:**
+
 - Code review + keeping module boundaries clean
 - CI runs `cargo clippy --all-targets -- -D warnings`, `cargo build`, and `cargo test`
 
@@ -195,6 +200,7 @@ fn should_{action}_when_{context}() {
 **Examples:**
 
 ✅ Good:
+
 ```rust
 #[test]
 fn should_return_value_when_key_exists() { }
@@ -207,6 +213,7 @@ fn should_flush_memtable_when_size_exceeds_threshold() { }
 ```
 
 ❌ Bad:
+
 ```rust
 #[test]
 fn test_get() { }  // Too vague
@@ -219,6 +226,7 @@ fn test_should_get_value() { }  // 'test_' prefix unnecessary
 ```
 
 **Rationale:**
+
 - Enforces descriptive test names
 - Acts as documentation
 - Makes test failures self-explanatory
@@ -236,19 +244,20 @@ fn should_recover_writes_when_reopened_after_crash() {
     let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
     tx.put(b"key".to_vec(), b"value".to_vec(), None)?;
     engine.commit(tx, WriteOptions::sync())?;
-    
+
     // Act
     drop(engine);  // Simulate crash
     let engine = Engine::open(test_opts())?;
     let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
     let result = tx.get(b"key")?;
-    
+
     // Assert
     assert_eq!(result, Some(b"value".as_ref().into()));
 }
 ```
 
 **Rules:**
+
 - Exactly one `// Act` section per test
 - Small tests (<5 lines) may omit AAA comments
 
@@ -265,6 +274,7 @@ cargo clippy --all-targets --fix
 ```
 
 **Common issues:**
+
 - Unused variables: Prefix with `_` or remove
 - Unnecessary clones: Use references
 - Complex expressions: Extract to named variables
@@ -285,6 +295,7 @@ No custom style configurations. We use Rust community defaults.
 ### Test Coverage
 
 **All new code MUST have tests:**
+
 - Public API: Integration tests in `tests/`
 - Internal logic: Unit tests (inline or `mod tests`)
 - Edge cases: Explicit tests for boundary conditions
@@ -293,11 +304,13 @@ No custom style configurations. We use Rust community defaults.
 ### Test Organization
 
 **Integration tests** (`tests/`):
+
 - Test public API (Engine, Transaction, OpenOptions)
 - End-to-end workflows
 - Cross-module interactions
 
 **Unit tests** (`src/*/mod.rs` or separate `tests.rs`):
+
 - Internal module logic
 - Helper functions
 - Isolated components
@@ -305,6 +318,7 @@ No custom style configurations. We use Rust community defaults.
 ### Benchmark Tests
 
 **Hot path benchmarks** (`benches/tier1_*`):
+
 - Must precompute all data outside `b.iter()`
 - No allocations inside hot loop
 - Use deterministic seeds (no RNG in hot loop)
@@ -347,6 +361,7 @@ python ./scripts/validate_tests.py --summary
 ```
 
 This checks:
+
 - Test naming convention (`should_{action}_when_{context}`)
 - AAA marker presence for non-trivial tests (`// Arrange`, `// Act`, `// Assert`)
 - Multiple `// Act` sections (multi-behavior heuristic)
@@ -372,20 +387,25 @@ Before opening a PR, ensure:
 
 ```markdown
 ## Summary
+
 Brief description of the change.
 
 ## Motivation
+
 Why is this change needed? What problem does it solve?
 
 ## Changes
+
 - Bullet list of specific changes
 - Include any breaking changes
 - Note any performance implications
 
 ## Testing
+
 How was this tested? New tests added?
 
 ## Related Issues
+
 Closes #123
 Fixes #456
 ```
@@ -393,6 +413,7 @@ Fixes #456
 ### CI Requirements
 
 All PRs must pass CI checks:
+
 - ✅ `cargo test` (all tests pass)
 - ✅ `cargo clippy` (zero warnings)
 - ✅ `cargo fmt --check` (code formatted)
@@ -402,6 +423,7 @@ All PRs must pass CI checks:
 ### Draft PRs
 
 Use draft PRs for work-in-progress:
+
 - Get early feedback
 - Discuss approach before full implementation
 - Mark as "Ready for review" when complete
@@ -442,6 +464,7 @@ Use draft PRs for work-in-progress:
 ### Code Organization
 
 **Module structure:**
+
 ```rust
 // Public API at top
 pub struct MyType { }
@@ -454,7 +477,7 @@ fn internal_helper() { }
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn should_work_when_valid_input() { }
 }
@@ -463,24 +486,28 @@ mod tests {
 ### Naming Conventions
 
 **Types:** `PascalCase`
+
 ```rust
 pub struct ColumnFamily { }
 pub enum WriteOptions { }
 ```
 
 **Functions/methods:** `snake_case`
+
 ```rust
 pub fn begin_tx() { }
 fn allocate_sequences() { }
 ```
 
 **Constants:** `SCREAMING_SNAKE_CASE`
+
 ```rust
 const MAX_MEMTABLE_SIZE: usize = 64 * MB;
 const DEFAULT_BLOCK_SIZE: usize = 4096;
 ```
 
 **Type parameters:** Single uppercase letter or `PascalCase`
+
 ```rust
 fn process<T>(item: T) { }
 fn store<Key, Value>(k: Key, v: Value) { }
@@ -489,6 +516,7 @@ fn store<Key, Value>(k: Key, v: Value) { }
 ### Error Handling
 
 **Use `?` operator:**
+
 ```rust
 // ✅ Good
 pub fn open(opts: OpenOptions) -> MidgeResult<Engine> {
@@ -510,6 +538,7 @@ pub fn open(opts: OpenOptions) -> MidgeResult<Engine> {
 ```
 
 **Provide context in errors:**
+
 ```rust
 // ✅ Good
 Err(MidgeError::Internal(format!(
@@ -523,6 +552,7 @@ Err(MidgeError::Internal("WAL open failed".into()))
 ### Comments
 
 **Document public API:**
+
 ```rust
 /// Opens a database at the specified path.
 ///
@@ -533,6 +563,7 @@ pub fn open(opts: OpenOptions) -> MidgeResult<Engine> { }
 ```
 
 **Explain non-obvious logic:**
+
 ```rust
 // Allocate sequences idempotently to handle retries.
 // Same request_id always gets same sequence number.
@@ -540,6 +571,7 @@ let seq = state.allocate_sequences_idempotent(request_id, count)?;
 ```
 
 **Avoid obvious comments:**
+
 ```rust
 // ❌ Bad
 let x = 5;  // Set x to 5
@@ -551,6 +583,7 @@ let x = 5;
 ### Imports
 
 **Group imports:**
+
 ```rust
 // Standard library
 use std::collections::HashMap;
@@ -574,6 +607,7 @@ use crate::storage::Storage;
 ## Recognition
 
 Contributors are recognized in:
+
 - GitHub contributors list
 - Release notes for significant contributions
 

@@ -103,18 +103,22 @@ while let Some((k, v)) = iter.next() {
 ## Documentation
 
 ### Getting Started
-- **[API Guide](docs/API_GUIDE.md)** - Complete guide to using Midge (OpenOptions, transactions, WriteOptions, queries)
-- **[Cloud Setup](docs/CLOUD_SETUP.md)** - Configuring S3, Azure, GCS, Cloudflare R2, and other cloud providers
-- **[Recovery & Durability](docs/RECOVERY.md)** - Durability guarantees, crash scenarios, and recovery behavior
+
+- **[API Guide](docs/api-guide.md)** - Complete guide to using Midge (OpenOptions, transactions, WriteOptions, queries)
+- **[Cloud Setup](docs/cloud-setup.md)** - Configuring S3, Azure, GCS, Cloudflare R2, and other cloud providers
+- **[Recovery & Durability](docs/recovery.md)** - Durability guarantees, crash scenarios, and recovery behavior
 
 ### Architecture & Design
-- **[The Big Idea](docs/THE_BIG_IDEA.md)** - Philosophy, design decisions, and core principles
-- **[Architecture](docs/ARCHITECTURE.md)** - Technical implementation guide for contributors
+
+- **[The Big Idea](docs/big-idea.md)** - Philosophy, design decisions, and core principles
+- **[Architecture](docs/architecture.md)** - Technical implementation guide for contributors
 
 ### Contributing
+
 - **[Contributing Guide](CONTRIBUTING.md)** - How to contribute code, tests, and documentation
 
 ### More
-- **[Testing](docs/TESTING.md)** - Test conventions and workflows
-- **[Benchmarks](docs/BENCHMARKS.md)** - Benchmark tiers, rules, and how to run them
-- **[Performance Tuning](docs/PERFORMANCE_TUNING.md)** - High-level tuning guidance
+
+- **[Testing](docs/testing.md)** - Test conventions and workflows
+- **[Benchmarks](docs/benchmarks.md)** - Benchmark tiers, rules, and how to run them
+- **[Performance Tuning](docs/performance-tuning.md)** - High-level tuning guidance
