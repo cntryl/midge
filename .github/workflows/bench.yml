@@ -21,7 +21,7 @@ jobs:
         run: rustup update stable
 
       - name: Run benchmarks
-        run: cargo bench --bench '*'
+        run: cargo bench --bench 'tier1_*' --bench 'tier2_*'
 
       - name: Upload Criterion artifacts
         uses: actions/upload-artifact@v6
