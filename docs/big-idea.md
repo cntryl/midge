@@ -1,46 +1,76 @@
 # The Big Idea
 
-**An Actor-Sequenced, Cloud-Native Embedded LSM**
+**Why Midge Exists and How It Works**
 
-## What We Are Building
+## The Problem
 
-We are building an **embedded LSM storage engine** designed around one core principle:
+Midge is built for modern infrastructure: ephemeral compute, object storage as the source of truth, and predictable behavior under load. It makes different tradeoffs than existing embedded storage engines:
+
+- **Cloud-native storage** — Object storage (S3, Azure, GCS) is a first-class durability target, not an afterthought
+- **Predictable behavior** — Single-threaded actor sequences all state changes; no hidden concurrency
+- **True embeddability** — Synchronous APIs, explicit control, no background daemon threads
+- **Auditable state** — Every mutation is sequenced through explicit messages and reproducible
+
+If you need an embedded LSM that treats cloud storage and determinism as primary design goals, Midge exists for you.
+
+## Our Core Principle
+
+We are building an embedded LSM storage engine around one uncompromising belief:
 
 > **All state transitions are explicit, serialized, and reproducible.**
 
-The engine runs **in-process** as a library, uses an **actor-owned core** to sequence all mutations, and treats **cloud object storage as a first-class durability target**, not an afterthought.
+No hidden threads. No lock contention. No "eventually consistent" internal state. No surprises.
 
-This is infrastructure-grade storage, not a convenience cache.
+If a behavior cannot be explained as _"this message caused this state transition,"_ it is a design failure.
 
-## Embeddability First
+## What We're Building: Midge
 
-- The database runs inside the host application's process.
-- All APIs are synchronous, typed, and in-process.
-- There is no standalone server, daemon, or RPC boundary.
-- Lifecycle, shutdown, memory, and durability tradeoffs are controlled by the host.
+**Midge** is an actor-sequenced, cloud-native embedded LSM storage engine.
 
-The engine integrates like a library, not a service.
+Three architectural pillars define everything we build:
 
-## Actor-Owned Core
+### 1. Actor-Sequenced Core
 
-A single **EventLoop** with coordinated actors owns all mutable engine state:
+A single **EventLoop** owns all mutable engine state. Every mutation—sequence number assignment, memtable operations, snapshot creation, flush and compaction planning, WAL lifecycle, cache management, backpressure signaling—happens in this actor, via explicit messages, in a known order.
 
-- sequence numbers and visibility
-- memtables and immutables
-- snapshots
-- version sets and manifests
-- flush and compaction planning
-- WAL segment lifecycle
-- cache pinning and eviction
-- backpressure and write stalls
+Background work (I/O, compression, uploads) is performed by **task executors** operating on immutable inputs. They report results back to the actor but never mutate shared state.
 
-No other component mutates state.
+**Invariant:** If state changes, it happens in the actor, via a message, in a defined sequence. Always.
 
-Background work (I/O, compression, uploads) is performed by task executors operating on immutable inputs and reporting results back to the actor.
+### 2. Cloud-Native by Design
 
-> **Invariant:** If state changes, it happens in the actor, via a message, in a known order.
+We support three explicit storage modes, each with a single authoritative source of truth:
 
-## Unified Write Path
+- **Memory Mode:** In-memory WAL and SSTs. No durability. For tests and ephemeral workloads.
+- **Local Mode:** Local disk is authoritative. Classic embedded durability.
+- **Cloud Mode:** Cloud storage (S3, Azure, etc.) is authoritative. Local disk is an **ephemeral cache only** that can disappear without violating correctness.
+
+In cloud mode:
+
+- WAL writes locally for latency, then uploads to object storage
+- SSTs live primarily in cloud storage
+- Manifest tracks cloud state as source of truth
+- Recovery ignores local filesystem except for opportunistic reuse
+- Local cache can be blown away at any time
+
+This isn't a plugin. It's architecture.
+
+### 3. Embedded and Explicit
+
+The database runs **in-process** as a library. All APIs are synchronous, typed, and blocking. There is no standalone server, no daemon, no RPC boundary, no hidden async runtime.
+
+The host application controls:
+
+- Lifecycle (startup, shutdown, resource cleanup)
+- Concurrency (run in background threads if you want)
+- Memory budget (explicit cache and write buffer sizes)
+- Durability tradeoffs (explicit policies: strict, batched, best-effort)
+
+We integrate like a library should, not like a service pretending to be a library.
+
+## How It Works
+
+### Unified Write Path
 
 Every write follows the same straight-line pipeline:
 
@@ -60,90 +90,7 @@ This applies uniformly to:
 
 There are no side paths, fast paths, or hidden mutations.
 
-## Supported Operations
-
-### Core KV
-
-- Get (point reads)
-- Put
-- Delete
-- DeleteRange (range tombstones)
-- Scan (range queries via Query builder with prefix, start/end bounds, limits, direction)
-
-### Atomic Transactions
-
-- Multi-operation atomic commits via Transaction
-- ReadOnly and ReadWrite modes
-- Snapshot isolation at transaction start
-- Single commit boundary
-- WAL-backed durability
-
-### Transaction Modes
-
-- ReadOnly: snapshot-isolated reads
-- ReadWrite: atomic writes with snapshot-based reads
-- Actor-serialized commits
-- No long-lived locks
-
-Snapshots are captured at transaction start and enforced by sequence number visibility.
-
-## Storage Modes & Source of Truth
-
-The engine supports **three explicit storage modes**, each with a single authoritative source of truth.
-
-### Memory Mode
-
-- In-memory WAL and SSTs
-- No durability
-- Used for tests, benchmarks, and ephemeral workloads
-
-### Local Mode
-
-- Local disk WAL and SSTs
-- Filesystem is authoritative
-- Classic embedded durability model
-
-### Cloud Mode (Cloud-Native)
-
-- Cloud WAL + cloud SSTs are the source of truth
-- Local disk/NVMe is **ephemeral cache only**
-- WAL and SSTs are uploaded and tracked by the actor
-- Recovery ignores local state unless reused opportunistically
-
-> In cloud mode, local data may disappear at any time without violating correctness.
-
-## Cloud-Native WAL
-
-- WAL appends locally for latency
-- Upload to cloud storage is actor-scheduled
-- Durability policies are explicit (Strict / Batched / CloudMirrored / CloudFirst / BestEffort)
-- Recovery is driven by:
-
-  - manifest
-  - cloud WAL objects
-  - compaction intent/log state
-
-Local WAL segments are never trusted in cloud mode.
-
-## Cloud-Native SST Layer
-
-- SSTs live primarily in object storage
-- Local storage is a cache
-- The actor decides:
-
-  - what to prefetch
-  - what to pin
-  - what to evict
-
-- Compaction can write directly to cloud
-
-The SST format is designed for:
-
-- few large objects
-- sequential reads
-- minimal cloud round-trips
-
-## Deterministic Flush & Compaction
+### Deterministic Flush & Compaction
 
 Flush and compaction are:
 
@@ -162,21 +109,13 @@ Given the same workload and timing, the same plans and state transitions occur.
 
 This determinism is intentional and enforced.
 
-## Modern SST Format
+### Modern SST Format
 
-- TLV-encoded blocks
-- Pluggable metadata:
-
-  - sparse index
-  - trie (prefix/range acceleration)
-  - bloom filters
-
-- Compression is first-class and tunable
-- Designed for both local and cloud access patterns
+Custom **TLV-encoded blocks** with pluggable metadata (sparse index, trie for prefix/range queries, bloom filters). Compression is first-class and tunable. Designed for cloud object patterns (few large objects, sequential reads, minimal round-trips) while remaining efficient for local access.
 
 Indexes exist to reduce I/O, not to look clever.
 
-## Failure & Recovery Model
+### Failure & Recovery Model
 
 Failures are expected.
 
@@ -192,27 +131,28 @@ The actor:
 
 Recovery is a replay of known transitions, not filesystem archaeology.
 
-## Quality Bar
+### What You Can Do
 
-This system targets **infrastructure-grade rigor**:
+**Core operations:**
 
-- deterministic behavior over opportunistic speed
-- invariants documented and enforced
-- tests that define behavior, not just coverage
-- explainable failures
-- performance tuning only after correctness is locked
+- **Get** (point reads), **Put**, **Delete**, **DeleteRange** (range tombstones)
+- **Scan** (range queries with prefix, bounds, limits, direction)
 
-If a behavior cannot be explained as:
+**Transactions:**
 
-> _"this message caused this state transition"_
+- Multi-operation atomic commits
+- ReadOnly and ReadWrite modes
+- Snapshot isolation at transaction start
+- Actor-serialized commits
+- No long-lived locks
 
-it is a design failure.
+**Durability policies** (explicit):
 
-## In One Sentence
+- Strict / Batched / CloudMirrored / CloudFirst / BestEffort
 
-This is an **actor-sequenced, cloud-native embedded LSM** designed to be predictable, inspectable, and durable—without hiding complexity behind threads, magic, or luck.
+Snapshots provide consistent point-in-time views. Iteration is consistent within a snapshot.
 
-## Use Cases & Target Applications
+## Who Should Use Midge
 
 Midge is designed for applications that:
 
@@ -232,77 +172,81 @@ Example contexts:
 - Embedded in a sidecar or agent
 - Testing harness for complex systems
 
-The principle: **Midge is the storage layer you can reason about and test.**
+**The principle:** Midge is the storage layer you can reason about and test.
 
-## Key Design Decisions & Tradeoffs
+## Choosing the Right Storage Engine
 
-### Synchronous APIs (Not Async)
+Midge optimizes for different goals than other embedded storage systems. Here's how the tradeoffs compare:
 
-**Decision:** All public APIs are synchronous and blocking.
+### RocksDB
 
-**Rationale:**
+| Aspect          | RocksDB                   | Midge                             |
+| --------------- | ------------------------- | --------------------------------- |
+| **Goal**        | Maximum throughput        | Predictable, auditable behavior   |
+| **Concurrency** | Multi-threaded            | Single-actor sequencing           |
+| **Compaction**  | Concurrent, opportunistic | Deterministic, planned            |
+| **SST Format**  | RocksDB blocks            | TLV with pluggable metadata       |
+| **Cloud**       | Via experimental plugins  | Native architecture               |
+| **Recovery**    | Filesystem scan + WAL     | Manifest + cloud WAL + intent log |
+| **Debugging**   | Thread dumps, profiling   | Message trace, intent replay      |
 
-- Simpler mental model for embedders
-- Easier to test deterministically
-- Clearer control flow and error handling
-- No async executor dependency
-- Caller controls their own concurrency strategy
+**When to choose RocksDB:** You need maximum throughput and are optimizing for local disk. RocksDB is battle-tested, widely deployed, and extremely fast.
 
-**Tradeoff:** Embedders manage their own background thread pools if needed.
+**When to choose Midge:** You need predictable behavior, cloud-native storage, or the ability to replay and debug state transitions deterministically.
 
-### Actor-Sequenced, Not Thread-Safe Partitions
+### FoundationDB
 
-**Decision:** Single actor sequences all state mutations, not partitioned by key or level.
+| Aspect           | FoundationDB              | Midge                        |
+| ---------------- | ------------------------- | ---------------------------- |
+| **Scope**        | Distributed database      | Embedded storage engine      |
+| **Consensus**    | Raft/Paxos across cluster | Single process, no consensus |
+| **Network**      | Core architecture         | Optional (cloud I/O only)    |
+| **Transactions** | ACID across cluster       | Serializable within process  |
+| **Use Case**     | Cluster-wide coordination | Embedded in a single process |
 
-**Rationale:**
+**When to choose FoundationDB:** You're building a distributed system that needs cross-node transactions and strong consistency guarantees.
 
-- Global seqno visibility is simple and correct
-- Ordering is explicit and auditable
-- No distributed consensus or compare-and-swap
-- Failure recovery is replay, not repair
+**When to choose Midge:** You need reliable storage within a single process, not distributed consensus.
 
-**Tradeoff:** Throughput ceiling is lower than thread-per-shard designs, but predictability is higher.
+### SQLite
 
-### Cloud as First-Class, Not an Afterthought
+| Aspect          | SQLite                     | Midge                      |
+| --------------- | -------------------------- | -------------------------- |
+| **Data Model**  | Relational with SQL        | Key-value                  |
+| **Query Model** | Full SQL engine            | Get/Put/Scan/Range         |
+| **Durability**  | Local file                 | Local or cloud             |
+| **Concurrency** | Multiple readers, WAL mode | Single-actor sequencing    |
+| **Use Case**    | Structured, queryable data | High-throughput KV storage |
 
-**Decision:** Cloud durability and SST storage are architectural choices, not plugins.
+**When to choose SQLite:** You need SQL, relational queries, or have structured data with complex access patterns.
 
-**Rationale:**
+**When to choose Midge:** You need a fast key-value store with explicit control over durability and cloud storage.
 
-- Explicit modes (memory / local / cloud) prevent confusion
-- Ephemeral local cache is simpler than "maybe sync, maybe don't"
-- Recovery logic is the same across all modes
-- Embedders know exactly where their data lives
+## The Tradeoffs We Chose
 
-**Tradeoff:** Running in-cloud requires explicit planning, but the semantics are clear.
+Every architectural choice is a tradeoff. Here's what we chose and why:
 
-### Deterministic Flush & Compaction
+### Synchronous APIs → Simple mental model, but caller manages threads
 
-**Decision:** Plans are logged; execution is deterministic.
+All public APIs are synchronous and blocking. No async/await, no hidden executor. This makes control flow explicit, testing deterministic, and error handling straightforward. The cost: embedders manage their own background thread pools if they want concurrency.
 
-**Rationale:**
+### Single Actor → Predictable but bounded throughput
 
-- Reproducible behavior enables testing and debugging
-- Forensics: "what compaction happened and why?"
-- No surprise performance cliffs from concurrent decisions
-- Same input → same state transition, always
+One actor sequences all state mutations, not partitioned by key or level. This makes ordering explicit, recovery simple (replay, not repair), and visibility trivial. The cost: throughput ceiling (~100k ops/sec) is lower than thread-per-shard designs. We choose **predictability over raw speed**.
 
-**Tradeoff:** Opportunistic speed is sacrificed for predictability.
+### Cloud-First → Explicit semantics, more planning required
 
-### Modern SST Format, Not RocksDB-Compatible
+Cloud durability and SST storage are architectural pillars, not plugins. Explicit modes (memory/local/cloud) prevent confusion. Ephemeral local cache is simpler than "maybe sync, maybe don't." The cost: running in cloud requires explicit planning. But you always know where your data lives.
 
-**Decision:** Custom TLV blocks with pluggable metadata.
+### Deterministic Compaction → Reproducible but not opportunistic
 
-**Rationale:**
+Plans are logged; execution is deterministic. Same input → same state transition. This enables testing, debugging, and forensics. The cost: we sacrifice opportunistic speed for reproducibility.
 
-- Designed for cloud and large objects, not tiny writes
-- Metadata is explicit (trie, sparse index, bloom)
-- Compression is first-class, not bolted on
-- No legacy baggage
+### Custom SST Format → No RocksDB compatibility
 
-**Tradeoff:** Not drop-in compatible with RocksDB, but cleaner and more intentional.
+TLV blocks with pluggable metadata. Designed for cloud and large objects, not tiny writes. Compression is first-class. The cost: not drop-in compatible with RocksDB. But cleaner and more intentional.
 
-## Concrete Example: A Write and Its State Transitions
+## A Concrete Example: How a Write Flows Through the System
 
 Here's what happens when an application calls `put` within a transaction:
 
@@ -337,194 +281,80 @@ Here's what happens when an application calls `put` within a transaction:
    - Actor updates manifest and seqno visibility
 
 All state changes happen in actor messages. Every decision is logged.
-If we replay the same sequence of inputs, we get the same sequence of outputs.
-```
 
-## Integration: How an Application Uses Midge
+**If we replay the same sequence of inputs, we get the same sequence of outputs. This is not luck. This is design.**
 
-### Initialization
+## What Integration Looks Like
 
-Applications create an engine with explicit configuration for storage mode, write buffer size, cache size, and compaction levels. The storage backend (memory, local, or cloud) is specified directly.
+Applications use Midge like any embedded library:
 
-### Write Operations
+**Initialization:** Create an engine with explicit config (storage mode, write buffer size, cache size, compaction levels). Pick your storage backend: memory, local, or cloud.
 
-All write operations are synchronous. Writes are committed via Transaction with explicit WriteOptions (sync, buffered, best_effort, cloud_strict). The engine may return backpressure signals (write stalls) when the memtable queue is full or compaction is lagging, allowing the application to decide how to handle the situation.
+**Write operations:** All writes are synchronous. Commit via Transaction with explicit WriteOptions. Engine may signal backpressure (write stalls) when memtable queue is full—application decides how to handle it.
 
-### Snapshots & Iteration
+**Snapshots & iteration:** Snapshots provide consistent point-in-time views at specific sequence numbers. Iteration is consistent within a snapshot. Snapshots are released when dropped.
 
-Snapshots provide consistent point-in-time views at specific sequence numbers. Iteration is consistent within a snapshot and supports prefix-based scanning. Snapshots are released when dropped.
+**Shutdown:** Flush memtables, optionally run compaction, close handles with manifest synchronization. Simple. Synchronous. Explicit.
 
-### Shutdown
+No magic.
 
-Graceful shutdown involves explicitly flushing memtables, optionally running compaction, and closing all handles with manifest synchronization. The API is **simple, synchronous, and explicit**. No magic.
-
-## Why This Isn't RocksDB
-
-| Aspect           | RocksDB                  | Midge                                |
-| ---------------- | ------------------------ | ------------------------------------ |
-| **API**          | Sync, but threads hidden | Sync, threads explicit               |
-| **Compaction**   | Concurrent, background   | Actor-scheduled, deterministic       |
-| **SST Format**   | Legacy RocksDB blocks    | Modern TLV, pluggable metadata       |
-| **Cloud**        | Bolted on (experimental) | Native, three modes                  |
-| **Durability**   | Local FS or S3 SDK       | Explicit levels (memory/local/cloud) |
-| **Recovery**     | Filesystem scan + WAL    | Manifest + cloud WAL + intent log    |
-| **Debugging**    | Thread dumps, flamegraph | Message trace, intent log replay     |
-| **Transactions** | Optional, complex        | Optional, actor-serialized           |
-
-**Bottom line:** RocksDB is battle-tested and fast. Midge trades some speed for predictability, cloud-nativity, and debuggability.
-
-## Why This Isn't FoundationDB
-
-| Aspect           | FoundationDB              | Midge                        |
-| ---------------- | ------------------------- | ---------------------------- |
-| **Scope**        | Distributed database      | Embedded storage engine      |
-| **Consensus**    | Paxos + leader election   | Single actor, no consensus   |
-| **Network**      | Fundamental               | Not fundamental              |
-| **Transactions** | ACID across cluster       | Serializable within actor    |
-| **Latency**      | Multi-region, managed     | Single-machine, predictable  |
-| **Use Case**     | Cluster-wide coordination | Embedded in a single process |
-
-**Bottom line:** FoundationDB solves distributed consensus. Midge solves "I need predictable storage in my process."
-
-## Why This Isn't SQLite
-
-| Aspect           | SQLite                      | Midge                       |
-| ---------------- | --------------------------- | --------------------------- |
-| **Schema**       | Relational with SQL         | Key-value, untyped          |
-| **Queries**      | Full SQL engine             | Simple KV, range, prefix    |
-| **Transactions** | SQL-level ACID              | Seqno-based visibility      |
-| **Durability**   | Local file                  | Local/Cloud, explicit modes |
-| **Concurrency**  | Multiple connections, locks | Single actor, no locks      |
-| **Use Case**     | Embedded relational DB      | Embedded KV store           |
-
-**Bottom line:** SQLite is for applications that need SQL. Midge is for applications that need a fast, reliable KV store that doesn't hide its internals.
-
-## Visibility & Observability
+## Observability: See Everything
 
 Every component exposes its state:
 
-### Runtime Metrics
+**Runtime metrics:** seqno rate, memtable size/count, SST count per level, flush/compaction frequency, WAL upload latency, cache hit rate.
 
-- Seqno assignment rate
-- Memtable size and count
-- SST count per level
-- Flush and compaction frequency
-- WAL upload latency
-- Cache hit rate
+**Tracing & intent log:** Every state transition is loggable. Messages can be recorded and replayed. Failure scenarios can be simulated. Forensics: "what happened between seqno 1000 and 2000?"
 
-### Tracing & Intent Log
+**Configuration:** All tuning parameters are explicit (write buffer size, cache size, compaction ratios, bloom tuning, cloud upload strategy). No magic constants. No adaptive tuning unless explicitly enabled.
 
-- Every state transition is loggable
-- Messages can be recorded and replayed
-- Failure scenarios can be simulated
-- Forensics: "what happened between seqno 1000 and 2000?"
+If you can't see it, we didn't build it right.
 
-### Configuration & Tuning
+## The Quality Bar: Infrastructure Grade
 
-All tuning parameters are explicit:
+This system targets infrastructure-grade rigor:
 
-- Write buffer size
-- Cache size and eviction policy
-- Compaction level count and size ratios
-- Cloud upload strategy (batch size, latency target)
-- Bloom filter tuning
+**Predictability:** Latency variance is bounded. No surprise thread explosions. Compaction happens when planned. Failures are expected and handled.
 
-No magic constants. No adaptive tuning (unless explicitly enabled).
+**Debuggability:** Every state change is loggable. Intent log enables forensics. Determinism enables reproduction. Tests validate behavior, not just coverage.
 
-## Quality Bar: Infrastructure Grade
+**Reliability:** Recovery is a known process. Partial failures are isolated. Manifest is source of truth. Cloud durability is explicit.
 
-This is what "infrastructure-grade" means:
+**Testability:** Deterministic execution. No flaky tests from timing. Mock cloud storage for testing. Intent logs for scenario validation.
 
-### Predictability
+If a behavior cannot be explained as a sequence of actor messages and state transitions, **it is a design failure**.
 
-- Latency variance is bounded
-- No surprise thread explosions
-- Compaction happens when planned
-- Failures are expected and handled
-
-### Debuggability
-
-- Every state change is loggable
-- Intent log enables forensics
-- Determinism enables reproduction
-- Tests can validate behavior, not just coverage
-
-### Reliability
-
-- Recovery is a known process
-- Partial failures are isolated
-- Manifest is the source of truth
-- Cloud durability is explicit
-
-### Testability
-
-- Deterministic execution
-- No flaky tests from timing
-- Mock cloud storage for testing
-- Intent logs for scenario validation
-
-If a behavior cannot be explained as a sequence of actor messages and state transitions, it is a **design failure**.
-
-## Implementation Layers
-
-These layers exist and must maintain their invariants:
-
-### API Layer
-
-User-facing engine interface (get, put, range, snapshot, etc).
-
-### Core Runtime
-
-EventLoop with specialized actors: sequences all mutations, owns state.
-
-### Memtable & Immutable Layers
-
-In-memory storage, sorted by seqno.
-
-### SST Layer
-
-Local and cloud SST storage, with cache management.
-
-### WAL Layer
-
-Local buffer → cloud upload, durability levels.
-
-### Compaction Layer
-
-Task-based execution, deterministic planning.
-
-### Manifest Layer
-
-Source of truth for what SSTs exist and which seqnos they cover.
-
-### Cloud Integration
-
-S3, Azure, Wasabi, mock provider interface.
-
-Dependencies must flow **upward** only. See `docs/DEPENDENCY_ANALYSIS.md` for the layer rules.
-
-## Performance Model
+## Performance: What to Expect
 
 Midge is **not a raw-speed benchmark champion**. It is a **predictable, auditable system**.
 
 Expected characteristics:
-
 - **Write latency:** 1–10ms (depends on WAL upload strategy)
 - **Read latency:** Sub-ms for in-cache, 10–100ms for cloud (with local cache)
-- **Throughput:** Limited by actor serialization (~100k ops/sec), not by disk
+- **Throughput:** ~100k ops/sec (limited by actor serialization, not by disk)
 - **Cache overhead:** ~10–20% of cache size for metadata
 
 If you need **raw throughput** (millions of ops/sec), use **RocksDB** or a sharded design.
 
 If you need **predictability and correctness**, use **Midge**.
 
-## Path to Production
+## How We Build
 
-1. **Correctness first** — all tests pass, all invariants hold
-2. **Stability** — deterministic behavior, no flaky tests, reproducible failures
-3. **Performance tuning** — only after correctness is locked
-4. **Cloud integration** — tested against real providers (optional)
-5. **Observability** — metrics, logging, intent traces
-6. **Documentation** — invariants, recovery procedures, design decisions
+Midge maintains strict discipline:
 
-Each phase has a clear quality gate. No phase proceeds without the previous one passing.
+1. **Correctness before performance** — Invariants are documented, tested, and enforced
+2. **Determinism before optimization** — Same inputs produce same state transitions
+3. **Explainability before convenience** — Every behavior traces to an actor message
+4. **Testing rigor** — No flaky tests, all failures are reproducible
+5. **Observable by default** — Metrics, intent logs, and configuration are always visible
+
+This discipline is ongoing, not a phase we graduate from.
+
+---
+
+## In One Sentence
+
+Midge is an **actor-sequenced, cloud-native embedded LSM** designed to be predictable, inspectable, and durable—without hiding complexity behind threads, magic, or luck.
+
+**This is storage infrastructure you can reason about, test, and trust.**
+```

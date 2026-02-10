@@ -88,17 +88,20 @@ The core hybrid storage model is **fully implemented** and tested. This architec
 ### Key Components
 
 **`HybridStorage`** ([src/storage/hybrid/](../src/storage/hybrid/))
+
 - Dual-backend orchestration (local + cloud)
 - WAL upload pipeline with CloudAck/CloudFail events
 - SST read/write routing (local first, cloud fallback)
 - Backpressure and budget management
 
 **`CloudExecutor`** ([src/storage/cloud/executor.rs](../src/storage/cloud/executor.rs))
+
 - Embedded tokio runtime for async cloud I/O
 - Callback-based event delivery (no futures exposed to engine)
 - Request/response abstraction over HTTP
 
 **Cloud Providers** ([src/storage/providers/](../src/storage/providers/))
+
 - Individual implementations: AWS S3, Azure Blob, GCS, MinIO, Wasabi, OCI
 - REST API clients with native authentication
 - All use `CloudBackend` trait for uniformity
@@ -143,6 +146,7 @@ engine.commit(tx, WriteOptions::buffered())?;
 ```
 
 **What happens:**
+
 - Local cache path: `/tmp/test-cache/`
 - Simulated cloud: `/tmp/test-cache/cloud_store/`
 - WAL segments uploaded to: `/tmp/test-cache/cloud_store/wal/`
@@ -173,6 +177,7 @@ Midge has clean, dependency-free implementations of major cloud providers. These
 **Location:** [src/storage/providers/aws.rs](../src/storage/providers/aws.rs)
 
 **Features:**
+
 - Full AWS SigV4 request signing
 - Regional endpoints
 - IAM role support (via environment)
@@ -201,11 +206,13 @@ let backend = provider.backend();
 ```
 
 **What works:**
+
 - PUT/GET/DELETE/LIST/HEAD operations
 - Async callback-based execution via `CloudExecutor`
 - Proper error handling and retries
 
 **What's missing:**
+
 - Automatic credential discovery from ~/.aws/credentials
 - STS token refresh
 - Integration with `Storage::Cloud` enum
@@ -215,6 +222,7 @@ let backend = provider.backend();
 **Location:** [src/storage/providers/azure.rs](../src/storage/providers/azure.rs)
 
 **Features:**
+
 - Native Azure Blob REST API (not S3-compatible)
 - Shared Key authentication (HMAC-SHA256)
 - SAS token authentication
@@ -243,6 +251,7 @@ let backend = provider.backend();
 ```
 
 **API Details:**
+
 - Base URL: `https://{account}.blob.core.windows.net/{container}`
 - PUT → BlockBlob
 - GET → With `x-ms-range` header for range reads
@@ -254,6 +263,7 @@ let backend = provider.backend();
 **Location:** [src/storage/providers/gcs.rs](../src/storage/providers/gcs.rs)
 
 **Features:**
+
 - S3-compatible API (via GCS interoperability)
 - HMAC key authentication
 - No Google SDK dependency
@@ -283,6 +293,7 @@ Use the returned access key and secret as AWS-compatible credentials.
 ### S3-Compatible Providers
 
 **Supported:**
+
 - **MinIO** ([src/storage/providers/minio.rs](../src/storage/providers/minio.rs))
 - **Wasabi** ([src/storage/providers/wasabi.rs](../src/storage/providers/wasabi.rs))
 - **Oracle Cloud (OCI)** ([src/storage/providers/oci.rs](../src/storage/providers/oci.rs))
@@ -342,6 +353,7 @@ let opts = OpenOptions::cloud("/tmp/cache", "bucket", "prefix/")
 ```
 
 **Work required:**
+
 - Parse `Storage::Cloud` fields to select provider
 - Credential discovery (env vars, instance metadata, config files)
 - Error handling for missing/invalid credentials
@@ -359,6 +371,7 @@ let cloud = build_cloud_backend(&opts.storage)?;
 ```
 
 **Work required:**
+
 - Provider factory function
 - Backend initialization
 - Configuration validation
@@ -448,16 +461,19 @@ let hybrid = HybridStorage::new(local_backend, Arc::new(mock));
 ## Next Steps
 
 **For production deployments today:**
+
 - Use `Storage::Local` with persistent disk
 - Standard filesystem-based durability
 - Well-tested and production-ready
 
 **For cloud storage development:**
+
 - Contribute to provider integration (see `src/engine/mod.rs::open()`)
 - Add credential management
 - Performance testing infra
 
 **Documentation:**
+
 - [Architecture](architecture.md) - System design and layer structure
 - [Recovery](recovery.md) - Durability guarantees and WAL replay
 - [API Guide](api-guide.md) - Public API surface and usage patterns

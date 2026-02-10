@@ -19,100 +19,74 @@ Comprehensive guide to using Midge in your application.
 All database operations start with `Engine::open()`:
 
 ```rust
-use cntryl_midge::{Engine, OpenOptions, Storage};
+use cntryl_midge::{Engine, OpenOptions};
 
-let opts = OpenOptions::new()
-    .storage(Storage::Local { path: "./mydb".into() })
+let engine = Engine::open(OpenOptions::local("./mydb").build())?;
+```
+
+### Configuration
+
+`OpenOptions` uses named constructors for storage mode, then builder methods for tuning:
+
+```rust
+let opts = OpenOptions::local("./mydb")
+    .goal(Goal::Throughput)           // Latency | Throughput | Economy
+    .memory_budget(MemoryBudget::Auto) // Or MemoryBudget::Bytes(512_000_000)
+    .workload(WorkloadProfile::Mixed)  // ReadMostly | WriteHeavy | Mixed | RangeScan
     .build();
-    
+
 let engine = Engine::open(opts)?;
 ```
 
-### OpenOptions Builder
+**Configuration knobs:**
 
-The builder provides explicit configuration without magic defaults:
+- `goal`: Optimization target (affects block sizes, compaction triggers)
+- `memory_budget`: Total memory (Auto = ~512MB; explicit via Bytes(n))
+- `workload`: Access pattern hint (affects cache allocation, bloom filters)
 
-```rust
-let opts = OpenOptions::new()
-    .storage(Storage::Local { path: "./mydb".into() })
-    .goal(Goal::Throughput)              // Latency | Throughput | Economy
-    .memory_budget(MemoryBudget::Auto)    // Or MemoryBudget::Bytes(512 * MB)
-    .workload_profile(WorkloadProfile::Mixed)  // ReadHeavy | WriteHeavy | Mixed
-    .build();
-```
-
-**Key parameters:**
-- `goal`: Primary optimization target (affects block sizes, buffer sizes, cache allocation)
-- `memory_budget`: Total memory available (Auto uses system memory with safety margins)
-- `workload_profile`: Access pattern hint (affects prefetching, bloom filters, compaction)
-
-All other parameters (block sizes, compaction triggers, cache ratios) are **derived automatically**.
+All low-level parameters are derived automatically from these high-level knobs.
 
 ## Storage Modes
 
-Midge supports three explicit storage modes. Choose one based on your deployment requirements.
+Midge has three storage modes. **Choose via named constructor**—there are no defaults.
 
 ### InMemory
 
-No persistence. Data lost when engine drops or process exits.
+No persistence. Data lost on engine drop.
 
 ```rust
-let opts = OpenOptions::new()
-    .storage(Storage::InMemory)
-    .build();
+let engine = Engine::open(OpenOptions::in_memory().build())?;
 ```
 
-**Use for:**
-- Testing
-- Benchmarks
-- Ephemeral caches
-- Temporary workloads
+**Use for:** Testing, benchmarks, ephemeral caches.
 
 ### Local
 
-Data persists to local filesystem. Classic embedded database model.
+Persists to local filesystem.
 
 ```rust
-let opts = OpenOptions::new()
-    .storage(Storage::Local { 
-        path: "/var/lib/myapp/db".into() 
-    })
-    .build();
+let engine = Engine::open(OpenOptions::local("/var/lib/myapp/db").build())?;
 ```
 
-**Use for:**
-- Traditional deployments
-- Single-node applications
-- When local disk is durable and reliable
+**Use for:** Traditional deployments, single-node apps, durable local disk.
 
 ### Cloud
 
-Data persists to cloud object storage. Local disk is ephemeral cache.
+Persists to cloud object storage (S3, Azure, GCS, R2). Local disk is ephemeral cache only.
 
 ```rust
-let opts = OpenOptions::new()
-    .storage(Storage::Cloud {
-        local_cache_path: "/tmp/cache".into(),
-        bucket: "my-app-database".to_string(),
-        prefix: "prod/instance-1/".to_string(),
-        endpoint: None,  // Or Some("https://s3.us-west-2.amazonaws.com")
-        region: None,    // Or Some("us-west-2")
-    })
-    .build();
+let opts = OpenOptions::cloud(
+    "/tmp/cache",           // local cache path
+    "my-bucket",            // bucket/container name
+    "prod/instance-1/"      // object key prefix
+).build();
+
+let engine = Engine::open(opts)?;
 ```
 
-**Use for:**
-- Cloud-native deployments
-- Serverless applications
-- Distributed systems
-- When local disk may disappear without warning
+**Use for:** Cloud-native deployments, serverless, when local disk can disappear.
 
-**Cloud credentials:**
-- Uses standard environment variables (AWS_ACCESS_KEY_ID, etc.)
-- Supports IAM roles, instance profiles
-- Provider-agnostic (S3, Azure, GCS, R2, MinIO)
-
-See [cloud-setup.md](cloud-setup.md) for detailed cloud configuration.
+**Authentication:** Uses standard environment variables (`AWS_ACCESS_KEY_ID`, etc.) and IAM roles. See [cloud-setup.md](cloud-setup.md).
 
 ## Transactions
 
@@ -144,16 +118,9 @@ engine.commit(tx, WriteOptions::sync())?;
 begin_tx → put/get/delete → commit (or drop to rollback)
 ```
 
-**Snapshots:**
-- Captured at `begin_tx()` time
-- All reads see consistent view at that sequence number
-- Writes are isolated until commit
-- No long-lived locks
+**Snapshot isolation:** Captured at `begin_tx()`. All reads see consistent view at that seqno.
 
-**Atomic commits:**
-- All writes in a transaction succeed or fail together
-- Single sequence number assigned to entire batch
-- Visibility is atomic (other readers see all or none)
+**Atomic commits:** All writes succeed or fail together. Single seqno for entire batch. Visibility is atomic.
 
 ## Write Operations
 
@@ -161,19 +128,19 @@ All writes happen on `Transaction` objects in ReadWrite mode.
 
 ### Put
 
-Write a key-value pair with optional TTL:
+Write a key-value pair:
 
 ```rust
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-
-// No expiration
 tx.put(b"user:42".to_vec(), b"alice".to_vec(), None)?;
-
-// Expires after 1 hour
-let expiration = Some(std::time::Duration::from_secs(3600));
-tx.put(b"session:xyz".to_vec(), b"data".to_vec(), expiration)?;
-
 engine.commit(tx, WriteOptions::buffered())?;
+```
+
+Optional TTL (third parameter):
+
+```rust
+let ttl_secs = Some(3600u64);  // expires in 1 hour
+tx.put(b"session:xyz".to_vec(), b"data".to_vec(), ttl_secs)?;
 ```
 
 ### Delete
@@ -186,27 +153,20 @@ tx.delete(b"user:42".to_vec())?;
 engine.commit(tx, WriteOptions::sync())?;
 ```
 
-**Note:** Delete is a tombstone. Key is marked deleted but not removed until compaction.
+Deletes are tombstones—removed during compaction.
 
 ### Delete Range
 
-Remove all keys in a range (start inclusive, end exclusive):
+Remove all keys in range `[start, end)`:
 
 ```rust
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-tx.delete_range(
-    b"user:100".to_vec(),  // start (inclusive)
-    b"user:200".to_vec()   // end (exclusive)
-)?;
+tx.delete_range(b"user:100".to_vec(), b"user:200".to_vec())?;
 engine.commit(tx, WriteOptions::sync())?;
 ```
 
-**Use cases:**
-- Bulk deletions (e.g., delete all sessions)
-- Time-series data cleanup
-- Partition drops
-
-**Performance:** O(1) to write tombstone, O(N) at read time to check range.
+**Use for:** Bulk deletions, time-series cleanup, partition drops.
+**Cost:** O(1) to write, O(N) at read time.
 
 ## Read Operations
 
@@ -216,23 +176,19 @@ Retrieve a single key:
 
 ```rust
 let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-
-match tx.get(b"user:42")? {
-    Some(value) => println!("Found: {:?}", value),
-    None => println!("Not found"),
+if let Some(value) = tx.get(b"user:42")? {
+    println!("Found: {:?}", value);
 }
 ```
 
-**Returns:** `Option<Bytes>`
-- `Some(value)` if key exists and not expired
-- `None` if key doesn't exist, was deleted, or is expired
+Returns `Option<Bytes>`: `Some(value)` if exists and not expired, `None` otherwise.
 
 ### Scan (Range Query)
 
 Iterate over keys using `Query` builder:
 
 ```rust
-use cntryl_midge::{Query, Direction};
+use cntryl_midge::Query;
 
 let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
 
@@ -260,23 +216,19 @@ let mut iter = tx.scan(&query)?;
 
 // Reverse scan
 let query = Query::new()
-    .direction(Direction::Reverse)
+    .reverse()
     .start_key(b"user:999".to_vec().into())
     .end_key(b"user:000".to_vec().into());
 let mut iter = tx.scan(&query)?;
 ```
 
-**Query builder methods:**
-- `.prefix(bytes)`: Match keys starting with prefix
-- `.start_key(bytes)`: Range lower bound (inclusive)
-- `.end_key(bytes)`: Range upper bound (exclusive)
-- `.limit(n)`: Max results to return
-- `.direction(Direction::Forward | Direction::Reverse)`: Iteration order
+**Query methods:**
+- `.prefix(bytes)`: Keys starting with prefix
+- `.start_key(bytes)` / `.end_key(bytes)`: Range bounds (start inclusive, end exclusive)
+- `.limit(n)`: Max results
+- `.reverse()`: Reverse iteration (default is forward)
 
-**Performance tips:**
-- Use prefix scans when possible (better than full range)
-- Set `.limit()` to avoid scanning entire keyspace
-- Bloom filters accelerate negative lookups
+**Tip:** Use prefix scans and limits. Bloom filters help negative lookups.
 
 ## Durability Options
 
@@ -284,220 +236,136 @@ Every commit requires explicit `WriteOptions`. No defaults.
 
 ### sync()
 
-**Full durability:** Blocks until fsync completes.
+Blocks until fsync completes. Write is durable when call returns.
 
 ```rust
 engine.commit(tx, WriteOptions::sync())?;
 ```
 
-**Guarantees:**
-- Write is durable when call returns
-- Survives process crash, power loss
-- Maximum latency (fsync blocks)
-
-**Use for:**
-- Financial transactions
-- Critical metadata
-- Anything that cannot be lost
+**Use for:** Financial transactions, critical metadata, anything that cannot be lost.
 
 ### buffered()
 
-**Deferred durability:** Write accepted, fsync happens asynchronously.
+Write accepted immediately, fsync batched in background.
 
 ```rust
 engine.commit(tx, WriteOptions::buffered())?;
 ```
 
-**Guarantees:**
-- Write is visible immediately
-- Durability achieved via background group commit (batched fsync)
-- If crash before batch fsync: data in memtable may be lost
+**Guarantees:** Visible immediately. Durable after background group commit. May lose <1s of writes on crash.
 
-**Use for:**
-- General workloads
-- High throughput requirements
-- Acceptable to lose <1 second of writes on crash
-
-**Performance:** ~100x faster than sync() due to batching.
+**Use for:** General workloads, high throughput. ~100x faster than `sync()`.
 
 ### best_effort()
 
-**No durability:** Fastest, no WAL writes.
+**No durability.** Fastest. No WAL writes. Data lost on crash before flush.
 
 ```rust
 engine.commit(tx, WriteOptions::best_effort())?;
 ```
 
-**Guarantees:**
-- Write is visible immediately
-- NO durability: data lost on crash before flush
-- Data becomes durable only after explicit `engine.flush_cf()`
-
-**Use ONLY for:**
-- Bulk data loads (setup phase)
-- Benchmark initialization
-- Test data
-- Data that can be reloaded from source
+**Use ONLY for:** Bulk loads, benchmark setup, test data.
 
 **Safe pattern:**
+
 ```rust
-// Phase 1: Fast load (no durability)
+// Load data fast (no durability)
 for i in 0..100_000 {
     let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
     tx.put(format!("key:{}", i).into_bytes(), b"value".to_vec(), None)?;
     engine.commit(tx, WriteOptions::best_effort())?;
 }
 
-// Phase 2: Persist to SST
+// Make durable
 engine.flush_cf(&cf)?;
 
-// Phase 3: Measured workload (with durability)
-// ... use WriteOptions::buffered() or sync()
+// Now switch to buffered() or sync() for real workload
 ```
 
 ### cloud_strict()
 
-**Immediate cloud durability:** Forces WAL seal + upload, blocks until complete.
+Forces WAL upload, blocks until complete. Write is durable in cloud when call returns.
 
 ```rust
 engine.commit(tx, WriteOptions::cloud_strict())?;
 ```
 
-**Guarantees:**
-- Write is durable in cloud storage when call returns
-- Local disk can be lost without data loss
-- Highest latency (network round-trip)
-
-**Use ONLY for:**
-- Critical cloud-first deployments
-- When local disk is known to be ephemeral
-- Explicit cloud durability requirements
-
-**Note:** Regular Cloud mode uses background uploads. Use `cloud_strict()` only when you need guaranteed cloud persistence before proceeding.
+**Use ONLY when:** You need guaranteed cloud persistence before proceeding. Regular cloud mode uses background uploads.
 
 ## Column Families
 
-Column families provide logical partitioning within a single database.
-
-### Creating Column Families
+Logical partitioning within a database. Separate keyspaces, independent compaction.
 
 ```rust
 let cf1 = engine.create_column_family("users")?;
 let cf2 = engine.create_column_family("sessions")?;
-```
 
-**Use cases:**
-- Separate keyspaces with different access patterns
-- Independent compaction schedules
-- Different retention policies (TTLs)
-
-### Using Column Families
-
-Specify column family in every transaction:
-
-```rust
-// Write to users CF
+// Each transaction specifies its CF
 let mut tx = engine.begin_tx(cf1.id(), TransactionMode::ReadWrite)?;
 tx.put(b"user:42".to_vec(), b"alice".to_vec(), None)?;
 engine.commit(tx, WriteOptions::sync())?;
-
-// Read from sessions CF
-let tx = engine.begin_tx(cf2.id(), TransactionMode::ReadOnly)?;
-let value = tx.get(b"session:xyz")?;
 ```
 
-### Default Column Family
-
-Always available, no need to create:
+**Default CF:** Always available:
 
 ```rust
 let default_cf = engine.default_column_family();
-let tx = engine.begin_tx(default_cf.id(), TransactionMode::ReadWrite)?;
 ```
 
-### Column Family Operations
+**Operations:**
 
 ```rust
-// Get by name
-let cf = engine.get_column_family("users");
-
-// Flush specific CF
-engine.flush_cf(&cf)?;
-
-// List all CFs
-let cf_names = engine.list_column_families();
+let cf = engine.get_column_family("users");  // Get by name
+engine.flush_cf(&cf)?;                        // Flush to SST
+let names = engine.list_column_families();    // List all
 ```
 
 ## Lifecycle Management
 
 ### Flushing
 
-Force memtable flush to SST files:
+Force memtable to SST:
 
 ```rust
 engine.flush_cf(&cf)?;
 ```
 
-**When to flush:**
-- Before shutdown (ensure data persists)
-- After bulk load with `best_effort()`
-- Before taking backups
-- To free memory
-
-**Note:** Flushes happen automatically when memtable is full. Manual flush is optional but recommended for graceful shutdown.
+**When:** Before shutdown, after `best_effort()` loads, before backups. (Automatic flushes happen when memtable is full.)
 
 ### Compaction
 
-Trigger compaction manually:
+Trigger manual compaction:
 
 ```rust
 engine.compact_all()?;
 ```
 
-**When to compact:**
-- After bulk deletes (reclaim space)
-- During maintenance windows
-- To improve read performance
-
-**Note:** Compaction happens automatically in background. Manual compaction is optional.
+**When:** After bulk deletes, maintenance windows. (Automatic compaction runs in background.)
 
 ### Shutdown
 
-Clean shutdown sequence:
+Recommended pattern:
 
 ```rust
-// 1. Flush all data
+// Flush all column families
 for cf_name in engine.list_column_families() {
     if let Some(cf) = engine.get_column_family(&cf_name) {
         engine.flush_cf(&cf)?;
     }
 }
 
-// 2. Optional: compact to optimize on-disk state
-engine.compact_all()?;
-
-// 3. Drop engine (automatically closes resources)
-drop(engine);
+drop(engine);  // Engine::drop() cleans up automatically
 ```
 
-**Note:** Engine implements `Drop` and cleans up automatically. Explicit flush is recommended but not required.
+### Recovery
 
-### Reopening
-
-Close and reopen same database:
+Reopeninig recovers automatically:
 
 ```rust
-drop(engine);  // Close
-
-let engine = Engine::open(opts)?;  // Reopen - recovers from WAL and manifest
+let engine = Engine::open(opts)?;  // Replays WAL, resumes from last checkpoint
 ```
 
-**Recovery:**
-- WAL is replayed automatically
-- Manifest tracks SST files
-- Sequence numbers resume from last checkpoint
-
-See [recovery.md](recovery.md) for recovery guarantees.
+See [recovery.md](recovery.md) for details.
 
 ## Error Handling
 
@@ -505,7 +373,7 @@ All operations return `MidgeResult<T>` (alias for `Result<T, MidgeError>`).
 
 ### Common Errors
 
-**WriteStall**: Backpressure signal, memtable queue full.
+**WriteStall:** Backpressure—memtable queue full.
 
 ```rust
 match engine.commit(tx, WriteOptions::sync()) {
@@ -518,122 +386,81 @@ match engine.commit(tx, WriteOptions::sync()) {
 }
 ```
 
-**ColumnFamilyNotFound**: Invalid CF handle.
+**ReadOnlyTransaction:** Attempted write in readonly mode.
 
-```rust
-let cf = engine.get_column_family("nonexistent")
-    .ok_or(MidgeError::ColumnFamilyNotFound("nonexistent".into()))?;
-```
-
-**ReadOnly**: Attempted write in ReadOnly transaction.
-
-```rust
-let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-match tx.put(b"key".to_vec(), b"value".to_vec(), None) {
-    Err(MidgeError::ReadOnlyTransaction) => {
-        // Transaction mode doesn't allow writes
-    }
-    _ => {}
-}
-```
+**ColumnFamilyNotFound:** Invalid CF name.
 
 ### Error Recovery
 
-**Transient errors** (WriteStall):
-- Retry with backoff
-- Reduce write rate
-- Wait for compaction to catch up
+**Transient** (WriteStall): Retry with backoff, reduce write rate.
 
-**Permanent errors** (IO, Corruption):
-- Log and propagate
-- Consider database recovery
-- May require restore from backup
+**Permanent** (IO, corruption): Log and propagate. May require restore from backup.
 
 ### Best Practices
 
-1. **Always specify WriteOptions explicitly**
-   ```rust
-   engine.commit(tx, WriteOptions::buffered())?;  // ✅ Good
-   // No default - forces conscious choice
-   ```
+**1. Always specify WriteOptions:**
 
-2. **Handle WriteStall gracefully**
-   ```rust
-   loop {
-       match engine.commit(tx, opts) {
-           Ok(_) => break,
-           Err(MidgeError::WriteStall) => {
-               std::thread::sleep(Duration::from_millis(50));
-               // Consider exponential backoff
-           }
-           Err(e) => return Err(e),
-       }
-   }
-   ```
+```rust
+engine.commit(tx, WriteOptions::buffered())?;  // No defaults - explicit choice
+```
 
-3. **Flush before shutdown**
-   ```rust
-   engine.flush_cf(&cf)?;
-   drop(engine);
-   ```
+**2. Handle WriteStall with backoff:**
 
-4. **Use transactions for atomicity**
-   ```rust
-   // Atomic: both succeed or both fail
-   let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-   tx.put(b"account:1".to_vec(), b"-100".to_vec(), None)?;
-   tx.put(b"account:2".to_vec(), b"+100".to_vec(), None)?;
-   engine.commit(tx, WriteOptions::sync())?;
-   ```
+```rust
+loop {
+    match engine.commit(tx, opts) {
+        Ok(_) => break,
+        Err(MidgeError::WriteStall) => std::thread::sleep(Duration::from_millis(50)),
+        Err(e) => return Err(e),
+    }
+}
+```
 
-5. **Choose appropriate storage mode**
-   - Development: `InMemory`
-   - Production (single node): `Local`
-   - Production (cloud): `Cloud`
+**3. Flush before shutdown:**
+
+```rust
+engine.flush_cf(&cf)?;
+```
+
+**4. Use transactions for atomicity:**
+
+```rust
+let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+tx.put(b"account:1".to_vec(), b"-100".to_vec(), None)?;
+tx.put(b"account:2".to_vec(), b"+100".to_vec(), None)?;
+engine.commit(tx, WriteOptions::sync())?;  // Both succeed or both fail
+```
 
 ## Advanced Topics
 
 ### Memory Management
 
-Memory usage is controlled by `MemoryBudget`:
-
 ```rust
-let opts = OpenOptions::new()
-    .memory_budget(MemoryBudget::Bytes(512 * 1024 * 1024))  // 512MB
+let opts = OpenOptions::local("./db")
+    .memory_budget(MemoryBudget::Bytes(512_000_000))  // 512MB
     .build();
 ```
 
-**Budget distribution:**
-- ~40%: Block cache (hot SST blocks)
-- ~30%: Write buffers (memtables)
-- ~20%: Bloom filters
-- ~10%: Metadata overhead
+**Budget distribution:** ~40% block cache, ~30% memtables, ~20% bloom filters, ~10% metadata.
 
 ### Observability
 
-Query runtime metrics:
-
 ```rust
 let metrics = engine.get_read_amp_metrics()?;
-println!("Average SSTs per read: {}", metrics.avg_ssts_per_read);
-println!("L0 overlap rate: {}", metrics.l0_overlap_rate);
+println!("Avg SSTs per read: {}", metrics.avg_ssts_per_read);  // lower is better
+println!("L0 overlap rate: {}", metrics.l0_overlap_rate);      // higher = more compaction
 ```
-
-**Key metrics:**
-- `avg_ssts_per_read`: Read amplification (lower is better)
-- `l0_overlap_rate`: L0 compaction pressure (higher = more compaction needed)
-- `sst_budget_violation_rate`: Fraction of reads exceeding SST budget
 
 ### Performance Tuning
 
-See [performance-tuning.md](performance-tuning.md) for detailed tuning guide.
-
 **Quick wins:**
-- Use `Goal::Throughput` for write-heavy workloads
-- Use `Goal::Latency` for read-latency-sensitive apps
-- Set appropriate `memory_budget` (more cache = better reads)
-- Use `buffered()` instead of `sync()` when acceptable
-- Batch writes in transactions (100-1000 ops per commit)
+
+- `Goal::Throughput` for write-heavy; `Goal::Latency` for read-latency-sensitive
+- Larger `memory_budget` = better read performance
+- `buffered()` instead of `sync()` when acceptable
+- Batch 100-1000 ops per transaction
+
+See [performance-tuning.md](performance-tuning.md) for details.
 
 ## Next Steps
 

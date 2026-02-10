@@ -112,7 +112,7 @@ while let Some((k, v)) = iter.next() {
 
 ### Architecture & Design
 
-- **[The Big Idea](docs/big-idea.md)** — Philosophy and design decisions
+- **[The Big Idea](docs/big-idea.md)** — Why we built Midge and how it works
 - **[Architecture](docs/architecture.md)** — Internals for contributors
 
 ### Contributing
