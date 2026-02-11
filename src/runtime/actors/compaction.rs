@@ -134,7 +134,7 @@ impl CompactionActor {
             let plan_clone = plan.clone();
             let epoch = std::sync::Arc::clone(&state.ingest_epoch);
             // Generate a stable job_id for this compaction job (for log correlation)
-            let job_id = next_request_id();
+            let job_id = next_request_id()?;
             std::thread::spawn(move || {
                 // Capture the epoch at start
                 let my_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
@@ -185,7 +185,7 @@ impl CompactionActor {
 
                 // Send completion back to runtime
                 let _ = tx.send(RuntimeMsg::CompactionComplete {
-                    request_id: next_request_id(),
+                    request_id: next_request_id().expect("request ID in compaction worker"),
                     input_ssts: input_files,
                     output_ssts,
                 });

@@ -125,7 +125,14 @@ impl WalWriter for FsWalWriterIo {
             t.metrics().record_wal_encode(e_elapsed.as_nanos() as u64);
         }
 
-        let len_prefix = (encoded.len() as u32).to_le_bytes();
+        // WAL wire format uses 4-byte length prefix; reject records that would truncate.
+        let enc_len = encoded.len();
+        if enc_len > u32::MAX as usize {
+            return Err(crate::common::MidgeError::InvalidArgument(
+                "WAL record length exceeds u32::MAX".into(),
+            ));
+        }
+        let len_prefix = (enc_len as u32).to_le_bytes();
 
         // Get a buffer from pool (or allocate)
         let mut buf = {
@@ -140,9 +147,10 @@ impl WalWriter for FsWalWriterIo {
         {
             let q = self.queue.lock();
             if q.len() >= super::writer_runner::MAX_QUEUE_DEPTH {
-                return Err(crate::common::MidgeError::Internal(
-                    format!("WAL queue full ({} items)", q.len())
-                ));
+                return Err(crate::common::MidgeError::Internal(format!(
+                    "WAL queue full ({} items)",
+                    q.len()
+                )));
             }
         }
 
@@ -190,7 +198,7 @@ impl WalWriter for FsWalWriterIo {
         while s.completed_flushes < my_flush_id {
             if s.write_failed {
                 return Err(crate::common::MidgeError::Internal(
-                    "WAL write failed persistently".to_string()
+                    "WAL write failed persistently".to_string(),
                 ));
             }
             self.sync_cond.wait(&mut s);
@@ -225,7 +233,7 @@ impl WalWriter for FsWalWriterIo {
         while s.completed_fsyncs < my_sync_id {
             if s.sync_failed {
                 return Err(crate::common::MidgeError::Internal(
-                    "WAL sync failed persistently".to_string()
+                    "WAL sync failed persistently".to_string(),
                 ));
             }
             self.sync_cond.wait(&mut s);

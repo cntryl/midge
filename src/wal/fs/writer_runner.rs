@@ -141,7 +141,10 @@ impl WriterRunner {
 
             // If any entry has exceeded max retry attempts, fail the writer and notify waiters
             // instead of silently dropping data (which would cause recovery to miss it).
-            if batch.iter().any(|entry| entry.attempts >= MAX_WRITE_ATTEMPTS) {
+            if batch
+                .iter()
+                .any(|entry| entry.attempts >= MAX_WRITE_ATTEMPTS)
+            {
                 tracing::error!(
                     "WAL write batch exceeded max retries; failing writer so waiters see write_failed"
                 );
@@ -196,7 +199,9 @@ impl WriterRunner {
                                     }
                                 }
                             } else {
-                                tracing::error!("wal writer could not reopen file handle after append failure");
+                                tracing::error!(
+                                    "wal writer could not reopen file handle after append failure"
+                                );
                                 let mut s = self.config.sync_state.lock();
                                 s.write_failed = true;
                                 self.config.sync_cond.notify_all();

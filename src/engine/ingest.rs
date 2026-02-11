@@ -240,7 +240,7 @@ impl IngestCoordinator {
             })
             .collect();
 
-        let request_id = next_request_id();
+        let request_id = next_request_id()?;
         let result = runtime
             .send_and_wait(RuntimeMsg::ApplyTransaction { request_id, ops })
             .and_then(|resp| match resp {
@@ -374,7 +374,7 @@ impl IngestCoordinator {
             .map(|i| i.to_transaction_op())
             .collect();
 
-        let request_id = next_request_id();
+        let request_id = next_request_id().expect("request ID in commit_batch");
 
         // Fast path: check cached stall flag (avoids round-trip in common case)
         // The flag is updated by runtime when memtable pressure changes.

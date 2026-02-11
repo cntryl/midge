@@ -293,7 +293,7 @@ impl Engine {
             memtable_size_limit = memtable_flush_threshold;
         }
 
-        let request_id = crate::runtime::next_request_id();
+        let request_id = crate::runtime::next_request_id()?;
         let resp = runtime_handle.send_and_wait(crate::runtime::RuntimeMsg::SetRuntimeConfig {
             request_id,
             memtable_size_limit: Some(memtable_size_limit),
@@ -428,7 +428,7 @@ impl Engine {
 
     /// Fetch the current runtime configuration snapshot for diagnostics or restoration.
     pub(crate) fn get_runtime_config(&self) -> MidgeResult<IngestModeSnapshot> {
-        let request_id = crate::runtime::next_request_id();
+        let request_id = crate::runtime::next_request_id()?;
         let resp = self
             .runtime_handle
             .send_and_wait(crate::runtime::RuntimeMsg::GetRuntimeConfig { request_id })?;
@@ -474,7 +474,7 @@ impl Engine {
 
     /// Return whether an ingest barrier is currently active.
     pub(crate) fn is_ingesting(&self) -> MidgeResult<bool> {
-        let request_id = crate::runtime::next_request_id();
+        let request_id = crate::runtime::next_request_id()?;
         let resp = self
             .runtime_handle
             .send_and_wait(crate::runtime::RuntimeMsg::GetIngestState { request_id })?;
@@ -493,7 +493,7 @@ impl Engine {
         let prev = self.get_runtime_config()?;
 
         // Step 1: Apply performance-oriented runtime knobs (larger memtable, batched WAL)
-        let request_id = crate::runtime::next_request_id();
+        let request_id = crate::runtime::next_request_id()?;
         let target_mem = (prev.memtable_size_limit.max(64 * 1024 * 1024)).saturating_mul(4); // grow 4x
         let batch_cfg = prev.wal_batch_config;
         let resp =
@@ -510,7 +510,7 @@ impl Engine {
         match resp {
             crate::runtime::RuntimeResponse::Ok { .. } => {
                 // Step 2: Ensure a hard ingest barrier: begin ingest (blocks until inflight compactions drain)
-                let bid = crate::runtime::next_request_id();
+                let bid = crate::runtime::next_request_id()?;
                 let br = self
                     .runtime_handle
                     .send_and_wait(crate::runtime::RuntimeMsg::BeginIngest { request_id: bid })?;
@@ -532,14 +532,14 @@ impl Engine {
     /// Restore runtime configuration from a previously-captured snapshot.
     pub(crate) fn exit_ingest_mode(&self, prev: IngestModeSnapshot) -> MidgeResult<()> {
         // Step 1: End ingest barrier (flush outstanding memtables and bump epoch)
-        let bid = crate::runtime::next_request_id();
+        let bid = crate::runtime::next_request_id()?;
         let br = self
             .runtime_handle
             .send_and_wait(crate::runtime::RuntimeMsg::EndIngest { request_id: bid })?;
         match br {
             crate::runtime::RuntimeResponse::Ok { .. } => {
                 // Step 2: Restore previous runtime configuration
-                let request_id = crate::runtime::next_request_id();
+                let request_id = crate::runtime::next_request_id()?;
                 let resp = self.runtime_handle.send_and_wait(
                     crate::runtime::RuntimeMsg::SetRuntimeConfig {
                         request_id,
@@ -573,7 +573,7 @@ impl Engine {
     /// Flush all pending writes to disk (used by tests)
     pub(crate) fn sync(&self) -> MidgeResult<()> {
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalSync {
-            request_id: next_request_id(),
+            request_id: next_request_id()?,
         })?;
 
         match response {
@@ -590,7 +590,7 @@ impl Engine {
         let response = self
             .runtime_handle
             .send_and_wait(RuntimeMsg::FlushMemtable {
-                request_id: next_request_id(),
+                request_id: next_request_id()?,
                 cf_id: cf.id(),
             })?;
 
@@ -765,7 +765,7 @@ impl Engine {
                     let response =
                         self.runtime_handle
                             .send_and_wait(RuntimeMsg::WalAppendDeleteRange {
-                                request_id: next_request_id(),
+                                request_id: next_request_id()?,
                                 cf_id,
                                 start_key,
                                 end_key,
@@ -812,7 +812,7 @@ impl Engine {
         cf_id: ColumnFamilyId,
         timeout: Duration,
     ) -> MidgeResult<bool> {
-        let request_id = next_request_id();
+        let request_id = next_request_id()?;
 
         let msg = RuntimeMsg::WaitForWriteStallClear { request_id, cf_id };
         let resp = self.runtime_handle.send_and_wait_timeout(msg, timeout)?;
@@ -851,7 +851,7 @@ impl Engine {
         sequence: u64,
     ) -> MidgeResult<Option<bytes::Bytes>> {
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::Read {
-            request_id: next_request_id(),
+            request_id: next_request_id()?,
             cf_id,
             key: key.to_vec(),
             sequence,
@@ -876,7 +876,7 @@ impl Engine {
         sequence: u64,
     ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::RangeScan {
-            request_id: next_request_id(),
+            request_id: next_request_id()?,
             cf_id,
             start: start.to_vec(),
             end: end.to_vec(),
@@ -907,7 +907,7 @@ impl Engine {
     pub fn create_column_family(&self, name: &str) -> MidgeResult<ColumnFamilyHandle> {
         let response = self.runtime_handle.send_and_wait_filtered(
             RuntimeMsg::ManifestCreateColumnFamily {
-                request_id: next_request_id(),
+                request_id: next_request_id()?,
                 name: name.to_string(),
             },
             |resp| {
@@ -932,7 +932,7 @@ impl Engine {
                 self.ingest_coordinators.insert(cf_id, coordinator);
                 self.runtime_handle
                     .send_and_wait(RuntimeMsg::ManifestPersist {
-                        request_id: next_request_id(),
+                        request_id: next_request_id()?,
                     })?;
 
                 Ok(handle)
@@ -949,7 +949,7 @@ impl Engine {
     pub fn drop_column_family(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {
         let response = self.runtime_handle.send_and_wait_filtered(
             RuntimeMsg::ManifestDropColumnFamily {
-                request_id: next_request_id(),
+                request_id: next_request_id()?,
                 cf_id,
             },
             |resp| {
@@ -974,7 +974,7 @@ impl Engine {
                 let _persist_response =
                     self.runtime_handle
                         .send_and_wait(RuntimeMsg::ManifestPersist {
-                            request_id: next_request_id(),
+                            request_id: next_request_id()?,
                         })?;
 
                 Ok(())
@@ -997,7 +997,7 @@ impl Engine {
 
     /// Compact all data (schedule compactions and wait for completion)
     pub fn compact_all(&self) -> MidgeResult<()> {
-        let request_id = next_request_id();
+        let request_id = next_request_id()?;
         let resp = self
             .runtime_handle
             .send_and_wait(crate::runtime::RuntimeMsg::CompactAll { request_id })?;
@@ -1024,7 +1024,7 @@ impl Engine {
         let response = self
             .runtime_handle
             .send_and_wait(RuntimeMsg::GetReadAmpMetrics {
-                request_id: next_request_id(),
+                request_id: next_request_id()?,
             })?;
 
         match response {

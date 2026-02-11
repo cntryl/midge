@@ -232,7 +232,7 @@ impl Transaction {
 
         // Fallback: legacy message passing (should not happen in normal operation)
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::Read {
-            request_id: next_request_id(),
+            request_id: next_request_id()?,
             cf_id: self.cf_id,
             key: key.to_vec(),
             sequence: self.start_sequence,
@@ -274,7 +274,7 @@ impl Transaction {
         } else {
             // Fallback: legacy message passing (should not happen in normal operation)
             let response = self.runtime_handle.send_and_wait(RuntimeMsg::RangeScan {
-                request_id: next_request_id(),
+                request_id: next_request_id()?,
                 cf_id: self.cf_id,
                 start: start.to_vec(),
                 end: end.to_vec(),
@@ -418,7 +418,7 @@ impl Transaction {
         let response = self
             .runtime_handle
             .send_and_wait(RuntimeMsg::ApplyTransaction {
-                request_id: next_request_id(),
+                request_id: next_request_id()?,
                 ops,
             })?;
 
@@ -426,7 +426,7 @@ impl Transaction {
             RuntimeResponse::TransactionApplied { .. } => {
                 if opts.is_sync() {
                     let sync_resp = self.runtime_handle.send_and_wait(RuntimeMsg::WalSync {
-                        request_id: next_request_id(),
+                        request_id: next_request_id()?,
                     })?;
                     match sync_resp {
                         RuntimeResponse::Ok { .. } => {}

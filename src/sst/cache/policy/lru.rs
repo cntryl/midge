@@ -67,7 +67,9 @@ impl CachePolicy for LruPolicy {
         }
 
         if let Some(idx) = victim_idx {
-            let victim = queue.remove(idx).unwrap_or_else(|| unreachable!("victim index from same queue"));
+            let victim = queue
+                .remove(idx)
+                .unwrap_or_else(|| unreachable!("victim index from same queue"));
             // Update all positions after the removed element
             for (_, p) in positions.iter_mut() {
                 if *p > idx {

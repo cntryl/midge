@@ -561,9 +561,10 @@ mod tests {
         // Act
         let current = iter.current();
 
-        // Assert - should be references to the data
-        assert_eq!(current.unwrap().0, &[1, 2][..]);
-        assert_eq!(current.unwrap().1, &[10, 20][..]);
+        // Assert - should be references to the data (single unwrap to avoid double call)
+        let (k, v) = current.expect("current");
+        assert_eq!(k, &[1, 2][..]);
+        assert_eq!(v, &[10, 20][..]);
     }
 
     #[test]

@@ -424,8 +424,10 @@ impl RuntimeState {
         }
     }
 
+    /// Allocate the next sequence number. Saturates at `u64::MAX` to avoid wrap;
+    /// after that, duplicate sequence numbers would occur (documented limitation).
     pub fn next_sequence(&mut self) -> u64 {
-        self.sequence += 1;
+        self.sequence = self.sequence.saturating_add(1);
         self.sequence
     }
 

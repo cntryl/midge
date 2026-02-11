@@ -66,8 +66,17 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 ///
 /// Uses `Relaxed` ordering because request IDs only need uniqueness,
 /// not cross-thread ordering guarantees.
-pub(crate) fn next_request_id() -> u64 {
-    NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+/// Returns an error if the counter would wrap (ID space exhausted).
+pub(crate) fn next_request_id() -> MidgeResult<u64> {
+    let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    if id == 0 {
+        // Wrapped; reset counter and refuse to hand out duplicate IDs.
+        NEXT_REQUEST_ID.store(1, Ordering::Relaxed);
+        return Err(MidgeError::Internal(
+            "request ID space exhausted (u64 wrap)".into(),
+        ));
+    }
+    Ok(id)
 }
 
 use serde::{Deserialize, Serialize};
@@ -794,7 +803,7 @@ impl RuntimeHandle {
     /// accepting new write transactions.
     pub fn check_write_stall(&self, cf_id: crate::engine::ColumnFamilyId) -> MidgeResult<bool> {
         let response = self.send_and_wait(RuntimeMsg::CheckWriteStall {
-            request_id: next_request_id(),
+            request_id: next_request_id()?,
             cf_id,
         })?;
 
@@ -961,9 +970,9 @@ mod tests {
         // (no setup)
 
         // Act
-        let id1 = next_request_id();
-        let id2 = next_request_id();
-        let id3 = next_request_id();
+        let id1 = next_request_id().expect("id");
+        let id2 = next_request_id().expect("id");
+        let id3 = next_request_id().expect("id");
 
         // Assert
         assert_ne!(id1, id2);
@@ -977,9 +986,9 @@ mod tests {
         // (no setup)
 
         // Act
-        let id1 = next_request_id();
-        let id2 = next_request_id();
-        let id3 = next_request_id();
+        let id1 = next_request_id().expect("id");
+        let id2 = next_request_id().expect("id");
+        let id3 = next_request_id().expect("id");
 
         // Assert
         assert!(id1 < id2);
@@ -994,7 +1003,7 @@ mod tests {
                 thread::spawn(|| {
                     let mut ids = vec![];
                     for _ in 0..20 {
-                        ids.push(next_request_id());
+                        ids.push(next_request_id().expect("id"));
                     }
                     ids
                 })
@@ -1024,7 +1033,7 @@ mod tests {
         // (no setup)
 
         // Act
-        let id = next_request_id();
+        let id = next_request_id().expect("id");
 
         // Assert - Should never be 0
         assert!(id > 0);
@@ -1112,7 +1121,7 @@ mod tests {
             .expect("start runtime");
         let resp = h
             .send_and_wait(RuntimeMsg::CompactAll {
-                request_id: next_request_id(),
+                request_id: next_request_id().expect("id"),
             })
             .expect("compact_all call");
         match resp {

@@ -55,10 +55,10 @@ impl ZipfianGenerator {
             return 1;
         }
 
-        let v = self.eta * u - (self.eta - 1.0);
+        let v = (self.eta * u - (self.eta - 1.0)).clamp(0.0, 1.0);
         let idx = (self.items as f64 * v.powf(self.alpha)) as usize;
 
-        idx % self.items
+        idx.min(self.items.saturating_sub(1))
     }
 
     /// Sample the next index using the provided RNG.
