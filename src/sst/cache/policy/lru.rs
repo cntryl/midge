@@ -37,7 +37,7 @@ impl CachePolicy for LruPolicy {
         let mut positions = self.positions.lock();
 
         // If key already exists, remove it from queue
-        if let Some(&pos) = positions.get(&key) {
+        if let Some(pos) = positions.remove(&key) {
             queue.remove(pos);
             // Update all positions after the removed element
             for (_, p) in positions.iter_mut() {
