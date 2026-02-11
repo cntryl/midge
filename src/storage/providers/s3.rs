@@ -104,13 +104,13 @@ pub struct S3Provider {
 
 impl S3Provider {
     /// Create provider with AWS credentials (SigV4 signing)
-    pub fn aws(bucket: String, region: String, creds: AwsCredentials) -> Self {
+    pub fn aws(bucket: String, region: String, creds: AwsCredentials) -> MidgeResult<Self> {
         let config = S3Config::aws(bucket, region);
         Self::with_config(config, Some(creds))
     }
 
     /// Create provider for Wasabi (simple access key/secret)
-    pub fn wasabi(bucket: String, region: String, access_key: String, secret_key: String) -> Self {
+    pub fn wasabi(bucket: String, region: String, access_key: String, secret_key: String) -> MidgeResult<Self> {
         let config = S3Config::wasabi(bucket, region.clone());
         let creds = AwsCredentials {
             access_key,
@@ -122,7 +122,7 @@ impl S3Provider {
     }
 
     /// Create provider for MinIO (access key/secret)
-    pub fn minio(bucket: String, endpoint: String, access_key: String, secret_key: String) -> Self {
+    pub fn minio(bucket: String, endpoint: String, access_key: String, secret_key: String) -> MidgeResult<Self> {
         let config = S3Config::minio(bucket, endpoint);
         let creds = AwsCredentials {
             access_key,
@@ -140,7 +140,7 @@ impl S3Provider {
         region: String,
         access_key: String,
         secret_key: String,
-    ) -> Self {
+    ) -> MidgeResult<Self> {
         let config = S3Config::oci_s3_compat(bucket, namespace, region.clone());
         let creds = AwsCredentials {
             access_key,
@@ -152,7 +152,7 @@ impl S3Provider {
     }
 
     /// Create provider with custom S3-compatible endpoint
-    pub fn custom(config: S3Config, access_key: String, secret_key: String) -> Self {
+    pub fn custom(config: S3Config, access_key: String, secret_key: String) -> MidgeResult<Self> {
         let creds = AwsCredentials {
             access_key,
             secret_key,
@@ -163,15 +163,15 @@ impl S3Provider {
     }
 
     /// Create provider with full config and optional credentials
-    fn with_config(config: S3Config, creds: Option<AwsCredentials>) -> Self {
+    fn with_config(config: S3Config, creds: Option<AwsCredentials>) -> MidgeResult<Self> {
         let signer = creds.map(|c| Arc::new(SigV4Signer::new(c)) as Arc<dyn CloudSigner>);
-        let executor = CloudExecutor::new(signer);
+        let executor = CloudExecutor::new(signer)?;
         let backend = Arc::new(S3Backend::new(config, executor));
-        Self { backend }
+        Ok(Self { backend })
     }
 
     /// Legacy constructor (AWS with explicit credentials)
-    pub fn new(bucket: String, region: String, creds: AwsCredentials) -> Self {
+    pub fn new(bucket: String, region: String, creds: AwsCredentials) -> MidgeResult<Self> {
         Self::aws(bucket, region, creds)
     }
 

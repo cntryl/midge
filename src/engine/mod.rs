@@ -321,7 +321,7 @@ impl Engine {
         // Initialize ingest coordinators
         let ingest_coordinators = dashmap::DashMap::new();
         let default_coordinator =
-            Arc::new(ingest::IngestCoordinator::new(0, runtime_handle.clone()));
+            Arc::new(ingest::IngestCoordinator::new(0, runtime_handle.clone())?);
         ingest_coordinators.insert(0, default_coordinator);
 
         // ═══════════════════════════════════════════════════════════════════════════
@@ -359,7 +359,7 @@ impl Engine {
                 let coordinator = Arc::new(ingest::IngestCoordinator::new(
                     cf_meta.id,
                     runtime_handle.clone(),
-                ));
+                )?);
                 ingest_coordinators.insert(cf_meta.id, coordinator);
             }
         }
@@ -928,7 +928,7 @@ impl Engine {
                 let coordinator = Arc::new(ingest::IngestCoordinator::new(
                     cf_id,
                     self.runtime_handle.clone(),
-                ));
+                )?);
                 self.ingest_coordinators.insert(cf_id, coordinator);
                 self.runtime_handle
                     .send_and_wait(RuntimeMsg::ManifestPersist {

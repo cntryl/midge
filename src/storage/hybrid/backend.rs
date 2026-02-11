@@ -80,6 +80,9 @@ pub struct HybridStorage {
 
     /// Dedicated WAL upload worker sender.
     wal_upload_tx: mpsc::Sender<UploadState>,
+
+    /// Flag indicating if WAL upload worker thread failed to spawn
+    upload_worker_failed: bool,
 }
 
 impl HybridStorage {
@@ -125,12 +128,13 @@ impl HybridStorage {
         // This avoids spawning one OS thread per segment, which is extremely
         // expensive under CloudFirst + synchronous write APIs (e.g. 10k puts).
         let (wal_upload_tx, wal_upload_rx) = mpsc::channel::<UploadState>();
+        let mut upload_worker_failed = false;
         {
             let cloud = Arc::clone(&cloud);
             let event_queue = Arc::clone(&event_queue);
             let external_event_tx = external_event_tx.clone();
 
-            std::thread::Builder::new()
+            let spawn_result = std::thread::Builder::new()
                 .name("midge-wal-uploader".to_string())
                 .spawn(move || {
                     while let Ok(upload) = wal_upload_rx.recv() {
@@ -228,8 +232,12 @@ impl HybridStorage {
                             }
                         }
                     }
-                })
-                .expect("failed to spawn WAL upload worker");
+                });
+
+            if let Err(e) = spawn_result {
+                tracing::error!("Failed to spawn WAL upload worker: {}", e);
+                upload_worker_failed = true;
+            }
         }
 
         Self {
@@ -240,6 +248,7 @@ impl HybridStorage {
             event_queue,
             external_event_tx,
             wal_upload_tx,
+            upload_worker_failed,
         }
     }
 

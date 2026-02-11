@@ -125,7 +125,7 @@ pub(crate) struct IngestCoordinator {
 
 impl IngestCoordinator {
     /// Create and start an ingest coordinator for a column family
-    pub fn new(cf_id: crate::engine::ColumnFamilyId, runtime: RuntimeHandle) -> Self {
+    pub fn new(cf_id: crate::engine::ColumnFamilyId, runtime: RuntimeHandle) -> MidgeResult<Self> {
         let (write_tx, write_rx) = bounded(INGEST_QUEUE_DEPTH);
         let (stop_tx, stop_rx) = bounded(1);
         let stall_flag = Arc::new(AtomicBool::new(false));
@@ -136,15 +136,20 @@ impl IngestCoordinator {
             .spawn(move || {
                 Self::ingest_loop(cf_id, runtime, write_rx, stop_rx, stall_flag_clone);
             })
-            .expect("Failed to spawn ingest thread");
+            .map_err(|e| {
+                crate::common::MidgeError::Internal(format!(
+                    "Failed to spawn ingest thread for CF {}: {}",
+                    cf_id, e
+                ))
+            })?;
 
-        Self {
+        Ok(Self {
             cf_id,
             write_tx,
             stop_tx,
             thread_handle: Some(thread_handle),
             stall_flag,
-        }
+        })
     }
 
     /// Update the cached stall status (called by engine when runtime notifies)

@@ -6,7 +6,7 @@ use crate::sst::cache::metrics::CacheMetrics;
 use crate::sst::cache::policy::{CachePolicy, CachePolicyType};
 use crate::sst::cache::value::CacheValue;
 use bytes::Bytes;
-use crossbeam_channel::{unbounded, Sender};
+use crossbeam_channel::{bounded, Sender};
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -48,7 +48,7 @@ impl CacheShard {
     ///
     /// Returns Arc<Self> because the background worker needs a reference
     pub fn new(max_bytes: u64, policy_type: CachePolicyType) -> Arc<Self> {
-        let (tx, rx) = unbounded();
+        let (tx, rx) = bounded(10_000);
 
         let shard = Arc::new(Self {
             entries: DashMap::new(),
@@ -227,7 +227,15 @@ impl CacheShard {
     fn evict_if_needed(&self) {
         use crate::sst::cache::BlockType;
 
-        while self.is_over_capacity() {
+        // Safeguard: limit eviction iterations to prevent excessive latency
+        // when admission worker thread fails. This prevents pathological cases
+        // where we spend excessive time evicting due to resource constraints.
+        const MAX_EVICTION_ATTEMPTS: usize = 100;
+        let mut eviction_count = 0;
+
+        while self.is_over_capacity() && eviction_count < MAX_EVICTION_ATTEMPTS {
+            eviction_count += 1;
+
             // Try to evict data blocks first (protect index/filter)
             if let Some(evicted) = self.try_evict_victim(&[BlockType::Index, BlockType::Filter]) {
                 self.update_metrics_after_eviction(evicted);
@@ -241,6 +249,14 @@ impl CacheShard {
             } else {
                 break; // Can't evict more data blocks, stop
             }
+        }
+
+        // Log if we hit the safeguard limit
+        if eviction_count >= MAX_EVICTION_ATTEMPTS && self.is_over_capacity() {
+            tracing::warn!(
+                "Cache eviction hit safeguard limit ({}), still over capacity",
+                MAX_EVICTION_ATTEMPTS
+            );
         }
     }
 

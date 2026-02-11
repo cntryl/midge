@@ -105,17 +105,17 @@ impl Drop for CloudExecutor {
 }
 
 impl CloudExecutor {
-    pub fn new(signer: Option<Arc<dyn CloudSigner>>) -> Self {
+    pub fn new(signer: Option<Arc<dyn CloudSigner>>) -> MidgeResult<Self> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("failed to build cloud tokio runtime");
+            .map_err(|e| MidgeError::Internal(format!("Failed to build cloud tokio runtime: {}", e)))?;
 
-        Self {
+        Ok(Self {
             client: Client::new(),
             signer,
             rt: Arc::new(rt),
-        }
+        })
     }
 
     fn sign_request(&self, request: &mut CloudRequest) -> MidgeResult<()> {

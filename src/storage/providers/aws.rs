@@ -23,16 +23,15 @@ impl AwsS3Provider {
     /// * `region` - AWS region (e.g., "us-east-1")
     /// * `access_key` - AWS access key ID
     /// * `secret_key` - AWS secret access key
-    pub fn new(bucket: String, region: String, access_key: String, secret_key: String) -> Self {
+    pub fn new(bucket: String, region: String, access_key: String, secret_key: String) -> MidgeResult<Self> {
         let creds = AwsCredentials {
             access_key,
             secret_key,
             region: region.clone(),
             session_token: None,
         };
-        Self {
-            inner: S3Provider::aws(bucket, region, creds),
-        }
+        let inner = S3Provider::aws(bucket, region, creds)?;
+        Ok(Self { inner })
     }
 
     /// Create AWS S3 provider with temporary credentials (includes session token)
@@ -51,24 +50,22 @@ impl AwsS3Provider {
         access_key: String,
         secret_key: String,
         session_token: String,
-    ) -> Self {
+    ) -> MidgeResult<Self> {
         let creds = AwsCredentials {
             access_key,
             secret_key,
             region: region.clone(),
             session_token: Some(session_token),
         };
-        Self {
-            inner: S3Provider::aws(bucket, region, creds),
-        }
+        let inner = S3Provider::aws(bucket, region, creds)?;
+        Ok(Self { inner })
     }
 
     /// Create AWS S3 provider from AwsCredentials
-    pub fn from_credentials(bucket: String, creds: AwsCredentials) -> Self {
+    pub fn from_credentials(bucket: String, creds: AwsCredentials) -> MidgeResult<Self> {
         let region = creds.region.clone();
-        Self {
-            inner: S3Provider::aws(bucket, region, creds),
-        }
+        let inner = S3Provider::aws(bucket, region, creds)?;
+        Ok(Self { inner })
     }
 
     /// Access the underlying S3Provider for lower-level operations

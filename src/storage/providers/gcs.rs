@@ -64,23 +64,23 @@ impl GcsProvider {
         bucket: String,
         project_id: String,
         token: String,
-    ) -> Self {
+    ) -> MidgeResult<Self> {
         let credential = GcsCredential::BearerToken {
             token: token.clone(),
         };
         let signer: Option<Arc<dyn CloudSigner>> =
             Some(Arc::new(BearerTokenSigner::new(token)));
-        let executor = CloudExecutor::new(signer);
+        let executor = CloudExecutor::new(signer)?;
         let backend = Arc::new(GcsBackend::new(
             bucket.clone(),
             executor,
         ));
-        Self {
+        Ok(Self {
             backend,
             bucket,
             project_id,
             credential,
-        }
+        })
     }
 
     /// Create provider with a service-account HMAC key pair.
@@ -89,7 +89,7 @@ impl GcsProvider {
         project_id: String,
         access_id: String,
         secret: String,
-    ) -> Self {
+    ) -> MidgeResult<Self> {
         let credential = GcsCredential::HmacKey {
             access_id: access_id.clone(),
             secret: secret.clone(),
@@ -101,22 +101,22 @@ impl GcsProvider {
             access_id,
             _secret: secret,
         }));
-        let executor = CloudExecutor::new(signer);
+        let executor = CloudExecutor::new(signer)?;
         let backend = Arc::new(GcsBackend::new(
             bucket.clone(),
             executor,
         ));
-        Self {
+        Ok(Self {
             backend,
             bucket,
             project_id,
             credential,
-        }
+        })
     }
 
     /// Legacy constructor — creates a provider with an empty bearer token.
     /// Callers should prefer `with_bearer_token` or `with_hmac_key`.
-    pub fn new(bucket: String, project_id: String) -> Self {
+    pub fn new(bucket: String, project_id: String) -> MidgeResult<Self> {
         Self::with_bearer_token(bucket, project_id, String::new())
     }
 
@@ -740,6 +740,6 @@ mod tests {
     // =========== Helper ===========
 
     fn make_noop_executor() -> CloudExecutor {
-        CloudExecutor::new(None)
+        CloudExecutor::new(None).expect("Failed to create noop executor in test")
     }
 }

@@ -828,7 +828,7 @@ pub struct Runtime {
 impl Runtime {
     /// Create a new runtime and a corresponding handle for submitting work.
     pub fn new() -> MidgeResult<(Self, RuntimeHandle)> {
-        let (msg_tx, msg_rx) = channel::unbounded();
+        let (msg_tx, msg_rx) = channel::bounded(1000);
         let router = Arc::new(ResponseRouter::new());
 
         let trace_enabled = std::env::var("MIDGE_TRACE_RUNTIME")
@@ -885,7 +885,7 @@ impl Runtime {
         };
 
         let msg_tx_for_loop = self.msg_tx.clone();
-        let msg_rx = std::mem::replace(&mut self.msg_rx, channel::unbounded().1);
+        let msg_rx = std::mem::replace(&mut self.msg_rx, channel::bounded(1000).1);
 
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())

@@ -17,6 +17,7 @@ pub struct LeaseHeartbeat {
     running: Arc<AtomicBool>,
     healthy: Arc<AtomicBool>,
     thread_handle: Option<JoinHandle<()>>,
+    spawn_failed: bool,
 }
 
 impl LeaseHeartbeat {
@@ -30,6 +31,7 @@ impl LeaseHeartbeat {
             running: Arc::new(AtomicBool::new(false)),
             healthy: Arc::new(AtomicBool::new(true)),
             thread_handle: None,
+            spawn_failed: false,
         }
     }
 
@@ -90,10 +92,19 @@ impl LeaseHeartbeat {
                 }
 
                 tracing::info!("lease heartbeat stopped");
-            })
-            .expect("failed to spawn lease heartbeat thread");
+            });
 
-        self.thread_handle = Some(handle);
+        match handle {
+            Ok(h) => {
+                self.thread_handle = Some(h);
+                self.spawn_failed = false;
+            }
+            Err(e) => {
+                tracing::error!("Failed to spawn lease heartbeat thread: {}", e);
+                self.healthy.store(false, Ordering::Release);
+                self.spawn_failed = true;
+            }
+        }
     }
 
     /// Stop the heartbeat loop.

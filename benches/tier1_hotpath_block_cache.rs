@@ -198,27 +198,26 @@ fn bench_insert_batch(c: &mut Criterion) {
     let cache_size = 10 * 1024 * 1024; // 10 MB
     let block_size = 4 * 1024; // 4 KB
 
-    for &num_blocks in &[100] {
-        let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
-        group.throughput(Throughput::Elements(num_blocks as u64));
+    let num_blocks = 100;
+    let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
+    group.throughput(Throughput::Elements(num_blocks as u64));
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(num_blocks),
-            &num_blocks,
-            |b, &n| {
-                b.iter_batched(
-                    || create_cache(cache_size),
-                    |cache| {
-                        for i in 0..n {
-                            cache.put(keys[i], blocks[i].clone());
-                        }
-                        black_box(());
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
-    }
+    group.bench_with_input(
+        BenchmarkId::from_parameter(num_blocks),
+        &num_blocks,
+        |b, &n| {
+            b.iter_batched(
+                || create_cache(cache_size),
+                |cache| {
+                    for i in 0..n {
+                        cache.put(keys[i], blocks[i].clone());
+                    }
+                    black_box(());
+                },
+                BatchSize::SmallInput,
+            )
+        },
+    );
 
     group.finish();
 }

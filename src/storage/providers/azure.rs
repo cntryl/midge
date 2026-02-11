@@ -60,7 +60,7 @@ pub struct AzureProvider {
 
 impl AzureProvider {
     /// Create provider with Shared Key authentication.
-    pub fn with_shared_key(account_name: String, container: String, account_key: String) -> Self {
+    pub fn with_shared_key(account_name: String, container: String, account_key: String) -> MidgeResult<Self> {
         let credential = AzureCredential::SharedKey {
             account_key: account_key.clone(),
         };
@@ -68,23 +68,23 @@ impl AzureProvider {
             account_name.clone(),
             account_key,
         )));
-        let executor = CloudExecutor::new(signer);
+        let executor = CloudExecutor::new(signer)?;
         let backend = Arc::new(AzureBackend::new(
             account_name.clone(),
             container.clone(),
             None, // no SAS — signer handles auth
             executor,
         ));
-        Self {
+        Ok(Self {
             backend,
             account_name,
             container,
             credential,
-        }
+        })
     }
 
     /// Create provider with SAS token authentication.
-    pub fn with_sas_token(account_name: String, container: String, sas_token: String) -> Self {
+    pub fn with_sas_token(account_name: String, container: String, sas_token: String) -> MidgeResult<Self> {
         // Normalise: strip leading '?' if present.
         let token = sas_token
             .strip_prefix('?')
@@ -93,24 +93,24 @@ impl AzureProvider {
         let credential = AzureCredential::SasToken {
             token: token.clone(),
         };
-        let executor = CloudExecutor::new(None); // SAS goes on the URL, no signer
+        let executor = CloudExecutor::new(None)?; // SAS goes on the URL, no signer
         let backend = Arc::new(AzureBackend::new(
             account_name.clone(),
             container.clone(),
             Some(token),
             executor,
         ));
-        Self {
+        Ok(Self {
             backend,
             account_name,
             container,
             credential,
-        }
+        })
     }
 
     /// Legacy constructor — defaults to shared key with an empty key.
     /// Callers should prefer `with_shared_key` or `with_sas_token`.
-    pub fn new(account_name: String, container: String) -> Self {
+    pub fn new(account_name: String, container: String) -> MidgeResult<Self> {
         Self::with_shared_key(account_name, container, String::new())
     }
 
@@ -854,6 +854,6 @@ mod tests {
 
     /// Create a no-op executor for URL-building tests (no signer).
     fn make_noop_executor() -> CloudExecutor {
-        CloudExecutor::new(None)
+        CloudExecutor::new(None).expect("Failed to create noop executor in test")
     }
 }
