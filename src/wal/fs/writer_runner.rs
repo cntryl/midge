@@ -9,13 +9,34 @@ pub struct SyncState {
     pub pending_fsyncs: u64,
     pub completed_flushes: u64,
     pub completed_fsyncs: u64,
+    /// Set to true when persistent write failures occur
+    pub write_failed: bool,
+    /// Set to true when persistent fsync failures occur
+    pub sync_failed: bool,
 }
+
+/// Queue entry with retry tracking to prevent unbounded re-queuing
+pub(crate) struct QueuedWrite {
+    pub(crate) data: Vec<u8>,
+    pub(crate) attempts: u8,
+}
+
+impl QueuedWrite {
+    pub(crate) fn new(data: Vec<u8>) -> Self {
+        Self { data, attempts: 0 }
+    }
+}
+
+/// Maximum number of retry attempts before dropping a write
+pub(crate) const MAX_WRITE_ATTEMPTS: u8 = 3;
+/// Maximum queue depth to prevent unbounded memory growth
+pub(crate) const MAX_QUEUE_DEPTH: usize = 1000;
 
 /// Configuration struct to reduce constructor arguments
 pub struct WriterConfig {
     pub fs: Arc<dyn Fs>,
     pub path: FsPath,
-    pub queue: Arc<Mutex<Vec<Vec<u8>>>>,
+    pub queue: Arc<Mutex<Vec<QueuedWrite>>>,
     pub queue_cond: Arc<Condvar>,
     pub buf_pool: Arc<Mutex<Vec<Vec<u8>>>>,
     pub sync_state: Arc<Mutex<SyncState>>,
@@ -63,7 +84,7 @@ impl WriterRunner {
 
         loop {
             // Wait for work (queue data, sync request, or shutdown)
-            let batch: Vec<Vec<u8>>;
+            let mut batch: Vec<QueuedWrite>;
             {
                 let mut q = self.config.queue.lock();
                 // Wait until: queue has data OR a sync/flush is requested OR shutdown requested.
@@ -117,17 +138,29 @@ impl WriterRunner {
                 batch = std::mem::take(&mut *q);
             }
 
+            // Filter out entries that have exceeded max retry attempts
+            batch.retain(|entry| {
+                if entry.attempts >= MAX_WRITE_ATTEMPTS {
+                    tracing::error!(attempts = entry.attempts, "dropping WAL write after max retries");
+                    false
+                } else {
+                    true
+                }
+            });
+
             // Process any queued data
             if !batch.is_empty() {
                 // Coalesce
-                let total: usize = batch.iter().map(|b| b.len()).sum();
+                let total: usize = batch.iter().map(|entry| entry.data.len()).sum();
                 let mut big = Vec::with_capacity(total);
-                for mut small in batch.into_iter() {
-                    big.extend_from_slice(&small);
-                    small.clear();
-                    // return small to pool
-                    let mut pool = self.config.buf_pool.lock();
-                    pool.push(small);
+                for entry in &batch {
+                    big.extend_from_slice(&entry.data);
+                }
+
+                // Return buffers to pool
+                let mut pool = self.config.buf_pool.lock();
+                for entry in batch {
+                    pool.push(entry.data);
                 }
 
                 // Write
@@ -151,26 +184,29 @@ impl WriterRunner {
                                 match file2.append(big_bytes.clone()) {
                                     Ok(pos) => write_result = Some(pos),
                                     Err(e2) => {
-                                        tracing::error!(error = ?e2, "wal writer append failed after retry; re-queueing buffer");
-                                        // Best-effort: requeue to avoid silent WAL loss.
-                                        let mut q = self.config.queue.lock();
-                                        q.push(big_bytes.to_vec());
-                                        self.config.queue_cond.notify_one();
+                                        tracing::error!(error = ?e2, "wal writer append failed after retry");
+                                        // Mark failure and exit thread on persistent failure
+                                        let mut s = self.config.sync_state.lock();
+                                        s.write_failed = true;
+                                        self.config.sync_cond.notify_all();
+                                        return;
                                     }
                                 }
                             } else {
-                                tracing::error!("wal writer could not reopen file handle after append failure; re-queueing buffer");
-                                let mut q = self.config.queue.lock();
-                                q.push(big_bytes.to_vec());
-                                self.config.queue_cond.notify_one();
+                                tracing::error!("wal writer could not reopen file handle after append failure");
+                                let mut s = self.config.sync_state.lock();
+                                s.write_failed = true;
+                                self.config.sync_cond.notify_all();
+                                return;
                             }
                         }
                     }
                 } else {
-                    tracing::error!("wal writer has no file handle; re-queueing buffer");
-                    let mut q = self.config.queue.lock();
-                    q.push(big_bytes.to_vec());
-                    self.config.queue_cond.notify_one();
+                    tracing::error!("wal writer has no file handle");
+                    let mut s = self.config.sync_state.lock();
+                    s.write_failed = true;
+                    self.config.sync_cond.notify_all();
+                    return;
                 }
 
                 if let Some(start_pos) = write_result {
@@ -219,7 +255,15 @@ impl WriterRunner {
                 }
                 if let Some(ref mut file) = file_opt {
                     let sync_start = Instant::now();
-                    let _ = file.sync(Durability::Durable);
+                    let sync_result = file.sync(Durability::Durable);
+                    if let Err(e) = sync_result {
+                        tracing::error!(error = ?e, "WAL fsync failed - marking sync as failed");
+                        let mut s = self.config.sync_state.lock();
+                        s.sync_failed = true;
+                        // Do NOT increment completed_fsyncs - leave waiters to check failure
+                        self.config.sync_cond.notify_all();
+                        return; // Exit run loop - writer thread terminates on fsync failure
+                    }
                     let sync_elapsed = sync_start.elapsed();
                     if let Some(t) = crate::telemetry::Telemetry::global() {
                         t.metrics()

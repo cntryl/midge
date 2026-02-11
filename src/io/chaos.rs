@@ -21,6 +21,7 @@ struct ChaosCounters {
     delete: AtomicUsize,
     list: AtomicUsize,
     rename: AtomicUsize,
+    sync: AtomicUsize,
 }
 
 impl ChaosFs {
@@ -40,6 +41,7 @@ impl ChaosFs {
                 delete: AtomicUsize::new(0),
                 list: AtomicUsize::new(0),
                 rename: AtomicUsize::new(0),
+                sync: AtomicUsize::new(0),
             },
         }
     }
@@ -98,6 +100,15 @@ impl ChaosFs {
                 .is_multiple_of(self.fail_every)
     }
 
+    fn should_fail_sync(&self) -> bool {
+        self.fail_every != 0
+            && self
+                .counters
+                .sync
+                .fetch_add(1, Ordering::Relaxed)
+                .is_multiple_of(self.fail_every)
+    }
+
     /// Reset all failure counters
     #[allow(dead_code)]
     pub fn reset_counters(&self) {
@@ -107,6 +118,7 @@ impl ChaosFs {
         self.counters.delete.store(0, Ordering::Relaxed);
         self.counters.list.store(0, Ordering::Relaxed);
         self.counters.rename.store(0, Ordering::Relaxed);
+        self.counters.sync.store(0, Ordering::Relaxed);
     }
 }
 
@@ -199,6 +211,10 @@ impl<'a> File for ChaosFile<'a> {
     }
 
     fn sync(&mut self, dur: Durability) -> FsResult<()> {
+        if self.chaos.should_fail_sync() {
+            tracing::warn!("ChaosFs: injecting sync failure");
+            return Err(FsError::Unavailable("chaos: sync failed".to_string()));
+        }
         self.inner.sync(dur)
     }
 

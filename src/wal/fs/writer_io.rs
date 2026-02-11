@@ -35,8 +35,8 @@ pub struct FsWalWriterIo {
     #[allow(dead_code)]
     fs: Arc<dyn Fs>,
 
-    // Queue of pending encoded record payloads (Vec<u8>)
-    queue: Arc<Mutex<Vec<Vec<u8>>>>,
+    // Queue of pending encoded record payloads with retry tracking
+    queue: Arc<Mutex<Vec<super::writer_runner::QueuedWrite>>>,
     queue_cond: Arc<Condvar>,
 
     // Pool of reusable small buffers to avoid per-put allocations
@@ -134,10 +134,20 @@ impl WalWriter for FsWalWriterIo {
         buf.extend_from_slice(&len_prefix);
         buf.extend_from_slice(&encoded);
 
-        // Enqueue
+        // Check backpressure BEFORE queuing
+        {
+            let q = self.queue.lock();
+            if q.len() >= super::writer_runner::MAX_QUEUE_DEPTH {
+                return Err(crate::common::MidgeError::Internal(
+                    format!("WAL queue full ({} items)", q.len())
+                ));
+            }
+        }
+
+        // Enqueue with retry counter
         {
             let mut q = self.queue.lock();
-            q.push(buf);
+            q.push(super::writer_runner::QueuedWrite::new(buf));
             // notify background writer
             self.queue_cond.notify_one();
         }
@@ -176,6 +186,11 @@ impl WalWriter for FsWalWriterIo {
         // Wait until writer marks the flush as completed
         let mut s = self.sync_state.lock();
         while s.completed_flushes < my_flush_id {
+            if s.write_failed {
+                return Err(crate::common::MidgeError::Internal(
+                    "WAL write failed persistently".to_string()
+                ));
+            }
             self.sync_cond.wait(&mut s);
         }
 
@@ -206,6 +221,11 @@ impl WalWriter for FsWalWriterIo {
 
         let mut s = self.sync_state.lock();
         while s.completed_fsyncs < my_sync_id {
+            if s.sync_failed {
+                return Err(crate::common::MidgeError::Internal(
+                    "WAL sync failed persistently".to_string()
+                ));
+            }
             self.sync_cond.wait(&mut s);
         }
         let elapsed = sync_start.elapsed();
