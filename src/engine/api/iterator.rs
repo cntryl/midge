@@ -3,11 +3,6 @@
 //! Iterators provide efficient sequential access to key-value pairs,
 //! including full range scans, prefix scans, and reverse iteration.
 
-#[allow(unused_imports)]
-use super::super::ColumnFamilyId;
-#[allow(unused_imports)]
-use crate::common::MidgeResult;
-
 /// Iteration direction
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {

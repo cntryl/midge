@@ -52,8 +52,8 @@ impl EventLoop {
         }
 
         // IMPORTANT: If we already have a buffered non-write message, do not `try_recv()`.
-        // Otherwise we could consume another non-write message and have nowhere to stash it,
-        // effectively dropping it and causing the corresponding `send_and_wait()` to hang.
+        // Otherwise we could consume another non-write message and have nowhere to stash it.
+        // The stashed message is always consumed on the next main-loop recv (see event_loop mod).
         if self.pending_msg.is_some() {
             return 0;
         }

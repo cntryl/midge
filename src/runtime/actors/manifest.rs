@@ -422,9 +422,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let sst_name = "sst_000003_000003.sst".to_string();
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
-        // Use a short-lived mutable borrow to satisfy Clippy's `unused_mut` lint —
-        // the test needs `state` to be mutable later when calling `add_sst`.
-        let _ = &mut state;
         assert!(state.sst_dir.exists(), "sst dir must exist");
         let sst_path = state.sst_dir.join(&sst_name);
 
@@ -453,7 +450,6 @@ mod tests {
             largest_seq: Some(10),
         };
 
-        let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
         assert_eq!(
             state.sst_dir.join(&sst_name),
             sst_path,

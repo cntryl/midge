@@ -334,29 +334,28 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::field_reassign_with_default)]
     fn should_roundtrip_manifest_when_persisting() {
-        // Arrange
+        // Arrange: build manifest in one expression to avoid field_reassign_with_default
         let test_dir = create_test_dir();
-        let mut manifest = Manifest::default();
-        manifest.next_wal_seq = 42;
-        manifest.last_persisted_sequence = 100;
-        manifest
-            .column_families
-            .push(crate::metadata::ColumnFamilyMeta {
-                id: 0,
-                name: "default".to_string(),
-                created_at: 0,
-                deleted_at: None,
-            });
-        manifest
-            .column_families
-            .push(crate::metadata::ColumnFamilyMeta {
-                id: 1,
-                name: "secondary".to_string(),
-                created_at: 0,
-                deleted_at: None,
-            });
+        let manifest = Manifest {
+            next_wal_seq: 42,
+            last_persisted_sequence: 100,
+            column_families: vec![
+                crate::metadata::ColumnFamilyMeta {
+                    id: 0,
+                    name: "default".to_string(),
+                    created_at: 0,
+                    deleted_at: None,
+                },
+                crate::metadata::ColumnFamilyMeta {
+                    id: 1,
+                    name: "secondary".to_string(),
+                    created_at: 0,
+                    deleted_at: None,
+                },
+            ],
+            ..Default::default()
+        };
 
         // Act
         ManifestPersistence::save(&test_dir, &manifest).expect("save should succeed");

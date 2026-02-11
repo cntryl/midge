@@ -30,8 +30,10 @@ use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 /// It does not manage segment rotation, sequence assignment, recovery,
 /// or any other higher-level concerns. Those belong to the WAL actor.
 pub struct FsWalWriterIo {
+    /// Reserved for segment rotation / reopen.
     #[allow(dead_code)]
     path: FsPath,
+    /// Reserved for segment rotation.
     #[allow(dead_code)]
     fs: Arc<dyn Fs>,
 

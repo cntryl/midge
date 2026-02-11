@@ -123,39 +123,40 @@ fn scan_tlvs<'a>(
     Ok(())
 }
 
+/// Helper: add to capacity or return error on overflow (avoids silent cap and potential OOM).
+fn add_capacity(capacity: usize, delta: usize) -> MidgeResult<usize> {
+    capacity
+        .checked_add(delta)
+        .ok_or_else(|| MidgeError::InvalidArgument("record size overflow".into()))
+}
+
 /// Encode a WAL record to bytes (v2 payload).
 pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
     // Use checked adds to avoid overflow on 32-bit systems or huge values.
     let mut capacity = PREFIX_LEN;
-    capacity = capacity.checked_add(TLV_HEADER_LEN + 1).unwrap_or(capacity); // OP
-    capacity = capacity.checked_add(TLV_HEADER_LEN + 4).unwrap_or(capacity); // CF_ID
-    capacity = capacity.checked_add(TLV_HEADER_LEN + 8).unwrap_or(capacity); // SEQ
-    capacity = capacity
-        .checked_add(TLV_HEADER_LEN + record.key.len())
-        .unwrap_or(capacity);
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + 1)?; // OP
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + 4)?; // CF_ID
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?; // SEQ
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + record.key.len())?;
 
     // Preserve existing semantics: an empty VALUE behaves like None.
     if let Some(v) = &record.value {
         if !v.is_empty() {
-            capacity = capacity
-                .checked_add(TLV_HEADER_LEN + v.len())
-                .unwrap_or(capacity);
+            capacity = add_capacity(capacity, TLV_HEADER_LEN + v.len())?;
         }
     }
 
     if record.expiration.is_some() {
-        capacity = capacity.checked_add(TLV_HEADER_LEN + 8).unwrap_or(capacity);
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
     }
     if let Some(r) = &record.range_end {
-        capacity = capacity
-            .checked_add(TLV_HEADER_LEN + r.len())
-            .unwrap_or(capacity);
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + r.len())?;
     }
     if record.txn_id.is_some() {
-        capacity = capacity.checked_add(TLV_HEADER_LEN + 8).unwrap_or(capacity);
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
     }
     if record.compression.is_some() {
-        capacity = capacity.checked_add(TLV_HEADER_LEN + 1).unwrap_or(capacity);
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + 1)?;
     }
 
     let mut buf = BytesMut::with_capacity(capacity);

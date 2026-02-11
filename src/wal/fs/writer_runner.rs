@@ -83,8 +83,9 @@ impl WriterRunner {
         let mut file_opt = self.open_file_handle().ok();
 
         loop {
-            // Wait for work (queue data, sync request, or shutdown)
-            let mut batch: Vec<QueuedWrite>;
+            // Wait for work (queue data, sync request, or shutdown).
+            // Lock order: always queue then sync_state (briefly); never the reverse.
+            let batch: Vec<QueuedWrite>;
             {
                 let mut q = self.config.queue.lock();
                 // Wait until: queue has data OR a sync/flush is requested OR shutdown requested.
@@ -138,15 +139,17 @@ impl WriterRunner {
                 batch = std::mem::take(&mut *q);
             }
 
-            // Filter out entries that have exceeded max retry attempts
-            batch.retain(|entry| {
-                if entry.attempts >= MAX_WRITE_ATTEMPTS {
-                    tracing::error!(attempts = entry.attempts, "dropping WAL write after max retries");
-                    false
-                } else {
-                    true
-                }
-            });
+            // If any entry has exceeded max retry attempts, fail the writer and notify waiters
+            // instead of silently dropping data (which would cause recovery to miss it).
+            if batch.iter().any(|entry| entry.attempts >= MAX_WRITE_ATTEMPTS) {
+                tracing::error!(
+                    "WAL write batch exceeded max retries; failing writer so waiters see write_failed"
+                );
+                let mut s = self.config.sync_state.lock();
+                s.write_failed = true;
+                self.config.sync_cond.notify_all();
+                return;
+            }
 
             // Process any queued data
             if !batch.is_empty() {
@@ -166,7 +169,7 @@ impl WriterRunner {
                 // Write
                 let big_bytes = bytes::Bytes::from(big);
                 let write_start = Instant::now();
-                let mut write_result: Option<u64> = None;
+                let write_result: Option<u64>;
 
                 // Ensure a handle exists if possible
                 if file_opt.is_none() {

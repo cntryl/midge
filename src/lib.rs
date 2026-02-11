@@ -27,10 +27,8 @@
 // Foundation - no dependencies
 pub mod common;
 
-// Internal modules — items in these private modules may not be reached from the
-// public API surface but are intentionally retained as tested infrastructure.
-// They participate in internal subsystems (compaction, runtime actors, telemetry,
-// storage orchestration) and are exercised by unit tests within each module.
+// Internal modules — used by engine/runtime; the compiler reports "dead" because
+// no external crate references them. They are exercised by unit tests within each module.
 #[allow(dead_code)]
 mod compaction;
 #[allow(dead_code)]

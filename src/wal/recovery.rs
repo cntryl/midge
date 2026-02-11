@@ -187,7 +187,6 @@ pub fn replay_wal(
             tracing::warn!(dir = %wal_dir, error = %e, "wal replay encountered corruption");
             // Tolerate corruption by returning successfully with whatever state was recovered
             // before the corruption point (commonly a truncated tail record after a crash).
-            let _ = e;
             Ok(stats)
         }
         Err(e) => {
