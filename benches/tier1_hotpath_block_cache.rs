@@ -198,7 +198,7 @@ fn bench_insert_batch(c: &mut Criterion) {
     let cache_size = 10 * 1024 * 1024; // 10 MB
     let block_size = 4 * 1024; // 4 KB
 
-    for &num_blocks in &[100, 1_000] {
+    for &num_blocks in &[100] {
         let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
         group.throughput(Throughput::Elements(num_blocks as u64));
 
@@ -223,39 +223,6 @@ fn bench_insert_batch(c: &mut Criterion) {
     group.finish();
 }
 
-// ─── Eviction Benchmark ──────────────────────────────────────────────────────
-
-/// Benchmark cache behavior under memory pressure (eviction).
-fn bench_eviction(c: &mut Criterion) {
-    let mut group = c.benchmark_group("block_cache/eviction");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1000));
-
-    // Small cache to trigger eviction (2 MB holds ~512 4KB blocks)
-    let cache_size = 2 * 1024 * 1024;
-    let block_size = 4 * 1024;
-    let num_blocks = 1000;
-
-    let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
-
-    group.bench_function("insert_1000_into_512_capacity", |b| {
-        // Use iter_batched to create fresh cache for each iteration
-        // This isolates cache construction overhead and provides consistent eviction behavior
-        b.iter_batched(
-            || create_cache(cache_size),
-            |cache| {
-                for i in 0..num_blocks {
-                    cache.put(keys[i], blocks[i].clone());
-                }
-                black_box(cache)
-            },
-            BatchSize::SmallInput,
-        )
-    });
-
-    group.finish();
-}
-
 // ─── Criterion Setup ─────────────────────────────────────────────────────────
 
 criterion_group! {
@@ -266,7 +233,6 @@ criterion_group! {
         bench_insert_single,
         bench_get_batch_hit,
         bench_get_batch_miss,
-        bench_insert_batch,
-        bench_eviction
+        bench_insert_batch
 }
 criterion_main!(tier1_hotpath_block_cache);
