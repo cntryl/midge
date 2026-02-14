@@ -1,0 +1,22 @@
+services:
+  testrunner:
+    build:
+      context: .
+      dockerfile: testrunner/Dockerfile
+    image: midge:test
+    container_name: midge-testrunner
+    volumes:
+      - ./results:/output
+    environment:
+      RUST_BACKTRACE: 1
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 7G
+        reservations:
+          cpus: "1"
+          memory: 3500M
+    command: -c "make -f /testrunner/Makefile all"
