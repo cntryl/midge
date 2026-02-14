@@ -21,7 +21,12 @@ static BENCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn unique_bench_path(prefix: &str) -> PathBuf {
     let counter = BENCH_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
-    std::env::temp_dir().join(format!("midge_bench_{}_{}_{}", prefix, pid, counter))
+    let base_dir = std::env::var("MIDGE_BENCH_DIR")
+        .ok()
+        .filter(|val| !val.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    base_dir.join(format!("midge_bench_{}_{}_{}", prefix, pid, counter))
 }
 
 /// Storage mode variant for benchmark parameterization.

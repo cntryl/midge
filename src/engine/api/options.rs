@@ -444,7 +444,9 @@ impl OpenOptions {
 }
 
 mod memory {
+    #[cfg(target_os = "linux")]
     use std::fs;
+    #[cfg(target_os = "linux")]
     use std::path::Path;
 
     pub fn auto_memory_budget_bytes() -> Option<usize> {
@@ -455,11 +457,11 @@ mod memory {
     fn budget_from_limit_bytes(limit: u64) -> usize {
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
         let mut budget = limit / 2;
-        let min_budget = 64 * 1024 * 1024;
+        let min_budget: usize = 64 * 1024 * 1024;
         if limit >= min_budget.saturating_mul(2) {
             budget = budget.max(min_budget);
         } else {
-            budget = budget.max(1 * 1024 * 1024);
+            budget = budget.max(1024 * 1024);
         }
         budget.min(limit).max(1)
     }

@@ -28,12 +28,20 @@ impl EventLoop {
             .cloned()
             .collect();
 
+        let sst_path_prefix = self
+            .state
+            .sst_dir
+            .strip_prefix(&self.state.db_path)
+            .unwrap_or_else(|_| std::path::Path::new("sst"))
+            .to_path_buf();
         Some(super::super::ReadSnapshot {
             cf_id,
             memtable: cf_state.memtable.clone(),
             immutable_memtables: cf_state.immutable_memtables.clone(),
             sst_files,
-            sst_dir: self.state.sst_dir.clone(),
+            sst_fs: std::sync::Arc::clone(&self.state.fs),
+            sst_path_prefix,
+            memory_mode: self.state.memory_mode,
         })
     }
 

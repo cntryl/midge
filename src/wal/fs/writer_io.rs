@@ -177,15 +177,13 @@ impl WalWriter for FsWalWriterIo {
         }
         
         // Still full after max attempts - fail with detailed diagnostics
-        {
-            let q = self.queue.lock();
-            return Err(crate::common::MidgeError::Internal(format!(
-                "WAL queue full after {} attempts ({}/{} items, backoff exhausted)",
-                MAX_WAIT_ATTEMPTS,
-                q.len(),
-                super::writer_runner::MAX_QUEUE_DEPTH
-            )));
-        }
+        let q = self.queue.lock();
+        Err(crate::common::MidgeError::Internal(format!(
+            "WAL queue full after {} attempts ({}/{} items, backoff exhausted)",
+            MAX_WAIT_ATTEMPTS,
+            q.len(),
+            super::writer_runner::MAX_QUEUE_DEPTH
+        )))
     }
 
     fn append_op(

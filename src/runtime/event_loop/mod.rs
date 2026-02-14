@@ -190,6 +190,12 @@ impl EventLoop {
                 .filter(|f| f.cf_id == cf_id)
                 .cloned()
                 .collect();
+            let sst_path_prefix = self
+                .state
+                .sst_dir
+                .strip_prefix(&self.state.db_path)
+                .unwrap_or_else(|_| std::path::Path::new("sst"))
+                .to_path_buf();
             cf_snapshots.insert(
                 cf_id,
                 CfSnapshotData {
@@ -197,7 +203,9 @@ impl EventLoop {
                         cf_state.memtable.clone(),
                         cf_state.immutable_memtables.clone(),
                         cf_files,
-                        self.state.sst_dir.clone(),
+                        Arc::clone(&self.state.fs),
+                        sst_path_prefix,
+                        self.state.memory_mode,
                     )),
                 },
             );
@@ -692,11 +700,19 @@ impl EventLoop {
                             .cloned()
                             .collect();
 
+                        let sst_path_prefix = self
+                            .state
+                            .sst_dir
+                            .strip_prefix(&self.state.db_path)
+                            .unwrap_or_else(|_| std::path::Path::new("sst"))
+                            .to_path_buf();
                         let snapshot = Arc::new(ReadSnapshot::new(
                             cf_state.memtable.clone(),
                             cf_state.immutable_memtables.clone(),
                             cf_files,
-                            self.state.sst_dir.clone(),
+                            Arc::clone(&self.state.fs),
+                            sst_path_prefix,
+                            self.state.memory_mode,
                         ));
                         self.respond(
                             request_id,
@@ -730,11 +746,19 @@ impl EventLoop {
                             .filter(|f| f.cf_id == cf_id)
                             .cloned()
                             .collect();
+                        let sst_path_prefix = self
+                            .state
+                            .sst_dir
+                            .strip_prefix(&self.state.db_path)
+                            .unwrap_or_else(|_| std::path::Path::new("sst"))
+                            .to_path_buf();
                         Some(Arc::new(ReadSnapshot::new(
                             cf_state.memtable.clone(),
                             cf_state.immutable_memtables.clone(),
                             cf_files,
-                            self.state.sst_dir.clone(),
+                            Arc::clone(&self.state.fs),
+                            sst_path_prefix,
+                            self.state.memory_mode,
                         )))
                     } else {
                         None
