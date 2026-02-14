@@ -41,6 +41,8 @@ pub struct Metrics {
     pub wal_lock_wait_ns_total: Arc<AtomicU64>,
     pub wal_write_syscall_count: Arc<AtomicU64>,
     pub wal_write_syscall_ns_total: Arc<AtomicU64>,
+    pub wal_backpressure_wait_count: Arc<AtomicU64>,
+    pub wal_backpressure_wait_attempts_total: Arc<AtomicU64>,
 
     // SST operations
     pub sst_created: Arc<AtomicU64>,
@@ -122,6 +124,8 @@ impl Metrics {
             wal_lock_wait_ns_total: Arc::new(AtomicU64::new(0)),
             wal_write_syscall_count: Arc::new(AtomicU64::new(0)),
             wal_write_syscall_ns_total: Arc::new(AtomicU64::new(0)),
+            wal_backpressure_wait_count: Arc::new(AtomicU64::new(0)),
+            wal_backpressure_wait_attempts_total: Arc::new(AtomicU64::new(0)),
             sst_created: Arc::new(AtomicU64::new(0)),
             sst_loaded: Arc::new(AtomicU64::new(0)),
             compactions_run: Arc::new(AtomicU64::new(0)),
@@ -325,6 +329,16 @@ impl Metrics {
     pub fn record_wal_fsync_ns(&self, ns: u64) {
         if self.enabled {
             self.wal_fsync_ns_total.fetch_add(ns, Ordering::Relaxed);
+        }
+    }
+
+    /// Record WAL backpressure wait (when queue is full and producer must wait)
+    #[inline]
+    pub fn record_wal_backpressure_wait(&self, wait_attempts: u64) {
+        if self.enabled {
+            self.wal_backpressure_wait_count.fetch_add(1, Ordering::Relaxed);
+            self.wal_backpressure_wait_attempts_total
+                .fetch_add(wait_attempts, Ordering::Relaxed);
         }
     }
 

@@ -14,10 +14,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2"
-          memory: 7G
+          cpus: 2
+          memory: 1GB
         reservations:
-          cpus: "1"
-          memory: 3500M
+          cpus: 2
+          memory: 1GB
     entrypoint: /bin/bash
-    command: -c "(cargo test && cargo bench --bench 'tier1_*' --bench 'tier2_*' && cargo stress --verbose) 2>&1 | tee /output/test-results.log"
+    command: -c "(cargo test && cargo bench --bench 'tier1_*' --bench 'tier2_*' && cargo stress --verbose --warmup 1) 2>&1 | tee /output/test-results.log"

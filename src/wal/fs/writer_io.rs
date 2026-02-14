@@ -143,28 +143,49 @@ impl WalWriter for FsWalWriterIo {
         buf.extend_from_slice(&len_prefix);
         buf.extend_from_slice(&encoded);
 
-        // Check backpressure BEFORE queuing
-        {
-            let q = self.queue.lock();
-            if q.len() >= super::writer_runner::MAX_QUEUE_DEPTH {
-                return Err(crate::common::MidgeError::Internal(format!(
-                    "WAL queue full ({} items)",
-                    q.len()
-                )));
-            }
-        }
-
-        // Enqueue with retry counter
-        {
-            let mut q = self.queue.lock();
-            q.push(super::writer_runner::QueuedWrite::new(buf));
-            // notify background writer
-            self.queue_cond.notify_one();
-        }
-
         // Return a best-effort start position; real position updated by writer thread.
         let pos = self.current_pos.load(std::sync::atomic::Ordering::SeqCst);
-        Ok(pos)
+
+        // Enqueue with backpressure: if queue is full, wait for it to drain.
+        // Use exponential backoff + timeout to avoid busy-waiting.
+        // This prevents "WAL queue full" errors under high load and enables smooth backpressure.
+        let mut backoff_ms = 1u64;
+        const MAX_BACKOFF_MS: u64 = 100;
+        const MAX_WAIT_ATTEMPTS: u32 = 50; // ~5s max wait with exponential backoff
+
+        for attempt in 0..MAX_WAIT_ATTEMPTS {
+            let mut q = self.queue.lock();
+            if q.len() < super::writer_runner::MAX_QUEUE_DEPTH {
+                // Space available, queue the write
+                q.push(super::writer_runner::QueuedWrite::new(buf));
+                self.queue_cond.notify_one();
+                
+                if attempt > 0 {
+                    if let Some(t) = crate::telemetry::Telemetry::global() {
+                        t.metrics().record_wal_backpressure_wait(attempt as u64);
+                    }
+                }
+                return Ok(pos);
+            }
+            
+            // Queue is full, wait for drain before retry
+            let wait_duration = std::time::Duration::from_millis(backoff_ms);
+            self.queue_cond.wait_for(&mut q, wait_duration);
+            
+            // Exponential backoff: 1ms → 2ms → 4ms → ... → 100ms
+            backoff_ms = std::cmp::min(backoff_ms * 2, MAX_BACKOFF_MS);
+        }
+        
+        // Still full after max attempts - fail with detailed diagnostics
+        {
+            let q = self.queue.lock();
+            return Err(crate::common::MidgeError::Internal(format!(
+                "WAL queue full after {} attempts ({}/{} items, backoff exhausted)",
+                MAX_WAIT_ATTEMPTS,
+                q.len(),
+                super::writer_runner::MAX_QUEUE_DEPTH
+            )));
+        }
     }
 
     fn append_op(

@@ -2,8 +2,6 @@ FROM rust:latest
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
-    make \
-    python3 \
     coreutils \
     pkg-config \
     libssl-dev \
@@ -30,4 +28,4 @@ RUN cargo build --all-targets
 
 # Set entrypoint to run Makefile
 ENTRYPOINT ["bash", "-c"]
-CMD ["cargo build"]
+CMD ["cargo build --all-targets"]

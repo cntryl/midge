@@ -30,7 +30,11 @@ impl QueuedWrite {
 /// Maximum number of retry attempts before dropping a write
 pub(crate) const MAX_WRITE_ATTEMPTS: u8 = 3;
 /// Maximum queue depth to prevent unbounded memory growth
-pub(crate) const MAX_QUEUE_DEPTH: usize = 1000;
+/// Increased from 1000 to 5000 to handle high-concurrency workloads:
+/// - Writer drains ~500k-1M items/sec, so 5000 items ≈ 5-10ms of backlog
+/// - Memory overhead: 5000 × 512B average ≈ 2.5MB (acceptable)
+/// - Reduces frequency of backpressure triggers while providing smooth flow control
+pub(crate) const MAX_QUEUE_DEPTH: usize = 5000;
 
 /// Configuration struct to reduce constructor arguments
 pub struct WriterConfig {
@@ -163,11 +167,15 @@ impl WriterRunner {
                     big.extend_from_slice(&entry.data);
                 }
 
-                // Return buffers to pool
-                let mut pool = self.config.buf_pool.lock();
-                for entry in batch {
-                    pool.push(entry.data);
+                // Return buffers to pool and notify any waiting producers that queue drained
+                {
+                    let mut pool = self.config.buf_pool.lock();
+                    for entry in batch {
+                        pool.push(entry.data);
+                    }
                 }
+                // Notify producers waiting on backpressure - queue now has space
+                self.config.queue_cond.notify_all();
 
                 // Write
                 let big_bytes = bytes::Bytes::from(big);
