@@ -180,11 +180,17 @@ impl EventLoop {
                     drained += 1;
                 }
 
-                Ok(RuntimeMsg::ApplyTransaction { request_id, ops }) => {
-                    match self
-                        .wal_actor
-                        .append_transaction(&mut self.state, request_id, ops)
-                    {
+                Ok(RuntimeMsg::ApplyTransaction {
+                    request_id,
+                    ops,
+                    durability_policy,
+                }) => {
+                    match self.wal_actor.append_transaction(
+                        &mut self.state,
+                        request_id,
+                        ops,
+                        durability_policy,
+                    ) {
                         Ok((last_sequence, op_count, deferred)) => {
                             // Publish snapshot BEFORE responding so callers see the write.
                             self.publish_snapshot();

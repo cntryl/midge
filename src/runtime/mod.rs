@@ -213,9 +213,12 @@ pub enum RuntimeMsg {
     ///
     /// Sequence numbers are allocated in-order inside the runtime.
     /// The response returns the last allocated sequence for the transaction.
+    /// The durability_policy parameter allows per-request durability control
+    /// (e.g., BestEffort for bulk loads to skip WAL writes entirely).
     ApplyTransaction {
         request_id: u64,
         ops: Vec<TransactionOp>,
+        durability_policy: Option<DurabilityPolicy>,
     },
     /// Sync WAL to disk.
     WalSync { request_id: u64 },

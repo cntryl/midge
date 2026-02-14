@@ -633,10 +633,15 @@ impl WalActor {
     ///
     /// This method:
     /// - allocates a single transaction id
-    /// - writes TxnBegin marker
-    /// - writes all operation records (in order)
-    /// - writes TxnCommit marker
+    /// - writes TxnBegin marker (unless BestEffort)
+    /// - writes all operation records (in order, unless BestEffort)
+    /// - writes TxnCommit marker (unless BestEffort)
     /// - applies all operations to memtables (in order)
+    ///
+    /// The `durability_policy` parameter allows per-request durability control.
+    /// If Some(DurabilityPolicy::BestEffort), WAL writes are skipped entirely
+    /// (only memtable updates happen) for maximum bulk-load performance.
+    /// If None, uses the actor's configured durability policy.
     ///
     /// Returns the last allocated sequence number for the batch.
     pub fn append_transaction(
@@ -644,6 +649,7 @@ impl WalActor {
         state: &mut RuntimeState,
         _request_id: u64,
         ops: Vec<crate::runtime::TransactionOp>,
+        durability_policy: Option<DurabilityPolicy>,
     ) -> MidgeResult<(u64, usize, bool)> {
         if ops.is_empty() {
             return Ok((state.sequence, 0, false));
@@ -694,17 +700,30 @@ impl WalActor {
             cf_id: 0,
         });
 
-        // Create and write begin record
-        let mut begin_record =
-            WalRecord::new_cf(0, WalOpKind::TxnBegin, marker_key.clone(), None, begin_seq);
-        begin_record.txn_id = Some(txn_id);
+        // Determine effective durability policy: use provided one, or fall back to actor's default
+        let effective_durability = durability_policy.unwrap_or(self.durability_policy);
 
-        // Pre-allocate WAL records batch: begin + N ops + commit
-        let mut wal_records: Vec<WalRecord> = Vec::with_capacity(ops_count + 2);
-        wal_records.push(begin_record);
-
+        // Build apply_ops for memtable updates (always needed)
         let mut apply_ops: Vec<TransactionApplyOp> = Vec::with_capacity(ops_count);
         let mut total_wal_bytes: usize = 0;
+
+        // For BestEffort mode, skip WAL entirely - only update memtable
+        let skip_wal = matches!(effective_durability, DurabilityPolicy::BestEffort);
+
+        // Build op records and apply_ops using deterministic sequences
+        let mut wal_records: Vec<WalRecord> = if skip_wal {
+            Vec::new() // Don't allocate WAL records for BestEffort
+        } else {
+            // Pre-allocate WAL records batch: begin + N ops + commit
+            let mut records = Vec::with_capacity(ops_count + 2);
+
+            // Create and write begin record
+            let mut begin_record =
+                WalRecord::new_cf(0, WalOpKind::TxnBegin, marker_key.clone(), None, begin_seq);
+            begin_record.txn_id = Some(txn_id);
+            records.push(begin_record);
+            records
+        };
 
         // Build op records using deterministic sequences
         for (i, op) in ops.into_iter().enumerate() {
@@ -752,7 +771,9 @@ impl WalActor {
                         sequence: seq,
                     });
 
-                    wal_records.push(record);
+                    if !skip_wal {
+                        wal_records.push(record);
+                    }
                 }
                 crate::runtime::TransactionOp::Delete { cf_id, key } => {
                     let mut record =
@@ -771,46 +792,55 @@ impl WalActor {
                         sequence: seq,
                     });
 
-                    wal_records.push(record);
+                    if !skip_wal {
+                        wal_records.push(record);
+                    }
                 }
             }
         }
 
-        // Write commit record
-        let last_sequence = commit_seq;
-        let mut commit_record =
-            WalRecord::new_cf(0, WalOpKind::TxnCommit, marker_key, None, commit_seq);
-        commit_record.txn_id = Some(txn_id);
-        wal_records.push(commit_record);
+        // Write commit record (only if not skipping WAL)
+        if !skip_wal {
+            let mut commit_record =
+                WalRecord::new_cf(0, WalOpKind::TxnCommit, marker_key, None, commit_seq);
+            commit_record.txn_id = Some(txn_id);
+            wal_records.push(commit_record);
 
-        // Compute total WAL bytes for bookkeeping
-        for r in &wal_records {
-            total_wal_bytes += r.estimated_size();
-        }
-
-        // Single batched WAL write — one writer lock acquisition, one buffer flush
-        if let Some(writer) = &mut self.writer {
-            let a_start = Instant::now();
-            writer.append_batch(&wal_records)?;
-            let a_elapsed = a_start.elapsed();
-            self.append_calls += 1;
-            self.append_total += a_elapsed;
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_wal_append(total_wal_bytes as u64);
-                t.metrics().record_wal_append_count();
-                t.metrics()
-                    .record_wal_append_ns(a_elapsed.as_nanos() as u64);
+            // Compute total WAL bytes for bookkeeping
+            for r in &wal_records {
+                total_wal_bytes += r.estimated_size();
             }
         }
 
-        // Update bookkeeping (single update for entire batch)
-        let record_count = wal_records.len();
-        state.wal.pending_writes += record_count;
-        self.pending_sync_count += record_count;
-        self.bytes_since_sync += total_wal_bytes;
+        // Single batched WAL write — one writer lock acquisition, one buffer flush
+        // Skip entirely for BestEffort mode
+        if !skip_wal {
+            if let Some(writer) = &mut self.writer {
+                let a_start = Instant::now();
+                writer.append_batch(&wal_records)?;
+                let a_elapsed = a_start.elapsed();
+                self.append_calls += 1;
+                self.append_total += a_elapsed;
+                if let Some(t) = crate::telemetry::Telemetry::global() {
+                    t.metrics().record_wal_append(total_wal_bytes as u64);
+                    t.metrics().record_wal_append_count();
+                    t.metrics()
+                        .record_wal_append_ns(a_elapsed.as_nanos() as u64);
+                }
+            }
+
+            // Update bookkeeping (single update for entire batch)
+            let record_count = wal_records.len();
+            state.wal.pending_writes += record_count;
+            self.pending_sync_count += record_count;
+            self.bytes_since_sync += total_wal_bytes;
+        }
+
+        let last_sequence = commit_seq;
 
         // Apply durability policy (single sync for the whole batch, where relevant).
-        match self.durability_policy {
+        // Use effective_durability which may be per-request BestEffort
+        match effective_durability {
             DurabilityPolicy::Strict | DurabilityPolicy::CloudMirrored => {
                 self.sync_internal(state)?;
                 state.wal.local_durable_seq = last_sequence;
@@ -830,7 +860,7 @@ impl WalActor {
 
         // For batched mode, mark the sequence range as pending atomicity
         // Reads at sequences >= begin_seq must wait for the batch to become durable
-        if matches!(self.durability_policy, DurabilityPolicy::Batched) {
+        if matches!(effective_durability, DurabilityPolicy::Batched) {
             state.pending_txn_min_seq = Some(begin_seq);
             state.pending_txn_start_time = Some(Instant::now());
 
@@ -1413,7 +1443,8 @@ mod tests {
             },
         ];
 
-        let (_last_seq, _count, deferred) = wal_actor.append_transaction(&mut state, 1, ops)?;
+        let (_last_seq, _count, deferred) =
+            wal_actor.append_transaction(&mut state, 1, ops, None)?;
         assert!(deferred);
 
         // Assert

@@ -199,10 +199,14 @@ impl IngestCoordinator {
     /// Bypasses the per-intent ingest queue and sends directly to the runtime
     /// as an `ApplyTransaction` message. This avoids queue overflow for large
     /// batches (e.g., bulk load) and eliminates per-op channel allocation.
+    ///
+    /// The `durability_policy` parameter allows per-request durability control.
+    /// If None, the runtime will use the engine's default durability policy.
     pub fn submit_batch(
         &self,
         runtime: &RuntimeHandle,
         intents: Vec<BatchWriteOp>,
+        durability_policy: Option<crate::wal::DurabilityPolicy>,
     ) -> MidgeResult<u64> {
         if intents.is_empty() {
             return Ok(0);
@@ -242,7 +246,11 @@ impl IngestCoordinator {
 
         let request_id = next_request_id()?;
         let result = runtime
-            .send_and_wait(RuntimeMsg::ApplyTransaction { request_id, ops })
+            .send_and_wait(RuntimeMsg::ApplyTransaction {
+                request_id,
+                ops,
+                durability_policy,
+            })
             .and_then(|resp| match resp {
                 RuntimeResponse::TransactionApplied {
                     last_sequence,
@@ -400,7 +408,11 @@ impl IngestCoordinator {
 
         // Send batch as ApplyTransaction
         let result = runtime
-            .send_and_wait(RuntimeMsg::ApplyTransaction { request_id, ops })
+            .send_and_wait(RuntimeMsg::ApplyTransaction {
+                request_id,
+                ops,
+                durability_policy: None, // Use engine's default durability policy
+            })
             .and_then(|resp| match resp {
                 RuntimeResponse::TransactionApplied {
                     last_sequence,

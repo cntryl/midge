@@ -788,7 +788,12 @@ impl Engine {
         // Submit all regular ops as a single batch (one channel alloc, one wait)
         let mut max_sequence = delete_range_sequence;
         if !batch_intents.is_empty() {
-            let sequence = coordinator.submit_batch(&self.runtime_handle, batch_intents)?;
+            let durability_policy = Some(opts.to_wal_durability_policy());
+            let sequence = coordinator.submit_batch(
+                &self.runtime_handle,
+                batch_intents,
+                durability_policy,
+            )?;
             max_sequence = max_sequence.max(sequence);
         }
 

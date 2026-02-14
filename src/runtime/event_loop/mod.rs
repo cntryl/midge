@@ -749,7 +749,11 @@ impl EventLoop {
                     );
                 }
 
-                RuntimeMsg::ApplyTransaction { request_id, ops } => {
+                RuntimeMsg::ApplyTransaction {
+                    request_id,
+                    ops,
+                    durability_policy,
+                } => {
                     if self.wal_actor.is_cloud_first() && self.hybrid_storage.is_none() {
                         self.respond(
                             request_id,
@@ -761,10 +765,12 @@ impl EventLoop {
                             },
                         );
                     } else {
-                        match self
-                            .wal_actor
-                            .append_transaction(&mut self.state, request_id, ops)
-                        {
+                        match self.wal_actor.append_transaction(
+                            &mut self.state,
+                            request_id,
+                            ops,
+                            durability_policy,
+                        ) {
                             Ok((last_sequence, op_count, deferred)) => {
                                 // Publish snapshot BEFORE responding so that
                                 // the caller's next begin_tx sees the write.

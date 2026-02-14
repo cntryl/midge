@@ -98,4 +98,20 @@ impl WriteOptions {
     pub fn is_cloud_strict(&self) -> bool {
         matches!(self.policy, DurabilityPolicy::CloudStrict)
     }
+
+    /// Convert API-level durability policy to WAL-level durability policy.
+    ///
+    /// Maps the user-facing API durability choices to runtime WAL durability policies:
+    /// - Sync → Strict (fsync after every write)
+    /// - Buffered → Batched (periodic fsync)
+    /// - BestEffort → BestEffort (skip WAL entirely)
+    /// - CloudStrict → CloudFirst (wait for cloud acknowledgment)
+    pub(crate) fn to_wal_durability_policy(self) -> crate::wal::DurabilityPolicy {
+        match self.policy {
+            DurabilityPolicy::Sync => crate::wal::DurabilityPolicy::Strict,
+            DurabilityPolicy::Buffered => crate::wal::DurabilityPolicy::Batched,
+            DurabilityPolicy::BestEffort => crate::wal::DurabilityPolicy::BestEffort,
+            DurabilityPolicy::CloudStrict => crate::wal::DurabilityPolicy::CloudFirst,
+        }
+    }
 }

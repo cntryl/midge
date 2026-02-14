@@ -363,12 +363,6 @@ impl Transaction {
             return Ok(());
         }
 
-        if opts.is_best_effort() {
-            return Err(MidgeError::InvalidArgument(
-                "BestEffort is not allowed for Transaction::commit".to_string(),
-            ));
-        }
-
         if self.write_set.is_empty() {
             return Ok(());
         }
@@ -420,6 +414,7 @@ impl Transaction {
             .send_and_wait(RuntimeMsg::ApplyTransaction {
                 request_id: next_request_id()?,
                 ops,
+                durability_policy: Some(opts.to_wal_durability_policy()),
             })?;
 
         match response {
