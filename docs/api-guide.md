@@ -31,7 +31,7 @@ let engine = Engine::open(OpenOptions::local("./mydb").build())?;
 ```rust
 let opts = OpenOptions::local("./mydb")
     .goal(Goal::Throughput)           // Latency | Throughput | Economy
-    .memory_budget(MemoryBudget::Auto) // Or MemoryBudget::Bytes(512_000_000)
+    .memory_budget(MemoryBudget::Auto) // Auto derives from system limits; or Bytes(512_000_000)
     .workload(WorkloadProfile::Mixed)  // ReadMostly | WriteHeavy | Mixed | RangeScan
     .build();
 
@@ -41,7 +41,7 @@ let engine = Engine::open(opts)?;
 **Configuration knobs:**
 
 - `goal`: Optimization target (affects block sizes, compaction triggers)
-- `memory_budget`: Total memory (Auto = ~512MB; explicit via Bytes(n))
+- `memory_budget`: Total memory (Auto = ~50% of effective memory limit; cgroup-aware when available)
 - `workload`: Access pattern hint (affects cache allocation, bloom filters)
 
 All low-level parameters are derived automatically from these high-level knobs.

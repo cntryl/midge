@@ -661,7 +661,7 @@ Active full (64MB) → becomes Immutable → schedule flush
 **Key:** `(SST file ID, block offset)`  
 **Value:** Decompressed block bytes
 
-**Size:** Configurable via `MemoryBudget` (typically 30-40% of total)
+**Size:** Configurable via `MemoryBudget` (Auto uses a fraction of effective memory limits)
 
 ### HybridStorage (Cloud Mode)
 

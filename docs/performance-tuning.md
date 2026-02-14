@@ -13,7 +13,8 @@ Use `Goal` to bias derived parameters:
 
 ### 2) Set a memory budget
 
-`MemoryBudget` controls how much memory the engine assumes it can use. More budget generally improves:
+`MemoryBudget` controls how much memory the engine assumes it can use. Auto derives from the
+effective memory limit (cgroup-aware when available). More budget generally improves:
 
 - read latency (larger block cache)
 - write smoothing (larger memtables / buffering)

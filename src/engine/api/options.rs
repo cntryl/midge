@@ -113,7 +113,7 @@ pub enum Goal {
 pub enum MemoryBudget {
     /// Automatically determine memory budget from available system memory.
     ///
-    /// Uses ~50% of available RAM for cache + memtables.
+    /// Uses ~50% of the effective memory limit (cgroup-aware when possible).
     #[default]
     Auto,
 
@@ -181,6 +181,9 @@ pub struct OpenOptions {
     /// Workload profile hint
     pub workload: WorkloadProfile,
 
+    /// Derived memory budget in bytes (from build())
+    pub(crate) derived_memory_budget: usize,
+
     // Derived parameters (populated by build())
     /// Block size in bytes (derived)
     pub(crate) block_size: usize,
@@ -219,6 +222,7 @@ impl OpenOptions {
             goal: Goal::default(),
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
+            derived_memory_budget: 0,
             // Initial derived values until build() recomputes them
             block_size: 16 * 1024,
             memtable_size_limit: 64 * 1024 * 1024,
@@ -242,6 +246,7 @@ impl OpenOptions {
             goal: Goal::default(),
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
+            derived_memory_budget: 0,
             // Initial derived values until build() recomputes them
             block_size: 16 * 1024,
             memtable_size_limit: 64 * 1024 * 1024,
@@ -280,6 +285,7 @@ impl OpenOptions {
             goal: Goal::default(),
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
+            derived_memory_budget: 0,
             // Initial derived values until build() recomputes them
             block_size: 16 * 1024,
             memtable_size_limit: 64 * 1024 * 1024,
@@ -317,12 +323,10 @@ impl OpenOptions {
     pub fn build(mut self) -> Self {
         // Derive memory budget
         let total_memory = match self.memory_budget {
-            MemoryBudget::Auto => {
-                // Auto currently uses a fixed 512MB budget (~50% of a 1 GiB system).
-                512 * 1024 * 1024
-            }
+            MemoryBudget::Auto => memory::auto_memory_budget_bytes().unwrap_or(512 * 1024 * 1024),
             MemoryBudget::Bytes(n) => n,
         };
+        self.derived_memory_budget = total_memory;
 
         // Derive block size based on goal and workload
         self.block_size = match (self.goal, self.workload) {
@@ -344,6 +348,12 @@ impl OpenOptions {
             WorkloadProfile::ReadMostly => base_memtable / 2, // Half for read-heavy (more cache)
             _ => base_memtable,
         };
+
+        // Clamp memtable size to keep total memory usage within budget.
+        let min_memtable = 4 * 1024 * 1024;
+        let max_memtable = total_memory / 2;
+        let max_allowed = max_memtable.max(min_memtable.min(total_memory));
+        self.memtable_size_limit = self.memtable_size_limit.min(max_allowed).max(1);
 
         // Derive target SST size
         self.target_sst_size = match self.goal {
@@ -368,6 +378,7 @@ impl OpenOptions {
             Goal::Throughput => 1024 * 1024, // 1MB
             Goal::Economy => 256 * 1024,     // 256KB
         };
+        self.wal_buffer_size = self.wal_buffer_size.min(total_memory.max(32 * 1024));
 
         // Derive compaction trigger
         self.l0_compaction_trigger = match (self.goal, self.workload) {
@@ -429,6 +440,90 @@ impl OpenOptions {
     /// Get derived compression policy
     pub fn compression_policy(&self) -> &CompressionPolicy {
         &self.compression_policy
+    }
+}
+
+mod memory {
+    use std::fs;
+    use std::path::Path;
+
+    pub fn auto_memory_budget_bytes() -> Option<usize> {
+        let limit = effective_memory_limit_bytes()?;
+        Some(budget_from_limit_bytes(limit))
+    }
+
+    fn budget_from_limit_bytes(limit: u64) -> usize {
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        let mut budget = limit / 2;
+        let min_budget = 64 * 1024 * 1024;
+        if limit >= min_budget.saturating_mul(2) {
+            budget = budget.max(min_budget);
+        } else {
+            budget = budget.max(1 * 1024 * 1024);
+        }
+        budget.min(limit).max(1)
+    }
+
+    fn effective_memory_limit_bytes() -> Option<u64> {
+        let host_total = host_total_memory_bytes();
+        let cgroup_limit = cgroup_memory_limit_bytes();
+
+        match (host_total, cgroup_limit) {
+            (Some(host), Some(limit)) => Some(host.min(limit)),
+            (Some(host), None) => Some(host),
+            (None, Some(limit)) => Some(limit),
+            (None, None) => None,
+        }
+    }
+
+    fn host_total_memory_bytes() -> Option<u64> {
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        let total_kb = system.total_memory();
+        if total_kb == 0 {
+            return None;
+        }
+        Some(total_kb.saturating_mul(1024))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cgroup_memory_limit_bytes() -> Option<u64> {
+        let v2_limit = cgroup_v2_limit_bytes();
+        if v2_limit.is_some() {
+            return v2_limit;
+        }
+        cgroup_v1_limit_bytes()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn cgroup_memory_limit_bytes() -> Option<u64> {
+        None
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cgroup_v2_limit_bytes() -> Option<u64> {
+        let controllers = Path::new("/sys/fs/cgroup/cgroup.controllers");
+        if !controllers.exists() {
+            return None;
+        }
+        let max_path = Path::new("/sys/fs/cgroup/memory.max");
+        let value = fs::read_to_string(max_path).ok()?;
+        let trimmed = value.trim();
+        if trimmed.eq_ignore_ascii_case("max") {
+            return None;
+        }
+        trimmed.parse::<u64>().ok().filter(|v| *v > 0)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cgroup_v1_limit_bytes() -> Option<u64> {
+        let max_path = Path::new("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+        let value = fs::read_to_string(max_path).ok()?;
+        let limit = value.trim().parse::<u64>().ok()?;
+        if limit == 0 {
+            return None;
+        }
+        Some(limit)
     }
 }
 
@@ -518,6 +613,23 @@ mod tests {
         assert_ne!(WorkloadProfile::WriteHeavy, WorkloadProfile::ReadMostly);
         assert_ne!(WorkloadProfile::ReadMostly, WorkloadProfile::RangeScan);
         assert_ne!(WorkloadProfile::RangeScan, WorkloadProfile::TtlHeavy);
+    }
+
+    #[test]
+    fn should_clamp_memtable_for_small_explicit_budget() {
+        // Arrange
+        let budget = 64 * 1024 * 1024;
+
+        // Act
+        let opts = OpenOptions::in_memory()
+            .goal(Goal::Throughput)
+            .memory_budget(MemoryBudget::Bytes(budget))
+            .build();
+
+        // Assert
+        assert_eq!(opts.derived_memory_budget, budget);
+        assert!(opts.memtable_size_limit() <= budget / 2);
+        assert!(opts.block_cache_size() <= budget);
     }
 
     // ========== OpenOptions Builder Tests ==========
