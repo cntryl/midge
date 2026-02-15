@@ -300,6 +300,7 @@ pub fn compress_block(
     }
 }
 
+#[inline(always)]
 fn compress_with_algo(data: &[u8], algo: CompressionAlgo) -> MidgeResult<(Bytes, CompressionAlgo)> {
     match algo {
         CompressionAlgo::None => Ok((Bytes::copy_from_slice(data), CompressionAlgo::None)),
@@ -366,6 +367,7 @@ fn compress_adaptive(
 }
 
 /// Decompress block data based on compression type.
+#[inline(always)]
 pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult<Bytes> {
     match algo {
         CompressionAlgo::None => Ok(Bytes::copy_from_slice(compressed)),

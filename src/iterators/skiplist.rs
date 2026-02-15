@@ -210,7 +210,7 @@ impl SkipList {
     }
 
     /// Point search: find node for key, or null if absent.
-    #[inline]
+    #[inline(always)]
     fn find_node<'g>(&self, key: &[u8], guard: &'g Guard) -> Shared<'g, Node> {
         let mut pred: Shared<'g, Node> = Shared::from(&*self.head as *const Node);
         let mut level = self.top_level.load(AO::Relaxed);

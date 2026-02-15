@@ -81,6 +81,7 @@ impl CacheShard {
     }
 
     /// Get a cached value (lock-free)
+    #[inline(always)]
     pub fn get(&self, key: &CacheKey) -> Option<CacheValue> {
         if let Some(value_ref) = self.entries.get(key) {
             let value = value_ref.value().clone();
@@ -208,12 +209,14 @@ impl CacheShard {
     }
 
     /// Record access for admission control
+    #[inline(always)]
     fn record_access_for_admission(&self, key: &CacheKey) {
         self.admission
             .record_access(key.sst_id.to_le_bytes().as_ref());
     }
 
     /// Check if a key should be admitted based on type-aware policy
+    #[inline(always)]
     fn should_admit(&self, key: &CacheKey) -> bool {
         self.admission.should_admit(key)
     }

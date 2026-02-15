@@ -287,9 +287,7 @@ impl EventLoop {
     fn record_wake_batch(&mut self, batch: usize) {
         if let Some(telemetry) = crate::telemetry::Telemetry::global() {
             telemetry.metrics().record_event_loop_wake();
-            telemetry
-                .metrics()
-                .record_event_loop_batch(batch as u64);
+            telemetry.metrics().record_event_loop_batch(batch as u64);
         }
 
         if self.loop_debug {
@@ -298,8 +296,7 @@ impl EventLoop {
             self.loop_debug_batch_total += batch as u64;
 
             if self.loop_debug_wakes % LOOP_DEBUG_EVERY == 0 {
-                let avg_batch = self.loop_debug_batch_total as f64
-                    / self.loop_debug_wakes as f64;
+                let avg_batch = self.loop_debug_batch_total as f64 / self.loop_debug_wakes as f64;
                 eprintln!(
                     "[midge] loop_stats wakes={} avg_batch={:.2}",
                     self.loop_debug_wakes, avg_batch
@@ -351,8 +348,7 @@ impl EventLoop {
             if self.has_actionable_work() {
                 match msg_rx.try_recv() {
                     Ok(msg) => {
-                        let outcome =
-                            self.process_wake_msg(msg, &msg_rx, MAX_DRAIN_WRITES_ON_WAKE);
+                        let outcome = self.process_wake_msg(msg, &msg_rx, MAX_DRAIN_WRITES_ON_WAKE);
                         if outcome == HandleOutcome::Break {
                             break;
                         }
@@ -425,10 +421,7 @@ impl EventLoop {
                         let max_sequence = self.state.wal.local_durable_seq;
                         let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
                         storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
-                        tracing::info!(
-                            segment_id,
-                            "Enqueued final CloudFirst segment on shutdown"
-                        );
+                        tracing::info!(segment_id, "Enqueued final CloudFirst segment on shutdown");
                     }
                 }
 
@@ -907,11 +900,12 @@ impl EventLoop {
                                     },
                                 );
                             } else {
-                                self.durability.queue_waiter(DurabilityWaiter::TransactionApply {
-                                    request_id,
-                                    last_sequence,
-                                    op_count,
-                                });
+                                self.durability
+                                    .queue_waiter(DurabilityWaiter::TransactionApply {
+                                        request_id,
+                                        last_sequence,
+                                        op_count,
+                                    });
                             }
                         }
                         Err(e) => {
@@ -969,7 +963,10 @@ impl EventLoop {
                 let resp = self
                     .flush_actor
                     .handle_flush(&mut self.state, cf_id, self.hybrid_storage.as_ref())
-                    .map(|sst_name| RuntimeResponse::FlushComplete { request_id, sst_name })
+                    .map(|sst_name| RuntimeResponse::FlushComplete {
+                        request_id,
+                        sst_name,
+                    })
                     .unwrap_or_else(|e| RuntimeResponse::Error {
                         request_id,
                         error: crate::common::MidgeError::Internal(e.to_string()),
@@ -984,12 +981,8 @@ impl EventLoop {
                 sst_name,
                 sequence,
             } => {
-                self.flush_actor.handle_flush_complete(
-                    &mut self.state,
-                    cf_id,
-                    &sst_name,
-                    sequence,
-                );
+                self.flush_actor
+                    .handle_flush_complete(&mut self.state, cf_id, &sst_name, sequence);
                 self.wake_write_stall_waiters();
                 self.publish_snapshot();
                 self.respond(request_id, RuntimeResponse::Ok { request_id });
@@ -1329,9 +1322,7 @@ impl EventLoop {
                                 // respond immediately and make data visible for reads.
                                 self.state.confirm_sequences(request_id);
                             } else if deferred {
-                                self.maybe_queue_confirm_only_waiter(
-                                    deferred, request_id, false,
-                                );
+                                self.maybe_queue_confirm_only_waiter(deferred, request_id, false);
                             } else {
                                 self.state.confirm_sequences(request_id);
                             }
@@ -1403,9 +1394,7 @@ impl EventLoop {
                                 // Background CloudFirst: confirm sequences immediately after local WAL write.
                                 self.state.confirm_sequences(request_id);
                             } else if deferred {
-                                self.maybe_queue_confirm_only_waiter(
-                                    deferred, request_id, false,
-                                );
+                                self.maybe_queue_confirm_only_waiter(deferred, request_id, false);
                             } else {
                                 self.state.confirm_sequences(request_id);
                             }
@@ -1552,9 +1541,9 @@ impl EventLoop {
                 removed,
                 added,
             } => {
-                let result = self
-                    .manifest_actor
-                    .compaction_complete(&mut self.state, removed, added);
+                let result =
+                    self.manifest_actor
+                        .compaction_complete(&mut self.state, removed, added);
                 let resp = result
                     .map(|_| RuntimeResponse::Ok { request_id })
                     .unwrap_or_else(|e| RuntimeResponse::Error {
@@ -1598,9 +1587,9 @@ impl EventLoop {
                 // DDL durability barrier: ensure WAL is durable before CF creation
                 self.force_wal_sync(&msg_rx);
 
-                let result =
-                    self.manifest_actor
-                        .create_column_family(&mut self.state, name.clone());
+                let result = self
+                    .manifest_actor
+                    .create_column_family(&mut self.state, name.clone());
                 let resp = result
                     .map(|cf_id| RuntimeResponse::ColumnFamilyCreated { request_id, cf_id })
                     .unwrap_or_else(|e| RuntimeResponse::Error {
@@ -1634,7 +1623,9 @@ impl EventLoop {
                 // DDL durability barrier: ensure WAL is durable before CF drop
                 self.force_wal_sync(&msg_rx);
 
-                let result = self.manifest_actor.drop_column_family(&mut self.state, cf_id);
+                let result = self
+                    .manifest_actor
+                    .drop_column_family(&mut self.state, cf_id);
                 let resp = result
                     .map(|_| RuntimeResponse::Ok { request_id })
                     .unwrap_or_else(|e| RuntimeResponse::Error {

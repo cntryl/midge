@@ -34,6 +34,7 @@ impl CacheValue {
     }
 
     /// Increment access count and return the new value
+    #[inline(always)]
     pub fn increment_access(&self) -> u64 {
         self.access_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)

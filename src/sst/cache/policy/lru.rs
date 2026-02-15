@@ -42,6 +42,7 @@ impl CachePolicy for LruPolicy {
     ///
     /// Assigns a new generation counter to track recency.
     /// No O(n) position updates needed.
+    #[inline]
     fn on_access(&self, key: CacheKey) {
         let gen = self.generation.fetch_add(1, Ordering::Relaxed);
         let mut gens = self.generations.lock();
@@ -57,12 +58,16 @@ impl CachePolicy for LruPolicy {
     fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
         let mut gens = self.generations.lock();
 
-        // Find the key with minimum generation, excluding specified types
-        let victim_key = gens
-            .iter()
-            .filter(|(key, _)| !exclude_types.contains(&key.block_type))
-            .min_by_key(|(_, &gen)| gen)
-            .map(|(key, _)| *key);
+        // Direct iteration to avoid closure overhead
+        let mut min_gen = u64::MAX;
+        let mut victim_key = None;
+
+        for (&key, &gen) in gens.iter() {
+            if !exclude_types.contains(&key.block_type) && gen < min_gen {
+                min_gen = gen;
+                victim_key = Some(key);
+            }
+        }
 
         // Remove the victim from tracking
         if let Some(key) = victim_key {
@@ -73,6 +78,7 @@ impl CachePolicy for LruPolicy {
     }
 
     /// Remove a key from tracking (O(1) operation)
+    #[inline]
     fn on_remove(&self, key: CacheKey) {
         let mut gens = self.generations.lock();
         gens.remove(&key);
@@ -82,6 +88,7 @@ impl CachePolicy for LruPolicy {
     ///
     /// Called when a concurrent removal occurred during eviction.
     /// Just clean up tracking state.
+    #[inline]
     fn on_stale(&self, key: CacheKey) {
         self.on_remove(key);
     }
