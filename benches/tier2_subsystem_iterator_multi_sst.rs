@@ -78,6 +78,7 @@ impl<'a> SstIterator<'a> {
 struct HeapEntry {
     key: Bytes,
     sst_id: u64,
+    iter_idx: u32, // Index into iterators array (u32 for smaller struct size)
 }
 
 impl Ord for HeapEntry {
@@ -108,9 +109,13 @@ impl<'a> MergeIterator<'a> {
         let mut heap = BinaryHeap::new();
 
         // Initialize heap with first key from each iterator
-        for iter in iterators.iter_mut() {
+        for (idx, iter) in iterators.iter_mut().enumerate() {
             if let Some((key, sst_id)) = iter.next() {
-                heap.push(HeapEntry { key, sst_id });
+                heap.push(HeapEntry {
+                    key,
+                    sst_id,
+                    iter_idx: idx as u32,
+                });
             }
         }
 
@@ -125,14 +130,14 @@ impl<'a> MergeIterator<'a> {
         if let Some(entry) = self.heap.pop() {
             self.keys_compared += 1;
 
-            // Find the iterator that produced this key and advance it
-            for iter in &mut self.iterators {
-                if iter.sst_id == entry.sst_id {
-                    if let Some((key, sst_id)) = iter.next() {
-                        self.heap.push(HeapEntry { key, sst_id });
-                    }
-                    break;
-                }
+            // O(1) access to the iterator using stored index
+            let iter = &mut self.iterators[entry.iter_idx as usize];
+            if let Some((key, sst_id)) = iter.next() {
+                self.heap.push(HeapEntry {
+                    key,
+                    sst_id,
+                    iter_idx: entry.iter_idx,
+                });
             }
 
             Some((entry.key, entry.sst_id))

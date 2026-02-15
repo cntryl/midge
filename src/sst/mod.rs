@@ -298,20 +298,87 @@ impl SkipListMemtable {
 
     /// Get visible value at or before `snapshot_seq` (respecting expirations).
     pub fn get_at_seq(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<Option<Vec<u8>>> {
-        // Respect expiration if present
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
         let visible = self.skiplist.get_visible_with_exp(key, snapshot_seq);
 
         Ok(match visible {
             Some(Some((bytes, exp))) => {
-                if exp.map(|e| e <= now).unwrap_or(false) {
-                    None
+                // Fast path: only check expiration if it's set
+                if let Some(exp_time) = exp {
+                    // Compute time only when needed
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    
+                    if exp_time <= now {
+                        None
+                    } else {
+                        Some(bytes.to_vec())
+                    }
                 } else {
+                    // No expiration set - return value immediately
                     Some(bytes.to_vec())
+                }
+            }
+            Some(None) => None,
+            None => None,
+        })
+    }
+
+    /// Get value as Bytes (zero-copy, for performance-critical paths).
+    /// 
+    /// Returns Bytes instead of Vec<u8>, avoiding allocation for callers
+    /// that can work with the Arc-based Bytes type.
+    pub fn get_bytes(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
+        let visible = self.skiplist.get_visible_with_exp(key, u64::MAX);
+
+        Ok(match visible {
+            Some(Some((bytes, exp))) => {
+                // Fast path: only check expiration if it's set
+                if let Some(exp_time) = exp {
+                    // Compute time only when needed
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    
+                    if exp_time <= now {
+                        None
+                    } else {
+                        Some(bytes)
+                    }
+                } else {
+                    // No expiration set - return value immediately
+                    Some(bytes)
+                }
+            }
+            Some(None) => None,
+            None => None,
+        })
+    }
+
+    /// Get value at sequence as Bytes (zero-copy, for snapshot reads).
+    pub fn get_bytes_at_seq(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<Option<Bytes>> {
+        let visible = self.skiplist.get_visible_with_exp(key, snapshot_seq);
+
+        Ok(match visible {
+            Some(Some((bytes, exp))) => {
+                // Fast path: only check expiration if it's set
+                if let Some(exp_time) = exp {
+                    // Compute time only when needed
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    
+                    if exp_time <= now {
+                        None
+                    } else {
+                        Some(bytes)
+                    }
+                } else {
+                    // No expiration set - return value immediately
+                    Some(bytes)
                 }
             }
             Some(None) => None,
@@ -408,19 +475,25 @@ impl Memtable for SkipListMemtable {
     }
 
     fn get(&self, key: &[u8]) -> MidgeResult<Option<Vec<u8>>> {
-        // Respect expiration if present
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
         let visible = self.skiplist.get_visible_with_exp(key, u64::MAX);
 
         Ok(match visible {
             Some(Some((bytes, exp))) => {
-                if exp.map(|e| e <= now).unwrap_or(false) {
-                    None
+                // Fast path: only check expiration if it's set
+                if let Some(exp_time) = exp {
+                    // Compute time only when needed
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    
+                    if exp_time <= now {
+                        None
+                    } else {
+                        Some(bytes.to_vec())
+                    }
                 } else {
+                    // No expiration set - return value immediately
                     Some(bytes.to_vec())
                 }
             }
