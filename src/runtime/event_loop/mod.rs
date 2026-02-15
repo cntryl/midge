@@ -25,6 +25,7 @@ mod write_batch;
 use crossbeam::channel::{Receiver, TryRecvError};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::actors::{
     CloudActor, CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor, WalActor,
@@ -335,6 +336,7 @@ impl EventLoop {
     /// Main event loop — runs until Shutdown message or channel close.
     pub fn run(&mut self, msg_rx: Receiver<RuntimeMsg>) {
         const MAX_DRAIN_WRITES_ON_WAKE: usize = 4096;
+        const ACTIONABLE_IDLE_BACKOFF: Duration = Duration::from_micros(50);
 
         loop {
             if let Some(pending) = self.pending_msg.take() {
@@ -370,26 +372,30 @@ impl EventLoop {
                 }
 
                 self.progress_pass(&msg_rx);
+                std::thread::sleep(ACTIONABLE_IDLE_BACKOFF);
                 continue;
             }
 
-            let msg = if let Some(storage_rx) = &self.hybrid_storage_events {
+            let msg = if let Some(storage_rx) = self.hybrid_storage_events.clone() {
                 crossbeam::channel::select! {
                     recv(msg_rx) -> msg => msg.ok(),
                     recv(storage_rx) -> ev => {
-                        if let Ok(ev) = ev {
-                            self.handle_storage_event(ev);
+                        match ev {
+                            Ok(ev) => {
+                                self.handle_storage_event(ev);
+                            }
+                            Err(_) => {
+                                self.hybrid_storage_events = None;
+                            }
                         }
-                        None
+                        continue;
                     }
                 }
             } else {
                 msg_rx.recv().ok()
             };
 
-            let Some(msg) = msg else {
-                break;
-            };
+            let Some(msg) = msg else { break; };
 
             let outcome = self.process_wake_msg(msg, &msg_rx, MAX_DRAIN_WRITES_ON_WAKE);
             if outcome == HandleOutcome::Break {

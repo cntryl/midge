@@ -286,6 +286,19 @@ impl SkipListMemtable {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
+    fn is_expired(expiration: Option<u64>) -> bool {
+        let Some(exp_time) = expiration else {
+            return false;
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        exp_time <= now
+    }
+
     /// Iterate over all entries in the memtable
     /// Returns (key, value, sequence) tuples in sorted order
     pub fn iter_all(&self, _max_seq: u64) -> Vec<(Vec<u8>, Option<Vec<u8>>, u64)> {
@@ -302,21 +315,9 @@ impl SkipListMemtable {
 
         Ok(match visible {
             Some(Some((bytes, exp))) => {
-                // Fast path: only check expiration if it's set
-                if let Some(exp_time) = exp {
-                    // Compute time only when needed
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-
-                    if exp_time <= now {
-                        None
-                    } else {
-                        Some(bytes.to_vec())
-                    }
+                if Self::is_expired(exp) {
+                    None
                 } else {
-                    // No expiration set - return value immediately
                     Some(bytes.to_vec())
                 }
             }
@@ -334,21 +335,9 @@ impl SkipListMemtable {
 
         Ok(match visible {
             Some(Some((bytes, exp))) => {
-                // Fast path: only check expiration if it's set
-                if let Some(exp_time) = exp {
-                    // Compute time only when needed
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-
-                    if exp_time <= now {
-                        None
-                    } else {
-                        Some(bytes)
-                    }
+                if Self::is_expired(exp) {
+                    None
                 } else {
-                    // No expiration set - return value immediately
                     Some(bytes)
                 }
             }
@@ -363,21 +352,9 @@ impl SkipListMemtable {
 
         Ok(match visible {
             Some(Some((bytes, exp))) => {
-                // Fast path: only check expiration if it's set
-                if let Some(exp_time) = exp {
-                    // Compute time only when needed
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-
-                    if exp_time <= now {
-                        None
-                    } else {
-                        Some(bytes)
-                    }
+                if Self::is_expired(exp) {
+                    None
                 } else {
-                    // No expiration set - return value immediately
                     Some(bytes)
                 }
             }
@@ -479,21 +456,9 @@ impl Memtable for SkipListMemtable {
 
         Ok(match visible {
             Some(Some((bytes, exp))) => {
-                // Fast path: only check expiration if it's set
-                if let Some(exp_time) = exp {
-                    // Compute time only when needed
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-
-                    if exp_time <= now {
-                        None
-                    } else {
-                        Some(bytes.to_vec())
-                    }
+                if Self::is_expired(exp) {
+                    None
                 } else {
-                    // No expiration set - return value immediately
                     Some(bytes.to_vec())
                 }
             }

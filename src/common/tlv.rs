@@ -89,6 +89,34 @@ pub fn decode_varint32(data: &[u8]) -> MidgeResult<u32> {
     Err(MidgeError::Corruption("varint32 incomplete".into()))
 }
 
+fn decode_varint32_with_len(data: &[u8]) -> MidgeResult<(u32, usize)> {
+    if data.is_empty() {
+        return Err(MidgeError::Corruption("varint32 incomplete".into()));
+    }
+
+    let b0 = data[0];
+    if b0 < 0x80 {
+        return Ok((b0 as u32, 1));
+    }
+
+    let mut result = (b0 & 0x7f) as u32;
+    let mut shift = 7;
+
+    for (i, &byte) in data.iter().enumerate().skip(1) {
+        if i >= 5 {
+            return Err(MidgeError::Corruption("varint32 overflow".into()));
+        }
+
+        result |= ((byte & 0x7f) as u32) << shift;
+        if byte < 0x80 {
+            return Ok((result, i + 1));
+        }
+        shift += 7;
+    }
+
+    Err(MidgeError::Corruption("varint32 incomplete".into()))
+}
+
 /// Decode a single TLV field from data
 /// Returns (tag, value_data, bytes_consumed)
 #[inline(always)]
@@ -106,13 +134,16 @@ pub fn decode_tlv_field(data: &[u8]) -> MidgeResult<(u8, &[u8], usize)> {
         return Err(MidgeError::Corruption("TLV field too short".into()));
     }
 
-    let len = data[1] as usize;
-    if data.len() < 2 + len {
+    let (len, len_bytes) = decode_varint32_with_len(&data[1..])?;
+    let len = len as usize;
+    let header_len = 1 + len_bytes;
+
+    if data.len() < header_len + len {
         return Err(MidgeError::Corruption("TLV field data truncated".into()));
     }
 
-    let value = &data[2..2 + len];
-    Ok((tag, value, 2 + len))
+    let value = &data[header_len..header_len + len];
+    Ok((tag, value, header_len + len))
 }
 
 #[cfg(test)]
@@ -177,6 +208,23 @@ mod tests {
         assert_eq!(tag, 5);
         assert_eq!(value, data);
         assert_eq!(consumed, 2 + data.len());
+    }
+
+    #[test]
+    fn should_decode_varint_length_for_bytes() {
+        // Arrange
+        let mut buf = BytesMut::new();
+        let data = vec![0u8; 300];
+
+        // Act
+        encode_bytes_with_tag(&mut buf, 9, &data);
+        let (tag, value, consumed) = decode_tlv_field(&buf).unwrap();
+
+        // Assert
+        assert_eq!(tag, 9);
+        assert_eq!(value.len(), data.len());
+        assert_eq!(value, data.as_slice());
+        assert!(consumed > 2 + data.len());
     }
 
     #[test]
