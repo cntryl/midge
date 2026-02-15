@@ -31,9 +31,9 @@ pub mod common;
 // no external crate references them. They are exercised by unit tests within each module.
 #[allow(dead_code)]
 mod compaction;
+pub mod handler;
 #[allow(dead_code)]
 mod io;
-pub mod handler;
 pub mod iterators;
 #[allow(dead_code)]
 mod lease;

@@ -140,7 +140,7 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
         // test flaky. Force a larger memtable so budget pressure reliably surfaces as
         // `WriteStall`.
         if mode == "local" {
-            opts.memtable_size = 8 * 1024 * 1024;
+            opts.memtable_size = 32 * 1024 * 1024; // 32MB for more reliable pressure
         }
 
         let engine = Arc::new(open_with_mode(opts, mode));
@@ -157,7 +157,7 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
 
             while !shutdown_clone.load(Ordering::Relaxed) {
                 let key = format!("key_{}", total_writes);
-                let value = vec![0u8; 2048]; // 2KB
+                let value = vec![0u8; 8192]; // 8KB for faster memory budget exhaustion
                 let mut txn = engine_clone
                     .begin_tx(cf_id, TransactionMode::ReadWrite)
                     .expect("begin");

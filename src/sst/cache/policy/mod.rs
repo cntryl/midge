@@ -52,7 +52,7 @@ pub enum CachePolicyType {
 }
 
 impl CachePolicyType {
-    /// Create a policy instance
+    /// Create a policy instance (legacy trait object interface)
     pub fn create(&self) -> Box<dyn CachePolicy> {
         match self {
             CachePolicyType::Lru => Box::new(LruPolicy::new()),

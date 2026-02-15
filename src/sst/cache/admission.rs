@@ -34,6 +34,7 @@ impl AdmissionCounter {
     }
 
     /// Hash a byte key to a cell index
+    #[inline(always)]
     fn hash_key(key: &[u8]) -> u64 {
         let mut h = 5381u64;
         for &b in key {

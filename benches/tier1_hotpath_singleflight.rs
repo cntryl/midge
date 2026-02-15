@@ -42,7 +42,7 @@ fn bench_singleflight_flush_fanout(c: &mut Criterion) {
                     // Consume receivers so Criterion measures the full fan-out cost
                     // (including wakeups) and doesn't allow the optimizer to lie.
                     for r in receivers {
-                        black_box(r.recv().unwrap());
+                        black_box(r.recv());
                     }
                     black_box(ran)
                 },
@@ -64,7 +64,7 @@ fn bench_singleflight_flush_fanout(c: &mut Criterion) {
                 let ran = acc.flush_now(|batch| batch.len() as u64);
 
                 for r in receivers {
-                    black_box(r.recv().unwrap());
+                    black_box(r.recv());
                 }
 
                 black_box(ran)

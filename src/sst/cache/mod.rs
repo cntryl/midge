@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// Divides cache into independent shards to reduce lock contention.
 /// Each shard manages its own entries with its own eviction policy.
 pub struct BlockCache {
-    /// Array of shards
+    /// Array of shards (Arc-wrapped because background worker threads own references)
     shards: Vec<Arc<CacheShard>>,
     /// Number of shards
     num_shards: usize,
@@ -56,12 +56,14 @@ impl BlockCache {
     }
 
     /// Get the shard for a key
+    #[inline(always)]
     fn get_shard(&self, key: &CacheKey) -> &Arc<CacheShard> {
         let shard_idx = key.shard_index(self.num_shards);
         &self.shards[shard_idx]
     }
 
     /// Get a cached block
+    #[inline(always)]
     pub fn get(&self, key: &CacheKey) -> Option<CacheValue> {
         self.get_shard(key).get(key)
     }

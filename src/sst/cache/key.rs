@@ -63,6 +63,7 @@ impl CacheKey {
     }
 
     /// Get the shard index for this key (0..num_shards)
+    #[inline(always)]
     pub fn shard_index(&self, num_shards: usize) -> usize {
         // Use XOR combination of both fields for better distribution
         let mut hasher = std::collections::hash_map::DefaultHasher::new();

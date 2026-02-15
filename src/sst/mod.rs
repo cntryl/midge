@@ -286,6 +286,19 @@ impl SkipListMemtable {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
+    fn is_expired(expiration: Option<u64>) -> bool {
+        let Some(exp_time) = expiration else {
+            return false;
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        exp_time <= now
+    }
+
     /// Iterate over all entries in the memtable
     /// Returns (key, value, sequence) tuples in sorted order
     pub fn iter_all(&self, _max_seq: u64) -> Vec<(Vec<u8>, Option<Vec<u8>>, u64)> {
@@ -298,20 +311,51 @@ impl SkipListMemtable {
 
     /// Get visible value at or before `snapshot_seq` (respecting expirations).
     pub fn get_at_seq(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<Option<Vec<u8>>> {
-        // Respect expiration if present
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
         let visible = self.skiplist.get_visible_with_exp(key, snapshot_seq);
 
         Ok(match visible {
             Some(Some((bytes, exp))) => {
-                if exp.map(|e| e <= now).unwrap_or(false) {
+                if Self::is_expired(exp) {
                     None
                 } else {
                     Some(bytes.to_vec())
+                }
+            }
+            Some(None) => None,
+            None => None,
+        })
+    }
+
+    /// Get value as Bytes (zero-copy, for performance-critical paths).
+    ///
+    /// Returns Bytes instead of Vec<u8>, avoiding allocation for callers
+    /// that can work with the Arc-based Bytes type.
+    pub fn get_bytes(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
+        let visible = self.skiplist.get_visible_with_exp(key, u64::MAX);
+
+        Ok(match visible {
+            Some(Some((bytes, exp))) => {
+                if Self::is_expired(exp) {
+                    None
+                } else {
+                    Some(bytes)
+                }
+            }
+            Some(None) => None,
+            None => None,
+        })
+    }
+
+    /// Get value at sequence as Bytes (zero-copy, for snapshot reads).
+    pub fn get_bytes_at_seq(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<Option<Bytes>> {
+        let visible = self.skiplist.get_visible_with_exp(key, snapshot_seq);
+
+        Ok(match visible {
+            Some(Some((bytes, exp))) => {
+                if Self::is_expired(exp) {
+                    None
+                } else {
+                    Some(bytes)
                 }
             }
             Some(None) => None,
@@ -408,17 +452,11 @@ impl Memtable for SkipListMemtable {
     }
 
     fn get(&self, key: &[u8]) -> MidgeResult<Option<Vec<u8>>> {
-        // Respect expiration if present
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
         let visible = self.skiplist.get_visible_with_exp(key, u64::MAX);
 
         Ok(match visible {
             Some(Some((bytes, exp))) => {
-                if exp.map(|e| e <= now).unwrap_or(false) {
+                if Self::is_expired(exp) {
                     None
                 } else {
                     Some(bytes.to_vec())
