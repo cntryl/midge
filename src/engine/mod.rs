@@ -193,7 +193,10 @@ impl Engine {
             } => (local_cache_path.clone(), false),
         };
 
-        let _ = std::fs::create_dir_all(&db_path);
+        // Only touch filesystem if not in memory mode
+        if !memory_mode {
+            let _ = std::fs::create_dir_all(&db_path);
+        }
 
         // ═══════════════════════════════════════════════════════════════════════════
         // PHASE 1: ACQUIRE PRIMARY LEASE (MUST HAPPEN BEFORE ENGINE STARTS)

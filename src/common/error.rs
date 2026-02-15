@@ -33,6 +33,9 @@ pub enum MidgeError {
     /// Write stall - memtable full or compaction lagging behind
     /// Application must apply backpressure
     WriteStall(String),
+
+    /// Memory mode violation - attempted disk I/O in memory-only mode
+    MemoryModeViolation(String),
 }
 
 impl fmt::Display for MidgeError {
@@ -46,6 +49,7 @@ impl fmt::Display for MidgeError {
             MidgeError::Internal(msg) => write!(f, "Internal error: {}", msg),
             MidgeError::InvalidPath => write!(f, "Invalid path"),
             MidgeError::WriteStall(msg) => write!(f, "Write stall: {}", msg),
+            MidgeError::MemoryModeViolation(msg) => write!(f, "Memory mode violation: {}", msg),
         }
     }
 }

@@ -51,20 +51,22 @@ impl ManifestActor {
         // Persist the intent before applying mutation
         state.append_intent(intent)?;
 
-        // Append to manifest journal (durable edit log)
-        let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
-            name: file_meta.name.clone(),
-            level: file_meta.level,
-            size_bytes: file_meta.size_bytes,
-            cf_id: file_meta.cf_id,
-            smallest_key: file_meta.smallest_key.clone(),
-            largest_key: file_meta.largest_key.clone(),
-            smallest_seq: file_meta.smallest_seq,
-            largest_seq: file_meta.largest_seq,
-            ..Default::default()
-        });
-        if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
-            tracing::warn!(error = ?e, "failed to append AddSst to journal");
+        // Append to manifest journal (durable edit log) - skip in memory mode
+        if !state.memory_mode {
+            let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                name: file_meta.name.clone(),
+                level: file_meta.level,
+                size_bytes: file_meta.size_bytes,
+                cf_id: file_meta.cf_id,
+                smallest_key: file_meta.smallest_key.clone(),
+                largest_key: file_meta.largest_key.clone(),
+                smallest_seq: file_meta.smallest_seq,
+                largest_seq: file_meta.largest_seq,
+                ..Default::default()
+            });
+            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
+                tracing::warn!(error = ?e, "failed to append AddSst to journal");
+            }
         }
 
         // Now that intent is durable, apply mutation to in-memory manifest
@@ -170,6 +172,12 @@ impl ManifestActor {
 
     /// Persist manifest to disk
     pub fn persist(&self, state: &RuntimeState) -> MidgeResult<()> {
+        // Skip persistence in memory mode
+        if state.memory_mode {
+            tracing::debug!("Manifest: skipping persistence in memory mode");
+            return Ok(());
+        }
+
         tracing::info!(
             file_count = state.manifest.files.len(),
             cf_count = state.manifest.column_families.len(),
@@ -209,14 +217,16 @@ impl ManifestActor {
 
         let cf_id = state.manifest.create_column_family(name.clone());
 
-        // Append create CF to journal
-        let edit = crate::metadata::ManifestEdit::CreateColumnFamily {
-            id: cf_id,
-            name: name.clone(),
-            created_at,
-        };
-        if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
-            tracing::warn!(error = ?e, "failed to append CreateColumnFamily to journal");
+        // Append create CF to journal (skip in memory mode)
+        if !state.memory_mode {
+            let edit = crate::metadata::ManifestEdit::CreateColumnFamily {
+                id: cf_id,
+                name: name.clone(),
+                created_at,
+            };
+            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
+                tracing::warn!(error = ?e, "failed to append CreateColumnFamily to journal");
+            }
         }
 
         self.pending_edits += 1;
@@ -250,10 +260,12 @@ impl ManifestActor {
             )));
         }
 
-        // Append drop CF edit to journal
-        let edit = crate::metadata::ManifestEdit::DropColumnFamily { id: cf_id };
-        if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
-            tracing::warn!(error = ?e, "failed to append DropColumnFamily to journal");
+        // Append drop CF edit to journal (skip in memory mode)
+        if !state.memory_mode {
+            let edit = crate::metadata::ManifestEdit::DropColumnFamily { id: cf_id };
+            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
+                tracing::warn!(error = ?e, "failed to append DropColumnFamily to journal");
+            }
         }
 
         // Remove ColumnFamilyState

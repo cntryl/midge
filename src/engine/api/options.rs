@@ -372,6 +372,11 @@ impl OpenOptions {
         let usable_memory = total_memory.saturating_sub(self.memtable_size_limit * 2); // 2 memtables
         self.block_cache_size = ((usable_memory as f64) * cache_ratio) as usize;
 
+        // Cap cache size for Economy goal to minimize resource usage
+        if self.goal == Goal::Economy {
+            self.block_cache_size = self.block_cache_size.min(256 * 1024 * 1024); // 256MB max
+        }
+
         // Derive WAL buffer size
         self.wal_buffer_size = match self.goal {
             Goal::Latency => 128 * 1024,     // 128KB

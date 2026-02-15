@@ -13,6 +13,27 @@ use super::traits::*;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global flag to enforce memory-mode constraint at RealFs construction time.
+/// Set to true when engine is opened in memory mode, preventing any RealFs usage.
+static MEMORY_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Set the global memory-mode flag. Called by Engine::open before runtime init.
+pub fn set_memory_mode(enabled: bool) {
+    MEMORY_MODE_ACTIVE.store(enabled, Ordering::SeqCst);
+}
+
+/// Check if memory mode is currently active
+pub fn is_memory_mode() -> bool {
+    MEMORY_MODE_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// Reset memory mode flag (for testing only)
+#[cfg(test)]
+pub fn reset_for_test() {
+    set_memory_mode(false);
+}
 
 /// Real filesystem backend
 pub struct RealFs {
@@ -21,6 +42,11 @@ pub struct RealFs {
 
 impl RealFs {
     /// Create a new real filesystem rooted at `base_path`
+    ///
+    /// # Note
+    /// Callers are responsible for ensuring this is not called in memory-only mode.
+    /// Higher-level code (EventLoop, lease creation, etc.) should check memory_mode
+    /// and use MockFs instead when appropriate.
     pub fn new(base_path: impl AsRef<Path>) -> FsResult<Self> {
         let path = base_path.as_ref().to_path_buf();
         fs::create_dir_all(&path).map_err(|e| io_err("create_dir_all", &path, e))?;

@@ -42,8 +42,9 @@ static INMEM_LEASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseError> {
     match storage {
         Storage::InMemory => {
-            // In-memory mode: use filesystem lease on temp directory
-            // This is safe because each InMemory instance gets a unique temp path.
+            // In-memory mode: use filesystem lease on temp directory (no disk I/O)
+            // Generate a unique temp path for lease coordination without actually
+            // creating the directory (memory mode must not touch filesystem).
             // NOTE: On some platforms (notably Windows) `SystemTime` resolution is not truly
             // nanosecond-granular, so concurrent callers can collide. Add a counter to ensure
             // uniqueness even under heavy parallel test load.
@@ -57,14 +58,12 @@ pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseErr
                     .unwrap_or_default()
                     .as_nanos()
             ));
-            std::fs::create_dir_all(&temp_path).map_err(|e| {
-                LeaseError::AcquisitionFailed(format!("failed to create temp dir: {}", e))
-            })?;
-            Ok(Arc::new(FileSystemLease::new(temp_path)))
+            // Memory mode: use MockFs for lease coordination (no disk I/O)
+            Ok(Arc::new(FileSystemLease::new(temp_path, true)))
         }
         Storage::Local { path } => {
-            // Local storage: use filesystem lease
-            Ok(Arc::new(FileSystemLease::new(path.clone())))
+            // Local storage: use filesystem lease with RealFs
+            Ok(Arc::new(FileSystemLease::new(path.clone(), false)))
         }
         Storage::Cloud {
             local_cache_path,

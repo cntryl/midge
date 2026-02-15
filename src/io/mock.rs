@@ -60,6 +60,33 @@ impl Fs for MockFs {
         }))
     }
 
+    fn open_persistent_handle(
+        &self,
+        path: &FsPath,
+        opts: OpenOptions,
+    ) -> FsResult<Box<dyn File>> {
+        let mut files = self.files.lock();
+
+        if opts.create_new && files.contains_key(&path.0) {
+            return Err(FsError::AlreadyExists(path.0.clone()));
+        }
+
+        files
+            .entry(path.0.clone())
+            .or_insert_with(|| MockFileData { data: Vec::new() });
+
+        if opts.truncate {
+            if let Some(file_data) = files.get_mut(&path.0) {
+                file_data.data.clear();
+            }
+        }
+
+        Ok(Box::new(MockPersistentFile {
+            path: path.0.clone(),
+            files: Arc::clone(&self.files),
+        }))
+    }
+
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         let mut files = self.files.lock();
         if files.remove(&path.0).is_none() {
@@ -202,6 +229,90 @@ impl<'a> File for MockFile<'a> {
 
     fn caps(&self) -> FileCaps {
         FileCaps::empty()
+    }
+}
+
+/// Persistent file handle (no lifetime dependency on Fs)
+pub struct MockPersistentFile {
+    path: String,
+    files: Arc<Mutex<HashMap<String, MockFileData>>>,
+}
+
+impl File for MockPersistentFile {
+    fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
+        let files = self.files.lock();
+        if let Some(data) = files.get(&self.path) {
+            let start = offset as usize;
+            let end = (offset + len) as usize;
+
+            if start > data.data.len() {
+                return Err(FsError::Io("offset beyond file".to_string()));
+            }
+
+            let slice = &data.data[start..end.min(data.data.len())];
+            Ok(Bytes::from(slice.to_vec()))
+        } else {
+            Err(FsError::NotFound(self.path.clone()))
+        }
+    }
+
+    fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
+        let mut files = self.files.lock();
+        if let Some(file_data) = files.get_mut(&self.path) {
+            let start = offset as usize;
+            let end = start + data.len();
+
+            if end > file_data.data.len() {
+                file_data.data.resize(end, 0);
+            }
+
+            file_data.data[start..end].copy_from_slice(&data);
+            Ok(())
+        } else {
+            Err(FsError::NotFound(self.path.clone()))
+        }
+    }
+
+    fn append(&mut self, data: Bytes) -> FsResult<u64> {
+        let mut files = self.files.lock();
+        if let Some(file_data) = files.get_mut(&self.path) {
+            let pos = file_data.data.len() as u64;
+            file_data.data.extend_from_slice(&data);
+            Ok(pos)
+        } else {
+            Err(FsError::NotFound(self.path.clone()))
+        }
+    }
+
+    fn len(&self) -> FsResult<u64> {
+        let files = self.files.lock();
+        if let Some(data) = files.get(&self.path) {
+            Ok(data.data.len() as u64)
+        } else {
+            Err(FsError::NotFound(self.path.clone()))
+        }
+    }
+
+    fn sync(&mut self, _dur: Durability) -> FsResult<()> {
+        Ok(())
+    }
+
+    fn close(self: Box<Self>) -> FsResult<()> {
+        Ok(())
+    }
+
+    fn caps(&self) -> FileCaps {
+        FileCaps::empty()
+    }
+
+    fn try_lock_exclusive(&self) -> FsResult<()> {
+        // Mock implementation: always succeed
+        Ok(())
+    }
+
+    fn unlock(&self) -> FsResult<()> {
+        // Mock implementation: always succeed
+        Ok(())
     }
 }
 

@@ -20,7 +20,7 @@
 //! - May not work correctly on NFS or other network filesystems
 
 use super::traits::{LeaseError, LeaseGuard, PrimaryLease};
-use crate::io::{Durability, File, Fs, FsPath, OpenMode, OpenOptions, RealFs};
+use crate::io::{Durability, File, Fs, FsPath, MockFs, OpenMode, OpenOptions, RealFs};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -40,8 +40,17 @@ pub struct FileSystemLease {
 
 impl FileSystemLease {
     /// Create a new filesystem lease for the given database path.
-    pub fn new(db_path: PathBuf) -> Self {
-        let fs = Arc::new(RealFs::new(&db_path).expect("failed to create filesystem for lease"));
+    ///
+    /// # Arguments
+    /// * `db_path` - Path to the database directory
+    /// * `use_mock_fs` - If true, uses MockFs (for in-memory mode); otherwise uses RealFs
+    pub fn new(db_path: PathBuf, use_mock_fs: bool) -> Self {
+        let fs: Arc<dyn Fs> = if use_mock_fs {
+            Arc::new(MockFs::new())
+        } else {
+            Arc::new(RealFs::new(&db_path).expect("failed to create filesystem for lease"))
+        };
+
         let lease_file_path = FsPath::new(LEASE_FILE_NAME);
         let holder_id = format!(
             "{}@{}",
@@ -203,7 +212,7 @@ mod tests {
     fn should_acquire_release_lease_when_no_contention() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
-        let lease = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf()));
+        let lease = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false));
 
         // Act
         let _guard = lease.try_acquire().unwrap();
@@ -220,8 +229,8 @@ mod tests {
     fn should_fail_acquisition_when_lease_already_held() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
-        let lease1 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf()));
-        let lease2 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf()));
+        let lease1 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false));
+        let lease2 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false));
 
         // Act
         let _guard1 = lease1.try_acquire().unwrap();
@@ -235,8 +244,8 @@ mod tests {
     fn should_acquire_after_release_when_lease_freed() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
-        let lease1 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf()));
-        let lease2 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf()));
+        let lease1 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false));
+        let lease2 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false));
 
         // Act
         let _guard1 = lease1.try_acquire().unwrap();
@@ -251,7 +260,7 @@ mod tests {
     fn should_renew_successfully_when_lease_held() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
-        let lease = FileSystemLease::new(temp_dir.path().to_path_buf());
+        let lease = FileSystemLease::new(temp_dir.path().to_path_buf(), false);
 
         // Act
         let _guard = lease.try_acquire().unwrap();
