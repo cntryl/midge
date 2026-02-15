@@ -128,6 +128,10 @@ impl CacheShard {
     }
 
     /// Insert a value into the cache (inline admission fallback)
+    ///
+    /// Optimized for constrained environments where background worker thread
+    /// cannot spawn. Uses fast capacity check and adaptive eviction to minimize
+    /// lock contention on the critical path.
     fn put_inline(&self, key: CacheKey, value: Bytes) {
         // Track access for admission control
         self.record_access_for_admission(&key);
@@ -138,13 +142,25 @@ impl CacheShard {
         }
 
         // Wrap in CacheValue
-        let cache_value = CacheValue::new(value);
+        let cache_value = CacheValue::new(value.clone());
+        let new_size = value.len() as u64;
 
-        // Insert and update metrics
+        // Fast capacity check: if we have plenty of space, skip eviction logic
+        let current_size = self.metrics.memory_bytes();
+        if current_size + new_size < self.max_bytes {
+            // Plenty of room, insert directly without eviction checks
+            self.insert_and_update_metrics(key, cache_value);
+            return;
+        }
+
+        // Tight on space: insert first, then evict if needed
+        // This reduces the number of eviction cycles vs. pre-checking
         self.insert_and_update_metrics(key, cache_value);
 
-        // Evict if over capacity
-        self.evict_if_needed();
+        // Only evict if actually over capacity (not just close)
+        if self.metrics.memory_bytes() > self.max_bytes {
+            self.evict_if_needed();
+        }
     }
 
     /// Insert a value into the cache (synchronous, for tests)
@@ -230,7 +246,11 @@ impl CacheShard {
         // Safeguard: limit eviction iterations to prevent excessive latency
         // when admission worker thread fails. This prevents pathological cases
         // where we spend excessive time evicting due to resource constraints.
-        const MAX_EVICTION_ATTEMPTS: usize = 100;
+        //
+        // Value is adaptive:
+        // - Background worker mode (not used): limit doesn't apply
+        // - Inline fallback mode: smaller limit (50) to avoid blocking hot path
+        const MAX_EVICTION_ATTEMPTS: usize = 50;
         let mut eviction_count = 0;
 
         while self.is_over_capacity() && eviction_count < MAX_EVICTION_ATTEMPTS {
@@ -251,10 +271,14 @@ impl CacheShard {
             }
         }
 
-        // Log if we hit the safeguard limit
-        if eviction_count >= MAX_EVICTION_ATTEMPTS && self.is_over_capacity() {
+        // Log if we hit the safeguard limit (only in inline mode where this matters)
+        if eviction_count >= MAX_EVICTION_ATTEMPTS
+            && self.is_over_capacity()
+            && self.admission_inline.load(Ordering::Relaxed)
+        {
             tracing::warn!(
-                "Cache eviction hit safeguard limit ({}), still over capacity",
+                "Cache eviction (inline mode) hit safeguard at {} attempts, still over capacity; \
+                     consider increasing cache size or checking memory pressure",
                 MAX_EVICTION_ATTEMPTS
             );
         }

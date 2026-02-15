@@ -95,21 +95,64 @@ impl BloomFilterOps for BloomReader {
         let h2 = xxh3_64_with_seed(key, SEED2);
         let num_bits = self.num_bits as u64;
 
-        for i in 0..(self.k as u64) {
-            let combined = h1.wrapping_add(i.wrapping_mul(h2));
+        // Unroll loop by 4 to reduce branch misprediction overhead on constrained CPUs.
+        // Each check is independent enough for ILP (instruction-level parallelism).
+        let k_full_groups = (self.k as usize) / 4;
+        let k_remainder = (self.k as usize) % 4;
+
+        // Process 4 hash functions at a time
+        for group in 0..k_full_groups {
+            let base_i = (group * 4) as u64;
+
+            // Check hash function at base_i
+            let combined1 = h1.wrapping_add(base_i.wrapping_mul(h2));
+            let bit_index1 = (combined1 % num_bits) as usize;
+            let byte_index1 = bit_index1 / 8;
+            let bit_offset1 = bit_index1 % 8;
+            if byte_index1 >= self.bits.len() || (self.bits[byte_index1] & (1 << bit_offset1)) == 0
+            {
+                return BloomTestResult::DefinitelyNotPresent;
+            }
+
+            // Check hash function at base_i+1
+            let combined2 = h1.wrapping_add((base_i + 1).wrapping_mul(h2));
+            let bit_index2 = (combined2 % num_bits) as usize;
+            let byte_index2 = bit_index2 / 8;
+            let bit_offset2 = bit_index2 % 8;
+            if byte_index2 >= self.bits.len() || (self.bits[byte_index2] & (1 << bit_offset2)) == 0
+            {
+                return BloomTestResult::DefinitelyNotPresent;
+            }
+
+            // Check hash function at base_i+2
+            let combined3 = h1.wrapping_add((base_i + 2).wrapping_mul(h2));
+            let bit_index3 = (combined3 % num_bits) as usize;
+            let byte_index3 = bit_index3 / 8;
+            let bit_offset3 = bit_index3 % 8;
+            if byte_index3 >= self.bits.len() || (self.bits[byte_index3] & (1 << bit_offset3)) == 0
+            {
+                return BloomTestResult::DefinitelyNotPresent;
+            }
+
+            // Check hash function at base_i+3
+            let combined4 = h1.wrapping_add((base_i + 3).wrapping_mul(h2));
+            let bit_index4 = (combined4 % num_bits) as usize;
+            let byte_index4 = bit_index4 / 8;
+            let bit_offset4 = bit_index4 % 8;
+            if byte_index4 >= self.bits.len() || (self.bits[byte_index4] & (1 << bit_offset4)) == 0
+            {
+                return BloomTestResult::DefinitelyNotPresent;
+            }
+        }
+
+        // Handle remaining 0-3 hash functions
+        for i in 0..k_remainder {
+            let combined = h1.wrapping_add((k_full_groups as u64 * 4 + i as u64).wrapping_mul(h2));
             let bit_index = (combined % num_bits) as usize;
             let byte_index = bit_index / 8;
             let bit_offset = bit_index % 8;
 
-            // Safety: bit_index < num_bits, so byte_index < bits.len() always
-            // when the filter was constructed correctly. But we keep the check
-            // for defense against corruption.
-            if byte_index >= self.bits.len() {
-                return BloomTestResult::DefinitelyNotPresent;
-            }
-
-            let is_set = (self.bits[byte_index] & (1 << bit_offset)) != 0;
-            if !is_set {
+            if byte_index >= self.bits.len() || (self.bits[byte_index] & (1 << bit_offset)) == 0 {
                 return BloomTestResult::DefinitelyNotPresent;
             }
         }

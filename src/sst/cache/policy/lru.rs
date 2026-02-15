@@ -3,24 +3,30 @@
 use super::CachePolicy;
 use crate::sst::cache::key::CacheKey;
 use parking_lot::Mutex;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// LRU eviction policy
+/// LRU eviction policy using generation counter (O(1) access, O(n) eviction scan)
 ///
-/// Tracks access order and evicts least recently used blocks first.
+/// Tracks access order by assigning a monotonically increasing generation
+/// counter to each key on access. Eviction finds the key with the lowest
+/// generation (least recently used).
+///
+/// This approach eliminates O(n) position updates that occur on every access
+/// by deferring the scan to only when picking a victim.
 pub struct LruPolicy {
-    /// Queue of keys in access order (front = oldest)
-    queue: Mutex<VecDeque<CacheKey>>,
-    /// Position of each key in the queue
-    positions: Mutex<HashMap<CacheKey, usize>>,
+    /// Map from key to last access generation
+    generations: Mutex<HashMap<CacheKey, u64>>,
+    /// Current generation counter (incremented on each access)
+    generation: AtomicU64,
 }
 
 impl LruPolicy {
     /// Create a new LRU policy
     pub fn new() -> Self {
         Self {
-            queue: Mutex::new(VecDeque::new()),
-            positions: Mutex::new(HashMap::new()),
+            generations: Mutex::new(HashMap::new()),
+            generation: AtomicU64::new(0),
         }
     }
 }
@@ -32,82 +38,58 @@ impl Default for LruPolicy {
 }
 
 impl CachePolicy for LruPolicy {
-    /// Lock order: always queue then positions; never the reverse (avoids deadlock).
+    /// Record access to a key (O(1) operation)
+    ///
+    /// Assigns a new generation counter to track recency.
+    /// No O(n) position updates needed.
     fn on_access(&self, key: CacheKey) {
-        let mut queue = self.queue.lock();
-        let mut positions = self.positions.lock();
-
-        // If key already exists, remove it from queue
-        if let Some(pos) = positions.remove(&key) {
-            queue.remove(pos);
-            // Update all positions after the removed element
-            for (_, p) in positions.iter_mut() {
-                if *p > pos {
-                    *p -= 1;
-                }
-            }
-        }
-
-        // Add key to end (most recently used)
-        queue.push_back(key);
-        positions.insert(key, queue.len() - 1);
+        let gen = self.generation.fetch_add(1, Ordering::Relaxed);
+        let mut gens = self.generations.lock();
+        gens.insert(key, gen);
     }
 
+    /// Pick a victim for eviction (O(n) scan, only during eviction)
+    ///
+    /// Finds the key with the smallest generation (least recently used)
+    /// among non-excluded types. This scan is O(n) in cache size,
+    /// but only runs during eviction (infrequent), unlike on_access
+    /// which ran O(n) on every hit.
     fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
-        let mut queue = self.queue.lock();
-        let mut positions = self.positions.lock();
+        let mut gens = self.generations.lock();
 
-        // Find first victim not in exclude list
-        let mut victim_idx = None;
-        for (idx, key) in queue.iter().enumerate() {
-            if !exclude_types.contains(&key.block_type) {
-                victim_idx = Some(idx);
-                break;
-            }
+        // Find the key with minimum generation, excluding specified types
+        let victim_key = gens
+            .iter()
+            .filter(|(key, _)| !exclude_types.contains(&key.block_type))
+            .min_by_key(|(_, &gen)| gen)
+            .map(|(key, _)| *key);
+
+        // Remove the victim from tracking
+        if let Some(key) = victim_key {
+            gens.remove(&key);
         }
 
-        if let Some(idx) = victim_idx {
-            let victim = queue
-                .remove(idx)
-                .unwrap_or_else(|| unreachable!("victim index from same queue"));
-            // Update all positions after the removed element
-            for (_, p) in positions.iter_mut() {
-                if *p > idx {
-                    *p -= 1;
-                }
-            }
-            positions.remove(&victim);
-            Some(victim)
-        } else {
-            None
-        }
+        victim_key
     }
 
+    /// Remove a key from tracking (O(1) operation)
     fn on_remove(&self, key: CacheKey) {
-        let mut queue = self.queue.lock();
-        let mut positions = self.positions.lock();
-
-        if let Some(pos) = positions.remove(&key) {
-            queue.remove(pos);
-            // Update all positions after the removed element
-            for (_, p) in positions.iter_mut() {
-                if *p > pos {
-                    *p -= 1;
-                }
-            }
-        }
+        let mut gens = self.generations.lock();
+        gens.remove(&key);
     }
 
+    /// Mark a key as stale and remove it (O(1) operation)
+    ///
+    /// Called when a concurrent removal occurred during eviction.
+    /// Just clean up tracking state.
     fn on_stale(&self, key: CacheKey) {
-        // Same as on_remove - just clean up tracking state
         self.on_remove(key);
     }
 
+    /// Clear all state (O(n) in current cache size)
     fn clear(&self) {
-        let mut queue = self.queue.lock();
-        let mut positions = self.positions.lock();
-        queue.clear();
-        positions.clear();
+        let mut gens = self.generations.lock();
+        gens.clear();
     }
 }
 

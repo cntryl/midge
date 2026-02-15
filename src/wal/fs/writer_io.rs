@@ -159,7 +159,7 @@ impl WalWriter for FsWalWriterIo {
                 // Space available, queue the write
                 q.push(super::writer_runner::QueuedWrite::new(buf));
                 self.queue_cond.notify_one();
-                
+
                 if attempt > 0 {
                     if let Some(t) = crate::telemetry::Telemetry::global() {
                         t.metrics().record_wal_backpressure_wait(attempt as u64);
@@ -167,15 +167,15 @@ impl WalWriter for FsWalWriterIo {
                 }
                 return Ok(pos);
             }
-            
+
             // Queue is full, wait for drain before retry
             let wait_duration = std::time::Duration::from_millis(backoff_ms);
             self.queue_cond.wait_for(&mut q, wait_duration);
-            
+
             // Exponential backoff: 1ms → 2ms → 4ms → ... → 100ms
             backoff_ms = std::cmp::min(backoff_ms * 2, MAX_BACKOFF_MS);
         }
-        
+
         // Still full after max attempts - fail with detailed diagnostics
         let q = self.queue.lock();
         Err(crate::common::MidgeError::Internal(format!(

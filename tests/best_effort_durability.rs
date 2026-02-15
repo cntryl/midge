@@ -92,11 +92,7 @@ fn should_lose_best_effort_data_when_not_flushed() -> cntryl_midge::MidgeResult<
 
     // Act - Write with BestEffort but DON'T flush
     let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite)?;
-    tx.put(
-        b"ephemeral_key".to_vec(),
-        b"ephemeral_value".to_vec(),
-        None,
-    )?;
+    tx.put(b"ephemeral_key".to_vec(), b"ephemeral_value".to_vec(), None)?;
     engine.commit(tx, WriteOptions::best_effort())?;
 
     // Verify data is in memtable before restart

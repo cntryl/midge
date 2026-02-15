@@ -25,11 +25,6 @@ impl SparseIndexReader {
     /// Find the block range containing a key
     ///
     /// Returns the range of blocks to search (start_block to end_block inclusive).
-    /// Binary search finds the entry where key >= entry.key, then returns that block
-    /// up to the next sampled entry's block.
-    /// Find the block range containing a key
-    ///
-    /// Returns the range of blocks to search (start_block to end_block inclusive).
     /// For keys larger than all index entries, returns (last_block, usize::MAX).
     /// Caller is responsible for bounding end_block to the actual SST block count.
     pub fn find_block_range(&self, key: &[u8]) -> BlockRange {

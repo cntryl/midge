@@ -60,11 +60,7 @@ impl Fs for MockFs {
         }))
     }
 
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        opts: OpenOptions,
-    ) -> FsResult<Box<dyn File>> {
+    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
         let mut files = self.files.lock();
 
         if opts.create_new && files.contains_key(&path.0) {

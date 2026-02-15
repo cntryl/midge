@@ -336,7 +336,8 @@ impl Metrics {
     #[inline]
     pub fn record_wal_backpressure_wait(&self, wait_attempts: u64) {
         if self.enabled {
-            self.wal_backpressure_wait_count.fetch_add(1, Ordering::Relaxed);
+            self.wal_backpressure_wait_count
+                .fetch_add(1, Ordering::Relaxed);
             self.wal_backpressure_wait_attempts_total
                 .fetch_add(wait_attempts, Ordering::Relaxed);
         }

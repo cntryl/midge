@@ -374,7 +374,8 @@ impl OpenOptions {
 
         // Cap cache size for Economy goal to minimize resource usage
         if self.goal == Goal::Economy {
-            self.block_cache_size = self.block_cache_size.min(256 * 1024 * 1024); // 256MB max
+            self.block_cache_size = self.block_cache_size.min(256 * 1024 * 1024);
+            // 256MB max
         }
 
         // Derive WAL buffer size

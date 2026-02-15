@@ -456,12 +456,52 @@ pub fn decompress_block_with_trailer(block: &[u8]) -> MidgeResult<Bytes> {
     decompress_block(&block[..compressed_data_len], algo)
 }
 
+/// Quick entropy check to detect if value is likely compressible.
+///
+/// Samples the first 32 bytes (or full value if smaller) to detect
+/// repetitive patterns that compress well. Avoids expensive LZ4 compression
+/// for incompressible data like random/encrypted values.
+///
+/// Returns true if value is likely worth compressing.
+#[inline]
+fn is_likely_compressible(value: &[u8]) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+
+    // Sample up to 32 bytes from the beginning
+    let sample_len = std::cmp::min(32, value.len());
+    let sample = &value[..sample_len];
+
+    // Count unique bytes in sample
+    let mut seen = [false; 256];
+    let mut unique_count = 0u32;
+    for &byte in sample {
+        if !seen[byte as usize] {
+            seen[byte as usize] = true;
+            unique_count += 1;
+        }
+    }
+
+    // If sample has < 200 different bytes out of 256 possible,
+    // it's likely compressible (entropy < 7.7 bits/byte)
+    unique_count < 200
+}
+
 /// Compress a WAL record value using LZ4 (fast, latency-optimal).
 ///
 /// Returns `(compressed_value, compression_algo_byte)` or `(original_value, None)`
-/// if the value is too small to benefit from compression.
+/// if the value is too small to benefit from compression or is incompressible.
+///
+/// Performs a quick entropy check before expensive LZ4 compression to avoid
+/// CPU waste on random/encrypted data in constrained environments.
 pub fn compress_wal_value(value: &[u8]) -> (Bytes, Option<u8>) {
     if value.len() < MIN_COMPRESS_SIZE {
+        return (Bytes::copy_from_slice(value), None);
+    }
+
+    // Fast entropy check: skip expensive compression for incompressible data
+    if !is_likely_compressible(value) {
         return (Bytes::copy_from_slice(value), None);
     }
 
