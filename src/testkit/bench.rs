@@ -438,7 +438,7 @@ mod tests {
 /// ```no_run
 /// use cntryl_midge::testkit::bench::consume_iterator;
 /// # use cntryl_midge::{Engine, Query};
-/// # let engine = Engine::open_in_memory().unwrap();
+/// # let engine = Engine::open_with_options(cntryl_midge::testkit::memory_opts()).unwrap();
 /// # let cf = engine.create_column_family("cf1").unwrap();
 /// # let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
 /// let iter = tx.scan(&Query::new()).unwrap();
@@ -463,7 +463,7 @@ pub fn consume_iterator(mut iter: crate::engine::api::iterator::Iterator) -> usi
 /// ```no_run
 /// use cntryl_midge::testkit::bench::consume_n_from_iterator;
 /// # use cntryl_midge::{Engine, Query};
-/// # let engine = Engine::open_in_memory().unwrap();
+/// # let engine = Engine::open_with_options(cntryl_midge::testkit::memory_opts()).unwrap();
 /// # let cf = engine.create_column_family("cf1").unwrap();
 /// # let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
 /// let iter = tx.scan(&Query::new()).unwrap();
