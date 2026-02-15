@@ -6,14 +6,10 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// LRU eviction policy using generation counter (O(1) access, O(n) eviction scan)
+/// LRU eviction policy using generation counter
 ///
 /// Tracks access order by assigning a monotonically increasing generation
-/// counter to each key on access. Eviction finds the key with the lowest
-/// generation (least recently used).
-///
-/// This approach eliminates O(n) position updates that occur on every access
-/// by deferring the scan to only when picking a victim.
+/// counter to each key on access.
 pub struct LruPolicy {
     /// Map from key to last access generation
     generations: Mutex<HashMap<CacheKey, u64>>,
@@ -38,53 +34,51 @@ impl Default for LruPolicy {
 }
 
 impl CachePolicy for LruPolicy {
-    /// Record access to a key (O(1) operation)
+    /// Record access to a key
     ///
     /// Assigns a new generation counter to track recency.
-    /// No O(n) position updates needed.
     #[inline]
     fn on_access(&self, key: CacheKey) {
         let gen = self.generation.fetch_add(1, Ordering::Relaxed);
-        let mut gens = self.generations.lock();
-        gens.insert(key, gen);
+        self.generations.lock().insert(key, gen);
     }
 
-    /// Pick a victim for eviction (O(n) scan, only during eviction)
+    /// Pick a victim for eviction
     ///
     /// Finds the key with the smallest generation (least recently used)
-    /// among non-excluded types. This scan is O(n) in cache size,
-    /// but only runs during eviction (infrequent), unlike on_access
-    /// which ran O(n) on every hit.
+    /// among non-excluded types.
     fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
-        let mut gens = self.generations.lock();
+        let mut generations = self.generations.lock();
 
-        // Direct iteration to avoid closure overhead
-        let mut min_gen = u64::MAX;
-        let mut victim_key = None;
+        let victim = if exclude_types.is_empty() {
+            // Fast path: no exclusions, just find global minimum
+            generations
+                .iter()
+                .min_by_key(|(_, &gen)| gen)
+                .map(|(&key, _)| key)
+        } else {
+            // With exclusions, filter first
+            generations
+                .iter()
+                .filter(|(key, _)| !exclude_types.contains(&key.block_type))
+                .min_by_key(|(_, &gen)| gen)
+                .map(|(&key, _)| key)
+        };
 
-        for (&key, &gen) in gens.iter() {
-            if !exclude_types.contains(&key.block_type) && gen < min_gen {
-                min_gen = gen;
-                victim_key = Some(key);
-            }
+        if let Some(key) = victim {
+            generations.remove(&key);
         }
 
-        // Remove the victim from tracking
-        if let Some(key) = victim_key {
-            gens.remove(&key);
-        }
-
-        victim_key
+        victim
     }
 
-    /// Remove a key from tracking (O(1) operation)
+    /// Remove a key from tracking
     #[inline]
     fn on_remove(&self, key: CacheKey) {
-        let mut gens = self.generations.lock();
-        gens.remove(&key);
+        self.generations.lock().remove(&key);
     }
 
-    /// Mark a key as stale and remove it (O(1) operation)
+    /// Mark a key as stale and remove it
     ///
     /// Called when a concurrent removal occurred during eviction.
     /// Just clean up tracking state.
@@ -93,10 +87,9 @@ impl CachePolicy for LruPolicy {
         self.on_remove(key);
     }
 
-    /// Clear all state (O(n) in current cache size)
+    /// Clear all state
     fn clear(&self) {
-        let mut gens = self.generations.lock();
-        gens.clear();
+        self.generations.lock().clear();
     }
 }
 

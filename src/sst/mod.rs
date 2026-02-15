@@ -309,7 +309,7 @@ impl SkipListMemtable {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    
+
                     if exp_time <= now {
                         None
                     } else {
@@ -326,7 +326,7 @@ impl SkipListMemtable {
     }
 
     /// Get value as Bytes (zero-copy, for performance-critical paths).
-    /// 
+    ///
     /// Returns Bytes instead of Vec<u8>, avoiding allocation for callers
     /// that can work with the Arc-based Bytes type.
     pub fn get_bytes(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
@@ -341,7 +341,7 @@ impl SkipListMemtable {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    
+
                     if exp_time <= now {
                         None
                     } else {
@@ -370,7 +370,7 @@ impl SkipListMemtable {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    
+
                     if exp_time <= now {
                         None
                     } else {
@@ -486,7 +486,7 @@ impl Memtable for SkipListMemtable {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    
+
                     if exp_time <= now {
                         None
                     } else {

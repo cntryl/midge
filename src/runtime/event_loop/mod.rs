@@ -295,7 +295,7 @@ impl EventLoop {
             self.loop_debug_wakes += 1;
             self.loop_debug_batch_total += batch as u64;
 
-            if self.loop_debug_wakes % LOOP_DEBUG_EVERY == 0 {
+            if self.loop_debug_wakes.is_multiple_of(LOOP_DEBUG_EVERY) {
                 let avg_batch = self.loop_debug_batch_total as f64 / self.loop_debug_wakes as f64;
                 eprintln!(
                     "[midge] loop_stats wakes={} avg_batch={:.2}",
@@ -923,8 +923,8 @@ impl EventLoop {
                 // Do this for local durability mode; CloudFirst uses rotate/upload logic.
                 if !self.wal_actor.is_cloud_first() {
                     const MAX_DRAIN_WRITES_AFTER_BATCH: usize = 1024;
-                    let _ = self.drain_pending_writes(&msg_rx, MAX_DRAIN_WRITES_AFTER_BATCH);
-                    self.sync_batched_wal_if_needed(&msg_rx);
+                    let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN_WRITES_AFTER_BATCH);
+                    self.sync_batched_wal_if_needed(msg_rx);
                 }
 
                 // Check if any memtable needs flushing (backpressure mechanism)
@@ -1353,7 +1353,7 @@ impl EventLoop {
                 }
 
                 // Auto-sync batched writes if needed (group commit completes all waiters)
-                self.sync_batched_wal_if_needed(&msg_rx);
+                self.sync_batched_wal_if_needed(msg_rx);
 
                 self.maybe_flush_cloudfirst_wal();
             }
@@ -1424,7 +1424,7 @@ impl EventLoop {
                     }
                 }
 
-                self.sync_batched_wal_if_needed(&msg_rx);
+                self.sync_batched_wal_if_needed(msg_rx);
                 self.maybe_flush_cloudfirst_wal();
             }
 
@@ -1585,7 +1585,7 @@ impl EventLoop {
                 }
 
                 // DDL durability barrier: ensure WAL is durable before CF creation
-                self.force_wal_sync(&msg_rx);
+                self.force_wal_sync(msg_rx);
 
                 let result = self
                     .manifest_actor
@@ -1621,7 +1621,7 @@ impl EventLoop {
                 }
 
                 // DDL durability barrier: ensure WAL is durable before CF drop
-                self.force_wal_sync(&msg_rx);
+                self.force_wal_sync(msg_rx);
 
                 let result = self
                     .manifest_actor
