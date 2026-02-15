@@ -347,25 +347,21 @@ impl IngestCoordinator {
 
             loop {
                 let mut pending_requests = Vec::new();
-                let mut all_intents = Vec::new();
-                let mut batch_durability = None;
 
-                let is_initial_batch = if let Some(initial) = initial_intents.take() {
-                    batch_durability = durability_policy;
-                    all_intents = initial;
-                    true
-                } else {
-                    match self.write_group_coord.pending_queue.1.try_recv() {
-                        Ok(pending) => {
-                            batch_durability = pending.durability_policy;
-                            all_intents = pending.intents;
-                            pending_requests.push((pending.result_tx, pending.durability_policy));
-                            false
+                let (mut all_intents, batch_durability, is_initial_batch) =
+                    if let Some(initial) = initial_intents.take() {
+                        (initial, durability_policy, true)
+                    } else {
+                        match self.write_group_coord.pending_queue.1.try_recv() {
+                            Ok(pending) => {
+                                pending_requests
+                                    .push((pending.result_tx, pending.durability_policy));
+                                (pending.intents, pending.durability_policy, false)
+                            }
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => break,
                         }
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => break,
-                    }
-                };
+                    };
 
                 if all_intents.is_empty() {
                     break;
