@@ -428,3 +428,56 @@ mod tests {
         assert!(_d.as_nanos() > 0);
     }
 }
+
+/// Consume an entire iterator and return the count of elements.
+///
+/// This helper ensures proper iteration consumption in benchmarks and
+/// uses `black_box` to prevent the compiler from optimizing away the loop.
+///
+/// # Example
+/// ```no_run
+/// use cntryl_midge::testkit::bench::consume_iterator;
+/// # use cntryl_midge::{Engine, Query};
+/// # let engine = Engine::open_in_memory().unwrap();
+/// # let cf = engine.create_column_family("cf1").unwrap();
+/// # let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+/// let iter = tx.scan(&Query::new()).unwrap();
+/// let count = consume_iterator(iter);
+/// println!("Scanned {} items", count);
+/// ```
+pub fn consume_iterator(mut iter: crate::engine::api::iterator::Iterator) -> usize {
+    let mut count = 0;
+    while iter.next().is_some() {
+        count += 1;
+    }
+    std::hint::black_box(count);
+    count
+}
+
+/// Consume up to N elements from an iterator and return the actual count consumed.
+///
+/// This is useful for benchmarks that want to measure partial scan performance
+/// without consuming the entire result set.
+///
+/// # Example
+/// ```no_run
+/// use cntryl_midge::testkit::bench::consume_n_from_iterator;
+/// # use cntryl_midge::{Engine, Query};
+/// # let engine = Engine::open_in_memory().unwrap();
+/// # let cf = engine.create_column_family("cf1").unwrap();
+/// # let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+/// let iter = tx.scan(&Query::new()).unwrap();
+/// let count = consume_n_from_iterator(iter, 100);
+/// println!("Scanned {} items (max 100)", count);
+/// ```
+pub fn consume_n_from_iterator(
+    mut iter: crate::engine::api::iterator::Iterator,
+    n: usize,
+) -> usize {
+    let mut count = 0;
+    while count < n && iter.next().is_some() {
+        count += 1;
+    }
+    std::hint::black_box(count);
+    count
+}

@@ -198,6 +198,16 @@ name = "tier1_hotpath_compression"
 path = "benches/tier1_hotpath_compression.rs"
 harness = false
 
+[[bench]]
+name = "tier1_hotpath_event_loop"
+path = "benches/tier1_hotpath_event_loop.rs"
+harness = false
+
+[[bench]]
+name = "tier2_subsystem_event_loop"
+path = "benches/tier2_subsystem_event_loop.rs"
+harness = false
+
 # =============================================================================
 # Benchmarks — Tier 2: Subsystem (<8s)
 # =============================================================================

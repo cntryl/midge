@@ -3,6 +3,10 @@
 //! Measures: cost of seeking and advancing once across different storage layouts.
 //! Value size is IRRELEVANT to the measured primitive (seek behavior independent of payload).
 //! This test only answers: "How fast can we seek and start iteration?"
+//!
+//! **Important:** This benchmark measures iterator setup cost plus first element only.
+//! It does NOT measure full scan throughput. For that, see tier4_ycsb_workload_e.rs
+//! or tier2_subsystem benchmarks that consume entire iterator results.
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 

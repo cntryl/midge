@@ -33,9 +33,11 @@ pub mod common;
 mod compaction;
 #[allow(dead_code)]
 mod io;
+pub mod handler;
 pub mod iterators;
 #[allow(dead_code)]
 mod lease;
+pub mod message;
 #[allow(dead_code)]
 mod metadata;
 #[allow(dead_code)]

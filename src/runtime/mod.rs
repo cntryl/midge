@@ -689,6 +689,14 @@ impl RuntimeHandle {
             .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))
     }
 
+    /// Register a response channel for a request_id.
+    ///
+    /// Intended for benchmarks to pre-register receivers and avoid
+    /// per-iteration allocations in hot loops.
+    pub fn register_response(&self, request_id: u64) -> Receiver<RuntimeResponse> {
+        self.router.register(request_id)
+    }
+
     /// Submit a message and wait synchronously for its response.
     ///
     /// The `RuntimeMsg` MUST carry a `request_id`. Use `next_request_id()` when

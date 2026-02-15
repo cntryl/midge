@@ -2,6 +2,16 @@
 //!
 //! Measures: cost of individual put/get/commit calls
 //! NOT: bulk operations, batch throughput, or volume scaling
+//!
+//! **Measurement Notes:**
+//! - Memory mode: reads from in-memory skiplist (memtable)
+//! - Local mode: reads from flushed SST via block cache
+//! - Cloud mode: reads from cloud-backed SST via block cache
+//!
+//! Different storage modes may show different latencies because they exercise
+//! different code paths. This is expected and informative, not a bug.
+//! Memory mode hits memtable, while local/cloud modes hit the block cache
+//! after the setup flush.
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 
