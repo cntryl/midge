@@ -94,6 +94,10 @@ pub struct Metrics {
     /// Cache hits (reused cached sequences)
     pub idempotency_cache_hits: Arc<AtomicU64>,
 
+    // Event loop
+    pub event_loop_wakes: Arc<AtomicU64>,
+    pub event_loop_batch_total: Arc<AtomicU64>,
+
     enabled: bool,
 }
 
@@ -154,8 +158,25 @@ impl Metrics {
             pending_txn_duration_ms_max: Arc::new(AtomicU64::new(0)),
             idempotency_alloc_total: Arc::new(AtomicU64::new(0)),
             idempotency_cache_hits: Arc::new(AtomicU64::new(0)),
+            event_loop_wakes: Arc::new(AtomicU64::new(0)),
+            event_loop_batch_total: Arc::new(AtomicU64::new(0)),
             enabled: _config.enabled && _config.enable_metrics,
         })
+    }
+
+    #[inline]
+    pub fn record_event_loop_wake(&self) {
+        if self.enabled {
+            self.event_loop_wakes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_event_loop_batch(&self, batch: u64) {
+        if self.enabled {
+            self.event_loop_batch_total
+                .fetch_add(batch, Ordering::Relaxed);
+        }
     }
 
     #[inline]
