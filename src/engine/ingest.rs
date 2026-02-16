@@ -85,7 +85,10 @@ struct LeaderGuard {
 
 impl LeaderGuard {
     fn new(coord: Arc<WriteGroupCoordinator>) -> Self {
-        Self { coord, active: true }
+        Self {
+            coord,
+            active: true,
+        }
     }
 
     fn dismiss(&mut self) {
@@ -348,20 +351,20 @@ impl IngestCoordinator {
             loop {
                 let mut pending_requests = Vec::new();
 
-                let (mut all_intents, batch_durability, is_initial_batch) =
-                    if let Some(initial) = initial_intents.take() {
-                        (initial, durability_policy, true)
-                    } else {
-                        match self.write_group_coord.pending_queue.1.try_recv() {
-                            Ok(pending) => {
-                                pending_requests
-                                    .push((pending.result_tx, pending.durability_policy));
-                                (pending.intents, pending.durability_policy, false)
-                            }
-                            Err(TryRecvError::Empty) => break,
-                            Err(TryRecvError::Disconnected) => break,
+                let (mut all_intents, batch_durability, is_initial_batch) = if let Some(initial) =
+                    initial_intents.take()
+                {
+                    (initial, durability_policy, true)
+                } else {
+                    match self.write_group_coord.pending_queue.1.try_recv() {
+                        Ok(pending) => {
+                            pending_requests.push((pending.result_tx, pending.durability_policy));
+                            (pending.intents, pending.durability_policy, false)
                         }
-                    };
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => break,
+                    }
+                };
 
                 if all_intents.is_empty() {
                     break;

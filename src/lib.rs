@@ -91,6 +91,7 @@ pub use engine::Key as Bytes;
 // Re-export BytesMut directly from the `bytes` crate.
 pub use bytes::BytesMut;
 
+#[cfg(any(test, feature = "testkit"))]
 pub use testkit::{MidgeOptions, StorageMode};
 
 // ---------------------------------------------------------------------------
@@ -115,7 +116,7 @@ pub use testkit::{MidgeOptions, StorageMode};
 ///
 /// // Open engine
 /// let engine = Engine::open(OpenOptions::local("./db").build())?;
-/// let cf = engine.create_column_family("cf1").unwrap();
+/// let cf = engine.create_column_family("cf1")?;
 ///
 /// // Write: explicit transaction, explicit commit, explicit durability
 /// let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;

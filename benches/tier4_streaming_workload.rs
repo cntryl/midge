@@ -11,7 +11,7 @@ use std::thread;
 use std::time::Duration;
 
 use cntryl_midge::testkit::ycsb;
-use cntryl_midge::{MidgeEngine, MidgeOptions};
+use cntryl_midge::{MidgeEngine, testkit::MidgeOptions};
 
 const VALUE_SIZE: usize = 256;
 

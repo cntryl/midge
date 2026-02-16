@@ -395,7 +395,9 @@ impl EventLoop {
                 msg_rx.recv().ok()
             };
 
-            let Some(msg) = msg else { break; };
+            let Some(msg) = msg else {
+                break;
+            };
 
             let outcome = self.process_wake_msg(msg, &msg_rx, MAX_DRAIN_WRITES_ON_WAKE);
             if outcome == HandleOutcome::Break {

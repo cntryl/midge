@@ -41,7 +41,10 @@ pub fn encode_varint_with_tag(buf: &mut BytesMut, tag: u8, mut value: u32) {
 /// Encode arbitrary bytes with a tag and length prefix
 pub fn encode_bytes_with_tag(buf: &mut BytesMut, tag: u8, data: &[u8]) {
     buf.put_u8(tag);
-    encode_varint32(buf, data.len() as u32);
+    // Defensive check — lengths larger than u32::MAX are unsupported and would truncate.
+    debug_assert!(data.len() <= u32::MAX as usize, "TLV value too large");
+    let len32 = u32::try_from(data.len()).expect("TLV value too large");
+    encode_varint32(buf, len32);
     buf.put_slice(data);
 }
 

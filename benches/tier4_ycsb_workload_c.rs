@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use cntryl_midge::testkit::ycsb;
 use cntryl_midge::testkit::zipfian::ZipfianGenerator;
-use cntryl_midge::MidgeOptions;
+use cntryl_midge::testkit::MidgeOptions;
 
 const INITIAL_KEYS: usize = 50_000; // Reduced from 100k: still exercises LSM multi-level reads
 const WARMUP: Duration = Duration::from_secs(1);

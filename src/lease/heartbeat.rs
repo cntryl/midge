@@ -176,7 +176,7 @@ mod tests {
 
     impl PrimaryLease for MockLease {
         fn try_acquire(&self) -> Result<LeaseGuard, LeaseError> {
-            Ok(LeaseGuard::new(|| {}))
+            Ok(LeaseGuard::token())
         }
 
         fn renew(&self) -> Result<(), LeaseError> {

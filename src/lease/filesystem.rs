@@ -29,6 +29,15 @@ use std::time::Duration;
 const LEASE_FILE_NAME: &str = ".midge_primary_lease.lock";
 const DEFAULT_TTL_SECS: u64 = 30;
 
+/// Helper to convert poisoned mutex errors into `LeaseError::IoError`.
+fn lock_mutex<'a, T>(
+    m: &'a Mutex<T>,
+    ctx: &str,
+) -> Result<std::sync::MutexGuard<'a, T>, LeaseError> {
+    m.lock()
+        .map_err(|_| LeaseError::IoError(format!("mutex poisoned: {}", ctx)))
+}
+
 /// Filesystem-based lease implementation.
 pub struct FileSystemLease {
     fs: Arc<dyn Fs>,
@@ -44,11 +53,12 @@ impl FileSystemLease {
     /// # Arguments
     /// * `db_path` - Path to the database directory
     /// * `use_mock_fs` - If true, uses MockFs (for in-memory mode); otherwise uses RealFs
-    pub fn new(db_path: PathBuf, use_mock_fs: bool) -> Self {
+    pub fn new(db_path: PathBuf, use_mock_fs: bool) -> Result<Self, LeaseError> {
         let fs: Arc<dyn Fs> = if use_mock_fs {
             Arc::new(MockFs::new())
         } else {
-            Arc::new(RealFs::new(&db_path).expect("failed to create filesystem for lease"))
+            let realfs = RealFs::new(&db_path).map_err(|e| LeaseError::IoError(e.to_string()))?;
+            Arc::new(realfs)
         };
 
         let lease_file_path = FsPath::new(LEASE_FILE_NAME);
@@ -60,13 +70,13 @@ impl FileSystemLease {
                 .to_string_lossy()
         );
 
-        Self {
+        Ok(Self {
             fs,
             lease_file_path,
             holder_id,
             lock_file: Mutex::new(None),
             acquired: AtomicBool::new(false),
-        }
+        })
     }
 
     /// Try to acquire the exclusive file lock.
@@ -120,11 +130,11 @@ impl PrimaryLease for FileSystemLease {
         file.write_at(0, bytes::Bytes::from(holder_info))?;
         file.sync(Durability::Durable)?;
 
-        // Store the file handle
-        *self
-            .lock_file
-            .lock()
-            .expect("failed to lock lock_file mutex to store file") = Some(file);
+        // Store the file handle (recover from poisoned mutex instead of panicking)
+        {
+            let mut guard = lock_mutex(&self.lock_file, "store file")?;
+            *guard = Some(file);
+        }
         self.acquired.store(true, Ordering::Release);
 
         tracing::info!(
@@ -133,12 +143,9 @@ impl PrimaryLease for FileSystemLease {
             "primary lease acquired"
         );
 
-        // Create guard - on drop/release, it will call the lease's release method
-        // We need to keep the lease alive, but we can't clone it since lock_file isn't cloneable
-        // The guard doesn't actually need to do anything - Engine::drop will call release()
-        Ok(LeaseGuard::new(|| {
-            // No-op: actual release happens in Engine::drop via self.release()
-        }))
+        // Create a token-style guard. NOTE: dropping this token does NOT release the underlying lease;
+        // callers must call `PrimaryLease::release()` (or rely on Engine::drop) to free the lease.
+        Ok(LeaseGuard::token())
     }
 
     fn renew(&self) -> Result<(), LeaseError> {
@@ -149,10 +156,7 @@ impl PrimaryLease for FileSystemLease {
         // For filesystem locks, renewal is a no-op since the OS maintains the lock
         // as long as the process is alive and the file is open.
         // We just verify the lock is still held by checking the file is still open.
-        let lock_guard = self
-            .lock_file
-            .lock()
-            .expect("failed to lock lock_file mutex during renew");
+        let lock_guard = lock_mutex(&self.lock_file, "during renew")?;
         if lock_guard.is_none() {
             return Err(LeaseError::RenewalFailed(
                 "lock file was closed".to_string(),
@@ -167,10 +171,7 @@ impl PrimaryLease for FileSystemLease {
             return Ok(()); // Idempotent
         }
 
-        let mut lock_guard = self
-            .lock_file
-            .lock()
-            .expect("failed to lock lock_file mutex during release");
+        let mut lock_guard = lock_mutex(&self.lock_file, "during release")?;
         if let Some(file) = lock_guard.take() {
             self.unlock(file.as_ref())?;
             drop(file); // Close file
@@ -212,7 +213,7 @@ mod tests {
     fn should_acquire_release_lease_when_no_contention() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
-        let lease = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false));
+        let lease = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false).unwrap());
 
         // Act
         let _guard = lease.try_acquire().unwrap();
@@ -229,8 +230,8 @@ mod tests {
     fn should_fail_acquisition_when_lease_already_held() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
-        let lease1 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false));
-        let lease2 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false));
+        let lease1 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false).unwrap());
+        let lease2 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false).unwrap());
 
         // Act
         let _guard1 = lease1.try_acquire().unwrap();
@@ -244,8 +245,8 @@ mod tests {
     fn should_acquire_after_release_when_lease_freed() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
-        let lease1 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false));
-        let lease2 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false));
+        let lease1 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false).unwrap());
+        let lease2 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false).unwrap());
 
         // Act
         let _guard1 = lease1.try_acquire().unwrap();
@@ -260,7 +261,7 @@ mod tests {
     fn should_renew_successfully_when_lease_held() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
-        let lease = FileSystemLease::new(temp_dir.path().to_path_buf(), false);
+        let lease = FileSystemLease::new(temp_dir.path().to_path_buf(), false).unwrap();
 
         // Act
         let _guard = lease.try_acquire().unwrap();

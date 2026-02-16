@@ -8,7 +8,7 @@
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 
-use cntryl_midge::MidgeOptions;
+use cntryl_midge::testkit::MidgeOptions;
 
 const VALUE_SIZE: usize = 128;
 

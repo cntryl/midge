@@ -76,60 +76,24 @@ impl RealFs {
     fn parent_dir(full_path: &Path) -> Option<&Path> {
         full_path.parent().filter(|p| !p.as_os_str().is_empty())
     }
-}
 
-impl Fs for RealFs {
-    fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+    /// Shared internal helper used by `Fs` implementations to open an OS file.
+    fn open_inner(&self, path: &FsPath, opts: super::traits::OpenOptions) -> super::traits::FsResult<Box<dyn super::traits::File>> {
+        // Forward to the `Fs`-level implementation so the code is colocated and
+        // reusable when `RealFs` is used as a backend for in-memory tests.
+        // Note: this helper returns a `'static` file handle.
         let full = self.full_path(path);
 
-        // Ensure parent directory exists when creating.
         if opts.create || opts.create_new {
             if let Some(parent) = Self::parent_dir(&full) {
-                fs::create_dir_all(parent).map_err(|e| io_err("create_dir_all", parent, e))?;
+                std::fs::create_dir_all(parent).map_err(|e| super::traits::FsError::Io(format!("create_dir_all: {e}")))?;
             }
         }
 
-        let mut std_opts = fs::OpenOptions::new();
-
+        let mut std_opts = std::fs::OpenOptions::new();
         match opts.mode {
-            OpenMode::ReadOnly => {
-                std_opts.read(true);
-            }
-            OpenMode::ReadWrite => {
-                std_opts.read(true).write(true);
-            }
-        }
-
-        if opts.create {
-            std_opts.create(true);
-        }
-        if opts.create_new {
-            std_opts.create_new(true);
-        }
-        if opts.truncate {
-            std_opts.truncate(true);
-        }
-
-        let file = std_opts.open(&full).map_err(|e| io_err("open", &full, e))?;
-
-        Ok(Box::new(RealFile { file }))
-    }
-
-    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        // For real FS, a file handle is independently owned and therefore 'static.
-        let full = self.full_path(path);
-
-        // Ensure parent dir
-        if opts.create || opts.create_new {
-            if let Some(parent) = Self::parent_dir(&full) {
-                fs::create_dir_all(parent).map_err(|e| io_err("create_dir_all", parent, e))?;
-            }
-        }
-
-        let mut std_opts = fs::OpenOptions::new();
-        match opts.mode {
-            OpenMode::ReadOnly => std_opts.read(true),
-            OpenMode::ReadWrite => std_opts.read(true).write(true),
+            super::traits::OpenMode::ReadOnly => std_opts.read(true),
+            super::traits::OpenMode::ReadWrite => std_opts.read(true).write(true),
         };
         if opts.create {
             std_opts.create(true);
@@ -140,8 +104,22 @@ impl Fs for RealFs {
         if opts.truncate {
             std_opts.truncate(true);
         }
-        let file = std_opts.open(&full).map_err(|e| io_err("open", &full, e))?;
+
+        let file = std_opts.open(&full).map_err(|e| super::traits::FsError::Io(e.to_string()))?;
         Ok(Box::new(RealFile { file }))
+    }
+}
+
+impl Fs for RealFs {
+    fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        // Delegate to shared implementation that returns a 'static file handle.
+        self.open_inner(path, opts)
+    }
+
+    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        // For real FS, a file handle is independently owned and therefore 'static.
+        // Delegate to the shared implementation which returns a `'static` handle.
+        self.open_inner(path, opts)
     }
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {

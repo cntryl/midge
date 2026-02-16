@@ -7,7 +7,7 @@
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 
-use cntryl_midge::MidgeOptions;
+use cntryl_midge::testkit::MidgeOptions;
 
 fn setup_engine(opts: MidgeOptions) -> cntryl_midge::MidgeEngine {
     cntryl_midge::testkit::stress::open_engine_no_compaction(opts)

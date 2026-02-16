@@ -1,30 +1,12 @@
-//! Cloud storage-based primary lease using conditional writes.
+//! Local placeholder for a cloud-backed primary lease.
 //!
-//! This implementation uses cloud storage primitives to provide distributed
-//! exclusive access. Suitable for:
+//! IMPORTANT: this implementation only writes a coordination file to the local
+//! `local_cache_path` and does NOT perform any remote conditional PUTs or use a
+//! cloud backend. It therefore does NOT provide distributed exclusivity and is
+//! suitable only for single-node testing and local development.
 //!
-//! - Multi-region deployments
-//! - Distributed consensus without coordination service
-//! - Cloud-native architectures
-//!
-//! ## Implementation strategy: Conditional Put with TTL
-//!
-//! All cloud providers use a common pattern:
-//! 1. Write a lease object containing `holder_id`, `acquired_at`, `expires_at`.
-//! 2. On acquire: read lease object → check expiry → conditional PUT if expired/missing.
-//! 3. On renew: read lease → verify holder_id → PUT with updated `expires_at`.
-//! 4. On release: DELETE lease object.
-//!
-//! The conditional-write guarantee is provider-specific:
-//! - **S3 / R2 / MinIO / Wasabi**: Use `If-None-Match: *` or ETag-based conditional PUT.
-//! - **Azure Blob**: Use native Blob Lease API (15-60 second TTL).
-//! - **GCS**: Use generation-based conditional writes.
-//! - **OCI**: Use ETag-conditional PUT.
-//!
-//! Because Midge does NOT pull in any cloud SDK at the lease layer (the SDKs
-//! are behind feature flags for the storage subsystem), the implementation uses
-//! a backend-agnostic approach: write/read a small JSON lease file through the
-//! `CloudBackend` trait already available in `storage::cloud`.
+//! Replace with a cloud-backed implementation (conditional writes / provider
+//! lease APIs) before using in multi-node production deployments.
 
 use super::traits::{LeaseError, LeaseGuard, PrimaryLease};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,19 +32,17 @@ pub struct CloudLeaseConfig {
     pub region: Option<String>,
 }
 
-/// Cloud storage lease using conditional writes for distributed exclusivity.
+/// Local-only placeholder for a cloud-backed lease implementation.
 ///
-/// Works with any cloud provider through the filesystem fallback mechanism:
-/// the lease file is written to the local cache directory and is protected
-/// by a coordination protocol based on timestamps and holder identity.
+/// This implementation stores a coordination document only in the local cache
+/// directory (not remotely). It is intended as a scaffold for a future
+/// cloud-backed implementation and does NOT provide distributed exclusivity.
 ///
-/// The lease file is a small JSON document:
-/// ```json
-/// {
-///   "holder_id": "12345@hostname",
-///   "acquired_at": "2026-02-07T12:00:00Z",
-///   "expires_at": "2026-02-07T12:00:30Z"
-/// }
+/// The local coordination document looks like:
+/// ```text
+/// holder_id: <pid@host>
+/// acquired_at: <rfc3339>
+/// expires_at: <rfc3339>
 /// ```
 pub struct CloudStorageLease {
     /// Cloud provider configuration.
@@ -104,6 +84,10 @@ impl CloudStorageLease {
     }
 
     /// Full object key for the lease file.
+    ///
+    /// Scaffolding for a future cloud-backed implementation — currently unused
+    /// for remote writes (local-only implementation). Kept for diagnostic use.
+    #[allow(dead_code)]
     fn lease_key(&self) -> String {
         if self.config.prefix.is_empty() {
             LEASE_OBJECT_KEY.to_string()
@@ -188,9 +172,8 @@ impl PrimaryLease for CloudStorageLease {
             "cloud storage lease acquired"
         );
 
-        Ok(LeaseGuard::new(|| {
-            // No-op: actual release happens in Engine::drop via self.release()
-        }))
+        // Token-style guard: dropping the guard does NOT release the lease.
+        Ok(LeaseGuard::token())
     }
 
     fn renew(&self) -> Result<(), LeaseError> {

@@ -5,7 +5,7 @@
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 
-use cntryl_midge::{MidgeEngine, MidgeOptions};
+use cntryl_midge::{MidgeEngine, testkit::MidgeOptions};
 
 const KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
 const VALUE_SIZE: usize = 64;
