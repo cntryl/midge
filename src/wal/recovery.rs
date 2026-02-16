@@ -58,6 +58,15 @@ pub struct RecoveryStats {
     pub apply_ns: u128,
     /// Total nanoseconds spent in overall replay (per call)
     pub total_replay_ns: u128,
+
+    /// Highest writer epoch seen across all replayed WAL records.
+    /// Records with epoch < max_epoch_seen are from stale writers and
+    /// are skipped during recovery to prevent zombie writes from
+    /// corrupting the recovered state.
+    pub max_epoch_seen: u64,
+    /// Number of WAL records skipped because their writer_epoch was
+    /// less than the highest epoch observed so far (stale writer).
+    pub stale_records_skipped: u64,
 }
 
 impl Default for RecoveryStats {
@@ -76,6 +85,8 @@ impl RecoveryStats {
             wal_read_ns: 0,
             apply_ns: 0,
             total_replay_ns: 0,
+            max_epoch_seen: 0,
+            stale_records_skipped: 0,
         }
     }
 
@@ -177,6 +188,8 @@ pub fn replay_wal(
                 records = stats.record_count,
                 bytes = stats.bytes,
                 max_sequence = ?stats.max_sequence,
+                max_epoch = stats.max_epoch_seen,
+                stale_skipped = stats.stale_records_skipped,
                 had_corruption = stats.had_corruption,
                 "wal replay completed"
             );
@@ -307,6 +320,27 @@ fn replay_wal_file(
 
         // Always count records, even if buffered/ignored.
         stats.record(&record);
+
+        // Epoch-based fencing: track the highest epoch seen and skip
+        // records from stale writers (epoch < max_epoch_seen).  This
+        // prevents zombie writers from corrupting the recovered state.
+        if record.writer_epoch > stats.max_epoch_seen {
+            stats.max_epoch_seen = record.writer_epoch;
+        }
+        if record.writer_epoch > 0 && record.writer_epoch < stats.max_epoch_seen {
+            stats.stale_records_skipped += 1;
+            tracing::warn!(
+                epoch = record.writer_epoch,
+                max_epoch = stats.max_epoch_seen,
+                seq = record.seq,
+                op = ?record.op,
+                pos = pos,
+                file = %file_path,
+                "skipping WAL record from stale writer epoch"
+            );
+            pos += 4 + len as u64;
+            continue;
+        }
 
         match record.op {
             WalOpKind::TxnBegin => {
@@ -490,6 +524,7 @@ mod tests {
                 Bytes::from_static(b"test_key"),
                 Some(Bytes::from_static(b"test_value")),
                 1,
+                1,
             );
             writer.append_record(&record).unwrap();
             writer.sync().unwrap();
@@ -522,6 +557,7 @@ mod tests {
                 Bytes::from_static(b"test_key"),
                 Some(Bytes::from_static(b"test_value")),
                 1,
+                1,
             );
             writer.append_record(&record).unwrap();
             writer.sync().unwrap();
@@ -551,6 +587,7 @@ mod tests {
                 WalOpKind::Put,
                 Bytes::from_static(b"test_key"),
                 Some(Bytes::from_static(b"test_value")),
+                1,
                 1,
             );
             writer.append_record(&record).unwrap();
@@ -582,11 +619,17 @@ mod tests {
                 Bytes::from_static(b"test_key"),
                 Some(Bytes::from_static(b"test_value")),
                 1,
+                1,
             );
             writer.append_record(&put_record).unwrap();
 
-            let delete_record =
-                WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"test_key"), None, 2);
+            let delete_record = WalRecord::new(
+                WalOpKind::Delete,
+                Bytes::from_static(b"test_key"),
+                None,
+                2,
+                1,
+            );
             writer.append_record(&delete_record).unwrap();
             writer.sync().unwrap();
         }
@@ -618,11 +661,17 @@ mod tests {
                 Bytes::from_static(b"test_key"),
                 Some(Bytes::from_static(b"test_value")),
                 1,
+                1,
             );
             writer.append_record(&put_record).unwrap();
 
-            let delete_record =
-                WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"test_key"), None, 2);
+            let delete_record = WalRecord::new(
+                WalOpKind::Delete,
+                Bytes::from_static(b"test_key"),
+                None,
+                2,
+                1,
+            );
             writer.append_record(&delete_record).unwrap();
             writer.sync().unwrap();
         }
@@ -654,6 +703,7 @@ mod tests {
                 Bytes::from_static(b"key0"),
                 Some(Bytes::from_static(b"value0")),
                 1,
+                1,
             );
             writer.append_record(&record_cf0).unwrap();
 
@@ -663,6 +713,7 @@ mod tests {
                 Bytes::from_static(b"key1"),
                 Some(Bytes::from_static(b"value1")),
                 2,
+                1,
             );
             writer.append_record(&record_cf1).unwrap();
             writer.sync().unwrap();
@@ -695,6 +746,7 @@ mod tests {
                 Bytes::from_static(b"key0"),
                 Some(Bytes::from_static(b"value0")),
                 1,
+                1,
             );
             writer.append_record(&record_cf0).unwrap();
 
@@ -704,6 +756,7 @@ mod tests {
                 Bytes::from_static(b"key1"),
                 Some(Bytes::from_static(b"value1")),
                 2,
+                1,
             );
             writer.append_record(&record_cf1).unwrap();
             writer.sync().unwrap();
@@ -737,6 +790,7 @@ mod tests {
                 Bytes::from_static(b"key0"),
                 Some(Bytes::from_static(b"value0")),
                 1,
+                1,
             );
             writer.append_record(&record_cf0).unwrap();
 
@@ -746,6 +800,7 @@ mod tests {
                 Bytes::from_static(b"key1"),
                 Some(Bytes::from_static(b"value1")),
                 2,
+                1,
             );
             writer.append_record(&record_cf1).unwrap();
             writer.sync().unwrap();
@@ -777,6 +832,7 @@ mod tests {
                 Bytes::from_static(b"key1"),
                 Some(Bytes::from_static(b"value1")),
                 5,
+                1,
             );
             writer.append_record(&record1).unwrap();
 
@@ -785,6 +841,7 @@ mod tests {
                 Bytes::from_static(b"key2"),
                 Some(Bytes::from_static(b"value2")),
                 10,
+                1,
             );
             writer.append_record(&record2).unwrap();
 
@@ -793,6 +850,7 @@ mod tests {
                 Bytes::from_static(b"key3"),
                 Some(Bytes::from_static(b"value3")),
                 7,
+                1,
             );
             writer.append_record(&record3).unwrap();
             writer.sync().unwrap();
@@ -824,6 +882,7 @@ mod tests {
                 Bytes::from_static(b"key1"),
                 Some(Bytes::from_static(b"value1")),
                 5,
+                1,
             );
             writer.append_record(&record1).unwrap();
 
@@ -832,6 +891,7 @@ mod tests {
                 Bytes::from_static(b"key2"),
                 Some(Bytes::from_static(b"value2")),
                 10,
+                1,
             );
             writer.append_record(&record2).unwrap();
 
@@ -840,6 +900,7 @@ mod tests {
                 Bytes::from_static(b"key3"),
                 Some(Bytes::from_static(b"value3")),
                 7,
+                1,
             );
             writer.append_record(&record3).unwrap();
             writer.sync().unwrap();
@@ -916,6 +977,7 @@ mod tests {
                 Bytes::from_static(b"expired_key"),
                 Some(Bytes::from_static(b"value")),
                 1,
+                1,
             );
             // Set expiration to the past (1 millisecond after epoch)
             expired_record.expiration = Some(1);
@@ -926,6 +988,7 @@ mod tests {
                 Bytes::from_static(b"future_key"),
                 Some(Bytes::from_static(b"value")),
                 2,
+                1,
             );
             // Set expiration to far future
             future_record.expiration = Some(u64::MAX);
@@ -965,6 +1028,7 @@ mod tests {
                 Bytes::from_static(b"key123"),         // 6 bytes
                 Some(Bytes::from_static(b"value456")), // 8 bytes
                 1,
+                1,
             );
             writer.append_record(&record).unwrap();
             writer.sync().unwrap();
@@ -999,6 +1063,7 @@ mod tests {
                 Bytes::from_static(b"key"),
                 Some(Bytes::from_static(b"value")),
                 1,
+                1,
             );
             writer.append_record(&put_record).unwrap();
 
@@ -1008,6 +1073,7 @@ mod tests {
                 Bytes::from_static(b"start"),
                 None,
                 2,
+                1,
             );
             delete_range_record.range_end = Some(Bytes::from_static(b"end"));
             writer.append_record(&delete_range_record).unwrap();
@@ -1036,8 +1102,13 @@ mod tests {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
             let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
 
-            let begin_record =
-                WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn_key"), None, 1);
+            let begin_record = WalRecord::new(
+                WalOpKind::TxnBegin,
+                Bytes::from_static(b"txn_key"),
+                None,
+                1,
+                1,
+            );
             writer.append_record(&begin_record).unwrap();
 
             let put_record = WalRecord::new(
@@ -1045,6 +1116,7 @@ mod tests {
                 Bytes::from_static(b"key"),
                 Some(Bytes::from_static(b"value")),
                 2,
+                1,
             );
             writer.append_record(&put_record).unwrap();
 
@@ -1053,6 +1125,7 @@ mod tests {
                 Bytes::from_static(b"txn_key"),
                 None,
                 3,
+                1,
             );
             writer.append_record(&commit_record).unwrap();
 

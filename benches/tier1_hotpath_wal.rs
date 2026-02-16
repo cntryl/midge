@@ -44,6 +44,7 @@ fn bench_wal_encode_record(c: &mut Criterion) {
                 small_key.clone(),
                 Some(small_value.clone()),
                 1,
+                1,
             ),
         ),
         (
@@ -53,11 +54,12 @@ fn bench_wal_encode_record(c: &mut Criterion) {
                 medium_key.clone(),
                 Some(medium_value.clone()),
                 1,
+                1,
             ),
         ),
         (
             "delete",
-            WalRecord::new(WalOpKind::Delete, delete_key.clone(), None, 1),
+            WalRecord::new(WalOpKind::Delete, delete_key.clone(), None, 1, 1),
         ),
     ];
 
@@ -90,6 +92,7 @@ fn bench_wal_decode_record(c: &mut Criterion) {
                 small_key.clone(),
                 Some(small_value.clone()),
                 1,
+                1,
             ))
             .unwrap(),
         ),
@@ -100,6 +103,7 @@ fn bench_wal_decode_record(c: &mut Criterion) {
                 medium_key.clone(),
                 Some(medium_value.clone()),
                 1,
+                1,
             ))
             .unwrap(),
         ),
@@ -109,6 +113,7 @@ fn bench_wal_decode_record(c: &mut Criterion) {
                 WalOpKind::Delete,
                 delete_key.clone(),
                 None,
+                1,
                 1,
             ))
             .unwrap(),
@@ -143,6 +148,7 @@ fn bench_wal_roundtrip(c: &mut Criterion) {
                 small_key.clone(),
                 Some(small_value.clone()),
                 1,
+                1,
             ),
         ),
         (
@@ -151,6 +157,7 @@ fn bench_wal_roundtrip(c: &mut Criterion) {
                 WalOpKind::Put,
                 medium_key.clone(),
                 Some(medium_value.clone()),
+                1,
                 1,
             ),
         ),
@@ -199,6 +206,7 @@ fn bench_wal_encode_sizes(c: &mut Criterion) {
             WalOpKind::Put,
             Bytes::copy_from_slice(key),
             Some(Bytes::copy_from_slice(value)),
+            1,
             1,
         );
 

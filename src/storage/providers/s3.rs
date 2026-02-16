@@ -236,9 +236,13 @@ impl S3Backend {
 }
 
 impl CloudBackend for S3Backend {
-    fn submit_put(&self, key: String, data: Vec<u8>, callback: CloudCallback) {
+    fn submit_put(&self, key: String, data: Vec<u8>, headers: Vec<(String, String)>, callback: CloudCallback) {
         let url = self.object_url(&key);
-        let request = CloudRequest::new(Method::PUT, url).with_body(data);
+        let mut request = CloudRequest::new(Method::PUT, url).with_body(data);
+        // Apply provided headers (e.g. conditional headers like If-None-Match)
+        for (name, value) in headers.into_iter() {
+            request = request.with_header(name, value);
+        }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status < 400 => CloudEvent::PutComplete {
                 key: ctx,

@@ -13,7 +13,10 @@
 mod criterion_helper;
 
 use cntryl_midge::Bytes;
-use cntryl_midge::{MidgeEngine, testkit::{MidgeOptions, StorageMode}};
+use cntryl_midge::{
+    testkit::{MidgeOptions, StorageMode},
+    MidgeEngine,
+};
 use criterion::{
     criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };

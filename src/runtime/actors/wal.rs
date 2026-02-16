@@ -79,6 +79,14 @@ pub struct WalActor {
     /// Last wall-clock time we performed a WAL fsync
     last_sync_instant: Instant,
 
+    /// Fencing epoch assigned when this writer acquired leadership.
+    /// Stamped on every WAL record so stale writers can be detected.
+    current_epoch: u64,
+
+    /// Optional leader store for epoch validation at sync boundaries.
+    /// When set, each fsync checks that our epoch is still current.
+    leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
+
     // === Optional instrumentation ===
     sync_calls: u64,
     sync_total: Duration,
@@ -94,6 +102,7 @@ impl WalActor {
         durability_policy: DurabilityPolicy,
         batch_config: BatchConfig,
         memory_mode: bool,
+        writer_epoch: u64,
     ) -> MidgeResult<Self> {
         let (wal_fs, writer) = if memory_mode {
             (None, None)
@@ -118,6 +127,8 @@ impl WalActor {
             append_total: Duration::from_secs(0),
             batch_config,
             last_sync_instant: Instant::now(),
+            current_epoch: writer_epoch,
+            leader_store: None,
         };
 
         // Log resolved WAL mode for diagnostics
@@ -155,6 +166,11 @@ impl WalActor {
 
     pub fn durability_policy(&self) -> DurabilityPolicy {
         self.durability_policy
+    }
+
+    /// Attach a leader store for epoch validation at sync boundaries.
+    pub fn set_leader_store(&mut self, store: Arc<dyn crate::lease::LeaderStore>) {
+        self.leader_store = Some(store);
     }
 
     pub fn batch_config(&self) -> crate::wal::policy::BatchConfig {
@@ -283,10 +299,23 @@ impl WalActor {
 
         // Create WAL record (with expiration if provided)
         let record = match ttl_seconds {
-            Some(ttl) if ttl > 0 => {
-                WalRecord::new_with_ttl(cf_id, op_kind, key.clone(), value.clone(), sequence, ttl)
-            }
-            _ => WalRecord::new_cf(cf_id, op_kind, key.clone(), value.clone(), sequence),
+            Some(ttl) if ttl > 0 => WalRecord::new_with_ttl(
+                cf_id,
+                op_kind,
+                key.clone(),
+                value.clone(),
+                sequence,
+                ttl,
+                self.current_epoch,
+            ),
+            _ => WalRecord::new_cf(
+                cf_id,
+                op_kind,
+                key.clone(),
+                value.clone(),
+                sequence,
+                self.current_epoch,
+            ),
         };
 
         // Calculate record size for batching
@@ -495,6 +524,7 @@ impl WalActor {
             expiration: None,
             range_end: Some(end_key.clone()),
             txn_id: None,
+            writer_epoch: self.current_epoch,
             compression: None,
         };
 
@@ -718,8 +748,14 @@ impl WalActor {
             let mut records = Vec::with_capacity(ops_count + 2);
 
             // Create and write begin record
-            let mut begin_record =
-                WalRecord::new_cf(0, WalOpKind::TxnBegin, marker_key.clone(), None, begin_seq);
+            let mut begin_record = WalRecord::new_cf(
+                0,
+                WalOpKind::TxnBegin,
+                marker_key.clone(),
+                None,
+                begin_seq,
+                self.current_epoch,
+            );
             begin_record.txn_id = Some(txn_id);
             records.push(begin_record);
             records
@@ -750,10 +786,16 @@ impl WalActor {
                             Some(value.clone()),
                             seq,
                             ttl,
+                            self.current_epoch,
                         ),
-                        _ => {
-                            WalRecord::new_cf(cf_id, op_kind, key.clone(), Some(value.clone()), seq)
-                        }
+                        _ => WalRecord::new_cf(
+                            cf_id,
+                            op_kind,
+                            key.clone(),
+                            Some(value.clone()),
+                            seq,
+                            self.current_epoch,
+                        ),
                     };
                     record.txn_id = Some(txn_id);
 
@@ -776,8 +818,14 @@ impl WalActor {
                     }
                 }
                 crate::runtime::TransactionOp::Delete { cf_id, key } => {
-                    let mut record =
-                        WalRecord::new_cf(cf_id, WalOpKind::Delete, key.clone(), None, seq);
+                    let mut record = WalRecord::new_cf(
+                        cf_id,
+                        WalOpKind::Delete,
+                        key.clone(),
+                        None,
+                        seq,
+                        self.current_epoch,
+                    );
                     record.txn_id = Some(txn_id);
 
                     // Log seq allocation for this CF (deferred)
@@ -801,8 +849,14 @@ impl WalActor {
 
         // Write commit record (only if not skipping WAL)
         if !skip_wal {
-            let mut commit_record =
-                WalRecord::new_cf(0, WalOpKind::TxnCommit, marker_key, None, commit_seq);
+            let mut commit_record = WalRecord::new_cf(
+                0,
+                WalOpKind::TxnCommit,
+                marker_key,
+                None,
+                commit_seq,
+                self.current_epoch,
+            );
             commit_record.txn_id = Some(txn_id);
             wal_records.push(commit_record);
 
@@ -1072,6 +1126,15 @@ impl WalActor {
 
     /// Internal sync helper - fsyncs the writer
     fn sync_internal(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
+        // Epoch fencing check: verify our epoch is still current before making
+        // data durable.  If a newer writer has taken over, we must stop.
+        if let Some(store) = &self.leader_store {
+            store.validate_epoch(self.current_epoch).map_err(|e| {
+                tracing::error!(epoch = self.current_epoch, err = %e, "fenced at sync boundary");
+                e
+            })?;
+        }
+
         if let Some(writer) = &mut self.writer {
             let start = Instant::now();
             writer.sync()?;
@@ -1382,6 +1445,7 @@ mod tests {
             DurabilityPolicy::Strict,
             BatchConfig::default(),
             true,
+            1,
         )?;
 
         // Act: append a single put
@@ -1419,8 +1483,13 @@ mod tests {
             max_delay_ms: 10_000,
             max_bytes: 1024 * 1024,
         };
-        let mut wal_actor =
-            WalActor::new(wal_dir.clone(), DurabilityPolicy::Batched, batch_cfg, false)?;
+        let mut wal_actor = WalActor::new(
+            wal_dir.clone(),
+            DurabilityPolicy::Batched,
+            batch_cfg,
+            false,
+            1,
+        )?;
 
         // Prepare a runtime state
         let mut state = RuntimeState::new(wal_dir, false);

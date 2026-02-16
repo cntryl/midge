@@ -44,6 +44,7 @@ pub mod tags {
     pub const RANGE_END: u8 = 7;
     pub const TXN_ID: u8 = 8;
     pub const COMPRESSION: u8 = 9;
+    pub const WRITER_EPOCH: u8 = 10;
 }
 
 /// Borrowed zero-copy WAL record view.
@@ -59,6 +60,7 @@ pub struct WalRecordView<'a> {
     pub expiration: Option<u64>,
     pub range_end: Option<&'a [u8]>,
     pub txn_id: Option<u64>,
+    pub writer_epoch: u64,
     pub compression: Option<u8>,
 }
 
@@ -155,6 +157,8 @@ pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
     if record.txn_id.is_some() {
         capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
     }
+    // writer_epoch is always present
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
     if record.compression.is_some() {
         capacity = add_capacity(capacity, TLV_HEADER_LEN + 1)?;
     }
@@ -168,6 +172,8 @@ pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
     put_u32(&mut buf, tags::CF_ID, record.cf_id);
     put_u64(&mut buf, tags::SEQ, record.seq);
     put_tlv(&mut buf, tags::KEY, &record.key);
+
+    put_u64(&mut buf, tags::WRITER_EPOCH, record.writer_epoch);
 
     if let Some(v) = &record.value {
         if !v.is_empty() {
@@ -218,6 +224,7 @@ pub fn decode_view<'a>(data: &'a [u8]) -> MidgeResult<WalRecordView<'a>> {
     let mut expiration = None;
     let mut range_end = None;
     let mut txn_id = None;
+    let mut writer_epoch = None;
     let mut compression = None;
 
     scan_tlvs(&data[PREFIX_LEN..], |tag, val| {
@@ -271,6 +278,14 @@ pub fn decode_view<'a>(data: &'a [u8]) -> MidgeResult<WalRecordView<'a>> {
                     val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
                 ]));
             }
+            tags::WRITER_EPOCH => {
+                if val.len() != 8 {
+                    return Err(corruption("bad WRITER_EPOCH length"));
+                }
+                writer_epoch = Some(u64::from_le_bytes([
+                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+                ]));
+            }
             tags::COMPRESSION => {
                 if val.len() != 1 {
                     return Err(corruption("bad COMPRESSION length"));
@@ -293,6 +308,7 @@ pub fn decode_view<'a>(data: &'a [u8]) -> MidgeResult<WalRecordView<'a>> {
         expiration,
         range_end,
         txn_id,
+        writer_epoch: writer_epoch.ok_or_else(|| corruption("missing WRITER_EPOCH"))?,
         compression,
     })
 }
@@ -331,6 +347,7 @@ pub fn decode(bytes: impl Buf) -> MidgeResult<WalRecord> {
         expiration: view.expiration,
         range_end: view.range_end.map(Bytes::copy_from_slice),
         txn_id: view.txn_id,
+        writer_epoch: view.writer_epoch,
         compression: None, // Decompressed — no longer carries a compression tag
     })
 }
@@ -347,6 +364,7 @@ mod tests {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             42,
+            1,
         );
 
         // Act
@@ -364,7 +382,7 @@ mod tests {
     #[test]
     fn should_roundtrip_delete_when_value_absent() {
         // Arrange
-        let record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"k"), None, 7);
+        let record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"k"), None, 7, 1);
 
         // Act
         let encoded = encode(&record).unwrap();
@@ -377,12 +395,34 @@ mod tests {
     }
 
     #[test]
+    fn should_roundtrip_writer_epoch() {
+        // Arrange
+        let mut record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            99,
+            1,
+        );
+        record.writer_epoch = 0x1234_5678_9abc_def0;
+
+        // Act
+        let encoded = encode(&record).unwrap();
+        let decoded = decode(&encoded[..]).unwrap();
+
+        // Assert
+        assert_eq!(decoded.seq, 99);
+        assert_eq!(decoded.writer_epoch, record.writer_epoch);
+    }
+
+    #[test]
     fn should_skip_unknown_tags_when_decoding() {
         // Arrange
         let record = WalRecord::new(
             WalOpKind::Put,
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
+            1,
             1,
         );
         let mut encoded = encode(&record).unwrap().to_vec();

@@ -216,7 +216,7 @@ impl Engine {
             MidgeError::Internal(format!("failed to create lease for storage backend: {}", e))
         })?;
 
-        let lease_guard = lease.try_acquire().map_err(|e| match e {
+        let lease_guard = lease.clone().try_acquire().map_err(|e| match e {
             crate::lease::LeaseError::AcquisitionFailed(msg) => MidgeError::Internal(format!(
                 "FATAL: another Midge instance is already running against this storage. \
                  Only one writable instance is allowed at a time. Error: {}",
@@ -231,12 +231,24 @@ impl Engine {
         tracing::warn!(
             holder_id = %lease.holder_id(),
             storage = ?opts.storage,
+            epoch = lease.epoch(),
             "primary lease acquired - this instance is now the exclusive writer"
         );
+
+        // Extract writer epoch from the lease for fencing.
+        let writer_epoch = lease.epoch();
+
+        // Extract the leader store (if available) for sync-boundary epoch validation.
+        let leader_store = lease.get_leader_store();
 
         // Build runtime state/config.
         // Cloud storage mode uses CloudFirst durability + HybridStorage.
         // Local/Memory modes use Batched durability with optional custom batch config.
+
+        // Shared lease health flag — heartbeat sets it to false on renewal failure;
+        // the event loop checks it before accepting new writes.
+        let lease_healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
         let (mut state, runtime_config) = match &opts.storage {
             Storage::Cloud { .. } => {
                 let cloud = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
@@ -254,6 +266,9 @@ impl Engine {
                     hybrid_storage: Some(cloud.hybrid_storage),
                     hybrid_storage_events: Some(cloud.events),
                     compression_policy: opts.compression_policy.clone(),
+                    writer_epoch,
+                    lease_healthy: Some(Arc::clone(&lease_healthy)),
+                    leader_store: leader_store.clone(),
                     ..Default::default()
                 };
 
@@ -267,6 +282,9 @@ impl Engine {
                     wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
                     wal_batch_config: batch_config,
                     compression_policy: opts.compression_policy.clone(),
+                    writer_epoch,
+                    lease_healthy: Some(Arc::clone(&lease_healthy)),
+                    leader_store: leader_store.clone(),
                     ..Default::default()
                 };
 
@@ -334,7 +352,8 @@ impl Engine {
         // The heartbeat loop renews the lease periodically to maintain exclusivity.
         // If renewal fails, the heartbeat will mark itself unhealthy.
         //
-        let mut lease_heartbeat = crate::lease::LeaseHeartbeat::new(Arc::clone(&lease));
+        let mut lease_heartbeat =
+            crate::lease::LeaseHeartbeat::new_with_healthy(Arc::clone(&lease), lease_healthy);
         lease_heartbeat.start();
 
         // Check heartbeat health immediately after start to catch early failures.

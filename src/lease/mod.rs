@@ -24,13 +24,18 @@
 
 mod cloud;
 mod filesystem;
+pub mod fs_leader_store;
 mod heartbeat;
 mod traits;
 
 pub use cloud::{CloudLeaseConfig, CloudStorageLease};
 pub use filesystem::FileSystemLease;
+#[allow(unused_imports)]
+pub use fs_leader_store::FsLeaderStore;
 pub use heartbeat::LeaseHeartbeat;
-pub use traits::{LeaseError, LeaseGuard, PrimaryLease};
+#[allow(unused_imports)]
+pub use traits::{format_leader_record, parse_leader_record, LeaderRecord};
+pub use traits::{LeaderStore, LeaseError, LeaseGuard, PrimaryLease};
 
 use crate::engine::api::Storage;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -1,0 +1,403 @@
+//! Filesystem-based leader store using CAS-via-rename.
+//!
+//! Provides distributed-safe leader election for local disk, NFS, SMB, and
+//! any backend that supports atomic rename.  Does NOT use file locks.
+//!
+//! ## CAS protocol
+//!
+//! 1. Read current leader record from `.midge_leader` (if any).
+//! 2. Write `LeaderRecord { epoch: current + 1, .. }` to a temp file.
+//! 3. Fsync the temp file.
+//! 4. Atomic rename temp → `.midge_leader`.
+//! 5. Fsync the parent directory.
+//! 6. Re-read `.midge_leader` to confirm our holder_id won the race.
+
+use super::traits::{
+    format_leader_record, parse_leader_record, LeaderRecord, LeaderStore, LeaseError,
+};
+use crate::io::{Durability, Fs, FsPath, OpenMode, OpenOptions};
+use std::sync::Arc;
+
+/// Well-known filename for the leader record.
+const LEADER_RECORD_FILE: &str = ".midge_leader";
+
+/// Filesystem-based `LeaderStore` using temp-write + fsync + atomic rename.
+pub struct FsLeaderStore {
+    fs: Arc<dyn Fs>,
+}
+
+impl FsLeaderStore {
+    /// Create a new filesystem leader store backed by the given `Fs`.
+    pub fn new(fs: Arc<dyn Fs>) -> Self {
+        Self { fs }
+    }
+
+    /// Build the temp file name for CAS.
+    ///
+    /// Includes PID, a per-process counter, and thread ID to ensure
+    /// uniqueness even when multiple threads/instances call concurrently.
+    fn temp_path() -> FsPath {
+        static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        FsPath::new(format!(".midge_leader.{}.{}.tmp", std::process::id(), n,))
+    }
+}
+
+impl LeaderStore for FsLeaderStore {
+    fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
+        let lock_path = FsPath::new(".midge_leader.lock");
+
+        // Attempt to create a lock file exclusively.  `create_new` fails if the
+        // file already exists, giving us cross-thread and cross-process mutual
+        // exclusion for the read-increment-write cycle.
+        let _lock_file = match self.fs.open(
+            &lock_path,
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: true,
+                truncate: false,
+            },
+        ) {
+            Ok(f) => f,
+            Err(_) => {
+                return Err(LeaseError::AcquisitionFailed(
+                    "another acquire is in progress (lock file exists)".to_string(),
+                ));
+            }
+        };
+
+        // Lock acquired — perform the read-increment-write CAS.
+        let result = self.acquire_inner(holder_id);
+
+        // Always release the lock file (best-effort cleanup).
+        let _ = self.fs.remove_file(&lock_path);
+
+        result
+    }
+
+    fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
+        let path = FsPath::new(LEADER_RECORD_FILE);
+
+        match self.fs.exists(&path) {
+            Ok(true) => {}
+            Ok(false) => return Ok(None),
+            Err(e) => return Err(LeaseError::IoError(format!("exists check failed: {}", e))),
+        }
+
+        let opts = OpenOptions {
+            mode: OpenMode::ReadOnly,
+            create: false,
+            create_new: false,
+            truncate: false,
+        };
+
+        let file = match self.fs.open(&path, opts) {
+            Ok(f) => f,
+            Err(e) => {
+                // File may have been removed between exists() and open()
+                let msg = e.to_string();
+                if msg.contains("not found") || msg.contains("No such file") {
+                    return Ok(None);
+                }
+                return Err(LeaseError::IoError(format!(
+                    "failed to open leader record: {}",
+                    e
+                )));
+            }
+        };
+
+        let len = file.len().map_err(|e| {
+            LeaseError::IoError(format!("failed to read leader record length: {}", e))
+        })?;
+
+        if len == 0 {
+            return Ok(None);
+        }
+
+        let data = file
+            .read_at(0, len)
+            .map_err(|e| LeaseError::IoError(format!("failed to read leader record: {}", e)))?;
+
+        let content = String::from_utf8(data.to_vec())
+            .map_err(|e| LeaseError::IoError(format!("leader record not UTF-8: {}", e)))?;
+
+        Ok(parse_leader_record(&content))
+    }
+}
+
+impl FsLeaderStore {
+    /// Refresh the leader record's `acquired_at` timestamp without changing
+    /// the epoch.  Used by the heartbeat to keep the record "fresh" so that
+    /// another process can distinguish a live writer from a crashed one.
+    ///
+    /// Returns `Ok(())` if the record was refreshed, or an error if the
+    /// current record does not match the expected holder/epoch.
+    pub fn refresh_timestamp(
+        &self,
+        holder_id: &str,
+        expected_epoch: u64,
+    ) -> Result<(), LeaseError> {
+        // Read current record and verify ownership
+        let current = self.read_current()?;
+        match current {
+            Some(rec) if rec.holder_id == holder_id && rec.epoch == expected_epoch => {}
+            Some(rec) => {
+                return Err(LeaseError::RenewalFailed(format!(
+                    "leader record changed: expected holder={} epoch={}, got holder={} epoch={}",
+                    holder_id, expected_epoch, rec.holder_id, rec.epoch
+                )));
+            }
+            None => {
+                return Err(LeaseError::RenewalFailed(
+                    "leader record missing during refresh".to_string(),
+                ));
+            }
+        }
+
+        // Write updated record with fresh timestamp (same epoch)
+        let now = chrono::Utc::now().to_rfc3339();
+        let refreshed = LeaderRecord {
+            epoch: expected_epoch,
+            holder_id: holder_id.to_string(),
+            acquired_at: now,
+        };
+
+        let content = format_leader_record(&refreshed);
+        let temp = Self::temp_path();
+        let target = FsPath::new(LEADER_RECORD_FILE);
+
+        {
+            let opts = OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: true,
+            };
+            let mut file = self.fs.open(&temp, opts)?;
+            file.write_at(0, bytes::Bytes::from(content))?;
+            file.sync(Durability::Durable)?;
+        }
+
+        self.fs.rename_atomic(&temp, &target)?;
+        let _ = self.fs.sync_dir(&FsPath::new("."), Durability::Durable);
+
+        Ok(())
+    }
+
+    /// Write an arbitrary leader-record payload to disk via CAS-rename.
+    ///
+    /// This bypasses ownership checks and is used during lease release to
+    /// stamp a stale `acquired_at` timestamp while preserving the epoch.
+    pub fn write_raw(&self, content: &str) -> Result<(), LeaseError> {
+        let temp = Self::temp_path();
+        let target = FsPath::new(LEADER_RECORD_FILE);
+
+        {
+            let opts = OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: true,
+            };
+            let mut file = self.fs.open(&temp, opts)?;
+            file.write_at(0, bytes::Bytes::from(content.to_string()))?;
+            file.sync(Durability::Durable)?;
+        }
+
+        self.fs.rename_atomic(&temp, &target)?;
+        let _ = self.fs.sync_dir(&FsPath::new("."), Durability::Durable);
+
+        Ok(())
+    }
+
+    /// Core CAS logic, called under the lock file held by `acquire_leadership`.
+    fn acquire_inner(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
+        // 1. Read current leader record (epoch 0 if absent)
+        let current_epoch = match self.read_current()? {
+            Some(rec) => rec.epoch,
+            None => 0,
+        };
+
+        let new_epoch = current_epoch + 1;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let new_record = LeaderRecord {
+            epoch: new_epoch,
+            holder_id: holder_id.to_string(),
+            acquired_at: now,
+        };
+
+        let content = format_leader_record(&new_record);
+        let temp = Self::temp_path();
+        let target = FsPath::new(LEADER_RECORD_FILE);
+
+        // 2. Write to temp file
+        {
+            let opts = OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: true,
+            };
+            let mut file = self.fs.open(&temp, opts)?;
+            file.write_at(0, bytes::Bytes::from(content))?;
+
+            // 3. Fsync the temp file
+            file.sync(Durability::Durable)?;
+        }
+
+        // 4. Atomic rename temp → leader record
+        self.fs.rename_atomic(&temp, &target)?;
+
+        // 5. Fsync parent directory
+        let _ = self.fs.sync_dir(&FsPath::new("."), Durability::Durable);
+
+        // 6. Re-read to confirm we won
+        match self.read_current()? {
+            Some(rec) if rec.holder_id == holder_id && rec.epoch == new_epoch => {
+                tracing::info!(
+                    epoch = new_epoch,
+                    holder_id = holder_id,
+                    "leadership acquired via CAS-rename"
+                );
+                Ok(new_record)
+            }
+            Some(rec) => Err(LeaseError::AcquisitionFailed(format!(
+                "lost CAS race: expected holder={} epoch={}, got holder={} epoch={}",
+                holder_id, new_epoch, rec.holder_id, rec.epoch
+            ))),
+            None => Err(LeaseError::IoError(
+                "leader record missing after rename".to_string(),
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::MockFs;
+
+    fn make_store() -> FsLeaderStore {
+        FsLeaderStore::new(Arc::new(MockFs::new()))
+    }
+
+    #[test]
+    fn should_acquire_leadership_when_no_existing_record() {
+        // Arrange
+        let store = make_store();
+
+        // Act
+        let record = store.acquire_leadership("test@host").unwrap();
+
+        // Assert
+        assert_eq!(record.epoch, 1);
+        assert_eq!(record.holder_id, "test@host");
+    }
+
+    #[test]
+    fn should_increment_epoch_when_reacquiring() {
+        // Arrange
+        let store = make_store();
+        let first = store.acquire_leadership("node-a").unwrap();
+
+        // Act
+        let second = store.acquire_leadership("node-b").unwrap();
+
+        // Assert
+        assert_eq!(first.epoch, 1);
+        assert_eq!(second.epoch, 2);
+        assert_eq!(second.holder_id, "node-b");
+    }
+
+    #[test]
+    fn should_read_current_when_record_exists() {
+        // Arrange
+        let store = make_store();
+        store.acquire_leadership("holder-1").unwrap();
+
+        // Act
+        let current = store.read_current().unwrap();
+
+        // Assert
+        assert!(current.is_some());
+        let rec = current.unwrap();
+        assert_eq!(rec.epoch, 1);
+        assert_eq!(rec.holder_id, "holder-1");
+    }
+
+    #[test]
+    fn should_return_none_when_no_record_exists() {
+        // Arrange
+        let store = make_store();
+
+        // Act
+        let current = store.read_current().unwrap();
+
+        // Assert
+        assert!(current.is_none());
+    }
+
+    #[test]
+    fn should_validate_epoch_when_matching() {
+        // Arrange
+        let store = make_store();
+        store.acquire_leadership("node-1").unwrap();
+
+        // Act
+        let result = store.validate_epoch(1);
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_fail_validate_epoch_when_stale() {
+        // Arrange
+        let store = make_store();
+        store.acquire_leadership("node-1").unwrap();
+        store.acquire_leadership("node-2").unwrap();
+
+        // Act
+        let result = store.validate_epoch(1);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_strictly_increase_epoch_when_multiple_acquisitions() {
+        // Arrange
+        let store = make_store();
+
+        // Act
+        let e1 = store.acquire_leadership("a").unwrap().epoch;
+        let e2 = store.acquire_leadership("b").unwrap().epoch;
+        let e3 = store.acquire_leadership("c").unwrap().epoch;
+        let e4 = store.acquire_leadership("a").unwrap().epoch;
+
+        // Assert
+        assert!(e1 < e2);
+        assert!(e2 < e3);
+        assert!(e3 < e4);
+    }
+
+    #[test]
+    fn should_roundtrip_leader_record_format() {
+        // Arrange
+        let rec = LeaderRecord {
+            epoch: 42,
+            holder_id: "123@host".to_string(),
+            acquired_at: "2026-02-16T12:00:00Z".to_string(),
+        };
+
+        // Act
+        let serialized = format_leader_record(&rec);
+        let parsed = parse_leader_record(&serialized);
+
+        // Assert
+        let parsed = parsed.unwrap();
+        assert_eq!(parsed, rec);
+    }
+}

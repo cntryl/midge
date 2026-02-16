@@ -78,7 +78,11 @@ impl RealFs {
     }
 
     /// Shared internal helper used by `Fs` implementations to open an OS file.
-    fn open_inner(&self, path: &FsPath, opts: super::traits::OpenOptions) -> super::traits::FsResult<Box<dyn super::traits::File>> {
+    fn open_inner(
+        &self,
+        path: &FsPath,
+        opts: super::traits::OpenOptions,
+    ) -> super::traits::FsResult<Box<dyn super::traits::File>> {
         // Forward to the `Fs`-level implementation so the code is colocated and
         // reusable when `RealFs` is used as a backend for in-memory tests.
         // Note: this helper returns a `'static` file handle.
@@ -86,7 +90,8 @@ impl RealFs {
 
         if opts.create || opts.create_new {
             if let Some(parent) = Self::parent_dir(&full) {
-                std::fs::create_dir_all(parent).map_err(|e| super::traits::FsError::Io(format!("create_dir_all: {e}")))?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| super::traits::FsError::Io(format!("create_dir_all: {e}")))?;
             }
         }
 
@@ -105,7 +110,9 @@ impl RealFs {
             std_opts.truncate(true);
         }
 
-        let file = std_opts.open(&full).map_err(|e| super::traits::FsError::Io(e.to_string()))?;
+        let file = std_opts
+            .open(&full)
+            .map_err(|e| super::traits::FsError::Io(e.to_string()))?;
         Ok(Box::new(RealFile { file }))
     }
 }

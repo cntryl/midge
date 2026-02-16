@@ -204,13 +204,17 @@ impl AzureBackend {
 }
 
 impl CloudBackend for AzureBackend {
-    fn submit_put(&self, key: String, data: Vec<u8>, callback: CloudCallback) {
+    fn submit_put(&self, key: String, data: Vec<u8>, headers: Vec<(String, String)>, callback: CloudCallback) {
         let url = self.object_url(&key);
         let len = data.len();
-        let request = CloudRequest::new(Method::PUT, url)
+        let mut request = CloudRequest::new(Method::PUT, url)
             .with_body(data)
             .with_header("x-ms-blob-type", "BlockBlob")
             .with_header("Content-Length", len.to_string());
+        // Merge provided headers into the request (caller-controlled; e.g. If-None-Match)
+        for (name, value) in headers.into_iter() {
+            request = request.with_header(name, value);
+        }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status < 400 => CloudEvent::PutComplete {
                 key: ctx,

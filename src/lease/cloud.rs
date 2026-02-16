@@ -8,9 +8,11 @@
 //! Replace with a cloud-backed implementation (conditional writes / provider
 //! lease APIs) before using in multi-node production deployments.
 
-use super::traits::{LeaseError, LeaseGuard, PrimaryLease};
+use super::fs_leader_store::FsLeaderStore;
+use super::traits::{LeaderStore, LeaseError, LeaseGuard, PrimaryLease};
+use crate::io::RealFs;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Default TTL for cloud leases (30 seconds).
@@ -57,6 +59,10 @@ pub struct CloudStorageLease {
     acquired: AtomicBool,
     /// Timestamp when lease was last renewed (for local staleness check).
     last_renewal: Mutex<Option<Instant>>,
+    /// Epoch from the leader store, set after successful acquisition.
+    acquired_epoch: std::sync::atomic::AtomicU64,
+    /// Leader store for epoch-based fencing (backed by local cache path).
+    leader_store: Option<Arc<FsLeaderStore>>,
 }
 
 impl CloudStorageLease {
@@ -73,6 +79,12 @@ impl CloudStorageLease {
                 .to_string_lossy()
         );
 
+        // Attempt to create an FsLeaderStore backed by the local cache path
+        // for epoch-based fencing.  Failure is non-fatal (degrades to epoch 0).
+        let leader_store = RealFs::new(&local_cache_path)
+            .ok()
+            .map(|fs| Arc::new(FsLeaderStore::new(Arc::new(fs))));
+
         Self {
             config,
             local_cache_path,
@@ -80,6 +92,8 @@ impl CloudStorageLease {
             ttl: Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS),
             acquired: AtomicBool::new(false),
             last_renewal: Mutex::new(None),
+            acquired_epoch: std::sync::atomic::AtomicU64::new(0),
+            leader_store,
         }
     }
 
@@ -136,16 +150,19 @@ impl CloudStorageLease {
 }
 
 impl PrimaryLease for CloudStorageLease {
-    fn try_acquire(&self) -> Result<LeaseGuard, LeaseError> {
-        if self.acquired.load(Ordering::Acquire) {
+    fn try_acquire(self: std::sync::Arc<Self>) -> Result<LeaseGuard, LeaseError> {
+        // Borrow the inner value for field access (auto-deref handles Arc -> &T)
+        let inner: &Self = &self;
+
+        if inner.acquired.load(Ordering::Acquire) {
             return Err(LeaseError::AcquisitionFailed(
                 "lease already acquired by this instance".to_string(),
             ));
         }
 
         // Check if an existing lease is still valid (held by another instance)
-        if let Some(existing) = self.read_lease_file() {
-            if existing.holder_id != self.holder_id && !existing.is_expired() {
+        if let Some(existing) = inner.read_lease_file() {
+            if existing.holder_id != inner.holder_id && !existing.is_expired() {
                 return Err(LeaseError::AcquisitionFailed(format!(
                     "another instance holds the lease (holder: {}, expires: {})",
                     existing.holder_id, existing.expires_at
@@ -156,19 +173,30 @@ impl PrimaryLease for CloudStorageLease {
         // Write our lease
         let now = chrono::Utc::now();
         let doc = LeaseDocument {
-            holder_id: self.holder_id.clone(),
+            holder_id: inner.holder_id.clone(),
             acquired_at: now.to_rfc3339(),
-            expires_at: (now + chrono::Duration::seconds(self.ttl.as_secs() as i64)).to_rfc3339(),
+            expires_at: (now + chrono::Duration::seconds(inner.ttl.as_secs() as i64)).to_rfc3339(),
         };
-        self.write_lease_file(&doc)?;
+        inner.write_lease_file(&doc)?;
 
-        self.acquired.store(true, Ordering::Release);
-        *self.last_renewal.lock().expect("poisoned") = Some(Instant::now());
+        // Acquire epoch from local leader store for fencing.
+        let epoch = if let Some(ref store) = inner.leader_store {
+            let record = store.acquire_leadership(&inner.holder_id)?;
+            record.epoch
+        } else {
+            0
+        };
+        inner
+            .acquired_epoch
+            .store(epoch, std::sync::atomic::Ordering::Release);
+
+        inner.acquired.store(true, Ordering::Release);
+        *inner.last_renewal.lock().expect("poisoned") = Some(Instant::now());
 
         tracing::info!(
-            holder_id = %self.holder_id,
-            bucket = %self.config.bucket,
-            lease_key = %self.lease_key(),
+            holder_id = %inner.holder_id,
+            bucket = %inner.config.bucket,
+            lease_key = %inner.lease_key(),
             "cloud storage lease acquired"
         );
 
@@ -206,6 +234,17 @@ impl PrimaryLease for CloudStorageLease {
         *self.last_renewal.lock().expect("poisoned") = Some(Instant::now());
 
         tracing::trace!("cloud storage lease renewed");
+
+        // Also validate epoch is still current with leader store.
+        if let Some(ref store) = self.leader_store {
+            let expected = self
+                .acquired_epoch
+                .load(std::sync::atomic::Ordering::Acquire);
+            if expected > 0 {
+                store.validate_epoch(expected)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -232,12 +271,23 @@ impl PrimaryLease for CloudStorageLease {
     fn holder_id(&self) -> String {
         self.holder_id.clone()
     }
-}
 
+    fn epoch(&self) -> u64 {
+        self.acquired_epoch.load(Ordering::Acquire)
+    }
+
+    fn get_leader_store(&self) -> Option<Arc<dyn LeaderStore>> {
+        self.leader_store
+            .as_ref()
+            .map(|s| Arc::clone(s) as Arc<dyn LeaderStore>)
+    }
+}
 // SAFETY: CloudStorageLease is Send + Sync because:
 // - `config`, `local_cache_path`, `holder_id`, `ttl` are immutable after construction.
 // - `acquired` uses `AtomicBool` for lock-free thread-safe access.
+// - `acquired_epoch` uses `AtomicU64` for lock-free thread-safe access.
 // - `last_renewal` uses `Mutex` for interior mutability with proper synchronization.
+// - `leader_store` is `Option<Arc<FsLeaderStore>>` — Arc is Send + Sync.
 unsafe impl Send for CloudStorageLease {}
 unsafe impl Sync for CloudStorageLease {}
 
@@ -298,6 +348,7 @@ fn parse_lease_document(content: &str) -> Option<LeaseDocument> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn test_config() -> CloudLeaseConfig {
         CloudLeaseConfig {
@@ -325,10 +376,10 @@ mod tests {
     fn should_acquire_lease_when_no_existing_lease() {
         // Arrange
         let cache_path = temp_cache_path();
-        let lease = CloudStorageLease::new(test_config(), cache_path.clone());
+        let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path.clone()));
 
         // Act
-        let result = lease.try_acquire();
+        let result = Arc::clone(&lease).try_acquire();
 
         // Assert
         assert!(result.is_ok());
@@ -339,11 +390,11 @@ mod tests {
     fn should_reject_double_acquire_when_already_held() {
         // Arrange
         let cache_path = temp_cache_path();
-        let lease = CloudStorageLease::new(test_config(), cache_path);
+        let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
 
         // Act
-        let _guard = lease.try_acquire().unwrap();
-        let result = lease.try_acquire();
+        let _guard = Arc::clone(&lease).try_acquire().unwrap();
+        let result = Arc::clone(&lease).try_acquire();
 
         // Assert
         assert!(result.is_err());
@@ -364,10 +415,10 @@ mod tests {
         let lease_path = cache_path.join(LEASE_OBJECT_KEY);
         std::fs::write(&lease_path, format_lease_document(&other_doc)).unwrap();
 
-        let lease = CloudStorageLease::new(test_config(), cache_path);
+        let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
 
         // Act
-        let result = lease.try_acquire();
+        let result = Arc::clone(&lease).try_acquire();
 
         // Assert
         assert!(result.is_err());
@@ -391,10 +442,10 @@ mod tests {
         let lease_path = cache_path.join(LEASE_OBJECT_KEY);
         std::fs::write(&lease_path, format_lease_document(&expired_doc)).unwrap();
 
-        let lease = CloudStorageLease::new(test_config(), cache_path);
+        let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
 
         // Act
-        let result = lease.try_acquire();
+        let result = Arc::clone(&lease).try_acquire();
 
         // Assert
         assert!(result.is_ok());
@@ -404,8 +455,8 @@ mod tests {
     fn should_renew_lease_when_held() {
         // Arrange
         let cache_path = temp_cache_path();
-        let lease = CloudStorageLease::new(test_config(), cache_path);
-        let _guard = lease.try_acquire().unwrap();
+        let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
+        let _guard = Arc::clone(&lease).try_acquire().unwrap();
 
         // Act
         let result = lease.renew();
@@ -418,7 +469,7 @@ mod tests {
     fn should_fail_renew_when_not_acquired() {
         // Arrange
         let cache_path = temp_cache_path();
-        let lease = CloudStorageLease::new(test_config(), cache_path);
+        let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
 
         // Act
         let result = lease.renew();
@@ -431,8 +482,8 @@ mod tests {
     fn should_release_lease_when_held() {
         // Arrange
         let cache_path = temp_cache_path();
-        let lease = CloudStorageLease::new(test_config(), cache_path.clone());
-        let _guard = lease.try_acquire().unwrap();
+        let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path.clone()));
+        let _guard = Arc::clone(&lease).try_acquire().unwrap();
 
         // Act
         let result = lease.release();
@@ -446,13 +497,13 @@ mod tests {
     fn should_allow_reacquire_after_release() {
         // Arrange
         let cache_path = temp_cache_path();
-        let lease = CloudStorageLease::new(test_config(), cache_path);
-        let guard = lease.try_acquire().unwrap();
+        let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
+        let guard = Arc::clone(&lease).try_acquire().unwrap();
         guard.release();
         lease.release().unwrap();
 
         // Act
-        let result = lease.try_acquire();
+        let result = Arc::clone(&lease).try_acquire();
 
         // Assert
         assert!(result.is_ok());
@@ -462,7 +513,7 @@ mod tests {
     fn should_return_correct_ttl() {
         // Arrange
         let cache_path = temp_cache_path();
-        let lease = CloudStorageLease::new(test_config(), cache_path);
+        let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
 
         // Act
         let ttl = lease.ttl();
@@ -475,7 +526,7 @@ mod tests {
     fn should_format_holder_id_with_process_info() {
         // Arrange
         let cache_path = temp_cache_path();
-        let lease = CloudStorageLease::new(test_config(), cache_path);
+        let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
 
         // Act
         let holder = lease.holder_id();
@@ -508,7 +559,7 @@ mod tests {
             region: None,
         };
         let cache_path = temp_cache_path();
-        let lease = CloudStorageLease::new(config, cache_path);
+        let lease = Arc::new(CloudStorageLease::new(config, cache_path));
 
         // Act
         let key = lease.lease_key();

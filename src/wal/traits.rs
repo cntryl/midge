@@ -36,6 +36,7 @@ pub trait WalWriter: Send + Sync {
             bytes::Bytes::copy_from_slice(key),
             value.map(bytes::Bytes::copy_from_slice),
             seq,
+            0, // writer_epoch: default impls use epoch 0 (callers should use append_record directly)
         );
         self.append_record(&record)
     }
@@ -48,7 +49,7 @@ pub trait WalWriter: Send + Sync {
         value: Option<bytes::Bytes>,
         seq: u64,
     ) -> MidgeResult<WalPos> {
-        let record = WalRecord::new(kind, key, value, seq);
+        let record = WalRecord::new(kind, key, value, seq, 0);
         self.append_record(&record)
     }
 

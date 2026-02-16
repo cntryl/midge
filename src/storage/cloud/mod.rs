@@ -119,7 +119,10 @@ impl ObjectMetadata {
 /// Non-blocking cloud backend interface used by the engine.
 #[allow(dead_code)]
 pub trait CloudBackend: Send + Sync + 'static {
-    fn submit_put(&self, key: String, data: Vec<u8>, callback: CloudCallback);
+    /// Submit a PUT request for `key` with optional HTTP headers. Implementations
+    /// MUST honor headers (e.g. `If-None-Match`, `If-Match`) when supported by the
+    /// provider to allow conditional writes.
+    fn submit_put(&self, key: String, data: Vec<u8>, headers: Vec<(String, String)>, callback: CloudCallback);
     fn submit_get(&self, key: String, callback: CloudCallback);
     fn submit_get_range(&self, key: String, start: u64, end: Option<u64>, callback: CloudCallback);
     fn submit_delete(&self, key: String, callback: CloudCallback);
@@ -131,6 +134,7 @@ pub trait CloudBackend: Send + Sync + 'static {
 #[allow(dead_code)]
 pub struct MockCloudBackend {
     storage: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    gens: Arc<Mutex<HashMap<String, u64>>>,
     uploads: Arc<Mutex<Vec<(String, u64)>>>,
     downloads: Arc<Mutex<Vec<String>>>,
 }
@@ -140,6 +144,7 @@ impl MockCloudBackend {
     pub fn new() -> Self {
         Self {
             storage: Arc::new(Mutex::new(HashMap::new())),
+            gens: Arc::new(Mutex::new(HashMap::new())),
             uploads: Arc::new(Mutex::new(Vec::new())),
             downloads: Arc::new(Mutex::new(Vec::new())),
         }
@@ -170,8 +175,46 @@ impl Default for MockCloudBackend {
 }
 
 impl CloudBackend for MockCloudBackend {
-    fn submit_put(&self, key: String, data: Vec<u8>, callback: CloudCallback) {
-        self.storage.lock().insert(key.clone(), data.clone());
+    fn submit_put(&self, key: String, data: Vec<u8>, headers: Vec<(String, String)>, callback: CloudCallback) {
+        // Honor `If-None-Match: *` (conditional create).
+        let if_none_match = headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("if-none-match") && v == "*");
+        if if_none_match && self.storage.lock().contains_key(&key) {
+            // Simulate conditional failure (precondition failed)
+            let event = CloudEvent::PutComplete { key, result: CloudOutcome::Err("precondition failed".to_string()) };
+            let _ = callback.send(event);
+            return;
+        }
+
+        // Honor `If-Match: <etag>` (conditional update).
+        // If object missing → precondition failed. If etag mismatches → precondition failed.
+        if let Some((_, expected)) = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("if-match")) {
+            let exists = self.storage.lock().contains_key(&key);
+            if !exists {
+                let event = CloudEvent::PutComplete { key, result: CloudOutcome::Err("precondition failed".to_string()) };
+                let _ = callback.send(event);
+                return;
+            }
+
+            // compare expected value to stored generation-based etag
+            let gens_lock = self.gens.lock();
+            let current_gen = gens_lock.get(&key).cloned().unwrap_or(0);
+            let current_etag = format!("mock-gen-{}", current_gen);
+            if expected != &current_etag {
+                let event = CloudEvent::PutComplete { key, result: CloudOutcome::Err("precondition failed".to_string()) };
+                let _ = callback.send(event);
+                return;
+            }
+        }
+
+        // Perform put: store data and bump generation (etag)
+        {
+            let mut store = self.storage.lock();
+            store.insert(key.clone(), data.clone());
+        }
+        let mut gens = self.gens.lock();
+        let new_gen = gens.get(&key).cloned().unwrap_or(0).saturating_add(1);
+        gens.insert(key.clone(), new_gen);
+
         self.uploads.lock().push((key.clone(), data.len() as u64));
         let event = CloudEvent::PutComplete {
             key,
@@ -245,7 +288,11 @@ impl CloudBackend for MockCloudBackend {
             .lock()
             .expect("storage mutex poisoned")
             .get(&key)
-            .map(|data| ObjectMetadata::new(data.len() as u64, format!("mock-{}", data.len()), 0))
+            .map(|data| {
+                // ETag is generation based and independent from content length.
+                let gen = self.gens.lock().get(&key).cloned().unwrap_or(0);
+                ObjectMetadata::new(data.len() as u64, format!("mock-gen-{}", gen), 0)
+            })
             .ok_or(MidgeError::NotFound);
         let event = CloudEvent::HeadComplete {
             key,
@@ -275,9 +322,9 @@ impl CloudStorage {
         format!("{}/{}", self.namespace, suffix)
     }
 
-    pub fn submit_put(&self, key: String, data: Vec<u8>, callback: CloudCallback) {
+    pub fn submit_put(&self, key: String, data: Vec<u8>, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.backend
-            .submit_put(self.full_path(&key), data, callback);
+            .submit_put(self.full_path(&key), data, headers, callback);
     }
 
     pub fn submit_get(&self, key: String, callback: CloudCallback) {
@@ -327,7 +374,7 @@ impl StorageBackend for CloudStorage {
 
     fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_put(key.clone(), data, tx);
+        self.submit_put(key.clone(), data, vec![], tx);
         if let Ok(CloudEvent::PutComplete { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
@@ -488,7 +535,7 @@ mod tests {
         let data = vec![1, 2, 3];
 
         // Act
-        storage.submit_put("file".into(), data, tx);
+        storage.submit_put("file".into(), data, vec![], tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -508,7 +555,7 @@ mod tests {
 
         // First put a file
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("testfile".into(), vec![1, 2, 3], put_tx);
+        storage.submit_put("testfile".into(), vec![1, 2, 3], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act
@@ -553,11 +600,11 @@ mod tests {
 
         // First put multiple files
         let (tx, rx) = mpsc::channel();
-        storage.submit_put("prefix/file1".into(), vec![1], tx);
+        storage.submit_put("prefix/file1".into(), vec![1], vec![], tx);
         let _ = rx.recv();
 
         let (tx, rx) = mpsc::channel();
-        storage.submit_put("prefix/file2".into(), vec![2], tx);
+        storage.submit_put("prefix/file2".into(), vec![2], vec![], tx);
         let _ = rx.recv();
 
         // Act
@@ -587,7 +634,7 @@ mod tests {
 
         // First put a file
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("testfile".into(), vec![1, 2, 3], put_tx);
+        storage.submit_put("testfile".into(), vec![1, 2, 3], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act
@@ -611,13 +658,119 @@ mod tests {
     }
 
     #[test]
+    fn should_honor_if_match_header_on_put() {
+        // Arrange
+        let storage = CloudStorage::with_mock();
+        let (put_tx, put_rx) = mpsc::channel();
+        storage.submit_put("file1".into(), vec![1], vec![], put_tx);
+        let _ = put_rx.recv();
+
+        // Get current etag via HEAD
+        let (head_tx, head_rx) = mpsc::channel();
+        storage.submit_head("file1".into(), head_tx);
+        let head_event = head_rx.recv().unwrap();
+        let current_etag = match head_event {
+            CloudEvent::HeadComplete { result, .. } => match result {
+                CloudOutcome::Ok(meta) => meta.etag,
+                _ => panic!("expected head ok"),
+            },
+            _ => panic!("expected head event"),
+        };
+
+        // Act - conditional update with matching If-Match
+        let headers = vec![("If-Match".into(), current_etag.clone())];
+        let (put_tx, put_rx) = mpsc::channel();
+        storage.submit_put("file1".into(), vec![9, 9, 9], headers, put_tx);
+        let put_event = put_rx.recv().unwrap();
+
+        // Assert - success and new etag changed
+        match put_event {
+            CloudEvent::PutComplete { result, .. } => assert!(result.is_ok()),
+            _ => panic!("expected put complete"),
+        }
+
+        let (head_tx, head_rx) = mpsc::channel();
+        storage.submit_head("file1".into(), head_tx);
+        let head_event = head_rx.recv().unwrap();
+        let new_etag = match head_event {
+            CloudEvent::HeadComplete { result, .. } => match result {
+                CloudOutcome::Ok(meta) => meta.etag,
+                _ => panic!("expected head ok"),
+            },
+            _ => panic!("expected head event"),
+        };
+
+        assert_ne!(current_etag, new_etag);
+    }
+
+    #[test]
+    fn should_fail_put_when_if_match_mismatch() {
+        // Arrange
+        let storage = CloudStorage::with_mock();
+        let (put_tx, put_rx) = mpsc::channel();
+        storage.submit_put("file2".into(), vec![1], vec![], put_tx);
+        let _ = put_rx.recv();
+
+        // Act - conditional update with non-matching If-Match
+        let headers = vec![("If-Match".into(), "mock-gen-999".into())];
+        let (put_tx, put_rx) = mpsc::channel();
+        storage.submit_put("file2".into(), vec![2], headers, put_tx);
+        let put_event = put_rx.recv().unwrap();
+
+        // Assert - precondition failed
+        match put_event {
+            CloudEvent::PutComplete { result, .. } => assert!(result.is_err()),
+            _ => panic!("expected put complete"),
+        }
+    }
+
+    #[test]
+    fn should_fail_if_match_on_missing_object() {
+        // Arrange
+        let storage = CloudStorage::with_mock();
+
+        // Act - If-Match on non-existent key should fail
+        let headers = vec![("If-Match".into(), "mock-gen-1".into())];
+        let (put_tx, put_rx) = mpsc::channel();
+        storage.submit_put("no-such".into(), vec![1], headers, put_tx);
+        let put_event = put_rx.recv().unwrap();
+
+        // Assert - precondition failed
+        match put_event {
+            CloudEvent::PutComplete { result, .. } => assert!(result.is_err()),
+            _ => panic!("expected put complete"),
+        }
+    }
+
+    #[test]
+    fn should_respect_if_none_match_star_on_existing_object() {
+        // Arrange
+        let storage = CloudStorage::with_mock();
+        let (put_tx, put_rx) = mpsc::channel();
+        storage.submit_put("file3".into(), vec![1], vec![], put_tx);
+        let _ = put_rx.recv();
+
+        // Act - conditional create should fail when object exists
+        let headers = vec![("If-None-Match".into(), "*".into())];
+        let (put_tx, put_rx) = mpsc::channel();
+        storage.submit_put("file3".into(), vec![2], headers, put_tx);
+        let put_event = put_rx.recv().unwrap();
+
+        // Assert - precondition failed
+        match put_event {
+            CloudEvent::PutComplete { result, .. } => assert!(result.is_err()),
+            _ => panic!("expected put complete"),
+        }
+    }
+
+    #[test]
     fn should_route_get_range_with_bounds() {
         // Arrange
         let storage = CloudStorage::with_mock();
 
         // First put a file
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("rangefile".into(), vec![1, 2, 3, 4, 5], put_tx);
+        storage.submit_put("rangefile".into(), vec![1, 2, 3, 4, 5], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act
@@ -671,7 +824,7 @@ mod tests {
         let data = vec![1, 2, 3];
 
         // Act
-        storage.submit_put("file".into(), data, tx);
+        storage.submit_put("file".into(), data, vec![], tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -692,7 +845,7 @@ mod tests {
 
         // First put a file so we can get it
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("testfile".into(), vec![1, 2, 3], put_tx);
+        storage.submit_put("testfile".into(), vec![1, 2, 3], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act
@@ -714,11 +867,11 @@ mod tests {
         // Arrange
         let storage = CloudStorage::with_mock();
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("prefix/file1".into(), vec![1], put_tx);
+        storage.submit_put("prefix/file1".into(), vec![1], vec![], put_tx);
         let _ = put_rx.recv();
 
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("prefix/file2".into(), vec![2], put_tx);
+        storage.submit_put("prefix/file2".into(), vec![2], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act
@@ -753,7 +906,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        storage.submit_put("largefile".into(), large_data.clone(), tx);
+        storage.submit_put("largefile".into(), large_data.clone(), vec![], tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -788,7 +941,7 @@ mod tests {
 
         // Act: put and get binary data round-trip
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("binaryfile".into(), binary_data.clone(), put_tx);
+        storage.submit_put("binaryfile".into(), binary_data.clone(), vec![], put_tx);
         let _ = put_rx.recv();
 
         let (tx, rx) = mpsc::channel();
@@ -816,7 +969,7 @@ mod tests {
 
         // Put operation
         let (tx, _rx) = mpsc::channel();
-        storage.submit_put("f1".into(), vec![1, 2], tx);
+        storage.submit_put("f1".into(), vec![1, 2], vec![], tx);
 
         // Get operation
         let (tx, _rx) = mpsc::channel();
@@ -869,7 +1022,7 @@ mod tests {
 
         // Put an empty file
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("emptyfile".into(), vec![], put_tx);
+        storage.submit_put("emptyfile".into(), vec![], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act

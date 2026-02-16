@@ -203,11 +203,15 @@ impl GcsBackend {
 }
 
 impl CloudBackend for GcsBackend {
-    fn submit_put(&self, key: String, data: Vec<u8>, callback: CloudCallback) {
+    fn submit_put(&self, key: String, data: Vec<u8>, headers: Vec<(String, String)>, callback: CloudCallback) {
         let url = self.upload_url(&key);
-        let request = CloudRequest::new(Method::POST, url)
+        let mut request = CloudRequest::new(Method::POST, url)
             .with_body(data)
             .with_header("Content-Type", "application/octet-stream");
+        // Attach any additional headers provided by caller (e.g. conditional headers)
+        for (name, value) in headers.into_iter() {
+            request = request.with_header(name, value);
+        }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => CloudEvent::PutComplete {
                 key: ctx,

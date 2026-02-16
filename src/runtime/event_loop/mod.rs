@@ -81,6 +81,10 @@ pub struct EventLoop {
     pub(super) write_stall_waiter_queues: HashMap<crate::engine::ColumnFamilyId, VecDeque<u64>>,
     /// Lock-free snapshot cache shared with Engine for read-path bypass.
     pub(super) snapshot_cache: Option<Arc<SnapshotCache>>,
+
+    /// Shared flag from the lease heartbeat. When `false`, the event loop
+    /// rejects new write operations with `MidgeError::Fenced`.
+    lease_healthy: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,12 +124,18 @@ impl EventLoop {
         // Create actors - they handle memory_mode internally
         let flush_actor =
             FlushActor::new(&sst_dir, memory_mode, config.compression_policy.clone())?;
-        let wal_actor = WalActor::new(
+        let mut wal_actor = WalActor::new(
             wal_dir,
             config.wal_durability_policy,
             config.wal_batch_config,
             memory_mode,
+            config.writer_epoch,
         )?;
+
+        // Wire leader store for epoch validation at sync boundaries.
+        if let Some(store) = config.leader_store.clone() {
+            wal_actor.set_leader_store(store);
+        }
 
         // 🔑 CRITICAL: Use the correct key for durability_waiters based on mode
         // - CloudFirst: key is segment_id (for rotate_to/complete calls)
@@ -160,6 +170,7 @@ impl EventLoop {
             write_stall_waiters: HashMap::new(),
             write_stall_waiter_queues: HashMap::new(),
             snapshot_cache: None,
+            lease_healthy: config.lease_healthy.clone(),
         };
 
         if let Some(storage) = config.hybrid_storage {
@@ -172,6 +183,18 @@ impl EventLoop {
     pub fn set_hybrid_storage(&mut self, storage: Arc<crate::storage::HybridStorage>) {
         self.eviction_actor = Some(EvictionActor::new(storage.clone()));
         self.hybrid_storage = Some(storage);
+    }
+
+    /// Returns an error if the lease has been lost (heartbeat detected failure).
+    fn check_lease_health(&self) -> crate::common::MidgeResult<()> {
+        if let Some(healthy) = &self.lease_healthy {
+            if !healthy.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(crate::common::MidgeError::Fenced(
+                    "lease heartbeat reports unhealthy — refusing writes".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Set the snapshot cache for read-path bypass.
@@ -861,6 +884,18 @@ impl EventLoop {
                 ops,
                 durability_policy,
             } => {
+                // Fencing gate: reject writes if lease is lost
+                if let Err(e) = self.check_lease_health() {
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::Error {
+                            request_id,
+                            error: e,
+                        },
+                    );
+                    return HandleOutcome::Continue;
+                }
+
                 if self.wal_actor.is_cloud_first() && self.hybrid_storage.is_none() {
                     self.respond(
                         request_id,
@@ -1294,6 +1329,18 @@ impl EventLoop {
                 ttl_seconds,
                 insert_only,
             } => {
+                // Fencing gate: reject writes if lease is lost
+                if let Err(e) = self.check_lease_health() {
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::Error {
+                            request_id,
+                            error: e,
+                        },
+                    );
+                    return HandleOutcome::Continue;
+                }
+
                 if self.wal_actor.is_cloud_first() && self.hybrid_storage.is_none() {
                     self.respond(
                         request_id,
@@ -1372,6 +1419,18 @@ impl EventLoop {
                 start_key,
                 end_key,
             } => {
+                // Fencing gate: reject writes if lease is lost
+                if let Err(e) = self.check_lease_health() {
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::Error {
+                            request_id,
+                            error: e,
+                        },
+                    );
+                    return HandleOutcome::Continue;
+                }
+
                 if self.wal_actor.is_cloud_first() && self.hybrid_storage.is_none() {
                     self.respond(
                         request_id,

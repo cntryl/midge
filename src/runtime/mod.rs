@@ -42,6 +42,15 @@ pub struct RuntimeConfig {
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     pub compression_policy: crate::sst::compression::CompressionPolicy,
+    /// Fencing epoch from leader election.  Stamped on every WAL record.
+    pub writer_epoch: u64,
+    /// Shared lease-health flag.  Set to `false` by the heartbeat thread when
+    /// renewal fails.  The event loop checks this before accepting writes.
+    pub lease_healthy: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Leader store for epoch validation at WAL sync boundaries.
+    /// Injected into the WAL actor so it can verify the epoch is still
+    /// valid before flushing to durable storage.
+    pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
 }
 
 impl Default for RuntimeConfig {
@@ -52,6 +61,9 @@ impl Default for RuntimeConfig {
             hybrid_storage: None,
             hybrid_storage_events: None,
             compression_policy: crate::sst::compression::CompressionPolicy::default(),
+            writer_epoch: 0,
+            lease_healthy: None,
+            leader_store: None,
         }
     }
 }

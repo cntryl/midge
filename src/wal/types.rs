@@ -92,11 +92,22 @@ pub struct WalRecord {
     /// Optional compression type for the value.
     #[serde(default)]
     pub compression: Option<u8>,
+
+    /// Writer fencing epoch (monotonic fencing token).
+    /// Stamped by the writer and encoded into WAL so storage/replay
+    /// can enforce fencing semantics.  Required on every record.
+    pub writer_epoch: u64,
 }
 
 impl WalRecord {
     /// Create a new WAL record for the default column family.
-    pub fn new(op: WalOpKind, key: Bytes, value: Option<Bytes>, seq: u64) -> Self {
+    pub fn new(
+        op: WalOpKind,
+        key: Bytes,
+        value: Option<Bytes>,
+        seq: u64,
+        writer_epoch: u64,
+    ) -> Self {
         Self {
             cf_id: 0,
             op,
@@ -107,6 +118,7 @@ impl WalRecord {
             range_end: None,
             txn_id: None,
             compression: None,
+            writer_epoch,
         }
     }
 
@@ -117,6 +129,7 @@ impl WalRecord {
         key: Bytes,
         value: Option<Bytes>,
         seq: u64,
+        writer_epoch: u64,
     ) -> Self {
         Self {
             cf_id,
@@ -128,6 +141,7 @@ impl WalRecord {
             range_end: None,
             txn_id: None,
             compression: None,
+            writer_epoch,
         }
     }
 
@@ -139,6 +153,7 @@ impl WalRecord {
         value: Option<Bytes>,
         seq: u64,
         ttl_seconds: u64,
+        writer_epoch: u64,
     ) -> Self {
         let expiration = if ttl_seconds > 0 {
             let now = std::time::SystemTime::now()
@@ -160,6 +175,7 @@ impl WalRecord {
             range_end: None,
             txn_id: None,
             compression: None,
+            writer_epoch,
         }
     }
 
@@ -181,7 +197,7 @@ impl WalRecord {
         let key_size = self.key.len();
         let value_size = self.value.as_ref().map(|v| v.len()).unwrap_or(0);
         let range_end_size = self.range_end.as_ref().map(|r| r.len()).unwrap_or(0);
-        4 + 1 + 8 + 4 + key_size + 4 + value_size + range_end_size + 20
+        4 + 1 + 8 + 4 + key_size + 4 + value_size + range_end_size + 20 + 8
     }
 }
 #[cfg(test)]
@@ -195,6 +211,7 @@ mod tests {
             WalOpKind::Put,
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
+            1,
             1,
         );
         expired_record.expiration = Some(1); // 1 ms after epoch
@@ -214,6 +231,7 @@ mod tests {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             1,
+            1,
         );
         future_record.expiration = Some(u64::MAX);
 
@@ -232,6 +250,7 @@ mod tests {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             1,
+            1,
         );
 
         // Act
@@ -249,6 +268,7 @@ mod tests {
             Bytes::from_static(b"mykey"),
             Some(Bytes::from_static(b"myvalue")),
             42,
+            1,
         );
 
         // Act
@@ -262,7 +282,7 @@ mod tests {
     #[test]
     fn should_estimate_size_without_value() {
         // Arrange
-        let record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"key"), None, 1);
+        let record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"key"), None, 1, 1);
 
         // Act
         let size = record.estimated_size();
@@ -281,6 +301,7 @@ mod tests {
             Some(Bytes::from_static(b"value")),
             42,
             3600, // 1 hour
+            1,
         );
 
         // Act

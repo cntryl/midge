@@ -35,6 +35,25 @@ impl LeaseHeartbeat {
         }
     }
 
+    /// Create a heartbeat that shares an external healthy flag.
+    ///
+    /// The caller keeps a clone of the `Arc<AtomicBool>` and can poll it
+    /// (e.g., in the event loop) without going through `LeaseHeartbeat`.
+    pub fn new_with_healthy(lease: Arc<dyn PrimaryLease>, healthy: Arc<AtomicBool>) -> Self {
+        Self {
+            lease,
+            running: Arc::new(AtomicBool::new(false)),
+            healthy,
+            thread_handle: None,
+            spawn_failed: false,
+        }
+    }
+
+    /// Return a shared reference to the healthy flag.
+    pub fn healthy_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.healthy)
+    }
+
     /// Start the heartbeat loop.
     ///
     /// Spawns a background thread that renews the lease at intervals
@@ -175,7 +194,8 @@ mod tests {
     }
 
     impl PrimaryLease for MockLease {
-        fn try_acquire(&self) -> Result<LeaseGuard, LeaseError> {
+        fn try_acquire(self: std::sync::Arc<Self>) -> Result<LeaseGuard, LeaseError> {
+            // Token-style guard for the mock (no-op on Drop)
             Ok(LeaseGuard::token())
         }
 
@@ -197,6 +217,10 @@ mod tests {
 
         fn holder_id(&self) -> String {
             "mock".to_string()
+        }
+
+        fn epoch(&self) -> u64 {
+            1
         }
     }
 

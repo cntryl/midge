@@ -10,7 +10,7 @@
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 
-use cntryl_midge::{Key, MidgeEngine, testkit::MidgeOptions, Query};
+use cntryl_midge::{testkit::MidgeOptions, Key, MidgeEngine, Query};
 const VALUE_SIZE: usize = 64; // Irrelevant to measured primitive; used only in setup
 const TARGET_BATCH: usize = 10_000;
 

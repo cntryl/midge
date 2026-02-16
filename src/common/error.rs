@@ -36,6 +36,9 @@ pub enum MidgeError {
 
     /// Memory mode violation - attempted disk I/O in memory-only mode
     MemoryModeViolation(String),
+
+    /// Writer fenced — epoch is stale, another leader has taken over
+    Fenced(String),
 }
 
 impl fmt::Display for MidgeError {
@@ -50,6 +53,7 @@ impl fmt::Display for MidgeError {
             MidgeError::InvalidPath => write!(f, "Invalid path"),
             MidgeError::WriteStall(msg) => write!(f, "Write stall: {}", msg),
             MidgeError::MemoryModeViolation(msg) => write!(f, "Memory mode violation: {}", msg),
+            MidgeError::Fenced(msg) => write!(f, "Fenced: writer epoch is stale: {}", msg),
         }
     }
 }
@@ -59,5 +63,11 @@ impl std::error::Error for MidgeError {}
 impl From<io::Error> for MidgeError {
     fn from(err: io::Error) -> Self {
         MidgeError::Io(err)
+    }
+}
+
+impl From<crate::lease::LeaseError> for MidgeError {
+    fn from(err: crate::lease::LeaseError) -> Self {
+        MidgeError::Fenced(err.to_string())
     }
 }

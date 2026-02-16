@@ -5,7 +5,7 @@
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 
-use cntryl_midge::{MidgeEngine, testkit::MidgeOptions};
+use cntryl_midge::{testkit::MidgeOptions, MidgeEngine};
 
 const VALUE_SIZE: usize = 64;
 const TARGET_BATCH: usize = 1_000;
