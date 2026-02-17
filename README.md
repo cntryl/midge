@@ -12,7 +12,7 @@ Built for Rust services and edge daemons that need reliable embedded storage wit
 
 ```toml
 [dependencies]
-cntryl-midge = "1"
+cntryl-midge = "0.1"
 ```
 
 ```rust

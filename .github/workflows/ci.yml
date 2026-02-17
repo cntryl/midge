@@ -33,6 +33,9 @@ jobs:
       - name: Update Rust toolchain
         run: rustup update stable
 
+      - name: Validate Test Structure
+        run: python ./scripts/validate_tests.py --summary
+
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 

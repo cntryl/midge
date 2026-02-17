@@ -298,7 +298,8 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().unwrap(), Bytes::from("value1"));
+        let value = result.expect("get failed").expect("key not found");
+        assert_eq!(value, Bytes::from("value1"));
     }
 
     // =========== SstReader Trait Behavior Tests ===========
@@ -655,7 +656,10 @@ mod tests {
         reader.insert(b"key".to_vec(), original_value.clone());
 
         // Act
-        let result = reader.get(b"key").unwrap().unwrap();
+        let result = reader
+            .get(b"key")
+            .expect("get failed")
+            .expect("key not found");
 
         // Assert
         assert_eq!(result.to_vec(), original_value);
