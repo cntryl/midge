@@ -9,7 +9,7 @@
 //! • It must treat EOF mid-record as **corruption**, not success.
 //! • It must not assume the file ends cleanly.
 //! • It must use the canonical format:
-//!       <u32 length prefix><encoded record bytes>
+//!       `<u32 length prefix><encoded record bytes>`
 //! • It must NOT attempt to fix, truncate, or adjust the file.
 //! • It must update `current_pos` monotonically.
 

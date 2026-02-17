@@ -46,7 +46,7 @@ impl CacheShard {
     /// `max_bytes`: Maximum capacity in bytes
     /// `policy_type`: Eviction policy to use
     ///
-    /// Returns Arc<Self> because the background worker needs a reference
+    /// Returns `Arc<Self>` because the background worker needs a reference
     pub fn new(max_bytes: u64, policy_type: CachePolicyType) -> Arc<Self> {
         let (tx, rx) = bounded(10_000);
 

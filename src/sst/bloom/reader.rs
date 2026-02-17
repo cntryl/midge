@@ -20,8 +20,8 @@ pub struct BloomReader {
 impl BloomReader {
     /// Deserialize a bloom filter from bytes (format-aware with corruption checks).
     ///
-    /// Format: [num_bits: u32][key_count: u32][k: u8][bits...]
-    /// Validates: num_bits > 0, k ∈ [1,8], bits size matches
+    /// Format: \[num_bits: u32\]\[key_count: u32\]\[k: u8\]\[bits...\]
+    /// Validates: num_bits > 0, k ∈ \[1,8\], bits size matches
     pub fn deserialize(data: &[u8]) -> MidgeResult<Self> {
         if data.len() < 9 {
             return Err(MidgeError::Corruption(
@@ -167,7 +167,7 @@ impl BloomFilterOps for BloomReader {
     fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
 
-        // Format (NEW): [num_bits: u32][key_count: u32][k: u8][bits...]
+        // Format (NEW): \[num_bits: u32\]\[key_count: u32\]\[k: u8\]\[bits...\]
         result.extend_from_slice(&(self.num_bits as u32).to_le_bytes());
         result.extend_from_slice(&(self.key_count as u32).to_le_bytes());
         result.push(self.k);
@@ -313,7 +313,7 @@ mod tests {
         let mut serialized = writer.serialize();
 
         // Act - truncate more aggressively to create a definite mismatch
-        // Current format is: [4 bytes num_bits][4 bytes key_count][1 byte k][bits...]
+        // Current format is: \[4 bytes num_bits\]\[4 bytes key_count\]\[1 byte k\]\[bits...\]
         // We truncate to a length that doesn't match either OLD or NEW format
         let bits_len = serialized.len() - 9;
         let invalid_len = 9 + bits_len - 2; // Remove 2 bytes from expected bits

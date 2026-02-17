@@ -138,7 +138,7 @@ pub trait WalFactory: Send + Sync {
         dir: &StoragePath,
     ) -> MidgeResult<Box<dyn WalReaderDyn>>;
 
-    /// Rotate the active WAL file (e.g., rename active wal.log to wal-<seq>.log)
+    /// Rotate the active WAL file (e.g., rename active wal.log to `wal-<seq>.log`)
     /// and return a new writer for the active WAL.
     fn rotate_writer(
         &self,

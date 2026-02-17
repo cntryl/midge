@@ -18,7 +18,7 @@ use crate::sst::traits::SstReader;
 use crate::sst::types::{BlockHandle, Footer};
 
 /// SST file reader using io::Fs abstraction
-/// Identical to SstFile but accepts Arc<dyn Fs> for the filesystem backend
+/// Identical to SstFile but accepts `Arc<dyn Fs>` for the filesystem backend
 pub struct SstFileIo {
     path: FsPath,
     fs: Arc<dyn Fs>,

@@ -328,7 +328,7 @@ impl SkipListMemtable {
 
     /// Get value as Bytes (zero-copy, for performance-critical paths).
     ///
-    /// Returns Bytes instead of Vec<u8>, avoiding allocation for callers
+    /// Returns Bytes instead of `Vec<u8>`, avoiding allocation for callers
     /// that can work with the Arc-based Bytes type.
     pub fn get_bytes(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
         let visible = self.skiplist.get_visible_with_exp(key, u64::MAX);

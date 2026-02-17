@@ -55,7 +55,7 @@ impl RangeFilter {
 
     /// Serialize the range filter
     ///
-    /// Format: [min_len: u32][min_key...][max_len: u32][max_key...]
+    /// Format: \[min_len: u32\]\[min_key...\]\[max_len: u32\]\[max_key...\]
     pub fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
         result.extend_from_slice(&(self.min_key.len() as u32).to_le_bytes());

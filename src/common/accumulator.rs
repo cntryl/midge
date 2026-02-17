@@ -65,7 +65,7 @@ where
 
     /// Submit a value and receive a handle that will be notified when the batch flushes.
     ///
-    /// Optimized: creates one shared Arc<WaitHandle> for the first waiter in a batch,
+    /// Optimized: creates one shared `Arc<WaitHandle>` for the first waiter in a batch,
     /// then all subsequent waiters clone it. This eliminates N-1 channel allocations
     /// per batch (20-40% faster for high waiter counts).
     pub fn submit_async(&self, v: V) -> AccumulatorReceiver<R> {

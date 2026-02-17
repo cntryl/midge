@@ -4,7 +4,8 @@ use std::thread;
 use std::time::Duration;
 
 #[test]
-fn measure_ingest_coordinator_metrics_concurrent() {
+fn should_measure_concurrent_ingest_coordinator_metrics_when_multiple_threads_write() {
+    // Arrange
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
     let engine = Arc::new(cntryl_midge::Engine::open_with_options(opts).unwrap());
     let cf = engine.create_column_family("test_cf").unwrap();
@@ -17,6 +18,7 @@ fn measure_ingest_coordinator_metrics_concurrent() {
     println!("Threads: {}", num_threads);
     println!("Operations per thread: {}", ops_per_thread);
 
+    // Act
     let start = std::time::Instant::now();
 
     let mut handles = vec![];
@@ -45,6 +47,7 @@ fn measure_ingest_coordinator_metrics_concurrent() {
         handle.join().expect("thread join");
     }
 
+    // Assert
     let elapsed = start.elapsed();
     let total_ops = (num_threads * ops_per_thread) as f64;
     let throughput = total_ops / elapsed.as_secs_f64();

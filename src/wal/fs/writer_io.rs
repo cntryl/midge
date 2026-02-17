@@ -9,7 +9,7 @@
 //! • It NEVER assigns sequence numbers.
 //! • It NEVER rotates WAL segments.
 //! • It NEVER writes metadata beyond the encoded WAL record format.
-//! • It MUST write records as: <u32 length prefix><encoded record bytes>.
+//! • It MUST write records as: `<u32 length prefix><encoded record bytes>`.
 //! • It MUST update the write position monotonically.
 //! • It MUST flush/sync exactly and only when asked.
 //! • All concurrency protection is via `Mutex` — do NOT add async constructs.

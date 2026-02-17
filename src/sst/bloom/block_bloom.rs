@@ -388,10 +388,10 @@ mod tests {
         let mut serialized = filter.serialize();
 
         // Find the bloom data section and corrupt k byte
-        // Format: [num_blocks: u32][offsets...][bloom_data...]
+        // Format: \[num_blocks: u32\]\[offsets...\]\[bloom_data...\]
         // num_blocks = 1, so header is 4 + 4 = 8 bytes
         // Bloom data starts at offset 8
-        // Inner bloom format: [num_bits][key_count][k][bits...]
+        // Inner bloom format: \[num_bits\]\[key_count\]\[k\]\[bits...\]
         // So k is at position 8 + 8 = 16
         if serialized.len() > 16 {
             serialized[16] = 99; // Set k to invalid value

@@ -7,9 +7,9 @@ use bytes::{BufMut, BytesMut};
 /// Encode trie nodes to compact binary format
 ///
 /// Layout:
-///   [ varint node_count ]
-///   [ node_0 ]
-///   [ node_1 ]
+///   \[ varint node_count \]
+///   \[ node_0 \]
+///   \[ node_1 \]
 ///   ...
 ///
 /// Each node:

@@ -449,7 +449,7 @@ mod tests {
         // Act
         let serialized = filter.serialize();
 
-        // Assert format: [num_bits: u32][key_count: u32][bits...]
+        // Assert format: \[num_bits: u32\]\[key_count: u32\]\[bits...\]
         assert!(serialized.len() >= 8);
         let num_bits_bytes = &serialized[0..4];
         let key_count_bytes = &serialized[4..8];
