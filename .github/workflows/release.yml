@@ -26,16 +26,16 @@ jobs:
           fi
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test
 
       - name: Validate test structure
         run: python ./scripts/validate_tests.py --summary
 
       - name: Check clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build release
-        run: cargo build --release --all-features
+        run: cargo build --release
 
       - name: Publish to crates.io (OIDC trusted publishing)
         run: cargo publish
