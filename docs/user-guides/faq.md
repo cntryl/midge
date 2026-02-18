@@ -15,7 +15,7 @@ Midge is an embedded LSM-tree key-value storage engine designed for predictable 
 - Explicit control over state transitions
 
 **Use RocksDB when you need:**
-- Maximum raw throughput (millions of ops/sec)
+- Maximum raw throughput (500k-2M+ ops/sec)
 - Battle-tested production stability
 - Multi-threaded concurrent compaction
 - Drop-in compatibility with existing RocksDB users
@@ -120,9 +120,10 @@ Midge is designed for **predictability** not raw speed:
 
 - **Write latency**: 1-10ms (depends on WriteOptions)
 - **Read latency**: <1ms cached, 10-100ms cloud
-- **Throughput**: ~100k ops/sec (actor serialization limit)
+- **Throughput**: ~50-75k ops/sec (limited by WAL I/O and per-operation work)
+- **Event loop**: 67M messages/sec (not the bottleneck)
 
-For millions of ops/sec, use RocksDB or a sharded design.
+For hundreds of thousands or millions of ops/sec, use RocksDB or a sharded design.
 
 ### How do I tune performance?
 

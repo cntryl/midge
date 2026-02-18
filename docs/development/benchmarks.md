@@ -40,42 +40,60 @@ This repo uses [Criterion](https://bheisler.github.io/criterion.rs/book/) for mi
 
 Tier 3 and 4 benchmarks are stress tests that measure system behavior under realistic workloads. They use the `cntryl-stress` harness for automated test discovery and execution.
 
-**Install stress tool:**
-
-```bash
-cargo install cntryl-stress
-```
-
 **Run all stress tests:**
 
 ```bash
-cargo stress
+cargo bench --bench 'tier*'
 ```
 
-**Run with verbose output:**
+**Run a specific benchmark suite:**
 
 ```bash
-cargo stress -v
+cargo bench --bench tier3_system_engine
+cargo bench --bench tier4_ycsb_workload_a
 ```
 
-**Run specific stress test (by function name):**
+**Run with configuration:**
 
 ```bash
-# YCSB workload A with 4 clients
-cargo stress tier4_ycsb_a_mem_4_clients
+# Specify number of runs and warmup
+cargo bench --bench tier3_system_engine -- --runs 3 --warmup 1
 
-# YCSB workload F (read-modify-write) with 8 clients
-cargo stress tier4_ycsb_f_local_8_clients
+# Filter benchmarks by name pattern
+cargo bench --bench tier4_ycsb_workload_a -- --workload "*read*"
 
-# All YCSB workload tests
-cargo stress tier4_ycsb
+# List available benchmarks without running
+cargo bench --bench tier4_system_compaction -- --list
 
-# All tier 3 system tests
-cargo stress tier3_system
-
-# Durability tests
-cargo stress tier4_system_durability
+# Verbose output
+cargo bench --bench tier3_system_engine -- --verbose
 ```
+
+**Configuration via environment variables:**
+
+```bash
+BENCH_RUNS=3 BENCH_WARMUP=1 cargo bench --bench tier3_system_engine
+```
+
+**Command-line arguments** (pass with `--` separator):
+
+```bash
+cargo bench --bench tier3_system_engine -- --runs 5 --warmup 2
+```
+
+Supported flags:
+
+- `--runs <N>` — Number of measurement runs (reports median)
+- `--warmup <N>` — Warmup runs to discard before measuring
+- `--workload <PATTERN>` — Filter tests by glob pattern
+- `--verbose`, `-v` — Verbose output
+- `--list` — List benchmarks without running
+- `--include-ignored` — Include `#[stress_test(ignore)]` tests
+- `--baseline <PATH>` — Compare against baseline JSON
+- `--threshold <FLOAT>` — Regression threshold (default: 0.05)
+- `--output-dir <PATH>` — Custom output directory
+
+Important: The `--` separator is required to pass arguments to the stress harness.
 
 **Stress test duration:**
 
@@ -204,25 +222,36 @@ group.throughput(Throughput::Bytes(data_size as u64));
 
 ## Tier 3-4 Stress Test Rules
 
-Stress tests measure behavior under load and have different rules than microbenchmarks:
+Stress tests use `#[stress_test]` macros and measure behavior under load with different rules than microbenchmarks:
 
-1. **Realistic workload patterns**
+1. **Macro-based test definition**
+   - Mark tests with `#[stress_test]`
+   - Use `StressContext` for explicit timing: `ctx.measure(|| { ... })`
+   - Setup/teardown outside `ctx.measure()` to exclude from timing
+   - Call `stress_main!()` once per benchmark suite for auto-discovery
+
+2. **Realistic workload patterns**
    - Use YCSB or actual operation distributions
    - Include proper transaction boundaries
    - Measure end-to-end latency including all overhead
 
-2. **Deterministic scenarios**
+3. **Deterministic scenarios**
    - Fixed operation counts (not time-based)
    - Reproducible data patterns
    - Same initial state across runs
 
-3. **Validate correctness during benchmark**
+4. **Validate correctness during benchmark**
    - Verify data consistency
    - Check recovery works
    - Validate durability guarantees
 
-4. **Measure realistic metrics**
-   - Throughput (ops/sec)
+5. **Throughput tracking**
+   - Call `ctx.set_bytes(n)` for bytes/sec reporting
+   - Call `ctx.set_elements(n)` for ops/sec reporting
+   - Add metadata with `ctx.tag(key, val)`
+
+6. **Measure realistic metrics**
+   - Throughput (ops/sec or bytes/sec)
    - Latency percentiles (p50, p95, p99)
    - Read/write amplification
    - Resource usage (memory, CPU)
@@ -250,12 +279,25 @@ Criterion reports:
 
 ### Stress Test Results (Tier 3-4)
 
-Stress tests report:
+Stress tests save results to `target/stress/{suite}/{timestamp}.{json,txt}`:
 
-- **throughput**: Operations per second under sustained load
-- **latency percentiles**: p50, p95, p99, p99.9 in milliseconds
+**Console output:**
+- **name**: Test name and duration
+- **throughput**: Bytes/sec (if `ctx.set_bytes()` called) or ops/sec (if `ctx.set_elements()` called)
+- **total time**: Time to run entire suite
+
+**JSON output** (`target/stress/{suite}/latest.json`):
+- Suite metadata (git SHA, timestamp, run count)
+- Per-test results with duration and throughput
+- Total suite duration
+
+**Text output** (`target/stress/{suite}/latest.txt`):
+- Human-readable format with all metrics
+- Git SHA and timestamp for tracking
+
+**Additional metrics to measure:**
 - **resource usage**: Memory, CPU utilization
-- **compaction stats**: Files created, levels touched
+- **compaction stats**: Files created, levels touched (add with `ctx.tag()`)
 - **correctness validation**: Pass/fail on durability checks
 
 **Healthy indicators:**
@@ -295,7 +337,10 @@ When comparing benchmark results:
 
 2. **Control environment**: Close other applications, disable frequency scaling, minimize background load.
 
-3. **Multiple runs**: Run benchmarks at least 3 times, report mean + std. dev.
+3. **Multiple runs**: Use `--runs` flag to run benchmarks at least 3 times, report median + std. dev.
+   ```bash
+   cargo bench --bench tier1_hotpath_api -- --runs 3
+   ```
 
 4. **Look for systematic differences**:
    - Warmup effects (first run slower due to cold caches)
@@ -303,7 +348,10 @@ When comparing benchmark results:
    - Memory fragmentation (longer running benchmarks)
    - System load variations
 
-5. **Statistical significance**: Criterion shows confidence intervals. Changes <5% may be noise, not real regression.
+5. **Statistical significance**: For Criterion, changes <5% may be noise, not real regression. For stress tests, use `--threshold` flag:
+   ```bash
+   cargo bench --bench tier3_system_engine -- --baseline baseline.json --threshold 0.05
+   ```
 
 ### Stress Test Comparisons
 
@@ -311,8 +359,16 @@ For Tier 3-4 stress tests:
 
 - **Compare on identical hardware**: Cloud instance type, disk speed, CPU generation
 - **Same background load**: Run benchmarks with similar system state each time
-- **Consistent warmup**: Cold start vs warm cache can show 2-5x differences
-- **Multiple iterations of same workload**: Report median + range across runs
+- **Consistent warmup**: Use `--warmup` to discard warmup iterations; cold start vs warm cache can show 2-5x differences
+- **Multiple iterations of same workload**: Use `--runs` to get multiple measurements, report median + range across runs
+- **Regression detection**: Use `--baseline` and `--threshold` flags:
+  ```bash
+  # Run and save baseline
+  cargo bench --bench tier3_system_engine -- --runs 3 --warmup 1
+  
+  # Later, compare against it
+  cargo bench --bench tier3_system_engine -- --baseline target/stress/tier3_system_engine/latest.json --threshold 0.05
+  ```
 
 Example comparison script:
 
@@ -323,7 +379,7 @@ Example comparison script:
 echo "Before optimization:"
 for i in {1..3}; do
     echo "  Run $i:"
-    cargo stress tier3_system_engine 2>&1 | grep -E "(throughput|latency|p99)"
+    cargo bench --bench tier3_system_engine 2>&1 | grep -E "(throughput|time)"
 done
 
 # Make optimization...
@@ -331,7 +387,7 @@ done
 echo "After optimization:"
 for i in {1..3}; do
     echo "  Run $i:"
-    cargo stress tier3_system_engine 2>&1 | grep -E "(throughput|latency|p99)"
+    cargo bench --bench tier3_system_engine 2>&1 | grep -E "(throughput|time)"
 done
 ```
 
@@ -353,33 +409,41 @@ cargo bench --bench tier1_hotpath_memtable -- --baseline before
 ### Validate System Performance
 
 ```bash
-# Run tier 2 subsystem tests
+# Run Criterion tier 2 subsystem tests
 cargo bench --bench tier2_subsystem_block_cache
 cargo bench --bench tier2_subsystem_memtable_rotate
 
-# Run individual tier 3 system tests
-cargo stress tier3_system_engine
-cargo stress tier3_system_compaction
-cargo stress tier3_system_recovery
+# Run individual tier 3 system stress tests
+cargo bench --bench tier3_system_engine
+cargo bench --bench tier3_system_compaction
+cargo bench --bench tier3_system_recovery
+
+# Run with warmup and multiple runs
+cargo bench --bench tier3_system_engine -- --runs 3 --warmup 2
 ```
 
 ### Run Full Workload Benchmark
 
 ```bash
 # Run YCSB workload A (balanced 50/50 read/write)
-cargo stress tier4_ycsb_workload_a
+cargo bench --bench tier4_ycsb_workload_a
 
-# Run all YCSB workloads
-cargo stress tier4_ycsb
+# Run all YCSB workloads (using Cargo glob pattern)
+cargo bench --bench 'tier4_ycsb*'
 
-# Run with verbose output
-cargo stress tier4_ycsb -v
+# Run with custom configuration
+cargo bench --bench tier4_ycsb_workload_a -- --runs 3 --warmup 2
+
+# Run with baseline comparison for regression detection
+cargo bench --bench tier4_ycsb_workload_a -- --baseline /path/to/baseline.json --threshold 0.10
 ```
 
 ### Performance Regression Detection
 
+**For Criterion (Tier 1-2):**
+
 ```bash
-# Before changes (using Criterion baseline)
+# Before changes
 cargo bench --bench tier1_hotpath_api -- --save-baseline baseline
 
 # Make changes (optimization or refactoring)
@@ -389,6 +453,21 @@ cargo bench --bench tier1_hotpath_api -- --save-baseline baseline
 cargo bench --bench tier1_hotpath_api -- --baseline baseline
 
 # Criterion will show % change and statistical significance
+```
+
+**For Stress Tests (Tier 3-4):**
+
+```bash
+# Save baseline before changes
+cargo bench --bench tier3_system_engine -- --runs 3 --warmup 1
+# Results saved to target/stress/tier3_system_engine/latest.json
+
+# Make changes...
+
+# Compare against baseline
+cargo bench --bench tier3_system_engine -- --baseline target/stress/tier3_system_engine/latest.json --threshold 0.05
+
+# cntryl-stress will report % change and flag regressions >5%
 ```
 
 ### Profile a Benchmark
@@ -405,8 +484,82 @@ perf report
 xcrun xctrace record --template "System Trace" ./target/release/deps/tier1_hotpath_api-*
 ```
 
+## Writing Stress Tests (Tier 3-4)
+
+Stress tests use the `#[stress_test]` macro and `StressContext` API:
+
+```rust
+use cntryl_stress::{stress_test, stress_main, StressContext};
+
+#[stress_test]
+fn compaction_throughput(ctx: &mut StressContext) {
+    // Setup outside measurement
+    let engine = Engine::new(config).unwrap();
+    let test_data = generate_test_data(10_000);
+    
+    // Record throughput (bytes processed)
+    ctx.set_bytes((test_data.len() * test_data[0].len()) as u64);
+    
+    // Measure the operation
+    ctx.measure(|| {
+        engine.compact().unwrap();
+    });
+    
+    // Add metadata
+    ctx.tag("workload", "compaction");
+    ctx.tag("data_size", "100MB");
+}
+
+#[stress_test]
+fn recovery_time(ctx: &mut StressContext) {
+    let engine = Engine::new(config).unwrap();
+    
+    // Setup: write some data
+    for i in 0..1_000_000 {
+        engine.put(format!("key{}", i), vec![0u8; 100]).unwrap();
+    }
+    engine.close().unwrap();
+    
+    // Measure recovery operation
+    ctx.measure(|| {
+        let _ = Engine::open(config).unwrap();
+    });
+    
+    ctx.tag("recovery_type", "cold_start");
+}
+
+#[stress_test(ignore)]  // Use (ignore) to skip a test
+fn expensive_operation(ctx: &mut StressContext) {
+    // This won't run by default
+    // Run with: cargo bench -- --include-ignored
+}
+
+stress_main!();  // Required once per bench file for auto-discovery
+```
+
+**In `Cargo.toml`, mark the benchmark as a stress test:**
+
+```toml
+[[bench]]
+name = "tier3_system_engine"
+path = "benches/tier3_system_engine.rs"
+harness = false  # Important: use cntryl-stress harness, not Criterion
+```
+
+**Key API:**
+
+- `ctx.measure(|| { ... })` — Time one operation, excluding setup/teardown
+- `ctx.set_bytes(n)` — Enable bytes/sec throughput reporting
+- `ctx.set_elements(n)` — Enable ops/sec throughput reporting
+- `ctx.tag(key, val)` — Add metadata (workload name, configuration, etc.)
+- `#[stress_test]` — Mark function as a test
+- `#[stress_test(ignore)]` — Skip test by default
+- `stress_main!()` — Auto-discover and run all `#[stress_test]` functions
+
 ## Notes for contributors
 
 - If you introduce a new hotpath, consider adding a Tier 1 benchmark.
 - Keep benchmark names descriptive and stable; they become part of long-term performance tracking.
-- Run `cargo stress -v` before submitting PRs with performance changes to catch regressions.
+- Run `cargo bench` before submitting PRs with performance changes to catch regressions.
+- For new Tier 3-4 tests, use the `#[stress_test]` macro and call `stress_main!()` once per benchmark suite.
+- Always call `ctx.measure()` only around the operation being timed; put setup/teardown outside.

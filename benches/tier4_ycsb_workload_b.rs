@@ -18,8 +18,27 @@ const MEASURED: Duration = Duration::from_secs(5);
 const ZIPFIAN_THETA: f64 = 0.99;
 
 const CLIENTS_1: usize = 1;
+const CLIENTS_2: usize = 2;
 const CLIENTS_4: usize = 4;
 const CLIENTS_8: usize = 8;
+const CLIENTS_16: usize = 16;
+const CLIENTS_32: usize = 32;
+const CLIENTS_64: usize = 64;
+
+// C = number of logical CPUs (realistic scaling)
+fn clients_c() -> usize {
+    num_cpus::get()
+}
+
+// 2C = 2× CPUs (oversubscription stress)
+fn clients_2c() -> usize {
+    num_cpus::get() * 2
+}
+
+// 4C = 4× CPUs (extreme oversubscription to find saturation point)
+fn clients_4c() -> usize {
+    num_cpus::get() * 4
+}
 
 const WORKLOAD_SEED: u64 = 0xB0B0_EA5E_5678_9ABC;
 
@@ -132,6 +151,12 @@ fn tier4_ycsb_b_mem_1_client(ctx: &mut StressContext) {
 }
 
 #[stress_test]
+fn tier4_ycsb_b_mem_2_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    run_workload_b(ctx, opts, CLIENTS_2);
+}
+
+#[stress_test]
 fn tier4_ycsb_b_mem_4_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
     run_workload_b(ctx, opts, CLIENTS_4);
@@ -144,9 +169,51 @@ fn tier4_ycsb_b_mem_8_clients(ctx: &mut StressContext) {
 }
 
 #[stress_test]
+fn tier4_ycsb_b_mem_c_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    run_workload_b(ctx, opts, clients_c());
+}
+
+#[stress_test]
+fn tier4_ycsb_b_mem_2c_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    run_workload_b(ctx, opts, clients_2c());
+}
+
+#[stress_test]
+fn tier4_ycsb_b_mem_16_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    run_workload_b(ctx, opts, CLIENTS_16);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_mem_32_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    run_workload_b(ctx, opts, CLIENTS_32);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_mem_64_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    run_workload_b(ctx, opts, CLIENTS_64);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_mem_4c_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    run_workload_b(ctx, opts, clients_4c());
+}
+
+#[stress_test]
 fn tier4_ycsb_b_local_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_workload_b(ctx, opts, CLIENTS_1);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_local_2_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_workload_b(ctx, opts, CLIENTS_2);
 }
 
 #[stress_test]
@@ -162,9 +229,51 @@ fn tier4_ycsb_b_local_8_clients(ctx: &mut StressContext) {
 }
 
 #[stress_test]
+fn tier4_ycsb_b_local_c_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_workload_b(ctx, opts, clients_c());
+}
+
+#[stress_test]
+fn tier4_ycsb_b_local_2c_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_workload_b(ctx, opts, clients_2c());
+}
+
+#[stress_test]
+fn tier4_ycsb_b_local_16_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_workload_b(ctx, opts, CLIENTS_16);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_local_32_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_workload_b(ctx, opts, CLIENTS_32);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_local_64_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_workload_b(ctx, opts, CLIENTS_64);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_local_4c_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_workload_b(ctx, opts, clients_4c());
+}
+
+#[stress_test]
 fn tier4_ycsb_b_cloud_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_workload_b(ctx, opts, CLIENTS_1);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_cloud_2_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_workload_b(ctx, opts, CLIENTS_2);
 }
 
 #[stress_test]
@@ -177,6 +286,42 @@ fn tier4_ycsb_b_cloud_4_clients(ctx: &mut StressContext) {
 fn tier4_ycsb_b_cloud_8_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_workload_b(ctx, opts, CLIENTS_8);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_cloud_c_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_workload_b(ctx, opts, clients_c());
+}
+
+#[stress_test]
+fn tier4_ycsb_b_cloud_2c_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_workload_b(ctx, opts, clients_2c());
+}
+
+#[stress_test]
+fn tier4_ycsb_b_cloud_16_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_workload_b(ctx, opts, CLIENTS_16);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_cloud_32_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_workload_b(ctx, opts, CLIENTS_32);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_cloud_64_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_workload_b(ctx, opts, CLIENTS_64);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_cloud_4c_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_workload_b(ctx, opts, clients_4c());
 }
 
 stress_main!();

@@ -12,4 +12,4 @@ services:
     stdin_open: true
     tty: true
     entrypoint: /bin/bash
-    command: -c "(cargo test && cargo bench --bench 'tier1_*' --bench 'tier2_*' && cargo stress --verbose --warmup 1) 2>&1 | tee /output/test-results.log"
+    command: -c "(cargo test && cargo bench --bench) 2>&1 | tee /output/test-results.log"

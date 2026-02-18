@@ -334,9 +334,16 @@ where
             .expect("CF should exist (tried 'cf1' and 'data')");
 
         handles.push(thread::spawn(move || {
-
             // Start all clients together to reduce launch skew.
             barrier.wait();
+
+            // Stagger thread starts to enable write grouping: threads with
+            // overlapping commits will be batched together automatically.
+            // Without this, all threads hit their first commit simultaneously,
+            // preventing the write group coordinator from batching.
+            if client_id > 0 {
+                std::thread::sleep(Duration::from_micros(client_id as u64 * 50));
+            }
 
             let mut op_index: u64 = 0;
             // Optional slow-op threshold (enable with MIDGE_YCSB_SLOW_OP_MS)

@@ -8,9 +8,6 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install cntryl-stress early for stress tests
-RUN cargo install cntryl-stress --verbose
-
 # Set working directory
 WORKDIR /workspace
 

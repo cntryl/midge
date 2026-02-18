@@ -77,7 +77,7 @@ engine.commit(tx, WriteOptions::buffered())?;
 
 **Performance:**
 - Low latency (~1-5ms, local write only)
-- High throughput (~10k-100k ops/sec)
+- High throughput (~10k-75k ops/sec depending on concurrency)
 - ~100x faster than sync() due to batching
 
 **Use when:**
@@ -110,7 +110,7 @@ engine.commit(tx, WriteOptions::best_effort())?;
 
 **Performance:**
 - Lowest latency (~0.1-1ms, memory write only)
-- Highest throughput (100k+ ops/sec)
+- Highest throughput (~50-75k ops/sec with concurrent clients)
 - No WAL overhead, no fsync
 
 **Use ONLY when:**

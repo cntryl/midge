@@ -108,10 +108,10 @@ Midge prioritizes **predictability over raw speed**:
 
 - **Write latency**: 1-10ms (depends on durability mode)
 - **Read latency**: Sub-ms for cached, 10-100ms for cloud (with local cache)
-- **Throughput**: ~100k ops/sec (limited by actor serialization)
+- **Throughput**: ~50-75k ops/sec (limited by WAL I/O and memtable work, not event loop)
 - **Cache overhead**: ~10-20% of cache size for metadata
 
-If you need millions of ops/sec, use RocksDB or a sharded design. If you need predictable, auditable behavior, use Midge.
+If you need hundreds of thousands or millions of ops/sec, use RocksDB or a sharded design. If you need predictable, auditable behavior, use Midge.
 
 ## Configuration
 

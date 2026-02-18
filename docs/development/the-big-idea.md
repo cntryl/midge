@@ -42,7 +42,7 @@ Background work (I/O, compression, uploads) is performed by **task executors** o
 - Debuggability: full state visible at any message boundary
 
 **Cost:**
-- Throughput ceiling (~100k ops/sec) lower than multi-threaded designs
+- Throughput ceiling (~50-75k ops/sec) lower than multi-threaded designs
 - Single serialization point can become bottleneck
 - We choose predictability over raw speed
 
@@ -297,7 +297,7 @@ All public APIs are synchronous and blocking. No async/await, no hidden executor
 
 One actor sequences all state mutations, not partitioned by key or level. This makes ordering explicit, recovery simple (replay, not repair), and visibility trivial.
 
-**Cost:** Throughput ceiling (~100k ops/sec) is lower than thread-per-shard designs. We choose **predictability over raw speed**.
+**Cost:** Throughput ceiling (~50-75k ops/sec) is lower than thread-per-shard designs (RocksDB: 500k-2M+ ops/sec). We choose **predictability over raw speed**.
 
 ### Cloud-First → Explicit semantics, more planning required
 
@@ -325,10 +325,10 @@ Expected characteristics:
 
 - **Write latency:** 1–10ms (depends on WAL upload strategy)
 - **Read latency:** Sub-ms for in-cache, 10–100ms for cloud (with local cache)
-- **Throughput:** ~100k ops/sec (limited by actor serialization, not by disk)
+- **Throughput:** ~50-75k ops/sec (limited by WAL I/O and per-operation work; event loop itself handles 67M msgs/sec)
 - **Cache overhead:** ~10–20% of cache size for metadata
 
-If you need **raw throughput** (millions of ops/sec), use **RocksDB** or a sharded design.
+If you need **raw throughput** (500k+ ops/sec), use **RocksDB** or a sharded design.
 
 If you need **predictability and correctness**, use **Midge**.
 

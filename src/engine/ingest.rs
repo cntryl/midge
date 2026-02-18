@@ -36,8 +36,20 @@ const INGEST_QUEUE_DEPTH: usize = 4096;
 /// Maximum transactions to group together before forcing commit
 const MAX_GROUPED_BATCHES: usize = 64;
 
-/// Time threshold for write grouping before forcing leader flush
-const WRITE_GROUP_TIMEOUT: Duration = Duration::from_micros(100);
+/// Initial/default timeout for adaptive write grouping
+const WRITE_GROUP_TIMEOUT_INITIAL: u64 = 100; // microseconds
+
+/// Minimum adaptive timeout (favor low latency at low concurrency)
+const WRITE_GROUP_TIMEOUT_MIN: u64 = 10;
+
+/// Maximum adaptive timeout (cap at diminishing returns point)
+const WRITE_GROUP_TIMEOUT_MAX: u64 = 500;
+
+/// Batch size threshold for increasing timeout (high traffic signal)
+const HIGH_BATCHING_THRESHOLD: usize = 16;
+
+/// Batch size threshold for decreasing timeout (low traffic signal)
+const LOW_BATCHING_THRESHOLD: usize = 2;
 
 /// Maximum time a leader waits for the runtime to apply a grouped transaction
 const WRITE_GROUP_APPLY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -67,12 +79,19 @@ pub(crate) struct BatchResponse {
 /// single transaction. The "leader" thread drains pending requests and commits them
 /// as a merged batch, reducing single-threaded event loop contention.
 ///
+/// Adaptive timeout mechanism:
+/// - High concurrency (batching many): increases timeout to collect more requests
+/// - Low concurrency (batching few): decreases timeout to reduce latency
+/// - Self-tunes to workload pattern
+///
 /// This is inspired by the write grouping pattern used in RocksDB, PebbleDB, etc.
 pub(crate) struct WriteGroupCoordinator {
     /// Atomic flag: true if a thread is actively serving as leader
     leader_active: AtomicBool,
     /// Bounded queue of pending batch requests waiting to be grouped
     pending_queue: (Sender<PendingBatchRequest>, Receiver<PendingBatchRequest>),
+    /// Adaptive timeout in microseconds (self-tunes based on batching effectiveness)
+    adaptive_timeout_us: std::sync::atomic::AtomicU64,
     /// Metrics
     leader_runs: Arc<std::sync::atomic::AtomicU64>,
     batches_grouped: Arc<std::sync::atomic::AtomicU64>,
@@ -110,8 +129,41 @@ impl WriteGroupCoordinator {
         Self {
             leader_active: AtomicBool::new(false),
             pending_queue: (tx, rx),
+            adaptive_timeout_us: std::sync::atomic::AtomicU64::new(WRITE_GROUP_TIMEOUT_INITIAL),
             leader_runs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             batches_grouped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    /// Get current adaptive timeout as Duration
+    fn get_timeout(&self) -> Duration {
+        let us = self.adaptive_timeout_us.load(Ordering::Relaxed);
+        Duration::from_micros(us)
+    }
+
+    /// Adapt timeout based on batching effectiveness
+    ///
+    /// - High batching (>= 16 requests): increase timeout by 20% (more traffic likely)
+    /// - Low batching (<= 2 requests): decrease timeout by 20% (favor low latency)
+    /// - Medium batching: keep stable
+    fn adjust_timeout(&self, batch_size: usize) {
+        let current = self.adaptive_timeout_us.load(Ordering::Relaxed);
+        
+        let new_timeout = if batch_size >= HIGH_BATCHING_THRESHOLD {
+            // High traffic: increase timeout to collect more requests
+            // +20% per adjustment, capped at max
+            (current * 12 / 10).min(WRITE_GROUP_TIMEOUT_MAX)
+        } else if batch_size <= LOW_BATCHING_THRESHOLD {
+            // Low traffic: decrease timeout for lower latency
+            // -20% per adjustment, floored at min
+            (current * 8 / 10).max(WRITE_GROUP_TIMEOUT_MIN)
+        } else {
+            // Medium traffic: stable (no adjustment)
+            current
+        };
+        
+        if new_timeout != current {
+            self.adaptive_timeout_us.store(new_timeout, Ordering::Relaxed);
         }
     }
 
@@ -128,10 +180,11 @@ impl WriteGroupCoordinator {
     }
 
     /// Get metrics for monitoring
-    pub fn metrics(&self) -> (u64, u64) {
+    pub fn metrics(&self) -> (u64, u64, u64) {
         (
             self.leader_runs.load(Ordering::Relaxed),
             self.batches_grouped.load(Ordering::Relaxed),
+            self.adaptive_timeout_us.load(Ordering::Relaxed),
         )
     }
 }
@@ -372,6 +425,7 @@ impl IngestCoordinator {
 
                 // Drain additional pending requests from the queue
                 let drain_start = Instant::now();
+                let adaptive_timeout = self.write_group_coord.get_timeout();
                 loop {
                     match self.write_group_coord.pending_queue.1.try_recv() {
                         Ok(pending) => {
@@ -379,7 +433,7 @@ impl IngestCoordinator {
                             pending_requests.push((pending.result_tx, pending.durability_policy));
                         }
                         Err(TryRecvError::Empty) => {
-                            if drain_start.elapsed() > WRITE_GROUP_TIMEOUT
+                            if drain_start.elapsed() > adaptive_timeout
                                 || pending_requests.len() >= MAX_GROUPED_BATCHES
                                 || all_intents.len() > MAX_BATCH_OPS
                             {
@@ -394,6 +448,10 @@ impl IngestCoordinator {
                 self.write_group_coord
                     .batches_grouped
                     .fetch_add(pending_requests.len() as u64 + 1, Ordering::Relaxed);
+
+                // Track batch size for adaptive timeout adjustment
+                // batch_size = initial batch (1) + pending_requests drained
+                let batch_size = pending_requests.len() + 1;
 
                 let ops: Vec<TransactionOp> = all_intents
                     .into_iter()
@@ -466,6 +524,11 @@ impl IngestCoordinator {
                 if is_initial_batch {
                     initial_result = Some(result);
                 }
+
+                // Adapt timeout based on batching effectiveness
+                // Higher batch_size → increase timeout (high concurrency)
+                // Lower batch_size → decrease timeout (low concurrency)
+                self.write_group_coord.adjust_timeout(batch_size);
             }
 
             leader_guard.dismiss();
@@ -788,6 +851,20 @@ impl IngestCoordinator {
 
 impl Drop for IngestCoordinator {
     fn drop(&mut self) {
+        // Print write grouping stats
+        let (leader_runs, batches_grouped, final_timeout_us) = self.write_group_coord.metrics();
+        if leader_runs > 0 {
+            let avg_group_size = if leader_runs > 0 {
+                batches_grouped as f64 / leader_runs as f64
+            } else {
+                0.0
+            };
+            eprintln!(
+                "[write-group-cf{}] leader_runs={} batches_grouped={} avg_group_size={:.2} final_timeout={}µs",
+                self.cf_id, leader_runs, batches_grouped, avg_group_size, final_timeout_us
+            );
+        }
+
         if self.thread_handle.is_some() {
             tracing::warn!(
                 cf_id = self.cf_id,
