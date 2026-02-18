@@ -102,7 +102,7 @@ clap = { version = "4.5", features = ["derive"] }
 criterion = "0.8"
 paste = "1.0"
 proptest = "1.8"
-cntryl-stress = "0.1.1"
+cntryl-stress = "0.2.0"
 
 # =============================================================================
 # Features
@@ -254,4 +254,102 @@ harness = false
 [[bench]]
 name = "tier2_subsystem_compression"
 path = "benches/tier2_subsystem_compression.rs"
+harness = false
+
+# =============================================================================
+# Benchmarks — Tier 3: System (<30s)
+# =============================================================================
+
+[[bench]]
+name = "tier3_system_compaction"
+path = "benches/tier3_system_compaction.rs"
+harness = false
+
+[[bench]]
+name = "tier3_system_durability"
+path = "benches/tier3_system_durability.rs"
+harness = false
+
+[[bench]]
+name = "tier3_system_engine"
+path = "benches/tier3_system_engine.rs"
+harness = false
+
+[[bench]]
+name = "tier3_system_mvcc"
+path = "benches/tier3_system_mvcc.rs"
+harness = false
+
+[[bench]]
+name = "tier3_system_recovery"
+path = "benches/tier3_system_recovery.rs"
+harness = false
+
+[[bench]]
+name = "tier3_system_scan"
+path = "benches/tier3_system_scan.rs"
+harness = false
+
+[[bench]]
+name = "tier3_system_sst"
+path = "benches/tier3_system_sst.rs"
+harness = false
+
+# =============================================================================
+# Benchmarks — Tier 4: Streaming & YCSB (>30s)
+# =============================================================================
+
+[[bench]]
+name = "tier4_streaming_workload"
+path = "benches/tier4_streaming_workload.rs"
+harness = false
+
+[[bench]]
+name = "tier4_system_compaction_throughput"
+path = "benches/tier4_system_compaction_throughput.rs"
+harness = false
+
+[[bench]]
+name = "tier4_system_durability_cloud"
+path = "benches/tier4_system_durability_cloud.rs"
+harness = false
+
+[[bench]]
+name = "tier4_system_engine_batch_throughput"
+path = "benches/tier4_system_engine_batch_throughput.rs"
+harness = false
+
+[[bench]]
+name = "tier4_system_recovery_throughput"
+path = "benches/tier4_system_recovery_throughput.rs"
+harness = false
+
+[[bench]]
+name = "tier4_ycsb_workload_a"
+path = "benches/tier4_ycsb_workload_a.rs"
+harness = false
+
+[[bench]]
+name = "tier4_ycsb_workload_b"
+path = "benches/tier4_ycsb_workload_b.rs"
+harness = false
+
+[[bench]]
+name = "tier4_ycsb_workload_c"
+path = "benches/tier4_ycsb_workload_c.rs"
+harness = false
+
+[[bench]]
+name = "tier4_ycsb_workload_d"
+path = "benches/tier4_ycsb_workload_d.rs"
+harness = false
+
+[[bench]]
+name = "tier4_ycsb_workload_e"
+path = "benches/tier4_ycsb_workload_e.rs"
+harness = false
+
+[[bench]]
+name = "tier4_ycsb_workload_f"
+path = "benches/tier4_ycsb_workload_f.rs"
 harness = false

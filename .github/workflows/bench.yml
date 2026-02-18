@@ -25,10 +25,12 @@ jobs:
         run: rustup update stable
 
       - name: Run benchmarks
-        run: cargo bench --bench 'tier1_*' --bench 'tier2_*'
+        run: cargo bench --bench 'tier1_*' --bench 'tier2_*' --bench 'tier3_*' --bench 'tier4_*'
 
       - name: Upload Criterion artifacts
         uses: actions/upload-artifact@v6
         with:
           name: criterion-artifacts-${{ matrix.os }}
-          path: target/criterion/**
+          path: |
+            target/criterion/**
+            target/stress/**
