@@ -840,14 +840,14 @@ Most users only see WriteOptions.
 1. `src/engine/api/write_options.rs`: Add variant
 2. `src/runtime/actors/wal.rs`: Handle in `append()`
 3. `src/runtime/durability.rs`: Update coordinator
-4. `docs/API_GUIDE.md`: Document behavior
-5. `docs/RECOVERY.md`: Document guarantees
+4. `docs/user-guides/api-guide.md`: Document behavior
+5. `docs/user-guides/durability.md`: Document guarantees
 
 **Add new storage backend:**
 1. `src/storage/`: Create new module
 2. Implement `Storage` trait
 3. Add to `OpenOptions::storage`
-4. Update `docs/CLOUD_SETUP.md`
+4. Update `docs/operations/cloud-setup.md`
 
 **Add new SST metadata:**
 1. `src/sst/block.rs`: Define TLV tag
@@ -995,7 +995,7 @@ cargo doc --document-private-items
 
 ## Next Steps
 
-- **Philosophy**: [THE_BIG_IDEA.md](THE_BIG_IDEA.md)
-- **API usage**: [API_GUIDE.md](API_GUIDE.md)
-- **Testing guide**: [TESTING.md](TESTING.md)
-- **Benchmark guide**: [BENCHMARKS.md](BENCHMARKS.md)
+- **Philosophy**: [the-big-idea.md](the-big-idea.md)
+- **API usage**: [../user-guides/api-guide.md](../user-guides/api-guide.md)
+- **Testing guide**: [testing.md](testing.md)
+- **Benchmark guide**: [benchmarks.md](benchmarks.md)

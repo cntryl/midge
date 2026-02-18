@@ -56,10 +56,10 @@ cargo bench
 
 Start with these docs:
 
-- [architecture.md](docs/architecture.md) - Technical implementation guide
-- [big-idea.md](docs/big-idea.md) - Design philosophy
-- [testing.md](docs/testing.md) - Testing conventions and workflows
-- [benchmarks.md](docs/benchmarks.md) - Benchmarking workflows and rules
+- [architecture.md](docs/development/architecture.md) - Technical implementation guide
+- [the-big-idea.md](docs/development/the-big-idea.md) - Design philosophy
+- [testing.md](docs/development/testing.md) - Testing conventions and workflows
+- [benchmarks.md](docs/development/benchmarks.md) - Benchmarking workflows and rules
 - `.github/copilot-instructions.md` - Development conventions
 
 ## Development Workflow

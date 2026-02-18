@@ -104,20 +104,25 @@ while let Some((k, v)) = iter.next() {
 
 ## Documentation
 
+**[Full Documentation Hub →](docs/)**
+
 ### Getting Started
 
-- **[API Guide](docs/api-guide.md)** — OpenOptions, transactions, WriteOptions, queries
-- **[Cloud Setup](docs/cloud-setup.md)** — S3, Azure, GCS, Cloudflare R2
-- **[Recovery & Durability](docs/recovery.md)** — Crash scenarios and guarantees
+- **[Quick Start](docs/user-guides/quick-start.md)** — 5-minute hello-world example
+- **[Overview](docs/user-guides/overview.md)** — What is Midge, when to use it
+- **[API Guide](docs/user-guides/api-guide.md)** — Complete API reference
+- **[FAQ](docs/user-guides/faq.md)** — Common questions and answers
 
-### Architecture & Design
+### Operations
 
-- **[The Big Idea](docs/big-idea.md)** — Why we built Midge and how it works
-- **[Architecture](docs/architecture.md)** — Internals for contributors
+- **[Performance Tuning](docs/operations/performance-tuning.md)** — Optimize for your workload
+- **[Cloud Setup](docs/operations/cloud-setup.md)** — Deploy to S3, Azure, GCS
+- **[Durability](docs/user-guides/durability.md)** — Crash recovery and guarantees
 
 ### Contributing
 
-- **[Contributing Guide](CONTRIBUTING.md)**
-- **[Testing](docs/testing.md)**
-- **[Benchmarks](docs/benchmarks.md)**
-- **[Performance Tuning](docs/performance-tuning.md)**
+- **[Contributing Guide](CONTRIBUTING.md)** — How to contribute
+- **[The Big Idea](docs/development/the-big-idea.md)** — Design philosophy
+- **[Architecture](docs/development/architecture.md)** — Technical internals
+- **[Testing](docs/development/testing.md)** — Test conventions
+- **[Benchmarks](docs/development/benchmarks.md)** — Performance benchmarking

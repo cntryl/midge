@@ -18,7 +18,7 @@ STOP!
   runtime pieces live under `src/`: `engine/` (main API), `storage/`
   (cloud/local backends), `wal/`, `sst/`, `compaction/`, `metadata/`
   (manifest), `iterators/`, `runtime/` (background actors), and
-  `common/` (foundation types). See `docs/THE_BIG_IDEA.md` for
+  `common/` (foundation types). See `docs/development/the-big-idea.md` for
   architecture overview.
 
 - **Layer rule (critical)**: lower-level modules must not depend on
@@ -59,7 +59,7 @@ STOP!
   - Cloud backends: `src/storage/cloud/` (multiple providers, use test
     mocks in benches).
   - Storage modes: Memory, Local, Cloud—each with distinct source of
-    truth (see `docs/THE_BIG_IDEA.md`).
+    truth (see `docs/development/the-big-idea.md`).
   - WAL & SST formats: `src/wal/` and `src/sst/` — be careful with
     on-disk compatibility and readers used in recovery tests.
 
