@@ -4,7 +4,12 @@
 //! slower/less deterministic than local-only durability. Keeping these in Tier 4
 //! avoids making Tier 3 runs long-running.
 
+#[path = "./stress_config.rs"]
+mod stress_config;
+
 use cntryl_stress::{stress_main, stress_test, StressContext};
+#[allow(unused_imports)]
+use stress_config::BenchConfig;
 
 use cntryl_midge::testkit::MidgeOptions;
 

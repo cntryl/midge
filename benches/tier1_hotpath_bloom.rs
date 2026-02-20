@@ -7,14 +7,14 @@
 //! - Hash computation and containment checks
 //! - Single key lookups (hit/miss)
 
-#[path = "./criterion_helper.rs"]
-mod criterion_helper;
+#[path = "./criterion_config.rs"]
+mod criterion_config;
 
 use cntryl_midge::sst::bloom::writer::BloomFilterOps;
 use cntryl_midge::sst::bloom::BloomWriter;
 use cntryl_midge::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::{criterion_config_for_tier, BenchTier};
+use criterion_config::criterion_config_for_tier1;
 use std::hint::black_box;
 
 /// Benchmark bloom filter containment check (hit vs miss)
@@ -130,7 +130,7 @@ fn bench_bloom_compute_hashes(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_bloom;
-    config = criterion_config_for_tier(BenchTier::Tier1Hot);
+    config = criterion_config_for_tier1();
     targets = bench_bloom_maybe_contains, bench_bloom_batch_lookups, bench_bloom_compute_hashes
 }
 criterion_main!(tier1_hotpath_bloom);

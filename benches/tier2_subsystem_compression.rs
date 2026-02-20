@@ -10,13 +10,13 @@
 //! - Batch throughput: consecutive block compress/decompress
 //! - WAL batch: many record-level compress/decompress ops
 
-#[path = "./criterion_helper.rs"]
-mod criterion_helper;
+#[path = "./criterion_config.rs"]
+mod criterion_config;
 
 use criterion::{
     criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
-use criterion_helper::{criterion_config_for_tier, BenchTier};
+use criterion_config::criterion_config_for_tier2;
 use std::hint::black_box;
 
 use cntryl_midge::sst::compression::{
@@ -321,7 +321,7 @@ fn bench_wal_batch_decompress(c: &mut Criterion) {
 
 criterion_group! {
     name = tier2_subsystem_compression;
-    config = criterion_config_for_tier(BenchTier::Tier2Subsystem);
+    config = criterion_config_for_tier2();
     targets =
         bench_block_compress_sizes,
         bench_block_decompress_sizes,

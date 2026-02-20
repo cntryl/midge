@@ -5,13 +5,13 @@
 //!
 //! Measures coordination overhead (cross-thread channel and park/wake).
 
-#[path = "./criterion_helper.rs"]
-mod criterion_helper;
+#[path = "./criterion_config.rs"]
+mod criterion_config;
 
 use cntryl_midge::handler::handle;
 use cntryl_midge::message::MessageKind;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::{criterion_config_for_tier, BenchTier};
+use criterion_config::criterion_config_for_tier2;
 use crossbeam::channel;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -171,7 +171,7 @@ fn bench_tier2(c: &mut Criterion) {
 
 criterion_group!(
     name = tier2_subsystem_event_loop;
-    config = criterion_config_for_tier(BenchTier::Tier2Subsystem);
+    config = criterion_config_for_tier2();
     targets = bench_tier2
 );
 criterion_main!(tier2_subsystem_event_loop);

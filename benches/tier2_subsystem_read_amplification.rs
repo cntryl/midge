@@ -12,14 +12,14 @@
 //! - System metrics: Blocks read per query, cache hit rate, amplification factor
 //! - Realistic patterns: Zipfian key distribution, mixed get/scan operations
 
-#[path = "./criterion_helper.rs"]
-mod criterion_helper;
+#[path = "./criterion_config.rs"]
+mod criterion_config;
 
 use cntryl_midge::Bytes;
 use criterion::{
     criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
-use criterion_helper::{criterion_config_for_tier, BenchTier};
+use criterion_config::criterion_config_for_tier2;
 use std::hint::black_box;
 
 // ─── Configuration ──────────────────────────────────────────────────────
@@ -407,7 +407,7 @@ fn bench_read_amp_cache_effectiveness(c: &mut Criterion) {
 
 criterion_group! {
     name = tier2_subsystem_read_amplification;
-    config = criterion_config_for_tier(BenchTier::Tier2Subsystem);
+    config = criterion_config_for_tier2();
     targets =
         bench_read_amp_point_lookups_zipfian,
         bench_read_amp_mixed_get_scan,

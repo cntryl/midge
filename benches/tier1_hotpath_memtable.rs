@@ -7,12 +7,12 @@
 //! - Insert operations (single and batch, various value sizes)
 //! - Point lookups (hit/miss)
 
-#[path = "./criterion_helper.rs"]
-mod criterion_helper;
+#[path = "./criterion_config.rs"]
+mod criterion_config;
 
 use cntryl_midge::sst::{Memtable, SkipListMemtable};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput};
-use criterion_helper::{criterion_config_for_tier, BenchTier};
+use criterion_config::criterion_config_for_tier1;
 use std::hint::black_box;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -231,7 +231,7 @@ fn bench_size_bytes(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_memtable;
-    config = criterion_config_for_tier(BenchTier::Tier1Hot);
+    config = criterion_config_for_tier1();
     targets =
         bench_put_single,
         bench_put_batch,

@@ -13,7 +13,12 @@
 //! calling `remaining()` without iterating. Expect 10-40x higher throughput
 //! in results after this fix.
 
+#[path = "./stress_config.rs"]
+mod stress_config;
+
 use cntryl_stress::{stress_main, stress_test, StressContext};
+#[allow(unused_imports)]
+use stress_config::BenchConfig;
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -13,7 +13,12 @@
 //!
 //! All setup strictly outside measurement; measured body is a single flush call.
 
+#[path = "./stress_config.rs"]
+mod stress_config;
+
 use cntryl_stress::{stress_main, stress_test, StressContext};
+#[allow(unused_imports)]
+use stress_config::BenchConfig;
 
 use cntryl_midge::{testkit::MidgeOptions, MidgeEngine};
 

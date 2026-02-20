@@ -10,12 +10,12 @@
 //!
 //! Note: I/O benchmarks are in tier2_subsystem/wal_io.rs
 
-#[path = "./criterion_helper.rs"]
-mod criterion_helper;
+#[path = "./criterion_config.rs"]
+mod criterion_config;
 
 use cntryl_midge::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::{criterion_config_for_tier, BenchTier};
+use criterion_config::criterion_config_for_tier1;
 
 use cntryl_midge::wal::encoding::{decode, encode};
 use cntryl_midge::wal::{WalOpKind, WalRecord};
@@ -220,7 +220,7 @@ fn bench_wal_encode_sizes(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_wal;
-    config = criterion_config_for_tier(BenchTier::Tier1Hot);
+    config = criterion_config_for_tier1();
     targets =
         bench_wal_encode_record,
         bench_wal_decode_record,

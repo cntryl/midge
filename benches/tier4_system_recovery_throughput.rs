@@ -12,7 +12,12 @@
 //! NOT measured:
 //! - Clean reopen (Tier 3: tier3_system_recovery.rs)
 
+#[path = "./stress_config.rs"]
+mod stress_config;
+
 use cntryl_stress::{stress_main, stress_test, StressContext};
+#[allow(unused_imports)]
+use stress_config::BenchConfig;
 
 use cntryl_midge::{testkit::MidgeOptions, MidgeEngine};
 

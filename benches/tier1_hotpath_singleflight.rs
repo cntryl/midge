@@ -6,12 +6,12 @@
 //! Measures the core primitive used for "accumulate → flush once → notify many waiters".
 //! This is intentionally not WAL-specific; it benchmarks the generic fan-out flush.
 
-#[path = "./criterion_helper.rs"]
-mod criterion_helper;
+#[path = "./criterion_config.rs"]
+mod criterion_config;
 
 use cntryl_midge::common::Accumulator;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput};
-use criterion_helper::{criterion_config_for_tier, BenchTier};
+use criterion_config::criterion_config_for_tier1;
 use std::hint::black_box;
 
 fn bench_singleflight_flush_fanout(c: &mut Criterion) {
@@ -77,7 +77,7 @@ fn bench_singleflight_flush_fanout(c: &mut Criterion) {
 
 criterion_group!(
     name = tier1_hotpath_singleflight;
-    config = criterion_config_for_tier(BenchTier::Tier1Hot);
+    config = criterion_config_for_tier1();
     targets = bench_singleflight_flush_fanout
 );
 criterion_main!(tier1_hotpath_singleflight);

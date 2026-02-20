@@ -11,14 +11,14 @@
 //! - System metrics: Keys compared, SSTs accessed, merge overhead
 //! - Realistic patterns: 2-5 SSTs with overlapping/disjoint key ranges
 
-#[path = "./criterion_helper.rs"]
-mod criterion_helper;
+#[path = "./criterion_config.rs"]
+mod criterion_config;
 
 use cntryl_midge::Bytes;
 use criterion::{
     criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
-use criterion_helper::{criterion_config_for_tier, BenchTier};
+use criterion_config::criterion_config_for_tier2;
 use std::collections::BinaryHeap;
 use std::hint::black_box;
 
@@ -333,7 +333,7 @@ fn bench_iterator_multi_sst_comparison(c: &mut Criterion) {
 
 criterion_group! {
     name = tier2_subsystem_iterator_multi_sst;
-    config = criterion_config_for_tier(BenchTier::Tier2Subsystem);
+    config = criterion_config_for_tier2();
     targets =
         bench_iterator_disjoint_ssts,
         bench_iterator_overlapping_ssts,

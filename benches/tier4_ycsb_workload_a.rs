@@ -2,7 +2,12 @@
 //!
 //! Workload A: 50% reads, 50% updates on an existing keyspace.
 
+#[path = "./stress_config.rs"]
+mod stress_config;
+
 use cntryl_stress::{stress_main, stress_test, StressContext};
+#[allow(unused_imports)]
+use stress_config::BenchConfig;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -229,12 +234,7 @@ fn tier4_ycsb_a_mem_c_clients(ctx: &mut StressContext) {
 #[stress_test]
 fn tier4_ycsb_a_mem_c_clients_uniform(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
-    run_workload_a_with_distribution(
-        ctx,
-        opts,
-        clients_c(),
-        KeyDistribution::Zipf { theta: 0.0 },
-    );
+    run_workload_a_with_distribution(ctx, opts, clients_c(), KeyDistribution::Zipf { theta: 0.0 });
 }
 
 #[stress_test]

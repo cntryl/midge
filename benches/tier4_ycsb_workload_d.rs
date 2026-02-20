@@ -2,7 +2,12 @@
 //!
 //! Workload D: 95% reads, 5% inserts; reads bias toward the most recent keys.
 
+#[path = "./stress_config.rs"]
+mod stress_config;
+
 use cntryl_stress::{stress_main, stress_test, StressContext};
+#[allow(unused_imports)]
+use stress_config::BenchConfig;
 
 use std::sync::Arc;
 use std::time::Duration;

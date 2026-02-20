@@ -8,11 +8,11 @@
 //! - Block trailer compress + CRC and decompress + verify
 //! - WAL value compress / decompress (LZ4 only, per-record)
 
-#[path = "./criterion_helper.rs"]
-mod criterion_helper;
+#[path = "./criterion_config.rs"]
+mod criterion_config;
 
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::{criterion_config_for_tier, BenchTier};
+use criterion_config::criterion_config_for_tier1;
 use std::hint::black_box;
 
 use cntryl_midge::sst::compression::{
@@ -228,7 +228,7 @@ fn bench_wal_value_decompress(c: &mut Criterion) {
 
 criterion_group!(
     name = benches;
-    config = criterion_config_for_tier(BenchTier::Tier1Hot);
+    config = criterion_config_for_tier1();
     targets =
         bench_compress_raw,
         bench_decompress_raw,

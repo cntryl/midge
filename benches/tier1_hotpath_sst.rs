@@ -8,11 +8,11 @@
 //! - decode single SST entry
 //! - roundtrip encode→decode
 
-#[path = "./criterion_helper.rs"]
-mod criterion_helper;
+#[path = "./criterion_config.rs"]
+mod criterion_config;
 
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::{criterion_config_for_tier, BenchTier};
+use criterion_config::criterion_config_for_tier1;
 
 use cntryl_midge::sst::encoding::{decode, encode, EntryType};
 use std::hint::black_box;
@@ -103,7 +103,7 @@ fn bench_roundtrip(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 criterion_group! {
     name = tier1_hotpath_sst;
-    config = criterion_config_for_tier(BenchTier::Tier1Hot);
+    config = criterion_config_for_tier1();
     targets =
         bench_encode,
         bench_decode,

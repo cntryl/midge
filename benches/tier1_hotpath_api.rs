@@ -9,8 +9,8 @@
 //!
 //! Note: Heavy I/O operations (flush, scan) are in tier2/tier3.
 
-#[path = "./criterion_helper.rs"]
-mod criterion_helper;
+#[path = "./criterion_config.rs"]
+mod criterion_config;
 
 use cntryl_midge::Bytes;
 use cntryl_midge::{
@@ -20,7 +20,7 @@ use cntryl_midge::{
 use criterion::{
     criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
-use criterion_helper::{criterion_config_for_tier, BenchTier};
+use criterion_config::criterion_config_for_tier1;
 use std::hint::black_box;
 
 fn make_fixed_kv(size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
@@ -208,7 +208,7 @@ fn bench_single_put(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_api;
-    config = criterion_config_for_tier(BenchTier::Tier1Hot);
+    config = criterion_config_for_tier1();
     targets = bench_batch_put, bench_single_get, bench_single_put
 }
 criterion_main!(tier1_hotpath_api);

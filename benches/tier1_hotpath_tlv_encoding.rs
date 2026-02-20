@@ -11,12 +11,12 @@
 //! These are the foundational building blocks used by both WAL and SST,
 //! so performance here directly impacts overall I/O throughput.
 
-#[path = "./criterion_helper.rs"]
-mod criterion_helper;
+#[path = "./criterion_config.rs"]
+mod criterion_config;
 
 use cntryl_midge::BytesMut;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::{criterion_config_for_tier, BenchTier};
+use criterion_config::criterion_config_for_tier1;
 
 use cntryl_midge::common::tlv::{
     decode_tlv_field, decode_varint32, encode_bytes_with_tag, encode_u64_with_tag,
@@ -246,7 +246,7 @@ fn bench_batch_field_encoding(c: &mut Criterion) {
 
 criterion_group!(
     name = benches;
-    config = criterion_config_for_tier(BenchTier::Tier1Hot);
+    config = criterion_config_for_tier1();
     targets =
         bench_varint32_encode,
         bench_varint32_decode,

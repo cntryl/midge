@@ -9,15 +9,15 @@
 //! - Insert operations (single and batch)
 //! - Eviction under memory pressure
 
-#[path = "./criterion_helper.rs"]
-mod criterion_helper;
+#[path = "./criterion_config.rs"]
+mod criterion_config;
 
 use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
 use cntryl_midge::Bytes;
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
-use criterion_helper::{criterion_config_for_tier, BenchTier};
+use criterion_config::criterion_config_for_tier1;
 use std::hint::black_box;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -226,7 +226,7 @@ fn bench_insert_batch(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_block_cache;
-    config = criterion_config_for_tier(BenchTier::Tier1Hot);
+    config = criterion_config_for_tier1();
     targets =
         bench_get_hot_single,
         bench_insert_single,

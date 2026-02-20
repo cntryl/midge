@@ -13,7 +13,12 @@
 //! Memory mode hits memtable, while local/cloud modes hit the block cache
 //! after the setup flush.
 
+#[path = "./stress_config.rs"]
+mod stress_config;
+
 use cntryl_stress::{stress_main, stress_test, StressContext};
+#[allow(unused_imports)]
+use stress_config::BenchConfig;
 
 use cntryl_midge::testkit::MidgeOptions;
 

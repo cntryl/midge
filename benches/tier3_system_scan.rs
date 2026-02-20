@@ -8,7 +8,12 @@
 //! It does NOT measure full scan throughput. For that, see tier4_ycsb_workload_e.rs
 //! or tier2_subsystem benchmarks that consume entire iterator results.
 
+#[path = "./stress_config.rs"]
+mod stress_config;
+
 use cntryl_stress::{stress_main, stress_test, StressContext};
+#[allow(unused_imports)]
+use stress_config::BenchConfig;
 
 use cntryl_midge::{testkit::MidgeOptions, Key, MidgeEngine, Query};
 const VALUE_SIZE: usize = 64; // Irrelevant to measured primitive; used only in setup

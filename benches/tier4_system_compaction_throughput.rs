@@ -16,7 +16,12 @@
 //! All setup outside measurement; measured body is one compact_all() call,
 //! but the system state before it varies to show scaling.
 
+#[path = "./stress_config.rs"]
+mod stress_config;
+
 use cntryl_stress::{stress_main, stress_test, StressContext};
+#[allow(unused_imports)]
+use stress_config::BenchConfig;
 
 use cntryl_midge::{testkit::MidgeOptions, MidgeEngine};
 

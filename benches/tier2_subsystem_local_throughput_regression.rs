@@ -9,9 +9,13 @@
 //! If this fails, it indicates a regression in local WAL batching,
 //! memtable configuration, or durability path performance.
 
+#[path = "./criterion_config.rs"]
+mod criterion_config;
+
 use cntryl_midge::testkit::opts_for_mode;
 use cntryl_midge::{Engine, WriteOptions};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion_config::criterion_config_for_tier2;
 
 const NUM_OPS_PER_BATCH: usize = 100;
 const VALUE_SIZE: usize = 128;
@@ -143,9 +147,9 @@ fn verify_local_throughput_minimum(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    benchmark_batched_writes,
-    verify_local_throughput_minimum
-);
+criterion_group! {
+    name = benches;
+    config = criterion_config_for_tier2();
+    targets = benchmark_batched_writes, verify_local_throughput_minimum
+}
 criterion_main!(benches);

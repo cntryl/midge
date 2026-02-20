@@ -148,7 +148,7 @@ impl WriteGroupCoordinator {
     /// - Medium batching: keep stable
     fn adjust_timeout(&self, batch_size: usize) {
         let current = self.adaptive_timeout_us.load(Ordering::Relaxed);
-        
+
         let new_timeout = if batch_size >= HIGH_BATCHING_THRESHOLD {
             // High traffic: increase timeout to collect more requests
             // +20% per adjustment, capped at max
@@ -161,9 +161,10 @@ impl WriteGroupCoordinator {
             // Medium traffic: stable (no adjustment)
             current
         };
-        
+
         if new_timeout != current {
-            self.adaptive_timeout_us.store(new_timeout, Ordering::Relaxed);
+            self.adaptive_timeout_us
+                .store(new_timeout, Ordering::Relaxed);
         }
     }
 

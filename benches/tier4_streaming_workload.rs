@@ -3,7 +3,12 @@
 //! Models append-heavy streaming with tail-follow reads.
 //! Focuses on stability, lag, and interference — not peak throughput.
 
+#[path = "./stress_config.rs"]
+mod stress_config;
+
 use cntryl_stress::{stress_main, stress_test, StressContext};
+#[allow(unused_imports)]
+use stress_config::BenchConfig;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
