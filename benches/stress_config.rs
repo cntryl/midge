@@ -21,7 +21,7 @@ impl Default for BenchConfig {
         let runs = std::env::var("BENCH_RUNS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(5);
+            .unwrap_or(1);
 
         let warmup = std::env::var("BENCH_WARMUP")
             .ok()
