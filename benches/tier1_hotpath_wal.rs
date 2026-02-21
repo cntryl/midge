@@ -177,54 +177,12 @@ fn bench_wal_roundtrip(c: &mut Criterion) {
     group.finish();
 }
 
-// ============================================================================
-// Additional Encoding Patterns
-// ============================================================================
-
-/// Benchmark encode with different key/value sizes.
-fn bench_wal_encode_sizes(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_wal_encode_sizes");
-    group.sampling_mode(SamplingMode::Flat);
-
-    let tiny_key: &[u8] = b"k";
-    let tiny_value: &[u8] = b"v";
-    let small_key: &[u8] = b"test_key";
-    let small_value: &[u8] = b"test_value";
-    let medium_key: &[u8] = &[0u8; 32];
-    let medium_value: &[u8] = &[0u8; 128];
-
-    let test_cases = [
-        ("tiny", tiny_key, tiny_value),
-        ("small", small_key, small_value),
-        ("medium", medium_key, medium_value),
-    ];
-
-    group.throughput(Throughput::Elements(1));
-
-    for (name, key, value) in test_cases {
-        let put_record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::copy_from_slice(key),
-            Some(Bytes::copy_from_slice(value)),
-            1,
-            1,
-        );
-
-        group.bench_function(name, |b| {
-            b.iter(|| black_box(encode(&put_record).unwrap()));
-        });
-    }
-
-    group.finish();
-}
-
 criterion_group! {
     name = tier1_hotpath_wal;
     config = criterion_config_for_tier1();
     targets =
         bench_wal_encode_record,
         bench_wal_decode_record,
-        bench_wal_roundtrip,
-        bench_wal_encode_sizes
+        bench_wal_roundtrip
 }
 criterion_main!(tier1_hotpath_wal);

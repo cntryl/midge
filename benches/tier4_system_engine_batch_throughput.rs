@@ -55,12 +55,6 @@ fn run_batch_commit_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops: u
 }
 
 #[stress_test]
-fn tier4_engine_batch_commit_throughput_100_mem(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("memory");
-    run_batch_commit_case(ctx, opts, 100);
-}
-
-#[stress_test]
 fn tier4_engine_batch_commit_throughput_100_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_batch_commit_case(ctx, opts, 100);

@@ -556,6 +556,130 @@ harness = false  # Important: use cntryl-stress harness, not Criterion
 - `#[stress_test(ignore)]` — Skip test by default
 - `stress_main!()` — Auto-discover and run all `#[stress_test]` functions
 
+## Regression Detection & Signal Discipline
+
+### Criterion Benchmarks (Tier 1-2): Explicit Thresholds
+
+**Problem:** Criterion's default behavior requires manual baseline comparison. Without explicit thresholds, operators can't automatically flag regressions in CI.
+
+**Solution:** Set explicit regression thresholds per tier:
+
+| Tier | Threshold | Rationale |
+|------|-----------|-----------|
+| **Tier 1** | **±5% latency** | Sub-microsecond ops; high precision needed. A 5% increase is meaningful. |
+| **Tier 2** | **±8-10% latency** | Subsystem-level; more variance due to component interaction. |
+
+**Usage:**
+
+```bash
+# Save baseline before optimization
+cargo bench --bench tier1_hotpath_api -- --save-baseline before
+
+# Make changes...
+
+# Compare (Criterion will show difference vs baseline)
+cargo bench --bench tier1_hotpath_api -- --baseline before --verbose
+```
+
+**Tip:** If Criterion reports >5% regression, investigate before merging.
+
+### Stress Tests (Tier 3-4): Multi-Run Regression Detection
+
+**Problem:** Stress tests run 1-3 times by default. With high variance (10-15%), single runs can't reliably detect real regressions.
+
+**Solution:**
+
+1. **Increase sample count for regression-critical tests:**
+   ```bash
+   BENCH_RUNS=5 cargo bench --bench tier4_ycsb_workload_b
+   ```
+
+2. **Track std. dev, not just median:**
+   - Record all runs in CI artifacts
+   - Compute statistical significance (e.g., >2σ change is likely real)
+
+3. **Set thresholds based on metric type:**
+   - **Throughput:** Flag if >10-15% drop sustained across ≥2 runs
+   - **p99 Latency:** Flag if >20% increase (tail latencies have higher variance)
+   - **Correctness:** Flag if any isolation violations detected
+
+4. **For MVCC/concurrent tests:**
+   - Measure fairness: writer latency under snapshot hold
+   - Flag if writer p99 increases >50% under contention
+
+### Example: CI Regression Thresholds
+
+Add to your CI workflow or benchmark tracking:
+
+```bash
+# Pseudo-code for regression detection
+
+BENCH_RUNS=3 cargo bench --bench tier4_ycsb_workload_b > bench_output.txt
+
+throughput=$(grep "throughput:" bench_output.txt | tail -1 | awk '{print $2}')
+prev_throughput=<baseline>
+
+percent_change=$(( (throughput - prev_throughput) * 100 / prev_throughput ))
+
+if [ ${percent_change#-} -gt 15 ]; then
+  echo "REGRESSION: Throughput dropped by ${percent_change}%"
+  exit 1
+fi
+```
+
+### Latency Distribution Tracking (Future)
+
+Current stress tests report throughput only. To improve signal, future updates should track latency percentiles:
+
+```rust
+// Pseudo-code: Future latency tracking in stress tests
+
+let mut latencies = Vec::new();
+ctx.measure(|| {
+    let start = Instant::now();
+    // ... operation ...
+    latencies.push(start.elapsed().as_micros());
+});
+
+latencies.sort_unstable();
+let p50 = latencies[latencies.len() / 2];
+let p99 = latencies[latencies.len() * 99 / 100];
+let max = latencies[latencies.len() - 1];
+
+ctx.tag("latency_p50_us", &p50.to_string());
+ctx.tag("latency_p99_us", &p99.to_string());
+ctx.tag("latency_max_us", &max.to_string());
+```
+
+This enables detection of:
+- Long-tail latency regressions (p99 jumps due to compaction)
+- Fairness issues (writer latency under snapshot load)
+- Tail amplification (e.g., multi-threaded scenarios where one thread blocks others)
+
+See [BENCHMARK_AUDIT.md](../../BENCHMARK_AUDIT.md) → Part 2 for detailed signal quality analysis.
+
+## CI Strategy: Fast Lane vs Extended Lane
+
+### Fast Lane (every push to main)
+
+Runs per-push. Target: <2 hours total (all platforms).
+
+- **Tier 1-2:** All hotpath + subsystem tests
+- **Tier 3:** All system tests
+- **Tier 4:** Core signal only (B, D, E, F, batch, recovery)
+
+**Rationale:** Fast feedback for regression detection without burning CI hours.
+
+### Extended Lane (nightly / on demand)
+
+Runs on schedule or with `[bench-extended]` commit message.
+
+- **Tier 2:** Compression subsystem (less critical)
+- **Tier 4:** Exploratory workloads (A, C, streaming, compaction_throughput, cloud_durability_base)
+- **Tier 4:** NEW high-priority tests (cloud failure scenarios, MVCC isolation under concurrency)
+
+**Rationale:** Deeper validation, exploratory patterns, failure modes.
+
 ## Notes for contributors
 
 - If you introduce a new hotpath, consider adding a Tier 1 benchmark.
@@ -563,3 +687,5 @@ harness = false  # Important: use cntryl-stress harness, not Criterion
 - Run `cargo bench` before submitting PRs with performance changes to catch regressions.
 - For new Tier 3-4 tests, use the `#[stress_test]` macro and call `stress_main!()` once per benchmark suite.
 - Always call `ctx.measure()` only around the operation being timed; put setup/teardown outside.
+- **For MVCC or concurrent tests:** Validate isolation correctness and measure writer fairness under contention.
+- **For cloud tests:** Test failure modes (transient errors, partial uploads) not just happy-path throughput.

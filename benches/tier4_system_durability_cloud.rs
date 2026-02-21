@@ -47,33 +47,9 @@ fn run_durability_puts_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops
 }
 
 #[stress_test]
-fn tier4_durability_async_cloud(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_durability_puts_case(ctx, opts, 10);
-}
-
-#[stress_test]
-fn tier4_durability_async_cloud_100(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_durability_puts_case(ctx, opts, 100);
-}
-
-#[stress_test]
 fn tier4_durability_async_cloud_1000(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_durability_puts_case(ctx, opts, 1_000);
-}
-
-#[stress_test]
-fn tier4_durability_sync_cloud(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_durability_puts_case(ctx, opts, 10);
-}
-
-#[stress_test]
-fn tier4_durability_sync_cloud_100(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_durability_puts_case(ctx, opts, 100);
 }
 
 #[stress_test]

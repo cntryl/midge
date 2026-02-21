@@ -16,9 +16,7 @@
 mod criterion_config;
 
 use cntryl_midge::Bytes;
-use criterion::{
-    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
-};
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_config::criterion_config_for_tier2;
 use std::hint::black_box;
 
@@ -355,54 +353,6 @@ fn bench_read_amp_uniform_distribution(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark: Cache effectiveness comparison
-/// Same workload, compare with cache vs without cache
-fn bench_read_amp_cache_effectiveness(c: &mut Criterion) {
-    let mut group = c.benchmark_group("read_amplification_cache_effectiveness");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1000));
-
-    for &with_cache in &[true, false] {
-        let label = if with_cache {
-            "with_cache"
-        } else {
-            "without_cache"
-        };
-        group.bench_with_input(
-            BenchmarkId::from_parameter(label),
-            &with_cache,
-            |b, &with_cache| {
-                b.iter(|| {
-                    let mut lsm = LsmSimulator::new_zipfian();
-
-                    // If no cache, clear it
-                    if !with_cache {
-                        lsm.cache_capacity = 0;
-                    }
-
-                    let mut zipf = ZipfianDistribution::new(40_000, 1.5);
-                    let mut total_blocks_read = 0u32;
-                    let mut total_found = 0u32;
-
-                    for _ in 0..1000 {
-                        let key_idx = zipf.next();
-                        let key = Bytes::from(format!("key:{:010}", key_idx));
-                        let (br, _, found) = lsm.get(&key);
-                        total_blocks_read += br;
-                        if found {
-                            total_found += 1;
-                        }
-                    }
-
-                    black_box((total_blocks_read, total_found))
-                })
-            },
-        );
-    }
-
-    group.finish();
-}
-
 // ─── Criterion Setup ────────────────────────────────────────────────────────
 
 criterion_group! {
@@ -411,7 +361,6 @@ criterion_group! {
     targets =
         bench_read_amp_point_lookups_zipfian,
         bench_read_amp_mixed_get_scan,
-        bench_read_amp_uniform_distribution,
-        bench_read_amp_cache_effectiveness
+        bench_read_amp_uniform_distribution
 }
 criterion_main!(tier2_subsystem_read_amplification);

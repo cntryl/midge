@@ -136,93 +136,6 @@ fn bench_range_scan_cold_cache(c: &mut Criterion) {
 
 // ─── Partially Warm Cache ────────────────────────────────────────────────────
 
-/// Benchmark range scan with partially warm cache (50% cached)
-fn bench_range_scan_partial_cache(c: &mut Criterion) {
-    for &num_blocks in &[100, 1000] {
-        let mut group =
-            c.benchmark_group(format!("range_scan_partial_cache_{}_blocks", num_blocks));
-        group.sampling_mode(SamplingMode::Flat);
-        group.throughput(Throughput::Elements(num_blocks as u64));
-
-        group.bench_function("50pct_cached", |b| {
-            // Use iter_batched to reset cache state between iterations.
-            // This ensures each iteration sees exactly 50% cache hit rate,
-            // since scan.execute() inserts missing blocks into the cache.
-            b.iter_batched(
-                || {
-                    let cache = BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru);
-                    populate_cache(&cache, SST_ID, 0, num_blocks / 2);
-                    (cache, RangeScan::new(0, num_blocks))
-                },
-                |(cache, scan)| {
-                    let (blocks_read, cache_hits) = scan.execute(&cache, SST_ID);
-                    black_box((blocks_read, cache_hits))
-                },
-                criterion::BatchSize::SmallInput,
-            )
-        });
-
-        group.finish();
-    }
-}
-
-// ─── Comparison Benchmark ────────────────────────────────────────────────────
-
-/// Direct comparison: warm vs cold cache on same 100-block scan
-fn bench_range_scan_cache_comparison(c: &mut Criterion) {
-    let num_blocks = 100;
-    let _block_data = precompute_block_data();
-
-    let mut group = c.benchmark_group("range_scan_cache_comparison");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(num_blocks as u64));
-
-    for &mode in &["warm", "cold", "partial_50pct"] {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(mode),
-            &mode,
-            |b, &mode| match mode {
-                "warm" => {
-                    let cache = BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru);
-                    populate_cache(&cache, SST_ID, 0, num_blocks);
-                    let scan = RangeScan::new(0, num_blocks);
-
-                    b.iter(|| {
-                        let (blocks_read, cache_hits) = scan.execute(&cache, SST_ID);
-                        black_box((blocks_read, cache_hits))
-                    })
-                }
-                "cold" => b.iter_batched(
-                    || {
-                        let cache = BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru);
-                        (cache, RangeScan::new(0, num_blocks))
-                    },
-                    |(cache, scan)| {
-                        let (blocks_read, cache_hits) = scan.execute(&cache, SST_ID);
-                        black_box((blocks_read, cache_hits))
-                    },
-                    criterion::BatchSize::SmallInput,
-                ),
-                "partial_50pct" => b.iter_batched(
-                    || {
-                        let cache = BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru);
-                        populate_cache(&cache, SST_ID, 0, num_blocks / 2);
-                        (cache, RangeScan::new(0, num_blocks))
-                    },
-                    |(cache, scan)| {
-                        let (blocks_read, cache_hits) = scan.execute(&cache, SST_ID);
-                        black_box((blocks_read, cache_hits))
-                    },
-                    criterion::BatchSize::SmallInput,
-                ),
-                _ => unreachable!(),
-            },
-        );
-    }
-
-    group.finish();
-}
-
 // ─── Strided Access Pattern ──────────────────────────────────────────────────
 
 /// Benchmark non-sequential access (every 10th block) with warm/cold cache
@@ -289,8 +202,6 @@ criterion_group! {
     targets =
         bench_range_scan_warm_cache,
         bench_range_scan_cold_cache,
-        bench_range_scan_partial_cache,
-        bench_range_scan_cache_comparison,
         bench_range_scan_strided_access
 }
 criterion_main!(tier2_subsystem_range_scan_cache);
