@@ -39,6 +39,7 @@ pub fn encode_varint_with_tag(buf: &mut BytesMut, tag: u8, mut value: u32) {
 }
 
 /// Encode arbitrary bytes with a tag and length prefix
+#[inline]
 pub fn encode_bytes_with_tag(buf: &mut BytesMut, tag: u8, data: &[u8]) {
     buf.put_u8(tag);
     // Defensive check — lengths larger than u32::MAX are unsupported and would truncate.
@@ -49,6 +50,7 @@ pub fn encode_bytes_with_tag(buf: &mut BytesMut, tag: u8, data: &[u8]) {
 }
 
 /// Encode a u64 with a tag and length prefix
+#[inline]
 pub fn encode_u64_with_tag(buf: &mut BytesMut, tag: u8, value: u64) {
     buf.put_u8(tag);
     buf.put_u8(8); // 8 bytes for u64
@@ -56,6 +58,7 @@ pub fn encode_u64_with_tag(buf: &mut BytesMut, tag: u8, value: u64) {
 }
 
 /// Encode a u8 with a tag and length prefix
+#[inline]
 pub fn encode_u8_with_tag(buf: &mut BytesMut, tag: u8, value: u8) {
     buf.put_u8(tag);
     buf.put_u8(1); // 1 byte
@@ -92,6 +95,7 @@ pub fn decode_varint32(data: &[u8]) -> MidgeResult<u32> {
     Err(MidgeError::Corruption("varint32 incomplete".into()))
 }
 
+#[inline]
 fn decode_varint32_with_len(data: &[u8]) -> MidgeResult<(u32, usize)> {
     if data.is_empty() {
         return Err(MidgeError::Corruption("varint32 incomplete".into()));

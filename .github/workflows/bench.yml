@@ -24,13 +24,33 @@ jobs:
       - name: Update Rust toolchain
         run: rustup update stable
 
-      - name: Run benchmarks
-        run: cargo bench --bench 'tier1_*' --bench 'tier2_*' --bench 'tier3_*' --bench 'tier4_*'
+      - name: Build all benchmarks
+        run: cargo bench --no-run
+
+      - name: Run Tier 1 benchmarks (hotpath)
+        run: cargo bench --bench 'tier1_*'
+        env:
+          RAYON_NUM_THREADS: 2
+
+      - name: Run Tier 2 benchmarks (subsystem)
+        run: cargo bench --bench 'tier2_*'
+        env:
+          RAYON_NUM_THREADS: 2
+
+      - name: Run Tier 3 benchmarks (system)
+        run: cargo bench --bench 'tier3_*'
+        env:
+          RAYON_NUM_THREADS: 2
+
+      - name: Run Tier 4 benchmarks (YCSB & streaming)
+        run: cargo bench --bench 'tier4_*'
+        env:
+          RAYON_NUM_THREADS: 2
 
       - name: Upload Criterion artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: criterion-artifacts-${{ matrix.os }}
+          name: bench-artifacts-${{ matrix.os }}
           path: |
             target/criterion/**
             target/stress/**
