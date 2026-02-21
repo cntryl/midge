@@ -31,7 +31,7 @@ pub fn criterion_config_for_tier1() -> Criterion {
     Criterion::default()
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(3))
-        .sample_size(100)
+        .sample_size(20)
         .without_plots()
 }
 
@@ -46,6 +46,6 @@ pub fn criterion_config_for_tier2() -> Criterion {
     Criterion::default()
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(3))
-        .sample_size(50)
+        .sample_size(20)
         .without_plots()
 }
