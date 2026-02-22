@@ -21,7 +21,9 @@ COPY scripts ./scripts
 # Create output directory
 RUN mkdir -p /output
 
-RUN cargo build --all-targets
+RUN cargo build
+RUN cargo test
+RUN cargo bench --no-run
 
 # Set entrypoint to run Makefile
 ENTRYPOINT ["bash", "-c"]
