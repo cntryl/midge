@@ -33,11 +33,17 @@ impl CloudOpTracker {
     }
 
     fn record_delete(&self, key: String) {
-        self.operations.lock().unwrap().push(format!("delete:{}", key));
+        self.operations
+            .lock()
+            .unwrap()
+            .push(format!("delete:{}", key));
     }
 
     fn record_write(&self, key: String) {
-        self.operations.lock().unwrap().push(format!("write:{}", key));
+        self.operations
+            .lock()
+            .unwrap()
+            .push(format!("write:{}", key));
     }
 
     fn has_deleted(&self, key: &str) -> bool {
@@ -45,7 +51,7 @@ impl CloudOpTracker {
             .lock()
             .unwrap()
             .iter()
-            .any(|op| op == format!("delete:{}", key))
+            .any(|op| op.as_str() == format!("delete:{}", key))
     }
 
     fn count_deleted(&self) -> usize {
@@ -176,10 +182,7 @@ fn should_not_collect_cloud_objects_referenced_by_manifest() {
 #[test]
 fn should_handle_gc_when_cloud_list_fails() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Cloud GC: Handle List Failure (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Cloud GC: Handle List Failure (mode: {}) ===", mode);
 
         // Arrange: Set up engine
         let engine = open_with_mode(opts.clone(), mode);
@@ -235,10 +238,7 @@ fn should_handle_gc_when_cloud_list_fails() {
 #[test]
 fn should_handle_gc_when_cloud_delete_fails() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Cloud GC: Handle Delete Failure (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Cloud GC: Handle Delete Failure (mode: {}) ===", mode);
 
         // Arrange: Create test data
         let engine = open_with_mode(opts.clone(), mode);

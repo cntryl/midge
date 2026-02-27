@@ -12,7 +12,6 @@
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
 
-use bytes::Bytes;
 use cntryl_midge::testkit::*;
 use cntryl_midge::{TransactionMode, WriteOptions};
 use std::thread;
@@ -101,10 +100,7 @@ fn should_recover_after_io_failure_during_wal_write() {
 #[test]
 fn should_recover_after_io_failure_during_flush() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Chaos: IO Failure During Flush (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Chaos: IO Failure During Flush (mode: {}) ===", mode);
 
         // Arrange
         // Act (Phase 1): Flush with potential SST write failure
@@ -238,9 +234,7 @@ fn should_recover_after_io_failure_during_compaction() {
                 mode
             );
 
-            eprintln!(
-                "✓ Recovered from compaction IO failure; manifest consistent"
-            );
+            eprintln!("✓ Recovered from compaction IO failure; manifest consistent");
         }
     });
 }
@@ -330,12 +324,8 @@ fn should_not_corrupt_data_after_partial_sst_write() {
                 .expect("begin_tx");
             for i in 0..100 {
                 let key = format!("sst_corrupt_key_{:04}", i);
-                tx.put(
-                    key.as_bytes().to_vec(),
-                    b"uncorrupted_value".to_vec(),
-                    None,
-                )
-                .ok();
+                tx.put(key.as_bytes().to_vec(), b"uncorrupted_value".to_vec(), None)
+                    .ok();
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
@@ -522,19 +512,17 @@ fn should_handle_intermittent_io_failures_under_load() {
             let cf_clone = cf.clone();
             let handle = std::thread::spawn(move || {
                 for batch in 0..20 {
-                    let mut tx = engine_clone
+                    let tx = engine_clone
                         .begin_tx(cf_clone.id(), TransactionMode::ReadWrite)
                         .ok();
 
-                    if let Some(ref mut t) = tx {
+                    if let Some(mut t) = tx {
                         for i in 0..50 {
                             let key = format!("chaos_load_t{}_b{}_k{:03}", tid, batch, i);
                             t.put(key.as_bytes().to_vec(), b"chaos_value".to_vec(), None)
                                 .ok();
                         }
-                        engine_clone
-                            .commit(t.take().unwrap(), WriteOptions::best_effort())
-                            .ok();
+                        engine_clone.commit(t, WriteOptions::best_effort()).ok();
                     }
 
                     // Random delay

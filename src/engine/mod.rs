@@ -482,18 +482,8 @@ impl Engine {
     /// 2. Writes are intentionally NOT immediately visible in memtables
     /// 3. Visibility is gated on cloud acknowledgment, not local apply
     ///
-    /// Ingest batching is enabled for all durability modes:
-    /// - Memory/Local/Batched: writes apply directly to memtables with immediate local visibility
-    /// - CloudFirst: acks immediately after local WAL write, cloud upload is background
-    ///
-    /// All modes benefit from batching which reduces event loop round-trips.
-    fn should_use_ingest_batching(&self) -> bool {
-        // All durability modes use ingest batching for throughput.
-        // CloudFirst handler in event_loop.rs already has proper support for
-        // ApplyTransaction with deferred confirmation on cloud upload.
-        true
-    }
-
+    /// Ingest batching is always enabled for throughput.
+    /// All durability modes benefit from batching which reduces event loop round-trips.
     /// Return whether an ingest barrier is currently active.
     pub(crate) fn is_ingesting(&self) -> MidgeResult<bool> {
         let request_id = crate::runtime::next_request_id()?;
@@ -719,11 +709,8 @@ impl Engine {
 
         // PHASE 2.2: Route all writes through ingest batching
         //
-        // All durability modes now use ingest batching:
-        // - Memory/Local/Batched: writes apply directly to memtables with immediate local visibility
-        // - CloudFirst: acks immediately after local WAL write, cloud upload is background
+        // All durability modes use ingest batching for throughput.
         // Batching reduces event loop contention by grouping concurrent writes into transactions.
-        let _use_batching = self.should_use_ingest_batching();
 
         // Route through ingest coordinator for all modes
         let coordinator = self
@@ -860,7 +847,11 @@ impl Engine {
         }
     }
 
-    /// Rollback a transaction
+    /// Rollback a transaction.
+    ///
+    /// This is a no-op because Midge transactions are designed for atomic commit only.
+    /// Writes are accumulated in the transaction and only applied when `commit()` is called.
+    /// Simply dropping the transaction (without commit) discards all pending writes.
     pub fn rollback_transaction(&self, _txn: api::Transaction) -> MidgeResult<()> {
         Ok(())
     }
