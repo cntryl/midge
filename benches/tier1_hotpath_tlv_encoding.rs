@@ -157,7 +157,7 @@ fn bench_tagged_field_encoding(c: &mut Criterion) {
             let mut buf = BytesMut::with_capacity(1 + 5 + data.len());
             b.iter(|| {
                 buf.clear();
-                encode_bytes_with_tag(&mut buf, 11, black_box(data));
+                encode_bytes_with_tag(&mut buf, 11, black_box(data)).unwrap();
                 black_box(buf.as_ref());
             });
         });
@@ -183,7 +183,7 @@ fn bench_tlv_field_decode(c: &mut Criterion) {
 
     for (name, data) in decode_cases {
         let mut buf = BytesMut::with_capacity(1 + 5 + data.len());
-        encode_bytes_with_tag(&mut buf, 11, data);
+        encode_bytes_with_tag(&mut buf, 11, data).unwrap();
         let encoded = buf.freeze();
 
         group.bench_function(name, |b| {
@@ -215,8 +215,8 @@ fn bench_batch_field_encoding(c: &mut Criterion) {
             buf.clear();
             // Simulate SST entry encoding: shared_len + key_delta + value + sequence + entry_type
             encode_varint_with_tag(&mut buf, 1, 0);
-            encode_bytes_with_tag(&mut buf, 2, key_delta);
-            encode_bytes_with_tag(&mut buf, 3, value);
+            encode_bytes_with_tag(&mut buf, 2, key_delta).unwrap();
+            encode_bytes_with_tag(&mut buf, 3, value).unwrap();
             encode_u64_with_tag(&mut buf, 4, seq);
             encode_u8_with_tag(&mut buf, 5, entry_type);
             black_box(&buf);

@@ -9,6 +9,7 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::engine::ColumnFamilyId;
 use crate::runtime::{next_request_id, RuntimeHandle, RuntimeMsg, RuntimeResponse};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -22,7 +23,7 @@ pub enum TransactionMode {
 }
 
 /// Pending write intent collected within a transaction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WriteIntent {
     /// Put operation (upsert)
     Put {
@@ -225,27 +226,11 @@ impl Transaction {
         }
 
         // Execute directly against snapshot (bypasses event loop)
-        if let Some(snapshot) = &self.read_snapshot {
-            let value = snapshot.get(key, self.start_sequence);
-            return Ok(value.map(bytes::Bytes::from));
-        }
-
-        // Fallback: legacy message passing (should not happen in normal operation)
-        let response = self.runtime_handle.send_and_wait(RuntimeMsg::Read {
-            request_id: next_request_id()?,
-            cf_id: self.cf_id,
-            key: key.to_vec(),
-            sequence: self.start_sequence,
-            requested_durability: super::Durability::Steady,
+        let snapshot = self.read_snapshot.as_ref().ok_or_else(|| {
+            MidgeError::Internal("read snapshot not available - this is a bug".to_string())
         })?;
-
-        match response {
-            RuntimeResponse::ReadValue { value, .. } => Ok(value.map(bytes::Bytes::from)),
-            RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(MidgeError::Internal(
-                "Unexpected response to Transaction::get".to_string(),
-            )),
-        }
+        let value = snapshot.get(key, self.start_sequence);
+        Ok(value.map(bytes::Bytes::from))
     }
 
     /// Range scan within this transaction
@@ -265,36 +250,14 @@ impl Transaction {
         };
 
         // Execute directly against snapshot (bypasses event loop)
-        let base_results = if let Some(snapshot) = &self.read_snapshot {
-            snapshot
-                .range_scan(start, end, self.start_sequence)
-                .into_iter()
-                .map(|(k, v)| (bytes::Bytes::from(k), bytes::Bytes::from(v)))
-                .collect::<Vec<_>>()
-        } else {
-            // Fallback: legacy message passing (should not happen in normal operation)
-            let response = self.runtime_handle.send_and_wait(RuntimeMsg::RangeScan {
-                request_id: next_request_id()?,
-                cf_id: self.cf_id,
-                start: start.to_vec(),
-                end: end.to_vec(),
-                sequence: self.start_sequence,
-                requested_durability: super::Durability::Steady,
-            })?;
-
-            match response {
-                RuntimeResponse::RangeScanResults { results, .. } => results
-                    .into_iter()
-                    .map(|(k, v)| (bytes::Bytes::from(k), bytes::Bytes::from(v)))
-                    .collect::<Vec<_>>(),
-                RuntimeResponse::Error { error, .. } => return Err(error),
-                _ => {
-                    return Err(MidgeError::Internal(
-                        "Unexpected response to Transaction::scan".to_string(),
-                    ))
-                }
-            }
-        };
+        let snapshot = self.read_snapshot.as_ref().ok_or_else(|| {
+            MidgeError::Internal("read snapshot not available - this is a bug".to_string())
+        })?;
+        let base_results = snapshot
+            .range_scan(start, end, self.start_sequence)
+            .into_iter()
+            .map(|(k, v)| (bytes::Bytes::from(k), bytes::Bytes::from(v)))
+            .collect::<Vec<_>>();
 
         let mut merged: BTreeMap<Vec<u8>, Option<bytes::Bytes>> = BTreeMap::new();
 
