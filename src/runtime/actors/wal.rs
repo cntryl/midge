@@ -842,7 +842,7 @@ impl WalActor {
             }
         }
 
-        if self.is_cloud_first() {
+        if matches!(effective_durability, DurabilityPolicy::CloudFirst) {
             // === CRITICAL: Check backpressure before queueing batch ===
             if self.should_apply_backpressure() {
                 tracing::warn!(
@@ -920,7 +920,7 @@ impl WalActor {
 
         // Return deferred=true if using group commit (Batched or CloudFirst modes)
         let deferred = matches!(
-            self.durability_policy,
+            effective_durability,
             DurabilityPolicy::Batched | DurabilityPolicy::CloudFirst
         );
         Ok((last_sequence, op_count, deferred))
