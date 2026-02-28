@@ -364,20 +364,15 @@ fn should_reject_open_when_lease_held_by_crashed_process() {
                 eprintln!("Second instance rejected: {:?}", e);
                 // This is the expected behavior
                 // Verify error indicates lease conflict
-                match e {
-                    // Assuming MidgeError::LeaseConflict or similar exists
-                    _ => {
-                        let err_str = format!("{:?}", e).to_lowercase();
-                        assert!(
-                            err_str.contains("lease")
-                                || err_str.contains("exclusive")
-                                || err_str.contains("instance")
-                                || err_str.contains("running"),
-                            "error should indicate lease conflict: {:?}",
-                            e
-                        );
-                    }
-                }
+                let err_str = format!("{:?}", e).to_lowercase();
+                assert!(
+                    err_str.contains("lease")
+                        || err_str.contains("exclusive")
+                        || err_str.contains("instance")
+                        || err_str.contains("running"),
+                    "error should indicate lease conflict: {:?}",
+                    e
+                );
             }
         }
 

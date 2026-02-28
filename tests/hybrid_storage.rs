@@ -15,7 +15,6 @@
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
 
-use bytes::Bytes;
 use cntryl_midge::testkit::*;
 use cntryl_midge::{TransactionMode, WriteOptions};
 use std::sync::Arc;
@@ -79,7 +78,10 @@ fn should_trigger_eviction_at_high_watermark() {
             mode
         );
 
-        eprintln!("✓ High watermark eviction triggered safely; {} keys readable", readable);
+        eprintln!(
+            "✓ High watermark eviction triggered safely; {} keys readable",
+            readable
+        );
     });
 }
 
@@ -188,10 +190,12 @@ fn should_resume_writes_after_eviction_clears_pressure() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             let key = format!("resume_key_{:02}", i);
-            if tx.put(key.as_bytes().to_vec(), medium_value.clone(), None).is_ok() {
-                if engine.commit(tx, WriteOptions::buffered()).is_ok() {
-                    resume_writes += 1;
-                }
+            if tx
+                .put(key.as_bytes().to_vec(), medium_value.clone(), None)
+                .is_ok()
+                && engine.commit(tx, WriteOptions::buffered()).is_ok()
+            {
+                resume_writes += 1;
             }
         }
 
@@ -212,10 +216,7 @@ fn should_resume_writes_after_eviction_clears_pressure() {
 #[test]
 fn should_prefer_local_reads_before_eviction() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Hybrid: Prefer Local Reads (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Hybrid: Prefer Local Reads (mode: {}) ===", mode);
 
         // Arrange: Write small data that fits comfortably in cache
         let engine = open_with_mode(opts.clone(), mode);
@@ -279,8 +280,7 @@ fn should_fetch_from_cloud_after_local_eviction() {
             .expect("begin_tx");
         for i in 0..20 {
             let key = format!("evict_fetch_key_{:02}", i);
-            tx.put(key.as_bytes().to_vec(), value.clone(), None)
-                .ok();
+            tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
         }
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
@@ -318,10 +318,7 @@ fn should_fetch_from_cloud_after_local_eviction() {
 #[test]
 fn should_persist_eviction_state_across_restart() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        eprintln!(
-            "\n=== Hybrid: Persist Eviction State (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Hybrid: Persist Eviction State (mode: {}) ===", mode);
 
         // Arrange
         // Act: Write, evict, note manifest state
@@ -336,8 +333,7 @@ fn should_persist_eviction_state_across_restart() {
                 .expect("begin_tx");
             for i in 0..15 {
                 let key = format!("persist_evict_key_{:02}", i);
-                tx.put(key.as_bytes().to_vec(), value.clone(), None)
-                    .ok();
+                tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
@@ -462,8 +458,7 @@ fn should_not_evict_ssts_with_active_readers() {
             .expect("begin_tx");
         for i in 0..25 {
             let key = format!("reader_protect_key_{:02}", i);
-            tx.put(key.as_bytes().to_vec(), value.clone(), None)
-                .ok();
+            tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
         }
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
@@ -479,9 +474,7 @@ fn should_not_evict_ssts_with_active_readers() {
         let eviction_handle = thread::spawn(move || {
             thread::sleep(Duration::from_millis(50));
             engine_clone.flush_cf(&cf_clone).ok();
-            engine_clone
-                .compact_all()
-                .ok();
+            engine_clone.compact_all().ok();
         });
 
         // Wait for eviction to complete

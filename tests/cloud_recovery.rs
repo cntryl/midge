@@ -41,8 +41,12 @@ fn should_recover_from_partial_sst_upload() {
                 .expect("begin_tx");
             for i in 0..100 {
                 let key = format!("partial_upload_key_{:04}", i);
-                tx.put(key.as_bytes().to_vec(), b"value_before_upload".to_vec(), None)
-                    .ok();
+                tx.put(
+                    key.as_bytes().to_vec(),
+                    b"value_before_upload".to_vec(),
+                    None,
+                )
+                .ok();
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
@@ -115,8 +119,7 @@ fn should_recover_from_failed_manifest_write_to_cloud() {
                 .expect("begin_tx");
             for i in 0..50 {
                 let key = format!("manifest_fail_key_{:04}", i);
-                tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None)
-                    .ok();
+                tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
@@ -127,8 +130,7 @@ fn should_recover_from_failed_manifest_write_to_cloud() {
                 .expect("begin_tx");
             for i in 50..100 {
                 let key = format!("manifest_fail_key_{:04}", i);
-                tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None)
-                    .ok();
+                tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None).ok();
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
@@ -225,7 +227,10 @@ fn should_retry_failed_cloud_upload_on_restart() {
                 mode
             );
 
-            eprintln!("✓ Failed upload retried on restart; {} keys recovered", found);
+            eprintln!(
+                "✓ Failed upload retried on restart; {} keys recovered",
+                found
+            );
         }
     });
 }
@@ -284,9 +289,7 @@ fn should_not_expose_partially_uploaded_sst() {
             mode
         );
 
-        eprintln!(
-            "✓ Partial uploads not exposed; snapshot isolation maintained"
-        );
+        eprintln!("✓ Partial uploads not exposed; snapshot isolation maintained");
     });
 }
 
@@ -310,8 +313,7 @@ fn should_recover_after_crash_mid_compaction_with_cloud() {
                 .expect("begin_tx");
             for i in 0..100 {
                 let key = format!("midcompact_key_{:04}", i);
-                tx.put(key.as_bytes().to_vec(), b"gen1".to_vec(), None)
-                    .ok();
+                tx.put(key.as_bytes().to_vec(), b"gen1".to_vec(), None).ok();
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
@@ -322,8 +324,7 @@ fn should_recover_after_crash_mid_compaction_with_cloud() {
                 .expect("begin_tx");
             for i in 100..200 {
                 let key = format!("midcompact_key_{:04}", i);
-                tx.put(key.as_bytes().to_vec(), b"gen2".to_vec(), None)
-                    .ok();
+                tx.put(key.as_bytes().to_vec(), b"gen2".to_vec(), None).ok();
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
@@ -331,7 +332,7 @@ fn should_recover_after_crash_mid_compaction_with_cloud() {
             // Trigger compaction but don't wait for completion (simulate mid-crash)
             engine.compact_all().ok();
             thread::sleep(Duration::from_millis(50)); // Let compaction start
-            // Crash by dropping engine
+                                                      // Crash by dropping engine
         }
 
         // Assert (Phase 2): Restart and verify manifest consistency
@@ -361,9 +362,7 @@ fn should_recover_after_crash_mid_compaction_with_cloud() {
                 "manifest inconsistency led to data loss after crash mid-compaction"
             );
 
-            eprintln!(
-                "✓ Recovered from mid-compaction crash; manifest consistent"
-            );
+            eprintln!("✓ Recovered from mid-compaction crash; manifest consistent");
         }
     });
 }
@@ -501,7 +500,10 @@ fn should_resume_pending_uploads_after_restart() {
                 mode
             );
 
-            eprintln!("✓ Pending uploads resumed on restart; {} keys available", found);
+            eprintln!(
+                "✓ Pending uploads resumed on restart; {} keys available",
+                found
+            );
         }
     });
 }
@@ -566,10 +568,7 @@ fn should_deduplicate_upload_on_retry() {
                 mode
             );
 
-            eprintln!(
-                "✓ Upload deduplicated on retry; {} keys recovered",
-                found
-            );
+            eprintln!("✓ Upload deduplicated on retry; {} keys recovered", found);
         }
     });
 }

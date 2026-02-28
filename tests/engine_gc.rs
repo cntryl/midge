@@ -12,10 +12,8 @@
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
 
-use bytes::Bytes;
 use cntryl_midge::testkit::*;
 use cntryl_midge::{TransactionMode, WriteOptions};
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -25,7 +23,8 @@ use std::time::Duration;
 // HELPER: Extract filesystem path from local storage mode
 // ============================================================================
 
-fn get_storage_path_if_local(opts: &MidgeOptions) -> Option<PathBuf> {
+#[allow(dead_code)]
+fn get_storage_path_if_local(_opts: &MidgeOptions) -> Option<PathBuf> {
     // For local storage, we need access to the temp directory
     // This is typically stored in opts during test setup
     // Since MidgeOptions doesn't expose storage directly, we create a marker file
@@ -53,8 +52,7 @@ fn should_collect_orphaned_sst_files_after_compaction() {
             .expect("begin_tx");
         for i in 0..100 {
             let key = format!("key_{:04}", i);
-            tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None)
-                .ok();
+            tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
         }
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush initial");
@@ -65,8 +63,7 @@ fn should_collect_orphaned_sst_files_after_compaction() {
             .expect("begin_tx");
         for i in 100..150 {
             let key = format!("key_{:04}", i);
-            tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None)
-                .ok();
+            tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
         }
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush second");
@@ -160,8 +157,7 @@ fn should_run_gc_after_configurable_interval() {
             .expect("begin_tx");
         for i in 0..100 {
             let key = format!("batch1_key_{:04}", i);
-            tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None)
-                .ok();
+            tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
         }
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush batch 1");
@@ -172,8 +168,7 @@ fn should_run_gc_after_configurable_interval() {
             .expect("begin_tx");
         for i in 0..100 {
             let key = format!("batch2_key_{:04}", i);
-            tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None)
-                .ok();
+            tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None).ok();
         }
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush batch 2");
@@ -218,8 +213,7 @@ fn should_persist_gc_state_across_restart() {
                 .expect("begin_tx");
             for i in 0..75 {
                 let key = format!("persist_key_{:04}", i);
-                tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None)
-                    .ok();
+                tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
@@ -230,8 +224,7 @@ fn should_persist_gc_state_across_restart() {
                 .expect("begin_tx");
             for i in 75..150 {
                 let key = format!("persist_key_{:04}", i);
-                tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None)
-                    .ok();
+                tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None).ok();
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
@@ -267,10 +260,7 @@ fn should_persist_gc_state_across_restart() {
 #[test]
 fn should_handle_gc_with_active_readers() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!(
-            "\n=== GC: Handle Active Readers (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== GC: Handle Active Readers (mode: {}) ===", mode);
 
         let engine = Arc::new(open_with_mode(opts.clone(), mode));
         let cf = engine.create_column_family("test").expect("create cf");
@@ -294,7 +284,7 @@ fn should_handle_gc_with_active_readers() {
 
         // Spawn thread to trigger compaction while snapshot is held
         let engine_clone = Arc::clone(&engine);
-        let cf_clone = cf.clone();
+        let _cf_clone = cf.clone();
         let compaction_handle = thread::spawn(move || {
             thread::sleep(Duration::from_millis(50));
             engine_clone.compact_all().ok();
@@ -368,11 +358,7 @@ fn should_collect_orphaned_wal_segments_after_flush() {
         for i in 0..50 {
             let key = format!("wal_key_{:04}", i);
             let val = tx.get(key.as_bytes()).expect("get");
-            assert!(
-                val.is_some(),
-                "data lost after flush in mode: {}",
-                mode
-            );
+            assert!(val.is_some(), "data lost after flush in mode: {}", mode);
         }
 
         // For local/cloud modes, old WAL segments should be marked for deletion
@@ -385,10 +371,7 @@ fn should_collect_orphaned_wal_segments_after_flush() {
 #[test]
 fn should_not_collect_wal_segments_still_needed_for_recovery() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        eprintln!(
-            "\n=== GC: Preserve WAL for Recovery (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== GC: Preserve WAL for Recovery (mode: {}) ===", mode);
 
         // Arrange
         // Act: Write uncommitted data and crash

@@ -14,10 +14,8 @@
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
 
-use bytes::Bytes;
 use cntryl_midge::testkit::*;
 use cntryl_midge::{TransactionMode, WriteOptions};
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -26,6 +24,7 @@ use std::time::Duration;
 // ============================================================================
 
 /// Placeholder metrics structure for testing instrumentation coverage
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 struct MetricsSnapshot {
     reads_total: u64,
@@ -50,10 +49,7 @@ fn capture_placeholder_metrics() -> MetricsSnapshot {
 #[test]
 fn should_emit_read_metrics_during_get() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
-        eprintln!(
-            "\n=== Telemetry: Emit Read Metrics (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Telemetry: Emit Read Metrics (mode: {}) ===", mode);
 
         // Arrange: Load data into engine
         let engine = open_with_mode(opts.clone(), mode);
@@ -72,7 +68,7 @@ fn should_emit_read_metrics_during_get() {
         engine.flush_cf(&cf).expect("flush");
 
         // Snapshot metrics before reads
-        let before_metrics = capture_placeholder_metrics();
+        let _before_metrics = capture_placeholder_metrics();
 
         // Act: Perform reads
         let tx = engine
@@ -87,7 +83,7 @@ fn should_emit_read_metrics_during_get() {
         }
 
         // Snapshot metrics after reads
-        let after_metrics = capture_placeholder_metrics();
+        let _after_metrics = capture_placeholder_metrics();
 
         // Assert: Read metrics incremented
         // In real impl: after_metrics.reads_total > before_metrics.reads_total
@@ -98,24 +94,24 @@ fn should_emit_read_metrics_during_get() {
             mode
         );
 
-        eprintln!("✓ Read metrics test completed; {} reads executed", read_count);
+        eprintln!(
+            "✓ Read metrics test completed; {} reads executed",
+            read_count
+        );
     });
 }
 
 #[test]
 fn should_emit_write_metrics_during_put() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
-        eprintln!(
-            "\n=== Telemetry: Emit Write Metrics (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Telemetry: Emit Write Metrics (mode: {}) ===", mode);
 
         // Arrange
         let engine = open_with_mode(opts.clone(), mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Capture baseline
-        let before_metrics = capture_placeholder_metrics();
+        let _before_metrics = capture_placeholder_metrics();
 
         // Act: Write batch of keys
         let value = b"metric_write_value";
@@ -125,23 +121,22 @@ fn should_emit_write_metrics_during_put() {
         let mut write_count = 0;
         for i in 0..100 {
             let key = format!("metrics_write_key_{:04}", i);
-            if tx.put(key.as_bytes().to_vec(), value.to_vec(), None).is_ok() {
+            if tx
+                .put(key.as_bytes().to_vec(), value.to_vec(), None)
+                .is_ok()
+            {
                 write_count += 1;
             }
         }
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
         // Capture after-write metrics
-        let after_metrics = capture_placeholder_metrics();
+        let _after_metrics = capture_placeholder_metrics();
 
         // Assert: Write metrics incremented
         // In real impl: after_metrics.writes_total >= before_metrics.writes_total + 100
         // after_metrics.bytes_written >= before_metrics.bytes_written + (100 * value.len())
-        assert_eq!(
-            write_count, 100,
-            "write count mismatch in mode: {}",
-            mode
-        );
+        assert_eq!(write_count, 100, "write count mismatch in mode: {}", mode);
 
         let expected_bytes = 100 * value.len();
         eprintln!(
@@ -169,8 +164,7 @@ fn should_emit_compaction_metrics_during_compaction() {
             .expect("begin_tx");
         for i in 0..100 {
             let key = format!("compact_metric_key_{:04}", i);
-            tx.put(key.as_bytes().to_vec(), b"gen1".to_vec(), None)
-                .ok();
+            tx.put(key.as_bytes().to_vec(), b"gen1".to_vec(), None).ok();
         }
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
@@ -181,20 +175,19 @@ fn should_emit_compaction_metrics_during_compaction() {
             .expect("begin_tx");
         for i in 100..200 {
             let key = format!("compact_metric_key_{:04}", i);
-            tx.put(key.as_bytes().to_vec(), b"gen2".to_vec(), None)
-                .ok();
+            tx.put(key.as_bytes().to_vec(), b"gen2".to_vec(), None).ok();
         }
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Capture before compaction
-        let before_metrics = capture_placeholder_metrics();
+        let _before_metrics = capture_placeholder_metrics();
 
         // Act: Trigger compaction
         engine.compact_all().ok();
 
         // Capture after compaction
-        let after_metrics = capture_placeholder_metrics();
+        let _after_metrics = capture_placeholder_metrics();
 
         // Assert: Compaction metrics available
         // In real impl: after_metrics.compactions_total > before_metrics.compactions_total
@@ -215,9 +208,7 @@ fn should_emit_compaction_metrics_during_compaction() {
             mode
         );
 
-        eprintln!(
-            "✓ Compaction metrics verified; compaction completed"
-        );
+        eprintln!("✓ Compaction metrics verified; compaction completed");
     });
 }
 
@@ -246,7 +237,7 @@ fn should_emit_cache_hit_miss_metrics() {
         engine.flush_cf(&cf).expect("flush");
 
         // Capture before cache test
-        let before_metrics = capture_placeholder_metrics();
+        let _before_metrics = capture_placeholder_metrics();
 
         // Act: First read (cache miss)
         let tx = engine
@@ -274,7 +265,7 @@ fn should_emit_cache_hit_miss_metrics() {
             })
             .count();
 
-        let after_metrics = capture_placeholder_metrics();
+        let _after_metrics = capture_placeholder_metrics();
 
         // Assert: Cache hit/miss metrics logged
         // In real impl: hit_ratio should be calculable from metrics
@@ -291,17 +282,14 @@ fn should_emit_cache_hit_miss_metrics() {
 #[test]
 fn should_emit_wal_metrics_during_flush() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
-        eprintln!(
-            "\n=== Telemetry: Emit WAL Metrics (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Telemetry: Emit WAL Metrics (mode: {}) ===", mode);
 
         // Arrange
         let engine = open_with_mode(opts.clone(), mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Capture baseline
-        let before_metrics = capture_placeholder_metrics();
+        let _before_metrics = capture_placeholder_metrics();
 
         // Act: Write to WAL and flush
         let mut tx = engine
@@ -322,7 +310,7 @@ fn should_emit_wal_metrics_during_flush() {
         engine.flush_cf(&cf).expect("flush");
 
         // Capture after WAL activity
-        let after_metrics = capture_placeholder_metrics();
+        let _after_metrics = capture_placeholder_metrics();
 
         // Assert: WAL metrics recorded
         // In real impl: after_metrics.wal_bytes_written > before_metrics.wal_bytes_written
@@ -384,8 +372,7 @@ fn should_reset_metrics_on_request() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         let key = b"single_key".to_vec();
-        tx.put(key.clone(), b"single_value".to_vec(), None)
-            .ok();
+        tx.put(key.clone(), b"single_value".to_vec(), None).ok();
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
         // Capture metrics M2
@@ -401,8 +388,6 @@ fn should_reset_metrics_on_request() {
             mode
         );
 
-        eprintln!(
-            "✓ Metrics reset verified; data integrity maintained, counters updated"
-        );
+        eprintln!("✓ Metrics reset verified; data integrity maintained, counters updated");
     });
 }

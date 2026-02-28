@@ -1,4 +1,4 @@
-﻿//! Integration tests for TTL (Time-To-Live) support
+//! Integration tests for TTL (Time-To-Live) support
 
 use std::sync::Arc;
 use std::thread;
@@ -289,9 +289,7 @@ fn should_expire_keys_covered_by_range_tombstone_during_compaction() {
 
         // Arrange: Write keys with TTL in range [k3, k8)
         let engine = Arc::new(open_with_mode(opts.clone(), mode));
-        let cf = engine
-            .create_column_family("test")
-            .expect("create cf");
+        let cf = engine.create_column_family("test").expect("create cf");
 
         // Write keys k1..k10 with 1 second TTL
         let mut tx = engine
@@ -320,9 +318,7 @@ fn should_expire_keys_covered_by_range_tombstone_during_compaction() {
         engine.compact_all().ok();
 
         // Assert: All keys expired and/or tombstoned, compaction cleaned them up
-        let tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .unwrap();
+        let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
 
         // k1, k2 should be expired (TTL)
         assert_eq!(tx.get(b"k1").unwrap(), None);
@@ -351,9 +347,7 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
 
         // Arrange: Build multi-level LSM with different TTLs
         let engine = Arc::new(open_with_mode(opts.clone(), mode));
-        let cf = engine
-            .create_column_family("test")
-            .expect("create cf");
+        let cf = engine.create_column_family("test").expect("create cf");
 
         // L0: Write keys with 1-second TTL
         let mut tx = engine
@@ -373,12 +367,8 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
             .unwrap();
         for i in 50..100 {
             let key = format!("level1_key_{:04}", i);
-            tx.put(
-                key.as_bytes().to_vec(),
-                b"l1_value".to_vec(),
-                Some(3600),
-            )
-            .unwrap();
+            tx.put(key.as_bytes().to_vec(), b"l1_value".to_vec(), Some(3600))
+                .unwrap();
         }
         engine.commit(tx, WriteOptions::buffered()).unwrap();
         engine.flush_cf(&cf).expect("flush L1");
@@ -390,9 +380,7 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
         engine.compact_all().ok();
 
         // Assert: L0 expired keys removed; L1 keys unchanged
-        let tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .unwrap();
+        let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
 
         // L0 keys should be gone (expired)
         let l0_found = (0..50)
@@ -422,16 +410,11 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
 #[test]
 fn should_not_expose_ttl_expired_key_covered_by_range_tombstone() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!(
-            "\n=== TTL: Don't Expose TTL+Tombstone (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== TTL: Don't Expose TTL+Tombstone (mode: {}) ===", mode);
 
         // Arrange: Create scenario with both TTL and tombstone covering same key
         let engine = Arc::new(open_with_mode(opts.clone(), mode));
-        let cf = engine
-            .create_column_family("test")
-            .expect("create cf");
+        let cf = engine.create_column_family("test").expect("create cf");
 
         // Write k5 with 1-second TTL (not flushed)
         let mut tx = engine
@@ -445,15 +428,12 @@ fn should_not_expose_ttl_expired_key_covered_by_range_tombstone() {
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
-        tx.delete_range(b"k1".to_vec(), b"k10".to_vec())
-            .unwrap();
+        tx.delete_range(b"k1".to_vec(), b"k10".to_vec()).unwrap();
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act: Read k5 after TTL expiry
         thread::sleep(Duration::from_millis(1100));
-        let tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .unwrap();
+        let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
         let result = tx.get(b"k5").unwrap();
 
         // Assert: k5 not exposed (TTL expired AND tombstone covers it)
@@ -462,4 +442,3 @@ fn should_not_expose_ttl_expired_key_covered_by_range_tombstone() {
         eprintln!("✓ TTL-expired + tombstone-covered key not exposed");
     });
 }
-

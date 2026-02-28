@@ -10,7 +10,6 @@
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
 
-use bytes::Bytes;
 use cntryl_midge::testkit::*;
 use cntryl_midge::{TransactionMode, WriteOptions};
 use std::sync::{Arc, Mutex};
@@ -20,18 +19,21 @@ use std::sync::{Arc, Mutex};
 // ============================================================================
 
 /// Simple operation tracker for verifying cloud operations
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct CloudOpTracker {
     operations: Arc<Mutex<Vec<String>>>,
 }
 
 impl CloudOpTracker {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self {
             operations: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
+    #[allow(dead_code)]
     fn record_delete(&self, key: String) {
         self.operations
             .lock()
@@ -39,6 +41,7 @@ impl CloudOpTracker {
             .push(format!("delete:{}", key));
     }
 
+    #[allow(dead_code)]
     fn record_write(&self, key: String) {
         self.operations
             .lock()
@@ -46,6 +49,7 @@ impl CloudOpTracker {
             .push(format!("write:{}", key));
     }
 
+    #[allow(dead_code)]
     fn has_deleted(&self, key: &str) -> bool {
         self.operations
             .lock()
@@ -54,6 +58,7 @@ impl CloudOpTracker {
             .any(|op| op.as_str() == format!("delete:{}", key))
     }
 
+    #[allow(dead_code)]
     fn count_deleted(&self) -> usize {
         self.operations
             .lock()
@@ -63,6 +68,7 @@ impl CloudOpTracker {
             .count()
     }
 
+    #[allow(dead_code)]
     fn get_operations(&self) -> Vec<String> {
         self.operations.lock().unwrap().clone()
     }
