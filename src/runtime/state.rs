@@ -223,26 +223,7 @@ impl RuntimeState {
         memory_mode: bool,
         recovery_wal_dir: Option<PathBuf>,
     ) -> Self {
-        // Only touch filesystem if not in memory mode
-        if !memory_mode {
-            if let Err(e) = std::fs::create_dir_all(&db_path) {
-                tracing::warn!(error = %e, path = ?db_path, "failed to create database directory");
-            }
-        }
-
-        let wal_dir = db_path.join("wal");
-        if !memory_mode {
-            if let Err(e) = std::fs::create_dir_all(&wal_dir) {
-                tracing::warn!(error = %e, path = ?wal_dir, "failed to create WAL directory");
-            }
-        }
-
-        let sst_dir = db_path.join("sst");
-        if !memory_mode {
-            if let Err(e) = std::fs::create_dir_all(&sst_dir) {
-                tracing::warn!(error = %e, path = ?sst_dir, "failed to create SST directory");
-            }
-        }
+        let (wal_dir, sst_dir) = Self::ensure_directories(&db_path, memory_mode);
 
         // Initialize filesystem abstraction (use MockFs in memory mode)
         let fs: std::sync::Arc<dyn Fs> = if memory_mode {
@@ -422,6 +403,28 @@ impl RuntimeState {
             )),
             ingest_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    fn ensure_directories(
+        db_path: &std::path::Path,
+        memory_mode: bool,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let wal_dir = db_path.join("wal");
+        let sst_dir = db_path.join("sst");
+
+        if !memory_mode {
+            if let Err(e) = std::fs::create_dir_all(db_path) {
+                tracing::warn!(error = %e, path = ?db_path, "failed to create database directory");
+            }
+            if let Err(e) = std::fs::create_dir_all(&wal_dir) {
+                tracing::warn!(error = %e, path = ?wal_dir, "failed to create WAL directory");
+            }
+            if let Err(e) = std::fs::create_dir_all(&sst_dir) {
+                tracing::warn!(error = %e, path = ?sst_dir, "failed to create SST directory");
+            }
+        }
+
+        (wal_dir, sst_dir)
     }
 
     /// Allocate the next sequence number. Saturates at `u64::MAX` to avoid wrap;
