@@ -103,6 +103,8 @@ impl Default for ClockProPolicy {
 
 impl CachePolicy for ClockProPolicy {
     fn on_access(&self, key: CacheKey) {
+        // Lock order: slots, key_to_slot, resident_count, hot_count, hot_target
+        // This order must be consistent across all methods to prevent deadlocks
         let mut slots = self.slots.lock();
         let mut key_to_slot = self.key_to_slot.lock();
         let mut resident_count = self.resident_count.lock();
@@ -137,6 +139,8 @@ impl CachePolicy for ClockProPolicy {
     }
 
     fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
+        // Lock order: slots, key_to_slot, hand, resident_count, hot_count, hot_target
+        // This order must be consistent across all methods to prevent deadlocks
         let mut slots = self.slots.lock();
         let mut key_to_slot = self.key_to_slot.lock();
         let mut hand = self.hand.lock();
@@ -200,12 +204,14 @@ impl CachePolicy for ClockProPolicy {
     }
 
     fn on_remove(&self, key: CacheKey) {
+        // Lock order: slots, key_to_slot, hand, resident_count, hot_count, hot_target
+        // This order must be consistent across all methods to prevent deadlocks
         let mut slots = self.slots.lock();
         let mut key_to_slot = self.key_to_slot.lock();
-        let _hand = self.hand.lock();
+        let hand = self.hand.lock();
         let mut resident_count = self.resident_count.lock();
         let mut hot_count = self.hot_count.lock();
-        let _hot_target = self.hot_target.lock();
+        let hot_target = self.hot_target.lock();
 
         if let Some(slot_idx) = key_to_slot.remove(&key) {
             if slot_idx < slots.len() {
@@ -216,15 +222,20 @@ impl CachePolicy for ClockProPolicy {
                 *resident_count = resident_count.saturating_sub(1);
             }
         }
+        // hand and hot_target locked for consistency but unused in this method
+        drop(hand);
+        drop(hot_target);
     }
 
     fn on_stale(&self, key: CacheKey) {
+        // Lock order: slots, key_to_slot, hand, resident_count, hot_count, hot_target
+        // This order must be consistent across all methods to prevent deadlocks
         let mut slots = self.slots.lock();
         let mut key_to_slot = self.key_to_slot.lock();
         let mut hand = self.hand.lock();
         let mut resident_count = self.resident_count.lock();
         let mut hot_count = self.hot_count.lock();
-        let _hot_target = self.hot_target.lock();
+        let hot_target = self.hot_target.lock();
 
         if let Some(slot_idx) = key_to_slot.remove(&key) {
             if slot_idx < slots.len() {
@@ -238,9 +249,13 @@ impl CachePolicy for ClockProPolicy {
 
         // Advance hand to skip over stale entries
         *hand = (*hand + 1) % slots.len().max(1);
+        // hot_target locked for consistency but unused in this method
+        drop(hot_target);
     }
 
     fn clear(&self) {
+        // Lock order: slots, key_to_slot, hand, resident_count, hot_count, hot_target
+        // This order must be consistent across all methods to prevent deadlocks
         let mut slots = self.slots.lock();
         let mut key_to_slot = self.key_to_slot.lock();
         let mut hand = self.hand.lock();
