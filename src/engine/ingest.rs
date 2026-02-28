@@ -379,7 +379,6 @@ impl IngestCoordinator {
             return Ok(0);
         }
 
-        // Fast path: check cached stall flag
         if self.stall_flag.load(Ordering::Acquire) {
             if let Ok(true) = runtime.check_write_stall(self.cf_id) {
                 return Err(MidgeError::WriteStall(format!(
@@ -390,240 +389,261 @@ impl IngestCoordinator {
             self.stall_flag.store(false, Ordering::Release);
         }
 
-        // Try to acquire leader status
         if self.write_group_coord.try_acquire_leader() {
-            let mut leader_guard = LeaderGuard::new(Arc::clone(&self.write_group_coord));
-
-            // We are the leader: merge this batch with all pending requests
-            self.write_group_coord
-                .leader_runs
-                .fetch_add(1, Ordering::Relaxed);
-
-            let mut initial_intents = Some(intents);
-            let mut initial_result: Option<MidgeResult<u64>> = None;
-
-            loop {
-                let mut pending_requests = Vec::new();
-
-                let (mut all_intents, batch_durability, is_initial_batch) = if let Some(initial) =
-                    initial_intents.take()
-                {
-                    (initial, durability_policy, true)
-                } else {
-                    match self.write_group_coord.pending_queue.1.try_recv() {
-                        Ok(pending) => {
-                            pending_requests.push((pending.result_tx, pending.durability_policy));
-                            (pending.intents, pending.durability_policy, false)
-                        }
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => break,
-                    }
-                };
-
-                if all_intents.is_empty() {
-                    break;
-                }
-
-                // Drain additional pending requests from the queue
-                let drain_start = Instant::now();
-                let adaptive_timeout = self.write_group_coord.get_timeout();
-                loop {
-                    match self.write_group_coord.pending_queue.1.try_recv() {
-                        Ok(pending) => {
-                            all_intents.extend(pending.intents);
-                            pending_requests.push((pending.result_tx, pending.durability_policy));
-                        }
-                        Err(TryRecvError::Empty) => {
-                            if drain_start.elapsed() > adaptive_timeout
-                                || pending_requests.len() >= MAX_GROUPED_BATCHES
-                                || all_intents.len() > MAX_BATCH_OPS
-                            {
-                                break;
-                            }
-                            std::thread::yield_now();
-                        }
-                        Err(TryRecvError::Disconnected) => break,
-                    }
-                }
-
-                self.write_group_coord
-                    .batches_grouped
-                    .fetch_add(pending_requests.len() as u64 + 1, Ordering::Relaxed);
-
-                // Track batch size for adaptive timeout adjustment
-                // batch_size = initial batch (1) + pending_requests drained
-                let batch_size = pending_requests.len() + 1;
-
-                let ops: Vec<TransactionOp> = all_intents
-                    .into_iter()
-                    .map(|op| {
-                        if let Some(value) = op.value {
-                            TransactionOp::Put {
-                                cf_id: op.cf_id,
-                                key: Bytes::from(op.key),
-                                value: Bytes::from(value),
-                                ttl_seconds: op.ttl_seconds,
-                                insert_only: op.insert_only,
-                            }
-                        } else {
-                            TransactionOp::Delete {
-                                cf_id: op.cf_id,
-                                key: Bytes::from(op.key),
-                            }
-                        }
-                    })
-                    .collect();
-
-                let result = match next_request_id() {
-                    Ok(request_id) => runtime
-                        .send_and_wait_timeout(
-                            RuntimeMsg::ApplyTransaction {
-                                request_id,
-                                ops,
-                                durability_policy: batch_durability,
-                            },
-                            WRITE_GROUP_APPLY_TIMEOUT,
-                        )
-                        .and_then(|resp| match resp {
-                            Some(RuntimeResponse::TransactionApplied {
-                                last_sequence,
-                                write_stall_hint,
-                                ..
-                            }) => {
-                                self.stall_flag.store(write_stall_hint, Ordering::Release);
-                                Ok(last_sequence)
-                            }
-                            Some(RuntimeResponse::Error { error, .. }) => Err(error),
-                            Some(_) => Err(MidgeError::Internal(
-                                "Unexpected response to ApplyTransaction".to_string(),
-                            )),
-                            None => Err(MidgeError::Internal(
-                                "Write group commit timed out".to_string(),
-                            )),
-                        }),
-                    Err(err) => Err(err),
-                };
-
-                let error_msg = match &result {
-                    Ok(_) => None,
-                    Err(e) => Some(format!("Write group commit failed: {:?}", e)),
-                };
-
-                for (waiter_tx, _) in pending_requests {
-                    match &result {
-                        Ok(seq) => {
-                            if waiter_tx.send(Ok(*seq)).is_err() {
-                                tracing::warn!(
-                                    cf_id = self.cf_id,
-                                    seq = *seq,
-                                    "failed to send write result to waiter (receiver dropped)"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            let err_msg = error_msg.clone().unwrap_or_default();
-                            if waiter_tx.send(Err(MidgeError::Internal(err_msg))).is_err() {
-                                tracing::warn!(
-                                    cf_id = self.cf_id,
-                                    error = ?e,
-                                    "failed to send error to waiter (receiver dropped)"
-                                );
-                            }
-                        }
-                    }
-                }
-
-                if is_initial_batch {
-                    initial_result = Some(result);
-                }
-
-                // Adapt timeout based on batching effectiveness
-                // Higher batch_size → increase timeout (high concurrency)
-                // Lower batch_size → decrease timeout (low concurrency)
-                self.write_group_coord.adjust_timeout(batch_size);
-            }
-
-            leader_guard.dismiss();
-            self.write_group_coord.release_leader();
-
-            initial_result.unwrap_or_else(|| {
-                Err(MidgeError::Internal(
-                    "Write group leader completed with no result".to_string(),
-                ))
-            })
+            self.drain_as_leader(runtime, intents, durability_policy)
         } else {
-            // We are not the leader: try to enqueue request and wait for leader's response
-            // If queue is full, submit directly to runtime
+            self.submit_as_follower(runtime, intents, durability_policy)
+        }
+    }
 
-            let (result_tx, result_rx) = crossbeam::channel::bounded(1);
+    fn drain_as_leader(
+        &self,
+        runtime: &RuntimeHandle,
+        initial_intents: Vec<BatchWriteOp>,
+        durability_policy: Option<crate::wal::DurabilityPolicy>,
+    ) -> MidgeResult<u64> {
+        let _leader_guard = LeaderGuard::new(Arc::clone(&self.write_group_coord));
 
-            let pending = PendingBatchRequest {
-                intents,
-                durability_policy,
-                result_tx,
+        self.write_group_coord
+            .leader_runs
+            .fetch_add(1, Ordering::Relaxed);
+
+        let mut initial_intents = Some(initial_intents);
+        let mut initial_result: Option<MidgeResult<u64>> = None;
+
+        loop {
+            let mut pending_requests = Vec::new();
+
+            let (mut all_intents, batch_durability, is_initial_batch) = match initial_intents.take()
+            {
+                Some(initial) => (initial, durability_policy, true),
+                None => match self.write_group_coord.pending_queue.1.try_recv() {
+                    Ok(pending) => {
+                        pending_requests.push((pending.result_tx, pending.durability_policy));
+                        (pending.intents, pending.durability_policy, false)
+                    }
+                    Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+                },
             };
 
-            // Try to enqueue request to leader
-            match self.write_group_coord.pending_queue.0.try_send(pending) {
-                Ok(()) => {
-                    // Wait for leader to process and return response
-                    result_rx
-                        .recv_timeout(WRITE_GROUP_WAIT_TIMEOUT)
-                        .map_err(|_| {
-                            MidgeError::Internal("Write grouping leader timed out".to_string())
-                        })
-                        .and_then(|result| result)
-                }
-                Err(crossbeam::channel::TrySendError::Full(pending)) => {
-                    // Queue full - just submit directly (bypass write grouping for this batch)
-                    let intents = pending.intents;
-                    let ops: Vec<TransactionOp> = intents
-                        .into_iter()
-                        .map(|op| {
-                            if let Some(value) = op.value {
-                                TransactionOp::Put {
-                                    cf_id: op.cf_id,
-                                    key: Bytes::from(op.key),
-                                    value: Bytes::from(value),
-                                    ttl_seconds: op.ttl_seconds,
-                                    insert_only: op.insert_only,
-                                }
-                            } else {
-                                TransactionOp::Delete {
-                                    cf_id: op.cf_id,
-                                    key: Bytes::from(op.key),
-                                }
-                            }
-                        })
-                        .collect();
+            if all_intents.is_empty() {
+                break;
+            }
 
-                    let request_id = next_request_id()?;
-                    runtime
-                        .send_and_wait(RuntimeMsg::ApplyTransaction {
-                            request_id,
-                            ops,
-                            durability_policy,
-                        })
-                        .and_then(|resp| match resp {
-                            RuntimeResponse::TransactionApplied {
-                                last_sequence,
-                                write_stall_hint,
-                                ..
-                            } => {
-                                self.stall_flag.store(write_stall_hint, Ordering::Release);
-                                Ok(last_sequence)
-                            }
-                            RuntimeResponse::Error { error, .. } => Err(error),
-                            _ => Err(MidgeError::Internal(
-                                "Unexpected response to ApplyTransaction".to_string(),
-                            )),
-                        })
+            all_intents = self.drain_pending_queue(all_intents, &mut pending_requests);
+
+            if all_intents.is_empty() {
+                break;
+            }
+
+            let batch_size = pending_requests.len() + 1;
+            self.write_group_coord
+                .batches_grouped
+                .fetch_add(pending_requests.len() as u64 + 1, Ordering::Relaxed);
+
+            let ops = Self::convert_to_transaction_ops(all_intents);
+            let result = self.apply_transaction(runtime, ops, batch_durability);
+
+            self.notify_waiters(&pending_requests, &result);
+
+            if is_initial_batch {
+                initial_result = Some(result);
+            }
+
+            self.write_group_coord.adjust_timeout(batch_size);
+        }
+
+        initial_result.unwrap_or_else(|| {
+            Err(MidgeError::Internal(
+                "Write group leader completed with no result".to_string(),
+            ))
+        })
+    }
+
+    fn drain_pending_queue(
+        &self,
+        mut all_intents: Vec<BatchWriteOp>,
+        pending_requests: &mut Vec<(
+            crossbeam::channel::Sender<MidgeResult<u64>>,
+            Option<crate::wal::DurabilityPolicy>,
+        )>,
+    ) -> Vec<BatchWriteOp> {
+        let drain_start = Instant::now();
+        let adaptive_timeout = self.write_group_coord.get_timeout();
+
+        loop {
+            match self.write_group_coord.pending_queue.1.try_recv() {
+                Ok(pending) => {
+                    all_intents.extend(pending.intents);
+                    pending_requests.push((pending.result_tx, pending.durability_policy));
                 }
-                Err(crossbeam::channel::TrySendError::Disconnected(_)) => Err(
-                    MidgeError::Internal("Write grouping coordinator disconnected".to_string()),
-                ),
+                Err(TryRecvError::Empty) => {
+                    if drain_start.elapsed() > adaptive_timeout
+                        || pending_requests.len() >= MAX_GROUPED_BATCHES
+                        || all_intents.len() > MAX_BATCH_OPS
+                    {
+                        break;
+                    }
+                    std::thread::yield_now();
+                }
+                Err(TryRecvError::Disconnected) => break,
             }
         }
+
+        all_intents
+    }
+
+    fn apply_transaction(
+        &self,
+        runtime: &RuntimeHandle,
+        ops: Vec<TransactionOp>,
+        durability_policy: Option<crate::wal::DurabilityPolicy>,
+    ) -> MidgeResult<u64> {
+        let request_id = next_request_id()?;
+        runtime
+            .send_and_wait_timeout(
+                RuntimeMsg::ApplyTransaction {
+                    request_id,
+                    ops,
+                    durability_policy,
+                },
+                WRITE_GROUP_APPLY_TIMEOUT,
+            )
+            .and_then(|resp| match resp {
+                Some(RuntimeResponse::TransactionApplied {
+                    last_sequence,
+                    write_stall_hint,
+                    ..
+                }) => {
+                    self.stall_flag.store(write_stall_hint, Ordering::Release);
+                    Ok(last_sequence)
+                }
+                Some(RuntimeResponse::Error { error, .. }) => Err(error),
+                Some(_) => Err(MidgeError::Internal(
+                    "Unexpected response to ApplyTransaction".to_string(),
+                )),
+                None => Err(MidgeError::Internal(
+                    "Write group commit timed out".to_string(),
+                )),
+            })
+    }
+
+    fn notify_waiters(
+        &self,
+        pending_requests: &Vec<(
+            crossbeam::channel::Sender<MidgeResult<u64>>,
+            Option<crate::wal::DurabilityPolicy>,
+        )>,
+        result: &MidgeResult<u64>,
+    ) {
+        let error_msg = match result {
+            Ok(_) => None,
+            Err(e) => Some(format!("Write group commit failed: {:?}", e)),
+        };
+
+        for (waiter_tx, _) in pending_requests {
+            match result {
+                Ok(seq) => {
+                    if waiter_tx.send(Ok(*seq)).is_err() {
+                        tracing::warn!(
+                            cf_id = self.cf_id,
+                            seq = *seq,
+                            "failed to send write result to waiter (receiver dropped)"
+                        );
+                    }
+                }
+                Err(_) => {
+                    let err_msg = error_msg.clone().unwrap_or_default();
+                    if waiter_tx.send(Err(MidgeError::Internal(err_msg))).is_err() {
+                        tracing::warn!(
+                            cf_id = self.cf_id,
+                            "failed to send error to waiter (receiver dropped)"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn submit_as_follower(
+        &self,
+        runtime: &RuntimeHandle,
+        intents: Vec<BatchWriteOp>,
+        durability_policy: Option<crate::wal::DurabilityPolicy>,
+    ) -> MidgeResult<u64> {
+        let (result_tx, result_rx) = crossbeam::channel::bounded(1);
+
+        let pending = PendingBatchRequest {
+            intents,
+            durability_policy,
+            result_tx,
+        };
+
+        match self.write_group_coord.pending_queue.0.try_send(pending) {
+            Ok(()) => result_rx
+                .recv_timeout(WRITE_GROUP_WAIT_TIMEOUT)
+                .map_err(|_| MidgeError::Internal("Write grouping leader timed out".to_string()))
+                .and_then(|result| result),
+            Err(crossbeam::channel::TrySendError::Full(pending)) => {
+                self.submit_direct(runtime, pending.intents, pending.durability_policy)
+            }
+            Err(crossbeam::channel::TrySendError::Disconnected(_)) => Err(MidgeError::Internal(
+                "Write grouping coordinator disconnected".to_string(),
+            )),
+        }
+    }
+
+    fn submit_direct(
+        &self,
+        runtime: &RuntimeHandle,
+        intents: Vec<BatchWriteOp>,
+        durability_policy: Option<crate::wal::DurabilityPolicy>,
+    ) -> MidgeResult<u64> {
+        let ops = Self::convert_to_transaction_ops(intents);
+        let request_id = next_request_id()?;
+
+        runtime
+            .send_and_wait(RuntimeMsg::ApplyTransaction {
+                request_id,
+                ops,
+                durability_policy,
+            })
+            .and_then(|resp| match resp {
+                RuntimeResponse::TransactionApplied {
+                    last_sequence,
+                    write_stall_hint,
+                    ..
+                } => {
+                    self.stall_flag.store(write_stall_hint, Ordering::Release);
+                    Ok(last_sequence)
+                }
+                RuntimeResponse::Error { error, .. } => Err(error),
+                _ => Err(MidgeError::Internal(
+                    "Unexpected response to ApplyTransaction".to_string(),
+                )),
+            })
+    }
+
+    fn convert_to_transaction_ops(intents: Vec<BatchWriteOp>) -> Vec<TransactionOp> {
+        intents
+            .into_iter()
+            .map(|op| {
+                if let Some(value) = op.value {
+                    TransactionOp::Put {
+                        cf_id: op.cf_id,
+                        key: Bytes::from(op.key),
+                        value: Bytes::from(value),
+                        ttl_seconds: op.ttl_seconds,
+                        insert_only: op.insert_only,
+                    }
+                } else {
+                    TransactionOp::Delete {
+                        cf_id: op.cf_id,
+                        key: Bytes::from(op.key),
+                    }
+                }
+            })
+            .collect()
     }
 
     /// Ingest loop: batches writes and commits them
