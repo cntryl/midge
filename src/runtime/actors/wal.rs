@@ -707,12 +707,11 @@ impl WalActor {
         // Marker key is unused by semantics but required by the record format.
         let marker_key = Bytes::from_static(b"txn");
 
-        // Preallocate sequence range for batch: begin, per-op, commit
-        // Note: ops_count > 0 is guaranteed by early return check above
+        // Preallocate sequence range for batch: begin, per-op, commit.
         let ops_count = ops.len();
         debug_assert!(
             ops_count > 0,
-            "ops.is_empty() check should have returned early"
+            "append_transaction requires at least one operation"
         );
         let ops_count_u64 = ops_count as u64;
         // sequences: begin_seq, op_seqs[0..ops_count-1], commit_seq

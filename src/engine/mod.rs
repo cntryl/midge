@@ -371,17 +371,14 @@ impl Engine {
         tracing::info!(db_path = %db_path.display(), open_ms = start.elapsed().as_secs_f64() * 1000.0, "engine open completed");
 
         // Load existing CFs from manifest
-        let manifest = match crate::metadata::ManifestPersistence::load(&db_path) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!(
-                    db_path = %db_path.display(),
-                    error = %e,
-                    "failed to load manifest, starting with empty state"
-                );
-                crate::metadata::Manifest::default()
-            }
-        };
+        let manifest = crate::metadata::ManifestPersistence::load(&db_path).map_err(|e| {
+            tracing::error!(
+                db_path = %db_path.display(),
+                error = %e,
+                "failed to load manifest"
+            );
+            crate::common::MidgeError::Internal(format!("failed to load manifest: {e}"))
+        })?;
         for cf_meta in &manifest.column_families {
             if cf_meta.id != 0 && cf_meta.deleted_at.is_none() {
                 let handle = ColumnFamilyHandle::new(cf_meta.id, cf_meta.name.clone());
