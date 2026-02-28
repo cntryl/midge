@@ -8,6 +8,27 @@ use super::super::{RuntimeMsg, RuntimeResponse};
 use super::EventLoop;
 use crossbeam::channel::{Receiver, TryRecvError};
 
+enum WriteResult {
+    WalAppend {
+        sequence: u64,
+        deferred: bool,
+    },
+    TransactionApplied {
+        last_sequence: u64,
+        op_count: usize,
+        deferred: bool,
+    },
+}
+
+impl WriteResult {
+    fn deferred(&self) -> bool {
+        match self {
+            WriteResult::WalAppend { deferred, .. } => *deferred,
+            WriteResult::TransactionApplied { deferred, .. } => *deferred,
+        }
+    }
+}
+
 impl EventLoop {
     pub(super) fn wake_write_stall_waiters(&mut self) {
         // Avoid borrowing issues by snapshotting keys.
@@ -84,42 +105,15 @@ impl EventLoop {
 
                     match result {
                         Ok((seq, deferred)) => {
-                            // Publish snapshot BEFORE responding.
-                            self.publish_snapshot();
-
-                            if self.should_ack_immediately(deferred) {
-                                if deferred {
-                                    self.maybe_queue_confirm_only_waiter(
-                                        deferred, request_id, false,
-                                    );
-                                } else {
-                                    // Already durable; confirm idempotency allocations now.
-                                    self.state.confirm_sequences(request_id);
-                                }
-
-                                self.respond(
-                                    request_id,
-                                    RuntimeResponse::WalAppended {
-                                        request_id,
-                                        sequence: seq,
-                                    },
-                                );
-                            } else {
-                                self.durability.queue_waiter(DurabilityWaiter::WalAppend {
-                                    request_id,
-                                    sequence: seq,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            self.respond(
+                            self.handle_write_success(
                                 request_id,
-                                RuntimeResponse::Error {
-                                    request_id,
-                                    error: e,
+                                WriteResult::WalAppend {
+                                    sequence: seq,
+                                    deferred,
                                 },
                             );
                         }
+                        Err(e) => self.handle_write_error(request_id, e),
                     }
 
                     drained += 1;
@@ -140,41 +134,15 @@ impl EventLoop {
 
                     match result {
                         Ok((seq, deferred)) => {
-                            // Publish snapshot BEFORE responding.
-                            self.publish_snapshot();
-
-                            if self.should_ack_immediately(deferred) {
-                                if deferred {
-                                    self.maybe_queue_confirm_only_waiter(
-                                        deferred, request_id, false,
-                                    );
-                                } else {
-                                    self.state.confirm_sequences(request_id);
-                                }
-
-                                self.respond(
-                                    request_id,
-                                    RuntimeResponse::WalAppended {
-                                        request_id,
-                                        sequence: seq,
-                                    },
-                                );
-                            } else {
-                                self.durability.queue_waiter(DurabilityWaiter::WalAppend {
-                                    request_id,
-                                    sequence: seq,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            self.respond(
+                            self.handle_write_success(
                                 request_id,
-                                RuntimeResponse::Error {
-                                    request_id,
-                                    error: e,
+                                WriteResult::WalAppend {
+                                    sequence: seq,
+                                    deferred,
                                 },
                             );
                         }
+                        Err(e) => self.handle_write_error(request_id, e),
                     }
 
                     drained += 1;
@@ -192,46 +160,16 @@ impl EventLoop {
                         durability_policy,
                     ) {
                         Ok((last_sequence, op_count, deferred)) => {
-                            // Publish snapshot BEFORE responding so callers see the write.
-                            self.publish_snapshot();
-
-                            if self.should_ack_immediately(deferred) {
-                                if deferred {
-                                    self.maybe_queue_confirm_only_waiter(
-                                        deferred, request_id, true,
-                                    );
-                                } else {
-                                    self.state.clear_pending_transaction_barrier();
-                                    self.state.confirm_sequences(request_id);
-                                }
-
-                                self.respond(
-                                    request_id,
-                                    RuntimeResponse::TransactionApplied {
-                                        request_id,
-                                        last_sequence,
-                                        op_count,
-                                        write_stall_hint: self.state.should_stall_writes(0),
-                                    },
-                                );
-                            } else {
-                                self.durability
-                                    .queue_waiter(DurabilityWaiter::TransactionApply {
-                                        request_id,
-                                        last_sequence,
-                                        op_count,
-                                    });
-                            }
-                        }
-                        Err(e) => {
-                            self.respond(
+                            self.handle_write_success(
                                 request_id,
-                                RuntimeResponse::Error {
-                                    request_id,
-                                    error: e,
+                                WriteResult::TransactionApplied {
+                                    last_sequence,
+                                    op_count,
+                                    deferred,
                                 },
                             );
                         }
+                        Err(e) => self.handle_write_error(request_id, e),
                     }
 
                     drained += 1;
@@ -293,5 +231,74 @@ impl EventLoop {
         }
 
         drained
+    }
+
+    fn handle_write_success(&mut self, request_id: u64, result: WriteResult) {
+        self.publish_snapshot();
+
+        let is_transaction = matches!(result, WriteResult::TransactionApplied { .. });
+        let deferred = result.deferred();
+        if self.should_ack_immediately(deferred) {
+            if deferred {
+                self.maybe_queue_confirm_only_waiter(deferred, request_id, is_transaction);
+            } else {
+                if is_transaction {
+                    self.state.clear_pending_transaction_barrier();
+                }
+                self.state.confirm_sequences(request_id);
+            }
+
+            match result {
+                WriteResult::WalAppend { sequence, .. } => {
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::WalAppended {
+                            request_id,
+                            sequence,
+                        },
+                    );
+                }
+                WriteResult::TransactionApplied {
+                    last_sequence,
+                    op_count,
+                    ..
+                } => {
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::TransactionApplied {
+                            request_id,
+                            last_sequence,
+                            op_count,
+                            write_stall_hint: self.state.should_stall_writes(0),
+                        },
+                    );
+                }
+            }
+        } else {
+            match result {
+                WriteResult::WalAppend { sequence, .. } => {
+                    self.durability.queue_waiter(DurabilityWaiter::WalAppend {
+                        request_id,
+                        sequence,
+                    });
+                }
+                WriteResult::TransactionApplied {
+                    last_sequence,
+                    op_count,
+                    ..
+                } => {
+                    self.durability
+                        .queue_waiter(DurabilityWaiter::TransactionApply {
+                            request_id,
+                            last_sequence,
+                            op_count,
+                        });
+                }
+            }
+        }
+    }
+
+    fn handle_write_error(&mut self, request_id: u64, error: crate::common::MidgeError) {
+        self.respond(request_id, RuntimeResponse::Error { request_id, error });
     }
 }

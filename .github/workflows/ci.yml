@@ -2,6 +2,8 @@ name: CI
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"  # Runs daily at midnight UTC
   push:
     branches: [main]
     paths:
@@ -32,6 +34,11 @@ jobs:
 
       - name: Update Rust toolchain
         run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci"
 
       - name: Validate Test Structure
         run: python ./scripts/validate_tests.py --summary

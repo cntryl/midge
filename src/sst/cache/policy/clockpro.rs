@@ -105,17 +105,21 @@ impl CachePolicy for ClockProPolicy {
     fn on_access(&self, key: CacheKey) {
         let mut slots = self.slots.lock();
         let mut key_to_slot = self.key_to_slot.lock();
-        let hot_target = self.hot_target.lock();
 
         if let Some(&slot_idx) = key_to_slot.get(&key) {
             // Existing entry: set reference bit and promote to hot if cold
             if slot_idx < slots.len() {
+                slots[slot_idx].ref_bit = true;
                 let was_cold = !slots[slot_idx].hot_bit;
 
                 // Promote cold → hot on access if hot set not full
-                if was_cold && *self.hot_count.lock() < *hot_target {
-                    slots[slot_idx].hot_bit = true;
-                    *self.hot_count.lock() += 1;
+                if was_cold {
+                    let mut hot_count = self.hot_count.lock();
+                    let hot_target = self.hot_target.lock();
+                    if *hot_count < *hot_target {
+                        slots[slot_idx].hot_bit = true;
+                        *hot_count += 1;
+                    }
                 }
             }
         } else {
@@ -130,11 +134,14 @@ impl CachePolicy for ClockProPolicy {
             };
 
             key_to_slot.insert(key, slot_idx);
-            *self.resident_count.lock() += 1;
+            let mut resident_count = self.resident_count.lock();
+            *resident_count += 1;
         }
     }
 
     fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
+        // Lock order: slots, key_to_slot, hand, resident_count, hot_count, hot_target
+        // This order must be consistent across all methods to prevent deadlocks
         let mut slots = self.slots.lock();
         let mut key_to_slot = self.key_to_slot.lock();
         let mut hand = self.hand.lock();
@@ -200,8 +207,8 @@ impl CachePolicy for ClockProPolicy {
     fn on_remove(&self, key: CacheKey) {
         let mut slots = self.slots.lock();
         let mut key_to_slot = self.key_to_slot.lock();
-        let mut hot_count = self.hot_count.lock();
         let mut resident_count = self.resident_count.lock();
+        let mut hot_count = self.hot_count.lock();
 
         if let Some(slot_idx) = key_to_slot.remove(&key) {
             if slot_idx < slots.len() {
@@ -215,13 +222,11 @@ impl CachePolicy for ClockProPolicy {
     }
 
     fn on_stale(&self, key: CacheKey) {
-        // Advance hand when encountering stale entries
-        // Treat as evicted test entry - clean up tracking
         let mut slots = self.slots.lock();
         let mut key_to_slot = self.key_to_slot.lock();
-        let mut hot_count = self.hot_count.lock();
-        let mut resident_count = self.resident_count.lock();
         let mut hand = self.hand.lock();
+        let mut resident_count = self.resident_count.lock();
+        let mut hot_count = self.hot_count.lock();
 
         if let Some(slot_idx) = key_to_slot.remove(&key) {
             if slot_idx < slots.len() {
@@ -238,11 +243,29 @@ impl CachePolicy for ClockProPolicy {
     }
 
     fn clear(&self) {
-        self.slots.lock().clear();
-        self.key_to_slot.lock().clear();
-        *self.hand.lock() = 0;
-        *self.resident_count.lock() = 0;
-        *self.hot_count.lock() = 0;
+        let mut slots = self.slots.lock();
+        let mut key_to_slot = self.key_to_slot.lock();
+        let mut hand = self.hand.lock();
+        let mut resident_count = self.resident_count.lock();
+        let mut hot_count = self.hot_count.lock();
+        let mut hot_target = self.hot_target.lock();
+
+        // Preserve capacity so we can recompute a reasonable hot_target.
+        let capacity = slots.capacity();
+
+        slots.clear();
+        key_to_slot.clear();
+        *hand = 0;
+        *resident_count = 0;
+        *hot_count = 0;
+
+        // After clear, approximate the initial hot_target based on capacity.
+        // For non-zero capacity, keep at least one hot slot (25% of capacity, min 1).
+        if capacity == 0 {
+            *hot_target = 0;
+        } else {
+            *hot_target = capacity.max(4) / 4;
+        }
     }
 }
 

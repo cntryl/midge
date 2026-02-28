@@ -707,8 +707,12 @@ impl WalActor {
         // Marker key is unused by semantics but required by the record format.
         let marker_key = Bytes::from_static(b"txn");
 
-        // Preallocate sequence range for batch: begin, per-op, commit
+        // Preallocate sequence range for batch: begin, per-op, commit.
         let ops_count = ops.len();
+        debug_assert!(
+            ops_count > 0,
+            "append_transaction requires at least one operation"
+        );
         let ops_count_u64 = ops_count as u64;
         // sequences: begin_seq, op_seqs[0..ops_count-1], commit_seq
         let begin_seq = state.sequence + 1;
@@ -733,12 +737,9 @@ impl WalActor {
         // Determine effective durability policy: use provided one, or fall back to actor's default
         let effective_durability = durability_policy.unwrap_or(self.durability_policy);
 
-        // Build apply_ops for memtable updates (always needed)
-        let mut apply_ops: Vec<TransactionApplyOp> = Vec::with_capacity(ops_count);
-        let mut total_wal_bytes: usize = 0;
-
         // For BestEffort mode, skip WAL entirely - only update memtable
         let skip_wal = matches!(effective_durability, DurabilityPolicy::BestEffort);
+        let mut total_wal_bytes: usize = 0;
 
         // Build op records and apply_ops using deterministic sequences
         let mut wal_records: Vec<WalRecord> = if skip_wal {
@@ -761,91 +762,8 @@ impl WalActor {
             records
         };
 
-        // Build op records using deterministic sequences
-        for (i, op) in ops.into_iter().enumerate() {
-            let seq = first_op_seq + i as u64;
-            match op {
-                crate::runtime::TransactionOp::Put {
-                    cf_id,
-                    key,
-                    value,
-                    ttl_seconds,
-                    insert_only,
-                } => {
-                    let op_kind = if insert_only {
-                        WalOpKind::Insert
-                    } else {
-                        WalOpKind::Put
-                    };
-
-                    let mut record = match ttl_seconds {
-                        Some(ttl) if ttl > 0 => WalRecord::new_with_ttl(
-                            cf_id,
-                            op_kind,
-                            key.clone(),
-                            Some(value.clone()),
-                            seq,
-                            ttl,
-                            self.current_epoch,
-                        ),
-                        _ => WalRecord::new_cf(
-                            cf_id,
-                            op_kind,
-                            key.clone(),
-                            Some(value.clone()),
-                            seq,
-                            self.current_epoch,
-                        ),
-                    };
-                    record.txn_id = Some(txn_id);
-
-                    // Log seq allocation for this CF (deferred)
-                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
-                        seqno: seq,
-                        cf_id,
-                    });
-
-                    apply_ops.push(TransactionApplyOp::Put {
-                        cf_id,
-                        key,
-                        value,
-                        expiration: record.expiration,
-                        sequence: seq,
-                    });
-
-                    if !skip_wal {
-                        wal_records.push(record);
-                    }
-                }
-                crate::runtime::TransactionOp::Delete { cf_id, key } => {
-                    let mut record = WalRecord::new_cf(
-                        cf_id,
-                        WalOpKind::Delete,
-                        key.clone(),
-                        None,
-                        seq,
-                        self.current_epoch,
-                    );
-                    record.txn_id = Some(txn_id);
-
-                    // Log seq allocation for this CF (deferred)
-                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
-                        seqno: seq,
-                        cf_id,
-                    });
-
-                    apply_ops.push(TransactionApplyOp::Delete {
-                        cf_id,
-                        key,
-                        sequence: seq,
-                    });
-
-                    if !skip_wal {
-                        wal_records.push(record);
-                    }
-                }
-            }
-        }
+        let apply_ops =
+            self.build_apply_ops(ops, first_op_seq, txn_id, state, skip_wal, &mut wal_records);
 
         // Write commit record (only if not skipping WAL)
         if !skip_wal {
@@ -924,7 +842,7 @@ impl WalActor {
             }
         }
 
-        if self.is_cloud_first() {
+        if matches!(effective_durability, DurabilityPolicy::CloudFirst) {
             // === CRITICAL: Check backpressure before queueing batch ===
             if self.should_apply_backpressure() {
                 tracing::warn!(
@@ -995,44 +913,142 @@ impl WalActor {
                 "Applied batch to memtable (CloudFirst)"
             );
         } else {
-            // Apply to memtables in-order (atomic visibility within the actor).
-            for apply_op in apply_ops {
-                match apply_op {
-                    TransactionApplyOp::Put {
-                        cf_id,
-                        key,
-                        value,
-                        expiration,
-                        sequence,
-                    } => {
-                        self.apply_to_memtable(
-                            state,
-                            sequence,
-                            cf_id,
-                            key,
-                            Some(value),
-                            expiration,
-                        )?;
-                    }
-                    TransactionApplyOp::Delete {
-                        cf_id,
-                        key,
-                        sequence,
-                    } => {
-                        self.apply_to_memtable(state, sequence, cf_id, key, None, None)?;
-                    }
-                }
-            }
+            self.apply_ops_to_memtables(state, apply_ops)?;
         }
 
         tracing::trace!(txn_id, last_sequence, op_count, "WAL transaction apply");
 
         // Return deferred=true if using group commit (Batched or CloudFirst modes)
         let deferred = matches!(
-            self.durability_policy,
+            effective_durability,
             DurabilityPolicy::Batched | DurabilityPolicy::CloudFirst
         );
         Ok((last_sequence, op_count, deferred))
+    }
+
+    fn build_apply_ops(
+        &mut self,
+        ops: Vec<crate::runtime::TransactionOp>,
+        first_op_seq: u64,
+        txn_id: u64,
+        state: &mut RuntimeState,
+        skip_wal: bool,
+        wal_records: &mut Vec<WalRecord>,
+    ) -> Vec<TransactionApplyOp> {
+        let mut apply_ops = Vec::with_capacity(ops.len());
+
+        for (i, op) in ops.into_iter().enumerate() {
+            let seq = first_op_seq + i as u64;
+            match op {
+                crate::runtime::TransactionOp::Put {
+                    cf_id,
+                    key,
+                    value,
+                    ttl_seconds,
+                    insert_only,
+                } => {
+                    let op_kind = if insert_only {
+                        WalOpKind::Insert
+                    } else {
+                        WalOpKind::Put
+                    };
+
+                    let mut record = match ttl_seconds {
+                        Some(ttl) if ttl > 0 => WalRecord::new_with_ttl(
+                            cf_id,
+                            op_kind,
+                            key.clone(),
+                            Some(value.clone()),
+                            seq,
+                            ttl,
+                            self.current_epoch,
+                        ),
+                        _ => WalRecord::new_cf(
+                            cf_id,
+                            op_kind,
+                            key.clone(),
+                            Some(value.clone()),
+                            seq,
+                            self.current_epoch,
+                        ),
+                    };
+                    record.txn_id = Some(txn_id);
+
+                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
+                        seqno: seq,
+                        cf_id,
+                    });
+
+                    apply_ops.push(TransactionApplyOp::Put {
+                        cf_id,
+                        key,
+                        value,
+                        expiration: record.expiration,
+                        sequence: seq,
+                    });
+
+                    if !skip_wal {
+                        wal_records.push(record);
+                    }
+                }
+                crate::runtime::TransactionOp::Delete { cf_id, key } => {
+                    let mut record = WalRecord::new_cf(
+                        cf_id,
+                        WalOpKind::Delete,
+                        key.clone(),
+                        None,
+                        seq,
+                        self.current_epoch,
+                    );
+                    record.txn_id = Some(txn_id);
+
+                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
+                        seqno: seq,
+                        cf_id,
+                    });
+
+                    apply_ops.push(TransactionApplyOp::Delete {
+                        cf_id,
+                        key,
+                        sequence: seq,
+                    });
+
+                    if !skip_wal {
+                        wal_records.push(record);
+                    }
+                }
+            }
+        }
+
+        apply_ops
+    }
+
+    fn apply_ops_to_memtables(
+        &mut self,
+        state: &mut RuntimeState,
+        apply_ops: Vec<TransactionApplyOp>,
+    ) -> MidgeResult<()> {
+        for apply_op in apply_ops {
+            match apply_op {
+                TransactionApplyOp::Put {
+                    cf_id,
+                    key,
+                    value,
+                    expiration,
+                    sequence,
+                } => {
+                    self.apply_to_memtable(state, sequence, cf_id, key, Some(value), expiration)?;
+                }
+                TransactionApplyOp::Delete {
+                    cf_id,
+                    key,
+                    sequence,
+                } => {
+                    self.apply_to_memtable(state, sequence, cf_id, key, None, None)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Checks current in-memory view (active + immutable memtables) for existence
