@@ -200,8 +200,10 @@ impl CachePolicy for ClockProPolicy {
     fn on_remove(&self, key: CacheKey) {
         let mut slots = self.slots.lock();
         let mut key_to_slot = self.key_to_slot.lock();
-        let mut hot_count = self.hot_count.lock();
+        let _hand = self.hand.lock();
         let mut resident_count = self.resident_count.lock();
+        let mut hot_count = self.hot_count.lock();
+        let _hot_target = self.hot_target.lock();
 
         if let Some(slot_idx) = key_to_slot.remove(&key) {
             if slot_idx < slots.len() {
@@ -215,13 +217,12 @@ impl CachePolicy for ClockProPolicy {
     }
 
     fn on_stale(&self, key: CacheKey) {
-        // Advance hand when encountering stale entries
-        // Treat as evicted test entry - clean up tracking
         let mut slots = self.slots.lock();
         let mut key_to_slot = self.key_to_slot.lock();
-        let mut hot_count = self.hot_count.lock();
-        let mut resident_count = self.resident_count.lock();
         let mut hand = self.hand.lock();
+        let mut resident_count = self.resident_count.lock();
+        let mut hot_count = self.hot_count.lock();
+        let _hot_target = self.hot_target.lock();
 
         if let Some(slot_idx) = key_to_slot.remove(&key) {
             if slot_idx < slots.len() {
@@ -238,11 +239,19 @@ impl CachePolicy for ClockProPolicy {
     }
 
     fn clear(&self) {
-        self.slots.lock().clear();
-        self.key_to_slot.lock().clear();
-        *self.hand.lock() = 0;
-        *self.resident_count.lock() = 0;
-        *self.hot_count.lock() = 0;
+        let mut slots = self.slots.lock();
+        let mut key_to_slot = self.key_to_slot.lock();
+        let mut hand = self.hand.lock();
+        let mut resident_count = self.resident_count.lock();
+        let mut hot_count = self.hot_count.lock();
+        let mut hot_target = self.hot_target.lock();
+
+        slots.clear();
+        key_to_slot.clear();
+        *hand = 0;
+        *resident_count = 0;
+        *hot_count = 0;
+        *hot_target = 0;
     }
 }
 

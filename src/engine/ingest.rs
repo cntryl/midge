@@ -207,11 +207,11 @@ impl WriteIntent {
     }
 
     fn to_transaction_op(&self) -> TransactionOp {
-        if self.value.is_some() {
+        if let Some(value) = &self.value {
             TransactionOp::Put {
                 cf_id: self.cf_id,
                 key: self.key.clone(),
-                value: self.value.clone().expect("value is_some checked above"),
+                value: value.clone(),
                 ttl_seconds: self.ttl_seconds,
                 insert_only: self.insert_only,
             }
@@ -512,12 +512,23 @@ impl IngestCoordinator {
                 for (waiter_tx, _) in pending_requests {
                     match &result {
                         Ok(seq) => {
-                            let _ = waiter_tx.send(Ok(*seq));
+                            if waiter_tx.send(Ok(*seq)).is_err() {
+                                tracing::warn!(
+                                    cf_id = self.cf_id,
+                                    seq = *seq,
+                                    "failed to send write result to waiter (receiver dropped)"
+                                );
+                            }
                         }
-                        Err(_) => {
-                            let _ = waiter_tx.send(Err(MidgeError::Internal(
-                                error_msg.clone().unwrap_or_default(),
-                            )));
+                        Err(e) => {
+                            let err_msg = error_msg.clone().unwrap_or_default();
+                            if waiter_tx.send(Err(MidgeError::Internal(err_msg))).is_err() {
+                                tracing::warn!(
+                                    cf_id = self.cf_id,
+                                    error = ?e,
+                                    "failed to send error to waiter (receiver dropped)"
+                                );
+                            }
                         }
                     }
                 }
@@ -765,7 +776,19 @@ impl IngestCoordinator {
             .map(|i| i.to_transaction_op())
             .collect();
 
-        let request_id = next_request_id().expect("request ID in commit_batch");
+        let request_id = match next_request_id() {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!(cf_id = cf_id, error = %e, "request ID space exhausted");
+                for intent in batch.intents.drain(..) {
+                    let _ = intent.result_tx.send(Err(MidgeError::Internal(
+                        "request ID space exhausted".to_string(),
+                    )));
+                }
+                batch.clear();
+                return;
+            }
+        };
 
         // Fast path: check cached stall flag (avoids round-trip in common case)
         // The flag is updated by runtime when memtable pressure changes.
@@ -827,16 +850,22 @@ impl IngestCoordinator {
             Ok(last_seq) => {
                 // Success: notify all callers with final sequence
                 for intent in batch.intents.drain(..) {
-                    let _ = intent.result_tx.send(Ok(last_seq));
+                    if intent.result_tx.send(Ok(last_seq)).is_err() {
+                        tracing::debug!("failed to send result to waiter (receiver dropped)");
+                    }
                 }
             }
             Err(e) => {
                 // Failure: propagate error to all callers
                 let err_msg = format!("Batch commit failed: {:?}", e);
                 for intent in batch.intents.drain(..) {
-                    let _ = intent
+                    if intent
                         .result_tx
-                        .send(Err(MidgeError::Internal(err_msg.clone())));
+                        .send(Err(MidgeError::Internal(err_msg.clone())))
+                        .is_err()
+                    {
+                        tracing::debug!("failed to send error to waiter (receiver dropped)");
+                    }
                 }
             }
         }

@@ -708,11 +708,12 @@ impl WalActor {
         let marker_key = Bytes::from_static(b"txn");
 
         // Preallocate sequence range for batch: begin, per-op, commit
+        // When ops_count = 0: begin_seq, commit_seq (empty transaction is valid)
         let ops_count = ops.len();
         let ops_count_u64 = ops_count as u64;
         // sequences: begin_seq, op_seqs[0..ops_count-1], commit_seq
         let begin_seq = state.sequence + 1;
-        let first_op_seq = begin_seq + 1;
+        let first_op_seq = begin_seq + 1; // unused if ops_count == 0
         let commit_seq = begin_seq + 1 + ops_count_u64;
 
         // Advance global sequence to commit_seq

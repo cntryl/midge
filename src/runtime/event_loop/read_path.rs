@@ -376,13 +376,12 @@ impl EventLoop {
             }
 
             for (key, value) in by_key.iter() {
-                if value.is_none() {
-                    continue; // tombstone
-                }
-                let in_start = start_opt.is_none_or(|s| key.as_slice() >= s);
-                let in_end = end_opt.is_none_or(|e| key.as_slice() < e);
-                if in_start && in_end {
-                    results.insert(key.clone(), value.clone().expect("value already checked"));
+                if let Some(v) = value {
+                    let in_start = start_opt.is_none_or(|s| key.as_slice() >= s);
+                    let in_end = end_opt.is_none_or(|e| key.as_slice() < e);
+                    if in_start && in_end {
+                        results.insert(key.clone(), v.clone());
+                    }
                 }
             }
         }
@@ -397,13 +396,12 @@ impl EventLoop {
         }
 
         for (key, value) in by_key.iter() {
-            if value.is_none() {
-                continue;
-            }
-            let in_start = start_opt.is_none_or(|s| key.as_slice() >= s);
-            let in_end = end_opt.is_none_or(|e| key.as_slice() < e);
-            if in_start && in_end {
-                results.insert(key.clone(), value.clone().expect("value already checked"));
+            if let Some(v) = value {
+                let in_start = start_opt.is_none_or(|s| key.as_slice() >= s);
+                let in_end = end_opt.is_none_or(|e| key.as_slice() < e);
+                if in_start && in_end {
+                    results.insert(key.clone(), v.clone());
+                }
             }
         }
 

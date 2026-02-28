@@ -40,13 +40,13 @@ pub fn encode_varint_with_tag(buf: &mut BytesMut, tag: u8, mut value: u32) {
 
 /// Encode arbitrary bytes with a tag and length prefix
 #[inline]
-pub fn encode_bytes_with_tag(buf: &mut BytesMut, tag: u8, data: &[u8]) {
+pub fn encode_bytes_with_tag(buf: &mut BytesMut, tag: u8, data: &[u8]) -> MidgeResult<()> {
     buf.put_u8(tag);
-    // Defensive check — lengths larger than u32::MAX are unsupported and would truncate.
-    debug_assert!(data.len() <= u32::MAX as usize, "TLV value too large");
-    let len32 = u32::try_from(data.len()).expect("TLV value too large");
+    let len32 = u32::try_from(data.len())
+        .map_err(|_| MidgeError::Internal("TLV value too large: exceeds u32::MAX".to_string()))?;
     encode_varint32(buf, len32);
     buf.put_slice(data);
+    Ok(())
 }
 
 /// Encode a u64 with a tag and length prefix
@@ -208,7 +208,7 @@ mod tests {
         let data = b"hello";
 
         // Act
-        encode_bytes_with_tag(&mut buf, 5, data);
+        encode_bytes_with_tag(&mut buf, 5, data).unwrap();
         let (tag, value, consumed) = decode_tlv_field(&buf).unwrap();
 
         // Assert
@@ -224,7 +224,7 @@ mod tests {
         let data = vec![0u8; 300];
 
         // Act
-        encode_bytes_with_tag(&mut buf, 9, &data);
+        encode_bytes_with_tag(&mut buf, 9, &data).unwrap();
         let (tag, value, consumed) = decode_tlv_field(&buf).unwrap();
 
         // Assert
