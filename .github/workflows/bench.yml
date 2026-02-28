@@ -26,6 +26,11 @@ jobs:
       - name: Update Rust toolchain
         run: rustup update stable
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "bench"
+
       - name: Build all benchmarks
         run: cargo bench --no-run
 
