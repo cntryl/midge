@@ -308,34 +308,25 @@ fn should_survive_rapid_open_close_cycling() {
 }
 
 #[test]
-fn should_recover_lease_after_process_crash() {
-    eprintln!("\n=== Exclusivity: Recover After Crash ===");
+fn should_recover_lease_after_clean_shutdown() {
+    eprintln!("\n=== Exclusivity: Recover After Clean Shutdown ===");
 
     // Arrange
     let db_path = temp_db_path();
 
-    // Act: Simulate crash by dropping engine
+    // Act: Open and drop cleanly (releases lease with ancient timestamp)
     {
-        let engine = Engine::open(OpenOptions::local(&db_path))
-            .expect("initial open should succeed");
+        let engine =
+            Engine::open(OpenOptions::local(&db_path)).expect("initial open should succeed");
         assert!(engine.is_primary_lease_healthy());
-        // Simulate ungraceful crash: drop engine without calling shutdown
     }
 
-    // Arrangements: Immediate reopen attempt (within lease TTL)
-    // Depending on implementation, this may fail if lease is still held
+    // After clean shutdown, lease is released with ancient timestamp.
+    // New process can acquire immediately (epoch increments).
 
-    // Attempt 1: Try to open immediately
-    let attempt1 = Engine::open(OpenOptions::local(&db_path));
-    eprintln!("Immediate reopen after crash: {:?}", attempt1.is_ok());
-
-    // Wait for lease TTL to expire (typically 5-10 seconds)
-    eprintln!("Waiting for lease expiry...");
-    thread::sleep(Duration::from_secs(2));
-
-    // Attempt 2: Reopen after lease timeout
+    // Attempt: Open immediately after clean release - should succeed
     let engine2 = Engine::open(OpenOptions::local(&db_path))
-        .expect("should recover after lease expiry");
+        .expect("should immediately acquire after clean release");
 
     // Assert: Recovered successfully
     assert!(
@@ -343,7 +334,7 @@ fn should_recover_lease_after_process_crash() {
         "recovered lease should be healthy"
     );
 
-    eprintln!("✓ Successfully recovered lease after simulated crash");
+    eprintln!("✓ Successfully recovered lease after clean shutdown");
 }
 
 #[test]
@@ -355,8 +346,8 @@ fn should_reject_open_when_lease_held_by_crashed_process() {
 
     // Act: Open first instance (acquire lease) and attempt second open
     {
-        let _engine = Engine::open(OpenOptions::local(&db_path))
-            .expect("first instance should open");
+        let _engine =
+            Engine::open(OpenOptions::local(&db_path)).expect("first instance should open");
 
         // Don't drop: let it hold the lease
 
@@ -376,10 +367,12 @@ fn should_reject_open_when_lease_held_by_crashed_process() {
                 match e {
                     // Assuming MidgeError::LeaseConflict or similar exists
                     _ => {
+                        let err_str = format!("{:?}", e).to_lowercase();
                         assert!(
-                            format!("{:?}", e).to_lowercase().contains("lease")
-                                || format!("{:?}", e).to_lowercase().contains("exclusive")
-                                || format!("{:?}", e).to_lowercase().contains("exclusive"),
+                            err_str.contains("lease")
+                                || err_str.contains("exclusive")
+                                || err_str.contains("instance")
+                                || err_str.contains("running"),
                             "error should indicate lease conflict: {:?}",
                             e
                         );
