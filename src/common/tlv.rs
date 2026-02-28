@@ -41,9 +41,12 @@ pub fn encode_varint_with_tag(buf: &mut BytesMut, tag: u8, mut value: u32) {
 /// Encode arbitrary bytes with a tag and length prefix
 #[inline]
 pub fn encode_bytes_with_tag(buf: &mut BytesMut, tag: u8, data: &[u8]) -> MidgeResult<()> {
+    // Validate length before writing anything to buffer to avoid partial mutation on error
+    let len32 = u32::try_from(data.len()).map_err(|_| {
+        MidgeError::InvalidArgument("TLV value too large: exceeds u32::MAX".to_string())
+    })?;
+
     buf.put_u8(tag);
-    let len32 = u32::try_from(data.len())
-        .map_err(|_| MidgeError::Internal("TLV value too large: exceeds u32::MAX".to_string()))?;
     encode_varint32(buf, len32);
     buf.put_slice(data);
     Ok(())

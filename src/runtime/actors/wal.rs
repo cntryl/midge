@@ -708,12 +708,11 @@ impl WalActor {
         let marker_key = Bytes::from_static(b"txn");
 
         // Preallocate sequence range for batch: begin, per-op, commit
-        // When ops_count = 0: begin_seq, commit_seq (empty transaction is valid)
         let ops_count = ops.len();
         let ops_count_u64 = ops_count as u64;
         // sequences: begin_seq, op_seqs[0..ops_count-1], commit_seq
         let begin_seq = state.sequence + 1;
-        let first_op_seq = begin_seq + 1; // unused if ops_count == 0
+        let first_op_seq = begin_seq + 1;
         let commit_seq = begin_seq + 1 + ops_count_u64;
 
         // Advance global sequence to commit_seq
@@ -759,7 +758,7 @@ impl WalActor {
             records
         };
 
-        let (apply_ops, mut wal_records) =
+        let apply_ops =
             self.build_apply_ops(ops, first_op_seq, txn_id, state, skip_wal, &mut wal_records);
 
         // Write commit record (only if not skipping WAL)
@@ -931,7 +930,7 @@ impl WalActor {
         state: &mut RuntimeState,
         skip_wal: bool,
         wal_records: &mut Vec<WalRecord>,
-    ) -> (Vec<TransactionApplyOp>, Vec<WalRecord>) {
+    ) -> Vec<TransactionApplyOp> {
         let mut apply_ops = Vec::with_capacity(ops.len());
 
         for (i, op) in ops.into_iter().enumerate() {
@@ -1017,7 +1016,7 @@ impl WalActor {
             }
         }
 
-        (apply_ops, wal_records.to_vec())
+        apply_ops
     }
 
     fn apply_ops_to_memtables(

@@ -105,6 +105,8 @@ impl CachePolicy for ClockProPolicy {
     fn on_access(&self, key: CacheKey) {
         let mut slots = self.slots.lock();
         let mut key_to_slot = self.key_to_slot.lock();
+        let mut resident_count = self.resident_count.lock();
+        let mut hot_count = self.hot_count.lock();
         let hot_target = self.hot_target.lock();
 
         if let Some(&slot_idx) = key_to_slot.get(&key) {
@@ -113,9 +115,9 @@ impl CachePolicy for ClockProPolicy {
                 let was_cold = !slots[slot_idx].hot_bit;
 
                 // Promote cold → hot on access if hot set not full
-                if was_cold && *self.hot_count.lock() < *hot_target {
+                if was_cold && *hot_count < *hot_target {
                     slots[slot_idx].hot_bit = true;
-                    *self.hot_count.lock() += 1;
+                    *hot_count += 1;
                 }
             }
         } else {
@@ -130,7 +132,7 @@ impl CachePolicy for ClockProPolicy {
             };
 
             key_to_slot.insert(key, slot_idx);
-            *self.resident_count.lock() += 1;
+            *resident_count += 1;
         }
     }
 
@@ -246,12 +248,22 @@ impl CachePolicy for ClockProPolicy {
         let mut hot_count = self.hot_count.lock();
         let mut hot_target = self.hot_target.lock();
 
+        // Preserve capacity so we can recompute a reasonable hot_target.
+        let capacity = slots.capacity();
+
         slots.clear();
         key_to_slot.clear();
         *hand = 0;
         *resident_count = 0;
         *hot_count = 0;
-        *hot_target = 0;
+
+        // After clear, approximate the initial hot_target based on capacity.
+        // For non-zero capacity, keep at least one hot slot (25% of capacity, min 1).
+        if capacity == 0 {
+            *hot_target = 0;
+        } else {
+            *hot_target = capacity.max(4) / 4;
+        }
     }
 }
 
