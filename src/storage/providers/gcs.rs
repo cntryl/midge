@@ -6,8 +6,8 @@
 //! - Non-blocking callback-based API via `CloudExecutor`
 //! - All operations routed through the same `CloudBackend` trait as S3/Azure
 
-use crate::common::{MidgeError, MidgeResult};
-use crate::storage::cloud::{
+use crate::common::MidgeResult;
+use super::super::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudExecutor, CloudOutcome, CloudRequest,
     CloudResponse, CloudSigner, ObjectMetadata,
 };
@@ -458,7 +458,6 @@ impl CloudSigner for HmacKeySigner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::cloud::CloudBackend;
 
     // =========== GcsCredential Tests ===========
 
@@ -510,7 +509,8 @@ mod tests {
             bucket.into(),
             project.into(),
             token.into(),
-        );
+        )
+        .expect("should create provider with bearer token");
 
         // Assert
         assert_eq!(provider.bucket(), "my-bucket");
@@ -535,7 +535,8 @@ mod tests {
             project.into(),
             access_id.into(),
             secret.into(),
-        );
+        )
+        .expect("should create provider with hmac key");
 
         // Assert
         assert_eq!(provider.bucket(), "my-bucket");
@@ -553,6 +554,7 @@ mod tests {
 
         // Act
         let provider = GcsProvider::new(bucket.into(), project.into());
+        let provider = provider.expect("should create provider with default credential");
 
         // Assert
         assert!(matches!(
@@ -569,6 +571,7 @@ mod tests {
 
         // Act
         let provider = GcsProvider::new(bucket.into(), project.into());
+        let provider = provider.expect("should create provider with empty bucket");
 
         // Assert
         assert_eq!(provider.bucket(), "");
@@ -583,6 +586,7 @@ mod tests {
 
         // Act
         let provider = GcsProvider::new(bucket.into(), project.into());
+        let provider = provider.expect("should create provider with empty project id");
 
         // Assert
         assert_eq!(provider.bucket(), "bucket");
@@ -597,6 +601,7 @@ mod tests {
 
         // Act
         let provider = GcsProvider::new(bucket.into(), project.into());
+        let provider = provider.expect("should create provider with special characters");
 
         // Assert
         assert_eq!(provider.bucket(), "my-bucket-123");

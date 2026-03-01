@@ -152,9 +152,11 @@
 //! 3. **WAL ordering**: Local write → cloud upload → CloudAck → memtable update
 //! 4. **Deterministic testing**: `MockCloudBackend` for synchronous test execution
 
+pub(crate) mod cloud;
 pub(crate) mod filesystem;
 pub(crate) mod hybrid;
 pub(crate) mod local_fs_storage;
+pub(crate) mod providers;
 pub(crate) mod test_support;
 
 /// Stable, filesystem-oriented storage abstraction.

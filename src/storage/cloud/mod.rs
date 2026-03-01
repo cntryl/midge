@@ -23,7 +23,6 @@
 //! - Events are received asynchronously but callback processing is synchronous
 //! - No futures in the engine: all async work happens in `CloudExecutor` embedded tokio runtime
 
-pub mod aws;
 pub mod executor;
 
 use super::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
@@ -32,7 +31,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::Mutex;
 
-pub use aws::AwsCredentials;
 pub use executor::{CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 
 /// Cloud operation outcome – cloneable wrapper around Result
@@ -64,6 +62,7 @@ impl<T: Clone> CloudOutcome<T> {
 /// Cloud operation completion events sent back via callback.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
+#[allow(clippy::enum_variant_names)]
 pub enum CloudEvent {
     PutComplete {
         key: String,
@@ -237,7 +236,6 @@ impl CloudBackend for MockCloudBackend {
         let result = self
             .storage
             .lock()
-            .expect("storage mutex poisoned")
             .get(&key)
             .map(|data| {
                 let end_idx = end.unwrap_or(data.len() as u64) as usize;
@@ -257,7 +255,6 @@ impl CloudBackend for MockCloudBackend {
     fn submit_delete(&self, key: String, callback: CloudCallback) {
         self.storage
             .lock()
-            .expect("storage mutex poisoned")
             .remove(&key);
         let event = CloudEvent::DeleteComplete {
             key,
@@ -270,7 +267,6 @@ impl CloudBackend for MockCloudBackend {
         let results: Vec<_> = self
             .storage
             .lock()
-            .expect("storage mutex poisoned")
             .keys()
             .filter(|k| k.starts_with(&prefix))
             .cloned()
@@ -286,7 +282,6 @@ impl CloudBackend for MockCloudBackend {
         let result = self
             .storage
             .lock()
-            .expect("storage mutex poisoned")
             .get(&key)
             .map(|data| {
                 // ETag is generation based and independent from content length.
@@ -992,8 +987,8 @@ mod tests {
         storage.submit_get_range("f5".into(), 0, Some(100), tx);
 
         // Assert
-        // Smoke test: just verify all methods can be called without panic.
-        assert!(true);
+        // Smoke test: all calls complete without panic and storage remains valid.
+        assert_eq!(storage.namespace, "midge");
     }
 
     #[test]

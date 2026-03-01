@@ -10,6 +10,7 @@
 //!    - Not yet implemented (stub functions provided)
 
 use super::s3::{S3Config, S3Provider};
+use crate::common::MidgeResult;
 
 /// Oracle Cloud Infrastructure Object Storage provider
 ///
@@ -38,21 +39,19 @@ impl OciProvider {
         region: String,
         access_key: String,
         secret_key: String,
-    ) -> Self {
+    ) -> MidgeResult<Self> {
         let config = S3Config::oci_s3_compat(bucket, namespace, region);
-        let inner = S3Provider::custom(config, access_key, secret_key);
-        Self { inner }
+        S3Provider::custom(config, access_key, secret_key).map(|inner| Self { inner })
     }
 
     /// Create OCI provider (using S3-compatible API)
     ///
     /// Convenience constructor equivalent to `s3_compat()`.
-    pub fn new(namespace: String, bucket: String, region: String) -> Self {
+    pub fn new(namespace: String, bucket: String, region: String) -> MidgeResult<Self> {
         // Note: This is a stub constructor that creates a provider with the namespace/bucket/region
         // but no credentials. Real usage should call `s3_compat()` with full credentials.
         let config = S3Config::oci_s3_compat(bucket, namespace, region.clone());
-        let inner = S3Provider::custom(config, String::new(), String::new());
-        Self { inner }
+        S3Provider::custom(config, String::new(), String::new()).map(|inner| Self { inner })
     }
 
     /// Access the underlying S3Provider for lower-level operations
@@ -82,7 +81,8 @@ mod tests {
             "us-phoenix-1".into(),
             "oci-access-key".into(),
             "oci-secret-key".into(),
-        );
+        )
+        .expect("should create oci s3 compat provider");
 
         let backend = provider.inner().backend();
 
@@ -99,7 +99,8 @@ mod tests {
             "mynamespace".to_string(),
             "mybucket".to_string(),
             "us-phoenix-1".to_string(),
-        );
+        )
+        .expect("should create oci provider");
 
         let backend = provider.inner().backend();
 

@@ -8,7 +8,7 @@
 //! - All operations routed through the same `CloudBackend` trait as S3
 
 use crate::common::{MidgeError, MidgeResult};
-use crate::storage::cloud::{
+use super::super::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudExecutor, CloudOutcome, CloudRequest,
     CloudResponse, CloudSigner, ObjectMetadata,
 };
@@ -119,7 +119,7 @@ impl AzureProvider {
     /// * `account_name` - Storage account name
     /// * `container` - Blob container name
     /// * `client_id` - Optional client ID for user-assigned identity.
-    ///                 If None, uses system-assigned identity.
+    ///   If None, uses system-assigned identity.
     ///
     /// # Environment Variables
     /// - `AZURE_CLIENT_ID`: User-assigned managed identity client ID
@@ -757,7 +757,7 @@ impl ManagedIdentitySigner {
             .header("Metadata", "true")
             .send()
             .map_err(|e| {
-                MidgeError::Authentication(format!(
+                MidgeError::Internal(format!(
                     "Failed to fetch managed identity token from IMDS: {}. \
                      Ensure managed identity is enabled on this Azure resource.",
                     e
@@ -767,7 +767,7 @@ impl ManagedIdentitySigner {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().unwrap_or_default();
-            return Err(MidgeError::Authentication(format!(
+            return Err(MidgeError::Internal(format!(
                 "IMDS token request failed with status {}: {}. \
                  Ensure managed identity is properly configured.",
                 status, body
@@ -804,7 +804,7 @@ impl ManagedIdentitySigner {
     fn get_token(&self) -> MidgeResult<String> {
         let mut cache = match self.token_cache.lock() {
             Ok(guard) => guard,
-            Err(poisoned) => {
+            Err(_poisoned) => {
                 return Err(MidgeError::Internal(
                     "Token cache mutex poisoned; token fetch failed in another thread. Restart required.".into()
                 ))
@@ -855,8 +855,6 @@ impl CloudSigner for ManagedIdentitySigner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::cloud::CloudBackend;
-
     // =========== AzureCredential Tests ===========
 
     #[test]
@@ -891,7 +889,9 @@ mod tests {
 
     #[test]
     fn should_create_managed_identity_credential_system_assigned() {
-        // Arrange + Act
+        // Arrange
+
+        // Act
         let cred = AzureCredential::ManagedIdentity { client_id: None };
 
         // Assert
@@ -927,14 +927,15 @@ mod tests {
         // Arrange
         let account = "myaccount";
         let container = "mycontainer";
-        let key = "accountkey123";
+        let key = "YWNjb3VudGtleTEyMw==";
 
         // Act
         let provider = AzureProvider::with_shared_key(
             account.into(),
             container.into(),
             key.into(),
-        );
+        )
+        .expect("should create provider with shared key");
 
         // Assert
         assert_eq!(provider.account_name(), "myaccount");
@@ -957,7 +958,8 @@ mod tests {
             account.into(),
             container.into(),
             sas_token.into(),
-        );
+        )
+        .expect("should create provider with sas token");
 
         // Assert
         assert_eq!(provider.account_name(), "myaccount");
@@ -977,7 +979,8 @@ mod tests {
             "account".into(),
             "container".into(),
             sas_token.into(),
-        );
+        )
+        .expect("should create provider with normalized sas token");
 
         // Assert
         match provider.credential() {
@@ -999,7 +1002,8 @@ mod tests {
             "account".into(),
             "container".into(),
             sas_token.into(),
-        );
+        )
+        .expect("should create provider with sas token without question mark");
 
         // Assert
         match provider.credential() {
@@ -1016,6 +1020,7 @@ mod tests {
 
         // Act
         let provider = AzureProvider::new(account.into(), container.into());
+        let provider = provider.expect("should create provider with default shared key");
 
         // Assert
         assert!(matches!(
@@ -1032,6 +1037,7 @@ mod tests {
 
         // Act
         let provider = AzureProvider::new(account.into(), container.into());
+        let provider = provider.expect("should create provider with empty account");
 
         // Assert
         assert_eq!(provider.account_name(), "");
@@ -1046,6 +1052,7 @@ mod tests {
 
         // Act
         let provider = AzureProvider::new(account.into(), container.into());
+        let provider = provider.expect("should create provider with empty container");
 
         // Assert
         assert_eq!(provider.account_name(), "account");
@@ -1060,6 +1067,7 @@ mod tests {
 
         // Act
         let provider = AzureProvider::new(account.into(), container.into());
+        let provider = provider.expect("should create provider with special characters");
 
         // Assert
         assert_eq!(provider.account_name(), "my-account-123");
@@ -1069,12 +1077,14 @@ mod tests {
     #[test]
     fn should_create_provider_with_different_shared_keys() {
         // Arrange
-        let (a1, c1, k1) = ("a1", "c1", "k1");
-        let (a2, c2, k2) = ("a2", "c2", "k2");
+        let (a1, c1, k1) = ("a1", "c1", "YTEta2V5");
+        let (a2, c2, k2) = ("a2", "c2", "YTIta2V5");
 
         // Act
         let p1 = AzureProvider::with_shared_key(a1.into(), c1.into(), k1.into());
         let p2 = AzureProvider::with_shared_key(a2.into(), c2.into(), k2.into());
+        let p1 = p1.expect("should create first provider");
+        let p2 = p2.expect("should create second provider");
 
         // Assert
         assert_ne!(p1.account_name(), p2.account_name());
@@ -1272,9 +1282,6 @@ mod tests {
         assert!(has_auth, "should have Authorization header");
     }
 
-    #[test]
-    fn should_include_xms_date_header_when_signing() {
-        // Arrange
     #[test]
     fn should_include_xms_date_header_when_signing() {
         // Arrange

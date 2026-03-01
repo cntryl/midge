@@ -8,6 +8,7 @@
 //! Wasabi regions: https://wasabi.com/
 
 use super::s3::{S3Config, S3Provider};
+use crate::common::MidgeResult;
 
 /// Wasabi Cloud Storage provider
 ///
@@ -29,10 +30,9 @@ impl WasabiProvider {
     /// * `region` - Wasabi region (e.g., "us-east-1")
     /// * `access_key` - Wasabi access key
     /// * `secret_key` - Wasabi secret key
-    pub fn new(bucket: String, region: String, access_key: String, secret_key: String) -> Self {
+    pub fn new(bucket: String, region: String, access_key: String, secret_key: String) -> MidgeResult<Self> {
         let config = S3Config::wasabi(bucket, region);
-        let inner = S3Provider::custom(config, access_key, secret_key);
-        Self { inner }
+        S3Provider::custom(config, access_key, secret_key).map(|inner| Self { inner })
     }
 
     /// Access the underlying S3Provider for lower-level operations
@@ -61,7 +61,8 @@ mod tests {
             "us-east-1".into(),
             "wasabi-access-key".into(),
             "wasabi-secret-key".into(),
-        );
+        )
+        .expect("should create wasabi provider");
 
         let backend = provider.inner().backend();
 
@@ -72,7 +73,7 @@ mod tests {
     #[test]
     fn should_support_different_regions() {
         // Arrange
-        let regions = vec!["us-east-1", "us-west-1", "eu-west-1", "ap-northeast-1"];
+        let regions = ["us-east-1", "us-west-1", "eu-west-1", "ap-northeast-1"];
 
         // Act
         let backend_ref_counts: Vec<usize> = regions
@@ -83,7 +84,8 @@ mod tests {
                     (*region).into(),
                     "key".into(),
                     "secret".into(),
-                );
+                )
+                .expect("should create wasabi provider for region");
                 let backend = provider.inner().backend();
                 Arc::strong_count(&backend)
             })

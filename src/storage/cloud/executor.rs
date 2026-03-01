@@ -90,20 +90,6 @@ pub struct CloudExecutor {
     rt: Arc<tokio::runtime::Runtime>,
 }
 
-impl Drop for CloudExecutor {
-    fn drop(&mut self) {
-        // Explicitly shutdown the embedded tokio runtime to ensure all pending tasks
-        // are drained and resources are properly released. On Windows, dropping a
-        // tokio runtime without explicit shutdown can cause heap corruption if
-        // callbacks or async tasks are still in-flight.
-        if Arc::strong_count(&self.rt) == 1 {
-            // Only call shutdown_blocking if this is the last strong reference.
-            // The runtime will wait for all spawned tasks to complete.
-            self.rt.shutdown_timeout(std::time::Duration::from_secs(10));
-        }
-    }
-}
-
 impl CloudExecutor {
     pub fn new(signer: Option<Arc<dyn CloudSigner>>) -> MidgeResult<Self> {
         let rt = tokio::runtime::Builder::new_current_thread()

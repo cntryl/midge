@@ -63,14 +63,3 @@ pub mod oci;
 pub mod s3;
 pub mod wasabi;
 
-// Re-export for convenience
-pub use aws::AwsS3Provider;
-pub use azure::AzureProvider;
-pub use gcs::GcsProvider;
-pub use minio::MinioProvider;
-pub use oci::OciProvider;
-pub use s3::S3Provider;
-pub use wasabi::WasabiProvider;
-
-#[cfg(feature = "cloud-common")]
-pub use s3::S3Config;

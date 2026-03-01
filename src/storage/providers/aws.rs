@@ -5,8 +5,8 @@
 //! - AWS credential handling (access key, secret key, optional session token)
 //! - Region-specific endpoint routing
 
-use super::s3::S3Provider;
-use crate::storage::cloud::AwsCredentials;
+use super::s3::{AwsCredentials, S3Provider};
+use crate::common::MidgeResult;
 
 /// AWS S3 provider with SigV4 authentication
 ///
@@ -31,6 +31,18 @@ impl AwsS3Provider {
             session_token: None,
         };
         let inner = S3Provider::aws(bucket, region, creds)?;
+        Ok(Self { inner })
+    }
+
+    /// Create AWS S3 provider using the default AWS credential chain.
+    ///
+    /// Works across AWS compute runtimes without embedding static keys:
+    /// - EC2/VMs via Instance Metadata Service (IMDS)
+    /// - EKS via IRSA (`AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE`)
+    /// - ECS/Fargate via task role endpoint
+    /// - Environment credentials (for local/dev and CI)
+    pub fn from_default_chain(bucket: String, region: String) -> MidgeResult<Self> {
+        let inner = S3Provider::aws_default(bucket, region)?;
         Ok(Self { inner })
     }
 
@@ -94,7 +106,8 @@ mod tests {
             "us-east-1".into(),
             "AKIAIOSFODNN7EXAMPLE".into(),
             "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
-        );
+        )
+        .expect("should create aws provider");
 
         let backend = provider.inner().backend();
 
@@ -113,7 +126,8 @@ mod tests {
             "ASIATEMP0000000000".into(),
             "wJalrXUtnFEMI/K7MDENG/bPxRfiCYTEMPORARY".into(),
             "AQoDYXdzEJr...<token_omitted>".into(),
-        );
+        )
+        .expect("should create aws provider with session token");
 
         let backend = provider.inner().backend();
 
@@ -132,7 +146,8 @@ mod tests {
         };
 
         // Act
-        let provider = AwsS3Provider::from_credentials("my-bucket".into(), creds);
+        let provider = AwsS3Provider::from_credentials("my-bucket".into(), creds)
+            .expect("should create aws provider from credentials");
 
         let backend = provider.inner().backend();
 

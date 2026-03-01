@@ -7,6 +7,7 @@
 //! - Support for custom endpoints (local, self-hosted, or cloud providers)
 
 use super::s3::{S3Config, S3Provider};
+use crate::common::MidgeResult;
 
 /// MinIO S3-compatible object storage provider
 ///
@@ -29,10 +30,9 @@ impl MinioProvider {
     /// * `endpoint` - MinIO endpoint URL (e.g., "http://localhost:9000" or "https://minio.example.com")
     /// * `access_key` - MinIO access key
     /// * `secret_key` - MinIO secret key
-    pub fn new(bucket: String, endpoint: String, access_key: String, secret_key: String) -> Self {
+    pub fn new(bucket: String, endpoint: String, access_key: String, secret_key: String) -> MidgeResult<Self> {
         let config = S3Config::minio(bucket, endpoint);
-        let inner = S3Provider::custom(config, access_key, secret_key);
-        Self { inner }
+        S3Provider::custom(config, access_key, secret_key).map(|inner| Self { inner })
     }
 
     /// Access the underlying S3Provider for lower-level operations
@@ -61,7 +61,8 @@ mod tests {
             "http://localhost:9000".into(),
             "minioadmin".into(),
             "minioadmin".into(),
-        );
+        )
+        .expect("should create local minio provider");
 
         let backend = provider.inner().backend();
 
@@ -79,7 +80,8 @@ mod tests {
             "https://minio.example.com".into(),
             "access-key-id".into(),
             "secret-access-key".into(),
-        );
+        )
+        .expect("should create remote minio provider");
 
         let backend = provider.inner().backend();
 
@@ -90,7 +92,7 @@ mod tests {
     #[test]
     fn should_support_different_endpoints() {
         // Arrange
-        let endpoints = vec![
+        let endpoints = [
             "http://localhost:9000",
             "http://minio:9000",
             "https://minio.example.com",
@@ -106,7 +108,8 @@ mod tests {
                     (*endpoint).into(),
                     "key".into(),
                     "secret".into(),
-                );
+                )
+                .expect("should create minio provider for endpoint");
                 let backend = provider.inner().backend();
                 Arc::strong_count(&backend)
             })
