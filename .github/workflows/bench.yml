@@ -11,8 +11,6 @@ on:
 jobs:
   bench:
     runs-on: ${{ matrix.os }}
-    env:
-      RAYON_NUM_THREADS: 4
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]

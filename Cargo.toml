@@ -26,7 +26,6 @@ crossbeam-channel = "0.5"
 crossbeam-epoch = "0.9"
 dashmap = "6.1"
 parking_lot = "0.12"
-rayon = "1.10"
 
 # Utilities used by stress workloads
 rand = "0.10"
