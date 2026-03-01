@@ -194,7 +194,7 @@ fn bench_delete(c: &mut Criterion) {
             |(memtable, key)| {
                 let _ = memtable.delete(black_box(key));
             },
-            BatchSize::LargeInput,
+            BatchSize::SmallInput,
         )
     });
 
