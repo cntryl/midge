@@ -34,64 +34,89 @@ fn make_value_indexed(i: usize) -> Vec<u8> {
 
 // ─── Insert Benchmarks ───────────────────────────────────────────────────────
 
-/// Benchmark single key-value insertion into a warm memtable
+/// Benchmark single key-value insertion into a fresh memtable
 fn bench_put_single(c: &mut Criterion) {
     let mut group = c.benchmark_group("memtable/put_single");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(1));
 
-    // Large unique-key pool: each key is inserted at most once, preventing
-    // version-chain growth while keeping one warm memtable per sub-bench.
-    let pool_size = 200_000;
-    let keys: Vec<Vec<u8>> = (0..pool_size).map(make_key).collect();
     let small_val = make_value(64);
     let medium_val = make_value(1024);
     let large_val = make_value(4096);
 
-    {
-        let memtable = SkipListMemtable::new();
-        for key in keys.iter().take(100) {
-            let _ = memtable.put(key.clone(), small_val.clone());
-        }
-        let mut counter = 100usize;
-        group.bench_function("64b_value", |b| {
-            b.iter(|| {
-                let idx = counter % pool_size;
-                counter = counter.wrapping_add(1);
-                let _ = memtable.put(black_box(keys[idx].clone()), black_box(small_val.clone()));
-            })
-        });
-    }
+    // Use iter_batched to create a fresh memtable for each iteration bundle.
+    // This prevents unbounded accumulation of nodes in a single memtable.
+    // With BatchSize::SmallInput, Criterion will batch ~8-16 iterations together,
+    // creating a new memtable for each batch.
+    
+    group.bench_function("64b_value", |b| {
+        b.iter_batched(
+            || {
+                let memtable = SkipListMemtable::new();
+                // Warm with 100 initial inserts (different keys)
+                for i in 0..100 {
+                    let _ = memtable.put(make_key(i), small_val.clone());
+                }
+                memtable
+            },
+            |memtable| {
+                // Each iteration uses a fresh memtable from setup.
+                // Insert one key (deterministic, unique across all batches).
+                static COUNTER: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(100);
+                let idx = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = memtable.put(
+                    black_box(make_key(idx)),
+                    black_box(small_val.clone()),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
 
-    {
-        let memtable = SkipListMemtable::new();
-        for key in keys.iter().take(100) {
-            let _ = memtable.put(key.clone(), medium_val.clone());
-        }
-        let mut counter = 100usize;
-        group.bench_function("1kb_value", |b| {
-            b.iter(|| {
-                let idx = counter % pool_size;
-                counter = counter.wrapping_add(1);
-                let _ = memtable.put(black_box(keys[idx].clone()), black_box(medium_val.clone()));
-            })
-        });
-    }
+    group.bench_function("1kb_value", |b| {
+        b.iter_batched(
+            || {
+                let memtable = SkipListMemtable::new();
+                for i in 0..100 {
+                    let _ = memtable.put(make_key(i), medium_val.clone());
+                }
+                memtable
+            },
+            |memtable| {
+                static COUNTER: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(100);
+                let idx = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = memtable.put(
+                    black_box(make_key(idx)),
+                    black_box(medium_val.clone()),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
 
-    {
-        let memtable = SkipListMemtable::new();
-        for key in keys.iter().take(100) {
-            let _ = memtable.put(key.clone(), large_val.clone());
-        }
-        let mut counter = 100usize;
-        group.bench_function("4kb_value", |b| {
-            b.iter(|| {
-                let idx = counter % pool_size;
-                counter = counter.wrapping_add(1);
-                let _ = memtable.put(black_box(keys[idx].clone()), black_box(large_val.clone()));
-            })
-        });
-    }
+    group.bench_function("4kb_value", |b| {
+        b.iter_batched(
+            || {
+                let memtable = SkipListMemtable::new();
+                for i in 0..100 {
+                    let _ = memtable.put(make_key(i), large_val.clone());
+                }
+                memtable
+            },
+            |memtable| {
+                static COUNTER: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(100);
+                let idx = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = memtable.put(
+                    black_box(make_key(idx)),
+                    black_box(large_val.clone()),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
 
     group.finish();
 }

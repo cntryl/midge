@@ -693,29 +693,43 @@ impl Default for SkipList {
 impl Drop for SkipList {
     fn drop(&mut self) {
         // SAFETY: We have exclusive access (`&mut self`), so no concurrent
-        // readers can be traversing the list. Using `epoch::unprotected()`
-        // is safe here because no other thread can pin an older epoch for
-        // this skiplist.
+        // readers can be traversing the list. During drop, we own the exclusive
+        // reference and all Arc clones have been dropped. Use epoch::unprotected()
+        // because no concurrent readers can pin an older epoch on this SkipList.
         //
         // Walk the level-0 forward chain (which links every node in order)
         // and free each node plus its entire version chain. Higher-level
         // forward pointers are skip-links to the same nodes, so level-0
         // is sufficient to visit every node exactly once.
+        //
+        // Collect all node pointers first to avoid borrowing issues.
+        let mut nodes_to_drop = Vec::new();
         unsafe {
             let guard = &epoch::unprotected();
             let head_ref = &*self.head;
-
-            // Free head sentinel's version chain (sentinel has a dummy version).
-            Self::drop_version_chain(&head_ref.versions_head, guard);
-
-            // Walk all non-head nodes via level-0 chain.
+            
+            // Collect all nodes in level-0 forward order.
             let mut curr = head_ref.forward[0].load(AO::Relaxed, guard);
             while !curr.is_null() {
-                let owned = curr.into_owned();
-                let next = owned.forward[0].load(AO::Relaxed, guard);
+                let shared = curr;
+                // Load next BEFORE converting to owned, to capture the pointer.
+                let next = shared.deref().forward[0].load(AO::Relaxed, guard);
+                nodes_to_drop.push(shared);
+                curr = next;
+            }
+        }
+        
+        // Now drop the version chain for head, then all nodes.
+        unsafe {
+            let guard = &epoch::unprotected();
+            let head_ref = &*self.head;
+            Self::drop_version_chain(&head_ref.versions_head, guard);
+            
+            // Convert to owned and drop each node.
+            for shared in nodes_to_drop {
+                let owned = shared.into_owned();
                 Self::drop_version_chain(&owned.versions_head, guard);
                 drop(owned);
-                curr = next;
             }
         }
     }
