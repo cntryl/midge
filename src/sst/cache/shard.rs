@@ -10,7 +10,7 @@ use crossbeam_channel::{bounded, Sender};
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread;
+use std::thread::{self, JoinHandle};
 
 /// Message sent to admission worker
 struct AdmissionRequest {
@@ -38,6 +38,8 @@ pub struct CacheShard {
     admission_tx: Sender<AdmissionRequest>,
     /// Fallback to inline admission when worker thread cannot be spawned
     admission_inline: AtomicBool,
+    /// Background admission worker thread handle
+    worker_handle: Option<JoinHandle<()>>,
 }
 
 impl CacheShard {
@@ -50,34 +52,49 @@ impl CacheShard {
     pub fn new(max_bytes: u64, policy_type: CachePolicyType) -> Arc<Self> {
         let (tx, rx) = bounded(10_000);
 
-        let shard = Arc::new(Self {
-            entries: DashMap::new(),
-            policy: policy_type.create(),
-            admission: AdmissionCounter::new(64, 1000),
-            metrics: CacheMetrics::new(),
-            max_bytes,
-            admission_tx: tx,
-            admission_inline: AtomicBool::new(false),
-        });
+        Arc::new_cyclic(|weak_shard| {
+            let worker_handle = Self::spawn_worker(weak_shard.clone(), rx);
+            let inline_mode = worker_handle.is_none();
+            Self {
+                entries: DashMap::new(),
+                policy: policy_type.create(),
+                admission: AdmissionCounter::new(64, 1000),
+                metrics: CacheMetrics::new(),
+                max_bytes,
+                admission_tx: tx,
+                admission_inline: AtomicBool::new(inline_mode),
+                worker_handle,
+            }
+        })
+    }
 
-        // Spawn background admission worker
-        let shard_clone = Arc::clone(&shard);
+    /// Spawn the background admission worker thread
+    ///
+    /// Returns Some(JoinHandle) on success, None on failure (fallback to inline)
+    fn spawn_worker(
+        weak_shard: std::sync::Weak<Self>,
+        rx: crossbeam_channel::Receiver<AdmissionRequest>,
+    ) -> Option<JoinHandle<()>> {
         let spawn_result = thread::Builder::new()
             .name("cache-admission-worker".to_string())
             .spawn(move || {
-                shard_clone.admission_worker(rx);
+                // Upgrade weak to strong; exit if shard already dropped
+                if let Some(shard) = weak_shard.upgrade() {
+                    shard.admission_worker(rx);
+                }
             });
 
-        if let Err(err) = spawn_result {
-            // Fall back to inline admission when thread creation fails (e.g., CI limits)
-            shard.admission_inline.store(true, Ordering::Relaxed);
-            tracing::warn!(
-                error = %err,
-                "cache admission worker spawn failed; falling back to inline admission"
-            );
+        match spawn_result {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                // Log failure but don't panic; inline admission will be used
+                tracing::warn!(
+                    error = %err,
+                    "cache admission worker spawn failed; falling back to inline admission"
+                );
+                None
+            }
         }
-
-        shard
     }
 
     /// Get a cached value (lock-free)
@@ -365,6 +382,31 @@ impl CacheShard {
     /// Check if cache is empty
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl Drop for CacheShard {
+    fn drop(&mut self) {
+        // Drop the admission_tx sender to signal worker to exit
+        // (We cannot take ownership of admission_tx, so we rely on it being dropped
+        // naturally when self is dropped, which happens after this drop impl runs)
+        
+        // Wait for worker thread to complete if it exists
+        // Use Option::take() to move the handle out of self
+        if let Some(handle) = self.worker_handle.take() {
+            match handle.join() {
+                Ok(()) => {
+                    tracing::trace!("cache admission worker exited cleanly");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = ?e,
+                        "cache admission worker thread panicked during shutdown"
+                    );
+                }
+            }
+        }
+        // If worker_handle is None, the thread was never spawned (inline mode)
     }
 }
 

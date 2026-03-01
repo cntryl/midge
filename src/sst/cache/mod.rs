@@ -147,6 +147,15 @@ impl BlockCache {
     }
 }
 
+impl Drop for BlockCache {
+    fn drop(&mut self) {
+        // Explicitly drop shards in sequence to ensure deterministic cleanup
+        // Each shard's drop will join its background worker thread
+        // This prevents thread leak and ensures all workers complete before returning
+        self.shards.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
