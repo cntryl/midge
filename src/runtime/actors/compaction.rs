@@ -136,54 +136,82 @@ impl CompactionActor {
             // Generate a stable job_id for this compaction job (for log correlation)
             let job_id = next_request_id()?;
             std::thread::spawn(move || {
-                // Capture the epoch at start
-                let my_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
+                // CRITICAL: Phase 2.2 - Panic recovery wrapper
+                // Catches panics in compaction logic and ensures CompactionComplete is always sent.
+                // Without this, panics leave active_compactions incremented forever, causing deadlock
+                // in the event loop when pending_compaction_waits tries to drain.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // Capture the epoch at start
+                    let my_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
 
-                // Abort check closure
-                let abort_check = || epoch.load(std::sync::atomic::Ordering::SeqCst) != my_epoch;
+                    // Abort check closure
+                    let abort_check =
+                        || epoch.load(std::sync::atomic::Ordering::SeqCst) != my_epoch;
 
-                // Execute compaction; allow cooperative abort via abort_check
-                let result = crate::compaction::execute_compaction(
-                    &plan_clone,
-                    sst_factory.as_ref(),
-                    &sst_dir,
-                    Some(&abort_check),
-                );
+                    // Execute compaction; allow cooperative abort via abort_check
+                    let result = crate::compaction::execute_compaction(
+                        &plan_clone,
+                        sst_factory.as_ref(),
+                        &sst_dir,
+                        Some(&abort_check),
+                    );
 
-                let output_ssts = match result {
-                    Ok(v) => v,
-                    Err(e) => {
-                        // Distinguish cooperative aborts due to ingest epoch changes
-                        let s = e.to_string();
-                        if s.contains("ingest epoch change") || s.contains("compaction aborted") {
-                            // ─────────────────────────────────────────────────────────────────────
-                            // COOPERATIVE CANCELLATION LOG — emitted exactly ONCE per aborted job.
-                            // ─────────────────────────────────────────────────────────────────────
-                            let new_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
-                            tracing::info!(
-                                component = "compaction",
-                                invariant = "cooperative_cancellation",
-                                job_id = job_id,
-                                old_epoch = my_epoch,
-                                new_epoch = new_epoch,
-                                input_files = ?input_files,
-                                "compaction: aborting due to ingest epoch change (job_id={}, old_epoch={}, new_epoch={})",
-                                job_id, my_epoch, new_epoch
-                            );
-                        } else {
-                            tracing::warn!(
-                                component = "compaction",
-                                job_id = job_id,
-                                error = %e,
-                                input_files = ?input_files,
-                                "compaction worker aborted or failed"
-                            );
+                    let output_ssts = match result {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // Distinguish cooperative aborts due to ingest epoch changes
+                            let s = e.to_string();
+                            if s.contains("ingest epoch change") || s.contains("compaction aborted")
+                            {
+                                // ─────────────────────────────────────────────────────────────────────
+                                // COOPERATIVE CANCELLATION LOG — emitted exactly ONCE per aborted job.
+                                // ─────────────────────────────────────────────────────────────────────
+                                let new_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
+                                tracing::info!(
+                                    component = "compaction",
+                                    invariant = "cooperative_cancellation",
+                                    job_id = job_id,
+                                    old_epoch = my_epoch,
+                                    new_epoch = new_epoch,
+                                    input_files = ?input_files,
+                                    "compaction: aborting due to ingest epoch change (job_id={}, old_epoch={}, new_epoch={})",
+                                    job_id, my_epoch, new_epoch
+                                );
+                            } else {
+                                tracing::warn!(
+                                    component = "compaction",
+                                    job_id = job_id,
+                                    error = %e,
+                                    input_files = ?input_files,
+                                    "compaction worker aborted or failed"
+                                );
+                            }
+                            Vec::new()
                         }
+                    };
+
+                    output_ssts
+                }));
+
+                // Extract output_ssts, handling panic case
+                let output_ssts = match result {
+                    Ok(ssts) => ssts,
+                    Err(panic_info) => {
+                        // Compaction thread panicked; log the panic and return empty output
+                        tracing::error!(
+                            component = "compaction",
+                            job_id = job_id,
+                            input_files = ?input_files,
+                            panic_info = ?panic_info,
+                            "compaction worker thread panicked; returning empty output to unblock event loop"
+                        );
                         Vec::new()
                     }
                 };
 
                 // Send completion back to runtime
+                // CRITICAL: This message MUST be sent even if compaction panicked.
+                // The event loop needs this to decrement active_compactions and drain pending_compaction_waits.
                 let _ = tx.send(RuntimeMsg::CompactionComplete {
                     request_id: next_request_id().expect("request ID in compaction worker"),
                     input_ssts: input_files,

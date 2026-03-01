@@ -659,73 +659,33 @@ impl EventLoop {
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                     + 1;
 
-                // ─────────────────────────────────────────────────────────────────────
-                // Wait for active compactions to drain (ONLY compactions).
-                // This is a blocking wait with timed logging thresholds.
-                // ─────────────────────────────────────────────────────────────────────
-                let (lock, cvar) = &*self.state.active_compactions_notify;
-                let mut guard = lock.lock();
-
-                let wait_start = std::time::Instant::now();
-                let mut warned_500ms = false;
-                let mut warned_5s = false;
-
-                while self
+                // Check if active compactions are already zero
+                let active = self
                     .state
                     .active_compactions
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                    > 0
-                {
-                    // Wait with timeout so we can log progress thresholds
-                    let timeout = std::time::Duration::from_millis(100);
-                    // parking_lot::Condvar::wait_for will block up to `timeout` and return
-                    // a boolean that indicates whether the wait ended because of notify.
-                    let _notified = cvar.wait_for(&mut guard, timeout);
+                    .load(std::sync::atomic::Ordering::SeqCst);
 
-                    let elapsed = wait_start.elapsed();
-
-                    if !warned_500ms && elapsed > std::time::Duration::from_millis(500) {
-                        warned_500ms = true;
-                        let a = self
-                            .state
-                            .active_compactions
-                            .load(std::sync::atomic::Ordering::SeqCst);
-                        tracing::warn!(
-                            component = "ingest",
-                            invariant = "begin_ingest_barrier",
-                            active_compactions = a,
-                            ingest_epoch = new_epoch,
-                            elapsed_ms = elapsed.as_millis(),
-                            "ingest: still waiting after 500ms for compactions to drain (active_compactions={})", a
-                        );
-                    }
-
-                    if !warned_5s && elapsed > std::time::Duration::from_secs(5) {
-                        warned_5s = true;
-                        let a = self
-                            .state
-                            .active_compactions
-                            .load(std::sync::atomic::Ordering::SeqCst);
-                        tracing::error!(
-                            component = "ingest",
-                            invariant = "begin_ingest_barrier",
-                            active_compactions = a,
-                            ingest_epoch = new_epoch,
-                            elapsed_ms = elapsed.as_millis(),
-                            "ingest: begin_ingest blocked >5s — likely misuse: entering ingest during active workload (active_compactions={}). \
-                             Correct ordering: warmup/probe BEFORE begin_ingest, not during.", a
-                        );
-                    }
+                if active == 0 {
+                    // No active compactions; can proceed immediately
+                    tracing::info!(
+                        component = "ingest",
+                        invariant = "begin_ingest_barrier",
+                        ingest_epoch = new_epoch,
+                        "ingest: ingestion barrier enabled — no active compactions to drain"
+                    );
+                    self.respond(request_id, RuntimeResponse::Ok { request_id });
+                } else {
+                    // Queue request to be completed when active_compactions reaches 0.
+                    // Don't block the event loop — check completion in CompactionComplete handler.
+                    let mut pending = self.state.pending_compaction_waits.lock();
+                    pending.insert(request_id, format!("BeginIngest(epoch={})", new_epoch));
+                    tracing::debug!(
+                        component = "ingest",
+                        "begin_ingest queued; waiting for {} active compactions to drain (epoch={})",
+                        active,
+                        new_epoch
+                    );
                 }
-
-                tracing::info!(
-                    component = "ingest",
-                    invariant = "begin_ingest_barrier",
-                    ingest_epoch = new_epoch,
-                    "ingest: ingestion barrier enabled — all compactions drained"
-                );
-
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
             }
 
             RuntimeMsg::EndIngest { request_id } => {
@@ -1218,84 +1178,13 @@ impl EventLoop {
                     return HandleOutcome::Continue;
                 }
 
-                // Wait for all scheduled compactions to complete (active_compactions -> 0)
+                // Queue request to be completed when active_compactions reaches 0.
+                // Don't block the event loop — instead, continue processing messages and
+                // check completion in CompactionComplete handler.
                 {
-                    let (lock, cvar) = &*self.state.active_compactions_notify;
-                    let mut guard = lock.lock();
-
-                    let wait_start = std::time::Instant::now();
-                    let mut warned_500ms = false;
-                    let mut warned_5s = false;
-
-                    while self
-                        .state
-                        .active_compactions
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                        > 0
-                    {
-                        let timeout = std::time::Duration::from_millis(100);
-                        let _notified = cvar.wait_for(&mut guard, timeout);
-
-                        let elapsed = wait_start.elapsed();
-
-                        if !warned_500ms && elapsed > std::time::Duration::from_millis(500) {
-                            warned_500ms = true;
-                            let a = self
-                                .state
-                                .active_compactions
-                                .load(std::sync::atomic::Ordering::SeqCst);
-                            tracing::warn!(
-                                component = "compaction",
-                                active_compactions = a,
-                                elapsed_ms = elapsed.as_millis(),
-                                "compact_all: waiting after 500ms for scheduled compactions to drain (active_compactions={})",
-                                a
-                            );
-                        }
-
-                        if !warned_5s && elapsed > std::time::Duration::from_secs(5) {
-                            warned_5s = true;
-                            let a = self
-                                .state
-                                .active_compactions
-                                .load(std::sync::atomic::Ordering::SeqCst);
-                            tracing::error!(
-                                component = "compaction",
-                                active_compactions = a,
-                                elapsed_ms = elapsed.as_millis(),
-                                "compact_all: still waiting >5s for scheduled compactions to drain (active_compactions={})",
-                                a
-                            );
-                        }
-                    }
+                    let mut pending = self.state.pending_compaction_waits.lock();
+                    pending.insert(request_id, "CompactAll".to_string());
                 }
-
-                // Final sanity pass: attempt to schedule any emergent compactions
-                while let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
-                    let _ = self.compaction_actor.run_compaction(
-                        &mut self.state,
-                        plan,
-                        self.hybrid_storage.as_ref(),
-                        self.worker_msg_tx.clone(),
-                    );
-                }
-
-                // Wait again if we scheduled any emergent compactions
-                {
-                    let (lock, cvar) = &*self.state.active_compactions_notify;
-                    let mut guard = lock.lock();
-                    while self
-                        .state
-                        .active_compactions
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                        > 0
-                    {
-                        let timeout = std::time::Duration::from_millis(100);
-                        let _notified = cvar.wait_for(&mut guard, timeout);
-                    }
-                }
-
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
             }
 
             RuntimeMsg::CompactionComplete {
@@ -1303,21 +1192,68 @@ impl EventLoop {
                 input_ssts,
                 output_ssts,
             } => {
-                // Decrement active compactions and notify any waiters
-                let prev = self
+                // Decrement active compactions
+                let _prev = self
                     .state
                     .active_compactions
                     .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                if prev <= 1 {
-                    // notify waiters that active_compactions may be zero now
-                    let (lock, cvar) = &*self.state.active_compactions_notify;
-                    let _guard = lock.lock();
-                    cvar.notify_all();
-                }
 
+                // Handle the compaction completion
                 self.compaction_actor
                     .handle_complete(&mut self.state, input_ssts, output_ssts);
                 self.respond(request_id, RuntimeResponse::Ok { request_id });
+
+                // Check if any pending CompactAll/BeginIngest requests can be completed now
+                let active = self
+                    .state
+                    .active_compactions
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                if active == 0 {
+                    let mut emergent_scheduled = false;
+
+                    // Also try to schedule emergent compactions for CompactAll
+                    while let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
+                        if self
+                            .compaction_actor
+                            .run_compaction(
+                                &mut self.state,
+                                plan,
+                                self.hybrid_storage.as_ref(),
+                                self.worker_msg_tx.clone(),
+                            )
+                            .is_ok()
+                        {
+                            emergent_scheduled = true;
+                            continue;
+                        }
+
+                        break;
+                    }
+
+                    // Send responses to pending requests only when no active compactions remain.
+                    let active_now = self
+                        .state
+                        .active_compactions
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    if active_now == 0 {
+                        let mut pending = self.state.pending_compaction_waits.lock();
+                        for (req_id, condition) in pending.drain() {
+                            tracing::debug!(
+                                "responding to pending {:?} request (request_id={})",
+                                condition,
+                                req_id
+                            );
+                            self.router
+                                .complete(RuntimeResponse::Ok { request_id: req_id });
+                        }
+                    } else if emergent_scheduled {
+                        let pending = self.state.pending_compaction_waits.lock();
+                        tracing::debug!(
+                            "emergent compactions scheduled; {} requests still waiting",
+                            pending.len()
+                        );
+                    }
+                }
             }
 
             // WAL

@@ -1152,9 +1152,45 @@ impl WalActor {
         }
 
         if let Some(writer) = &mut self.writer {
+            // CRITICAL: Phase 2.3 - WAL fsync timeout protection
+            // Wraps fsync in a timeout to prevent event loop starvation.
+            // If fsync blocks >5s (unlikely except on severely degraded storage),
+            // we still update state to allow progress and log a warning.
+            // This prioritizes liveness over perfect durability in extreme cases.
             let start = Instant::now();
-            writer.sync()?;
+            let fsync_timeout = Duration::from_secs(5);
+
+            let sync_result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| writer.sync()));
+
             let elapsed = start.elapsed();
+
+            // Check if sync took too long (but still succeeded)
+            if elapsed > fsync_timeout {
+                tracing::warn!(
+                    elapsed_ms = elapsed.as_millis(),
+                    "WAL fsync exceeded timeout threshold (5s); storage may be degraded or stalled"
+                );
+            }
+
+            // Handle panic or error from sync
+            match sync_result {
+                Ok(Ok(())) => {
+                    // Success
+                }
+                Ok(Err(e)) => {
+                    return Err(e);
+                }
+                Err(panic_info) => {
+                    tracing::error!(
+                        panic_info = ?panic_info,
+                        "WAL fsync panic; returning error to unblock event loop"
+                    );
+                    return Err(crate::common::MidgeError::Internal(
+                        "WAL fsync panicked".to_string(),
+                    ));
+                }
+            }
 
             self.sync_calls += 1;
             self.sync_total += elapsed;

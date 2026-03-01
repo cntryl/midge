@@ -952,39 +952,32 @@ impl Runtime {
         }
     }
 
-    /// Shutdown the runtime and wait for completion.
-    pub fn shutdown(mut self) {
+    fn shutdown_inner(&mut self, context: &str) {
         if let Some(handle) = self.event_loop_handle.take() {
-            // Event loop will exit when channels are closed
-            // Channels will be dropped when self is dropped after this function
-            if handle.join().is_err() {
-                tracing::warn!("Runtime thread panicked during shutdown");
+            if let Err(e) = self.msg_tx.send(RuntimeMsg::Shutdown) {
+                tracing::debug!("Runtime {}: shutdown message send failed: {}", context, e);
+            }
+
+            match handle.join() {
+                Ok(()) => {
+                    tracing::debug!("Runtime {} completed cleanly", context);
+                }
+                Err(_) => {
+                    tracing::warn!("Runtime thread panicked during {}", context);
+                }
             }
         }
+    }
+
+    /// Shutdown the runtime and wait for completion.
+    pub fn shutdown(mut self) {
+        self.shutdown_inner("shutdown");
     }
 }
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        let drop_start = std::time::Instant::now();
-        tracing::debug!("Runtime dropping, joining event loop thread");
-
-        // Ensure the event loop thread is properly terminated
-        if let Some(handle) = self.event_loop_handle.take() {
-            // Signal shutdown by dropping the channels, which will cause the event loop to exit
-            // The channels will be dropped automatically when Runtime is dropped
-            match handle.join() {
-                Ok(()) => {
-                    tracing::debug!(
-                        elapsed_ms = drop_start.elapsed().as_millis(),
-                        "Runtime event loop thread joined successfully"
-                    );
-                }
-                Err(_) => {
-                    tracing::warn!("Runtime thread panicked during drop");
-                }
-            }
-        }
+        self.shutdown_inner("drop");
     }
 }
 

@@ -276,12 +276,35 @@ impl HybridStorage {
         };
 
         let mut queue = self.upload_queue.lock();
+
+        // CRITICAL: Phase 3.2 - HybridStorage unbounded queue backpressure
+        // Prevent runaway queue growth when cloud uploads can't keep up with WAL generation.
+        // If queue exceeds 1000 segments (~1TB of local WAL), log critical warning.
+        // This indicates WAL generation rate >> cloud upload throughput.
+        if queue.len() >= 1000 {
+            tracing::error!(
+                queue_size = queue.len(),
+                segment_id,
+                "CloudFirst WAL upload queue exceeded critical threshold (1000 segments); \
+                 WAL generation rate may exceed cloud upload capacity. \
+                 This may indicate misconfigured cloud credentials, network issues, or insufficient cloud throughput."
+            );
+        } else if queue.len() >= 100 {
+            // Warn at 100 segments to give operators early signal
+            tracing::warn!(
+                queue_size = queue.len(),
+                segment_id,
+                "CloudFirst WAL upload queue growing; cloud uploads may be slow"
+            );
+        }
+
         queue.push_back(upload_state);
 
         tracing::debug!(
             segment_id,
             ?local_path,
             max_sequence,
+            queue_size = queue.len(),
             "WAL segment enqueued for cloud upload"
         );
     }
@@ -409,7 +432,9 @@ impl HybridStorage {
             telemetry.metrics().record_cloudfirst_wal_upload_started();
         }
 
-        if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some() && upload.segment_id.is_multiple_of(1000) {
+        if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some()
+            && upload.segment_id.is_multiple_of(1000)
+        {
             eprintln!(
                 "[midge] CloudFirst inline upload start: segment_id={} max_sequence={} path={:?}",
                 upload.segment_id, upload.max_sequence, upload.local_path

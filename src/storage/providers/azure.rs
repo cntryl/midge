@@ -788,26 +788,49 @@ impl ManagedIdentitySigner {
 
     /// Get a valid cached token, refreshing if necessary.
     fn get_token(&self) -> MidgeResult<String> {
-        let mut cache = match self.token_cache.lock() {
-            Ok(guard) => guard,
-            Err(_poisoned) => {
-                return Err(MidgeError::Internal(
-                    "Token cache mutex poisoned; token fetch failed in another thread. Restart required.".into()
-                ))
-            }
-        };
+        // CRITICAL: Phase 3.1 - Azure token mutex contention fix
+        // Original code held the mutex lock while calling fetch_token() (HTTP request),
+        // blocking all other threads for up to 10 seconds during token refresh.
+        // This pattern is fixed by:
+        // 1. Check cache without holding lock across slow operation
+        // 2. Release lock before HTTP call to IMDS
+        // 3. Update cache atomically after fetch
 
-        // Check if cached token is valid
-        if let Some(ref token) = *cache {
-            if !token.is_expired() {
-                return Ok(token.access_token.clone());
-            }
-        }
+        // Fast path: check if cached token is still valid (minimal lock hold)
+        {
+            let cache = match self.token_cache.lock() {
+                Ok(guard) => guard,
+                Err(_poisoned) => {
+                    return Err(MidgeError::Internal(
+                        "Token cache mutex poisoned; token fetch failed in another thread. Restart required.".into()
+                    ))
+                }
+            };
 
-        // Fetch fresh token
+            if let Some(ref token) = *cache {
+                if !token.is_expired() {
+                    return Ok(token.access_token.clone());
+                }
+            }
+        } // Lock released here before fetch_token()
+
+        // Fetch fresh token WITHOUT holding the lock
+        // This allows other threads to check the cache while we wait for IMDS
         let fresh_token = self.fetch_token()?;
         let access_token = fresh_token.access_token.clone();
-        *cache = Some(fresh_token);
+
+        // Update cache atomically after fetch completes
+        {
+            let mut cache = match self.token_cache.lock() {
+                Ok(guard) => guard,
+                Err(_poisoned) => {
+                    return Err(MidgeError::Internal(
+                        "Token cache mutex poisoned during cache update".into(),
+                    ))
+                }
+            };
+            *cache = Some(fresh_token);
+        }
 
         Ok(access_token)
     }

@@ -4,8 +4,9 @@
 // You MUST implement CloudExecutor as a fully self-contained async engine.
 //
 // Requirements:
-// 1. CloudExecutor MUST embed its own single-threaded Tokio runtime:
-//      let rt = tokio::runtime::Builder::new_current_thread()
+// 1. CloudExecutor MUST embed its own multi-threaded Tokio runtime:
+//      let rt = tokio::runtime::Builder::new_multi_thread()
+//          .worker_threads(4)  // Prevents single-thread starvation
 //          .enable_all()
 //          .build()
 //          .unwrap();
@@ -93,7 +94,8 @@ pub struct CloudExecutor {
 
 impl CloudExecutor {
     pub fn new(signer: Option<Arc<dyn CloudSigner>>) -> MidgeResult<Self> {
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
             .enable_all()
             .build()
             .map_err(|e| {
@@ -181,7 +183,8 @@ impl Drop for CloudExecutor {
         let rt_arc = std::mem::replace(
             &mut self.rt,
             Arc::new(
-                tokio::runtime::Builder::new_current_thread()
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
                     .build()
                     .expect("Failed to create placeholder runtime"),
             ),

@@ -204,6 +204,10 @@ pub struct RuntimeState {
     /// and cleared at EndIngest so tools and tests can detect when ingest mode
     /// is enforced.
     pub ingest_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    /// Pending CompactAll/BeginIngest requests waiting for compactions to finish.
+    /// Maps request_id -> completion_condition (e.g., "CompactAll", "BeginIngest").
+    pub pending_compaction_waits: parking_lot::Mutex<std::collections::HashMap<u64, String>>,
 }
 
 impl RuntimeState {
@@ -402,6 +406,7 @@ impl RuntimeState {
                 parking_lot::Condvar::new(),
             )),
             ingest_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pending_compaction_waits: parking_lot::Mutex::new(std::collections::HashMap::new()),
         }
     }
 

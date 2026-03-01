@@ -138,17 +138,13 @@ impl CacheShard {
         self.record_access_for_admission(&key);
 
         // Send to admission worker (non-blocking)
-        if self
-            .admission_tx
-            .as_ref()
-            .is_none_or(|tx| {
-                tx.send(AdmissionRequest {
-                    key,
-                    value: value.clone(),
-                })
-                .is_err()
+        if self.admission_tx.as_ref().is_none_or(|tx| {
+            tx.send(AdmissionRequest {
+                key,
+                value: value.clone(),
             })
-        {
+            .is_err()
+        }) {
             // If channel is unavailable/disconnected, fall back to inline admission
             self.admission_inline.store(true, Ordering::Relaxed);
             self.put_inline(key, value);
