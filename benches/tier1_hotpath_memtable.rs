@@ -40,57 +40,67 @@ fn bench_put_single(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(1));
 
-    // Pre-create keys and values outside measurement
+    // Precompute keys and values outside measurements
     let keys: Vec<Vec<u8>> = (0..1000).map(make_key).collect();
     let small_val = make_value(64);
     let medium_val = make_value(1024);
     let large_val = make_value(4096);
-
-    // Warm memtable - pre-populated with some data
-    let memtable = SkipListMemtable::new();
-    for key in keys.iter().take(100) {
-        let _ = memtable.put(key.clone(), small_val.clone());
-    }
 
     let mut counter = 100usize;
 
     group.bench_function("64b_value", |b| {
         b.iter_batched(
             || {
+                // Create a FRESH memtable per iteration to prevent unbounded
+                // version-chain growth. Pre-warm it with 100 entries.
+                let mt = SkipListMemtable::new();
+                for key in keys.iter().take(100) {
+                    let _ = mt.put(key.clone(), small_val.clone());
+                }
                 let idx = counter % keys.len();
                 counter = counter.wrapping_add(1);
-                (keys[idx].clone(), small_val.clone())
+                (mt, keys[idx].clone())
             },
-            |(key, value)| {
-                let _ = memtable.put(black_box(key), black_box(value));
+            |(memtable, key)| {
+                let _ = memtable.put(black_box(key), black_box(small_val.clone()));
             },
             BatchSize::SmallInput,
         )
     });
 
+    let mut counter = 100usize;
     group.bench_function("1kb_value", |b| {
         b.iter_batched(
             || {
+                let mt = SkipListMemtable::new();
+                for key in keys.iter().take(100) {
+                    let _ = mt.put(key.clone(), medium_val.clone());
+                }
                 let idx = counter % keys.len();
                 counter = counter.wrapping_add(1);
-                (keys[idx].clone(), medium_val.clone())
+                (mt, keys[idx].clone())
             },
-            |(key, value)| {
-                let _ = memtable.put(black_box(key), black_box(value));
+            |(memtable, key)| {
+                let _ = memtable.put(black_box(key), black_box(medium_val.clone()));
             },
             BatchSize::SmallInput,
         )
     });
 
+    let mut counter = 100usize;
     group.bench_function("4kb_value", |b| {
         b.iter_batched(
             || {
+                let mt = SkipListMemtable::new();
+                for key in keys.iter().take(100) {
+                    let _ = mt.put(key.clone(), large_val.clone());
+                }
                 let idx = counter % keys.len();
                 counter = counter.wrapping_add(1);
-                (keys[idx].clone(), large_val.clone())
+                (mt, keys[idx].clone())
             },
-            |(key, value)| {
-                let _ = memtable.put(black_box(key), black_box(value));
+            |(memtable, key)| {
+                let _ = memtable.put(black_box(key), black_box(large_val.clone()));
             },
             BatchSize::SmallInput,
         )

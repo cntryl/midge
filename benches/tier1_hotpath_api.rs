@@ -100,6 +100,9 @@ fn bench_batch_put(c: &mut Criterion) {
         );
     }
 
+    // CRITICAL: Flush memtable to prevent unbounded version-chain growth
+    let _ = engine.flush_cf(&cf);
+
     group.finish();
 }
 
@@ -169,6 +172,9 @@ fn bench_single_get(c: &mut Criterion) {
         })
     });
 
+    // CRITICAL: Flush memtable to prevent unbounded version-chain growth
+    let _ = engine.flush_cf(&cf);
+
     group.finish();
 }
 
@@ -202,6 +208,11 @@ fn bench_single_put(c: &mut Criterion) {
             black_box(());
         })
     });
+
+    // CRITICAL: Flush memtable to prevent unbounded version-chain growth
+    // across subsequent benchmarks. This clears all in-memory data without
+    // triggering compaction (which is disabled).
+    let _ = engine.flush_cf(&cf);
 
     group.finish();
 }
