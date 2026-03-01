@@ -35,7 +35,7 @@ pub struct CacheShard {
     /// Maximum size in bytes
     max_bytes: u64,
     /// Channel for async admission requests
-    admission_tx: Sender<AdmissionRequest>,
+    admission_tx: Option<Sender<AdmissionRequest>>,
     /// Fallback to inline admission when worker thread cannot be spawned
     admission_inline: AtomicBool,
     /// Background admission worker thread handle
@@ -61,7 +61,7 @@ impl CacheShard {
                 admission: AdmissionCounter::new(64, 1000),
                 metrics: CacheMetrics::new(),
                 max_bytes,
-                admission_tx: tx,
+                admission_tx: Some(tx),
                 admission_inline: AtomicBool::new(inline_mode),
                 worker_handle,
             }
@@ -78,9 +78,12 @@ impl CacheShard {
         let spawn_result = thread::Builder::new()
             .name("cache-admission-worker".to_string())
             .spawn(move || {
-                // Upgrade weak to strong; exit if shard already dropped
-                if let Some(shard) = weak_shard.upgrade() {
-                    shard.admission_worker(rx);
+                for request in rx {
+                    // Upgrade weak to strong per request so worker does not keep shard alive.
+                    let Some(shard) = weak_shard.upgrade() else {
+                        break;
+                    };
+                    shard.handle_admission_request(request);
                 }
             });
 
@@ -137,19 +140,20 @@ impl CacheShard {
         // Send to admission worker (non-blocking)
         if self
             .admission_tx
-            .send(AdmissionRequest {
-                key,
-                value: value.clone(),
+            .as_ref()
+            .is_none_or(|tx| {
+                tx.send(AdmissionRequest {
+                    key,
+                    value: value.clone(),
+                })
+                .is_err()
             })
-            .is_ok()
         {
-            true
-        } else {
-            // If the channel is disconnected, fall back to inline admission
+            // If channel is unavailable/disconnected, fall back to inline admission
             self.admission_inline.store(true, Ordering::Relaxed);
             self.put_inline(key, value);
-            true
         }
+        true
     }
 
     /// Insert a value into the cache (inline admission fallback)
@@ -212,24 +216,19 @@ impl CacheShard {
         self.evict_if_needed();
     }
 
-    /// Background admission worker
-    ///
-    /// Processes admission requests from the queue, performs admission checks,
-    /// inserts entries, and evicts when over capacity.
-    fn admission_worker(&self, rx: crossbeam_channel::Receiver<AdmissionRequest>) {
-        for request in rx {
-            // Check type-aware admission policy
-            if !self.should_admit(&request.key) {
-                continue;
-            }
-
-            // Insert into cache
-            let cache_value = CacheValue::new(request.value);
-            self.insert_and_update_metrics(request.key, cache_value);
-
-            // Evict if over capacity (runs in background)
-            self.evict_if_needed();
+    /// Handle one admission request on the background worker.
+    fn handle_admission_request(&self, request: AdmissionRequest) {
+        // Check type-aware admission policy
+        if !self.should_admit(&request.key) {
+            return;
         }
+
+        // Insert into cache
+        let cache_value = CacheValue::new(request.value);
+        self.insert_and_update_metrics(request.key, cache_value);
+
+        // Evict if over capacity (runs in background)
+        self.evict_if_needed();
     }
 
     /// Record access for admission control
@@ -394,9 +393,8 @@ impl CacheShard {
 
 impl Drop for CacheShard {
     fn drop(&mut self) {
-        // Drop the admission_tx sender to signal worker to exit
-        // (We cannot take ownership of admission_tx, so we rely on it being dropped
-        // naturally when self is dropped, which happens after this drop impl runs)
+        // Close sender first so worker receive loop exits promptly.
+        let _ = self.admission_tx.take();
 
         // Wait for worker thread to complete if it exists
         // Use Option::take() to move the handle out of self

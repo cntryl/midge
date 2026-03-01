@@ -80,7 +80,7 @@ pub struct HybridStorage {
     external_event_tx: Option<cb::Sender<StorageEvent>>,
 
     /// Dedicated WAL upload worker sender.
-    wal_upload_tx: mpsc::Sender<UploadState>,
+    wal_upload_tx: Option<mpsc::Sender<UploadState>>,
 
     /// Flag indicating if WAL upload worker thread failed to spawn
     upload_worker_failed: bool,
@@ -258,7 +258,7 @@ impl HybridStorage {
             upload_queue,
             event_queue,
             external_event_tx,
-            wal_upload_tx,
+            wal_upload_tx: Some(wal_upload_tx),
             upload_worker_failed,
             upload_worker_handle,
         }
@@ -359,7 +359,11 @@ impl HybridStorage {
             // If worker failed to spawn, perform inline upload as fallback.
             if self.upload_worker_failed {
                 self.process_upload_inline(upload.clone());
-            } else if self.wal_upload_tx.send(upload.clone()).is_err() {
+            } else if self
+                .wal_upload_tx
+                .as_ref()
+                .is_none_or(|tx| tx.send(upload.clone()).is_err())
+            {
                 // Worker thread died unexpectedly - fall back to inline mode
                 tracing::warn!(
                     segment_id = upload.segment_id,
@@ -715,8 +719,9 @@ impl StorageBackend for HybridStorage {
 
 impl Drop for HybridStorage {
     fn drop(&mut self) {
-        // The sender will be dropped automatically when self drops,
-        // which will cause recv() in the worker thread to return Err
+        // Drop sender first so worker recv() unblocks and exits promptly.
+        // Waiting for join before dropping sender can deadlock until timeout.
+        let _ = self.wal_upload_tx.take();
 
         // Wait for the worker thread to complete with a timeout
         if let Some(handle) = self.upload_worker_handle.take() {
