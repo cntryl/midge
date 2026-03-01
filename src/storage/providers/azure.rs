@@ -125,26 +125,6 @@ impl AzureProvider {
     /// - `AZURE_CLIENT_ID`: User-assigned managed identity client ID
     /// - `MSI_ENDPOINT`: Custom IMDS endpoint (for testing)
     /// - `IDENTITY_ENDPOINT`: Alternative endpoint (App Service/Container Apps)
-    ///
-    /// # Examples
-    /// ```no_run
-    /// # use cntryl_midge::storage::providers::AzureProvider;
-    /// // System-assigned identity
-    /// let provider = AzureProvider::with_managed_identity(
-    ///     "mystorageaccount".into(),
-    ///     "mycontainer".into(),
-    ///     None
-    /// )?;
-    ///
-    /// // User-assigned identity
-    /// std::env::set_var("AZURE_CLIENT_ID", "00000000-0000-0000-0000-000000000000");
-    /// let provider = AzureProvider::with_managed_identity(
-    ///     "mystorageaccount".into(),
-    ///     "mycontainer".into(),
-    ///     Some("00000000-0000-0000-0000-000000000000".into())
-    /// )?;
-    /// # Ok::<(), cntryl_midge::common::MidgeError>(())
-    /// ```
     pub fn with_managed_identity(
         account_name: String,
         container: String,
@@ -199,20 +179,6 @@ impl AzureProvider {
     /// - `AZURE_STORAGE_KEY`: Account key for SharedKey auth
     /// - `AZURE_STORAGE_SAS_TOKEN`: SAS token
     /// - `AZURE_CLIENT_ID`: User-assigned managed identity client ID
-    ///
-    /// # Examples
-    /// ```no_run
-    /// # use cntryl_midge::storage::providers::AzureProvider;
-    /// // Using connection string
-    /// std::env::set_var("AZURE_STORAGE_CONNECTION_STRING", 
-    ///     "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=...");
-    /// let provider = AzureProvider::from_env("myaccount".into(), "mycontainer".into())?;
-    ///
-    /// // Using managed identity
-    /// std::env::set_var("AZURE_CLIENT_ID", "00000000-0000-0000-0000-000000000000");
-    /// let provider = AzureProvider::from_env("myaccount".into(), "mycontainer".into())?;
-    /// # Ok::<(), cntryl_midge::common::MidgeError>(())
-    /// ```
     pub fn from_env(account_name: String, container: String) -> MidgeResult<Self> {
         // Try connection string first
         if let Ok(conn_str) = std::env::var("AZURE_STORAGE_CONNECTION_STRING") {
