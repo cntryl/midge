@@ -707,7 +707,7 @@ impl Drop for SkipList {
         unsafe {
             let guard = &epoch::unprotected();
             let head_ref = &*self.head;
-            
+
             // Collect all nodes in level-0 forward order.
             let mut curr = head_ref.forward[0].load(AO::Relaxed, guard);
             while !curr.is_null() {
@@ -718,13 +718,13 @@ impl Drop for SkipList {
                 curr = next;
             }
         }
-        
+
         // Now drop the version chain for head, then all nodes.
         unsafe {
             let guard = &epoch::unprotected();
             let head_ref = &*self.head;
             Self::drop_version_chain(&head_ref.versions_head, guard);
-            
+
             // Convert to owned and drop each node.
             for shared in nodes_to_drop {
                 let owned = shared.into_owned();

@@ -27,9 +27,9 @@ pub mod executor;
 
 use super::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
 use crate::common::MidgeError;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 pub use executor::{CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 
@@ -121,7 +121,13 @@ pub trait CloudBackend: Send + Sync + 'static {
     /// Submit a PUT request for `key` with optional HTTP headers. Implementations
     /// MUST honor headers (e.g. `If-None-Match`, `If-Match`) when supported by the
     /// provider to allow conditional writes.
-    fn submit_put(&self, key: String, data: Vec<u8>, headers: Vec<(String, String)>, callback: CloudCallback);
+    fn submit_put(
+        &self,
+        key: String,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    );
     fn submit_get(&self, key: String, callback: CloudCallback);
     fn submit_get_range(&self, key: String, start: u64, end: Option<u64>, callback: CloudCallback);
     fn submit_delete(&self, key: String, callback: CloudCallback);
@@ -174,22 +180,39 @@ impl Default for MockCloudBackend {
 }
 
 impl CloudBackend for MockCloudBackend {
-    fn submit_put(&self, key: String, data: Vec<u8>, headers: Vec<(String, String)>, callback: CloudCallback) {
+    fn submit_put(
+        &self,
+        key: String,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
         // Honor `If-None-Match: *` (conditional create).
-        let if_none_match = headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("if-none-match") && v == "*");
+        let if_none_match = headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("if-none-match") && v == "*");
         if if_none_match && self.storage.lock().contains_key(&key) {
             // Simulate conditional failure (precondition failed)
-            let event = CloudEvent::PutComplete { key, result: CloudOutcome::Err("precondition failed".to_string()) };
+            let event = CloudEvent::PutComplete {
+                key,
+                result: CloudOutcome::Err("precondition failed".to_string()),
+            };
             let _ = callback.send(event);
             return;
         }
 
         // Honor `If-Match: <etag>` (conditional update).
         // If object missing → precondition failed. If etag mismatches → precondition failed.
-        if let Some((_, expected)) = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("if-match")) {
+        if let Some((_, expected)) = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("if-match"))
+        {
             let exists = self.storage.lock().contains_key(&key);
             if !exists {
-                let event = CloudEvent::PutComplete { key, result: CloudOutcome::Err("precondition failed".to_string()) };
+                let event = CloudEvent::PutComplete {
+                    key,
+                    result: CloudOutcome::Err("precondition failed".to_string()),
+                };
                 let _ = callback.send(event);
                 return;
             }
@@ -199,7 +222,10 @@ impl CloudBackend for MockCloudBackend {
             let current_gen = gens_lock.get(&key).cloned().unwrap_or(0);
             let current_etag = format!("mock-gen-{}", current_gen);
             if expected != &current_etag {
-                let event = CloudEvent::PutComplete { key, result: CloudOutcome::Err("precondition failed".to_string()) };
+                let event = CloudEvent::PutComplete {
+                    key,
+                    result: CloudOutcome::Err("precondition failed".to_string()),
+                };
                 let _ = callback.send(event);
                 return;
             }
@@ -223,7 +249,12 @@ impl CloudBackend for MockCloudBackend {
     }
 
     fn submit_get(&self, key: String, callback: CloudCallback) {
-        let result = self.storage.lock().get(&key).cloned().ok_or(MidgeError::NotFound);
+        let result = self
+            .storage
+            .lock()
+            .get(&key)
+            .cloned()
+            .ok_or(MidgeError::NotFound);
         self.downloads.lock().push(key.clone());
         let event = CloudEvent::GetComplete {
             key,
@@ -253,9 +284,7 @@ impl CloudBackend for MockCloudBackend {
     }
 
     fn submit_delete(&self, key: String, callback: CloudCallback) {
-        self.storage
-            .lock()
-            .remove(&key);
+        self.storage.lock().remove(&key);
         let event = CloudEvent::DeleteComplete {
             key,
             result: CloudOutcome::Ok(()),
@@ -317,7 +346,13 @@ impl CloudStorage {
         format!("{}/{}", self.namespace, suffix)
     }
 
-    pub fn submit_put(&self, key: String, data: Vec<u8>, headers: Vec<(String, String)>, callback: CloudCallback) {
+    pub fn submit_put(
+        &self,
+        key: String,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
         self.backend
             .submit_put(self.full_path(&key), data, headers, callback);
     }

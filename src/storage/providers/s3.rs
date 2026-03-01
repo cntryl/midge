@@ -7,17 +7,17 @@
 //! - Oracle Cloud Infrastructure (OCI S3 compatibility)
 //! - Any other S3-compatible service
 
-use crate::common::{MidgeError, MidgeResult};
 use super::super::cloud::{
     CloudBackend, CloudExecutor, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
 };
 use super::super::cloud::{CloudCallback, CloudEvent, CloudOutcome};
+use crate::common::{MidgeError, MidgeResult};
 use chrono::Utc;
 use hex;
 use hmac::{Hmac, Mac};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
-use reqwest::Method;
 use reqwest::blocking::Client;
+use reqwest::Method;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
@@ -224,15 +224,16 @@ impl DefaultAwsCredentialProvider {
     }
 
     fn resolve_ecs_task_role(&self) -> MidgeResult<CachedAwsCredentials> {
-        let endpoint = if let Ok(relative_uri) = std::env::var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI") {
-            format!("http://169.254.170.2{}", relative_uri)
-        } else if let Ok(full_uri) = std::env::var("AWS_CONTAINER_CREDENTIALS_FULL_URI") {
-            full_uri
-        } else {
-            return Err(MidgeError::InvalidArgument(
-                "ECS credential endpoint variables are not set".into(),
-            ));
-        };
+        let endpoint =
+            if let Ok(relative_uri) = std::env::var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI") {
+                format!("http://169.254.170.2{}", relative_uri)
+            } else if let Ok(full_uri) = std::env::var("AWS_CONTAINER_CREDENTIALS_FULL_URI") {
+                full_uri
+            } else {
+                return Err(MidgeError::InvalidArgument(
+                    "ECS credential endpoint variables are not set".into(),
+                ));
+            };
 
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(5))
@@ -282,7 +283,8 @@ impl DefaultAwsCredentialProvider {
                 }
             });
 
-        let mut role_req = client.get("http://169.254.169.254/latest/meta-data/iam/security-credentials/");
+        let mut role_req =
+            client.get("http://169.254.169.254/latest/meta-data/iam/security-credentials/");
         if let Some(ref token_value) = token {
             role_req = role_req.header("X-aws-ec2-metadata-token", token_value);
         }
@@ -490,7 +492,12 @@ impl S3Provider {
     }
 
     /// Create provider for Wasabi (simple access key/secret)
-    pub fn wasabi(bucket: String, region: String, access_key: String, secret_key: String) -> MidgeResult<Self> {
+    pub fn wasabi(
+        bucket: String,
+        region: String,
+        access_key: String,
+        secret_key: String,
+    ) -> MidgeResult<Self> {
         let config = S3Config::wasabi(bucket, region.clone());
         let creds = AwsCredentials {
             access_key,
@@ -502,7 +509,12 @@ impl S3Provider {
     }
 
     /// Create provider for MinIO (access key/secret)
-    pub fn minio(bucket: String, endpoint: String, access_key: String, secret_key: String) -> MidgeResult<Self> {
+    pub fn minio(
+        bucket: String,
+        endpoint: String,
+        access_key: String,
+        secret_key: String,
+    ) -> MidgeResult<Self> {
         let config = S3Config::minio(bucket, endpoint);
         let creds = AwsCredentials {
             access_key,
@@ -564,6 +576,12 @@ impl S3Provider {
     }
 }
 
+impl Drop for S3Provider {
+    fn drop(&mut self) {
+        tracing::trace!("S3Provider dropping, cleanup will propagate to CloudExecutor");
+    }
+}
+
 struct S3Backend {
     config: S3Config,
     executor: CloudExecutor,
@@ -620,7 +638,13 @@ impl S3Backend {
 }
 
 impl CloudBackend for S3Backend {
-    fn submit_put(&self, key: String, data: Vec<u8>, headers: Vec<(String, String)>, callback: CloudCallback) {
+    fn submit_put(
+        &self,
+        key: String,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
         let url = self.object_url(&key);
         let mut request = CloudRequest::new(Method::PUT, url).with_body(data);
         // Apply provided headers (e.g. conditional headers like If-None-Match)
@@ -911,10 +935,7 @@ impl SigV4Signer {
     }
 
     fn signing_key(&self, secret_key: &str, date: &str) -> MidgeResult<Vec<u8>> {
-        let k_date = hmac_sha256(
-            format!("AWS4{}", secret_key).as_bytes(),
-            date.as_bytes(),
-        )?;
+        let k_date = hmac_sha256(format!("AWS4{}", secret_key).as_bytes(), date.as_bytes())?;
         let k_region = hmac_sha256(&k_date, self.region.as_bytes())?;
         let k_service = hmac_sha256(&k_region, b"s3")?;
         hmac_sha256(&k_service, b"aws4_request")
@@ -973,11 +994,9 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        assert!(request
-            .headers
-            .iter()
-            .any(|(name, value)| name.eq_ignore_ascii_case("x-amz-security-token")
-                && value == "session-token-abc"));
+        assert!(request.headers.iter().any(|(name, value)| name
+            .eq_ignore_ascii_case("x-amz-security-token")
+            && value == "session-token-abc"));
         assert!(request
             .headers
             .iter()
@@ -1012,10 +1031,8 @@ mod tests {
             .map(|(_, value)| value.clone())
             .unwrap_or_default();
         assert!(auth.contains("Credential=AKIAXXXTESTENV/"));
-        assert!(request
-            .headers
-            .iter()
-            .any(|(name, value)| name.eq_ignore_ascii_case("x-amz-security-token")
-                && value == "test-env-token"));
+        assert!(request.headers.iter().any(|(name, value)| name
+            .eq_ignore_ascii_case("x-amz-security-token")
+            && value == "test-env-token"));
     }
 }

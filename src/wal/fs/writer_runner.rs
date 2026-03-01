@@ -35,6 +35,13 @@ pub(crate) const MAX_WRITE_ATTEMPTS: u8 = 3;
 /// - Memory overhead: 5000 × 512B average ≈ 2.5MB (acceptable)
 /// - Reduces frequency of backpressure triggers while providing smooth flow control
 pub(crate) const MAX_QUEUE_DEPTH: usize = 5000;
+/// Maximum buffer pool size to prevent unbounded memory growth
+/// When pool reaches this size, excess buffers are dropped instead of pooled
+/// Sized to accommodate sustained high-concurrency writes:
+/// - 64 buffers × ~1KB average ≈ 64KB pool overhead (minimal)
+/// - Provides ~1.3% of MAX_QUEUE_DEPTH as pooled buffers
+/// - Balances memory usage with allocation avoidance for most workloads
+pub(crate) const MAX_BUFFER_POOL_SIZE: usize = 64;
 
 /// Configuration struct to reduce constructor arguments
 pub struct WriterConfig {
@@ -168,10 +175,22 @@ impl WriterRunner {
                 }
 
                 // Return buffers to pool and notify any waiting producers that queue drained
+                // Only return buffers if pool is below maximum size to prevent unbounded growth
                 {
                     let mut pool = self.config.buf_pool.lock();
+                    let mut dropped = 0usize;
                     for entry in batch {
-                        pool.push(entry.data);
+                        if pool.len() < MAX_BUFFER_POOL_SIZE {
+                            pool.push(entry.data);
+                        } else {
+                            // Pool is full, drop buffer to prevent unbounded growth
+                            dropped += 1;
+                        }
+                    }
+                    if dropped > 0 {
+                        if let Some(t) = crate::telemetry::Telemetry::global() {
+                            t.metrics().record_wal_buffer_pool_overflow(dropped as u64);
+                        }
                     }
                 }
                 // Notify producers waiting on backpressure - queue now has space

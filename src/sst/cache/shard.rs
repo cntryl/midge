@@ -92,6 +92,9 @@ impl CacheShard {
                     error = %err,
                     "cache admission worker spawn failed; falling back to inline admission"
                 );
+                if let Some(t) = crate::telemetry::Telemetry::global() {
+                    t.metrics().record_thread_spawn_failure();
+                }
                 None
             }
         }
@@ -120,6 +123,10 @@ impl CacheShard {
     /// Returns true if request was queued, false if channel is disconnected.
     pub fn put(&self, key: CacheKey, value: Bytes) -> bool {
         if self.admission_inline.load(Ordering::Relaxed) {
+            // Track inline fallback usage
+            if let Some(t) = crate::telemetry::Telemetry::global() {
+                t.metrics().record_cache_inline_fallback();
+            }
             self.put_inline(key, value);
             return true;
         }
@@ -390,7 +397,7 @@ impl Drop for CacheShard {
         // Drop the admission_tx sender to signal worker to exit
         // (We cannot take ownership of admission_tx, so we rely on it being dropped
         // naturally when self is dropped, which happens after this drop impl runs)
-        
+
         // Wait for worker thread to complete if it exists
         // Use Option::take() to move the handle out of self
         if let Some(handle) = self.worker_handle.take() {

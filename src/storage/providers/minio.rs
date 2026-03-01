@@ -30,7 +30,12 @@ impl MinioProvider {
     /// * `endpoint` - MinIO endpoint URL (e.g., "http://localhost:9000" or "https://minio.example.com")
     /// * `access_key` - MinIO access key
     /// * `secret_key` - MinIO secret key
-    pub fn new(bucket: String, endpoint: String, access_key: String, secret_key: String) -> MidgeResult<Self> {
+    pub fn new(
+        bucket: String,
+        endpoint: String,
+        access_key: String,
+        secret_key: String,
+    ) -> MidgeResult<Self> {
         let config = S3Config::minio(bucket, endpoint);
         S3Provider::custom(config, access_key, secret_key).map(|inner| Self { inner })
     }

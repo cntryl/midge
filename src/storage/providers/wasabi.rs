@@ -30,7 +30,12 @@ impl WasabiProvider {
     /// * `region` - Wasabi region (e.g., "us-east-1")
     /// * `access_key` - Wasabi access key
     /// * `secret_key` - Wasabi secret key
-    pub fn new(bucket: String, region: String, access_key: String, secret_key: String) -> MidgeResult<Self> {
+    pub fn new(
+        bucket: String,
+        region: String,
+        access_key: String,
+        secret_key: String,
+    ) -> MidgeResult<Self> {
         let config = S3Config::wasabi(bucket, region);
         S3Provider::custom(config, access_key, secret_key).map(|inner| Self { inner })
     }

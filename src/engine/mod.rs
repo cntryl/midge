@@ -135,31 +135,44 @@ pub struct Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
+        let drop_start = std::time::Instant::now();
+        tracing::debug!("Engine dropping, initiating cleanup");
+
         // Stop lease heartbeat first
         if let Some(heartbeat_mutex) = self._lease_heartbeat.take() {
             if let Ok(mut heartbeat) = heartbeat_mutex.lock() {
                 heartbeat.stop();
+                tracing::trace!("Engine: lease heartbeat stopped");
             }
         }
 
         // Shutdown all ingest coordinators
+        let ingest_count = self.ingest_coordinators.len();
         for entry in self.ingest_coordinators.iter() {
             entry.value().shutdown();
         }
+        tracing::trace!(count = ingest_count, "Engine: ingest coordinators shutdown");
 
         // Gracefully shutdown the runtime when engine is dropped
         // Send shutdown message first
         let _ = self.runtime_handle.shutdown();
         // Then drop the runtime which will wait for the thread to finish
         self._runtime.take();
+        tracing::trace!("Engine: runtime shutdown complete");
 
         // Release lease via the PrimaryLease interface
         if let Some(lease) = self._lease.take() {
             let _ = lease.release();
+            tracing::trace!("Engine: lease released");
         }
 
         // Drop the guard last
         self._lease_guard.take();
+
+        tracing::debug!(
+            elapsed_ms = drop_start.elapsed().as_millis(),
+            "Engine cleanup complete"
+        );
     }
 }
 

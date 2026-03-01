@@ -48,7 +48,7 @@ fn bench_put_single(c: &mut Criterion) {
     // This prevents unbounded accumulation of nodes in a single memtable.
     // With BatchSize::SmallInput, Criterion will batch ~8-16 iterations together,
     // creating a new memtable for each batch.
-    
+
     group.bench_function("64b_value", |b| {
         b.iter_batched(
             || {
@@ -65,10 +65,7 @@ fn bench_put_single(c: &mut Criterion) {
                 static COUNTER: std::sync::atomic::AtomicUsize =
                     std::sync::atomic::AtomicUsize::new(100);
                 let idx = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = memtable.put(
-                    black_box(make_key(idx)),
-                    black_box(small_val.clone()),
-                );
+                let _ = memtable.put(black_box(make_key(idx)), black_box(small_val.clone()));
             },
             BatchSize::SmallInput,
         );
@@ -87,10 +84,7 @@ fn bench_put_single(c: &mut Criterion) {
                 static COUNTER: std::sync::atomic::AtomicUsize =
                     std::sync::atomic::AtomicUsize::new(100);
                 let idx = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = memtable.put(
-                    black_box(make_key(idx)),
-                    black_box(medium_val.clone()),
-                );
+                let _ = memtable.put(black_box(make_key(idx)), black_box(medium_val.clone()));
             },
             BatchSize::SmallInput,
         );
@@ -109,10 +103,7 @@ fn bench_put_single(c: &mut Criterion) {
                 static COUNTER: std::sync::atomic::AtomicUsize =
                     std::sync::atomic::AtomicUsize::new(100);
                 let idx = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = memtable.put(
-                    black_box(make_key(idx)),
-                    black_box(large_val.clone()),
-                );
+                let _ = memtable.put(black_box(make_key(idx)), black_box(large_val.clone()));
             },
             BatchSize::SmallInput,
         );

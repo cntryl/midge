@@ -32,7 +32,8 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 /// Status of a cloud upload operation
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +84,9 @@ pub struct HybridStorage {
 
     /// Flag indicating if WAL upload worker thread failed to spawn
     upload_worker_failed: bool,
+
+    /// Background WAL upload worker thread handle
+    upload_worker_handle: Option<JoinHandle<()>>,
 }
 
 impl HybridStorage {
@@ -129,12 +133,12 @@ impl HybridStorage {
         // expensive under CloudFirst + synchronous write APIs (e.g. 10k puts).
         let (wal_upload_tx, wal_upload_rx) = mpsc::channel::<UploadState>();
         let mut upload_worker_failed = false;
-        {
+        let upload_worker_handle = {
             let cloud = Arc::clone(&cloud);
             let event_queue = Arc::clone(&event_queue);
             let external_event_tx = external_event_tx.clone();
 
-            let spawn_result = std::thread::Builder::new()
+            let spawn_result = thread::Builder::new()
                 .name("midge-wal-uploader".to_string())
                 .spawn(move || {
                     while let Ok(upload) = wal_upload_rx.recv() {
@@ -234,11 +238,18 @@ impl HybridStorage {
                     }
                 });
 
-            if let Err(e) = spawn_result {
-                tracing::error!("Failed to spawn WAL upload worker: {}", e);
-                upload_worker_failed = true;
+            match spawn_result {
+                Ok(handle) => Some(handle),
+                Err(e) => {
+                    tracing::error!("Failed to spawn WAL upload worker: {}", e);
+                    if let Some(t) = crate::telemetry::Telemetry::global() {
+                        t.metrics().record_thread_spawn_failure();
+                    }
+                    upload_worker_failed = true;
+                    None
+                }
             }
-        }
+        };
 
         Self {
             local,
@@ -249,6 +260,7 @@ impl HybridStorage {
             external_event_tx,
             wal_upload_tx,
             upload_worker_failed,
+            upload_worker_handle,
         }
     }
 
@@ -344,7 +356,17 @@ impl HybridStorage {
             upload.status = UploadStatus::InFlight { started_at: now };
 
             // Send to the dedicated worker; avoid per-upload thread spawn.
-            let _ = self.wal_upload_tx.send(upload.clone());
+            // If worker failed to spawn, perform inline upload as fallback.
+            if self.upload_worker_failed {
+                self.process_upload_inline(upload.clone());
+            } else if self.wal_upload_tx.send(upload.clone()).is_err() {
+                // Worker thread died unexpectedly - fall back to inline mode
+                tracing::warn!(
+                    segment_id = upload.segment_id,
+                    "WAL upload worker unavailable, falling back to inline upload"
+                );
+                self.process_upload_inline(upload.clone());
+            }
         }
 
         // 4) Garbage-collect finished items (Completed or Failed after 3 retries).
@@ -367,6 +389,117 @@ impl HybridStorage {
         actor
             .handle_event(actor::StorageBudgetEvent::ReserveForFlush { est_size })
             .unwrap_or(actor::ReservationResult::Ok)
+    }
+
+    /// Process a single WAL upload inline (fallback when worker thread unavailable)
+    ///
+    /// This is a fallback path used when:
+    /// - The background upload worker failed to spawn
+    /// - The worker thread died unexpectedly
+    ///
+    /// Performs the upload synchronously in the caller's context (typically runtime thread).
+    /// This may add latency but prevents deadlock when resources are constrained.
+    fn process_upload_inline(&self, upload: UploadState) {
+        let upload_start = Instant::now();
+        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+            telemetry.metrics().record_cloudfirst_wal_upload_started();
+        }
+
+        if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some() && upload.segment_id.is_multiple_of(1000) {
+            eprintln!(
+                "[midge] CloudFirst inline upload start: segment_id={} max_sequence={} path={:?}",
+                upload.segment_id, upload.max_sequence, upload.local_path
+            );
+        }
+
+        // Read file
+        let data = match std::fs::read(&upload.local_path) {
+            Ok(data) => data,
+            Err(e) => {
+                let error = format!("read {:?}: {}", upload.local_path, e);
+                let mut events = self.event_queue.lock();
+                events.push_back(StorageEvent::CloudFail {
+                    segment_id: upload.segment_id,
+                    error: error.clone(),
+                });
+                if let Some(tx) = &self.external_event_tx {
+                    let _ = tx.send(StorageEvent::CloudFail {
+                        segment_id: upload.segment_id,
+                        error,
+                    });
+                }
+                return;
+            }
+        };
+
+        let bytes = data.len() as u64;
+        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+            telemetry.metrics().record_cloud_upload(bytes);
+        }
+
+        // Submit to cloud backend
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cloud_key = format!("wal/{}.wal", upload.segment_id);
+        self.cloud.submit_write(cloud_key, data, tx);
+
+        // Wait for completion
+        match rx.recv() {
+            Ok(StorageEvent::WriteComplete { result, .. }) if result.is_ok() => {
+                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                    telemetry.metrics().record_cloudfirst_wal_upload_completed(
+                        upload_start.elapsed().as_micros() as u64,
+                    );
+                }
+                let mut events = self.event_queue.lock();
+                let ack = StorageEvent::CloudAck {
+                    segment_id: upload.segment_id,
+                    max_sequence: upload.max_sequence,
+                };
+                events.push_back(ack.clone());
+                if let Some(tx) = &self.external_event_tx {
+                    let _ = tx.send(ack);
+                }
+
+                if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some()
+                    && upload.segment_id.is_multiple_of(1000)
+                {
+                    eprintln!(
+                        "[midge] CloudFirst inline upload ack: segment_id={} max_sequence={}",
+                        upload.segment_id, upload.max_sequence
+                    );
+                }
+            }
+            Ok(StorageEvent::WriteComplete { result, .. }) => {
+                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                    telemetry.metrics().record_cloudfirst_wal_upload_failed();
+                }
+                let error = match result {
+                    StorageOutcome::Err(e) => e,
+                    _ => "Unknown error".to_string(),
+                };
+                let mut events = self.event_queue.lock();
+                let fail = StorageEvent::CloudFail {
+                    segment_id: upload.segment_id,
+                    error: error.clone(),
+                };
+                events.push_back(fail.clone());
+                if let Some(tx) = &self.external_event_tx {
+                    let _ = tx.send(fail);
+                }
+            }
+            _ => {
+                let error = "Channel error".to_string();
+                let mut events = self.event_queue.lock();
+                let fail = StorageEvent::CloudFail {
+                    segment_id: upload.segment_id,
+                    error: error.clone(),
+                };
+                events.push_back(fail.clone());
+                if let Some(tx) = &self.external_event_tx {
+                    let _ = tx.send(fail);
+                }
+            }
+        }
     }
 
     /// Signal that a flush completed with actual size
@@ -577,5 +710,44 @@ impl StorageBackend for HybridStorage {
             prefix,
             result: StorageOutcome::Ok(results),
         });
+    }
+}
+
+impl Drop for HybridStorage {
+    fn drop(&mut self) {
+        // The sender will be dropped automatically when self drops,
+        // which will cause recv() in the worker thread to return Err
+
+        // Wait for the worker thread to complete with a timeout
+        if let Some(handle) = self.upload_worker_handle.take() {
+            let start = Instant::now();
+            let timeout = Duration::from_secs(30);
+
+            // Spawn a thread to join with timeout
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || {
+                let result = handle.join();
+                let _ = tx.send(result);
+            });
+
+            // Wait for completion or timeout
+            match rx.recv_timeout(timeout) {
+                Ok(Ok(())) => {
+                    tracing::debug!(
+                        elapsed_ms = start.elapsed().as_millis(),
+                        "HybridStorage WAL upload worker shutdown cleanly"
+                    );
+                }
+                Ok(Err(_)) => {
+                    tracing::warn!("HybridStorage WAL upload worker panicked during shutdown");
+                }
+                Err(_timeout) => {
+                    tracing::error!(
+                        "HybridStorage WAL upload worker did not shutdown within 30s timeout; thread detached"
+                    );
+                    // Thread will be detached and continue running
+                }
+            }
+        }
     }
 }

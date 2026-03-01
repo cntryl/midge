@@ -38,6 +38,7 @@ For deploying, tuning, and maintaining Midge in production environments:
 
 - **[Cloud Setup](operations/cloud-setup.md)** — Configure cloud storage backends (S3, GCS, Azure)
 - **[Performance Tuning](operations/performance-tuning.md)** — Optimize for latency, throughput, or economy
+- **[Resource Limits](operations/resource-limits.md)** — Thread management, memory limits, graceful degradation
 - **[Migration Guide](operations/migration-guide.md)** — Version upgrades, backups, data migration
 
 ### Monitoring and Operations

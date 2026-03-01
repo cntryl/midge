@@ -23,7 +23,12 @@ impl AwsS3Provider {
     /// * `region` - AWS region (e.g., "us-east-1")
     /// * `access_key` - AWS access key ID
     /// * `secret_key` - AWS secret access key
-    pub fn new(bucket: String, region: String, access_key: String, secret_key: String) -> MidgeResult<Self> {
+    pub fn new(
+        bucket: String,
+        region: String,
+        access_key: String,
+        secret_key: String,
+    ) -> MidgeResult<Self> {
         let creds = AwsCredentials {
             access_key,
             secret_key,

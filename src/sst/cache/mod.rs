@@ -149,10 +149,21 @@ impl BlockCache {
 
 impl Drop for BlockCache {
     fn drop(&mut self) {
+        let drop_start = std::time::Instant::now();
+        tracing::trace!(
+            shards = self.num_shards,
+            "BlockCache dropping, cleaning up shards"
+        );
+
         // Explicitly drop shards in sequence to ensure deterministic cleanup
         // Each shard's drop will join its background worker thread
-        // This prevents thread leak and ensures all workers complete before returning
+        // This prevents thread leak and ensures all 16 worker threads are joined before returning
         self.shards.clear();
+
+        tracing::trace!(
+            elapsed_ms = drop_start.elapsed().as_millis(),
+            "BlockCache cleanup complete"
+        );
     }
 }
 

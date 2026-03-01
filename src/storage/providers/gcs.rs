@@ -6,11 +6,11 @@
 //! - Non-blocking callback-based API via `CloudExecutor`
 //! - All operations routed through the same `CloudBackend` trait as S3/Azure
 
-use crate::common::MidgeResult;
 use super::super::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudExecutor, CloudOutcome, CloudRequest,
     CloudResponse, CloudSigner, ObjectMetadata,
 };
+use crate::common::MidgeResult;
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::Method;
 use std::sync::Arc;
@@ -36,10 +36,7 @@ pub enum GcsCredential {
     /// OAuth2 Bearer token (short-lived, from gcloud CLI or metadata server).
     BearerToken { token: String },
     /// Service-account HMAC key pair (for HMAC-based auth, simpler than OAuth2).
-    HmacKey {
-        access_id: String,
-        secret: String,
-    },
+    HmacKey { access_id: String, secret: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -68,13 +65,9 @@ impl GcsProvider {
         let credential = GcsCredential::BearerToken {
             token: token.clone(),
         };
-        let signer: Option<Arc<dyn CloudSigner>> =
-            Some(Arc::new(BearerTokenSigner::new(token)));
+        let signer: Option<Arc<dyn CloudSigner>> = Some(Arc::new(BearerTokenSigner::new(token)));
         let executor = CloudExecutor::new(signer)?;
-        let backend = Arc::new(GcsBackend::new(
-            bucket.clone(),
-            executor,
-        ));
+        let backend = Arc::new(GcsBackend::new(bucket.clone(), executor));
         Ok(Self {
             backend,
             bucket,
@@ -102,10 +95,7 @@ impl GcsProvider {
             _secret: secret,
         }));
         let executor = CloudExecutor::new(signer)?;
-        let backend = Arc::new(GcsBackend::new(
-            bucket.clone(),
-            executor,
-        ));
+        let backend = Arc::new(GcsBackend::new(bucket.clone(), executor));
         Ok(Self {
             backend,
             bucket,
@@ -141,6 +131,12 @@ impl GcsProvider {
     #[cfg(test)]
     pub(crate) fn credential(&self) -> &GcsCredential {
         &self.credential
+    }
+}
+
+impl Drop for GcsProvider {
+    fn drop(&mut self) {
+        tracing::trace!("GcsProvider dropping, cleanup will propagate to CloudExecutor");
     }
 }
 
@@ -203,7 +199,13 @@ impl GcsBackend {
 }
 
 impl CloudBackend for GcsBackend {
-    fn submit_put(&self, key: String, data: Vec<u8>, headers: Vec<(String, String)>, callback: CloudCallback) {
+    fn submit_put(
+        &self,
+        key: String,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
         let url = self.upload_url(&key);
         let mut request = CloudRequest::new(Method::POST, url)
             .with_body(data)
@@ -253,13 +255,7 @@ impl CloudBackend for GcsBackend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    fn submit_get_range(
-        &self,
-        key: String,
-        start: u64,
-        end: Option<u64>,
-        callback: CloudCallback,
-    ) {
+    fn submit_get_range(&self, key: String, start: u64, end: Option<u64>, callback: CloudCallback) {
         let url = self.download_url(&key);
         let range = match end {
             Some(e) => format!("bytes={}-{}", start, e.saturating_sub(1)),
@@ -267,14 +263,12 @@ impl CloudBackend for GcsBackend {
         };
         let request = CloudRequest::new(Method::GET, url).with_header("Range", range);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 206 || resp.status == 200 => {
-                CloudEvent::GetRangeComplete {
-                    key: ctx,
-                    start,
-                    end,
-                    result: CloudOutcome::Ok(resp.body),
-                }
-            }
+            Ok(resp) if resp.status == 206 || resp.status == 200 => CloudEvent::GetRangeComplete {
+                key: ctx,
+                start,
+                end,
+                result: CloudOutcome::Ok(resp.body),
+            },
             Ok(resp) => CloudEvent::GetRangeComplete {
                 key: ctx,
                 start,
@@ -415,13 +409,12 @@ impl BearerTokenSigner {
 impl CloudSigner for BearerTokenSigner {
     fn sign(&self, request: &mut CloudRequest) -> MidgeResult<()> {
         if !self.token.is_empty() {
-            request.headers.retain(|(n, _)| {
-                !n.eq_ignore_ascii_case("Authorization")
-            });
-            request.headers.push((
-                "Authorization".into(),
-                format!("Bearer {}", self.token),
-            ));
+            request
+                .headers
+                .retain(|(n, _)| !n.eq_ignore_ascii_case("Authorization"));
+            request
+                .headers
+                .push(("Authorization".into(), format!("Bearer {}", self.token)));
         }
         Ok(())
     }
@@ -441,9 +434,9 @@ impl CloudSigner for HmacKeySigner {
         // GCS HMAC keys are S3-compatible. A full implementation would use
         // SigV4-style signing against storage.googleapis.com. For now we
         // attach the access_id so the request is identifiable.
-        request.headers.retain(|(n, _)| {
-            !n.eq_ignore_ascii_case("x-goog-access-id")
-        });
+        request
+            .headers
+            .retain(|(n, _)| !n.eq_ignore_ascii_case("x-goog-access-id"));
         request
             .headers
             .push(("x-goog-access-id".into(), self.access_id.clone()));
@@ -505,12 +498,8 @@ mod tests {
         let token = "ya29.token";
 
         // Act
-        let provider = GcsProvider::with_bearer_token(
-            bucket.into(),
-            project.into(),
-            token.into(),
-        )
-        .expect("should create provider with bearer token");
+        let provider = GcsProvider::with_bearer_token(bucket.into(), project.into(), token.into())
+            .expect("should create provider with bearer token");
 
         // Assert
         assert_eq!(provider.bucket(), "my-bucket");

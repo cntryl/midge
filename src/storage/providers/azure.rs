@@ -7,11 +7,11 @@
 //! - Non-blocking callback-based API via `CloudExecutor`
 //! - All operations routed through the same `CloudBackend` trait as S3
 
-use crate::common::{MidgeError, MidgeResult};
 use super::super::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudExecutor, CloudOutcome, CloudRequest,
     CloudResponse, CloudSigner, ObjectMetadata,
 };
+use crate::common::{MidgeError, MidgeResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as Base64Engine};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
@@ -65,7 +65,11 @@ pub struct AzureProvider {
 
 impl AzureProvider {
     /// Create provider with Shared Key authentication.
-    pub fn with_shared_key(account_name: String, container: String, account_key: String) -> MidgeResult<Self> {
+    pub fn with_shared_key(
+        account_name: String,
+        container: String,
+        account_key: String,
+    ) -> MidgeResult<Self> {
         let credential = AzureCredential::SharedKey {
             account_key: account_key.clone(),
         };
@@ -86,7 +90,11 @@ impl AzureProvider {
     }
 
     /// Create provider with SAS token authentication.
-    pub fn with_sas_token(account_name: String, container: String, sas_token: String) -> MidgeResult<Self> {
+    pub fn with_sas_token(
+        account_name: String,
+        container: String,
+        sas_token: String,
+    ) -> MidgeResult<Self> {
         // Normalise: strip leading '?' if present.
         let token = sas_token
             .strip_prefix('?')
@@ -143,7 +151,7 @@ impl AzureProvider {
             account_name.clone(),
             effective_client_id,
         )?);
-        
+
         let executor = CloudExecutor::new(Some(signer))?;
         let backend = Arc::new(AzureBackend::new(
             account_name.clone(),
@@ -218,10 +226,12 @@ impl AzureProvider {
             }
         }
 
-        let account = account_name
-            .ok_or_else(|| MidgeError::InvalidArgument("Missing AccountName in connection string".into()))?;
-        let key = account_key
-            .ok_or_else(|| MidgeError::InvalidArgument("Missing AccountKey in connection string".into()))?;
+        let account = account_name.ok_or_else(|| {
+            MidgeError::InvalidArgument("Missing AccountName in connection string".into())
+        })?;
+        let key = account_key.ok_or_else(|| {
+            MidgeError::InvalidArgument("Missing AccountKey in connection string".into())
+        })?;
 
         Self::with_shared_key(account, container, key)
     }
@@ -247,6 +257,12 @@ impl AzureProvider {
     #[cfg(test)]
     pub(crate) fn credential(&self) -> &AzureCredential {
         &self.credential
+    }
+}
+
+impl Drop for AzureProvider {
+    fn drop(&mut self) {
+        tracing::trace!("AzureProvider dropping, cleanup will propagate to CloudExecutor");
     }
 }
 
@@ -316,7 +332,13 @@ impl AzureBackend {
 }
 
 impl CloudBackend for AzureBackend {
-    fn submit_put(&self, key: String, data: Vec<u8>, headers: Vec<(String, String)>, callback: CloudCallback) {
+    fn submit_put(
+        &self,
+        key: String,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
         let url = self.object_url(&key);
         let len = data.len();
         let mut request = CloudRequest::new(Method::PUT, url)
@@ -368,13 +390,7 @@ impl CloudBackend for AzureBackend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    fn submit_get_range(
-        &self,
-        key: String,
-        start: u64,
-        end: Option<u64>,
-        callback: CloudCallback,
-    ) {
+    fn submit_get_range(&self, key: String, start: u64, end: Option<u64>, callback: CloudCallback) {
         let url = self.object_url(&key);
         let range = match end {
             Some(e) => format!("bytes={}-{}", start, e.saturating_sub(1)),
@@ -382,14 +398,12 @@ impl CloudBackend for AzureBackend {
         };
         let request = CloudRequest::new(Method::GET, url).with_header("x-ms-range", range);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 206 || resp.status == 200 => {
-                CloudEvent::GetRangeComplete {
-                    key: ctx,
-                    start,
-                    end,
-                    result: CloudOutcome::Ok(resp.body),
-                }
-            }
+            Ok(resp) if resp.status == 206 || resp.status == 200 => CloudEvent::GetRangeComplete {
+                key: ctx,
+                start,
+                end,
+                result: CloudOutcome::Ok(resp.body),
+            },
             Ok(resp) => CloudEvent::GetRangeComplete {
                 key: ctx,
                 start,
@@ -516,10 +530,13 @@ struct SharedKeySigner {
 
 impl SharedKeySigner {
     fn new(account_name: String, account_key_base64: String) -> MidgeResult<Self> {
-        let decoded_key = BASE64.decode(&account_key_base64)
-            .map_err(|e| MidgeError::InvalidArgument(
-                format!("Invalid base64 in account key: {}. \
-                         Ensure AZURE_STORAGE_KEY is properly base64-encoded", e)))?;
+        let decoded_key = BASE64.decode(&account_key_base64).map_err(|e| {
+            MidgeError::InvalidArgument(format!(
+                "Invalid base64 in account key: {}. \
+                         Ensure AZURE_STORAGE_KEY is properly base64-encoded",
+                e
+            ))
+        })?;
         Ok(Self {
             account_name,
             decoded_key,
@@ -574,10 +591,8 @@ impl SharedKeySigner {
             .map(|(n, v)| (n.to_lowercase(), v.trim().to_string()))
             .collect();
         x_ms.sort_by(|a, b| a.0.cmp(&b.0));
-        let canonical_headers: String = x_ms
-            .iter()
-            .map(|(k, v)| format!("{}:{}\n", k, v))
-            .collect();
+        let canonical_headers: String =
+            x_ms.iter().map(|(k, v)| format!("{}:{}\n", k, v)).collect();
 
         // Canonicalized resource: /{account}/{path}?{sorted-query-params}
         let path = url.path();
@@ -631,8 +646,12 @@ impl CloudSigner for SharedKeySigner {
 
         let content_length = request.body.as_ref().map(|b| b.len());
 
-        let sts =
-            self.string_to_sign(request.method.as_str(), &request.headers, &url, content_length);
+        let sts = self.string_to_sign(
+            request.method.as_str(),
+            &request.headers,
+            &url,
+            content_length,
+        );
 
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.decoded_key)
             .map_err(|_| MidgeError::Internal("hmac init failed".into()))?;
@@ -741,13 +760,12 @@ impl ManagedIdentitySigner {
         }
 
         // Parse JSON response
-        let body = response.text().map_err(|e| {
-            MidgeError::Internal(format!("Failed to read IMDS response: {}", e))
-        })?;
+        let body = response
+            .text()
+            .map_err(|e| MidgeError::Internal(format!("Failed to read IMDS response: {}", e)))?;
 
-        let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-            MidgeError::Internal(format!("Failed to parse IMDS JSON: {}", e))
-        })?;
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| MidgeError::Internal(format!("Failed to parse IMDS JSON: {}", e)))?;
 
         let access_token = json["access_token"]
             .as_str()
@@ -758,7 +776,9 @@ impl ManagedIdentitySigner {
         let expires_on = json["expires_on"]
             .as_str()
             .and_then(|s| s.parse::<u64>().ok())
-            .ok_or_else(|| MidgeError::Internal("Missing or invalid expires_on in IMDS response".into()))?;
+            .ok_or_else(|| {
+                MidgeError::Internal("Missing or invalid expires_on in IMDS response".into())
+            })?;
 
         Ok(CachedToken {
             access_token,
@@ -799,16 +819,17 @@ impl CloudSigner for ManagedIdentitySigner {
         let token = self.get_token()?;
 
         // Add Bearer token authorization header
-        request.headers.push((
-            "Authorization".into(),
-            format!("Bearer {}", token),
-        ));
+        request
+            .headers
+            .push(("Authorization".into(), format!("Bearer {}", token)));
 
         // Add required Azure headers
         let now = Utc::now();
         let date = now.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
         request.headers.push(("x-ms-date".into(), date));
-        request.headers.push(("x-ms-version".into(), "2024-11-04".into()));
+        request
+            .headers
+            .push(("x-ms-version".into(), "2024-11-04".into()));
 
         Ok(())
     }
@@ -896,12 +917,8 @@ mod tests {
         let key = "YWNjb3VudGtleTEyMw==";
 
         // Act
-        let provider = AzureProvider::with_shared_key(
-            account.into(),
-            container.into(),
-            key.into(),
-        )
-        .expect("should create provider with shared key");
+        let provider = AzureProvider::with_shared_key(account.into(), container.into(), key.into())
+            .expect("should create provider with shared key");
 
         // Assert
         assert_eq!(provider.account_name(), "myaccount");
@@ -920,12 +937,9 @@ mod tests {
         let sas_token = "sv=2021-06-08&ss=b&srt=sco";
 
         // Act
-        let provider = AzureProvider::with_sas_token(
-            account.into(),
-            container.into(),
-            sas_token.into(),
-        )
-        .expect("should create provider with sas token");
+        let provider =
+            AzureProvider::with_sas_token(account.into(), container.into(), sas_token.into())
+                .expect("should create provider with sas token");
 
         // Assert
         assert_eq!(provider.account_name(), "myaccount");
@@ -941,12 +955,9 @@ mod tests {
         let sas_token = "?sv=2021-06-08&ss=b";
 
         // Act
-        let provider = AzureProvider::with_sas_token(
-            "account".into(),
-            "container".into(),
-            sas_token.into(),
-        )
-        .expect("should create provider with normalized sas token");
+        let provider =
+            AzureProvider::with_sas_token("account".into(), "container".into(), sas_token.into())
+                .expect("should create provider with normalized sas token");
 
         // Assert
         match provider.credential() {
@@ -964,12 +975,9 @@ mod tests {
         let sas_token = "sv=2021-06-08&ss=b";
 
         // Act
-        let provider = AzureProvider::with_sas_token(
-            "account".into(),
-            "container".into(),
-            sas_token.into(),
-        )
-        .expect("should create provider with sas token without question mark");
+        let provider =
+            AzureProvider::with_sas_token("account".into(), "container".into(), sas_token.into())
+                .expect("should create provider with sas token without question mark");
 
         // Assert
         match provider.credential() {
@@ -1063,11 +1071,7 @@ mod tests {
         let container = "mycontainer";
 
         // Act
-        let result = AzureProvider::with_managed_identity(
-            account.into(),
-            container.into(),
-            None,
-        );
+        let result = AzureProvider::with_managed_identity(account.into(), container.into(), None);
 
         // Assert
         assert!(result.is_ok());
@@ -1113,11 +1117,7 @@ mod tests {
         let container = "mycontainer";
 
         // Act
-        let result = AzureProvider::with_managed_identity(
-            account.into(),
-            container.into(),
-            None,
-        );
+        let result = AzureProvider::with_managed_identity(account.into(), container.into(), None);
 
         // Assert
         std::env::remove_var("AZURE_CLIENT_ID");
@@ -1180,8 +1180,7 @@ mod tests {
     #[test]
     fn should_build_correct_object_url_without_sas() {
         // Arrange
-        let backend =
-            AzureBackend::new("acct".into(), "ctr".into(), None, make_noop_executor());
+        let backend = AzureBackend::new("acct".into(), "ctr".into(), None, make_noop_executor());
 
         // Act
         let url = backend.object_url("path/to/blob");
@@ -1210,8 +1209,7 @@ mod tests {
     #[test]
     fn should_build_correct_list_url() {
         // Arrange
-        let backend =
-            AzureBackend::new("acct".into(), "ctr".into(), None, make_noop_executor());
+        let backend = AzureBackend::new("acct".into(), "ctr".into(), None, make_noop_executor());
 
         // Act
         let url = backend.list_url("wal/");

@@ -36,6 +36,7 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::storage::cloud::{CloudCallback, CloudEvent};
 use reqwest::{Client, Method};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Represents a generic HTTP request issued by cloud providers.
 #[derive(Clone)]
@@ -95,7 +96,9 @@ impl CloudExecutor {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| MidgeError::Internal(format!("Failed to build cloud tokio runtime: {}", e)))?;
+            .map_err(|e| {
+                MidgeError::Internal(format!("Failed to build cloud tokio runtime: {}", e))
+            })?;
 
         Ok(Self {
             client: Client::new(),
@@ -168,5 +171,31 @@ impl CloudExecutor {
             let event = mapper(context.clone(), result);
             let _ = cb.send(event);
         });
+    }
+}
+
+impl Drop for CloudExecutor {
+    fn drop(&mut self) {
+        // Try to get exclusive ownership of the runtime for explicit shutdown
+        // If we can't (multiple references exist), the runtime will cleanup naturally
+        let rt_arc = std::mem::replace(
+            &mut self.rt,
+            Arc::new(
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("Failed to create placeholder runtime"),
+            ),
+        );
+
+        if let Ok(rt) = Arc::try_unwrap(rt_arc) {
+            // We have exclusive ownership - perform explicit shutdown with timeout
+            // Increased from 5s to 10s to accommodate slow cloud operations
+            let timeout = Duration::from_secs(10);
+            rt.shutdown_timeout(timeout);
+            tracing::debug!("CloudExecutor tokio runtime shutdown completed");
+        } else {
+            // Multiple references exist - runtime will cleanup when last ref drops
+            tracing::debug!("CloudExecutor dropping with shared runtime reference");
+        }
     }
 }

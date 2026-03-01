@@ -966,12 +966,23 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
+        let drop_start = std::time::Instant::now();
+        tracing::debug!("Runtime dropping, joining event loop thread");
+
         // Ensure the event loop thread is properly terminated
         if let Some(handle) = self.event_loop_handle.take() {
             // Signal shutdown by dropping the channels, which will cause the event loop to exit
             // The channels will be dropped automatically when Runtime is dropped
-            if handle.join().is_err() {
-                tracing::warn!("Runtime thread panicked during drop");
+            match handle.join() {
+                Ok(()) => {
+                    tracing::debug!(
+                        elapsed_ms = drop_start.elapsed().as_millis(),
+                        "Runtime event loop thread joined successfully"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!("Runtime thread panicked during drop");
+                }
             }
         }
     }
