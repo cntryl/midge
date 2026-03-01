@@ -220,21 +220,26 @@ let engine = Engine::open(opts)?;
 
 **Credentials:**
 
-Midge discovers Azure credentials from:
-- Environment variable: `AZURE_STORAGE_CONNECTION_STRING`
-- Explicit shared key: `AZURE_STORAGE_ACCOUNT` + `AZURE_STORAGE_KEY`
-- SAS token: `AZURE_STORAGE_SAS_TOKEN`
+Midge discovers Azure credentials from (in priority order):
+1. **Connection String**: `AZURE_STORAGE_CONNECTION_STRING`
+2. **Shared Key**: `AZURE_STORAGE_KEY`
+3. **SAS Token**: `AZURE_STORAGE_SAS_TOKEN`
+4. **Managed Identity**: `AZURE_CLIENT_ID` (or system-assigned if not set)
 
 **Configuration:**
 
 ```rust
 use cntryl_midge::{Engine, OpenOptions};
 
-// Using connection string (recommended)
+// Option 1: Using connection string
 std::env::set_var(
     "AZURE_STORAGE_CONNECTION_STRING",
     "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=..."
 );
+
+// Option 2: Using Managed Identity (recommended for Azure VMs/ACA)
+std::env::set_var("AZURE_CLIENT_ID", "<user-assigned-identity-client-id>");
+// Or rely on system-assigned identity (no AZURE_CLIENT_ID needed)
 
 let opts = OpenOptions::cloud(
     "/var/cache/midge",
@@ -251,6 +256,49 @@ let engine = Engine::open(opts)?;
 - Full BlockBlob support (PUT/GET/DELETE/LIST)
 - Range reads with `x-ms-range` header
 - Efficient prefix listing with `comp=list`
+
+**Managed Identity Support:**
+
+Midge fully supports Azure Managed Identity for passwordless authentication:
+
+```rust
+use cntryl_midge::storage::providers::AzureProvider;
+
+// System-assigned Managed Identity
+let provider = AzureProvider::with_managed_identity(
+    "mystorageaccount".into(),
+    "mycontainer".into(),
+    None  // No client_id = system-assigned
+)?;
+
+// User-assigned Managed Identity
+let provider = AzureProvider::with_managed_identity(
+    "mystorageaccount".into(),
+    "mycontainer".into(),
+    Some("00000000-0000-0000-0000-000000000000".into())
+)?;
+
+// Or use automatic discovery from environment
+std::env::set_var("AZURE_CLIENT_ID", "00000000-0000-0000-0000-000000000000");
+let provider = AzureProvider::from_env(
+    "mystorageaccount".into(),
+    "mycontainer".into()
+)?;
+```
+
+**Works on:**
+- Azure Virtual Machines (with managed identity enabled)
+- Azure Container Apps
+- Azure App Service
+- Azure Kubernetes Service (AKS)
+- Azure Container Instances
+- Any Azure service supporting managed identities
+
+**Token management:**
+- Automatic token fetch from Azure Instance Metadata Service (IMDS)
+- Token caching with automatic refresh before expiry
+- Transparent OAuth bearer token authentication
+- No manual credential management required
 - DELETE → Standard blob deletion
 
 ### GCS Provider
