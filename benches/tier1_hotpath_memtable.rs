@@ -176,28 +176,25 @@ fn bench_delete(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(1));
 
-    let keys: Vec<Vec<u8>> = (0..1000).map(make_key).collect();
+    let keys: Vec<Vec<u8>> = (0..100).map(make_key).collect();
     let value = make_value(128);
-
-    // Warm memtable
-    let memtable = SkipListMemtable::new();
-    for key in &keys {
-        let _ = memtable.put(key.clone(), value.clone());
-    }
-
-    let mut counter = 0usize;
 
     group.bench_function("delete", |b| {
         b.iter_batched(
             || {
-                let idx = counter % keys.len();
-                counter = counter.wrapping_add(1);
-                keys[idx].clone()
+                // Create a warm memtable per iteration to prevent unbounded
+                // version-chain growth that causes OOM on CI runners.
+                let mt = SkipListMemtable::new();
+                for key in &keys {
+                    let _ = mt.put(key.clone(), value.clone());
+                }
+                let key = keys[50].clone();
+                (mt, key)
             },
-            |key| {
+            |(memtable, key)| {
                 let _ = memtable.delete(black_box(key));
             },
-            BatchSize::SmallInput,
+            BatchSize::LargeInput,
         )
     });
 
