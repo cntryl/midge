@@ -32,7 +32,7 @@ Midge is structured as a layered embedded LSM engine with explicit dependencies 
 - Explicit durability choices (WriteOptions)
 - Cloud-native storage (first-class, not bolted on)
 
-See [THE_BIG_IDEA.md](THE_BIG_IDEA.md) for philosophy and rationale.
+See [the-big-idea.md](the-big-idea.md) for philosophy and rationale.
 
 ## Module Structure
 

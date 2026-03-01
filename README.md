@@ -45,7 +45,6 @@ That's it. Everything — local disk, cloud storage, column families — follows
 
 - You need multi-process access to the same store
 - You're not writing in Rust (no stable non-Rust client yet)
-- You need the absolute highest throughput — RocksDB will beat Midge in a benchmark
 
 ## Why Midge?
 
@@ -55,7 +54,7 @@ That's it. Everything — local disk, cloud storage, column families — follows
 
 **Durability is your choice.** Use `WriteOptions::sync()` when you need a guarantee. Use `WriteOptions::default()` when you want throughput. The control is yours and the behavior is documented.
 
-**It's fast enough.** Up to 160 MB/s on local disk, 46 MB/s on cloud storage. Not the fastest embedded engine in a benchmark — but predictable under real workloads, which matters more.
+**It's predictable.** Deterministic behavior under production load with explicit durability control. Throughput up to 160 MB/s on local disk, 46 MB/s on cloud storage.
 
 **It's designed to be trustworthy.** 1,500+ tests including deterministic crash recovery scenarios and enforced test structure validation. The v1 API follows semver — no surprises in patch releases. CI runs the full test suite on every commit across Linux, macOS, and Windows. Built for infrastructure, not prototypes.
 

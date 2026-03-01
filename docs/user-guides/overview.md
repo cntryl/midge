@@ -79,39 +79,16 @@ All writes require explicit `WriteOptions`:
 
 See [durability.md](durability.md) for detailed guarantees and recovery behavior.
 
-## Comparison with Alternatives
-
-### vs RocksDB
-
-**RocksDB**: Maximum throughput, multi-threaded, battle-tested for local disk
-**Midge**: Predictable behavior, cloud-native, deterministic testing
-
-Choose RocksDB for raw speed on local disk. Choose Midge for cloud-native deployments and predictability.
-
-### vs FoundationDB
-
-**FoundationDB**: Distributed database with consensus, multi-node ACID
-**Midge**: Embedded single-process storage engine
-
-Choose FoundationDB for distributed consensus. Choose Midge for embedded local storage.
-
-### vs SQLite
-
-**SQLite**: Relational database with full SQL engine
-**Midge**: Key-value store with explicit APIs
-
-Choose SQLite for structured relational data. Choose Midge for high-throughput KV operations.
-
 ## Performance Characteristics
 
 Midge prioritizes **predictability over raw speed**:
 
 - **Write latency**: 1-10ms (depends on durability mode)
 - **Read latency**: Sub-ms for cached, 10-100ms for cloud (with local cache)
-- **Throughput**: ~50-75k ops/sec (limited by WAL I/O and memtable work, not event loop)
+- **Throughput**: ~50-75k ops/sec (typical workload: 1KB values, buffered mode, concurrent clients; limited by WAL I/O and memtable work, not event loop)
 - **Cache overhead**: ~10-20% of cache size for metadata
 
-If you need hundreds of thousands or millions of ops/sec, use RocksDB or a sharded design. If you need predictable, auditable behavior, use Midge.
+Midge optimizes for predictable behavior and explicitness over raw throughput maximization.
 
 ## Configuration
 

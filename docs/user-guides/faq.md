@@ -22,7 +22,7 @@ Midge is an embedded LSM-tree key-value storage engine designed for predictable 
 
 ### Is Midge production-ready?
 
-Midge core engine (InMemory and Local modes) is functional and tested. Cloud mode is currently in development/testing. See [../operations/cloud-setup.md](../operations/cloud-setup.md) for cloud status.
+Yes. Midge core engine and all storage modes (InMemory, Local, and Cloud) are production-ready. See [../operations/cloud-setup.md](../operations/cloud-setup.md) for cloud provider setup details.
 
 ### What languages does Midge support?
 
@@ -46,7 +46,7 @@ Rust only. Native library written in Rust with Rust APIs. C bindings or FFI wrap
 - Use for: Cloud-native apps, serverless, distributed systems
 - Cloud is source of truth (S3, GCS, Azure Blob)
 - Local disk is ephemeral cache
-- **Current status**: Development/testing only
+- **Status**: Production-ready
 
 ### Can I migrate between storage modes?
 
@@ -62,7 +62,7 @@ No. Cloud mode requires network connectivity to cloud storage. For offline opera
 
 ### What cloud providers are supported?
 
-Currently supported (development/testing):
+Production-supported providers:
 - AWS S3
 - Azure Blob Storage
 - Google Cloud Storage
@@ -76,23 +76,7 @@ See [../operations/cloud-setup.md](../operations/cloud-setup.md) for provider co
 
 ### Which WriteOptions should I use?
 
-**Decision tree:**
-
-```
-Can you tolerate data loss?
-├─ NO → Continue below
-└─ YES (data is reloadable) → Use best_effort() + flush()
-
-Do you need cloud durability?
-├─ YES → Use cloud_strict() or Cloud mode + buffered()
-└─ NO → Continue below
-
-Can you tolerate <500ms of data loss on crash?
-├─ YES → Use buffered() (recommended for most use cases)
-└─ NO → Use sync() (full local durability)
-```
-
-**Summary table:**
+**Quick reference:**
 
 | Use Case | Recommended | Rationale |
 |----------|-------------|-----------|
@@ -120,7 +104,7 @@ Midge is designed for **predictability** not raw speed:
 
 - **Write latency**: 1-10ms (depends on WriteOptions)
 - **Read latency**: <1ms cached, 10-100ms cloud
-- **Throughput**: ~50-75k ops/sec (limited by WAL I/O and per-operation work)
+- **Throughput**: ~50-75k ops/sec (typical workload: 1KB values, buffered mode; limited by WAL I/O and per-operation work)
 - **Event loop**: 67M messages/sec (not the bottleneck)
 
 For hundreds of thousands or millions of ops/sec, use RocksDB or a sharded design.

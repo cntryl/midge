@@ -75,6 +75,17 @@ engine.commit(tx, WriteOptions::buffered())?;
 | Before group commit fsync | **Data lost** (not yet durable) |
 | After group commit fsync | **Data recovered** (in WAL) |
 
+**Crash Loss Window:**
+```
+Timeline:
+[commit(buffered)] ------- [group fsync] ------- [writes durable]
+     ^                          ^                        ^
+     |                          |                        |
+   returns Ok              crash here =            crash here =
+   (visible)            data lost (<500ms)        data recovers
+                        vulnerability window         (in WAL)
+```
+
 **Performance:**
 - Low latency (~1-5ms, local write only)
 - High throughput (~10k-75k ops/sec depending on concurrency)
@@ -107,6 +118,17 @@ engine.commit(tx, WriteOptions::best_effort())?;
 **Recovery:**
 - Crash before flush: **All best_effort writes are lost**
 - Crash after flush: **Writes are recovered** (in SST)
+
+**Crash Loss Window:**
+```
+Timeline:
+[commit(best_effort)] ------- [flush_cf()] ------- [writes durable]
+     ^                            ^                        ^
+     |                            |                        |
+   returns Ok                crash here =           crash here =
+   (visible)              TOTAL DATA LOSS          data recovers
+                          (WAL skipped)            (in SST)
+```
 
 **Performance:**
 - Lowest latency (~0.1-1ms, memory write only)

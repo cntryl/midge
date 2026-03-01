@@ -2,6 +2,8 @@
 
 **Central navigation hub for all Midge documentation**
 
+_Version: 0.1.0 | Status: Production | Last updated: March 2026_
+
 ## Documentation Structure
 
 Documentation is organized by audience:

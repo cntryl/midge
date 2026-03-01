@@ -2,6 +2,8 @@
 
 Comprehensive guide to using Midge in your application.
 
+**Thread Safety:** The `Engine` type is `Send + Sync` and can be safely shared across threads (wrap in `Arc<Engine>` for multi-threaded access). All operations are synchronous (no async/await). Concurrent API calls are serialized internally via actor-based message passing. For threading model details, see [../development/architecture.md#threading-model](../development/architecture.md#threading-model).
+
 ## Table of Contents
 
 - [Opening a Database](#opening-a-database)
@@ -86,7 +88,7 @@ let engine = Engine::open(opts)?;
 
 **Use for:** Cloud-native deployments, serverless, when local disk can disappear.
 
-**Authentication:** Uses standard environment variables (`AWS_ACCESS_KEY_ID`, etc.) and IAM roles. See [cloud-setup.md](cloud-setup.md).
+**Authentication:** Uses standard environment variables (`AWS_ACCESS_KEY_ID`, etc.) and IAM roles. See [../operations/cloud-setup.md](../operations/cloud-setup.md).
 
 ## Transactions
 
@@ -234,6 +236,8 @@ let mut iter = tx.scan(&query)?;
 
 Every commit requires explicit `WriteOptions`. No defaults.
 
+For comprehensive durability guarantees, recovery behavior, and crash scenarios, see [durability.md](durability.md). This section covers API usage.
+
 ### sync()
 
 Blocks until fsync completes. Write is durable when call returns.
@@ -359,13 +363,13 @@ drop(engine);  // Engine::drop() cleans up automatically
 
 ### Recovery
 
-Reopeninig recovers automatically:
+Reopening recovers automatically:
 
 ```rust
 let engine = Engine::open(opts)?;  // Replays WAL, resumes from last checkpoint
 ```
 
-See [recovery.md](recovery.md) for details.
+See [durability.md](durability.md) for details.
 
 ## Error Handling
 
@@ -441,7 +445,7 @@ let opts = OpenOptions::local("./db")
     .build();
 ```
 
-**Budget distribution:** ~40% block cache, ~30% memtables, ~20% bloom filters, ~10% metadata.
+**Budget distribution:** Varies by Goal. Typical: ~40-60% block cache, ~20-30% memtables, ~10-20% bloom filters, ~10% metadata. See [../operations/performance-tuning.md](../operations/performance-tuning.md) for details.
 
 ### Observability
 
@@ -460,11 +464,11 @@ println!("L0 overlap rate: {}", metrics.l0_overlap_rate);      // higher = more 
 - `buffered()` instead of `sync()` when acceptable
 - Batch 100-1000 ops per transaction
 
-See [performance-tuning.md](performance-tuning.md) for details.
+See [../operations/performance-tuning.md](../operations/performance-tuning.md) for details.
 
 ## Next Steps
 
-- **Cloud deployments**: [cloud-setup.md](cloud-setup.md)
-- **Recovery guarantees**: [recovery.md](recovery.md)
-- **Architecture details**: [big-idea.md](big-idea.md)
-- **Benchmarks**: [benchmarks.md](benchmarks.md)
+- **Cloud deployments**: [../operations/cloud-setup.md](../operations/cloud-setup.md)
+- **Durability guarantees**: [durability.md](durability.md)
+- **Architecture details**: [../development/the-big-idea.md](../development/the-big-idea.md)
+- **Benchmarks**: [../development/benchmarks.md](../development/benchmarks.md)

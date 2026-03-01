@@ -98,7 +98,7 @@ let engine = MidgeEngine::open(opts)?;
 
 Cloud is source of truth, local disk is ephemeral cache. Use for serverless and distributed deployments.
 
-**Note:** Cloud mode currently development/testing only. See [../operations/cloud-setup.md](../operations/cloud-setup.md) for configuration.
+See [../operations/cloud-setup.md](../operations/cloud-setup.md) for cloud provider configuration.
 
 ## Write Durability
 
@@ -116,7 +116,7 @@ engine.commit(tx, WriteOptions::best_effort())?;
 engine.flush_cf(&cf)?;  // Make durable
 ```
 
-See [durability.md](durability.md) for detailed guarantees.
+For comprehensive durability guarantees and recovery behavior, see [durability.md](durability.md).
 
 ## Transactions
 

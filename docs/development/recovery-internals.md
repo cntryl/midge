@@ -36,14 +36,16 @@ Each step is atomic and logged. If recovery fails mid-process, it can be retried
 - Manifest size (more SSTs = longer load time)
 - Cloud latency (if recovering from cloud storage)
 
-**Typical recovery times:**
+**Typical recovery times** (on modern SSD, local storage):
 
 | Scenario | Recovery Time |
 |----------|---------------|
 | Clean shutdown (no WAL) | <100ms |
 | Small WAL (<10MB) | <1 second |
 | Large WAL (100MB+) | 5-10 seconds |
-| Cloud recovery (manifest + WAL download) | 10-30 seconds |
+| Cloud recovery (manifest + WAL download) | 10-30 seconds* |
+
+_*Cloud recovery times vary significantly based on network latency and cloud provider performance._
 
 **Optimization opportunities:**
 - Flush before shutdown reduces WAL size

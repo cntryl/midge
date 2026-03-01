@@ -72,7 +72,7 @@ let opts = OpenOptions::local("./db")
 **Performance characteristics:**
 - Read latency: 5-50ms (larger blocks to scan)
 - Write latency: 1-10ms (larger batches)
-- Throughput: ~50-75k ops/sec (concurrent clients, buffered mode)
+- Throughput: ~50-75k ops/sec (typical workload: concurrent clients, 1KB values, buffered mode)
 
 ---
 

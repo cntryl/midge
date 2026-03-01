@@ -656,8 +656,6 @@ This enables detection of:
 - Fairness issues (writer latency under snapshot load)
 - Tail amplification (e.g., multi-threaded scenarios where one thread blocks others)
 
-See [BENCHMARK_AUDIT.md](../../BENCHMARK_AUDIT.md) → Part 2 for detailed signal quality analysis.
-
 ## CI Strategy: Fast Lane vs Extended Lane
 
 ### Fast Lane (every push to main)
