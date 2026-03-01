@@ -8,6 +8,10 @@ on:
       - "src/**"
       - "benches/**"
 
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   bench:
     runs-on: ${{ matrix.os }}
