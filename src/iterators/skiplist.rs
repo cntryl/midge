@@ -690,6 +690,53 @@ impl Default for SkipList {
     }
 }
 
+impl Drop for SkipList {
+    fn drop(&mut self) {
+        // SAFETY: We have exclusive access (`&mut self`), so no concurrent
+        // readers can be traversing the list. Using `epoch::unprotected()`
+        // is safe here because no other thread can pin an older epoch for
+        // this skiplist.
+        //
+        // Walk the level-0 forward chain (which links every node in order)
+        // and free each node plus its entire version chain. Higher-level
+        // forward pointers are skip-links to the same nodes, so level-0
+        // is sufficient to visit every node exactly once.
+        unsafe {
+            let guard = &epoch::unprotected();
+            let head_ref = &*self.head;
+
+            // Free head sentinel's version chain (sentinel has a dummy version).
+            Self::drop_version_chain(&head_ref.versions_head, guard);
+
+            // Walk all non-head nodes via level-0 chain.
+            let mut curr = head_ref.forward[0].load(AO::Relaxed, guard);
+            while !curr.is_null() {
+                let owned = curr.into_owned();
+                let next = owned.forward[0].load(AO::Relaxed, guard);
+                Self::drop_version_chain(&owned.versions_head, guard);
+                drop(owned);
+                curr = next;
+            }
+        }
+    }
+}
+
+impl SkipList {
+    /// Free all `VersionNode`s in a version chain starting from `head`.
+    ///
+    /// # Safety
+    /// Caller must ensure exclusive access (no concurrent readers).
+    unsafe fn drop_version_chain(head: &Atomic<VersionNode>, guard: &Guard) {
+        let mut v = head.load(AO::Relaxed, guard);
+        while !v.is_null() {
+            let owned = v.into_owned();
+            let next = owned.next.load(AO::Relaxed, guard);
+            drop(owned);
+            v = next;
+        }
+    }
+}
+
 // Safety: SkipList is Send + Sync because:
 // - All shared state is accessed via atomic operations and epoch-based pointers.
 // - We do not use interior mutability without synchronization.
