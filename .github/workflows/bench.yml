@@ -49,7 +49,7 @@ jobs:
         run: cargo bench --bench 'tier4_*'
 
       - name: Upload Criterion artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: bench-artifacts-${{ matrix.os }}
           path: |
