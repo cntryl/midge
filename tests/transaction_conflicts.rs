@@ -844,12 +844,17 @@ fn should_handle_high_concurrency_optimistic_locking() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
+        let barrier = Arc::new(std::sync::Barrier::new(50));
         let mut handles = vec![];
 
         // Act - 50 threads performing optimistic lock pattern (read then write)
         for i in 0..50 {
             let engine_clone = Arc::clone(&engine);
+            let barrier_clone = Arc::clone(&barrier);
             let handle = std::thread::spawn(move || {
+                // Wait for all threads to be ready before starting
+                barrier_clone.wait();
+
                 // Optimistic lock pattern: read first
                 let read_tx = engine_clone
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
