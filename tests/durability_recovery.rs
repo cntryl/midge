@@ -1,12 +1,12 @@
-﻿//! Crash Recovery Tests
+//! Clean Shutdown Reopen Recovery Tests
 //!
-//! Tests recovery behavior after crashes, restarts, and WAL/SST interactions.
-//! Validates that the engine recovers correctly from various failure modes:
-//! - Clean shutdown and restart
-//! - Crash after flush/memtable operations
-//! - WAL vs SST precedence during recovery
-//! - Manifest atomicity and consistency
-//! - Idempotent recovery (multiple restart cycles)
+//! Tests recovery behavior after clean shutdown followed by reopen, plus
+//! WAL/SST replay ordering and repeated reopen idempotency.
+//! Coverage in this file is limited to normal process teardown via `drop`:
+//! - Recovery of flushed and unflushed committed writes after reopen
+//! - WAL vs SST precedence during reopen
+//! - Delete replay and multi-write visibility after reopen
+//! - Repeated clean reopen cycles and post-reopen write continuity
 //!
 //! **Storage Modes**: LocalDisk + CloudBacked ONLY (requires persistence)
 //!
@@ -75,7 +75,7 @@ fn should_recover_from_clean_shutdown_when_reopening() {
 }
 
 #[test]
-fn should_recover_from_crash_after_flush_when_reopening() {
+fn should_recover_after_clean_shutdown_when_writes_include_flushed_and_unflushed_data() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         // Act (Phase 1)
@@ -83,7 +83,7 @@ fn should_recover_from_crash_after_flush_when_reopening() {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
-            // Write, flush, then simulate crash with additional writes
+            // Write, flush, then add additional committed writes
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
@@ -99,7 +99,7 @@ fn should_recover_from_crash_after_flush_when_reopening() {
             tx.put(b"unflushed_key".to_vec(), b"unflushed_value".to_vec(), None)
                 .expect("put");
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
-            // Crash before flush
+            // Engine is dropped without flushing the second write set
         }
 
         // Assert (Phase 2)
@@ -132,7 +132,7 @@ fn should_recover_from_crash_after_flush_when_reopening() {
 }
 
 #[test]
-fn should_recover_unflushed_data_given_crash_during_flush_when_reopening() {
+fn should_recover_unflushed_data_when_reopening_after_clean_shutdown() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         // Act (Phase 1)
@@ -151,7 +151,7 @@ fn should_recover_unflushed_data_given_crash_during_flush_when_reopening() {
                     .expect("put");
                 engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
-            // Simulate crash during flush (flush not completed)
+            // Engine is dropped before an explicit flush occurs
         }
 
         // Assert (Phase 2)
@@ -162,11 +162,13 @@ fn should_recover_unflushed_data_given_crash_during_flush_when_reopening() {
             // Data should be recoverable from WAL
             for i in 0..100 {
                 let key = format!("key_{:03}", i);
+                let expected = Bytes::from(format!("value_{:03}", i));
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
-                assert!(
-                    tx.get(key.as_bytes()).expect("get").is_some(),
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("get"),
+                    Some(expected),
                     "mode: {}",
                     mode
                 );
@@ -204,7 +206,7 @@ fn should_prefer_wal_given_wal_newer_than_sst_when_recovering() {
             tx.put(b"key".to_vec(), b"value_v2".to_vec(), None)
                 .expect("put");
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
-            // Crash before flush
+            // Engine is dropped before a second flush occurs
         }
 
         // Assert (Phase 2)
@@ -243,7 +245,7 @@ fn should_skip_wal_entries_given_already_in_sst_when_recovering() {
                 .expect("put");
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
-            // Crash (no new writes after flush)
+            // Engine is dropped after a successful flush
         }
 
         // Assert (Phase 2)
@@ -288,7 +290,7 @@ fn should_replay_wal_in_order_given_multiple_writes_when_recovering() {
                 .expect("put");
                 engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
-            // Crash before flush
+            // Engine is dropped before an explicit flush occurs
         }
 
         // Assert (Phase 2)
@@ -319,7 +321,7 @@ fn should_replay_wal_in_order_given_multiple_writes_when_recovering() {
 // ============================================================================
 
 #[test]
-fn should_recover_deletes_given_crash_after_delete_when_reopening() {
+fn should_recover_deletes_when_reopening_after_clean_shutdown() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         // Act (Phase 1)
@@ -342,7 +344,7 @@ fn should_recover_deletes_given_crash_after_delete_when_reopening() {
                 .expect("begin_tx");
             tx.delete(b"to_delete".to_vec()).expect("delete");
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
-            // Crash before flush
+            // Engine is dropped before persisting the delete via flush
         }
 
         // Assert (Phase 2)
@@ -364,7 +366,7 @@ fn should_recover_deletes_given_crash_after_delete_when_reopening() {
 }
 
 #[test]
-fn should_recover_write_batch_atomically_given_crash_when_reopening() {
+fn should_recover_independent_committed_transactions_when_reopening_after_clean_shutdown() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         // Act (Phase 1)
@@ -372,7 +374,7 @@ fn should_recover_write_batch_atomically_given_crash_when_reopening() {
             let engine = open_with_mode(opts.clone(), mode);
             let _cf = engine.create_column_family("test").expect("create cf");
 
-            // Write batch operations converted to individual transactions
+            // Commit three independent transactions before shutdown
             let mut tx = engine
                 .begin_tx(_cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
@@ -391,7 +393,7 @@ fn should_recover_write_batch_atomically_given_crash_when_reopening() {
             tx.put(b"key3".to_vec(), b"value3".to_vec(), None)
                 .expect("put");
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
-            // Crash before flush
+            // Engine is dropped before an explicit flush occurs
         }
 
         // Assert (Phase 2)
@@ -399,19 +401,34 @@ fn should_recover_write_batch_atomically_given_crash_when_reopening() {
             let engine = open_with_mode(opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
-            // All batch operations should be recovered atomically
+            // All independently committed writes should be visible after reopen
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
-            assert!(tx.get(b"key1").expect("get").is_some(), "mode: {}", mode);
+            assert_eq!(
+                tx.get(b"key1").expect("get"),
+                Some(Bytes::from_static(b"value1")),
+                "mode: {}",
+                mode
+            );
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
-            assert!(tx.get(b"key2").expect("get").is_some(), "mode: {}", mode);
+            assert_eq!(
+                tx.get(b"key2").expect("get"),
+                Some(Bytes::from_static(b"value2")),
+                "mode: {}",
+                mode
+            );
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
-            assert!(tx.get(b"key3").expect("get").is_some(), "mode: {}", mode);
+            assert_eq!(
+                tx.get(b"key3").expect("get"),
+                Some(Bytes::from_static(b"value3")),
+                "mode: {}",
+                mode
+            );
         }
     });
 }
@@ -421,7 +438,7 @@ fn should_recover_write_batch_atomically_given_crash_when_reopening() {
 // ============================================================================
 
 #[test]
-fn should_recover_from_wal_given_manifest_save_failure_when_reopening() {
+fn should_recover_from_wal_when_reopening_after_clean_shutdown() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         // Act (Phase 1)
@@ -429,14 +446,14 @@ fn should_recover_from_wal_given_manifest_save_failure_when_reopening() {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
-            // Write and flush (simulating manifest save failure)
+            // Write committed data without forcing an SST flush
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             tx.put(b"key".to_vec(), b"value".to_vec(), None)
                 .expect("put");
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
-            // Crash during manifest save (before it persists)
+            // Engine is dropped after the commit
         }
 
         // Assert (Phase 2)
@@ -459,7 +476,7 @@ fn should_recover_from_wal_given_manifest_save_failure_when_reopening() {
 }
 
 #[test]
-fn should_preserve_consistency_given_crash_before_manifest_update_when_reopening() {
+fn should_preserve_consistency_when_reopening_after_clean_shutdown() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         // Act (Phase 1)
@@ -479,7 +496,7 @@ fn should_preserve_consistency_given_crash_before_manifest_update_when_reopening
                     engine.commit(tx, WriteOptions::buffered()).expect("commit");
                 }
             }
-            // Crash before final manifest sync
+            // Engine is dropped after all commits complete
         }
 
         // Assert (Phase 2)
@@ -491,11 +508,13 @@ fn should_preserve_consistency_given_crash_before_manifest_update_when_reopening
             for batch_num in 0..3 {
                 for i in 0..10 {
                     let key = format!("batch_{}_key_{:02}", batch_num, i);
+                    let expected = Bytes::from_static(b"value");
                     let tx = engine
                         .begin_tx(cf.id(), TransactionMode::ReadOnly)
                         .expect("begin_tx");
-                    assert!(
-                        tx.get(key.as_bytes()).expect("get").is_some(),
+                    assert_eq!(
+                        tx.get(key.as_bytes()).expect("get"),
+                        Some(expected.clone()),
                         "mode: {}",
                         mode
                     );
@@ -510,7 +529,7 @@ fn should_preserve_consistency_given_crash_before_manifest_update_when_reopening
 // ============================================================================
 
 #[test]
-fn should_be_idempotent_given_multiple_recovery_cycles_when_reopening() {
+fn should_be_idempotent_when_reopening_multiple_times_after_clean_shutdown() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         {
@@ -529,12 +548,12 @@ fn should_be_idempotent_given_multiple_recovery_cycles_when_reopening() {
             tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
                 .expect("put");
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
-            // Crash
+            // Engine is dropped after the committed writes
         }
 
         // Act (Recovery cycles)
         {
-            // First recovery: open and drop to simulate crash during recovery
+            // First reopen cycle: open and drop again
             let engine = open_with_mode(opts.clone(), mode);
             drop(engine);
 
@@ -566,7 +585,7 @@ fn should_be_idempotent_given_multiple_recovery_cycles_when_reopening() {
 }
 
 #[test]
-fn should_maintain_exactly_once_given_multiple_crash_cycles_when_reopening() {
+fn should_maintain_exactly_once_visibility_when_reopening_multiple_times_after_clean_shutdown() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         {
@@ -579,7 +598,7 @@ fn should_maintain_exactly_once_given_multiple_crash_cycles_when_reopening() {
             tx.put(b"key".to_vec(), b"value".to_vec(), None)
                 .expect("put");
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
-            // Crash
+            // Engine is dropped after the committed write
         }
 
         // Act (Phase 2: First recovery)
@@ -592,7 +611,7 @@ fn should_maintain_exactly_once_given_multiple_crash_cycles_when_reopening() {
                 .expect("begin_tx");
             let val = tx.get(b"key").expect("get");
             assert_eq!(val, Some(Bytes::from_static(b"value")), "mode: {}", mode);
-            // Crash again (recovery might trigger flush)
+            // Engine is dropped again after the first reopen
         }
 
         // Assert (Phase 3: Second recovery)
@@ -611,7 +630,7 @@ fn should_maintain_exactly_once_given_multiple_crash_cycles_when_reopening() {
 }
 
 #[test]
-fn should_continue_sequence_numbers_given_recovery_when_new_writes() {
+fn should_continue_sequence_numbers_when_new_writes_follow_clean_reopen() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         {
@@ -630,15 +649,15 @@ fn should_continue_sequence_numbers_given_recovery_when_new_writes() {
             tx.put(b"seq_2".to_vec(), b"value_2".to_vec(), None)
                 .expect("put");
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
-            // Crash
+            // Engine is dropped after the committed writes
         }
 
-        // Act (Phase 2: Recovery and new writes)
+        // Act (Phase 2: Reopen and new writes)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
-            // Verify recovery
+            // Verify previously committed data is visible after reopen
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
@@ -702,7 +721,7 @@ fn should_continue_sequence_numbers_given_recovery_when_new_writes() {
 }
 
 #[test]
-fn should_skip_corrupted_tail_given_partial_record_when_tolerant_mode() {
+fn should_replay_valid_wal_records_when_reopening_after_clean_shutdown() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         // Act (Phase 1)
@@ -720,7 +739,7 @@ fn should_skip_corrupted_tail_given_partial_record_when_tolerant_mode() {
                     .expect("put");
                 engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
-            // Crash with partial record at tail
+            // Engine is dropped after writing valid WAL records
         }
 
         // Assert (Phase 2)
@@ -728,19 +747,19 @@ fn should_skip_corrupted_tail_given_partial_record_when_tolerant_mode() {
             let engine = open_with_mode(opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
-            // Valid records before tail should be recovered
+            // Valid committed records should be recovered on reopen
             for i in 0..50 {
                 let key = format!("valid_{:03}", i);
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
-                assert!(
-                    tx.get(key.as_bytes()).expect("get").is_some(),
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("get"),
+                    Some(Bytes::from_static(b"value")),
                     "mode: {}",
                     mode
                 );
             }
-            // Recovery should not panic on corrupted tail
         }
     });
 }
