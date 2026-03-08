@@ -1199,10 +1199,69 @@ impl EventLoop {
                     .active_compactions
                     .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
 
-                // Handle the compaction completion
-                self.compaction_actor
-                    .handle_complete(&mut self.state, input_ssts, output_ssts);
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
+                // Handle the compaction completion (clean local state)
+                self.compaction_actor.handle_complete(
+                    &mut self.state,
+                    input_ssts.clone(),
+                    output_ssts.clone(),
+                );
+
+                // 🔑 CRITICAL: Route to manifest actor to publish compaction changes
+                // Infer cf_id and output level from input files (all inputs belong to same CF)
+                let cf_id = self
+                    .state
+                    .manifest
+                    .files
+                    .iter()
+                    .find(|f| input_ssts.contains(&f.name))
+                    .map(|f| f.cf_id)
+                    .unwrap_or(0);
+
+                let output_level = self
+                    .state
+                    .manifest
+                    .files
+                    .iter()
+                    .filter(|f| input_ssts.contains(&f.name))
+                    .map(|f| f.level)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+
+                // Construct FileMeta for output SSTs (minimal metadata; can be enriched later via SST reading)
+                let added: Vec<crate::runtime::FileMeta> = output_ssts
+                    .iter()
+                    .map(|name| crate::runtime::FileMeta {
+                        name: name.clone(),
+                        level: output_level,
+                        size_bytes: 0, // TODO: could read from filesystem or SST header
+                        cf_id,
+                        smallest_key: None, // TODO: read from SST after completion
+                        largest_key: None,  // TODO: read from SST after completion
+                        smallest_seq: None,
+                        largest_seq: None,
+                    })
+                    .collect();
+
+                // Publish compaction changes to manifest (update and persist)
+                if let Err(e) =
+                    self.manifest_actor
+                        .compaction_complete(&mut self.state, input_ssts, added)
+                {
+                    tracing::error!(error = ?e, "failed to apply compaction to manifest");
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::Error {
+                            request_id,
+                            error: crate::common::MidgeError::Internal(format!(
+                                "failed to apply compaction to manifest: {}",
+                                e
+                            )),
+                        },
+                    );
+                } else {
+                    self.respond(request_id, RuntimeResponse::Ok { request_id });
+                }
 
                 // Check if any pending CompactAll/BeginIngest requests can be completed now
                 let active = self
