@@ -52,11 +52,11 @@ That's it. Everything — local disk, cloud storage, column families — follows
 
 **Transactions are explicit and obvious.** Every read and every write happens inside a transaction you own. No hidden flushes, no background writer surprises, no wondering when your data lands. You call `commit`, it commits.
 
-**Durability is your choice.** Use `WriteOptions::sync()` when you need a guarantee. Use `WriteOptions::default()` when you want throughput. The control is yours and the behavior is documented.
+**Durability is your choice.** Use `WriteOptions::sync()` when you need a guarantee. Use `WriteOptions::buffered()` when you want higher throughput with weaker crash guarantees. The control is explicit and the behavior is documented.
 
 **It's predictable.** Deterministic behavior under production load with explicit durability control. Throughput up to 160 MB/s on local disk, 46 MB/s on cloud storage.
 
-**It's designed to be trustworthy.** 1,500+ tests including deterministic crash recovery scenarios and enforced test structure validation. The v1 API follows semver — no surprises in patch releases. CI runs the full test suite on every commit across Linux, macOS, and Windows. Built for infrastructure, not prototypes.
+**It's designed to be trustworthy.** 1,500+ tests including deterministic crash recovery scenarios and enforced test structure validation. CI runs the full test suite on every commit across Linux, macOS, and Windows. Midge is still pre-1.0, so minor releases may change APIs or operational guidance before 1.0. See the stability policy for the current compatibility contract.
 
 ## Common operations
 
@@ -121,6 +121,7 @@ while let Some((k, v)) = iter.next() {
 ### Contributing
 
 - **[Contributing Guide](CONTRIBUTING.md)** — How to contribute
+- **[Stability Policy](docs/development/stability-policy.md)** — Pre-1.0 compatibility and upgrade expectations
 - **[The Big Idea](docs/development/the-big-idea.md)** — Design philosophy
 - **[Architecture](docs/development/architecture.md)** — Technical internals
 - **[Testing](docs/development/testing.md)** — Test conventions

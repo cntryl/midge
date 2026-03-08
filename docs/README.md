@@ -2,7 +2,9 @@
 
 **Central navigation hub for all Midge documentation**
 
-_Version: 0.1.0 | Status: Production | Last updated: March 2026_
+_Version: 0.1.0 | Status: Pre-1.0 | Last updated: March 2026_
+
+Midge is in the 0.1 release line. APIs, operational guidance, and compatibility guarantees are still being tightened before 1.0. See [development/stability-policy.md](development/stability-policy.md) for the current contract.
 
 ## Documentation Structure
 
@@ -30,7 +32,7 @@ Start here to understand what Midge is and get up and running quickly:
 
 ---
 
-## Operating Midge in Production
+## Operating Midge
 
 For deploying, tuning, and maintaining Midge in production environments:
 
@@ -60,6 +62,7 @@ For developers working on Midge internals:
 
 ### Development Workflow
 
+- **[Stability Policy](development/stability-policy.md)** — Pre-1.0 compatibility commitments and upgrade expectations
 - **[Testing](development/testing.md)** — Test structure, naming conventions, validation
 - **[Benchmarks](development/benchmarks.md)** — Performance benchmarking guidelines
 - **[CONTRIBUTING](../CONTRIBUTING.md)** — Contribution workflow, PR process, code standards
@@ -104,6 +107,7 @@ For developers working on Midge internals:
 - **API Documentation** (rustdoc): Run `cargo doc --open`
 - **License**: See [LICENSE](../LICENSE)
 - **Security Policy**: See [SECURITY](../SECURITY.md)
+- **Stability Policy**: See [development/stability-policy.md](development/stability-policy.md)
 - **Changelog**: See [CHANGELOG](../CHANGELOG.md)
 
 ---

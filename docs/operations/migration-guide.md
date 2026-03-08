@@ -8,6 +8,8 @@
 
 Midge is in early development (0.1.x). APIs and data formats may change between minor versions until 1.0 release.
 
+See [../development/stability-policy.md](../development/stability-policy.md) for the current compatibility contract and what is intentionally not frozen yet.
+
 ### Compatibility Policy
 
 **Pre-1.0 (current):**
@@ -138,9 +140,9 @@ new_engine.flush_cf(&cf)?;
 
 ### 0.1.0 → Current
 
-No breaking changes yet (initial release).
+0.1.0 is the initial pre-1.0 release. Treat later 0.x minor upgrades as potentially breaking until the 1.0 contract is published.
 
-**Future breaking changes will be documented here.**
+Review the CHANGELOG and [stability policy](../development/stability-policy.md) before upgrading.
 
 ---
 

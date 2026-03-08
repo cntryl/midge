@@ -22,7 +22,7 @@ Midge is an embedded LSM-tree key-value storage engine designed for predictable 
 
 ### Is Midge production-ready?
 
-Yes. Midge core engine and all storage modes (InMemory, Local, and Cloud) are production-ready. See [../operations/cloud-setup.md](../operations/cloud-setup.md) for cloud provider setup details.
+Not as a blanket claim yet. Midge is still in the 0.1 release line, so compatibility and operational guarantees are still tightening before 1.0. Evaluate it feature-by-feature for your workload, and review the [stability policy](../development/stability-policy.md), [durability guide](durability.md), and [migration guide](../operations/migration-guide.md) before depending on it in production.
 
 ### What languages does Midge support?
 
@@ -46,7 +46,7 @@ Rust only. Native library written in Rust with Rust APIs. C bindings or FFI wrap
 - Use for: Cloud-native apps, serverless, distributed systems
 - Cloud is source of truth (S3, GCS, Azure Blob)
 - Local disk is ephemeral cache
-- **Status**: Production-ready
+- **Status**: Pre-1.0; validate for your workload and recovery requirements
 
 ### Can I migrate between storage modes?
 
@@ -70,7 +70,7 @@ Production-supported providers:
 - MinIO (S3-compatible)
 - Any S3-compatible object storage
 
-See [../operations/cloud-setup.md](../operations/cloud-setup.md) for provider configuration.
+See [../operations/cloud-setup.md](../operations/cloud-setup.md) for provider configuration, and [../development/stability-policy.md](../development/stability-policy.md) for pre-1.0 compatibility expectations.
 
 ## Durability
 

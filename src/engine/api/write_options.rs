@@ -1,11 +1,12 @@
 //! Write options for explicit durability control
 //!
 //! Provides explicit control over write durability semantics.
-//! Callers must always specify durability policy - no defaults.
+//! Callers must always specify durability policy - there is intentionally no
+//! `Default` implementation.
 
 /// Write options - MUST be explicitly provided for all commits
 ///
-/// Deliberately NO Default impl to force explicit choices
+/// Deliberately no `Default` impl to force explicit choices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteOptions {
     /// Durability policy
