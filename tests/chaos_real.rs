@@ -116,11 +116,14 @@ fn should_not_publish_best_effort_writes_when_crashing_after_sst_write_before_ma
     // WHY THIS IS HONEST:
     // The child dies in the production flush path after the file write; recovery must clean up the orphan SST
     // instead of incorrectly publishing it.
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
+    // Act
     let committed = act_best_effort_flush_crash_before_publish(db_path);
 
+    // Assert
     assert!(
         !committed.is_empty(),
         "child did not stage tracked best-effort writes"

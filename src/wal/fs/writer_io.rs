@@ -443,6 +443,7 @@ mod tests {
 
     #[test]
     fn should_advance_current_pos_before_append_record_returns() -> MidgeResult<()> {
+        // Arrange
         let fs = Arc::new(crate::io::MockFs::new());
         let writer = FsWalWriterIo::new("wal.log", fs)?;
         let record = WalRecord::new(
@@ -453,8 +454,10 @@ mod tests {
             7,
         );
 
+        // Act
         let pos = writer.append_record(&record)?;
 
+        // Assert
         assert_eq!(pos, 0);
         assert!(writer.current_pos() > 0);
         Ok(())

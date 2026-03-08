@@ -228,6 +228,7 @@ mod tests {
         fn should_roundtrip_arbitrary_wal_synced_intents(
             pairs in proptest::collection::vec((0u64..10_000, 0u64..10_000), 0..32)
         ) {
+            // Arrange
             let test_dir = create_test_dir();
             let intents: Vec<IntentLogEntry> = pairs
                 .iter()
@@ -237,9 +238,11 @@ mod tests {
                 })
                 .collect();
 
+            // Act
             IntentPersistence::save(&test_dir, &intents).expect("save should succeed");
             let loaded = IntentPersistence::load(&test_dir).expect("load should succeed");
 
+            // Assert
             prop_assert_eq!(loaded.len(), intents.len());
             for (loaded_entry, expected_entry) in loaded.iter().zip(intents.iter()) {
                 match (loaded_entry, expected_entry) {

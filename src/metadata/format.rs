@@ -111,27 +111,34 @@ mod tests {
 
     #[test]
     fn should_create_format_marker_for_empty_database_directory() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("temp dir");
 
+        // Act
         let version = ensure_or_create_format_marker(temp_dir.path()).expect("create marker");
 
+        // Assert
         assert_eq!(version, CURRENT_FORMAT_VERSION);
         assert!(format_marker_path(temp_dir.path()).exists());
     }
 
     #[test]
     fn should_fail_given_legacy_state_without_format_marker() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(temp_dir.path().join("manifest.yaml"), "legacy: true\n")
             .expect("write legacy manifest");
 
+        // Act
         let error = ensure_or_create_format_marker(temp_dir.path()).expect_err("legacy format");
 
+        // Assert
         assert!(matches!(error, MidgeError::CompatibilityError(_)));
     }
 
     #[test]
     fn should_fail_given_unknown_format_version() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(
             format_marker_path(temp_dir.path()),
@@ -139,8 +146,10 @@ mod tests {
         )
         .expect("write marker");
 
+        // Act
         let error = validate_format_marker(temp_dir.path()).expect_err("unknown version");
 
+        // Assert
         assert!(matches!(error, MidgeError::CompatibilityError(_)));
     }
 }

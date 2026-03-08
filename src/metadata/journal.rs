@@ -828,6 +828,7 @@ mod tests {
         fn should_preserve_batch_order_when_replaying_bump_wal_seq_edits(
             seqs in proptest::collection::vec(0u64..10_000, 1..32)
         ) {
+            // Arrange
             let td = tempdir().unwrap();
             let db = td.path();
             let batch: Vec<ManifestEdit> = seqs
@@ -836,11 +837,13 @@ mod tests {
                 .map(|seq| ManifestEdit::BumpWalSeq { seq })
                 .collect();
 
+            // Act
             append_edit_batch(db, &batch).expect("append batch failed");
 
             let replayed = replay_journal(db).expect("replay_journal failed");
             prop_assert_eq!(replayed.len(), 1);
 
+            // Assert
             match &replayed[0] {
                 ManifestEdit::Batch(inner) => {
                     prop_assert_eq!(inner.len(), batch.len());

@@ -4,6 +4,7 @@ use tempfile::TempDir;
 
 #[test]
 fn should_fail_strict_open_when_manifest_journal_is_corrupt() {
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
@@ -13,12 +14,14 @@ fn should_fail_strict_open_when_manifest_journal_is_corrupt() {
     )
     .expect("write corrupt manifest journal");
 
+    // Act
     let result = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Strict)
             .build(),
     );
 
+    // Assert
     match result {
         Err(MidgeError::RecoveryFailed(message)) => {
             assert!(
@@ -33,6 +36,7 @@ fn should_fail_strict_open_when_manifest_journal_is_corrupt() {
 
 #[test]
 fn should_open_in_salvage_mode_when_manifest_journal_is_corrupt() {
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
@@ -42,6 +46,7 @@ fn should_open_in_salvage_mode_when_manifest_journal_is_corrupt() {
     )
     .expect("write corrupt manifest journal");
 
+    // Act
     let engine = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Salvage)
@@ -49,6 +54,7 @@ fn should_open_in_salvage_mode_when_manifest_journal_is_corrupt() {
     )
     .expect("salvage open");
 
+    // Assert
     let metrics = engine.get_runtime_metrics().expect("runtime metrics");
     assert_eq!(metrics.health, EngineHealth::SalvageMode);
     assert_eq!(metrics.salvage_mode_opens, 1);
@@ -56,17 +62,20 @@ fn should_open_in_salvage_mode_when_manifest_journal_is_corrupt() {
 
 #[test]
 fn should_fail_strict_open_when_intent_log_is_corrupt() {
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
     fs::write(db_path.join("intent_log.yaml"), ":\n- broken: [").expect("write corrupt intent log");
 
+    // Act
     let result = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Strict)
             .build(),
     );
 
+    // Assert
     match result {
         Err(MidgeError::RecoveryFailed(message)) => {
             assert!(
@@ -81,6 +90,7 @@ fn should_fail_strict_open_when_intent_log_is_corrupt() {
 
 #[test]
 fn should_fail_open_given_legacy_persisted_state_without_format_marker() {
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
@@ -90,8 +100,10 @@ fn should_fail_open_given_legacy_persisted_state_without_format_marker() {
     )
     .expect("write legacy manifest");
 
+    // Act
     let result = Engine::open(OpenOptions::local(db_path).build());
 
+    // Assert
     match result {
         Err(MidgeError::CompatibilityError(message)) => {
             assert!(

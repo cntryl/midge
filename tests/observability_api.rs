@@ -3,7 +3,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 #[test]
-fn should_expose_runtime_metrics_storage_layout_and_verification_for_local_engine() {
+fn should_expose_local_engine_observability_surfaces() {
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
@@ -24,7 +25,13 @@ fn should_expose_runtime_metrics_storage_layout_and_verification_for_local_engin
         .expect("commit best effort");
     engine.flush_cf(&default_cf).expect("flush default cf");
 
+    // Act
     let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    let layout = engine.get_storage_layout().expect("storage layout");
+    let report = engine.verify_storage().expect("verify storage");
+    let offline_report = Engine::verify_path(db_path).expect("offline verify path");
+
+    // Assert
     assert_eq!(metrics.health, EngineHealth::Healthy);
     assert!(
         metrics.sst_count >= 1,
@@ -38,8 +45,6 @@ fn should_expose_runtime_metrics_storage_layout_and_verification_for_local_engin
         metrics.wal_append_count >= metrics.wal_fsync_count,
         "WAL append counter should never be below fsync counter"
     );
-
-    let layout = engine.get_storage_layout().expect("storage layout");
     assert_eq!(layout.health, EngineHealth::Healthy);
     assert!(
         layout
@@ -62,23 +67,22 @@ fn should_expose_runtime_metrics_storage_layout_and_verification_for_local_engin
                 && file.size_bytes > 0),
         "published SSTs must have complete metadata"
     );
-
-    let report = engine.verify_storage().expect("verify storage");
     assert!(report.manifest_files_verified >= 1);
     assert!(report.sst_files_verified >= 1);
     assert_eq!(report.health, EngineHealth::Healthy);
-
-    let offline_report = Engine::verify_path(db_path).expect("offline verify path");
     assert_eq!(offline_report.health, EngineHealth::Healthy);
     assert!(offline_report.manifest_files_verified >= 1);
 }
 
 #[test]
 fn should_reject_storage_verification_in_memory_mode() {
+    // Arrange
     let engine = Engine::open(OpenOptions::in_memory().build()).expect("open in-memory engine");
 
+    // Act
     let result = engine.verify_storage();
 
+    // Assert
     match result {
         Err(MidgeError::NotSupported(message)) => {
             assert!(
@@ -92,6 +96,7 @@ fn should_reject_storage_verification_in_memory_mode() {
 
 #[test]
 fn should_report_degraded_health_given_obsolete_sst_files_and_json_verification() {
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
@@ -113,14 +118,23 @@ fn should_report_degraded_health_given_obsolete_sst_files_and_json_verification(
     std::fs::write(db_path.join("sst").join("orphan.sst.tmp"), b"orphan-bytes")
         .expect("write orphan file");
 
+    // Act
     let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    let layout = engine.get_storage_layout().expect("storage layout");
+    let report = engine.verify_storage().expect("verify storage");
+    let output = Command::new(env!("CARGO_BIN_EXE_midge"))
+        .arg("verify")
+        .arg("--json")
+        .arg(db_path)
+        .output()
+        .expect("run midge verify");
+
+    // Assert
     assert_eq!(metrics.health, EngineHealth::Degraded);
     assert!(
         metrics.obsolete_file_backlog >= 1,
         "obsolete file backlog should reflect orphaned SST files"
     );
-
-    let layout = engine.get_storage_layout().expect("storage layout");
     assert_eq!(layout.health, EngineHealth::Degraded);
     assert!(
         layout
@@ -129,17 +143,7 @@ fn should_report_degraded_health_given_obsolete_sst_files_and_json_verification(
             .any(|name| name == "orphan.sst.tmp"),
         "storage layout should report obsolete SST artifacts"
     );
-
-    let report = engine.verify_storage().expect("verify storage");
     assert_eq!(report.health, EngineHealth::Degraded);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_midge"))
-        .arg("verify")
-        .arg("--json")
-        .arg(db_path)
-        .output()
-        .expect("run midge verify");
-
     assert_eq!(
         output.status.code(),
         Some(1),

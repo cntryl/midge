@@ -1591,6 +1591,7 @@ mod tests {
             ),
             snapshot_seq in 0u64..4096
         ) {
+            // Arrange
             let sl = SkipList::new();
             let key = Bytes::from_static(b"prop_key");
 
@@ -1601,12 +1602,14 @@ mod tests {
                 }
             }
 
+            // Act
             let expected = versions
                 .range(..=snapshot_seq)
                 .next_back()
                 .and_then(|(_, value)| value.clone())
                 .map(Bytes::from);
 
+            // Assert
             prop_assert_eq!(sl.get(key.as_ref(), snapshot_seq), expected);
         }
     }

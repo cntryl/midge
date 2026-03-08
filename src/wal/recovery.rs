@@ -1234,6 +1234,7 @@ mod tests {
 
     #[test]
     fn should_fail_strict_recovery_on_bad_crc_at_byte_zero() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -1255,9 +1256,12 @@ mod tests {
         append_raw_bytes(&wal_path, &frame);
 
         let mut memtables = HashMap::new();
+
+        // Act
         let err = replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
             .unwrap_err();
 
+        // Assert
         match err {
             MidgeError::Corruption(msg) => assert!(msg.contains("CRC mismatch")),
             other => panic!("expected corruption error, got {other:?}"),
@@ -1266,6 +1270,7 @@ mod tests {
 
     #[test]
     fn should_salvage_valid_prefix_on_bad_crc_tail() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -1301,6 +1306,8 @@ mod tests {
         append_raw_bytes(&wal_path, &frame);
 
         let mut memtables = HashMap::new();
+
+        // Act
         let stats = replay_wal_with_policy(
             &storage,
             &wal_dir,
@@ -1309,6 +1316,7 @@ mod tests {
         )
         .unwrap();
 
+        // Assert
         assert!(stats.had_corruption);
         assert_eq!(stats.record_count, 1);
         assert_eq!(memtables[&0].get(b"good").unwrap(), Some(b"value".to_vec()));
@@ -1317,6 +1325,7 @@ mod tests {
 
     #[test]
     fn should_salvage_valid_prefix_on_truncated_tail_frame() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -1352,6 +1361,8 @@ mod tests {
         append_raw_bytes(&wal_path, &frame);
 
         let mut memtables = HashMap::new();
+
+        // Act
         let stats = replay_wal_with_policy(
             &storage,
             &wal_dir,
@@ -1360,6 +1371,7 @@ mod tests {
         )
         .unwrap();
 
+        // Assert
         assert!(!stats.had_corruption);
         assert_eq!(stats.record_count, 1);
         assert_eq!(memtables[&0].get(b"good").unwrap(), Some(b"value".to_vec()));
@@ -1368,6 +1380,7 @@ mod tests {
 
     #[test]
     fn should_skip_stale_writer_epoch_records() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -1399,8 +1412,11 @@ mod tests {
         }
 
         let mut memtables = HashMap::new();
+
+        // Act
         let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
+        // Assert
         assert_eq!(stats.max_epoch_seen, 2);
         assert_eq!(stats.stale_records_skipped, 1);
         assert_eq!(memtables[&0].get(b"fresh").unwrap(), Some(b"v2".to_vec()));

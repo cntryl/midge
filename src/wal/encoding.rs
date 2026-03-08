@@ -388,6 +388,7 @@ mod tests {
 
     #[test]
     fn should_roundtrip_empty_value_distinct_from_delete() {
+        // Arrange
         let record = WalRecord::new(
             WalOpKind::Put,
             Bytes::from_static(b"k"),
@@ -396,9 +397,11 @@ mod tests {
             1,
         );
 
+        // Act
         let encoded = encode(&record).unwrap();
         let decoded = decode(&encoded[..]).unwrap();
 
+        // Assert
         assert_eq!(decoded.op, WalOpKind::Put);
         assert_eq!(decoded.value, Some(Bytes::from_static(b"")));
     }
@@ -511,6 +514,7 @@ mod tests {
             expiration in proptest::option::of(any::<u64>()),
             txn_id in proptest::option::of(any::<u64>()),
         ) {
+            // Arrange
             let mut record = WalRecord::new_cf(
                 cf_id,
                 WalOpKind::Put,
@@ -522,9 +526,11 @@ mod tests {
             record.expiration = expiration;
             record.txn_id = txn_id;
 
+            // Act
             let encoded = encode(&record).unwrap();
             let decoded = decode(&encoded[..]).unwrap();
 
+            // Assert
             prop_assert_eq!(decoded.cf_id, cf_id);
             prop_assert_eq!(decoded.op, WalOpKind::Put);
             prop_assert_eq!(decoded.seq, seq);

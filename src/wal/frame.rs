@@ -71,9 +71,13 @@ mod tests {
     proptest! {
         #[test]
         fn should_roundtrip_arbitrary_payloads(payload in proptest::collection::vec(any::<u8>(), 0..8192)) {
+            // Arrange
             let mut buf = Vec::new();
+
+            // Act
             append_frame(&mut buf, &payload)?;
 
+            // Assert
             prop_assert_eq!(buf.len(), WAL_FRAME_HEADER_LEN + payload.len());
 
             let (payload_len, expected_crc) = decode_frame_header(&buf[..WAL_FRAME_HEADER_LEN])?;
@@ -87,6 +91,7 @@ mod tests {
             payload in proptest::collection::vec(any::<u8>(), 1..4096),
             flip_index in 0usize..4096
         ) {
+            // Arrange
             let mut buf = Vec::new();
             append_frame(&mut buf, &payload)?;
             let (payload_len, expected_crc) = decode_frame_header(&buf[..WAL_FRAME_HEADER_LEN])?;
@@ -96,7 +101,10 @@ mod tests {
             let idx = payload_start + (flip_index % payload.len());
             buf[idx] ^= 0x5a;
 
+            // Act
             let err = verify_frame_crc(&buf[payload_start..], expected_crc).unwrap_err();
+
+            // Assert
             prop_assert!(matches!(err, MidgeError::Corruption(_)));
         }
     }
