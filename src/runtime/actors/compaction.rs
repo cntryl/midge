@@ -164,8 +164,8 @@ impl CompactionActor {
                         Some(&abort_check),
                     );
 
-                    let output_ssts = match result {
-                        Ok(v) => v,
+                    let (output_ssts, succeeded) = match result {
+                        Ok(v) => (v, true),
                         Err(e) => {
                             // Distinguish cooperative aborts due to ingest epoch changes
                             let s = e.to_string();
@@ -194,16 +194,16 @@ impl CompactionActor {
                                     "compaction worker aborted or failed"
                                 );
                             }
-                            Vec::new()
+                            (Vec::new(), false)
                         }
                     };
 
-                    output_ssts
+                    (output_ssts, succeeded)
                 }));
 
                 // Extract output_ssts, handling panic case
-                let output_ssts = match result {
-                    Ok(ssts) => ssts,
+                let (output_ssts, succeeded) = match result {
+                    Ok(result) => result,
                     Err(panic_info) => {
                         // Compaction thread panicked; log the panic and return empty output
                         tracing::error!(
@@ -213,7 +213,7 @@ impl CompactionActor {
                             panic_info = ?panic_info,
                             "compaction worker thread panicked; returning empty output to unblock event loop"
                         );
-                        Vec::new()
+                        (Vec::new(), false)
                     }
                 };
 
@@ -226,6 +226,7 @@ impl CompactionActor {
                     output_ssts,
                     cf_id: plan_clone.cf_id,
                     target_level: plan_clone.target_level,
+                    succeeded,
                 });
             });
 

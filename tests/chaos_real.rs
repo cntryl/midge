@@ -65,6 +65,7 @@ fn should_abort_in_child_process_when_chaos_scenario_requested() {
     // Act
     match scenario.to_string_lossy().as_ref() {
         "flush_after_sst_write" => child_flush_after_sst_write(&db_path),
+        "flush_after_sst_write_best_effort" => child_flush_after_sst_write_best_effort(&db_path),
         "manifest_crash_after_sync" => child_manifest_crash_after_sync(&db_path),
         "concurrent_random_wal_append" => child_concurrent_random_wal_append(&db_path),
         other => panic!("unknown child scenario: {other}"),
@@ -100,6 +101,33 @@ fn should_recover_sync_commits_when_crashing_after_sst_write_before_manifest_pub
     );
     let engine = open_local_engine(db_path);
     assert_committed_records_visible(&engine, &committed);
+}
+
+#[test]
+fn should_not_publish_best_effort_writes_when_crashing_after_sst_write_before_manifest_publication()
+{
+    // WHAT THIS TEST DOES:
+    // Runs a child process that writes best-effort commits, calls flush, and aborts at the real failpoint
+    // after the SST is durable but before manifest publication completes.
+    // FAILURE INJECTED:
+    // Real subprocess abort via midge::flush::after_sst_write_before_publish.
+    // EXPECTED INVARIANT:
+    // Best-effort writes must not become restart-visible because flush did not return Ok.
+    // WHY THIS IS HONEST:
+    // The child dies in the production flush path after the file write; recovery must clean up the orphan SST
+    // instead of incorrectly publishing it.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+
+    let committed = act_best_effort_flush_crash_before_publish(db_path);
+
+    assert!(
+        !committed.is_empty(),
+        "child did not stage tracked best-effort writes"
+    );
+
+    let engine = open_local_engine(db_path);
+    assert_committed_records_absent(&engine, &committed);
 }
 
 #[test]
@@ -280,6 +308,12 @@ fn act_flush_crash_before_publish(db_path: &Path) -> Vec<CommitRecord> {
     read_committed_records(db_path)
 }
 
+fn act_best_effort_flush_crash_before_publish(db_path: &Path) -> Vec<CommitRecord> {
+    run_child_expect_abort("flush_after_sst_write_best_effort", db_path, &[]);
+    expire_crashed_process_lease(db_path);
+    read_committed_records(db_path)
+}
+
 fn act_manifest_crash_with_partial_final_record(db_path: &Path) -> Vec<CommitRecord> {
     run_child_expect_abort(
         "manifest_crash_after_sync",
@@ -374,6 +408,31 @@ fn child_flush_after_sst_write(db_path: &Path) {
             key.as_bytes(),
             value.as_bytes(),
             WriteOptions::sync(),
+            &committed_path,
+        );
+    }
+
+    engine
+        .flush_cf(&default_cf)
+        .expect("flush should reach failpoint");
+}
+
+fn child_flush_after_sst_write_best_effort(db_path: &Path) {
+    configure_abort_failpoint("midge::flush::after_sst_write_before_publish");
+
+    let engine = open_local_engine(db_path);
+    let default_cf = default_cf(&engine);
+    let committed_path = committed_log_path(db_path);
+
+    for index in 0..8 {
+        let key = format!("best-effort-flush-key-{index:02}");
+        let value = format!("best-effort-flush-value-{index:02}");
+        put_and_track_commit(
+            &engine,
+            &default_cf,
+            key.as_bytes(),
+            value.as_bytes(),
+            WriteOptions::best_effort(),
             &committed_path,
         );
     }
@@ -530,6 +589,22 @@ fn assert_committed_records_visible(engine: &Engine, committed: &[CommitRecord])
             value,
             Some(Bytes::from(record.value.clone())),
             "committed key {:?} must recover exactly",
+            String::from_utf8_lossy(&record.key)
+        );
+    }
+}
+
+fn assert_committed_records_absent(engine: &Engine, committed: &[CommitRecord]) {
+    let default_cf = default_cf(engine);
+    for record in committed {
+        let tx = engine
+            .begin_tx(default_cf.id(), TransactionMode::ReadOnly)
+            .expect("begin read tx");
+        let value = tx.get(&record.key).expect("get tracked key");
+        assert_eq!(
+            value,
+            None,
+            "best-effort key {:?} must not become visible after crash before flush publication",
             String::from_utf8_lossy(&record.key)
         );
     }

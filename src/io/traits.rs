@@ -265,7 +265,14 @@ impl From<FsError> for crate::common::MidgeError {
             FsError::NotFound(_msg) => crate::common::MidgeError::NotFound,
             FsError::AlreadyExists(msg) => crate::common::MidgeError::InvalidArgument(msg),
             FsError::Corruption(msg) => crate::common::MidgeError::Corruption(msg),
-            FsError::Io(msg) => crate::common::MidgeError::Io(std::io::Error::other(msg)),
+            FsError::Io(msg) => {
+                let lowered = msg.to_ascii_lowercase();
+                if lowered.contains("no space") || lowered.contains("disk full") {
+                    crate::common::MidgeError::NoSpace(msg)
+                } else {
+                    crate::common::MidgeError::Io(std::io::Error::other(msg))
+                }
+            }
             FsError::Unavailable(msg) => crate::common::MidgeError::Internal(msg),
             FsError::Unsupported(msg) => crate::common::MidgeError::NotSupported(msg),
         }

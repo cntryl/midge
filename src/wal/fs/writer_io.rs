@@ -9,7 +9,7 @@
 //! • It NEVER assigns sequence numbers.
 //! • It NEVER rotates WAL segments.
 //! • It NEVER writes metadata beyond the encoded WAL record format.
-//! • It MUST write records as: `<u32 length prefix><encoded record bytes>`.
+//! • It MUST write records as: `<u32 length prefix><u32 crc32c><encoded record bytes>`.
 //! • It MUST update the write position monotonically.
 //! • It MUST flush/sync exactly and only when asked.
 //! • All concurrency protection is via `Mutex` — do NOT add async constructs.
@@ -113,77 +113,115 @@ impl FsWalWriterIo {
 
         Ok(writer)
     }
-}
 
-impl WalWriter for FsWalWriterIo {
-    fn append_record(&self, record: &WalRecord) -> MidgeResult<WalPos> {
-        // Encode and enqueue payload into queue; do not perform IO here.
+    fn encode_record_frame(&self, record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
         let e_start = std::time::Instant::now();
         let encoded = encoding::encode(record)?;
         let e_elapsed = e_start.elapsed();
         if let Some(t) = crate::telemetry::Telemetry::global() {
             t.metrics().record_wal_encode(e_elapsed.as_nanos() as u64);
         }
+        crate::wal::frame::append_frame(buf, &encoded)
+    }
 
-        // WAL wire format uses 4-byte length prefix; reject records that would truncate.
-        let enc_len = encoded.len();
-        if enc_len > u32::MAX as usize {
-            return Err(crate::common::MidgeError::InvalidArgument(
-                "WAL record length exceeds u32::MAX".into(),
-            ));
+    fn take_buffer(&self) -> Vec<u8> {
+        let mut pool = self.buf_pool.lock();
+        pool.pop().unwrap_or_else(|| Vec::with_capacity(1024))
+    }
+
+    fn writer_failure(&self) -> Option<crate::common::MidgeError> {
+        let s = self.sync_state.lock();
+        if s.write_failed {
+            let msg = s
+                .last_write_error
+                .clone()
+                .unwrap_or_else(|| "WAL write failed persistently".to_string());
+            return Some(Self::error_from_message(msg));
         }
-        let len_prefix = (enc_len as u32).to_le_bytes();
+        if s.sync_failed {
+            let msg = s
+                .last_sync_error
+                .clone()
+                .unwrap_or_else(|| "WAL sync failed persistently".to_string());
+            return Some(Self::error_from_message(msg));
+        }
+        None
+    }
 
-        // Get a buffer from pool (or allocate)
-        let mut buf = {
-            let mut pool = self.buf_pool.lock();
-            pool.pop().unwrap_or_else(|| Vec::with_capacity(1024))
-        };
-        buf.clear();
-        buf.extend_from_slice(&len_prefix);
-        buf.extend_from_slice(&encoded);
-
-        // Return a best-effort start position; real position updated by writer thread.
-        let pos = self.current_pos.load(std::sync::atomic::Ordering::SeqCst);
+    fn enqueue_encoded(&self, buf: Vec<u8>) -> MidgeResult<WalPos> {
+        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
 
         // Enqueue with backpressure: if queue is full, wait for it to drain.
-        // Use exponential backoff + timeout to avoid busy-waiting.
-        // This prevents "WAL queue full" errors under high load and enables smooth backpressure.
         let mut backoff_ms = 1u64;
         const MAX_BACKOFF_MS: u64 = 100;
-        const MAX_WAIT_ATTEMPTS: u32 = 50; // ~5s max wait with exponential backoff
+        const MAX_WAIT_ATTEMPTS: u32 = 50;
 
         for attempt in 0..MAX_WAIT_ATTEMPTS {
+            if let Some(err) = self.writer_failure() {
+                return Err(err);
+            }
+
             let mut q = self.queue.lock();
             if q.len() < super::writer_runner::MAX_QUEUE_DEPTH {
-                // Space available, queue the write
-                q.push(super::writer_runner::QueuedWrite::new(buf));
+                q.push(super::writer_runner::QueuedWrite::new(buf, ack_tx));
                 self.queue_cond.notify_one();
+
+                drop(q);
 
                 if attempt > 0 {
                     if let Some(t) = crate::telemetry::Telemetry::global() {
                         t.metrics().record_wal_backpressure_wait(attempt as u64);
                     }
                 }
-                return Ok(pos);
+
+                return match ack_rx.recv() {
+                    Ok(result) => result,
+                    Err(_) => Err(self.writer_failure().unwrap_or_else(|| {
+                        crate::common::MidgeError::Internal(
+                            "WAL writer thread exited before append acknowledgement".to_string(),
+                        )
+                    })),
+                };
             }
 
-            // Queue is full, wait for drain before retry
             let wait_duration = std::time::Duration::from_millis(backoff_ms);
             self.queue_cond.wait_for(&mut q, wait_duration);
+            drop(q);
 
-            // Exponential backoff: 1ms → 2ms → 4ms → ... → 100ms
             backoff_ms = std::cmp::min(backoff_ms * 2, MAX_BACKOFF_MS);
         }
 
-        // Still full after max attempts - fail with detailed diagnostics
+        if let Some(err) = self.writer_failure() {
+            return Err(err);
+        }
+
         let q = self.queue.lock();
-        Err(crate::common::MidgeError::Internal(format!(
+        Err(crate::common::MidgeError::WriteStall(format!(
             "WAL queue full after {} attempts ({}/{} items, backoff exhausted)",
             MAX_WAIT_ATTEMPTS,
             q.len(),
             super::writer_runner::MAX_QUEUE_DEPTH
         )))
+    }
+
+    fn error_from_message(message: String) -> crate::common::MidgeError {
+        let lowered = message.to_ascii_lowercase();
+        if lowered.contains("no space") || lowered.contains("disk full") {
+            crate::common::MidgeError::NoSpace(message)
+        } else {
+            crate::common::MidgeError::Internal(message)
+        }
+    }
+}
+
+impl WalWriter for FsWalWriterIo {
+    fn append_record(&self, record: &WalRecord) -> MidgeResult<WalPos> {
+        // Encode and enqueue payload into queue. The method only returns after the
+        // writer thread has appended the bytes to the local WAL file.
+        let mut buf = self.take_buffer();
+        buf.clear();
+        self.encode_record_frame(record, &mut buf)?;
+        self.enqueue_encoded(buf)
     }
 
     fn append_op(
@@ -196,6 +234,26 @@ impl WalWriter for FsWalWriterIo {
         Err(crate::common::MidgeError::NotSupported(
             "append_op without sequence number not supported".into(),
         ))
+    }
+
+    fn append_batch(&self, records: &[WalRecord]) -> MidgeResult<WalPos> {
+        if records.is_empty() {
+            return Ok(self.current_pos());
+        }
+
+        let mut buf = self.take_buffer();
+        buf.clear();
+
+        let mut last_record_offset = 0u64;
+        for (index, record) in records.iter().enumerate() {
+            if index + 1 == records.len() {
+                last_record_offset = buf.len() as u64;
+            }
+            self.encode_record_frame(record, &mut buf)?;
+        }
+
+        let batch_start = self.enqueue_encoded(buf)?;
+        Ok(batch_start.saturating_add(last_record_offset))
     }
 
     fn flush(&self) -> MidgeResult<()> {
@@ -216,9 +274,11 @@ impl WalWriter for FsWalWriterIo {
         let mut s = self.sync_state.lock();
         while s.completed_flushes < my_flush_id {
             if s.write_failed {
-                return Err(crate::common::MidgeError::Internal(
-                    "WAL write failed persistently".to_string(),
-                ));
+                let msg = s
+                    .last_write_error
+                    .clone()
+                    .unwrap_or_else(|| "WAL write failed persistently".to_string());
+                return Err(Self::error_from_message(msg));
             }
             self.sync_cond.wait(&mut s);
         }
@@ -251,9 +311,11 @@ impl WalWriter for FsWalWriterIo {
         let mut s = self.sync_state.lock();
         while s.completed_fsyncs < my_sync_id {
             if s.sync_failed {
-                return Err(crate::common::MidgeError::Internal(
-                    "WAL sync failed persistently".to_string(),
-                ));
+                let msg = s
+                    .last_sync_error
+                    .clone()
+                    .unwrap_or_else(|| "WAL sync failed persistently".to_string());
+                return Err(Self::error_from_message(msg));
             }
             self.sync_cond.wait(&mut s);
         }
@@ -335,6 +397,8 @@ impl Drop for FsWalWriterIo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::types::WalRecord;
+    use bytes::Bytes;
 
     #[test]
     fn should_create_wal_writer_io() -> MidgeResult<()> {
@@ -374,6 +438,25 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn should_advance_current_pos_before_append_record_returns() -> MidgeResult<()> {
+        let fs = Arc::new(crate::io::MockFs::new());
+        let writer = FsWalWriterIo::new("wal.log", fs)?;
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            1,
+            7,
+        );
+
+        let pos = writer.append_record(&record)?;
+
+        assert_eq!(pos, 0);
+        assert!(writer.current_pos() > 0);
         Ok(())
     }
 }

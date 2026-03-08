@@ -93,6 +93,15 @@ pub(crate) fn next_request_id() -> MidgeResult<u64> {
 
 use serde::{Deserialize, Serialize};
 
+/// Crash-recovery phase marker for publish workflows.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PublicationPhase {
+    /// Output files are durable, but the manifest journal has not been made authoritative yet.
+    OutputDurable,
+    /// The manifest journal now reflects the new state; replay may finalize cleanup idempotently.
+    ManifestPublished,
+}
+
 /// Simplified compaction plan for message passing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionPlan {
@@ -155,6 +164,20 @@ pub enum IntentLogEntry {
         input_files: Vec<String>,
         output_level: u32,
     },
+    /// Flush output SST is durable and awaiting publication cleanup.
+    FlushPublish {
+        phase: PublicationPhase,
+        cf_id: crate::engine::ColumnFamilyId,
+        sequence: u64,
+        file_meta: FileMeta,
+    },
+    /// Compaction output SSTs are durable and awaiting publication cleanup.
+    CompactionPublish {
+        phase: PublicationPhase,
+        cf_id: crate::engine::ColumnFamilyId,
+        removed: Vec<String>,
+        added: Vec<FileMeta>,
+    },
     /// Manifest updated with new SST
     SstAdded { file_meta: FileMeta },
     /// Manifest updated after compaction
@@ -202,6 +225,7 @@ pub enum RuntimeMsg {
         output_ssts: Vec<String>,
         cf_id: crate::engine::ColumnFamilyId,
         target_level: u32,
+        succeeded: bool,
     },
 
     // === WAL Actor ===

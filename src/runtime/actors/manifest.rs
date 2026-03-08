@@ -42,15 +42,6 @@ impl ManifestActor {
             }
         }
 
-        // 🔑 CRITICAL: Write intent BEFORE applying mutations
-        // This ensures we can recover if crash occurs during SST addition
-        let intent = crate::runtime::IntentLogEntry::SstAdded {
-            file_meta: file_meta.clone(),
-        };
-
-        // Persist the intent before applying mutation
-        state.append_intent(intent)?;
-
         // Append to manifest journal (durable edit log) - skip in memory mode
         if !state.memory_mode {
             let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
@@ -101,16 +92,6 @@ impl ManifestActor {
         removed: Vec<String>,
         added: Vec<FileMeta>,
     ) -> MidgeResult<()> {
-        // 🔑 CRITICAL: Write intent BEFORE applying mutations
-        // This ensures we can recover incomplete mutations on crash
-        let intent = crate::runtime::IntentLogEntry::CompactionApplied {
-            removed: removed.clone(),
-            added: added.clone(),
-        };
-
-        // Persist the intent before applying mutations
-        state.append_intent(intent)?;
-
         // Append compaction edits to manifest journal as a single batch (reduces fixed overhead)
         let mut edits = Vec::with_capacity(removed.len() + added.len());
         for n in &removed {

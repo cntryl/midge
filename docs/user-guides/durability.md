@@ -15,6 +15,34 @@ This guide helps you understand:
 - What happens during crashes
 - How to test and verify durability
 
+## Engine Open and Verification
+
+Midge now opens in **strict recovery mode by default**:
+
+```rust
+let engine = Engine::open(
+    OpenOptions::local("./db")
+        .recovery_policy(RecoveryPolicy::Strict)
+        .build()
+)?;
+```
+
+- `RecoveryPolicy::Strict` fails open if manifest, intent log, or WAL recovery cannot establish a trustworthy state.
+- `RecoveryPolicy::Salvage` keeps the valid prefix, opens in a degraded state, and reports that through runtime health.
+
+Operator-facing checks:
+
+```rust
+let metrics = engine.get_runtime_metrics()?;
+let layout = engine.get_storage_layout()?;
+let report = engine.verify_storage()?;
+```
+
+- `get_runtime_metrics()` exposes current WAL, memtable, compaction, and health counters.
+- `get_storage_layout()` reports published SST metadata and pinned snapshots.
+- `verify_storage()` replays WAL in strict mode and validates manifest/intent/SST state without mutating data.
+- Offline verification is also available through `midge verify <db-path>`.
+
 For technical details about recovery implementation, see [../development/recovery-internals.md](../development/recovery-internals.md).
 
 ## Durability Levels
@@ -60,7 +88,7 @@ engine.commit(tx, WriteOptions::buffered())?;
 
 **Guarantee:**
 - Write is visible immediately to all readers
-- Write is in local WAL (not yet fsynced)
+- Write has crossed the local WAL append barrier (bytes are in `wal.log`, but not yet fsynced)
 - Durability achieved via background group commit (batched fsync)
 
 **Background fsync triggers:**
@@ -114,10 +142,12 @@ engine.commit(tx, WriteOptions::best_effort())?;
 - Write is visible immediately to all readers
 - Write is in memtable ONLY (not in WAL)
 - No durability until explicit `engine.flush_cf()`
+- `engine.flush_cf()` is a publish barrier: on `Ok(())`, the flushed data is durably published to SST state and restart-safe
 
 **Recovery:**
 - Crash before flush: **All best_effort writes are lost**
-- Crash after flush: **Writes are recovered** (in SST)
+- Crash while `flush_cf()` is still in progress: **Writes are still not published**
+- Crash after `flush_cf()` returns `Ok(())`: **Writes are recovered** (in SST)
 
 **Crash Loss Window:**
 ```
@@ -126,8 +156,9 @@ Timeline:
      ^                            ^                        ^
      |                            |                        |
    returns Ok                crash here =           crash here =
-   (visible)              TOTAL DATA LOSS          data recovers
-                          (WAL skipped)            (in SST)
+   (visible)            still not published        data recovers
+                         / total data loss          (in SST)
+                           (WAL skipped)
 ```
 
 **Performance:**
@@ -174,7 +205,8 @@ engine.commit(tx, WriteOptions::cloud_strict())?;
 ```
 
 **Guarantee:**
-- Write has been uploaded to cloud object storage
+- Write has become visible after the local WAL append barrier
+- Write has been uploaded to cloud object storage before the call returns
 - Survives local disk loss, instance termination
 - Cloud provider has acknowledged write
 
@@ -194,7 +226,7 @@ engine.commit(tx, WriteOptions::cloud_strict())?;
 - Explicit cloud persistence required before proceeding
 - Compliance requires cloud-level durability proof
 
-**Note:** Regular Cloud mode uses background uploads. Most applications should use `buffered()` in Cloud mode, not `cloud_strict()`.
+**Note:** Regular Cloud mode uses background uploads. In cloud-backed mode, ordinary commits become visible after the local WAL append barrier and cloud durability advances asynchronously. Use `cloud_strict()` only when the caller must wait for the cloud durability frontier.
 
 ---
 

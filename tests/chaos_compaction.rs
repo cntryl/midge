@@ -43,6 +43,39 @@ struct CommitRecord {
 /// Crash BEFORE manifest persist: manifest update in memory, but not durable.
 /// Recovery should restore compaction state from WAL, not manifest.
 #[test]
+fn should_recover_all_data_when_crashing_after_compaction_output_is_durable_but_before_manifest_publish(
+) {
+    // Arrange: Create engine and write enough data to trigger compaction
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+
+    // Act: crash after outputs are durable and intented, but before manifest publish.
+    let committed = run_child_crash_at_output_durable_before_publish(db_path);
+
+    // Assert
+    assert!(
+        !committed.is_empty(),
+        "expected child to commit data before crash"
+    );
+
+    let engine = open_local_engine(db_path);
+    let default_cf = default_cf(&engine);
+
+    for record in &committed {
+        let tx = engine
+            .begin_tx(default_cf.id(), TransactionMode::ReadOnly)
+            .expect("begin read tx");
+        let actual = tx.get(&record.key).expect("get committed key");
+        assert_eq!(
+            actual,
+            Some(Bytes::copy_from_slice(&record.value)),
+            "key {:?} must be recoverable after crash before manifest publish",
+            String::from_utf8_lossy(&record.key)
+        );
+    }
+}
+
+#[test]
 fn should_recover_all_data_when_crashing_after_compaction_but_before_manifest_persist() {
     // Arrange: Create engine and write enough data to trigger compaction
     let temp_dir = TempDir::new().expect("temp dir");
@@ -144,6 +177,9 @@ fn should_crash_in_child_when_compaction_crash_scenario_requested() {
 
     // Act
     match scenario.to_string_lossy().as_ref() {
+        "crash_before_manifest_publish" => {
+            child_create_data_and_compact_with_crash_before_publish(&db_path)
+        }
         "crash_before_manifest_persist" => {
             child_create_data_and_compact_with_crash_before_persist(&db_path)
         }
@@ -209,6 +245,54 @@ fn child_create_data_and_compact_with_crash_before_persist(db_path: &Path) {
     panic!("expected crash at manifest persist failpoint");
 }
 
+fn child_create_data_and_compact_with_crash_before_publish(db_path: &Path) {
+    let scenario = fail::FailScenario::setup();
+    std::panic::set_hook(Box::new(|_| std::process::abort()));
+
+    fail::cfg(
+        "slice7::after_compaction_output_durable_before_manifest_publish",
+        "panic",
+    )
+    .expect("configure failpoint");
+
+    std::mem::forget(scenario);
+
+    let engine = open_local_engine(db_path);
+    let default_cf = default_cf(&engine);
+
+    for batch in 0..5 {
+        let mut tx = engine
+            .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
+            .expect("begin batch tx");
+        for i in 0..100 {
+            let key = format!("compaction_prepublish_key_batch{:02}_{:04}", batch, i);
+            tx.put(key.as_bytes().to_vec(), b"compaction_value".to_vec(), None)
+                .expect("put");
+            let committed_log = db_path.join("commits.ndjson");
+            let record = CommitRecord {
+                key: key.as_bytes().to_vec(),
+                value: b"compaction_value".to_vec(),
+            };
+            let json = serde_json::to_string(&record).expect("serialize record");
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&committed_log)
+                .expect("open commits log")
+                .write_all(format!("{}\n", json).as_bytes())
+                .expect("write commit record");
+        }
+        engine
+            .commit(tx, WriteOptions::buffered())
+            .expect("commit batch");
+        engine.flush_cf(&default_cf).expect("flush batch");
+    }
+
+    engine.compact_all().expect("compact_all");
+
+    panic!("expected crash at manifest publish failpoint");
+}
+
 fn child_create_data_and_compact_with_crash_before_gc(db_path: &Path) {
     let scenario = fail::FailScenario::setup();
     std::panic::set_hook(Box::new(|_| std::process::abort()));
@@ -266,6 +350,12 @@ fn child_create_data_and_compact_with_crash_before_gc(db_path: &Path) {
 
 fn run_child_crash_at_compaction_before_persist(db_path: &Path) -> Vec<CommitRecord> {
     run_child_expect_abort("crash_before_manifest_persist", db_path);
+    expire_crashed_process_lease(db_path);
+    read_committed_records(db_path)
+}
+
+fn run_child_crash_at_output_durable_before_publish(db_path: &Path) -> Vec<CommitRecord> {
+    run_child_expect_abort("crash_before_manifest_publish", db_path);
     expire_crashed_process_lease(db_path);
     read_committed_records(db_path)
 }

@@ -33,6 +33,10 @@ fn should_expose_runtime_metrics_storage_layout_and_verification_for_local_engin
         metrics.manifest_last_persisted_sequence >= metrics.current_sequence,
         "flush should advance manifest durability frontier"
     );
+    assert!(
+        metrics.wal_append_count >= metrics.wal_fsync_count,
+        "WAL append counter should never be below fsync counter"
+    );
 
     let layout = engine.get_storage_layout().expect("storage layout");
     assert_eq!(layout.health, EngineHealth::Healthy);
@@ -62,6 +66,10 @@ fn should_expose_runtime_metrics_storage_layout_and_verification_for_local_engin
     assert!(report.manifest_files_verified >= 1);
     assert!(report.sst_files_verified >= 1);
     assert_eq!(report.health, EngineHealth::Healthy);
+
+    let offline_report = Engine::verify_path(db_path).expect("offline verify path");
+    assert_eq!(offline_report.health, EngineHealth::Healthy);
+    assert!(offline_report.manifest_files_verified >= 1);
 }
 
 #[test]

@@ -285,12 +285,17 @@ impl EventLoop {
 
         if !self.state.memory_mode {
             self.manifest_actor.add_sst(&mut self.state, file_meta)?;
+            self.state.transition_flush_publication_intent(
+                sst_name,
+                crate::runtime::PublicationPhase::ManifestPublished,
+            )?;
             if sequence > self.state.manifest.last_persisted_sequence {
                 self.state.manifest.last_persisted_sequence = sequence;
             }
             if let Err(error) = self.manifest_actor.persist(&self.state) {
                 tracing::warn!(%error, sst_name, "manifest checkpoint after flush failed; journal remains authoritative");
             }
+            self.state.clear_flush_publication_intent(sst_name)?;
         }
 
         self.flush_actor
@@ -1253,6 +1258,7 @@ impl EventLoop {
                 output_ssts,
                 cf_id,
                 target_level,
+                succeeded,
             } => {
                 // Decrement active compactions
                 let _prev = self
@@ -1267,67 +1273,101 @@ impl EventLoop {
                     output_ssts.clone(),
                 );
 
-                let added: Result<Vec<_>, _> = output_ssts
-                    .iter()
-                    .map(|name| self.build_sst_file_meta(cf_id, target_level, name))
-                    .collect();
-
-                // Publish compaction changes to manifest (update and persist)
-                if let Err(e) = added.and_then(|added| {
-                    self.manifest_actor.compaction_complete(
-                        &mut self.state,
-                        input_ssts.clone(),
-                        added,
-                    )
-                }) {
-                    tracing::error!(error = ?e, "failed to apply compaction to manifest");
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::Internal(format!(
-                                "failed to apply compaction to manifest: {}",
-                                e
-                            )),
-                        },
+                if !succeeded {
+                    tracing::warn!(
+                        input_count = input_ssts.len(),
+                        output_count = output_ssts.len(),
+                        "compaction worker failed or aborted; leaving manifest unchanged"
                     );
+                    self.respond(request_id, RuntimeResponse::Ok { request_id });
                 } else {
-                    // 🔑 CRITICAL Slice 6: Manifest publication succeeded.
-                    // Now persist the manifest to make changes durable.
-                    fail::fail_point!("slice6::after_compaction_update_before_manifest_persist");
+                    let added: Result<Vec<_>, _> = output_ssts
+                        .iter()
+                        .map(|name| self.build_sst_file_meta(cf_id, target_level, name))
+                        .collect();
 
-                    if let Err(e) = self.manifest_actor.persist(&self.state) {
-                        tracing::error!(error = ?e, "failed to persist manifest after compaction");
+                    // Publish compaction changes to manifest (update and persist)
+                    if let Err(e) = added.and_then(|added| {
+                        self.state.record_compaction_publication_intent(
+                            cf_id,
+                            input_ssts.clone(),
+                            added.clone(),
+                        )?;
+
+                        fail::fail_point!(
+                            "slice7::after_compaction_output_durable_before_manifest_publish"
+                        );
+
+                        self.manifest_actor.compaction_complete(
+                            &mut self.state,
+                            input_ssts.clone(),
+                            added,
+                        )?;
+                        self.state.transition_compaction_publication_intent(
+                            &output_ssts,
+                            crate::runtime::PublicationPhase::ManifestPublished,
+                        )
+                    }) {
+                        tracing::error!(error = ?e, "failed to apply compaction to manifest");
                         self.respond(
                             request_id,
                             RuntimeResponse::Error {
                                 request_id,
                                 error: crate::common::MidgeError::Internal(format!(
-                                    "failed to persist manifest after compaction: {}",
+                                    "failed to apply compaction to manifest: {}",
                                     e
                                 )),
                             },
                         );
                     } else {
-                        // 🔑 CRITICAL Slice 6: Manifest is now durable.
-                        // Safe to delete input SSTs (they are now orphaned from manifest).
-                        fail::fail_point!("slice6::after_manifest_persist_before_sst_gc");
+                        // 🔑 CRITICAL Slice 6: Manifest publication succeeded.
+                        // Now persist the manifest to make changes durable.
+                        fail::fail_point!(
+                            "slice6::after_compaction_update_before_manifest_persist"
+                        );
 
-                        // Queue GC deletion of input SSTs
-                        if let Err(e) = self.gc_actor.delete_ssts(&mut self.state, &input_ssts) {
-                            tracing::warn!(
-                                error = ?e,
-                                "GC deletion of compaction input SSTs failed (non-fatal)"
+                        if let Err(e) = self.manifest_actor.persist(&self.state) {
+                            tracing::error!(error = ?e, "failed to persist manifest after compaction");
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::Error {
+                                    request_id,
+                                    error: crate::common::MidgeError::Internal(format!(
+                                        "failed to persist manifest after compaction: {}",
+                                        e
+                                    )),
+                                },
                             );
                         } else {
-                            tracing::info!(
-                                removed_count = input_ssts.len(),
-                                "Successfully deleted compaction input SSTs"
-                            );
-                        }
+                            // 🔑 CRITICAL Slice 6: Manifest is now durable.
+                            // Safe to delete input SSTs (they are now orphaned from manifest).
+                            fail::fail_point!("slice6::after_manifest_persist_before_sst_gc");
 
-                        self.publish_snapshot();
-                        self.respond(request_id, RuntimeResponse::Ok { request_id });
+                            // Queue GC deletion of input SSTs
+                            if let Err(e) = self.gc_actor.delete_ssts(&mut self.state, &input_ssts)
+                            {
+                                tracing::warn!(
+                                    error = ?e,
+                                    "GC deletion of compaction input SSTs failed (non-fatal)"
+                                );
+                            } else {
+                                tracing::info!(
+                                    removed_count = input_ssts.len(),
+                                    "Successfully deleted compaction input SSTs"
+                                );
+                            }
+
+                            if let Err(error) =
+                                self.state.clear_compaction_publication_intent(&output_ssts)
+                            {
+                                tracing::warn!(
+                                    %error,
+                                    "failed to clear compaction publication intent after GC"
+                                );
+                            }
+                            self.publish_snapshot();
+                            self.respond(request_id, RuntimeResponse::Ok { request_id });
+                        }
                     }
                 }
 

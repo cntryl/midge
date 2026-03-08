@@ -5,7 +5,7 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::metadata::Manifest;
-use crate::runtime::IntentLogEntry;
+use crate::runtime::{IntentLogEntry, PublicationPhase};
 use crate::sst::{Memtable, ReadAmpMetrics, SkipListMemtable};
 
 use std::collections::{HashMap, HashSet};
@@ -376,10 +376,18 @@ impl RuntimeState {
         let recovered_sequence = if !memory_mode && replay_dir.exists() {
             let mut recovery_memtables = HashMap::new();
             match crate::storage::LocalFsStorage::new(replay_dir) {
-                Ok(storage) => match crate::wal::recovery::replay_wal(
+                Ok(storage) => match crate::wal::recovery::replay_wal_with_policy(
                     &storage,
                     &crate::storage::abstraction::StoragePath::new(""),
                     &mut recovery_memtables,
+                    match recovery_policy {
+                        crate::engine::RecoveryPolicy::Strict => {
+                            crate::wal::recovery::ReplayPolicy::Strict
+                        }
+                        crate::engine::RecoveryPolicy::Salvage => {
+                            crate::wal::recovery::ReplayPolicy::SalvageValidPrefix
+                        }
+                    },
                 ) {
                     Ok(stats) => {
                         if let Some(t) = crate::telemetry::Telemetry::global() {
@@ -401,6 +409,13 @@ impl RuntimeState {
                             apply_ms = (stats.apply_ns as f64) / 1_000_000.0,
                             "WAL recovery completed successfully"
                         );
+                        if stats.had_corruption {
+                            opened_in_salvage_mode = true;
+                            tracing::warn!(
+                                replay_dir = ?replay_dir,
+                                "WAL recovery salvaged a valid prefix after corruption"
+                            );
+                        }
                         for (cf_id, recovered_memtable) in recovery_memtables {
                             if let Some(cf_state) = column_families.get_mut(&cf_id) {
                                 cf_state.memtable = recovered_memtable;
@@ -546,6 +561,7 @@ impl RuntimeState {
             .sum();
         let sst_count = self.manifest.files.len();
         let sst_bytes = self.manifest.files.iter().map(|file| file.size_bytes).sum();
+        let telemetry = crate::telemetry::Telemetry::global().map(|t| t.metrics().snapshot());
 
         crate::engine::RuntimeMetricsSnapshot {
             health: self.health(),
@@ -574,6 +590,16 @@ impl RuntimeState {
             sst_bytes,
             salvage_mode_opens: u64::from(self.opened_in_salvage_mode),
             no_space_events: 0,
+            compactions_run: telemetry.as_ref().map_or(0, |m| m.compactions_run),
+            compaction_bytes_rewritten: telemetry
+                .as_ref()
+                .map_or(0, |m| m.compaction_bytes_rewritten),
+            write_stalls_total: telemetry.as_ref().map_or(0, |m| m.write_stalls),
+            wal_append_count: telemetry.as_ref().map_or(0, |m| m.wal_append_count),
+            wal_flush_count: telemetry.as_ref().map_or(0, |m| m.wal_flush_count),
+            wal_fsync_count: telemetry.as_ref().map_or(0, |m| m.wal_fsync_count),
+            wal_append_ns_total: telemetry.as_ref().map_or(0, |m| m.wal_append_ns_total),
+            wal_fsync_ns_total: telemetry.as_ref().map_or(0, |m| m.wal_fsync_ns_total),
             wal_recovery_records_replayed: self.wal_recovery_records_replayed,
             wal_recovery_bytes_replayed: self.wal_recovery_bytes_replayed,
             intent_log_replay_runs: self.intent_log_replay_runs,
@@ -862,6 +888,370 @@ impl RuntimeState {
         Ok(())
     }
 
+    pub fn record_compaction_publication_intent(
+        &mut self,
+        cf_id: crate::engine::ColumnFamilyId,
+        removed: Vec<String>,
+        added: Vec<crate::runtime::FileMeta>,
+    ) -> MidgeResult<()> {
+        self.intent_log.retain(|entry| {
+            !matches!(
+                entry,
+                crate::runtime::IntentLogEntry::CompactionPublish {
+                    added: existing_added,
+                    ..
+                } if Self::same_file_name_set(
+                    existing_added.iter().map(|meta| meta.name.as_str()),
+                    added.iter().map(|meta| meta.name.as_str()),
+                )
+            )
+        });
+        self.intent_log
+            .push(crate::runtime::IntentLogEntry::CompactionPublish {
+                phase: PublicationPhase::OutputDurable,
+                cf_id,
+                removed,
+                added,
+            });
+        self.persist_intent_log()
+    }
+
+    pub fn transition_flush_publication_intent(
+        &mut self,
+        sst_name: &str,
+        phase: PublicationPhase,
+    ) -> MidgeResult<()> {
+        for entry in &mut self.intent_log {
+            if let crate::runtime::IntentLogEntry::FlushPublish {
+                phase: current_phase,
+                file_meta,
+                ..
+            } = entry
+            {
+                if file_meta.name == sst_name {
+                    *current_phase = phase;
+                }
+            }
+        }
+        self.persist_intent_log()
+    }
+
+    pub fn clear_flush_publication_intent(&mut self, sst_name: &str) -> MidgeResult<()> {
+        self.intent_log.retain(|entry| {
+            !matches!(
+                entry,
+                crate::runtime::IntentLogEntry::FlushPublish { file_meta, .. }
+                    if file_meta.name == sst_name
+            )
+        });
+        self.persist_intent_log()
+    }
+
+    pub fn transition_compaction_publication_intent(
+        &mut self,
+        output_ssts: &[String],
+        phase: PublicationPhase,
+    ) -> MidgeResult<()> {
+        for entry in &mut self.intent_log {
+            if let crate::runtime::IntentLogEntry::CompactionPublish {
+                phase: current_phase,
+                added,
+                ..
+            } = entry
+            {
+                if Self::same_file_name_set(
+                    added.iter().map(|meta| meta.name.as_str()),
+                    output_ssts.iter().map(String::as_str),
+                ) {
+                    *current_phase = phase;
+                }
+            }
+        }
+        self.persist_intent_log()
+    }
+
+    pub fn clear_compaction_publication_intent(
+        &mut self,
+        output_ssts: &[String],
+    ) -> MidgeResult<()> {
+        self.intent_log.retain(|entry| {
+            !matches!(
+                entry,
+                crate::runtime::IntentLogEntry::CompactionPublish { added, .. }
+                    if Self::same_file_name_set(
+                        added.iter().map(|meta| meta.name.as_str()),
+                        output_ssts.iter().map(String::as_str),
+                    )
+            )
+        });
+        self.persist_intent_log()
+    }
+
+    fn same_file_name_set<'a, I, J>(left: I, right: J) -> bool
+    where
+        I: Iterator<Item = &'a str>,
+        J: Iterator<Item = &'a str>,
+    {
+        let mut left_names: Vec<_> = left.collect();
+        let mut right_names: Vec<_> = right.collect();
+        left_names.sort_unstable();
+        right_names.sort_unstable();
+        left_names == right_names
+    }
+
+    fn manifest_has_file(&self, sst_name: &str) -> bool {
+        self.manifest.files.iter().any(|file| file.name == sst_name)
+    }
+
+    fn manifest_reflects_compaction(
+        &self,
+        removed: &[String],
+        added: &[crate::runtime::FileMeta],
+    ) -> bool {
+        removed.iter().all(|name| !self.manifest_has_file(name))
+            && added
+                .iter()
+                .all(|file_meta| self.manifest_has_file(&file_meta.name))
+    }
+
+    fn insert_manifest_file_if_missing(&mut self, file_meta: &crate::runtime::FileMeta) -> bool {
+        if self.manifest_has_file(&file_meta.name) {
+            return false;
+        }
+
+        self.manifest.files.push(crate::metadata::FileMeta {
+            name: file_meta.name.clone(),
+            level: file_meta.level,
+            size_bytes: file_meta.size_bytes,
+            cf_id: file_meta.cf_id,
+            smallest_key: file_meta.smallest_key.clone(),
+            largest_key: file_meta.largest_key.clone(),
+            smallest_seq: file_meta.smallest_seq,
+            largest_seq: file_meta.largest_seq,
+            ..Default::default()
+        });
+        true
+    }
+
+    fn apply_compaction_to_manifest(
+        &mut self,
+        removed: &[String],
+        added: &[crate::runtime::FileMeta],
+    ) -> bool {
+        let mut changed = false;
+        self.manifest.files.retain(|file| {
+            let keep = !removed.contains(&file.name);
+            if !keep {
+                changed = true;
+            }
+            keep
+        });
+
+        for file_meta in added {
+            changed |= self.insert_manifest_file_if_missing(file_meta);
+        }
+
+        changed
+    }
+
+    fn append_manifest_add_sst(&self, file_meta: &crate::runtime::FileMeta) -> MidgeResult<()> {
+        if self.memory_mode {
+            return Ok(());
+        }
+
+        crate::metadata::append_edit(
+            &self.db_path,
+            &crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                name: file_meta.name.clone(),
+                level: file_meta.level,
+                size_bytes: file_meta.size_bytes,
+                cf_id: file_meta.cf_id,
+                smallest_key: file_meta.smallest_key.clone(),
+                largest_key: file_meta.largest_key.clone(),
+                smallest_seq: file_meta.smallest_seq,
+                largest_seq: file_meta.largest_seq,
+                ..Default::default()
+            }),
+        )
+    }
+
+    fn append_manifest_compaction_batch(
+        &self,
+        removed: &[String],
+        added: &[crate::runtime::FileMeta],
+    ) -> MidgeResult<()> {
+        if self.memory_mode {
+            return Ok(());
+        }
+
+        let mut edits = Vec::with_capacity(removed.len() + added.len());
+        for name in removed {
+            edits.push(crate::metadata::ManifestEdit::RemoveSst { name: name.clone() });
+        }
+        for file_meta in added {
+            edits.push(crate::metadata::ManifestEdit::AddSst(
+                crate::metadata::FileMeta {
+                    name: file_meta.name.clone(),
+                    level: file_meta.level,
+                    size_bytes: file_meta.size_bytes,
+                    cf_id: file_meta.cf_id,
+                    smallest_key: file_meta.smallest_key.clone(),
+                    largest_key: file_meta.largest_key.clone(),
+                    smallest_seq: file_meta.smallest_seq,
+                    largest_seq: file_meta.largest_seq,
+                    ..Default::default()
+                },
+            ));
+        }
+
+        if edits.is_empty() {
+            return Ok(());
+        }
+
+        crate::metadata::append_edit_batch(&self.db_path, &edits)
+    }
+
+    fn persist_manifest_checkpoint(&self) -> MidgeResult<()> {
+        if self.memory_mode {
+            return Ok(());
+        }
+
+        crate::metadata::ManifestPersistence::save(&self.db_path, &self.manifest)
+            .map_err(crate::common::MidgeError::Internal)
+    }
+
+    fn handle_recovery_issue(&mut self, message: String) -> MidgeResult<bool> {
+        if self.recovery_policy == crate::engine::RecoveryPolicy::Strict {
+            return Err(MidgeError::RecoveryFailed(message));
+        }
+
+        self.opened_in_salvage_mode = true;
+        tracing::warn!("{}", message);
+        Ok(false)
+    }
+
+    fn validate_recovered_sst(&mut self, sst_name: &str) -> MidgeResult<bool> {
+        let path = self.sst_dir.join(sst_name);
+        if !path.exists() {
+            return self.handle_recovery_issue(format!(
+                "recovery intent references missing SST '{}'",
+                sst_name
+            ));
+        }
+
+        match crate::sst::fs::SstFileIo::open_with_real_fs(&path) {
+            Ok(_) => Ok(true),
+            Err(error) => self.handle_recovery_issue(format!(
+                "recovery intent references invalid SST '{}': {}",
+                sst_name, error
+            )),
+        }
+    }
+
+    fn delete_sst_if_exists(&mut self, sst_name: &str) -> MidgeResult<()> {
+        let path = self.sst_dir.join(sst_name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                if self.recovery_policy == crate::engine::RecoveryPolicy::Strict {
+                    Err(MidgeError::RecoveryFailed(format!(
+                        "failed to delete SST '{}' during recovery: {}",
+                        sst_name, error
+                    )))
+                } else {
+                    self.opened_in_salvage_mode = true;
+                    tracing::warn!(
+                        sst_name,
+                        error = %error,
+                        "failed to delete SST during salvage recovery"
+                    );
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn replay_flush_publish_intent(
+        &mut self,
+        phase: PublicationPhase,
+        file_meta: &crate::runtime::FileMeta,
+    ) -> MidgeResult<bool> {
+        if self.manifest_has_file(&file_meta.name) {
+            tracing::info!(sst_name = %file_meta.name, "flush publish intent already reflected in manifest");
+            return Ok(false);
+        }
+
+        match phase {
+            PublicationPhase::OutputDurable => {
+                let path = self.sst_dir.join(&file_meta.name);
+                if path.exists() {
+                    if !self.validate_recovered_sst(&file_meta.name)? {
+                        return Ok(false);
+                    }
+                    self.delete_sst_if_exists(&file_meta.name)?;
+                    tracing::info!(
+                        sst_name = %file_meta.name,
+                        "deleted orphan flush SST left behind before manifest publication"
+                    );
+                } else {
+                    tracing::info!(
+                        sst_name = %file_meta.name,
+                        "flush publication intent references no remaining SST; treating it as an already-cleaned orphan"
+                    );
+                }
+                Ok(false)
+            }
+            PublicationPhase::ManifestPublished => {
+                if !self.validate_recovered_sst(&file_meta.name)? {
+                    return Ok(false);
+                }
+
+                self.append_manifest_add_sst(file_meta)?;
+                let changed = self.insert_manifest_file_if_missing(file_meta);
+                tracing::info!(
+                    sst_name = %file_meta.name,
+                    "replayed manifest-published flush intent"
+                );
+                Ok(changed)
+            }
+        }
+    }
+
+    fn replay_compaction_publish_intent(
+        &mut self,
+        phase: PublicationPhase,
+        removed: &[String],
+        added: &[crate::runtime::FileMeta],
+    ) -> MidgeResult<bool> {
+        for file_meta in added {
+            if !self.validate_recovered_sst(&file_meta.name)? {
+                return Ok(false);
+            }
+        }
+
+        let mut manifest_changed = false;
+        if !self.manifest_reflects_compaction(removed, added) {
+            self.append_manifest_compaction_batch(removed, added)?;
+            manifest_changed |= self.apply_compaction_to_manifest(removed, added);
+            tracing::info!(
+                removed_count = removed.len(),
+                added_count = added.len(),
+                "replayed compaction publication into manifest"
+            );
+        }
+
+        if phase == PublicationPhase::ManifestPublished
+            || self.manifest_reflects_compaction(removed, added)
+        {
+            for sst_name in removed {
+                self.delete_sst_if_exists(sst_name)?;
+            }
+        }
+
+        Ok(manifest_changed)
+    }
+
     /// Replay intent log to recover incomplete mutations
     /// Called during startup to apply any interrupted manifest or durability changes
     pub fn replay_intent_log(&mut self) -> MidgeResult<()> {
@@ -884,58 +1274,47 @@ impl RuntimeState {
             "replaying intent log during recovery"
         );
 
-        for intent in &self.intent_log {
+        let intents = self.intent_log.clone();
+        let mut manifest_changed = false;
+
+        for intent in &intents {
             match intent {
+                crate::runtime::IntentLogEntry::FlushPublish {
+                    phase, file_meta, ..
+                } => {
+                    manifest_changed |= self.replay_flush_publish_intent(*phase, file_meta)?;
+                }
+                crate::runtime::IntentLogEntry::CompactionPublish {
+                    phase,
+                    removed,
+                    added,
+                    ..
+                } => {
+                    manifest_changed |=
+                        self.replay_compaction_publish_intent(*phase, removed, added)?;
+                }
                 crate::runtime::IntentLogEntry::CompactionApplied { removed, added } => {
-                    // Replay compaction: remove old SSTs, add new ones
-                    self.manifest.files.retain(|f| !removed.contains(&f.name));
-
-                    for file_meta in added {
-                        let manifest_meta = crate::metadata::FileMeta {
-                            name: file_meta.name.clone(),
-                            level: file_meta.level,
-                            size_bytes: file_meta.size_bytes,
-                            cf_id: file_meta.cf_id,
-                            smallest_key: file_meta.smallest_key.clone(),
-                            largest_key: file_meta.largest_key.clone(),
-                            smallest_seq: file_meta.smallest_seq,
-                            largest_seq: file_meta.largest_seq,
-                            ..Default::default()
-                        };
-                        self.manifest.files.push(manifest_meta);
-                    }
-
-                    tracing::info!(
-                        removed_count = removed.len(),
-                        added_count = added.len(),
-                        "replayed compaction intent"
-                    );
+                    manifest_changed |= self.replay_compaction_publish_intent(
+                        PublicationPhase::ManifestPublished,
+                        removed,
+                        added,
+                    )?;
                 }
                 crate::runtime::IntentLogEntry::SstAdded { file_meta } => {
-                    // Replay SST addition
-                    let manifest_meta = crate::metadata::FileMeta {
-                        name: file_meta.name.clone(),
-                        level: file_meta.level,
-                        size_bytes: file_meta.size_bytes,
-                        cf_id: file_meta.cf_id,
-                        smallest_key: file_meta.smallest_key.clone(),
-                        largest_key: file_meta.largest_key.clone(),
-                        smallest_seq: file_meta.smallest_seq,
-                        largest_seq: file_meta.largest_seq,
-                        ..Default::default()
-                    };
-                    self.manifest.files.push(manifest_meta);
-
-                    tracing::info!(
-                        sst_name = %file_meta.name,
-                        "replayed SST addition intent"
-                    );
+                    manifest_changed |= self.replay_flush_publish_intent(
+                        PublicationPhase::ManifestPublished,
+                        file_meta,
+                    )?;
                 }
                 _ => {
                     // Other intents (WalSynced, DataUploaded, etc.) don't require replay
                     // They are informational and don't affect the recoverable state
                 }
             }
+        }
+
+        if manifest_changed {
+            self.persist_manifest_checkpoint()?;
         }
 
         // Clear the intent log after successful replay

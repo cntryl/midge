@@ -17,7 +17,7 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::{
     next_request_id, Runtime, RuntimeHandle, RuntimeMsg, RuntimeResponse, RuntimeState,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -129,6 +129,14 @@ pub struct RuntimeMetricsSnapshot {
     pub sst_bytes: u64,
     pub salvage_mode_opens: u64,
     pub no_space_events: u64,
+    pub compactions_run: u64,
+    pub compaction_bytes_rewritten: u64,
+    pub write_stalls_total: u64,
+    pub wal_append_count: u64,
+    pub wal_flush_count: u64,
+    pub wal_fsync_count: u64,
+    pub wal_append_ns_total: u64,
+    pub wal_fsync_ns_total: u64,
     pub wal_recovery_records_replayed: u64,
     pub wal_recovery_bytes_replayed: u64,
     pub intent_log_replay_runs: u64,
@@ -292,6 +300,52 @@ impl Drop for Engine {
 }
 
 impl Engine {
+    fn verify_storage_path_internal(
+        db_path: &Path,
+        runtime_health: Option<EngineHealth>,
+    ) -> MidgeResult<StorageVerificationReport> {
+        let manifest =
+            crate::metadata::ManifestPersistence::load_with_policy(db_path, RecoveryPolicy::Strict)
+                .map_err(MidgeError::RecoveryFailed)?;
+        let intents =
+            crate::runtime::IntentPersistence::load_with_policy(db_path, RecoveryPolicy::Strict)
+                .map_err(MidgeError::RecoveryFailed)?;
+
+        let fs =
+            std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
+                MidgeError::RecoveryFailed(format!("failed to open filesystem: {e}"))
+            })?) as Arc<dyn crate::io::Fs>;
+
+        for file in &manifest.files {
+            let rel = std::path::PathBuf::from("sst").join(&file.name);
+            let path_str = rel.to_string_lossy().to_string();
+            crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&fs)).map_err(|e| {
+                MidgeError::Corruption(format!("failed to verify SST {}: {}", file.name, e))
+            })?;
+        }
+
+        let wal_storage =
+            crate::storage::LocalFsStorage::new(db_path.join("wal")).map_err(|e| {
+                MidgeError::RecoveryFailed(format!("failed to open WAL directory: {e}"))
+            })?;
+        let wal_stats = crate::wal::recovery::replay_wal_with_policy(
+            &wal_storage,
+            &crate::storage::abstraction::StoragePath::new(""),
+            &mut std::collections::HashMap::new(),
+            crate::wal::recovery::ReplayPolicy::Strict,
+        )
+        .map_err(|e| MidgeError::RecoveryFailed(format!("WAL verification failed: {e}")))?;
+
+        Ok(StorageVerificationReport {
+            manifest_files_verified: manifest.files.len(),
+            sst_files_verified: manifest.files.len(),
+            wal_recovery_records_replayed: wal_stats.record_count,
+            wal_recovery_bytes_replayed: wal_stats.bytes,
+            intent_entries_loaded: intents.len(),
+            health: runtime_health.unwrap_or(EngineHealth::Healthy),
+        })
+    }
+
     /// Open a database with explicit environment selection.
     ///
     /// The storage backend is specified by `OpenOptions.storage`. There is no
@@ -1282,52 +1336,18 @@ impl Engine {
             ));
         }
 
-        let manifest = crate::metadata::ManifestPersistence::load_with_policy(
+        Self::verify_storage_path_internal(
             &self.db_path,
-            RecoveryPolicy::Strict,
-        )
-        .map_err(MidgeError::RecoveryFailed)?;
-        let intents = crate::runtime::IntentPersistence::load_with_policy(
-            &self.db_path,
-            RecoveryPolicy::Strict,
-        )
-        .map_err(MidgeError::RecoveryFailed)?;
-
-        let fs =
-            std::sync::Arc::new(crate::io::real::RealFs::new(&self.db_path).map_err(|e| {
-                MidgeError::RecoveryFailed(format!("failed to open filesystem: {e}"))
-            })?) as Arc<dyn crate::io::Fs>;
-
-        for file in &manifest.files {
-            let rel = std::path::PathBuf::from("sst").join(&file.name);
-            let path_str = rel.to_string_lossy().to_string();
-            crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&fs)).map_err(|e| {
-                MidgeError::Corruption(format!("failed to verify SST {}: {}", file.name, e))
-            })?;
-        }
-
-        let wal_storage =
-            crate::storage::LocalFsStorage::new(self.db_path.join("wal")).map_err(|e| {
-                MidgeError::RecoveryFailed(format!("failed to open WAL directory: {e}"))
-            })?;
-        let wal_stats = crate::wal::recovery::replay_wal(
-            &wal_storage,
-            &crate::storage::abstraction::StoragePath::new(""),
-            &mut std::collections::HashMap::new(),
-        )
-        .map_err(|e| MidgeError::RecoveryFailed(format!("WAL verification failed: {e}")))?;
-
-        Ok(StorageVerificationReport {
-            manifest_files_verified: manifest.files.len(),
-            sst_files_verified: manifest.files.len(),
-            wal_recovery_records_replayed: wal_stats.record_count,
-            wal_recovery_bytes_replayed: wal_stats.bytes,
-            intent_entries_loaded: intents.len(),
-            health: match self.get_runtime_metrics() {
-                Ok(snapshot) => snapshot.health,
-                Err(_) => EngineHealth::Corrupt,
+            match self.get_runtime_metrics() {
+                Ok(snapshot) => Some(snapshot.health),
+                Err(_) => Some(EngineHealth::Corrupt),
             },
-        })
+        )
+    }
+
+    /// Verify a storage directory without opening a runtime.
+    pub fn verify_path(path: impl Into<PathBuf>) -> MidgeResult<StorageVerificationReport> {
+        Self::verify_storage_path_internal(&path.into(), None)
     }
 
     // === Internal helpers ===

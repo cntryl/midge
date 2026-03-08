@@ -15,20 +15,14 @@
 //! - Does NOT block event loop waiting for cloud
 //! - Queues pending requests and completes them when cloud_durable_seq advances
 //!
-//! NOTE: `DurabilityPolicy::CloudFirst` is wired end-to-end.
-//! In CloudFirst mode, `append()` queues writes in `pending_cloud_writes` and
-//! defers visibility/response until `handle_cloud_upload_complete()` advances
-//! `cloud_durable_seq` on CloudAck.
+//! NOTE: `DurabilityPolicy::CloudFirst` is wired as an async cloud-backed mode.
+//! Local WAL append is the immediate visibility barrier; cloud durability advances
+//! independently via `cloud_durable_seq`.
 //!
-//! CLOUD-DURABLE MEMTABLE RULE:
-//! In Durability::CloudFirst mode, writes are NOT visible in memtable
-//! until cloud storage acknowledges durability. Local WAL is ephemeral;
-//! cloud WAL is the source of truth. Therefore:
-//! - Append to local WAL immediately (fast path)
-//! - Do NOT update memtable yet
-//! - Do NOT respond to request yet
-//! - Queue as PendingCloudWrite
-//! - When cloud ACKs: apply to memtable + respond to request
+//! CLOUD-BACKED VISIBILITY RULE:
+//! In `DurabilityPolicy::CloudFirst`, writes become visible after the local WAL
+//! append barrier succeeds and the memtable is updated. Cloud upload remains
+//! asynchronous unless the caller explicitly waits on the cloud durability frontier.
 
 use super::super::state::RuntimeState;
 use super::cloud_write_queue::{
@@ -239,9 +233,8 @@ impl WalActor {
     /// - Strict: fsync immediately + apply to memtable + respond
     /// - Batched: batch writes + apply to memtable immediately + respond
     /// - CloudMirrored: fsync + apply to memtable + schedule cloud upload + respond
-    /// - CloudFirst: local write (cache) + queue for cloud + DO NOT apply to memtable yet
+    /// - CloudFirst: local append barrier + apply to memtable + queue for cloud confirmation
     ///
-    /// In CloudFirst mode, writes are NOT visible until cloud acknowledges.
     /// Returns the assigned sequence number.
     ///
     /// IDEMPOTENCY: Uses request_id to detect retries. If the same request_id is seen twice,

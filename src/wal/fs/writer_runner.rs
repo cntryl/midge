@@ -13,17 +13,27 @@ pub struct SyncState {
     pub write_failed: bool,
     /// Set to true when persistent fsync failures occur
     pub sync_failed: bool,
+    pub last_write_error: Option<String>,
+    pub last_sync_error: Option<String>,
 }
 
 /// Queue entry with retry tracking to prevent unbounded re-queuing
 pub(crate) struct QueuedWrite {
     pub(crate) data: Vec<u8>,
     pub(crate) attempts: u8,
+    pub(crate) ack: std::sync::mpsc::SyncSender<crate::common::MidgeResult<u64>>,
 }
 
 impl QueuedWrite {
-    pub(crate) fn new(data: Vec<u8>) -> Self {
-        Self { data, attempts: 0 }
+    pub(crate) fn new(
+        data: Vec<u8>,
+        ack: std::sync::mpsc::SyncSender<crate::common::MidgeResult<u64>>,
+    ) -> Self {
+        Self {
+            data,
+            attempts: 0,
+            ack,
+        }
     }
 }
 
@@ -156,12 +166,11 @@ impl WriterRunner {
                 .iter()
                 .any(|entry| entry.attempts >= MAX_WRITE_ATTEMPTS)
             {
-                tracing::error!(
-                    "WAL write batch exceeded max retries; failing writer so waiters see write_failed"
-                );
-                let mut s = self.config.sync_state.lock();
-                s.write_failed = true;
-                self.config.sync_cond.notify_all();
+                let msg =
+                    "WAL write batch exceeded max retries; failing writer to preserve ordering"
+                        .to_string();
+                tracing::error!("{msg}");
+                self.fail_writes(&batch, msg);
                 return;
             }
 
@@ -173,28 +182,6 @@ impl WriterRunner {
                 for entry in &batch {
                     big.extend_from_slice(&entry.data);
                 }
-
-                // Return buffers to pool and notify any waiting producers that queue drained
-                // Only return buffers if pool is below maximum size to prevent unbounded growth
-                {
-                    let mut pool = self.config.buf_pool.lock();
-                    let mut dropped = 0usize;
-                    for entry in batch {
-                        if pool.len() < MAX_BUFFER_POOL_SIZE {
-                            pool.push(entry.data);
-                        } else {
-                            // Pool is full, drop buffer to prevent unbounded growth
-                            dropped += 1;
-                        }
-                    }
-                    if dropped > 0 {
-                        if let Some(t) = crate::telemetry::Telemetry::global() {
-                            t.metrics().record_wal_buffer_pool_overflow(dropped as u64);
-                        }
-                    }
-                }
-                // Notify producers waiting on backpressure - queue now has space
-                self.config.queue_cond.notify_all();
 
                 // Write
                 let big_bytes = bytes::Bytes::from(big);
@@ -218,29 +205,27 @@ impl WriterRunner {
                                     Ok(pos) => write_result = Some(pos),
                                     Err(e2) => {
                                         tracing::error!(error = ?e2, "wal writer append failed after retry");
-                                        // Mark failure and exit thread on persistent failure
-                                        let mut s = self.config.sync_state.lock();
-                                        s.write_failed = true;
-                                        self.config.sync_cond.notify_all();
+                                        self.fail_writes(
+                                            &batch,
+                                            format!("wal writer append failed after retry: {e2}"),
+                                        );
                                         return;
                                     }
                                 }
                             } else {
-                                tracing::error!(
+                                let msg =
                                     "wal writer could not reopen file handle after append failure"
-                                );
-                                let mut s = self.config.sync_state.lock();
-                                s.write_failed = true;
-                                self.config.sync_cond.notify_all();
+                                        .to_string();
+                                tracing::error!("{msg}");
+                                self.fail_writes(&batch, msg);
                                 return;
                             }
                         }
                     }
                 } else {
-                    tracing::error!("wal writer has no file handle");
-                    let mut s = self.config.sync_state.lock();
-                    s.write_failed = true;
-                    self.config.sync_cond.notify_all();
+                    let msg = "wal writer has no file handle".to_string();
+                    tracing::error!("{msg}");
+                    self.fail_writes(&batch, msg);
                     return;
                 }
 
@@ -255,6 +240,7 @@ impl WriterRunner {
                     self.config
                         .current_pos
                         .store(end_pos, std::sync::atomic::Ordering::SeqCst);
+                    self.ack_batch_success(&batch, start_pos);
 
                     // Mark completed flushes (barrier for "writes before flush() have been written")
                     {
@@ -263,6 +249,8 @@ impl WriterRunner {
                         self.config.sync_cond.notify_all();
                     }
                 }
+
+                self.recycle_batch(batch);
             }
 
             // If a flush was requested but there was no data batch, still complete it.
@@ -295,8 +283,10 @@ impl WriterRunner {
                         tracing::error!(error = ?e, "WAL fsync failed - marking sync as failed");
                         let mut s = self.config.sync_state.lock();
                         s.sync_failed = true;
+                        s.last_sync_error = Some(e.to_string());
                         // Do NOT increment completed_fsyncs - leave waiters to check failure
                         self.config.sync_cond.notify_all();
+                        self.config.queue_cond.notify_all();
                         return; // Exit run loop - writer thread terminates on fsync failure
                     }
                     let sync_elapsed = sync_start.elapsed();
@@ -311,6 +301,57 @@ impl WriterRunner {
                 s.completed_fsyncs = s.pending_fsyncs;
                 self.config.sync_cond.notify_all();
             }
+        }
+    }
+
+    fn ack_batch_success(&self, batch: &[QueuedWrite], batch_start_pos: u64) {
+        let mut next_pos = batch_start_pos;
+        for entry in batch {
+            let entry_pos = next_pos;
+            next_pos = next_pos.saturating_add(entry.data.len() as u64);
+            let _ = entry.ack.send(Ok(entry_pos));
+        }
+    }
+
+    fn recycle_batch(&self, batch: Vec<QueuedWrite>) {
+        let mut pool = self.config.buf_pool.lock();
+        let mut dropped = 0usize;
+        for entry in batch {
+            if pool.len() < MAX_BUFFER_POOL_SIZE {
+                pool.push(entry.data);
+            } else {
+                dropped += 1;
+            }
+        }
+        drop(pool);
+
+        if dropped > 0 {
+            if let Some(t) = crate::telemetry::Telemetry::global() {
+                t.metrics().record_wal_buffer_pool_overflow(dropped as u64);
+            }
+        }
+
+        self.config.queue_cond.notify_all();
+    }
+
+    fn fail_writes(&self, batch: &[QueuedWrite], message: String) {
+        for entry in batch {
+            let _ = entry.ack.send(Err(Self::error_from_message(&message)));
+        }
+
+        let mut s = self.config.sync_state.lock();
+        s.write_failed = true;
+        s.last_write_error = Some(message);
+        self.config.sync_cond.notify_all();
+        self.config.queue_cond.notify_all();
+    }
+
+    fn error_from_message(message: &str) -> crate::common::MidgeError {
+        let lowered = message.to_ascii_lowercase();
+        if lowered.contains("no space") || lowered.contains("disk full") {
+            crate::common::MidgeError::NoSpace(message.to_string())
+        } else {
+            crate::common::MidgeError::Internal(message.to_string())
         }
     }
 }

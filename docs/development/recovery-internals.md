@@ -163,7 +163,8 @@ _*Cloud recovery times vary significantly based on network latency and cloud pro
 Each WAL segment contains a sequence of records:
 
 ```
-Record: [Checksum(4B) | Length(4B) | Type(1B) | Payload(N bytes)]
+Frame:  [Length(4B) | CRC32C(4B) | EncodedRecord(N bytes)]
+Record: [Magic | Version | TLV fields...]
 ```
 
 **Record types:**
@@ -174,9 +175,10 @@ Record: [Checksum(4B) | Length(4B) | Type(1B) | Payload(N bytes)]
 - CommitTransaction: Transaction commit marker
 
 **WAL durability:**
-- Checksums (CRC32) on every record
-- Incomplete records detected and skipped
-- Atomic record writes (no partial records)
+- Checksums (CRC32C) on every WAL frame
+- Incomplete tail frames are detected during replay
+- Truncated tail frames are dropped while keeping the valid prefix, even in strict mode
+- Strict mode still fails open on checksum corruption, invalid frame data, or corruption at byte 0
 
 ### Replay Logic
 
@@ -190,14 +192,19 @@ For each WAL segment (ordered by sequence):
             Else:
                 Skip (already in SST)
         Else:
-            Log warning (corrupted record)
-            Skip record
-            Continue with next record
+            Stop at first corrupted/torn frame
+            If this is a truncated tail beyond byte 0:
+                Keep the valid prefix
+            Else if in salvage mode:
+                Keep the valid prefix and report degraded recovery
+            Else:
+                Fail recovery
 ```
 
 **Key invariants:**
 - Replay is idempotent (same input → same output)
 - Sequence numbers determine what to replay
+- Corruption at byte 0 is never silently ignored in strict recovery
 - Corrupted records are skipped (logged but not fatal)
 - Transactions are atomic (all-or-nothing)
 
@@ -287,21 +294,21 @@ Manifest is the **authoritative source of truth** for:
 **Scenario:** Compaction started but crashed before committing to manifest.
 
 **Detection:**
-- Intent logged in manifest: "Begin compaction of SSTs [A, B] → C"
-- No corresponding completion entry: "Compaction complete, SST C committed"
+- Intent log records `OutputDurable` once the output SST set is fully written
+- The intent advances to `ManifestPublished` only after the manifest journal becomes authoritative
+- Any remaining intent on startup means recovery must finish or clean up that publication path idempotently
 
 **Recovery:**
-- Detect incomplete compaction in manifest
-- Check if output SST exists and is valid
-  - Valid: Commit compaction (idempotent retry)
-  - Invalid or missing: Abandon compaction, keep input SSTs
+- If the manifest already reflects the compaction, recovery retries obsolete-SST cleanup only
+- If only `OutputDurable` was recorded, recovery validates the output SSTs and then publishes the manifest batch
+- If output SSTs are missing or invalid before publication, strict mode fails; salvage mode logs degradation and keeps the pre-compaction manifest state
 
 **Guarantee:** No data loss. SSTs are immutable, compaction is idempotent.
 
 **Implementation:**
-- Compaction intents include input/output checksums
-- Output SST validated before commit
-- Input SSTs retained until commit
+- Compaction intents carry full output `FileMeta` plus source/output file sets
+- Output SSTs are validated before publish or replay-finalization
+- Input SSTs are retained until `ManifestPublished` is durable
 
 ### Partial WAL Segments
 
@@ -314,9 +321,9 @@ Manifest is the **authoritative source of truth** for:
 
 **Recovery:**
 - Detect incomplete record
-- Log warning: "Incomplete WAL record at offset X"
-- Discard incomplete record
-- Resume from last complete record
+- If the torn frame is a trailing tail beyond byte 0: discard it and keep the valid prefix
+- Otherwise strict mode returns recovery failure immediately
+- Salvage mode logs warning, discards the bad suffix, and keeps the valid prefix
 
 **Guarantee:** Writes are atomic at record granularity. Partial records are never applied.
 
@@ -374,14 +381,14 @@ Manifest is the **authoritative source of truth** for:
 
 All on-disk data is protected by checksums:
 
-- **WAL records**: CRC32 checksum per record
+- **WAL frames**: CRC32C checksum per frame
 - **SST blocks**: CRC32 checksum per block
 - **Manifest entries**: CRC32 checksum per entry
 
 **Checksum validation:**
 - On read: Validate before returning data
 - On replay: Validate before applying
-- On corruption: Return error, log warning
+- On corruption: strict mode returns error; salvage mode logs warning and keeps the valid prefix only
 
 ### Corruption Detection
 
