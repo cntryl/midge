@@ -1244,10 +1244,11 @@ impl EventLoop {
                     .collect();
 
                 // Publish compaction changes to manifest (update and persist)
-                if let Err(e) =
-                    self.manifest_actor
-                        .compaction_complete(&mut self.state, input_ssts, added)
-                {
+                if let Err(e) = self.manifest_actor.compaction_complete(
+                    &mut self.state,
+                    input_ssts.clone(),
+                    added,
+                ) {
                     tracing::error!(error = ?e, "failed to apply compaction to manifest");
                     self.respond(
                         request_id,
@@ -1260,7 +1261,42 @@ impl EventLoop {
                         },
                     );
                 } else {
-                    self.respond(request_id, RuntimeResponse::Ok { request_id });
+                    // 🔑 CRITICAL Slice 6: Manifest publication succeeded.
+                    // Now persist the manifest to make changes durable.
+                    fail::fail_point!("slice6::after_compaction_update_before_manifest_persist");
+
+                    if let Err(e) = self.manifest_actor.persist(&self.state) {
+                        tracing::error!(error = ?e, "failed to persist manifest after compaction");
+                        self.respond(
+                            request_id,
+                            RuntimeResponse::Error {
+                                request_id,
+                                error: crate::common::MidgeError::Internal(format!(
+                                    "failed to persist manifest after compaction: {}",
+                                    e
+                                )),
+                            },
+                        );
+                    } else {
+                        // 🔑 CRITICAL Slice 6: Manifest is now durable.
+                        // Safe to delete input SSTs (they are now orphaned from manifest).
+                        fail::fail_point!("slice6::after_manifest_persist_before_sst_gc");
+
+                        // Queue GC deletion of input SSTs
+                        if let Err(e) = self.gc_actor.delete_ssts(&mut self.state, &input_ssts) {
+                            tracing::warn!(
+                                error = ?e,
+                                "GC deletion of compaction input SSTs failed (non-fatal)"
+                            );
+                        } else {
+                            tracing::info!(
+                                removed_count = input_ssts.len(),
+                                "Successfully deleted compaction input SSTs"
+                            );
+                        }
+
+                        self.respond(request_id, RuntimeResponse::Ok { request_id });
+                    }
                 }
 
                 // Check if any pending CompactAll/BeginIngest requests can be completed now
