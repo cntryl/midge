@@ -14,8 +14,10 @@ use crate::sst::cache::{BlockCache, CacheKey};
 use crate::sst::encoding;
 use crate::sst::read_amp_metrics::ReadAmpMetrics;
 use crate::sst::sparse_index::SparseIndexReader;
-use crate::sst::traits::SstReader;
-use crate::sst::types::{BlockHandle, Footer};
+use crate::sst::types::{
+    decode_range_tombstones, BlockHandle, Footer, KeyState, RangeTombstone, SstEntry,
+    SstMetadata, SST_FORMAT_V1,
+};
 
 /// SST file reader using io::Fs abstraction
 /// Identical to SstFile but accepts `Arc<dyn Fs>` for the filesystem backend
@@ -30,6 +32,8 @@ pub struct SstFileIo {
     read_amp_metrics: ReadAmpMetrics,
     sparse_index: Option<Arc<SparseIndexReader>>,
     block_cache: Option<Arc<BlockCache>>,
+    format_version: u32,
+    range_tombstones: Vec<RangeTombstone>,
 }
 
 impl SstFileIo {
@@ -46,6 +50,8 @@ impl SstFileIo {
             read_amp_metrics: ReadAmpMetrics::new(),
             sparse_index: None,
             block_cache: None,
+            format_version: SST_FORMAT_V1,
+            range_tombstones: Vec::new(),
         }
     }
 
@@ -124,16 +130,6 @@ impl SstFileIo {
 
     fn load_metadata(&mut self) -> MidgeResult<()> {
         // Open file in read-only mode
-        let file = self.fs.open(
-            &self.path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
-
         // Get file size
         let metadata = self.fs.metadata(&self.path)?;
         let file_size = metadata.len;
@@ -153,9 +149,52 @@ impl SstFileIo {
 
         // Read footer from end of file
         let footer_offset = file_size - footer_size;
-        let footer_data = file.read_at(footer_offset, footer_size)?;
+        let footer_data = {
+            let file = self.fs.open(
+                &self.path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )?;
+            file.read_at(footer_offset, footer_size)?
+        };
 
         self.footer = Some(Footer::decode(&footer_data)?);
+        self.load_sst_metadata()?;
+
+        Ok(())
+    }
+
+    fn load_sst_metadata(&mut self) -> MidgeResult<()> {
+        let Some(footer) = self.footer.clone() else {
+            return Ok(());
+        };
+
+        if footer.meta_index_handle.size == 0 {
+            self.format_version = SST_FORMAT_V1;
+            self.range_tombstones.clear();
+            return Ok(());
+        }
+
+        let metadata_bytes = self.read_block(&footer.meta_index_handle)?;
+        if metadata_bytes.is_empty() {
+            self.format_version = SST_FORMAT_V1;
+            self.range_tombstones.clear();
+            return Ok(());
+        }
+
+        let metadata = SstMetadata::decode(&metadata_bytes)?;
+        self.format_version = metadata.format_version;
+        self.range_tombstones = match metadata.range_tombstone_handle {
+            Some(handle) if handle.size > 0 => {
+                let tombstone_bytes = self.read_block(&handle)?;
+                decode_range_tombstones(&tombstone_bytes)?
+            }
+            _ => Vec::new(),
+        };
 
         Ok(())
     }
@@ -356,42 +395,76 @@ impl SstFileIo {
         Ok(result)
     }
 
+    fn scan_block_entries_from_bytes(
+        &self,
+        block_data: &bytes::Bytes,
+    ) -> MidgeResult<Vec<SstEntry>> {
+        let mut result = Vec::new();
+        let mut offset = 0;
+        let mut previous_key = Vec::new();
+
+        while offset < block_data.len() {
+            let (entry, next_offset) =
+                encoding::decode_with_format(block_data.as_ref(), offset, self.format_version)?;
+
+            let shared_len = entry.shared_len as usize;
+            if shared_len > previous_key.len() {
+                return Err(MidgeError::Corruption(
+                    "Invalid shared prefix length in SST entry".into(),
+                ));
+            }
+
+            let mut full_key = Vec::with_capacity(shared_len + entry.key_delta.len());
+            full_key.extend_from_slice(&previous_key[..shared_len]);
+            full_key.extend_from_slice(entry.key_delta);
+
+            let value_bytes = if let Some(val_off) = entry.value_offset {
+                let val_len = match entry.value {
+                    Some(v) => v.len(),
+                    None => {
+                        return Err(MidgeError::Corruption(
+                            "value offset present without value".into(),
+                        ))
+                    }
+                };
+                Some(block_data.slice(val_off..val_off + val_len))
+            } else {
+                None
+            };
+
+            previous_key = full_key.clone();
+            result.push(SstEntry::new(
+                full_key,
+                value_bytes,
+                entry.sequence,
+                entry.entry_type as u8,
+                entry.expiration,
+            ));
+            offset = next_offset;
+        }
+
+        Ok(result)
+    }
+
     fn scan_block_from_bytes(
         &self,
         block_data: &bytes::Bytes,
     ) -> MidgeResult<Vec<(bytes::Bytes, Option<bytes::Bytes>)>> {
-        let mut result = Vec::new();
-        let mut offset = 0;
+        Ok(self
+            .scan_block_entries_from_bytes(block_data)?
+            .into_iter()
+            .map(|entry| (Bytes::from(entry.key), entry.value))
+            .collect())
+    }
 
-        while offset < block_data.len() {
-            if let Ok((entry, next_offset)) = encoding::decode(block_data.as_ref(), offset) {
-                // Zero-copy: create Bytes slices that reference the original block buffer
-                let key_start = entry.key_offset;
-                let key_len = entry.key_delta.len();
-                let key_bytes = block_data.slice(key_start..key_start + key_len);
-
-                let value_bytes = if let Some(val_off) = entry.value_offset {
-                    let val_len = match entry.value {
-                        Some(v) => v.len(),
-                        None => {
-                            return Err(MidgeError::Corruption(
-                                "value offset present without value".into(),
-                            ))
-                        }
-                    };
-                    Some(block_data.slice(val_off..val_off + val_len))
-                } else {
-                    None
-                };
-
-                result.push((key_bytes, value_bytes));
-                offset = next_offset;
-            } else {
-                break;
-            }
+    fn state_from_entry(entry: SstEntry) -> KeyState {
+        if entry.is_tombstone() {
+            KeyState::Tombstone(entry.sequence)
+        } else if let Some(value) = entry.value {
+            KeyState::Value(value, entry.sequence, entry.expiration, entry.op_type)
+        } else {
+            KeyState::Absent
         }
-
-        Ok(result)
     }
 
     /// Check block bloom filter with proper metrics and failure-safe semantics
@@ -550,10 +623,26 @@ impl crate::sst::SstReader for SstFileIo {
 
 impl crate::sst::SstStateReader for SstFileIo {
     fn get_state(&self, key: &[u8]) -> MidgeResult<crate::sst::types::KeyState> {
-        match self.get(key)? {
-            Some(value) => Ok(crate::sst::types::KeyState::Value(value, 0, None, 0)),
-            None => Ok(crate::sst::types::KeyState::Absent),
+        let mut best_match: Option<SstEntry> = None;
+        let index = self.scan_index()?;
+
+        for (_first_key, handle) in index.iter() {
+            let block_data = self.read_block(handle)?;
+            for entry in self.scan_block_entries_from_bytes(&block_data)? {
+                if entry.key.as_slice() == key
+                    && best_match
+                        .as_ref()
+                        .map(|current| entry.sequence > current.sequence)
+                        .unwrap_or(true)
+                {
+                    best_match = Some(entry);
+                }
+            }
         }
+
+        Ok(best_match
+            .map(Self::state_from_entry)
+            .unwrap_or(crate::sst::types::KeyState::Absent))
     }
 
     fn scan_range_state(
@@ -561,11 +650,33 @@ impl crate::sst::SstStateReader for SstFileIo {
         start: Option<&[u8]>,
         end: Option<&[u8]>,
     ) -> MidgeResult<Vec<(Bytes, crate::sst::types::KeyState)>> {
-        let pairs = self.scan_range(start, end)?;
-        Ok(pairs
-            .into_iter()
-            .map(|(k, v)| (k.clone(), crate::sst::types::KeyState::Value(v, 0, None, 0)))
-            .collect())
+        let index = self.scan_index()?;
+        let mut result = Vec::new();
+
+        for (_first_key, handle) in index {
+            let block_data = self.read_block(&handle)?;
+            for entry in self.scan_block_entries_from_bytes(&block_data)? {
+                if let Some(s) = start {
+                    if entry.key.as_slice() < s {
+                        continue;
+                    }
+                }
+                if let Some(e) = end {
+                    if entry.key.as_slice() >= e {
+                        continue;
+                    }
+                }
+
+                let key = Bytes::from(entry.key.clone());
+                result.push((key, Self::state_from_entry(entry)));
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn range_tombstones(&self) -> Vec<crate::sst::types::RangeTombstone> {
+        self.range_tombstones.clone()
     }
 }
 

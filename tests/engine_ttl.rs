@@ -113,6 +113,33 @@ fn should_persist_ttl_metadata_given_restart_when_reopening() {
 }
 
 #[test]
+fn should_persist_ttl_metadata_given_flush_and_restart_when_reopening() {
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.create_column_family("test").expect("create cf");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .unwrap();
+            tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(3600))
+                .unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
+            engine.flush_cf(&cf).unwrap();
+        }
+
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine
+                .get_column_family("test")
+                .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
+            let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+            let result = read_tx.get(b"key1").unwrap();
+            assert_eq!(result, Some(Bytes::from_static(b"value1")));
+        }
+    });
+}
+
+#[test]
 fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange

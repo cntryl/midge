@@ -13,6 +13,7 @@
 
 use crate::common::MidgeResult;
 use crate::sst::traits::SstFactory;
+use crate::sst::types::{KeyState, RangeTombstone};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -98,27 +99,51 @@ fn is_expired(version: &CompactionVersion, now_secs: u64) -> bool {
     matches!(version.expiration, Some(exp) if exp <= now_secs)
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SstCompactionInput {
+    pub versions: Vec<CompactionVersion>,
+    pub range_tombstones: Vec<RangeTombstone>,
+}
+
+fn collect_reader_input(
+    reader: &dyn crate::sst::traits::SstReaderExt,
+) -> MidgeResult<SstCompactionInput> {
+    let versions = reader
+        .scan_range_state(None, None)?
+        .into_iter()
+        .filter_map(|(key, state)| match state {
+            KeyState::Absent => None,
+            KeyState::Tombstone(seq) => Some(CompactionVersion {
+                key: key.to_vec(),
+                seq,
+                is_tombstone: true,
+                value: None,
+                expiration: None,
+            }),
+            KeyState::Value(value, seq, expiration, _op_type) => Some(CompactionVersion {
+                key: key.to_vec(),
+                seq,
+                is_tombstone: false,
+                value: Some(value.to_vec()),
+                expiration,
+            }),
+        })
+        .collect();
+
+    Ok(SstCompactionInput {
+        versions,
+        range_tombstones: reader.range_tombstones(),
+    })
+}
+
 /// Collect all versions from the given input SST files.
 ///
-/// NOTE:
-///   - At the moment this is a **best-effort stub** until the SST reader
-///     traits are fully wired for compaction (e.g. `SstStateReader`).
-///   - It *intentionally* returns an empty collection rather than panicking
-///     or guessing at the concrete SST reader type.
-///   - This function is structured so that it can be upgraded to a streaming
-///     implementation without changing its public signature.
-///
-/// Once the SST layer exposes an iterator that yields logical versions, this
-/// function should:
-///   - Open each file through `sst_factory`.
-///   - Iterate all entries, mapping them to `CompactionVersion`.
-///   - Push into the accumulating `versions` vector.
 pub fn collect_versions(
     sst_factory: &dyn SstFactory,
     input_files: &[String],
     abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<Vec<CompactionVersion>> {
-    let versions = Vec::new();
+    let mut versions = Vec::new();
 
     for filename in input_files {
         // Periodically check whether we should abort (cooperative cancellation)
@@ -131,21 +156,23 @@ pub fn collect_versions(
 
         let path = Path::new(filename);
 
-        // Use the generic SstReader API from the factory to open the file.
-        let _reader = sst_factory.open(path)?;
-
-        // **Note**: The current SstFactory trait returns `Box<dyn SstReader>`, which
-        // doesn't directly expose `SstStateReader` methods (seq, tombstone, expiration).
-        // To properly wire this, we would need either:
-        //   1. An extended trait combining both interfaces, or
-        //   2. A separate factory method for stateful readers, or
-        //   3. Open directly via `SstFile::open()` within compaction.
-        //
-        // For now, we keep the function signature for compatibility with the architecture,
-        // but the real implementation requires SST trait extension. The streaming pipeline
-        // (MergeIterator + StreamDeduplicate) is ready and tested; this is the remaining
-        // integration point.
+        let reader = sst_factory.open(path)?;
+        let input = collect_reader_input(reader.as_ref())?;
+        if !input.range_tombstones.is_empty() {
+            tracing::debug!(
+                file = %filename,
+                count = input.range_tombstones.len(),
+                "compaction observed SST range tombstones"
+            );
+        }
+        versions.extend(input.versions);
     }
+
+    versions.sort_by(|left, right| {
+        left.key
+            .cmp(&right.key)
+            .then_with(|| right.seq.cmp(&left.seq))
+    });
 
     Ok(versions)
 }
@@ -414,6 +441,61 @@ mod tests {
         // Assert
         assert!(!future_expired);
         assert!(!none_expired);
+    }
+
+    #[test]
+    fn should_collect_versions_and_range_tombstones_from_stateful_reader() {
+        use crate::sst::traits::{SstReader, SstStateReader};
+
+        struct FakeReader;
+
+        impl SstReader for FakeReader {
+            fn get(&self, _key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
+                Ok(None)
+            }
+
+            fn scan_range(
+                &self,
+                _start: Option<&[u8]>,
+                _end: Option<&[u8]>,
+            ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+                Ok(Vec::new())
+            }
+        }
+
+        impl SstStateReader for FakeReader {
+            fn get_state(&self, _key: &[u8]) -> MidgeResult<KeyState> {
+                Ok(KeyState::Absent)
+            }
+
+            fn scan_range_state(
+                &self,
+                _start: Option<&[u8]>,
+                _end: Option<&[u8]>,
+            ) -> MidgeResult<Vec<(bytes::Bytes, KeyState)>> {
+                Ok(vec![
+                    (
+                        bytes::Bytes::from_static(b"alpha"),
+                        KeyState::Value(bytes::Bytes::from_static(b"v1"), 42, Some(900), 0),
+                    ),
+                    (bytes::Bytes::from_static(b"beta"), KeyState::Tombstone(41)),
+                ])
+            }
+
+            fn range_tombstones(&self) -> Vec<RangeTombstone> {
+                vec![RangeTombstone::new(b"c".to_vec(), b"f".to_vec(), 40)]
+            }
+        }
+
+        let input = collect_reader_input(&FakeReader).expect("collect stateful input");
+
+        assert_eq!(input.versions.len(), 2);
+        assert_eq!(input.versions[0].key, b"alpha".to_vec());
+        assert_eq!(input.versions[0].seq, 42);
+        assert_eq!(input.versions[0].expiration, Some(900));
+        assert!(input.versions[1].is_tombstone);
+        assert_eq!(input.range_tombstones.len(), 1);
+        assert_eq!(input.range_tombstones[0].start, b"c".to_vec());
     }
 
     #[test]

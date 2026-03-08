@@ -17,6 +17,9 @@
 //!
 //! Entry length is fully deterministic from the header.
 //! Decode is zero-copy and allocation-free.
+//!
+//! Version 2 extends the header with:
+//! [expiration_millis: u64] // u64::MAX => no expiration
 
 use crate::common::{MidgeError, MidgeResult};
 use bytes::{BufMut, BytesMut};
@@ -121,6 +124,7 @@ pub struct EntryView<'a> {
     pub value_offset: Option<usize>,
     pub sequence: u64,
     pub entry_type: EntryType,
+    pub expiration: Option<u64>,
     pub bytes_consumed: usize,
 }
 
@@ -128,6 +132,26 @@ pub struct EntryView<'a> {
 ///
 /// This is allocation-free and returns a borrowed view.
 pub fn decode<'a>(data: &'a [u8], offset: usize) -> MidgeResult<(EntryView<'a>, usize)> {
+    decode_with_format(data, offset, crate::sst::types::SST_FORMAT_V1)
+}
+
+/// Decode a single entry using the SST format version.
+pub fn decode_with_format<'a>(
+    data: &'a [u8],
+    offset: usize,
+    format_version: u32,
+) -> MidgeResult<(EntryView<'a>, usize)> {
+    match format_version {
+        crate::sst::types::SST_FORMAT_V1 => decode_v1(data, offset),
+        crate::sst::types::SST_FORMAT_V2 => decode_v2(data, offset),
+        other => Err(MidgeError::Corruption(format!(
+            "Unsupported SST entry format version: {}",
+            other
+        ))),
+    }
+}
+
+fn decode_v1<'a>(data: &'a [u8], offset: usize) -> MidgeResult<(EntryView<'a>, usize)> {
     if offset >= data.len() {
         return Err(MidgeError::Corruption("Offset beyond data length".into()));
     }
@@ -198,10 +222,136 @@ pub fn decode<'a>(data: &'a [u8], offset: usize) -> MidgeResult<(EntryView<'a>, 
             value_offset,
             sequence: seq,
             entry_type,
+            expiration: None,
             bytes_consumed: consumed,
         },
         p,
     ))
+}
+
+fn decode_v2<'a>(data: &'a [u8], offset: usize) -> MidgeResult<(EntryView<'a>, usize)> {
+    if offset >= data.len() {
+        return Err(MidgeError::Corruption("Offset beyond data length".into()));
+    }
+
+    let mut p = offset;
+
+    if data.len() < p + 25 {
+        return Err(MidgeError::Corruption("Truncated SST entry header".into()));
+    }
+
+    let shared = u16::from_le_bytes([data[p], data[p + 1]]);
+    let key_len = u16::from_le_bytes([data[p + 2], data[p + 3]]) as usize;
+    let val_len =
+        u32::from_le_bytes([data[p + 4], data[p + 5], data[p + 6], data[p + 7]]) as usize;
+    let seq = u64::from_le_bytes([
+        data[p + 8],
+        data[p + 9],
+        data[p + 10],
+        data[p + 11],
+        data[p + 12],
+        data[p + 13],
+        data[p + 14],
+        data[p + 15],
+    ]);
+    let raw_entry_type = data[p + 16];
+    let expiration_raw = u64::from_le_bytes([
+        data[p + 17],
+        data[p + 18],
+        data[p + 19],
+        data[p + 20],
+        data[p + 21],
+        data[p + 22],
+        data[p + 23],
+        data[p + 24],
+    ]);
+
+    p += 25;
+
+    if data.len() < p + key_len {
+        return Err(MidgeError::Corruption(format!(
+            "Not enough data for key: need {}, have {}",
+            key_len,
+            data.len().saturating_sub(p)
+        )));
+    }
+
+    if data.len() < p + key_len + val_len {
+        return Err(MidgeError::Corruption(format!(
+            "Not enough data for value: need {}, have {}",
+            val_len,
+            data.len().saturating_sub(p + key_len)
+        )));
+    }
+
+    let key_offset = p;
+    let key = &data[p..p + key_len];
+    p += key_len;
+
+    let (value_offset, value) = if val_len > 0 {
+        let v_off = p;
+        let v = &data[p..p + val_len];
+        p += val_len;
+        (Some(v_off), Some(v))
+    } else {
+        (None, None)
+    };
+
+    let consumed = p - offset;
+    let entry_type = EntryType::try_from(raw_entry_type)?;
+    let expiration = if expiration_raw == u64::MAX {
+        None
+    } else {
+        Some(expiration_raw)
+    };
+
+    Ok((
+        EntryView {
+            shared_len: shared,
+            key_delta: key,
+            key_offset,
+            value,
+            value_offset,
+            sequence: seq,
+            entry_type,
+            expiration,
+            bytes_consumed: consumed,
+        },
+        p,
+    ))
+}
+
+/// Encode a v2 SST entry with persisted expiration metadata.
+#[inline]
+pub fn encode_v2(
+    key_delta: &[u8],
+    shared_len: u16,
+    value: Option<&[u8]>,
+    seq: u64,
+    entry_type: EntryType,
+    expiration: Option<u64>,
+) -> Vec<u8> {
+    let header = 2usize + 2 + 4 + 8 + 1 + 8;
+    let key_len = key_delta.len();
+    let val_len = value.map_or(0, |v| v.len());
+    let cap = header
+        .checked_add(key_len)
+        .and_then(|s| s.checked_add(val_len))
+        .unwrap_or(header);
+
+    let mut buf = BytesMut::with_capacity(cap);
+    let val = value.unwrap_or(&[]);
+    let val_len = val.len() as u32;
+
+    buf.put_u16_le(shared_len);
+    buf.put_u16_le(key_delta.len() as u16);
+    buf.put_u32_le(val_len);
+    buf.put_u64_le(seq);
+    buf.put_u8(entry_type as u8);
+    buf.put_u64_le(expiration.unwrap_or(u64::MAX));
+    buf.extend_from_slice(key_delta);
+    buf.extend_from_slice(val);
+    buf.to_vec()
 }
 
 #[cfg(test)]

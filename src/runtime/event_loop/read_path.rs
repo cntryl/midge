@@ -496,7 +496,7 @@ mod tests {
             fn open(
                 &self,
                 _path: &std::path::Path,
-            ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::SstReader>> {
+            ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
                 struct FakeReader;
                 impl crate::sst::traits::SstReader for FakeReader {
                     fn get(&self, key: &[u8]) -> crate::common::MidgeResult<Option<bytes::Bytes>> {
@@ -518,6 +518,46 @@ mod tests {
                             Ok(vec![(
                                 bytes::Bytes::copy_from_slice(b"a"),
                                 bytes::Bytes::copy_from_slice(b"va"),
+                            )])
+                        } else {
+                            Ok(Vec::new())
+                        }
+                    }
+                }
+                impl crate::sst::traits::SstStateReader for FakeReader {
+                    fn get_state(
+                        &self,
+                        key: &[u8],
+                    ) -> crate::common::MidgeResult<crate::sst::types::KeyState> {
+                        Ok(if key == b"a" {
+                            crate::sst::types::KeyState::Value(
+                                bytes::Bytes::copy_from_slice(b"va"),
+                                10,
+                                None,
+                                0,
+                            )
+                        } else {
+                            crate::sst::types::KeyState::Absent
+                        })
+                    }
+
+                    fn scan_range_state(
+                        &self,
+                        start: Option<&[u8]>,
+                        end: Option<&[u8]>,
+                    ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::sst::types::KeyState)>>
+                    {
+                        let s = start.unwrap_or(&[]);
+                        let e = end.unwrap_or(&[255u8]);
+                        if s <= &b"a"[..] && &b"a"[..] < e {
+                            Ok(vec![(
+                                bytes::Bytes::copy_from_slice(b"a"),
+                                crate::sst::types::KeyState::Value(
+                                    bytes::Bytes::copy_from_slice(b"va"),
+                                    10,
+                                    None,
+                                    0,
+                                ),
                             )])
                         } else {
                             Ok(Vec::new())

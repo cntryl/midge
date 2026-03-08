@@ -41,6 +41,12 @@ impl Block {
 /// RocksDB-compatible magic number for SST footer validation
 pub const SST_FOOTER_MAGIC: u64 = 0xdb4775248b80fb57;
 
+/// Legacy SST entry format without persisted expiration metadata.
+pub const SST_FORMAT_V1: u32 = 1;
+
+/// Stateful SST entry format with persisted expiration and metadata blocks.
+pub const SST_FORMAT_V2: u32 = 2;
+
 /// Footer stored at end of SST file
 #[derive(Debug, Clone)]
 pub struct Footer {
@@ -195,8 +201,67 @@ impl Footer {
     }
 }
 
+/// SST-level metadata persisted in the meta block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SstMetadata {
+    pub format_version: u32,
+    pub range_tombstone_handle: Option<BlockHandle>,
+}
+
+impl Default for SstMetadata {
+    fn default() -> Self {
+        Self {
+            format_version: SST_FORMAT_V1,
+            range_tombstone_handle: None,
+        }
+    }
+}
+
+impl SstMetadata {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(4 + 8 + 8);
+        buf.extend_from_slice(&self.format_version.to_le_bytes());
+        match self.range_tombstone_handle {
+            Some(handle) => {
+                buf.extend_from_slice(&handle.offset.to_le_bytes());
+                buf.extend_from_slice(&handle.size.to_le_bytes());
+            }
+            None => {
+                buf.extend_from_slice(&0u64.to_le_bytes());
+                buf.extend_from_slice(&0u64.to_le_bytes());
+            }
+        }
+        buf
+    }
+
+    pub fn decode(data: &[u8]) -> crate::common::MidgeResult<Self> {
+        if data.len() < 20 {
+            return Err(crate::common::MidgeError::Corruption(
+                "SST metadata block too short".into(),
+            ));
+        }
+
+        let format_version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let offset = u64::from_le_bytes([
+            data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
+        ]);
+        let size = u64::from_le_bytes([
+            data[12], data[13], data[14], data[15], data[16], data[17], data[18], data[19],
+        ]);
+
+        Ok(Self {
+            format_version,
+            range_tombstone_handle: if offset == 0 && size == 0 {
+                None
+            } else {
+                Some(BlockHandle::new(offset, size))
+            },
+        })
+    }
+}
+
 /// Range tombstone for covering key ranges
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RangeTombstone {
     pub start: Vec<u8>,
     pub end: Vec<u8>,
@@ -212,6 +277,101 @@ impl RangeTombstone {
     pub fn covers(&self, key: &[u8]) -> bool {
         key >= self.start.as_slice() && key < self.end.as_slice()
     }
+}
+
+pub fn encode_range_tombstones(tombstones: &[RangeTombstone]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(tombstones.len() as u32).to_le_bytes());
+
+    for tombstone in tombstones {
+        buf.extend_from_slice(&(tombstone.start.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&tombstone.start);
+        buf.extend_from_slice(&(tombstone.end.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&tombstone.end);
+        buf.extend_from_slice(&tombstone.seq.to_le_bytes());
+    }
+
+    buf
+}
+
+pub fn decode_range_tombstones(
+    data: &[u8],
+) -> crate::common::MidgeResult<Vec<RangeTombstone>> {
+    if data.len() < 4 {
+        return Err(crate::common::MidgeError::Corruption(
+            "Range tombstone block too short".into(),
+        ));
+    }
+
+    let mut offset = 0;
+    let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    offset += 4;
+    let mut tombstones = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        if offset + 4 > data.len() {
+            return Err(crate::common::MidgeError::Corruption(
+                "Range tombstone start length truncated".into(),
+            ));
+        }
+        let start_len = u32::from_le_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        if offset + start_len > data.len() {
+            return Err(crate::common::MidgeError::Corruption(
+                "Range tombstone start bytes truncated".into(),
+            ));
+        }
+        let start = data[offset..offset + start_len].to_vec();
+        offset += start_len;
+
+        if offset + 4 > data.len() {
+            return Err(crate::common::MidgeError::Corruption(
+                "Range tombstone end length truncated".into(),
+            ));
+        }
+        let end_len = u32::from_le_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        if offset + end_len > data.len() {
+            return Err(crate::common::MidgeError::Corruption(
+                "Range tombstone end bytes truncated".into(),
+            ));
+        }
+        let end = data[offset..offset + end_len].to_vec();
+        offset += end_len;
+
+        if offset + 8 > data.len() {
+            return Err(crate::common::MidgeError::Corruption(
+                "Range tombstone sequence truncated".into(),
+            ));
+        }
+        let seq = u64::from_le_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
+        ]);
+        offset += 8;
+
+        tombstones.push(RangeTombstone::new(start, end, seq));
+    }
+
+    Ok(tombstones)
 }
 
 /// Parsed entry from SST block

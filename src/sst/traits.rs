@@ -20,7 +20,7 @@ pub trait SstReader: Send + Sync {
 }
 
 /// Stateful reader contract exposing tombstones and metadata
-pub trait SstStateReader {
+pub trait SstStateReader: Send + Sync {
     /// Get presence state (value/tombstone/absent) for a specific key
     fn get_state(&self, key: &[u8]) -> MidgeResult<super::types::KeyState>;
 
@@ -51,9 +51,14 @@ pub trait SstStateReader {
     }
 }
 
+/// Combined reader contract used by the SST factory.
+pub trait SstReaderExt: SstReader + SstStateReader {}
+
+impl<T> SstReaderExt for T where T: SstReader + SstStateReader {}
+
 /// Writer contract for SST implementations
 pub trait SstWriter: Send {
-    type Reader: SstReader;
+    type Reader: SstReaderExt;
 
     /// Add a key-value entry to the SST
     fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()>;
@@ -164,7 +169,7 @@ pub trait SstFactory: Send + Sync {
     fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>>;
 
     /// Open an existing SST file for reading
-    fn open(&self, path: &Path) -> MidgeResult<Box<dyn SstReader>>;
+    fn open(&self, path: &Path) -> MidgeResult<Box<dyn SstReaderExt>>;
 }
 
 #[cfg(test)]
@@ -227,6 +232,34 @@ mod tests {
         }
     }
 
+    impl SstStateReader for MockSstReader {
+        fn get_state(&self, key: &[u8]) -> MidgeResult<crate::sst::types::KeyState> {
+            Ok(match self.data.get(key) {
+                Some(value) => crate::sst::types::KeyState::Value(
+                    Bytes::copy_from_slice(value),
+                    0,
+                    None,
+                    0,
+                ),
+                None => crate::sst::types::KeyState::Absent,
+            })
+        }
+
+        fn scan_range_state(
+            &self,
+            start: Option<&[u8]>,
+            end: Option<&[u8]>,
+        ) -> MidgeResult<Vec<(Bytes, crate::sst::types::KeyState)>> {
+            Ok(self
+                .scan_range(start, end)?
+                .into_iter()
+                .map(|(key, value)| {
+                    (key, crate::sst::types::KeyState::Value(value, 0, None, 0))
+                })
+                .collect())
+        }
+    }
+
     #[derive(Debug)]
     struct MockSstWriter {
         data: Vec<(Vec<u8>, Vec<u8>)>,
@@ -263,7 +296,7 @@ mod tests {
     fn should_use_reader_as_trait_object() {
         // Arrange
         let reader = MockSstReader::new();
-        let reader_ref: &dyn SstReader = &reader;
+        let reader_ref: &dyn SstReaderExt = &reader;
 
         // Act
         let result = reader_ref.get(b"any_key");
@@ -291,7 +324,7 @@ mod tests {
         // Arrange
         let mut reader = MockSstReader::new();
         reader.insert(b"key1".to_vec(), b"value1".to_vec());
-        let reader_ref: &dyn SstReader = &reader;
+        let reader_ref: &dyn SstReaderExt = &reader;
 
         // Act
         let result = reader_ref.get(b"key1");
