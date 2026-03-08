@@ -26,6 +26,9 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 - Tiered benchmarking suite (Tier1-4)
 - YCSB workload support
 - Cross-platform support (Linux, Windows, macOS)
+- Startup recovery metrics API: `Engine::get_recovery_metrics()`
+- Runtime recovery metrics snapshot path (`GetRecoveryMetrics`) for WAL and intent-log replay visibility
+- Integration coverage for recovery metrics API, including deterministic `intent_log.yaml` replay fixture
 
 ### Documentation
 - Architecture guide
@@ -35,6 +38,8 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 - API guide
 - Testing guide
 - Benchmarking guide
+- README example for recovery metrics usage
+- Recovery internals observability section for startup replay counters
 
 ## [0.1.0] - TBD
 
