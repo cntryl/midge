@@ -294,6 +294,11 @@ impl RuntimeState {
                     &mut recovery_memtables,
                 ) {
                     Ok(stats) => {
+                        if let Some(t) = crate::telemetry::Telemetry::global() {
+                            t.metrics()
+                                .record_wal_recovery(stats.record_count, stats.bytes);
+                        }
+
                         tracing::info!(
                             records_recovered = stats.record_count,
                             bytes_recovered = stats.bytes,
@@ -635,6 +640,11 @@ impl RuntimeState {
     pub fn replay_intent_log(&mut self) -> MidgeResult<()> {
         if self.intent_log.is_empty() {
             return Ok(());
+        }
+
+        if let Some(t) = crate::telemetry::Telemetry::global() {
+            t.metrics()
+                .record_intent_log_replay(self.intent_log.len() as u64);
         }
 
         tracing::info!(

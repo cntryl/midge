@@ -34,6 +34,12 @@ pub struct Metrics {
     pub wal_append_ns_total: Arc<AtomicU64>,
     pub wal_fsync_ns_total: Arc<AtomicU64>,
 
+    // Recovery operations
+    pub wal_recovery_records_replayed: Arc<AtomicU64>,
+    pub wal_recovery_bytes_replayed: Arc<AtomicU64>,
+    pub intent_log_replay_runs: Arc<AtomicU64>,
+    pub intent_log_entries_replayed: Arc<AtomicU64>,
+
     // Breakdowns
     pub wal_encode_count: Arc<AtomicU64>,
     pub wal_encode_ns_total: Arc<AtomicU64>,
@@ -126,6 +132,11 @@ impl Metrics {
             wal_fsync_count: Arc::new(AtomicU64::new(0)),
             wal_append_ns_total: Arc::new(AtomicU64::new(0)),
             wal_fsync_ns_total: Arc::new(AtomicU64::new(0)),
+
+            wal_recovery_records_replayed: Arc::new(AtomicU64::new(0)),
+            wal_recovery_bytes_replayed: Arc::new(AtomicU64::new(0)),
+            intent_log_replay_runs: Arc::new(AtomicU64::new(0)),
+            intent_log_entries_replayed: Arc::new(AtomicU64::new(0)),
 
             wal_encode_count: Arc::new(AtomicU64::new(0)),
             wal_encode_ns_total: Arc::new(AtomicU64::new(0)),
@@ -361,6 +372,27 @@ impl Metrics {
         }
     }
 
+    /// Record WAL recovery totals from startup replay.
+    #[inline]
+    pub fn record_wal_recovery(&self, records: u64, bytes: u64) {
+        if self.enabled {
+            self.wal_recovery_records_replayed
+                .fetch_add(records, Ordering::Relaxed);
+            self.wal_recovery_bytes_replayed
+                .fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    /// Record intent-log replay performed at startup.
+    #[inline]
+    pub fn record_intent_log_replay(&self, entries: u64) {
+        if self.enabled {
+            self.intent_log_replay_runs.fetch_add(1, Ordering::Relaxed);
+            self.intent_log_entries_replayed
+                .fetch_add(entries, Ordering::Relaxed);
+        }
+    }
+
     /// Record WAL backpressure wait (when queue is full and producer must wait)
     #[inline]
     pub fn record_wal_backpressure_wait(&self, wait_attempts: u64) {
@@ -579,6 +611,12 @@ impl Metrics {
             wal_fsync_count: self.wal_fsync_count.load(Ordering::Relaxed),
             wal_append_ns_total: self.wal_append_ns_total.load(Ordering::Relaxed),
             wal_fsync_ns_total: self.wal_fsync_ns_total.load(Ordering::Relaxed),
+            wal_recovery_records_replayed: self
+                .wal_recovery_records_replayed
+                .load(Ordering::Relaxed),
+            wal_recovery_bytes_replayed: self.wal_recovery_bytes_replayed.load(Ordering::Relaxed),
+            intent_log_replay_runs: self.intent_log_replay_runs.load(Ordering::Relaxed),
+            intent_log_entries_replayed: self.intent_log_entries_replayed.load(Ordering::Relaxed),
         }
     }
 }
@@ -613,6 +651,10 @@ pub struct MetricsSnapshot {
     pub wal_fsync_count: u64,
     pub wal_append_ns_total: u64,
     pub wal_fsync_ns_total: u64,
+    pub wal_recovery_records_replayed: u64,
+    pub wal_recovery_bytes_replayed: u64,
+    pub intent_log_replay_runs: u64,
+    pub intent_log_entries_replayed: u64,
 }
 
 impl MetricsSnapshot {
@@ -690,5 +732,24 @@ mod tests {
 
         // Assert
         assert_eq!(snap.puts, 0);
+    }
+
+    #[test]
+    fn should_record_recovery_metrics_when_replay_occurs() {
+        // Arrange
+        let config = TelemetryConfig::default().with_enabled(true);
+        let metrics = Metrics::new(&config).unwrap();
+
+        // Act
+        metrics.record_wal_recovery(42, 4096);
+        metrics.record_intent_log_replay(3);
+
+        let snap = metrics.snapshot();
+
+        // Assert
+        assert_eq!(snap.wal_recovery_records_replayed, 42);
+        assert_eq!(snap.wal_recovery_bytes_replayed, 4096);
+        assert_eq!(snap.intent_log_replay_runs, 1);
+        assert_eq!(snap.intent_log_entries_replayed, 3);
     }
 }
