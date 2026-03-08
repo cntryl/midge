@@ -925,7 +925,8 @@ impl WalActor {
                 self.append_calls += 1;
                 self.append_total += a_elapsed;
                 if let Some(t) = crate::telemetry::Telemetry::global() {
-                    t.metrics().record_wal_append(commit_record.estimated_size() as u64);
+                    t.metrics()
+                        .record_wal_append(commit_record.estimated_size() as u64);
                     t.metrics().record_wal_append_count();
                     t.metrics()
                         .record_wal_append_ns(a_elapsed.as_nanos() as u64);

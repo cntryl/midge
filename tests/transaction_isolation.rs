@@ -1,10 +1,12 @@
 // Copyright (c) 2025 Cntryl, Inc.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//! Transaction isolation tests - validates snapshot isolation, dirty read prevention, and consistency guarantees.
+//! Transaction visibility and last-write-wins behavior tests.
 //!
-//! Tests ensure that transactions provide proper isolation levels and prevent anomalies like
-//! dirty reads, non-repeatable reads, and phantom reads across all storage modes.
+//! These tests cover the currently implemented guarantees: hidden uncommitted
+//! writes, read-your-own-writes, read-only snapshot behavior, and LWW commit
+//! outcomes. They do not claim serializable, phantom-free, or full snapshot
+//! isolation for read-write transactions.
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
@@ -150,11 +152,11 @@ fn should_see_own_writes_given_transaction_when_reading() {
 }
 
 // ============================================================================
-// SNAPSHOT ISOLATION TESTS
+// READ VISIBILITY TESTS
 // ============================================================================
 
 #[test]
-fn should_read_at_begin_sequence_given_snapshot_when_reading() {
+fn should_read_latest_committed_value_given_new_reader_after_concurrent_write() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
@@ -170,11 +172,6 @@ fn should_read_at_begin_sequence_given_snapshot_when_reading() {
             .unwrap();
 
         // Act
-        let txn = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-
-        // Concurrent write after transaction started
         let mut concurrent_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
@@ -185,53 +182,13 @@ fn should_read_at_begin_sequence_given_snapshot_when_reading() {
             .commit(concurrent_tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
 
-        // Transaction should see snapshot at start
         let read_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
         let value = read_tx.get(b"key").unwrap();
 
-        // Assert - current engine sees updated value
+        // Assert
         assert_eq!(value, Some(Bytes::from_static(b"updated")));
-
-        drop(txn);
-    });
-}
-
-#[test]
-fn should_not_see_concurrent_writes_given_snapshot_isolation_when_reading() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
-        let cf = engine.create_column_family("test").expect("create cf");
-        let mut setup_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        setup_tx
-            .put(b"key".to_vec(), b"initial".to_vec(), None)
-            .unwrap();
-        engine
-            .commit(setup_tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
-
-        // Act
-        let txn = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-
-        // Concurrent update
-        let mut concurrent_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        concurrent_tx
-            .put(b"key".to_vec(), b"updated".to_vec(), None)
-            .unwrap();
-        engine
-            .commit(concurrent_tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
-
-        // Assert - transaction holds snapshot view (verified through isolation testing)
-        drop(txn);
     });
 }
 
@@ -275,45 +232,6 @@ fn should_return_old_value_given_snapshot_before_write_when_reading() {
         // Assert - snapshot transaction still sees the old value
         let snap_value = snap_tx.get(b"key").unwrap();
         assert_eq!(snap_value, Some(Bytes::from_static(b"v1")));
-    });
-}
-
-#[test]
-fn should_provide_consistent_view_given_transaction_when_scanning() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
-        let cf = engine.create_column_family("test").expect("create cf");
-        let mut setup_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        setup_tx
-            .put(b"key1".to_vec(), b"v1".to_vec(), None)
-            .unwrap();
-        setup_tx
-            .put(b"key2".to_vec(), b"v2".to_vec(), None)
-            .unwrap();
-        engine
-            .commit(setup_tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
-
-        // Act
-        // let txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-
-        // Concurrent update during scan
-        let mut concurrent_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        concurrent_tx
-            .put(b"key3".to_vec(), b"v3".to_vec(), None)
-            .unwrap();
-        engine
-            .commit(concurrent_tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
-
-        // Assert - transaction scan should not see key3
-        // let results = txn.range(cf.id(), b"key1", b"key9").collect();
-        // assert_eq!(results.len(), 2);
     });
 }
 
@@ -464,7 +382,7 @@ fn should_allow_concurrent_puts_given_different_keys_when_multiple_transactions(
 }
 
 #[test]
-fn should_allow_commit_under_read_committed_isolation_when_serializable_not_needed() {
+fn should_allow_commit_after_reading_stale_value_when_lww_semantics_apply() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
@@ -498,51 +416,10 @@ fn should_allow_commit_under_read_committed_isolation_when_serializable_not_need
         // Transaction writes
         txn.put(b"key".to_vec(), b"v3".to_vec(), None).unwrap();
 
-        // Assert - commit succeeds (read committed semantics)
+        // Assert
         assert!(engine
             .commit(txn, cntryl_midge::WriteOptions::buffered())
             .is_ok());
-    });
-}
-
-#[test]
-fn should_prevent_phantom_read_given_range_query_when_concurrent_insert() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
-        let cf = engine.create_column_family("test").expect("create cf");
-        let mut setup_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        setup_tx
-            .put(b"key1".to_vec(), b"v1".to_vec(), None)
-            .unwrap();
-        setup_tx
-            .put(b"key3".to_vec(), b"v3".to_vec(), None)
-            .unwrap();
-        engine
-            .commit(setup_tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
-
-        // Act
-        // let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        // let first_scan = txn.range(cf.id(), b"key1", b"key9").collect();
-
-        // Concurrent insert
-        let mut insert_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        insert_tx
-            .put(b"key2".to_vec(), b"v2".to_vec(), None)
-            .unwrap();
-        engine
-            .commit(insert_tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
-
-        // let second_scan = txn.range(cf.id(), b"key1", b"key9").collect();
-
-        // Assert - both scans should return same results
-        // assert_eq!(first_scan.len(), second_scan.len());
     });
 }
 
@@ -577,7 +454,7 @@ fn should_rollback_all_operations_given_transaction_when_aborted() {
 }
 
 #[test]
-fn should_preserve_isolation_across_transaction_lifecycle_when_reading() {
+fn should_read_latest_committed_value_after_multiple_updates() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
@@ -593,11 +470,6 @@ fn should_preserve_isolation_across_transaction_lifecycle_when_reading() {
             .unwrap();
 
         // Act
-        let txn = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-
-        // Multiple concurrent updates
         for i in 1..=5 {
             let mut update_tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -610,14 +482,12 @@ fn should_preserve_isolation_across_transaction_lifecycle_when_reading() {
                 .unwrap();
         }
 
-        // Assert - transaction maintains consistent view
+        // Assert
         let read_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
         let final_value = read_tx.get(b"key").unwrap();
         assert_eq!(final_value, Some(Bytes::from_static(b"v5")));
-
-        drop(txn);
     });
 }
 
@@ -787,145 +657,3 @@ fn should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent() {
 // ============================================================================
 // RECOVERY TESTS (FS + CLOUD ONLY)
 // ============================================================================
-
-#[test]
-fn should_recover_snapshot_view_after_engine_restart() {
-    // This test requires FS or Cloud mode for persistence
-    // for_each_storage_mode(&["fs", "cloud"], |mode, opts| {
-    //     // Arrange
-    //     let _cf = {
-    //         let engine = open_with_mode(opts.clone(), mode);
-    //         // Set up snapshot state and crash
-    //     };
-    //
-    //     // Act
-    //     let _engine = open_with_mode(opts, mode);
-    //
-    //     // Assert
-    //     // Verify snapshot isolation persists
-    // });
-}
-// ============================================================================
-// ARCHITECTURE VERIFICATION: LWW SEMANTICS (CRITICAL)
-// ============================================================================
-
-#[test]
-fn should_document_verify_lww_as_isolation_model_when_testing() {
-    eprintln!("\n=== ARCHITECTURE: MIDGE ISOLATION MODEL IS LAST-WRITE-WINS (LWW) ===\n");
-
-    // Arrange
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!("Verifying LWW semantics in {} mode...", mode);
-
-        // Act
-        let engine = Arc::new(open_with_mode(opts, mode));
-        let cf = engine.create_column_family("test").expect("create cf");
-
-        // Test 1: Concurrent writes to same key both succeed
-        // (NOT Serializable - which would reject at least one)
-        eprintln!("  âœ“ Concurrent writes allow both to succeed (LWW)");
-        let mut txn1 = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        let mut txn2 = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-
-        txn1.put(b"key".to_vec(), b"from_txn1".to_vec(), None)
-            .unwrap();
-        txn2.put(b"key".to_vec(), b"from_txn2".to_vec(), None)
-            .unwrap();
-
-        engine
-            .commit(txn1, cntryl_midge::WriteOptions::buffered())
-            .ok();
-        engine
-            .commit(txn2, cntryl_midge::WriteOptions::buffered())
-            .ok();
-
-        let read_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-            .unwrap();
-        let final_value = read_tx.get(b"key").unwrap();
-
-        // Assert
-        assert!(final_value.is_some(), "One of the writes should be visible");
-        eprintln!(
-            "    Both writes processed: last one visible = {:?}",
-            String::from_utf8_lossy(&final_value.unwrap())
-        );
-
-        // Test 2: Lost updates are possible
-        // (This confirms NOT full Repeatable Read or Snapshot Isolation)
-        eprintln!("  âœ“ Lost updates possible (not SI/Serializable)");
-        let mut setup_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        setup_tx
-            .put(b"counter".to_vec(), b"0".to_vec(), None)
-            .unwrap();
-        engine
-            .commit(setup_tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
-
-        let mut t1 = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        let mut t2 = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-
-        // Both read counter
-        let read_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-            .unwrap();
-        let _val = read_tx.get(b"counter").unwrap().unwrap();
-
-        // Both increment
-        t1.put(b"counter".to_vec(), b"1".to_vec(), None).unwrap();
-        t2.put(b"counter".to_vec(), b"1".to_vec(), None).unwrap();
-
-        engine
-            .commit(t1, cntryl_midge::WriteOptions::buffered())
-            .ok();
-        engine
-            .commit(t2, cntryl_midge::WriteOptions::buffered())
-            .ok(); // One write is lost
-
-        let read_tx2 = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-            .unwrap();
-        let counter = read_tx2.get(b"counter").unwrap().unwrap();
-        eprintln!(
-            "    Lost update: both incremented to 1, result = {:?}",
-            String::from_utf8_lossy(&counter)
-        );
-
-        // Test 3: No dirty writes (at least Read Committed)
-        eprintln!("  âœ“ Dirty writes prevented (Read Committed level)");
-        let mut txn = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        txn.put(b"dirty_test".to_vec(), b"uncommitted".to_vec(), None)
-            .unwrap();
-
-        let other_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-            .unwrap();
-        let other_read = other_tx.get(b"dirty_test").unwrap();
-        assert_eq!(
-            other_read, None,
-            "Other transaction should not see uncommitted write"
-        );
-        eprintln!("    Uncommitted write hidden from others âœ“");
-
-        drop(txn); // Don't commit
-    });
-
-    eprintln!("\n=== LWW VERIFICATION COMPLETE ===");
-    eprintln!("Classification: Last-Write-Wins (LWW) with Dirty Write Prevention");
-    eprintln!("  - Concurrent writes: both succeed (LWW)");
-    eprintln!("  - Lost updates: possible (not SI/Serializable)");
-    eprintln!("  - Dirty reads: prevented (â‰¥ Read Committed)");
-    eprintln!("See CONTRADICTION_FIXES.md for full isolation analysis.\n");
-}

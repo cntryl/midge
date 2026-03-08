@@ -1,226 +1,146 @@
-//! Memory Spill Audit
+//! Large-transaction behavior under low configured memory budgets.
 //!
-//! Purpose: Verify that transaction spill actually works when memory limit exceeded
-//! and determine if there are any contradictions in spill behavior documentation
+//! These tests verify externally visible behavior: large transactions commit
+//! successfully and their data remains readable. They do not claim direct
+//! visibility into whether spill-to-disk occurred internally.
 
+use bytes::Bytes;
 use cntryl_midge::testkit::*;
 use cntryl_midge::{TransactionMode, WriteOptions};
 
 #[test]
-fn should_commit_large_transaction_when_memory_limit_exceeded() {
-    eprintln!("\n=== AUDIT: MEMORY SPILL BEHAVIOR ===");
-
+fn should_commit_large_transaction_above_configured_memory_budget() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Use disk-based mode to see spill files
-        let opts = opts.memory_budget(128 * 1024); // 128KB to force spill
-
-        let engine = open_with_mode(opts, mode);
+        // Arrange
+        let engine = open_with_mode(opts.memory_budget(128 * 1024), mode);
         let cf = engine.create_column_family("test").expect("create cf");
-        let cf_id = cf.id();
 
-        eprintln!("Memory budget set to 128KB (mode: {})", mode);
-
-        // Try to write data exceeding memory limit
-        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-        let mut total_bytes = 0;
-
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin large transaction");
         for i in 0..500 {
             let key = format!("large_key_{:05}", i);
-            let value = vec![65u8; 1024]; // 1KB value per key
-
-            tx.put(key.as_bytes().to_vec(), value, None)
-                .expect("put in transaction");
-
-            total_bytes += key.len() + 1024;
+            tx.put(key.as_bytes().to_vec(), vec![65u8; 1024], None)
+                .expect("put large value");
         }
 
-        eprintln!(
-            "Writing {} bytes total (500 keys x 1KB values)",
-            total_bytes
+        // Act
+        engine
+            .commit(tx, WriteOptions::buffered())
+            .expect("commit large transaction");
+
+        // Assert
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin verification transaction");
+        assert_eq!(
+            tx.get(b"large_key_00000").expect("read first key"),
+            Some(Bytes::from(vec![65u8; 1024]))
         );
-        eprintln!("Memory budget is 128KB, so spill should trigger at ~128KB");
-
-        // Commit the transaction
-        let commit_result = engine.commit(tx, WriteOptions::buffered());
-        eprintln!("Commit result: {:?}", commit_result);
-
-        match commit_result {
-            Ok(_) => {
-                eprintln!("âœ“ Transaction committed successfully despite exceeding memory budget");
-
-                // Verify some data is actually present
-                let check_key = "large_key_00000";
-                let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-                let value = tx.get(check_key.as_bytes()).expect("get");
-                match value {
-                    Some(v) => {
-                        eprintln!(
-                            "âœ“ Data persisted: retrieved {} bytes for {}",
-                            v.len(),
-                            check_key
-                        );
-                    }
-                    None => {
-                        eprintln!("âœ— Data NOT persisted - key not found");
-                    }
-                }
-
-                eprintln!("Conclusion: Memory spill appears to be working - large transaction committed successfully");
-            }
-            Err(e) => {
-                eprintln!("âœ— Transaction failed to commit: {:?}", e);
-                eprintln!(
-                    "Conclusion: Spill may NOT be working - transaction exceeded memory and failed"
-                );
-            }
-        }
+        assert_eq!(
+            tx.get(b"large_key_00499").expect("read last key"),
+            Some(Bytes::from(vec![65u8; 1024]))
+        );
+        assert_eq!(
+            tx.get(b"large_key_00250").expect("read middle key"),
+            Some(Bytes::from(vec![65u8; 1024]))
+        );
     });
 }
 
 #[test]
-fn should_respect_memory_budget_across_transactions() {
-    eprintln!("\n=== AUDIT: MEMORY BUDGET ENFORCEMENT ===");
-
+fn should_preserve_values_from_two_large_transactions_within_configured_budget() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        let opts = opts.memory_budget(256 * 1024); // 256KB
-
-        let engine = open_with_mode(opts, mode);
+        // Arrange
+        let engine = open_with_mode(opts.memory_budget(256 * 1024), mode);
         let cf = engine.create_column_family("test").expect("create cf");
-        let cf_id = cf.id();
 
-        eprintln!("Memory budget: 256KB (mode: {})", mode);
-
-        // Write transaction 1: 128KB
-        let mut tx1 = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+        let mut tx1 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin first transaction");
         for i in 0..128 {
             let key = format!("batch1_key_{:03}", i);
-            let value = vec![65u8; 1024]; // 1KB per key
-            tx1.put(key.as_bytes().to_vec(), value, None)
-                .expect("put in tx1");
+            tx1.put(key.as_bytes().to_vec(), vec![65u8; 1024], None)
+                .expect("put batch1 value");
         }
-        eprintln!("TX1: Writing 128KB of data");
+        engine
+            .commit(tx1, WriteOptions::buffered())
+            .expect("commit first transaction");
 
-        let result1 = engine.commit(tx1, WriteOptions::buffered());
-        eprintln!("TX1 result: {:?}", result1);
-
-        // Write transaction 2: another 128KB (total would be 256KB, within budget)
-        let mut tx2 = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+        let mut tx2 = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin second transaction");
         for i in 0..128 {
             let key = format!("batch2_key_{:03}", i);
-            let value = vec![66u8; 1024]; // 1KB per key
-            tx2.put(key.as_bytes().to_vec(), value, None)
-                .expect("put in tx2");
+            tx2.put(key.as_bytes().to_vec(), vec![66u8; 1024], None)
+                .expect("put batch2 value");
         }
-        eprintln!("TX2: Writing another 128KB of data");
 
-        let result2 = engine.commit(tx2, WriteOptions::buffered());
-        eprintln!("TX2 result: {:?}", result2);
+        // Act
+        engine
+            .commit(tx2, WriteOptions::buffered())
+            .expect("commit second transaction");
 
-        match (result1, result2) {
-            (Ok(_), Ok(_)) => {
-                eprintln!("âœ“ Both transactions committed within budget");
-
-                // Verify data from both
-                let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-                let val1 = tx.get(b"batch1_key_000").expect("get").is_some();
-                let val2 = tx.get(b"batch2_key_000").expect("get").is_some();
-
-                if val1 && val2 {
-                    eprintln!(
-                        "âœ“ Data from both transactions persisted - memory budgeting working"
-                    );
-                } else {
-                    eprintln!("âœ— Some data missing - memory budgeting may have issues");
-                }
-            }
-            _ => {
-                eprintln!("âœ— One or more transactions failed");
-            }
-        }
+        // Assert
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin verification transaction");
+        assert_eq!(
+            tx.get(b"batch1_key_000").expect("read first batch key"),
+            Some(Bytes::from(vec![65u8; 1024]))
+        );
+        assert_eq!(
+            tx.get(b"batch2_key_000").expect("read second batch key"),
+            Some(Bytes::from(vec![66u8; 1024]))
+        );
+        assert_eq!(
+            tx.get(b"batch1_key_127").expect("read last batch1 key"),
+            Some(Bytes::from(vec![65u8; 1024]))
+        );
+        assert_eq!(
+            tx.get(b"batch2_key_127").expect("read last batch2 key"),
+            Some(Bytes::from(vec![66u8; 1024]))
+        );
     });
 }
 
 #[test]
-fn should_handle_transaction_spill_to_disk_correctly() {
-    eprintln!("\n=== AUDIT: SPILL TO DISK MECHANISM ===");
-
+fn should_preserve_sample_keys_after_committing_large_low_budget_transaction() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        let opts = opts.memory_budget(64 * 1024); // Very small: 64KB to force spill quickly
-
-        let engine = open_with_mode(opts, mode);
+        // Arrange
+        let engine = open_with_mode(opts.memory_budget(64 * 1024), mode);
         let cf = engine.create_column_family("test").expect("create cf");
-        let cf_id = cf.id();
 
-        eprintln!(
-            "Memory budget: 64KB (very small to force spill) - mode: {}",
-            mode
-        );
-        eprintln!("Sync writes: enabled");
-
-        // Single transaction with data > 64KB
-        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-
-        eprintln!("Writing 200 keys x 512 bytes = 100KB (exceeds 64KB budget)");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin low-budget transaction");
         for i in 0..200 {
             let key = format!("spilltest_key_{:04}", i);
-            let value = vec![88u8; 512]; // 512 bytes per key
-            tx.put(key.as_bytes().to_vec(), value, None).expect("put");
+            tx.put(key.as_bytes().to_vec(), vec![88u8; 512], None)
+                .expect("put low-budget value");
         }
 
-        let commit_result = engine.commit(tx, WriteOptions::buffered());
+        // Act
+        engine
+            .commit(tx, WriteOptions::buffered())
+            .expect("commit low-budget transaction");
 
-        match commit_result {
-            Ok(_) => {
-                eprintln!(
-                    "âœ“ Large transaction (100KB) committed successfully with 64KB memory budget"
-                );
-                eprintln!("Conclusion: SPILL IS WORKING - data exceeded memory and was persisted");
-
-                // Sample check: verify some keys exist
-                let sample_checks = [
-                    "spilltest_key_0000",
-                    "spilltest_key_0100",
-                    "spilltest_key_0199",
-                ];
-                let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-                let all_present = sample_checks
-                    .iter()
-                    .all(|key| tx.get(key.as_bytes()).expect("get").is_some());
-
-                if all_present {
-                    eprintln!("âœ“ Spilled data verified: sample keys are accessible");
-                }
-            }
-            Err(e) => {
-                eprintln!("âœ— Transaction failed: {:?}", e);
-                eprintln!("Conclusion: SPILL MAY NOT BE WORKING - verify implementation");
-            }
+        // Assert
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin verification transaction");
+        for key in [
+            b"spilltest_key_0000".as_slice(),
+            b"spilltest_key_0100".as_slice(),
+            b"spilltest_key_0199".as_slice(),
+        ] {
+            assert_eq!(
+                tx.get(key).expect("read sample low-budget key"),
+                Some(Bytes::from(vec![88u8; 512])),
+                "mode: {} key: {}",
+                mode,
+                String::from_utf8_lossy(key)
+            );
         }
     });
-}
-
-#[test]
-fn summary_memory_spill_status() {
-    eprintln!("\nâ•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—");
-    eprintln!("â•‘  MEMORY SPILL CONTRADICTION AUDIT SUMMARY              â•‘");
-    eprintln!("â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
-    eprintln!();
-    eprintln!("QUESTION:");
-    eprintln!("  Does Midge support transaction spill to disk when");
-    eprintln!("  memory budget is exceeded?");
-    eprintln!();
-    eprintln!("FINDINGS:");
-    eprintln!("  â€¢ transaction_spill.rs tests: Assume spill works");
-    eprintln!("  â€¢ Tests use memory_budget() and expect all data to persist");
-    eprintln!("  â€¢ See tests above for actual spill behavior verification");
-    eprintln!();
-    eprintln!("EXPECTED BEHAVIOR:");
-    eprintln!("  If spill is implemented:");
-    eprintln!("    - Transactions exceeding memory_budget() should succeed");
-    eprintln!("    - Data written to disk, then loaded from disk on commit");
-    eprintln!("    - All keys should be queryable after commit");
-    eprintln!();
-    eprintln!("CONTRADICTION RESOLVED:");
-    eprintln!("  If spill tests all pass â†’ spill IS implemented");
-    eprintln!("  If spill tests fail â†’ feature is NOT implemented, tests are aspirational");
 }

@@ -1,135 +1,129 @@
-//! Integration test for hot SST tracking
+//! Read-path behavior across multiple flushed SST generations.
 //!
-//! Validates that frequently accessed SSTs are tracked correctly
-//! for read-aware compaction prioritization.
+//! The engine does not currently expose hot-SST counters through a public test
+//! API, so these tests verify only the externally observable read behavior that
+//! exercises those code paths.
 
+use bytes::Bytes;
 use cntryl_midge::testkit::{open_with_mode, opts_for_mode};
 use cntryl_midge::MidgeResult;
 use cntryl_midge::{TransactionMode, WriteOptions};
 
 #[test]
-fn should_track_read_counts_per_sst_when_accessed() -> MidgeResult<()> {
-    // Arrange: Create engine with multiple SSTs
+fn should_preserve_reads_from_both_flushed_batches_after_repeated_access() -> MidgeResult<()> {
+    // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
-    // Write batch 1 - will become SST 1
     for i in 0..10 {
         let key = format!("batch1_key{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value1".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::best_effort())?; // Fast setup
+        engine.commit(tx, WriteOptions::best_effort())?;
     }
     engine.flush_cf(&cf)?;
-    std::thread::sleep(std::time::Duration::from_millis(100));
 
-    // Write batch 2 - will become SST 2
     for i in 0..10 {
         let key = format!("batch2_key{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value2".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::best_effort())?; // Fast setup
+        engine.commit(tx, WriteOptions::best_effort())?;
     }
     engine.flush_cf(&cf)?;
-    std::thread::sleep(std::time::Duration::from_millis(100));
 
-    // Act: Read from batch1 multiple times (hot SST)
+    // Act
     for _ in 0..5 {
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-        let _ = read_tx.get(b"batch1_key000")?;
+        assert_eq!(
+            read_tx.get(b"batch1_key000")?,
+            Some(Bytes::from_static(b"value1"))
+        );
     }
-
-    // Read from batch2 once (cold SST)
     let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-    let _ = read_tx.get(b"batch2_key000")?;
 
-    // Assert: batch1 SST should have higher read count
-    // (We can't directly access read counts yet, but this validates the code path)
-    println!("Hot SST tracking completed successfully");
-
+    // Assert
+    assert_eq!(
+        read_tx.get(b"batch2_key000")?,
+        Some(Bytes::from_static(b"value2"))
+    );
     Ok(())
 }
 
 #[test]
-fn should_track_l0_reads_separately() -> MidgeResult<()> {
-    // Arrange: Create multiple L0 SSTs
+fn should_return_latest_value_for_overlapping_l0_keys_after_flushes() -> MidgeResult<()> {
+    // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
-    // Create 3 L0 files with overlapping ranges
     for batch in 0..3 {
         for i in 0..5 {
-            let key = format!("key{:03}", i); // Same key range, overlapping
+            let key = format!("key{:03}", i);
             let value = format!("value_batch{}", batch);
             let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)?;
-            engine.commit(tx, WriteOptions::best_effort())?; // Fast setup
+            engine.commit(tx, WriteOptions::best_effort())?;
         }
         engine.flush_cf(&cf)?;
-        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    // Act: Read a key that exists in all 3 L0 files
-    // Should increment read_count for multiple SSTs
+    // Act
     let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-    let _ = read_tx.get(b"key000")?;
 
-    // Assert: Multiple L0 SSTs should have been accessed
-    println!("L0 read tracking completed successfully");
-
+    // Assert
+    assert_eq!(
+        read_tx.get(b"key000")?,
+        Some(Bytes::from_static(b"value_batch2"))
+    );
+    assert_eq!(
+        read_tx.get(b"key004")?,
+        Some(Bytes::from_static(b"value_batch2"))
+    );
     Ok(())
 }
 
 #[test]
-fn should_skip_cold_ssts_using_key_ranges() -> MidgeResult<()> {
-    // Arrange: Create SSTs with disjoint key ranges
+fn should_find_keys_in_middle_range_after_flushing_disjoint_key_ranges() -> MidgeResult<()> {
+    // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
-    // SST 1: keys [a000-a999]
     for i in 0..10 {
         let key = format!("a{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value_a".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::best_effort())?; // Fast setup
+        engine.commit(tx, WriteOptions::best_effort())?;
     }
     engine.flush_cf(&cf)?;
-    std::thread::sleep(std::time::Duration::from_millis(50));
 
-    // SST 2: keys [b000-b999]
     for i in 0..10 {
         let key = format!("b{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value_b".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::best_effort())?; // Fast setup
+        engine.commit(tx, WriteOptions::best_effort())?;
     }
     engine.flush_cf(&cf)?;
-    std::thread::sleep(std::time::Duration::from_millis(50));
 
-    // SST 3: keys [c000-c999]
     for i in 0..10 {
         let key = format!("c{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value_c".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::best_effort())?; // Fast setup
+        engine.commit(tx, WriteOptions::best_effort())?;
     }
     engine.flush_cf(&cf)?;
-    std::thread::sleep(std::time::Duration::from_millis(100));
 
-    // Act: Read from middle range (only SST 2 should be accessed)
+    // Act
     let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-    let _ = read_tx.get(b"b005")?;
 
-    // Assert: Only relevant SST should have read count incremented
-    // (SST 1 and 3 should remain cold due to key range filtering)
-    println!("Key range filtering for cold SSTs completed successfully");
-
+    // Assert
+    assert_eq!(read_tx.get(b"b005")?, Some(Bytes::from_static(b"value_b")));
+    assert_eq!(read_tx.get(b"a005")?, Some(Bytes::from_static(b"value_a")));
+    assert_eq!(read_tx.get(b"c005")?, Some(Bytes::from_static(b"value_c")));
     Ok(())
 }
 
 #[test]
-fn should_accumulate_reads_over_time() -> MidgeResult<()> {
-    // Arrange: Create SST
+fn should_preserve_readability_after_mixed_access_pattern() -> MidgeResult<()> {
+    // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
@@ -137,34 +131,33 @@ fn should_accumulate_reads_over_time() -> MidgeResult<()> {
         let key = format!("key{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::best_effort())?; // Fast setup
+        engine.commit(tx, WriteOptions::best_effort())?;
     }
     engine.flush_cf(&cf)?;
-    std::thread::sleep(std::time::Duration::from_millis(100));
 
-    // Act: Simulate workload with different access patterns
-    // Hot key (read 10 times)
+    // Act
     for _ in 0..10 {
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-        let _ = read_tx.get(b"key000")?;
+        assert_eq!(
+            read_tx.get(b"key000")?,
+            Some(Bytes::from_static(b"test_value"))
+        );
     }
-
-    // Warm key (read 3 times)
     for _ in 0..3 {
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-        let _ = read_tx.get(b"key010")?;
+        assert_eq!(
+            read_tx.get(b"key010")?,
+            Some(Bytes::from_static(b"test_value"))
+        );
     }
-
-    // Cold key (read once)
     let read_tx1 = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-    let _ = read_tx1.get(b"key019")?;
-
-    // Missing key (should still increment SST read count due to bloom check)
     let read_tx2 = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-    let _ = read_tx2.get(b"missing_key")?;
 
-    // Assert: SST should accumulate all reads (10 + 3 + 1 + 1 = 15 accesses)
-    println!("Accumulated read tracking completed successfully");
-
+    // Assert
+    assert_eq!(
+        read_tx1.get(b"key019")?,
+        Some(Bytes::from_static(b"test_value"))
+    );
+    assert_eq!(read_tx2.get(b"missing_key")?, None);
     Ok(())
 }

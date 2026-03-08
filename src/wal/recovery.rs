@@ -1159,13 +1159,8 @@ mod tests {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
             let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
 
-            let mut begin_record = WalRecord::new(
-                WalOpKind::TxnBegin,
-                Bytes::from_static(b"txn"),
-                None,
-                1,
-                1,
-            );
+            let mut begin_record =
+                WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 1, 1);
             begin_record.txn_id = Some(42);
             writer.append_record(&begin_record).unwrap();
 
@@ -1189,7 +1184,7 @@ mod tests {
         // Assert
         assert_eq!(stats.record_count, 2);
         assert!(
-            memtables.get(&0).is_none(),
+            !memtables.contains_key(&0),
             "incomplete transactions must not materialize a recovered memtable entry"
         );
     }

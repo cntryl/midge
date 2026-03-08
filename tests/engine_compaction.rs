@@ -36,8 +36,7 @@ fn should_preserve_snapshot_reads_when_flushing_while_snapshot_is_open() {
         .expect("begin snapshot tx");
 
     // Act
-    engine.flush_cf(&cf)
-        .expect("flush while snapshot is open");
+    engine.flush_cf(&cf).expect("flush while snapshot is open");
 
     // Assert
     let snap_val = snapshot

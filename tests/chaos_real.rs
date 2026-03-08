@@ -8,8 +8,8 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use bytes::Bytes;
-use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 use cntryl_midge::wal::{self, WalOpKind, WalRecord};
+use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
@@ -94,7 +94,10 @@ fn should_recover_sync_commits_when_crashing_after_sst_write_before_manifest_pub
     let committed = act_flush_crash_before_publish(db_path);
 
     // Assert
-    assert!(!committed.is_empty(), "child did not persist tracked commits");
+    assert!(
+        !committed.is_empty(),
+        "child did not persist tracked commits"
+    );
     let engine = open_local_engine(db_path);
     assert_committed_records_visible(&engine, &committed);
 }
@@ -196,7 +199,8 @@ fn should_recover_all_sync_commits_when_manifest_file_is_zeroed_after_crash() {
 }
 
 #[test]
-fn should_expose_only_successful_commits_when_random_wal_append_crash_interrupts_concurrent_buffered_writes() {
+fn should_expose_only_successful_commits_when_random_wal_append_crash_interrupts_concurrent_buffered_writes(
+) {
     // WHAT THIS TEST DOES:
     // Runs four child threads that each attempt one hundred buffered commits under a start barrier,
     // with a real failpoint aborting the process at a random WAL append count.
@@ -214,7 +218,10 @@ fn should_expose_only_successful_commits_when_random_wal_append_crash_interrupts
     let committed = act_concurrent_random_wal_append_crash(db_path);
 
     // Assert
-    assert!(!committed.is_empty(), "expected at least one successful commit before crash");
+    assert!(
+        !committed.is_empty(),
+        "expected at least one successful commit before crash"
+    );
     let engine = open_local_engine(db_path);
     let default_cf = default_cf(&engine);
     for thread_id in 0..4 {
@@ -313,7 +320,10 @@ fn act_manifest_crash_with_zeroed_manifest(db_path: &Path) -> Vec<CommitRecord> 
     expire_crashed_process_lease(db_path);
 
     let manifest_path = manifest_path(db_path);
-    assert!(manifest_path.exists(), "manifest file should exist before corruption");
+    assert!(
+        manifest_path.exists(),
+        "manifest file should exist before corruption"
+    );
     zero_file(&manifest_path);
 
     read_committed_records(db_path)
@@ -368,7 +378,9 @@ fn child_flush_after_sst_write(db_path: &Path) {
         );
     }
 
-    engine.flush_cf(&default_cf).expect("flush should reach failpoint");
+    engine
+        .flush_cf(&default_cf)
+        .expect("flush should reach failpoint");
 }
 
 fn child_manifest_crash_after_sync(db_path: &Path) {
@@ -467,7 +479,8 @@ fn put_and_track_commit(
     let mut tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadWrite)
         .expect("begin write tx");
-    tx.put(key.to_vec(), value.to_vec(), None).expect("put value");
+    tx.put(key.to_vec(), value.to_vec(), None)
+        .expect("put value");
     engine.commit(tx, opts).expect("commit value");
     append_commit_record(committed_path, key, value);
 }

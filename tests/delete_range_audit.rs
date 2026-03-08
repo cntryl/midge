@@ -1,152 +1,99 @@
-﻿//! Delete Range Limitation Audit
+//! Delete-range correctness checks.
 //!
-//! Purpose: Verify the documented limitation that range() is stubbed
-//! and determine if delete_range() actually works despite this
+//! These tests verify actual delete-range and scan behavior rather than
+//! printing manual audit output.
 
+use bytes::Bytes;
 use cntryl_midge::testkit::*;
+use cntryl_midge::Query;
 
 #[test]
-fn should_verify_delete_range_works_despite_range_being_stubbed() {
-    eprintln!("\n=== AUDIT: DELETE_RANGE LIMITATION ===");
-
+fn should_delete_only_keys_within_requested_range_when_delete_range_commits() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
-        eprintln!("Testing delete_range in mode: {}", mode);
-
-        // Set up test data
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
+            .expect("begin seed transaction");
         for i in 1..=10 {
             let key = format!("key{:02}", i);
-            let val = format!("val{:02}", i);
-            tx.put(key.into_bytes(), val.into_bytes(), None).unwrap();
+            let value = format!("val{:02}", i);
+            tx.put(key.into_bytes(), value.into_bytes(), None)
+                .expect("seed key");
         }
         engine
             .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+            .expect("commit seed transaction");
 
-        eprintln!("  Inserted 10 keys: key01..key10");
-
-        // Test 1: Delete a range [key02, key08) (should delete key02-key07)
+        // Act
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
+            .expect("begin delete_range transaction");
         tx.delete_range(b"key02".to_vec(), b"key08".to_vec())
-            .unwrap();
+            .expect("delete range");
         engine
             .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
-        eprintln!("  Called delete_range(key02, key08)");
+            .expect("commit delete_range transaction");
 
-        // Check what was actually deleted
-        let mut deleted_count = 0;
-        let mut retained_count = 0;
-
+        // Assert
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-            .unwrap();
+            .expect("begin read transaction");
         for i in 1..=10 {
             let key = format!("key{:02}", i);
-            let exists = tx.get(key.as_bytes()).unwrap().is_some();
-
+            let value = tx.get(key.as_bytes()).expect("read key after delete_range");
             if (2..8).contains(&i) {
-                if !exists {
-                    deleted_count += 1;
-                    eprintln!("    âœ“ {} deleted (in range)", key);
-                } else {
-                    eprintln!("    âœ— {} retained (should be deleted!)", key);
-                }
-            } else if exists {
-                retained_count += 1;
-                eprintln!("    âœ“ {} retained (outside range)", key);
+                assert_eq!(value, None, "mode: {} key: {}", mode, key);
             } else {
-                eprintln!("    âœ— {} deleted (should be retained!)", key);
+                let expected = format!("val{:02}", i);
+                assert_eq!(
+                    value,
+                    Some(Bytes::copy_from_slice(expected.as_bytes())),
+                    "mode: {} key: {}",
+                    mode,
+                    key
+                );
             }
-        }
-
-        eprintln!(
-            "  Result: {} deleted, {} retained",
-            deleted_count, retained_count
-        );
-
-        if deleted_count > 0 {
-            eprintln!("âœ“ DELETE_RANGE IS WORKING despite documented range() limitation");
-            eprintln!("  Actual behavior: Successfully deleted keys in specified range");
-        } else if deleted_count == 0 && deleted_count + retained_count == 10 {
-            eprintln!("âœ— DELETE_RANGE NOT WORKING");
-            eprintln!("  All keys retained - delete_range may be using stubbed range()");
         }
     });
 }
 
 #[test]
-fn should_test_range_method_directly_if_available() {
-    eprintln!("\n=== AUDIT: RANGE METHOD STATUS ===");
-
+fn should_return_all_inserted_keys_when_scanning_unbounded_query() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
-        eprintln!("Testing range() method in mode: {}", mode);
-
-        // Insert test data
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        tx.put(b"a".to_vec(), b"val_a".to_vec(), None).unwrap();
-        tx.put(b"b".to_vec(), b"val_b".to_vec(), None).unwrap();
-        tx.put(b"c".to_vec(), b"val_c".to_vec(), None).unwrap();
-        tx.put(b"d".to_vec(), b"val_d".to_vec(), None).unwrap();
+            .expect("begin seed transaction");
+        for key in [b"a", b"b", b"c", b"d"] {
+            tx.put(
+                key.to_vec(),
+                [b'v', b'a', b'l', b'_', key[0]].to_vec(),
+                None,
+            )
+            .expect("seed scan key");
+        }
         engine
             .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+            .expect("commit seed transaction");
 
-        // Try to call range() - if it exists and is not stubbed, this will return keys
-        let query = cntryl_midge::Query::new();
+        // Act
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-            .unwrap();
-        let mut iter = tx.scan(&query).unwrap();
+            .expect("begin scan transaction");
+        let mut iter = tx.scan(&Query::new()).expect("scan all keys");
         let results: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
 
-        eprintln!("  scan() returned {} results", results.len());
-
-        if results.is_empty() {
-            eprintln!("âœ— RANGE/SCAN returning empty - likely stubbed");
-        } else {
-            eprintln!("âœ“ RANGE/SCAN working - returned {} keys", results.len());
-            for (k, _v) in &results {
-                eprintln!("    Key: {}", String::from_utf8_lossy(k));
-            }
-        }
+        // Assert
+        assert_eq!(results.len(), 4, "mode: {}", mode);
+        assert_eq!(results[0].0, Bytes::from_static(b"a"));
+        assert_eq!(results[1].0, Bytes::from_static(b"b"));
+        assert_eq!(results[2].0, Bytes::from_static(b"c"));
+        assert_eq!(results[3].0, Bytes::from_static(b"d"));
     });
-}
-
-#[test]
-fn summary_delete_range_limitation() {
-    eprintln!("\nâ•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—");
-    eprintln!("â•‘  DELETE RANGE CONTRADICTION AUDIT SUMMARY              â•‘");
-    eprintln!("â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
-    eprintln!();
-    eprintln!("QUESTION:");
-    eprintln!("  Does delete_range() work, or is it limited by range() being stubbed?");
-    eprintln!();
-    eprintln!("FINDING FROM COMMENTS:");
-    eprintln!("  File: engine_delete_range.rs contains:");
-    eprintln!("    'Delete range is implemented by calling range() to find keys,");
-    eprintln!("     then deleting each one individually. The range() method is");
-    eprintln!("     currently a stub returning empty.'");
-    eprintln!();
-    eprintln!("IMPLICATIONS:");
-    eprintln!("  If range() is stubbed â†’ delete_range() cannot find keys â†’ won't delete");
-    eprintln!("  If delete_range() works anyway â†’ either:");
-    eprintln!("    A) Implementation doesn't use range() for delete_range");
-    eprintln!("    B) Implementation has been updated since documentation");
-    eprintln!();
-    eprintln!("RESOLUTION:");
-    eprintln!("  Run tests above to verify actual delete_range() behavior");
-    eprintln!("  Compare results with documented limitation");
 }
