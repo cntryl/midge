@@ -23,11 +23,31 @@ When `Engine::open()` is called, recovery happens automatically:
 1. Acquire exclusive lease (prevents concurrent access)
 2. Load manifest (discover SST files and sequence ranges)
 3. Replay WAL (restore uncommitted writes from log)
-4. Reconcile state (merge WAL writes with SST data)
-5. Resume operations (start accepting new writes)
+4. Replay intent log (complete interrupted manifest-related transitions)
+5. Reconcile state (merge WAL writes with SST data)
+6. Resume operations (start accepting new writes)
 ```
 
 Each step is atomic and logged. If recovery fails mid-process, it can be retried from the beginning.
+
+## Recovery Observability
+
+Midge exposes startup recovery counters through `Engine::get_recovery_metrics()`:
+
+- `wal_recovery_records_replayed`
+- `wal_recovery_bytes_replayed`
+- `intent_log_replay_runs`
+- `intent_log_entries_replayed`
+
+Example:
+
+```rust
+let recovery = engine.get_recovery_metrics()?;
+println!("WAL records replayed: {}", recovery.wal_recovery_records_replayed);
+println!("Intent entries replayed: {}", recovery.intent_log_entries_replayed);
+```
+
+These counters are intended for crash testing, startup diagnostics, and verifying that expected recovery paths executed.
 
 ### Recovery Time
 

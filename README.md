@@ -101,6 +101,18 @@ while let Some((k, v)) = iter.next() {
 }
 ```
 
+**Recovery metrics**
+
+```rust
+let recovery = engine.get_recovery_metrics()?;
+println!("WAL records replayed: {}", recovery.wal_recovery_records_replayed);
+println!("WAL bytes replayed: {}", recovery.wal_recovery_bytes_replayed);
+println!("Intent replay runs: {}", recovery.intent_log_replay_runs);
+println!("Intent entries replayed: {}", recovery.intent_log_entries_replayed);
+```
+
+Use these counters to confirm startup recovery behavior after crashes or unclean shutdowns.
+
 ## Documentation
 
 **[Full Documentation Hub →](docs/)**
