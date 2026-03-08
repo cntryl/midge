@@ -115,6 +115,7 @@ fn should_persist_ttl_metadata_given_restart_when_reopening() {
 #[test]
 fn should_persist_ttl_metadata_given_flush_and_restart_when_reopening() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -127,6 +128,7 @@ fn should_persist_ttl_metadata_given_flush_and_restart_when_reopening() {
             engine.flush_cf(&cf).unwrap();
         }
 
+        // Act
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine
@@ -134,6 +136,8 @@ fn should_persist_ttl_metadata_given_flush_and_restart_when_reopening() {
                 .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
             let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
             let result = read_tx.get(b"key1").unwrap();
+
+            // Assert
             assert_eq!(result, Some(Bytes::from_static(b"value1")));
         }
     });

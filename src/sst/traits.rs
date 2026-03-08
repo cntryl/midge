@@ -235,12 +235,9 @@ mod tests {
     impl SstStateReader for MockSstReader {
         fn get_state(&self, key: &[u8]) -> MidgeResult<crate::sst::types::KeyState> {
             Ok(match self.data.get(key) {
-                Some(value) => crate::sst::types::KeyState::Value(
-                    Bytes::copy_from_slice(value),
-                    0,
-                    None,
-                    0,
-                ),
+                Some(value) => {
+                    crate::sst::types::KeyState::Value(Bytes::copy_from_slice(value), 0, None, 0)
+                }
                 None => crate::sst::types::KeyState::Absent,
             })
         }
@@ -253,9 +250,7 @@ mod tests {
             Ok(self
                 .scan_range(start, end)?
                 .into_iter()
-                .map(|(key, value)| {
-                    (key, crate::sst::types::KeyState::Value(value, 0, None, 0))
-                })
+                .map(|(key, value)| (key, crate::sst::types::KeyState::Value(value, 0, None, 0)))
                 .collect())
         }
     }

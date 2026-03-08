@@ -774,6 +774,15 @@ impl RuntimeState {
             .count()
     }
 
+    /// Return the oldest active snapshot sequence, if any snapshots are pinned.
+    pub fn oldest_active_snapshot_sequence(&self) -> Option<u64> {
+        self.snapshots
+            .active_snapshots
+            .values()
+            .map(|(sequence, _created_at, _ref_count)| *sequence)
+            .min()
+    }
+
     pub fn get_cf(&self, cf_id: crate::engine::ColumnFamilyId) -> Option<&ColumnFamilyState> {
         self.column_families.get(&cf_id)
     }

@@ -185,12 +185,10 @@ impl DynSstWriter for InMemorySstWriter {
                 entry.expiration,
             );
 
-            if !current_block.is_empty() && current_block.len() + encoded.len() > target_block_size {
-                let handle = Self::append_block(
-                    &mut file_bytes,
-                    &current_block,
-                    &self.compression_policy,
-                )?;
+            if !current_block.is_empty() && current_block.len() + encoded.len() > target_block_size
+            {
+                let handle =
+                    Self::append_block(&mut file_bytes, &current_block, &self.compression_policy)?;
                 if let Some(first_key) = current_first_key.take() {
                     index_entries.push((first_key, handle));
                 }
@@ -207,7 +205,8 @@ impl DynSstWriter for InMemorySstWriter {
         }
 
         if !current_block.is_empty() {
-            let handle = Self::append_block(&mut file_bytes, &current_block, &self.compression_policy)?;
+            let handle =
+                Self::append_block(&mut file_bytes, &current_block, &self.compression_policy)?;
             if let Some(first_key) = current_first_key.take() {
                 index_entries.push((first_key, handle));
             }
@@ -235,11 +234,8 @@ impl DynSstWriter for InMemorySstWriter {
         )?;
 
         let index_bytes = Self::serialize_index(&index_entries);
-        let index_handle = Self::append_block(
-            &mut file_bytes,
-            &index_bytes,
-            &self.compression_policy,
-        )?;
+        let index_handle =
+            Self::append_block(&mut file_bytes, &index_bytes, &self.compression_policy)?;
 
         let footer = Footer::new(meta_handle, index_handle);
         file_bytes.extend_from_slice(&footer.encode());
@@ -258,10 +254,7 @@ impl SstFactory for FsSstFactoryIo {
     }
 
     /// Open an existing SST file
-    fn open(
-        &self,
-        path: &Path,
-    ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+    fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         FsSstFactoryIo::open(self, path)
     }
 }
@@ -308,7 +301,8 @@ mod tests {
     }
 
     #[test]
-    fn should_roundtrip_stateful_entries_and_range_tombstones() -> MidgeResult<()> {
+    fn should_roundtrip_stateful_entries_when_sst_contains_range_tombstones() -> MidgeResult<()> {
+        // Arrange
         let temp_dir = tempfile::tempdir()?;
         let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = FsSstFactoryIo::new(fs, 4096);
@@ -321,9 +315,11 @@ mod tests {
         writer.add_range_tombstone(b"cat", b"cow", 7)?;
         writer.finish_to_path(&path)?;
 
+        // Act
         let reader = factory.open(std::path::Path::new("stateful.sst"))?;
         let states = reader.scan_range_state(None, None)?;
 
+        // Assert
         assert_eq!(states.len(), 3);
         match &states[0].1 {
             crate::sst::types::KeyState::Value(value, seq, expiration, op_type) => {

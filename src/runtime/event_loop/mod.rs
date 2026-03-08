@@ -1093,6 +1093,7 @@ impl EventLoop {
                     target_level: plan.target_level,
                     cf_id: plan.cf_id,
                     output_seq: self.state.next_sequence(),
+                    snapshot_horizon: self.state.oldest_active_snapshot_sequence(),
                 };
 
                 let schedule_res = self.compaction_actor.run_compaction(

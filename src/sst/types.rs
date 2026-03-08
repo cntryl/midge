@@ -294,9 +294,7 @@ pub fn encode_range_tombstones(tombstones: &[RangeTombstone]) -> Vec<u8> {
     buf
 }
 
-pub fn decode_range_tombstones(
-    data: &[u8],
-) -> crate::common::MidgeResult<Vec<RangeTombstone>> {
+pub fn decode_range_tombstones(data: &[u8]) -> crate::common::MidgeResult<Vec<RangeTombstone>> {
     if data.len() < 4 {
         return Err(crate::common::MidgeError::Corruption(
             "Range tombstone block too short".into(),

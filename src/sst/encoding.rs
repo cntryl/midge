@@ -242,8 +242,7 @@ fn decode_v2<'a>(data: &'a [u8], offset: usize) -> MidgeResult<(EntryView<'a>, u
 
     let shared = u16::from_le_bytes([data[p], data[p + 1]]);
     let key_len = u16::from_le_bytes([data[p + 2], data[p + 3]]) as usize;
-    let val_len =
-        u32::from_le_bytes([data[p + 4], data[p + 5], data[p + 6], data[p + 7]]) as usize;
+    let val_len = u32::from_le_bytes([data[p + 4], data[p + 5], data[p + 6], data[p + 7]]) as usize;
     let seq = u64::from_le_bytes([
         data[p + 8],
         data[p + 9],

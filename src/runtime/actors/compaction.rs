@@ -71,7 +71,11 @@ impl CompactionActor {
 
         // Try to pick a compaction for the default column family (cf_id=0)
         let cf_id = 0u32;
-        self.compactor.pick_compaction(&state.manifest.files, cf_id)
+        let mut plan = self
+            .compactor
+            .pick_compaction(&state.manifest.files, cf_id)?;
+        plan.snapshot_horizon = state.oldest_active_snapshot_sequence();
+        Some(plan)
     }
 
     /// Execute a compaction plan

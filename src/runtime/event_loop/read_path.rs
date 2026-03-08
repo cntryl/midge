@@ -528,7 +528,8 @@ mod tests {
                     fn get_state(
                         &self,
                         key: &[u8],
-                    ) -> crate::common::MidgeResult<crate::sst::types::KeyState> {
+                    ) -> crate::common::MidgeResult<crate::sst::types::KeyState>
+                    {
                         Ok(if key == b"a" {
                             crate::sst::types::KeyState::Value(
                                 bytes::Bytes::copy_from_slice(b"va"),

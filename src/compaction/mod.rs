@@ -28,24 +28,35 @@ pub fn execute_compaction(
     // --- 1. Collect versions from all input files ---------------------------
     //
     // For now, we load versions into memory. Future: streaming merge iterator.
-    let versions = executor::collect_versions(sst_factory, &plan.input_files, abort_check)?;
+    let input = executor::collect_compaction_input(sst_factory, &plan.input_files, abort_check)?;
 
-    if versions.is_empty() {
+    if input.versions.is_empty() && input.range_tombstones.is_empty() {
         return Ok(Vec::new());
     }
 
     // --- 2. Deduplicate and keep only latest versions -----------------------
-    let deduplicated = executor::deduplicate_versions(&versions);
+    let deduplicated = executor::deduplicate_versions(&input.versions);
 
     // --- 3. Filter out tombstones for final output --------------------------
-    let final_versions = executor::filter_tombstones(&deduplicated);
+    let final_versions =
+        executor::filter_tombstones_with_horizon(&deduplicated, plan.snapshot_horizon);
+
+    if final_versions.is_empty() && input.range_tombstones.is_empty() {
+        return Ok(Vec::new());
+    }
 
     // --- 4. Prepare output file path ----------------------------------------
     let output_file = output_filename(plan, output_dir);
     let output_file_str = output_file.to_str().ok_or(MidgeError::InvalidPath)?;
 
     // --- 5. Write merged versions to SST ------------------------------------
-    executor::write_versions_to_sst(sst_factory, output_file_str, &final_versions, abort_check)?;
+    executor::write_compaction_output_to_sst(
+        sst_factory,
+        output_file_str,
+        &final_versions,
+        &input.range_tombstones,
+        abort_check,
+    )?;
 
     Ok(vec![output_file
         .file_name()
@@ -71,6 +82,8 @@ fn output_filename(plan: &CompactionPlan, cf_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sst::traits::SstFactory;
+    use tempfile::tempdir;
 
     // ============================================================================
     // Tests for output_filename invariant: stable, zero-padded naming
@@ -324,5 +337,73 @@ mod tests {
 
         // Assert
         assert_eq!(plan.output_seq, u64::MAX);
+    }
+
+    #[test]
+    fn should_preserve_range_tombstones_when_compacting_only_deletes() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+
+        let mut input_writer = factory.create()?;
+        input_writer.add_with_meta(b"alpha", None, 11, 2, None)?;
+        input_writer.add_range_tombstone(b"cat", b"cow", 7)?;
+        input_writer.finish_to_path(&temp_dir.path().join("input.sst"))?;
+
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(42);
+        plan.input_files.push("input.sst".to_string());
+
+        // Act
+        let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        assert_eq!(output_names, vec!["00000042.sst".to_string()]);
+
+        let reader = factory.open(std::path::Path::new("00000042.sst"))?;
+        let states = reader.scan_range_state(None, None)?;
+        assert!(
+            states.is_empty(),
+            "point tombstone should be dropped without snapshots"
+        );
+
+        let range_tombstones = reader.range_tombstones();
+        assert_eq!(range_tombstones.len(), 1);
+        assert_eq!(range_tombstones[0].start, b"cat".to_vec());
+        assert_eq!(range_tombstones[0].end, b"cow".to_vec());
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_preserve_recent_point_tombstones_when_snapshot_horizon_exists() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+
+        let mut input_writer = factory.create()?;
+        input_writer.add_with_meta(b"alpha", Some(b"older"), 5, 0, None)?;
+        input_writer.add_with_meta(b"alpha", None, 11, 2, None)?;
+        input_writer.finish_to_path(&temp_dir.path().join("input.sst"))?;
+
+        let mut plan = CompactionPlan::new(0, 0, 1)
+            .with_output_seq(43)
+            .with_snapshot_horizon(Some(10));
+        plan.input_files.push("input.sst".to_string());
+
+        // Act
+        let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        assert_eq!(output_names, vec!["00000043.sst".to_string()]);
+
+        let reader = factory.open(std::path::Path::new("00000043.sst"))?;
+        match reader.get_state(b"alpha")? {
+            crate::sst::types::KeyState::Tombstone(seq) => assert_eq!(seq, 11),
+            other => panic!("expected preserved tombstone, got {other:?}"),
+        }
+
+        Ok(())
     }
 }

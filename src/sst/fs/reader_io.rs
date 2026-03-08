@@ -15,8 +15,8 @@ use crate::sst::encoding;
 use crate::sst::read_amp_metrics::ReadAmpMetrics;
 use crate::sst::sparse_index::SparseIndexReader;
 use crate::sst::types::{
-    decode_range_tombstones, BlockHandle, Footer, KeyState, RangeTombstone, SstEntry,
-    SstMetadata, SST_FORMAT_V1,
+    decode_range_tombstones, BlockHandle, Footer, KeyState, RangeTombstone, SstEntry, SstMetadata,
+    SST_FORMAT_V1,
 };
 
 /// SST file reader using io::Fs abstraction
