@@ -158,6 +158,18 @@ pub enum WorkloadProfile {
     TtlHeavy,
 }
 
+/// Recovery policy for engine open.
+///
+/// `Strict` fails engine open if manifest, intent-log, or WAL recovery cannot
+/// establish a trustworthy state. `Salvage` preserves legacy best-effort
+/// behavior and may open in a degraded state after logging warnings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecoveryPolicy {
+    #[default]
+    Strict,
+    Salvage,
+}
+
 /// Database open options with smart defaults.
 ///
 /// Use the builder pattern to configure high-level knobs, and all low-level
@@ -180,6 +192,9 @@ pub struct OpenOptions {
 
     /// Workload profile hint
     pub workload: WorkloadProfile,
+
+    /// Recovery policy used during engine open.
+    pub recovery_policy: RecoveryPolicy,
 
     /// Derived memory budget in bytes (from build())
     pub(crate) derived_memory_budget: usize,
@@ -222,6 +237,7 @@ impl OpenOptions {
             goal: Goal::default(),
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
+            recovery_policy: RecoveryPolicy::default(),
             derived_memory_budget: 0,
             // Initial derived values until build() recomputes them
             block_size: 16 * 1024,
@@ -246,6 +262,7 @@ impl OpenOptions {
             goal: Goal::default(),
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
+            recovery_policy: RecoveryPolicy::default(),
             derived_memory_budget: 0,
             // Initial derived values until build() recomputes them
             block_size: 16 * 1024,
@@ -285,6 +302,7 @@ impl OpenOptions {
             goal: Goal::default(),
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
+            recovery_policy: RecoveryPolicy::default(),
             derived_memory_budget: 0,
             // Initial derived values until build() recomputes them
             block_size: 16 * 1024,
@@ -313,6 +331,12 @@ impl OpenOptions {
     /// Set workload profile hint.
     pub fn workload(mut self, profile: WorkloadProfile) -> Self {
         self.workload = profile;
+        self
+    }
+
+    /// Set recovery policy.
+    pub fn recovery_policy(mut self, policy: RecoveryPolicy) -> Self {
+        self.recovery_policy = policy;
         self
     }
 

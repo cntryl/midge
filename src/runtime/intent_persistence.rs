@@ -19,6 +19,13 @@ impl IntentPersistence {
     pub fn load_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     ) -> Result<Vec<IntentLogEntry>, String> {
+        Self::load_with_fs_and_policy(fs, crate::engine::RecoveryPolicy::Salvage)
+    }
+
+    pub fn load_with_fs_and_policy(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        recovery_policy: crate::engine::RecoveryPolicy,
+    ) -> Result<Vec<IntentLogEntry>, String> {
         use crate::io::traits::FsPath;
 
         let p = FsPath::new(Self::INTENT_FILE);
@@ -51,14 +58,37 @@ impl IntentPersistence {
         let contents =
             String::from_utf8(data.to_vec()).map_err(|e| format!("intent file not utf8: {}", e))?;
 
-        let intents: Vec<IntentLogEntry> = serde_yaml::from_str(&contents)
-            .map_err(|e| format!("failed to parse intent YAML: {}", e))?;
+        let intents: Vec<IntentLogEntry> = serde_yaml::from_str(&contents).map_err(|e| {
+            if recovery_policy == crate::engine::RecoveryPolicy::Strict {
+                format!("failed to parse intent YAML: {}", e)
+            } else {
+                format!("failed to parse intent YAML (salvage mode): {}", e)
+            }
+        })?;
 
         tracing::debug!(path = ?p, entries = intents.len(), "intent log loaded");
         Ok(intents)
     }
 
     pub fn load(db_path: &Path) -> Result<Vec<IntentLogEntry>, String> {
+        Self::load_with_policy(db_path, crate::engine::RecoveryPolicy::Salvage)
+    }
+
+    pub fn load_with_policy(
+        db_path: &Path,
+        recovery_policy: crate::engine::RecoveryPolicy,
+    ) -> Result<Vec<IntentLogEntry>, String> {
+        use crate::io::real::RealFs;
+        use std::sync::Arc;
+
+        let real =
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
+        let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
+        Self::load_with_fs_and_policy(&fs, recovery_policy)
+    }
+
+    #[allow(dead_code)]
+    fn load_legacy(db_path: &Path) -> Result<Vec<IntentLogEntry>, String> {
         let p = Self::intent_path(db_path);
         if !p.exists() {
             tracing::debug!(path = ?p, "intent file not found, using empty log");

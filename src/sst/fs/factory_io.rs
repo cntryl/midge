@@ -169,21 +169,26 @@ impl DynSstWriter for InMemorySstWriter {
         let mut previous_key = Vec::new();
 
         for entry in entries {
-            let shared_len = Self::shared_prefix_len(&previous_key, &entry.key);
-            let key_delta = &entry.key[shared_len as usize..];
-            let encoded = crate::sst::encoding::encode_v2(
-                key_delta,
-                shared_len,
-                entry.value.as_deref(),
-                entry.sequence,
-                match entry.op_type {
-                    1 => EntryType::Insert,
-                    2 => EntryType::Delete,
-                    3 => EntryType::Merge,
-                    _ => EntryType::Put,
-                },
-                entry.expiration,
-            );
+            let encode_entry = |previous_key: &[u8], entry: &PendingEntry| {
+                let shared_len = Self::shared_prefix_len(previous_key, &entry.key);
+                let key_delta = &entry.key[shared_len as usize..];
+                let encoded = crate::sst::encoding::encode_v2(
+                    key_delta,
+                    shared_len,
+                    entry.value.as_deref(),
+                    entry.sequence,
+                    match entry.op_type {
+                        1 => EntryType::Insert,
+                        2 => EntryType::Delete,
+                        3 => EntryType::Merge,
+                        _ => EntryType::Put,
+                    },
+                    entry.expiration,
+                );
+                (shared_len, encoded)
+            };
+
+            let (_shared_len, mut encoded) = encode_entry(&previous_key, &entry);
 
             if !current_block.is_empty() && current_block.len() + encoded.len() > target_block_size
             {
@@ -194,6 +199,9 @@ impl DynSstWriter for InMemorySstWriter {
                 }
                 current_block.clear();
                 previous_key.clear();
+                let (_recomputed_shared_len, recomputed_encoded) =
+                    encode_entry(&previous_key, &entry);
+                encoded = recomputed_encoded;
             }
 
             if current_first_key.is_none() {

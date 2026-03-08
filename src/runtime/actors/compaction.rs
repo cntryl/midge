@@ -224,6 +224,8 @@ impl CompactionActor {
                     request_id: next_request_id().expect("request ID in compaction worker"),
                     input_ssts: input_files,
                     output_ssts,
+                    cf_id: plan_clone.cf_id,
+                    target_level: plan_clone.target_level,
                 });
             });
 

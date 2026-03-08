@@ -160,7 +160,7 @@ pub enum IntentLogEntry {
     /// Manifest updated after compaction
     CompactionApplied {
         removed: Vec<String>,
-        added: Vec<String>,
+        added: Vec<FileMeta>,
     },
     /// WAL segment synced
     WalSynced { segment_id: u64, seqno: u64 },
@@ -200,6 +200,8 @@ pub enum RuntimeMsg {
         request_id: u64,
         input_ssts: Vec<String>,
         output_ssts: Vec<String>,
+        cf_id: crate::engine::ColumnFamilyId,
+        target_level: u32,
     },
 
     // === WAL Actor ===
@@ -339,6 +341,12 @@ pub enum RuntimeMsg {
     /// Get startup recovery metrics snapshot.
     GetRecoveryMetrics { request_id: u64 },
 
+    /// Get a stable runtime metrics snapshot for operators.
+    GetRuntimeMetrics { request_id: u64 },
+
+    /// Get a stable storage layout snapshot for operators.
+    GetStorageLayout { request_id: u64 },
+
     // === Sequencing ===
     /// Get the runtime's authoritative current sequence number.
     ///
@@ -432,6 +440,8 @@ impl RuntimeMsg {
             | RangeScan { request_id, .. }
             | GetReadAmpMetrics { request_id }
             | GetRecoveryMetrics { request_id }
+            | GetRuntimeMetrics { request_id }
+            | GetStorageLayout { request_id }
             | GetCurrentSequence { request_id }
             | CaptureReadSnapshot { request_id, .. }
             | BeginTransaction { request_id, .. }
@@ -480,6 +490,8 @@ impl RuntimeMsg {
             RangeScan { .. } => "RangeScan",
             GetReadAmpMetrics { .. } => "GetReadAmpMetrics",
             GetRecoveryMetrics { .. } => "GetRecoveryMetrics",
+            GetRuntimeMetrics { .. } => "GetRuntimeMetrics",
+            GetStorageLayout { .. } => "GetStorageLayout",
             GetCurrentSequence { .. } => "GetCurrentSequence",
             CaptureReadSnapshot { .. } => "CaptureReadSnapshot",
             BeginTransaction { .. } => "BeginTransaction",
@@ -572,6 +584,18 @@ pub enum RuntimeResponse {
         intent_log_entries_replayed: u64,
     },
 
+    /// Stable operator-facing runtime metrics snapshot.
+    RuntimeMetricsSnapshot {
+        request_id: u64,
+        snapshot: crate::engine::RuntimeMetricsSnapshot,
+    },
+
+    /// Stable operator-facing storage layout snapshot.
+    StorageLayoutSnapshot {
+        request_id: u64,
+        snapshot: crate::engine::StorageLayoutSnapshot,
+    },
+
     /// Current authoritative runtime sequence.
     CurrentSequence {
         request_id: u64,
@@ -587,7 +611,7 @@ pub enum RuntimeResponse {
     /// Combined response for BeginTransaction: sequence + snapshot in one round-trip.
     BeginTransactionResult {
         request_id: u64,
-        /// Start sequence for the transaction (current_sequence + 1).
+        /// Start sequence for the transaction (current committed sequence).
         start_sequence: u64,
         /// Immutable read snapshot (None if the CF doesn't exist).
         snapshot: Option<Arc<super::runtime::read_snapshot::ReadSnapshot>>,
@@ -629,6 +653,8 @@ impl RuntimeResponse {
             | RuntimeResponse::ColumnFamilyCreated { request_id, .. }
             | RuntimeResponse::ReadAmpMetricsSnapshot { request_id, .. }
             | RuntimeResponse::RecoveryMetricsSnapshot { request_id, .. }
+            | RuntimeResponse::RuntimeMetricsSnapshot { request_id, .. }
+            | RuntimeResponse::StorageLayoutSnapshot { request_id, .. }
             | RuntimeResponse::CurrentSequence { request_id, .. }
             | RuntimeResponse::ReadSnapshot { request_id, .. }
             | RuntimeResponse::BeginTransactionResult { request_id, .. }

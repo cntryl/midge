@@ -4,8 +4,6 @@
 //! point reads and range scans, plus durability-aware message handlers.
 
 use super::EventLoop;
-use crate::sst::traits::SstReader;
-use crate::sst::Memtable;
 
 use super::super::durability::DurabilityWaiter;
 use super::super::RuntimeResponse;
@@ -34,15 +32,16 @@ impl EventLoop {
             .strip_prefix(&self.state.db_path)
             .unwrap_or_else(|_| std::path::Path::new("sst"))
             .to_path_buf();
-        Some(super::super::ReadSnapshot {
-            cf_id,
-            memtable: cf_state.memtable.clone(),
-            immutable_memtables: cf_state.immutable_memtables.clone(),
+        let mut snapshot = super::super::ReadSnapshot::new(
+            cf_state.memtable.clone(),
+            cf_state.immutable_memtables.clone(),
             sst_files,
-            sst_fs: std::sync::Arc::clone(&self.state.fs),
+            std::sync::Arc::clone(&self.state.fs),
             sst_path_prefix,
-            memory_mode: self.state.memory_mode,
-        })
+            self.state.memory_mode,
+        );
+        snapshot.cf_id = cf_id;
+        Some(snapshot)
     }
 
     /// Check if a sequence number is durable at the requested level.
@@ -71,7 +70,7 @@ impl EventLoop {
         sequence: u64,
         requested_durability: crate::engine::api::Durability,
     ) {
-        let visible_up_to = if sequence == 0 { 0 } else { sequence - 1 };
+        let visible_up_to = sequence;
 
         // === Phase 0 Guardrail #3: Transaction atomicity barrier ===
         // If a transaction is pending commit (Batched mode), block reads at sequences
@@ -118,7 +117,7 @@ impl EventLoop {
         sequence: u64,
         requested_durability: crate::engine::api::Durability,
     ) {
-        let visible_up_to = if sequence == 0 { 0 } else { sequence - 1 };
+        let visible_up_to = sequence;
 
         // === Phase 0 Guardrail #3: Transaction atomicity barrier ===
         // If a transaction is pending commit (Batched mode), block scans at sequences
@@ -169,116 +168,8 @@ impl EventLoop {
         key: &[u8],
         seq: u64,
     ) -> Option<Vec<u8>> {
-        let cf_state = self.state.column_families.get(&cf_id)?;
-
-        // Simple get logic
-        // Active memtable — use snapshot-aware lookup when requested
-        if seq == u64::MAX {
-            if let Ok(Some(v)) = cf_state.memtable.get(key) {
-                return Some(v);
-            }
-        } else if let Ok(Some(v)) = cf_state.memtable.get_at_seq(key, seq) {
-            return Some(v);
-        }
-
-        // Immutable memtables (newest → oldest) — check newest first
-        for imm in cf_state.immutable_memtables.iter().rev() {
-            if seq == u64::MAX {
-                if let Ok(Some(v)) = imm.get(key) {
-                    return Some(v);
-                }
-            } else if let Ok(Some(v)) = imm.get_at_seq(key, seq) {
-                return Some(v);
-            }
-        }
-
-        // SST lookup: check files from newest to oldest across all levels
-        let mut ssts_checked = 0u64;
-        let mut l0_ssts_checked = 0u64;
-        let mut blocks_read = 0u64;
-
-        // Get all SST files for this CF, grouped by level
-        let mut files_by_level: std::collections::BTreeMap<u32, Vec<_>> =
-            std::collections::BTreeMap::new();
-        for file in &self.state.manifest.files {
-            if file.cf_id == cf_id {
-                files_by_level
-                    .entry(file.level)
-                    .or_default()
-                    .push(file.clone());
-            }
-        }
-
-        // Search L0 first (newest to oldest), then L1, L2, etc.
-        // L0 files may overlap, so we must check all of them
-        if let Some(l0_files) = files_by_level.get(&0) {
-            for file_meta in l0_files.iter().rev() {
-                ssts_checked += 1;
-                l0_ssts_checked += 1;
-
-                // Track read access for compaction prioritization
-                file_meta.record_read();
-
-                // Try to open and read from this SST
-                let sst_path = self.state.sst_dir.join(&file_meta.name);
-                if let Ok(reader) = crate::sst::fs::SstFileIo::open_with_real_fs(&sst_path) {
-                    blocks_read += 1; // At minimum, we read index block
-                    if let Ok(Some(value)) = reader.get(key) {
-                        // Found! Record metrics and return
-                        self.state.read_amp_metrics.record_read(
-                            ssts_checked,
-                            l0_ssts_checked,
-                            blocks_read,
-                        );
-                        return Some(value.to_vec());
-                    }
-                }
-            }
-        }
-
-        // Check higher levels (L1, L2, ...) - these are sorted and non-overlapping
-        for (&level, files) in files_by_level.iter() {
-            if level == 0 {
-                continue; // Already checked L0
-            }
-
-            for file_meta in files.iter().rev() {
-                // Check if key is in range for this SST
-                if let (Some(ref smallest), Some(ref largest)) =
-                    (&file_meta.smallest_key, &file_meta.largest_key)
-                {
-                    if key < smallest.as_slice() || key > largest.as_slice() {
-                        continue; // Key not in this SST's range
-                    }
-                }
-
-                ssts_checked += 1;
-
-                // Track read access for compaction prioritization
-                file_meta.record_read();
-
-                // Try to open and read from this SST
-                let sst_path = self.state.sst_dir.join(&file_meta.name);
-                if let Ok(reader) = crate::sst::fs::SstFileIo::open_with_real_fs(&sst_path) {
-                    blocks_read += 1; // At minimum, we read index block
-                    if let Ok(Some(value)) = reader.get(key) {
-                        // Found! Record metrics and return
-                        self.state.read_amp_metrics.record_read(
-                            ssts_checked,
-                            l0_ssts_checked,
-                            blocks_read,
-                        );
-                        return Some(value.to_vec());
-                    }
-                }
-            }
-        }
-
-        // Key not found in any SST - record miss
-        self.state
-            .read_amp_metrics
-            .record_read(ssts_checked, l0_ssts_checked, blocks_read);
-        None
+        self.create_read_snapshot(cf_id)
+            .and_then(|snapshot| snapshot.get(key, seq))
     }
 
     /// Range scan: iterate keys in [start, end) from memtables and SSTs
@@ -287,125 +178,11 @@ impl EventLoop {
         cf_id: u32,
         start: &[u8],
         end: &[u8],
-        _snapshot_seq: u64,
+        snapshot_seq: u64,
     ) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let cf_state = match self.state.column_families.get(&cf_id) {
-            Some(state) => state,
-            None => return vec![],
-        };
-
-        // Treat empty bounds as unbounded.
-        //
-        // `Transaction::scan` uses empty Vecs when the caller does not specify start/end.
-        // Interpreting empty as an actual key would make Query::new() scan the empty range.
-        let start_opt = if start.is_empty() { None } else { Some(start) };
-        let end_opt = if end.is_empty() { None } else { Some(end) };
-
-        // Collect results in order: SSTs (oldest->newest) -> immutable memtables (oldest->newest) -> active memtable
-        // so that newer versions override older ones.
-        let mut results: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
-            std::collections::BTreeMap::new();
-
-        // --- SSTs: check L0 (newest->oldest) first, then higher levels ---
-        let mut files_by_level: std::collections::BTreeMap<u32, Vec<_>> =
-            std::collections::BTreeMap::new();
-        for file in &self.state.manifest.files {
-            if file.cf_id == cf_id {
-                files_by_level
-                    .entry(file.level)
-                    .or_default()
-                    .push(file.clone());
-            }
-        }
-
-        // L0: newest -> oldest (may overlap)
-        if let Some(l0_files) = files_by_level.get(&0) {
-            for file_meta in l0_files.iter().rev() {
-                let sst_path = self.state.sst_dir.join(&file_meta.name);
-                if let Ok(reader) = self.compaction_actor.open_sst_reader(&sst_path) {
-                    if let Ok(pairs) = reader.scan_range(start_opt, end_opt) {
-                        for (k, v) in pairs {
-                            // SstReader::scan_range returns only (key, value) tuples of present values.
-                            // Treat all returned values as valid for the snapshot (SSTs are persisted).
-                            results.entry(k.to_vec()).or_insert(v.to_vec());
-                        }
-                    }
-                }
-            }
-        }
-
-        // Higher levels
-        for (&level, files) in files_by_level.iter() {
-            if level == 0 {
-                continue;
-            }
-
-            for file_meta in files.iter().rev() {
-                if let (Some(ref smallest), Some(ref largest)) =
-                    (&file_meta.smallest_key, &file_meta.largest_key)
-                {
-                    if start >= smallest.as_slice() && start >= largest.as_slice() {
-                        // Key range doesn't overlap; skip
-                        continue;
-                    }
-                }
-
-                let sst_path = self.state.sst_dir.join(&file_meta.name);
-                if let Ok(reader) = self.compaction_actor.open_sst_reader(&sst_path) {
-                    if let Ok(pairs) = reader.scan_range(start_opt, end_opt) {
-                        for (k, v) in pairs {
-                            // SstReader::scan_range returns only (key, value) tuples of present values.
-                            // Treat all returned values as valid for the snapshot (SSTs are persisted).
-                            results.entry(k.to_vec()).or_insert(v.to_vec());
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Immutable memtables: oldest -> newest ---
-        for imm in cf_state.immutable_memtables.iter() {
-            // Build by_key for this memtable (keep first seen = most recent within memtable)
-            let mut by_key: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> =
-                std::collections::BTreeMap::new();
-            for (key, value, _seq) in imm.iter_all(u64::MAX) {
-                // Current behavior: snapshots return current state (no MVCC), so do not
-                // filter memtable entries by the snapshot sequence. In future when MVCC
-                // is implemented, this should be filtered by `snapshot_seq`.
-                by_key.entry(key).or_insert(value);
-            }
-
-            for (key, value) in by_key.iter() {
-                if let Some(v) = value {
-                    let in_start = start_opt.is_none_or(|s| key.as_slice() >= s);
-                    let in_end = end_opt.is_none_or(|e| key.as_slice() < e);
-                    if in_start && in_end {
-                        results.insert(key.clone(), v.clone());
-                    }
-                }
-            }
-        }
-
-        // --- Active memtable (newest) overrides everything ---
-        let mut by_key: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> =
-            std::collections::BTreeMap::new();
-        for (key, value, _seq) in cf_state.memtable.iter_all(u64::MAX) {
-            // See note above: snapshots currently reflect current state; do not filter by
-            // snapshot sequence here. This preserves existing behavior documented in tests.
-            by_key.entry(key).or_insert(value);
-        }
-
-        for (key, value) in by_key.iter() {
-            if let Some(v) = value {
-                let in_start = start_opt.is_none_or(|s| key.as_slice() >= s);
-                let in_end = end_opt.is_none_or(|e| key.as_slice() < e);
-                if in_start && in_end {
-                    results.insert(key.clone(), v.clone());
-                }
-            }
-        }
-
-        results.into_iter().collect()
+        self.create_read_snapshot(cf_id)
+            .map(|snapshot| snapshot.range_scan(start, end, snapshot_seq))
+            .unwrap_or_default()
     }
 }
 

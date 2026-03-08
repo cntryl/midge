@@ -251,6 +251,54 @@ impl EventLoop {
         });
     }
 
+    fn build_sst_file_meta(
+        &self,
+        cf_id: crate::engine::ColumnFamilyId,
+        level: u32,
+        sst_name: &str,
+    ) -> crate::common::MidgeResult<crate::runtime::FileMeta> {
+        let path = self.state.sst_dir.join(sst_name);
+        let summary = crate::sst::fs::SstFileIo::summarize_with_real_fs(&path)?;
+
+        Ok(crate::runtime::FileMeta {
+            name: sst_name.to_string(),
+            level,
+            size_bytes: summary.size_bytes,
+            cf_id,
+            smallest_key: Some(summary.smallest_key),
+            largest_key: Some(summary.largest_key),
+            smallest_seq: Some(summary.smallest_seq),
+            largest_seq: Some(summary.largest_seq),
+        })
+    }
+
+    fn publish_flushed_sst(
+        &mut self,
+        cf_id: crate::engine::ColumnFamilyId,
+        sst_name: &str,
+        sequence: u64,
+        file_meta: Option<crate::runtime::FileMeta>,
+    ) -> crate::common::MidgeResult<()> {
+        let Some(file_meta) = file_meta else {
+            return Ok(());
+        };
+
+        if !self.state.memory_mode {
+            self.manifest_actor.add_sst(&mut self.state, file_meta)?;
+            if sequence > self.state.manifest.last_persisted_sequence {
+                self.state.manifest.last_persisted_sequence = sequence;
+            }
+            if let Err(error) = self.manifest_actor.persist(&self.state) {
+                tracing::warn!(%error, sst_name, "manifest checkpoint after flush failed; journal remains authoritative");
+            }
+        }
+
+        self.flush_actor
+            .handle_flush_complete(&mut self.state, cf_id, sst_name, sequence);
+        self.publish_snapshot();
+        Ok(())
+    }
+
     /// Helper: deliver a RuntimeResponse to the requester via the router.
     #[inline]
     pub(super) fn respond(&self, request_id: u64, resp: RuntimeResponse) {
@@ -556,6 +604,26 @@ impl EventLoop {
                 );
             }
 
+            RuntimeMsg::GetRuntimeMetrics { request_id } => {
+                self.respond(
+                    request_id,
+                    RuntimeResponse::RuntimeMetricsSnapshot {
+                        request_id,
+                        snapshot: self.state.runtime_metrics_snapshot(),
+                    },
+                );
+            }
+
+            RuntimeMsg::GetStorageLayout { request_id } => {
+                self.respond(
+                    request_id,
+                    RuntimeResponse::StorageLayoutSnapshot {
+                        request_id,
+                        snapshot: self.state.storage_layout_snapshot(),
+                    },
+                );
+            }
+
             RuntimeMsg::SetRuntimeConfig {
                 request_id,
                 memtable_size_limit,
@@ -714,11 +782,11 @@ impl EventLoop {
                         self.hybrid_storage.as_ref(),
                     ) {
                         let sequence = self.state.sequence;
-                        self.flush_actor.handle_flush_complete(
-                            &mut self.state,
+                        let _ = self.publish_flushed_sst(
                             cf_id,
-                            &sst_name,
+                            &sst_name.sst_name,
                             sequence,
+                            sst_name.file_meta,
                         );
                     }
                 }
@@ -768,36 +836,12 @@ impl EventLoop {
                 cf_id,
                 sequence: _,
             } => {
-                if let Some(cf_state) = self.state.column_families.get(&cf_id) {
-                    // Collect SST files for this CF
-                    let cf_files: Vec<_> = self
-                        .state
-                        .manifest
-                        .files
-                        .iter()
-                        .filter(|f| f.cf_id == cf_id)
-                        .cloned()
-                        .collect();
-
-                    let sst_path_prefix = self
-                        .state
-                        .sst_dir
-                        .strip_prefix(&self.state.db_path)
-                        .unwrap_or_else(|_| std::path::Path::new("sst"))
-                        .to_path_buf();
-                    let snapshot = Arc::new(ReadSnapshot::new(
-                        cf_state.memtable.clone(),
-                        cf_state.immutable_memtables.clone(),
-                        cf_files,
-                        Arc::clone(&self.state.fs),
-                        sst_path_prefix,
-                        self.state.memory_mode,
-                    ));
+                if let Some(snapshot) = self.create_read_snapshot(cf_id) {
                     self.respond(
                         request_id,
                         RuntimeResponse::ReadSnapshot {
                             request_id,
-                            snapshot,
+                            snapshot: Arc::new(snapshot),
                         },
                     );
                 } else {
@@ -815,33 +859,8 @@ impl EventLoop {
             }
 
             RuntimeMsg::BeginTransaction { request_id, cf_id } => {
-                let start_sequence = self.state.sequence + 1;
-                let snapshot = if let Some(cf_state) = self.state.column_families.get(&cf_id) {
-                    let cf_files: Vec<_> = self
-                        .state
-                        .manifest
-                        .files
-                        .iter()
-                        .filter(|f| f.cf_id == cf_id)
-                        .cloned()
-                        .collect();
-                    let sst_path_prefix = self
-                        .state
-                        .sst_dir
-                        .strip_prefix(&self.state.db_path)
-                        .unwrap_or_else(|_| std::path::Path::new("sst"))
-                        .to_path_buf();
-                    Some(Arc::new(ReadSnapshot::new(
-                        cf_state.memtable.clone(),
-                        cf_state.immutable_memtables.clone(),
-                        cf_files,
-                        Arc::clone(&self.state.fs),
-                        sst_path_prefix,
-                        self.state.memory_mode,
-                    )))
-                } else {
-                    None
-                };
+                let start_sequence = self.state.sequence;
+                let snapshot = self.create_read_snapshot(cf_id).map(Arc::new);
                 self.respond(
                     request_id,
                     RuntimeResponse::BeginTransactionResult {
@@ -951,17 +970,24 @@ impl EventLoop {
                         cf_id_to_flush,
                         self.hybrid_storage.as_ref(),
                     ) {
-                        Ok(sst_name) => {
+                        Ok(flush_output) => {
                             // Complete the flush by updating bookkeeping
                             let sequence = self.state.sequence;
-                            self.flush_actor.handle_flush_complete(
-                                &mut self.state,
+                            if let Err(error) = self.publish_flushed_sst(
                                 cf_id_to_flush,
-                                &sst_name,
+                                &flush_output.sst_name,
                                 sequence,
-                            );
+                                flush_output.file_meta,
+                            ) {
+                                tracing::error!(
+                                    %error,
+                                    cf_id = cf_id_to_flush,
+                                    sst_name = %flush_output.sst_name,
+                                    "auto-flush publication failed"
+                                );
+                            }
                             self.wake_write_stall_waiters();
-                            tracing::debug!(cf_id = cf_id_to_flush, sst_name = %sst_name, "Auto-flushed memtable to enable backpressure");
+                            tracing::debug!(cf_id = cf_id_to_flush, sst_name = %flush_output.sst_name, "Auto-flushed memtable to enable backpressure");
                         }
                         Err(e) => {
                             tracing::trace!(cf_id = cf_id_to_flush, error = %e, "Flush failed (backpressure or internal error)");
@@ -976,17 +1002,34 @@ impl EventLoop {
             // Flush
             // =============================================================
             RuntimeMsg::FlushMemtable { request_id, cf_id } => {
-                let resp = self
-                    .flush_actor
-                    .handle_flush(&mut self.state, cf_id, self.hybrid_storage.as_ref())
-                    .map(|sst_name| RuntimeResponse::FlushComplete {
+                let resp = match self.flush_actor.handle_flush(
+                    &mut self.state,
+                    cf_id,
+                    self.hybrid_storage.as_ref(),
+                ) {
+                    Ok(flush_output) => {
+                        let sequence = self.state.sequence;
+                        match self.publish_flushed_sst(
+                            cf_id,
+                            &flush_output.sst_name,
+                            sequence,
+                            flush_output.file_meta,
+                        ) {
+                            Ok(()) => {
+                                self.wake_write_stall_waiters();
+                                RuntimeResponse::FlushComplete {
+                                    request_id,
+                                    sst_name: flush_output.sst_name,
+                                }
+                            }
+                            Err(error) => RuntimeResponse::Error { request_id, error },
+                        }
+                    }
+                    Err(e) => RuntimeResponse::Error {
                         request_id,
-                        sst_name,
-                    })
-                    .unwrap_or_else(|e| RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Internal(e.to_string()),
-                    });
+                        error: e,
+                    },
+                };
 
                 self.respond(request_id, resp);
             }
@@ -997,11 +1040,14 @@ impl EventLoop {
                 sst_name,
                 sequence,
             } => {
-                self.flush_actor
-                    .handle_flush_complete(&mut self.state, cf_id, &sst_name, sequence);
-                self.wake_write_stall_waiters();
-                self.publish_snapshot();
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
+                let resp = match self.publish_flushed_sst(cf_id, &sst_name, sequence, None) {
+                    Ok(()) => {
+                        self.wake_write_stall_waiters();
+                        RuntimeResponse::Ok { request_id }
+                    }
+                    Err(error) => RuntimeResponse::Error { request_id, error },
+                };
+                self.respond(request_id, resp);
             }
 
             // =============================================================
@@ -1205,6 +1251,8 @@ impl EventLoop {
                 request_id,
                 input_ssts,
                 output_ssts,
+                cf_id,
+                target_level,
             } => {
                 // Decrement active compactions
                 let _prev = self
@@ -1219,49 +1267,19 @@ impl EventLoop {
                     output_ssts.clone(),
                 );
 
-                // 🔑 CRITICAL: Route to manifest actor to publish compaction changes
-                // Infer cf_id and output level from input files (all inputs belong to same CF)
-                let cf_id = self
-                    .state
-                    .manifest
-                    .files
+                let added: Result<Vec<_>, _> = output_ssts
                     .iter()
-                    .find(|f| input_ssts.contains(&f.name))
-                    .map(|f| f.cf_id)
-                    .unwrap_or(0);
-
-                let output_level = self
-                    .state
-                    .manifest
-                    .files
-                    .iter()
-                    .filter(|f| input_ssts.contains(&f.name))
-                    .map(|f| f.level)
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
-
-                // Construct FileMeta for output SSTs (minimal metadata; can be enriched later via SST reading)
-                let added: Vec<crate::runtime::FileMeta> = output_ssts
-                    .iter()
-                    .map(|name| crate::runtime::FileMeta {
-                        name: name.clone(),
-                        level: output_level,
-                        size_bytes: 0, // TODO: could read from filesystem or SST header
-                        cf_id,
-                        smallest_key: None, // TODO: read from SST after completion
-                        largest_key: None,  // TODO: read from SST after completion
-                        smallest_seq: None,
-                        largest_seq: None,
-                    })
+                    .map(|name| self.build_sst_file_meta(cf_id, target_level, name))
                     .collect();
 
                 // Publish compaction changes to manifest (update and persist)
-                if let Err(e) = self.manifest_actor.compaction_complete(
-                    &mut self.state,
-                    input_ssts.clone(),
-                    added,
-                ) {
+                if let Err(e) = added.and_then(|added| {
+                    self.manifest_actor.compaction_complete(
+                        &mut self.state,
+                        input_ssts.clone(),
+                        added,
+                    )
+                }) {
                     tracing::error!(error = ?e, "failed to apply compaction to manifest");
                     self.respond(
                         request_id,
@@ -1308,6 +1326,7 @@ impl EventLoop {
                             );
                         }
 
+                        self.publish_snapshot();
                         self.respond(request_id, RuntimeResponse::Ok { request_id });
                     }
                 }

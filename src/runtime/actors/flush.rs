@@ -10,6 +10,12 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::sst::Memtable;
 use std::path::Path;
 
+#[derive(Debug, Clone)]
+pub struct FlushOutput {
+    pub sst_name: String,
+    pub file_meta: Option<crate::runtime::FileMeta>,
+}
+
 /// Actor handling memtable flushes
 pub struct FlushActor {
     /// Number of flushes in progress
@@ -54,10 +60,13 @@ impl FlushActor {
         state: &mut RuntimeState,
         cf_id: crate::engine::ColumnFamilyId,
         sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
-    ) -> MidgeResult<String> {
+    ) -> MidgeResult<FlushOutput> {
         // In memory mode, flushes are no-ops (everything stays in memory)
         if self.memory_mode {
-            return Ok(format!("memory_flush_{}", state.sequence));
+            return Ok(FlushOutput {
+                sst_name: format!("memory_flush_{}", state.sequence),
+                file_meta: None,
+            });
         }
 
         // Estimate SST size: approximate as active memtable size
@@ -84,7 +93,9 @@ impl FlushActor {
                 }
                 crate::storage::hybrid::actor::ReservationResult::RejectNoSpace => {
                     tracing::error!(cf_id = cf_id, "Flush rejected: no disk space available");
-                    return Err(MidgeError::Internal("No disk space available".to_string()));
+                    return Err(MidgeError::NoSpace(
+                        "no disk space available for flush".to_string(),
+                    ));
                 }
             }
         }
@@ -116,6 +127,13 @@ impl FlushActor {
             .get_cf_mut(cf_id)
             .ok_or_else(|| MidgeError::Internal(format!("Column family {} not found", cf_id)))?;
 
+        if cf.memtable.size_bytes() == 0 {
+            return Ok(FlushOutput {
+                sst_name: format!("noop_flush_{}", state.sequence),
+                file_meta: None,
+            });
+        }
+
         // Freeze current memtable and create new one
         let frozen = std::mem::replace(
             &mut cf.memtable,
@@ -146,9 +164,7 @@ impl FlushActor {
                 cf_id,
                 next_seq: sst_seq + 1,
             };
-            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
-                tracing::warn!(error = ?e, "failed to append BumpNextSstSeq to journal");
-            }
+            crate::metadata::append_edit(&state.db_path, &edit)?;
         }
         state.manifest.next_sst_seqs.insert(cf_id, sst_seq + 1);
 
@@ -158,8 +174,9 @@ impl FlushActor {
 
         // Write frozen memtable to SST file (blocking for now; could be async)
         let write_start = std::time::Instant::now();
-        self.write_memtable_to_sst(&frozen, &sst_path)?;
+        let mut file_meta = self.write_memtable_to_sst(&frozen, &sst_path, cf_id, &sst_name)?;
         let write_ns = write_start.elapsed().as_nanos();
+        file_meta.level = 0;
 
         tracing::info!(cf_id = cf_id, sst_name = %sst_name, write_ms = (write_ns as f64) / 1_000_000.0, "SST file written");
 
@@ -177,7 +194,10 @@ impl FlushActor {
             tracing::debug!(cf_id = cf_id, sst_name = %sst_name, "SST queued for cloud upload");
         }
 
-        Ok(sst_name)
+        Ok(FlushOutput {
+            sst_name,
+            file_meta: Some(file_meta),
+        })
     }
 
     /// Write a frozen memtable to an SST file
@@ -185,7 +205,9 @@ impl FlushActor {
         &self,
         memtable: &std::sync::Arc<crate::sst::SkipListMemtable>,
         path: &Path,
-    ) -> MidgeResult<()> {
+        cf_id: crate::engine::ColumnFamilyId,
+        sst_name: &str,
+    ) -> MidgeResult<crate::runtime::FileMeta> {
         // Create SST writer (should not reach here in memory mode, but be defensive)
         let sst_factory = self.sst_factory.as_ref().ok_or_else(|| {
             MidgeError::Internal("SST factory not available in memory mode".to_string())
@@ -194,10 +216,29 @@ impl FlushActor {
 
         // Get all entries from memtable and write to SST
         let entries = memtable.iter_all(u64::MAX);
+        if entries.is_empty() {
+            return Err(MidgeError::Corruption(
+                "attempted to flush an empty memtable".to_string(),
+            ));
+        }
+
+        let smallest_key = entries
+            .first()
+            .map(|(key, _, _)| key.clone())
+            .ok_or_else(|| MidgeError::Corruption("memtable flush missing smallest key".into()))?;
+        let largest_key = entries
+            .last()
+            .map(|(key, _, _)| key.clone())
+            .ok_or_else(|| MidgeError::Corruption("memtable flush missing largest key".into()))?;
+        let mut smallest_seq = u64::MAX;
+        let mut largest_seq = 0_u64;
 
         let add_start = std::time::Instant::now();
         let mut added_count: usize = 0;
         for (key, value, seq) in entries {
+            smallest_seq = smallest_seq.min(seq);
+            largest_seq = largest_seq.max(seq);
+
             // Determine op_type: 0=Put, 2=Delete
             let op_type = if value.is_some() { 0 } else { 2 };
 
@@ -213,7 +254,17 @@ impl FlushActor {
 
         tracing::info!(path = ?path, added = added_count, add_ms = (add_ns as f64) / 1_000_000.0, finish_ms = (finish_ns as f64) / 1_000_000.0, "memtable -> sst flush breakdown");
 
-        Ok(())
+        let size_bytes = std::fs::metadata(path)?.len();
+        Ok(crate::runtime::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes,
+            cf_id,
+            smallest_key: Some(smallest_key),
+            largest_key: Some(largest_key),
+            smallest_seq: Some(smallest_seq),
+            largest_seq: Some(largest_seq),
+        })
     }
 
     /// Handle flush completion notification

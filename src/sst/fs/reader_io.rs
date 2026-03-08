@@ -19,6 +19,16 @@ use crate::sst::types::{
     SST_FORMAT_V1,
 };
 
+/// Stable summary of the physical contents of a single SST file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SstFileSummary {
+    pub size_bytes: u64,
+    pub smallest_key: Vec<u8>,
+    pub largest_key: Vec<u8>,
+    pub smallest_seq: u64,
+    pub largest_seq: u64,
+}
+
 /// SST file reader using io::Fs abstraction
 /// Identical to SstFile but accepts `Arc<dyn Fs>` for the filesystem backend
 pub struct SstFileIo {
@@ -76,6 +86,11 @@ impl SstFileIo {
         Self::open(&path_str, fs)
     }
 
+    /// Summarize an SST file opened via RealFs.
+    pub fn summarize_with_real_fs(path: &std::path::Path) -> MidgeResult<SstFileSummary> {
+        Self::open_with_real_fs(path)?.summary()
+    }
+
     /// Enable bloom filter for this reader
     pub fn with_bloom(mut self, bloom: BloomReader) -> Self {
         self.bloom_reader = Some(bloom);
@@ -126,6 +141,99 @@ impl SstFileIo {
     /// Get reference to read amplification metrics for this reader
     pub fn read_amp_metrics(&self) -> &ReadAmpMetrics {
         &self.read_amp_metrics
+    }
+
+    /// Derive key-range and sequence metadata from the actual SST contents.
+    pub fn summary(&self) -> MidgeResult<SstFileSummary> {
+        use crate::sst::traits::SstStateReader;
+
+        let size_bytes = self.fs.metadata(&self.path)?.len;
+        let entries = self.scan_range_state(None, None)?;
+
+        let mut smallest_key: Option<Vec<u8>> = None;
+        let mut largest_key: Option<Vec<u8>> = None;
+        let mut smallest_seq: Option<u64> = None;
+        let mut largest_seq: Option<u64> = None;
+
+        for (key, state) in entries {
+            let key_vec = key.to_vec();
+            if smallest_key
+                .as_ref()
+                .map(|current| key_vec.as_slice() < current.as_slice())
+                .unwrap_or(true)
+            {
+                smallest_key = Some(key_vec.clone());
+            }
+            if largest_key
+                .as_ref()
+                .map(|current| key_vec.as_slice() > current.as_slice())
+                .unwrap_or(true)
+            {
+                largest_key = Some(key_vec);
+            }
+
+            let seq = match state {
+                KeyState::Value(_, seq, _, _) | KeyState::Tombstone(seq) => seq,
+                KeyState::Absent => continue,
+            };
+            smallest_seq = Some(smallest_seq.map(|current| current.min(seq)).unwrap_or(seq));
+            largest_seq = Some(largest_seq.map(|current| current.max(seq)).unwrap_or(seq));
+        }
+
+        for tombstone in self.range_tombstones() {
+            if smallest_key
+                .as_ref()
+                .map(|current| tombstone.start.as_slice() < current.as_slice())
+                .unwrap_or(true)
+            {
+                smallest_key = Some(tombstone.start.clone());
+            }
+            if largest_key
+                .as_ref()
+                .map(|current| tombstone.end.as_slice() > current.as_slice())
+                .unwrap_or(true)
+            {
+                largest_key = Some(tombstone.end.clone());
+            }
+            smallest_seq = Some(
+                smallest_seq
+                    .map(|current| current.min(tombstone.seq))
+                    .unwrap_or(tombstone.seq),
+            );
+            largest_seq = Some(
+                largest_seq
+                    .map(|current| current.max(tombstone.seq))
+                    .unwrap_or(tombstone.seq),
+            );
+        }
+
+        Ok(SstFileSummary {
+            size_bytes,
+            smallest_key: smallest_key.ok_or_else(|| {
+                MidgeError::Corruption(format!(
+                    "SST '{}' contains no publishable entries",
+                    self.path.0.as_str()
+                ))
+            })?,
+            largest_key: largest_key.ok_or_else(|| {
+                MidgeError::Corruption(format!(
+                    "SST '{}' contains no publishable entries",
+                    self.path.0.as_str()
+                ))
+            })?,
+            smallest_seq: smallest_seq.ok_or_else(|| {
+                MidgeError::Corruption(format!(
+                    "SST '{}' contains no publishable sequence bounds",
+                    self.path.0.as_str()
+                ))
+            })?,
+            largest_seq: largest_seq.ok_or_else(|| {
+                MidgeError::Corruption(format!(
+                    "SST '{}' contains no publishable sequence bounds",
+                    self.path.0.as_str()
+                ))
+            })?,
+        })
     }
 
     fn load_metadata(&mut self) -> MidgeResult<()> {
@@ -643,6 +751,46 @@ impl crate::sst::SstStateReader for SstFileIo {
         Ok(best_match
             .map(Self::state_from_entry)
             .unwrap_or(crate::sst::types::KeyState::Absent))
+    }
+
+    fn get_state_at(
+        &self,
+        key: &[u8],
+        snapshot_seq: u64,
+    ) -> MidgeResult<crate::sst::types::KeyState> {
+        let mut best_match: Option<SstEntry> = None;
+        let index = self.scan_index()?;
+
+        for (_first_key, handle) in index.iter() {
+            let block_data = self.read_block(handle)?;
+            for entry in self.scan_block_entries_from_bytes(&block_data)? {
+                if entry.key.as_slice() != key {
+                    continue;
+                }
+                if snapshot_seq != u64::MAX && entry.sequence > snapshot_seq {
+                    continue;
+                }
+                if best_match
+                    .as_ref()
+                    .map(|current| entry.sequence > current.sequence)
+                    .unwrap_or(true)
+                {
+                    best_match = Some(entry);
+                }
+            }
+        }
+
+        let now_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        Ok(match best_match {
+            Some(entry) if entry.is_tombstone() => KeyState::Tombstone(entry.sequence),
+            Some(entry) if entry.is_expired(now_millis) => KeyState::Tombstone(entry.sequence),
+            Some(entry) => Self::state_from_entry(entry),
+            None => KeyState::Absent,
+        })
     }
 
     fn scan_range_state(

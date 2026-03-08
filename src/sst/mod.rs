@@ -326,6 +326,40 @@ impl SkipListMemtable {
         })
     }
 
+    /// Get key state at a specific snapshot sequence.
+    ///
+    /// Expired visible values are surfaced as tombstones so older versions do
+    /// not reappear through lower layers during snapshot reads.
+    pub fn get_key_state_at(
+        &self,
+        key: &[u8],
+        snapshot_seq: u64,
+    ) -> MidgeResult<crate::sst::types::KeyState> {
+        for (entry_key, value, seq, is_tombstone, exp, op) in
+            self.skiplist.drain_with_meta_with_exp()
+        {
+            if entry_key.as_ref() != key {
+                continue;
+            }
+            if snapshot_seq != u64::MAX && seq > snapshot_seq {
+                continue;
+            }
+
+            return Ok(match (value, is_tombstone) {
+                (_, true) | (None, _) => crate::sst::types::KeyState::Tombstone(seq),
+                (Some(value), false) => {
+                    if Self::is_expired(exp) {
+                        crate::sst::types::KeyState::Tombstone(seq)
+                    } else {
+                        crate::sst::types::KeyState::Value(value, seq, exp, op.as_u8())
+                    }
+                }
+            });
+        }
+
+        Ok(crate::sst::types::KeyState::Absent)
+    }
+
     /// Get value as Bytes (zero-copy, for performance-critical paths).
     ///
     /// Returns Bytes instead of `Vec<u8>`, avoiding allocation for callers
@@ -361,6 +395,50 @@ impl SkipListMemtable {
             Some(None) => None,
             None => None,
         })
+    }
+
+    /// Scan visible key state in `[start, end)` at the provided snapshot sequence.
+    ///
+    /// Expired visible values are surfaced as tombstones so they suppress older
+    /// values during cross-layer merges.
+    pub fn range_state_at(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        snapshot_seq: u64,
+    ) -> Vec<(Vec<u8>, crate::sst::types::KeyState)> {
+        use std::collections::BTreeMap;
+
+        let mut by_key = BTreeMap::new();
+
+        for (key, value, seq, is_tombstone, exp, op) in self.skiplist.drain_with_meta_with_exp() {
+            if snapshot_seq != u64::MAX && seq > snapshot_seq {
+                continue;
+            }
+            if start.is_some_and(|s| key.as_ref() < s) {
+                continue;
+            }
+            if end.is_some_and(|e| key.as_ref() >= e) {
+                continue;
+            }
+            if by_key.contains_key(key.as_ref()) {
+                continue;
+            }
+
+            let state = match (value, is_tombstone) {
+                (_, true) | (None, _) => crate::sst::types::KeyState::Tombstone(seq),
+                (Some(value), false) => {
+                    if Self::is_expired(exp) {
+                        crate::sst::types::KeyState::Tombstone(seq)
+                    } else {
+                        crate::sst::types::KeyState::Value(value, seq, exp, op.as_u8())
+                    }
+                }
+            };
+            by_key.insert(key.to_vec(), state);
+        }
+
+        by_key.into_iter().collect()
     }
 
     /// Put with explicit sequence and optional expiration (Unix millis)

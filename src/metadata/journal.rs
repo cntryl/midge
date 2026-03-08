@@ -266,14 +266,19 @@ pub fn replay_journal_with_fs(
 
     let mut edits = Vec::new();
     let mut last_marker_edit_idx: Option<usize> = None;
+    let mut fatal_prefix_error: Option<String> = None;
 
     // Read loop using positional reads
     let mut offset: u64 = 0;
     let file_len = file.len().map_err(crate::common::MidgeError::from)?;
 
     while offset < file_len {
+        let record_start = offset;
         // Read header: type (1) + len (4)
         if offset + 5 > file_len {
+            if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
+                fatal_prefix_error = Some("manifest journal has truncated header at byte 0".into());
+            }
             break; // partial header
         }
         let typ_b = file
@@ -290,6 +295,9 @@ pub fn replay_journal_with_fs(
 
         // Ensure payload + crc present
         if offset + (len as u64) + 4 > file_len {
+            if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
+                fatal_prefix_error = Some("manifest journal has incomplete first record".into());
+            }
             break; // partial payload
         }
 
@@ -309,6 +317,9 @@ pub fn replay_journal_with_fs(
         let calc = hasher.finalize();
         if calc != got_crc {
             tracing::warn!("journal crc mismatch, stopping at tail");
+            if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
+                fatal_prefix_error = Some("manifest journal CRC mismatch at byte 0".into());
+            }
             break;
         }
 
@@ -325,6 +336,11 @@ pub fn replay_journal_with_fs(
                 }
                 Err(e) => {
                     tracing::warn!("fsync marker deserialize failed: {}", e);
+                    if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
+                        fatal_prefix_error = Some(format!(
+                            "manifest journal fsync marker deserialize failed: {e}"
+                        ));
+                    }
                     break;
                 }
             }
@@ -333,6 +349,10 @@ pub fn replay_journal_with_fs(
                 Ok(batch) => edits.push(ManifestEdit::Batch(batch)),
                 Err(e) => {
                     tracing::warn!("journal batch deserialize failed: {}", e);
+                    if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
+                        fatal_prefix_error =
+                            Some(format!("manifest journal batch deserialize failed: {e}"));
+                    }
                     break;
                 }
             }
@@ -341,10 +361,18 @@ pub fn replay_journal_with_fs(
                 Ok(edit) => edits.push(edit),
                 Err(e) => {
                     tracing::warn!("journal record deserialize failed: {}", e);
+                    if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
+                        fatal_prefix_error =
+                            Some(format!("manifest journal record deserialize failed: {e}"));
+                    }
                     break;
                 }
             }
         }
+    }
+
+    if let Some(message) = fatal_prefix_error {
+        return Err(crate::common::MidgeError::Corruption(message));
     }
 
     if let Some(idx) = last_marker_edit_idx {

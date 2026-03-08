@@ -76,8 +76,17 @@ pub type MidgeEngine = Engine;
 // Scan API
 pub use engine::{Direction, Query, ScanIterator};
 
+// Observability and diagnostics
+pub use engine::{
+    EngineHealth, ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot,
+    SnapshotPinSnapshot, StorageFileLayout, StorageLayoutLevel, StorageLayoutSnapshot,
+    StorageVerificationReport,
+};
+
 // Configuration
-pub use engine::{Goal, MemoryBudget, OpenOptions, Storage, WorkloadProfile, WriteOptions};
+pub use engine::{
+    Goal, MemoryBudget, OpenOptions, RecoveryPolicy, Storage, WorkloadProfile, WriteOptions,
+};
 
 // Key/value types
 pub use engine::{Key, Value};

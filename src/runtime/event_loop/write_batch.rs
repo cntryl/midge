@@ -202,20 +202,27 @@ impl EventLoop {
                     cf_id_to_flush,
                     self.hybrid_storage.as_ref(),
                 ) {
-                    Ok(sst_name) => {
+                    Ok(flush_output) => {
                         // Complete the flush by updating bookkeeping.
                         // Use current sequence as approximation for the flushed memtable's max seq.
                         let sequence = self.state.sequence;
-                        self.flush_actor.handle_flush_complete(
-                            &mut self.state,
+                        if let Err(error) = self.publish_flushed_sst(
                             cf_id_to_flush,
-                            &sst_name,
+                            &flush_output.sst_name,
                             sequence,
-                        );
+                            flush_output.file_meta,
+                        ) {
+                            tracing::error!(
+                                %error,
+                                cf_id = cf_id_to_flush,
+                                sst_name = %flush_output.sst_name,
+                                "flush publication failed after batch write"
+                            );
+                        }
                         self.wake_write_stall_waiters();
                         tracing::debug!(
                             cf_id = cf_id_to_flush,
-                            sst_name = %sst_name,
+                            sst_name = %flush_output.sst_name,
                             "Auto-flushed memtable after batch write"
                         );
                     }

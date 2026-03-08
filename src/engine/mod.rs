@@ -28,8 +28,8 @@ pub(crate) mod api;
 mod ingest;
 
 pub use api::{
-    Direction, Goal, Key, MemoryBudget, OpenOptions, Query, ScanIterator, Storage, Transaction,
-    TransactionMode, Value, WorkloadProfile, WriteOptions,
+    Direction, Goal, Key, MemoryBudget, OpenOptions, Query, RecoveryPolicy, ScanIterator, Storage,
+    Transaction, TransactionMode, Value, WorkloadProfile, WriteOptions,
 };
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<ColumnFamilyId, ColumnFamilyHandle>;
@@ -92,6 +92,104 @@ pub struct RecoveryMetricsSnapshot {
     pub intent_log_entries_replayed: u64,
 }
 
+/// High-level engine health state for operators and diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineHealth {
+    Healthy,
+    Degraded,
+    SalvageMode,
+    WriteStalled,
+    Corrupt,
+}
+
+/// Stable operator-facing snapshot of runtime metrics.
+#[derive(Debug, Clone)]
+pub struct RuntimeMetricsSnapshot {
+    pub health: EngineHealth,
+    pub current_sequence: u64,
+    pub manifest_last_persisted_sequence: u64,
+    pub manifest_next_wal_seq: u64,
+    pub active_memtables: usize,
+    pub immutable_memtables: usize,
+    pub total_memtable_bytes: usize,
+    pub memtable_size_limit: usize,
+    pub memtable_flush_threshold: usize,
+    pub write_stalled: bool,
+    pub wal_current_segment_id: u64,
+    pub wal_pending_writes: usize,
+    pub wal_last_synced_seq: u64,
+    pub wal_local_durable_seq: u64,
+    pub wal_cloud_durable_seq: u64,
+    pub pending_compactions: usize,
+    pub compacting_ssts: usize,
+    pub active_compactions: usize,
+    pub pending_cloud_uploads: usize,
+    pub active_snapshots: usize,
+    pub sst_count: usize,
+    pub sst_bytes: u64,
+    pub salvage_mode_opens: u64,
+    pub no_space_events: u64,
+    pub wal_recovery_records_replayed: u64,
+    pub wal_recovery_bytes_replayed: u64,
+    pub intent_log_replay_runs: u64,
+    pub intent_log_entries_replayed: u64,
+}
+
+/// Active snapshot pin observed by the runtime.
+#[derive(Debug, Clone)]
+pub struct SnapshotPinSnapshot {
+    pub snapshot_id: u64,
+    pub sequence: u64,
+    pub age_seconds: u64,
+    pub ref_count: usize,
+}
+
+/// Single SST entry in a storage layout report.
+#[derive(Debug, Clone)]
+pub struct StorageFileLayout {
+    pub name: String,
+    pub level: u32,
+    pub cf_id: ColumnFamilyId,
+    pub size_bytes: u64,
+    pub smallest_key: Option<Vec<u8>>,
+    pub largest_key: Option<Vec<u8>>,
+    pub smallest_seq: Option<u64>,
+    pub largest_seq: Option<u64>,
+}
+
+/// Per-level storage layout summary.
+#[derive(Debug, Clone)]
+pub struct StorageLayoutLevel {
+    pub level: u32,
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub files: Vec<StorageFileLayout>,
+}
+
+/// Stable operator-facing snapshot of on-disk layout and pinned state.
+#[derive(Debug, Clone)]
+pub struct StorageLayoutSnapshot {
+    pub health: EngineHealth,
+    pub manifest_last_persisted_sequence: u64,
+    pub manifest_next_wal_seq: u64,
+    pub levels: Vec<StorageLayoutLevel>,
+    pub active_snapshots: Vec<SnapshotPinSnapshot>,
+    pub pending_compactions: usize,
+    pub compacting_ssts: Vec<String>,
+    pub obsolete_files: Vec<String>,
+}
+
+/// Non-mutating verification report for a storage directory.
+#[derive(Debug, Clone)]
+pub struct StorageVerificationReport {
+    pub manifest_files_verified: usize,
+    pub sst_files_verified: usize,
+    pub wal_recovery_records_replayed: u64,
+    pub wal_recovery_bytes_replayed: u64,
+    pub intent_entries_loaded: usize,
+    pub health: EngineHealth,
+}
+
 impl ColumnFamilyHandle {
     pub fn new(id: ColumnFamilyId, name: String) -> Self {
         Self { id, name }
@@ -127,6 +225,10 @@ pub struct Engine {
     runtime_handle: RuntimeHandle,
     /// Database path
     db_path: PathBuf,
+    /// Pure in-memory mode flag.
+    memory_mode: bool,
+    /// Recovery policy used for this open.
+    recovery_policy: RecoveryPolicy,
     /// Latest committed sequence observed by the engine.
     ///
     /// Sequence numbers are allocated inside the runtime (at WAL append time) and
@@ -281,11 +383,12 @@ impl Engine {
                     &db_path,
                 )?;
 
-                let state = RuntimeState::new_with_recovery_dir(
+                let state = RuntimeState::try_new_with_recovery_dir(
                     db_path.clone(),
                     memory_mode,
                     Some(cloud.recovery_cloud_wal_dir.clone()),
-                );
+                    opts.recovery_policy,
+                )?;
 
                 let config = crate::runtime::RuntimeConfig {
                     wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
@@ -314,13 +417,18 @@ impl Engine {
                     ..Default::default()
                 };
 
-                (RuntimeState::new(db_path.clone(), memory_mode), config)
+                (
+                    RuntimeState::try_new(db_path.clone(), memory_mode, opts.recovery_policy)?,
+                    config,
+                )
             }
         };
 
         // 🔑 CRITICAL: Replay intent log to recover any interrupted mutations
         // Must happen BEFORE runtime starts processing messages
         state.replay_intent_log()?;
+        let recovered_sequence = state.sequence;
+        let recovered_cf_metas = state.manifest.column_families.clone();
 
         // Start runtime
         let (runtime_inst, _) = Runtime::new()?;
@@ -396,16 +504,9 @@ impl Engine {
 
         tracing::info!(db_path = %db_path.display(), open_ms = start.elapsed().as_secs_f64() * 1000.0, "engine open completed");
 
-        // Load existing CFs from manifest
-        let manifest = crate::metadata::ManifestPersistence::load(&db_path).map_err(|e| {
-            tracing::error!(
-                db_path = %db_path.display(),
-                error = %e,
-                "failed to load manifest"
-            );
-            crate::common::MidgeError::Internal(format!("failed to load manifest: {e}"))
-        })?;
-        for cf_meta in &manifest.column_families {
+        // Rebuild local CF handles from the same recovered manifest state the
+        // runtime validated during open.
+        for cf_meta in &recovered_cf_metas {
             if cf_meta.id != 0 && cf_meta.deleted_at.is_none() {
                 let handle = ColumnFamilyHandle::new(cf_meta.id, cf_meta.name.clone());
                 column_families.insert(cf_meta.id, handle);
@@ -423,7 +524,9 @@ impl Engine {
             _runtime: Some(runtime),
             runtime_handle,
             db_path,
-            sequence: std::sync::atomic::AtomicU64::new(0),
+            memory_mode,
+            recovery_policy: opts.recovery_policy,
+            sequence: std::sync::atomic::AtomicU64::new(recovered_sequence),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
             column_families,
             _lease: Some(lease),
@@ -678,7 +781,7 @@ impl Engine {
 
         // Fast path: read snapshot from lock-free ArcSwap cache (no event loop round-trip).
         let cache_guard = self.runtime_handle.snapshot_cache.load();
-        let start_sequence = cache_guard.sequence + 1;
+        let start_sequence = cache_guard.sequence;
         let read_snapshot = cache_guard
             .cf_snapshots
             .get(&cf_id)
@@ -1135,6 +1238,96 @@ impl Engine {
                 "Unexpected response from GetRecoveryMetrics".to_string(),
             )),
         }
+    }
+
+    /// Get an operator-facing snapshot of runtime metrics and health.
+    pub fn get_runtime_metrics(&self) -> MidgeResult<RuntimeMetricsSnapshot> {
+        let response = self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::GetRuntimeMetrics {
+                request_id: next_request_id()?,
+            })?;
+
+        match response {
+            RuntimeResponse::RuntimeMetricsSnapshot { snapshot, .. } => Ok(snapshot),
+            RuntimeResponse::Error { error, .. } => Err(error),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response from GetRuntimeMetrics".to_string(),
+            )),
+        }
+    }
+
+    /// Get a stable snapshot of the current SST layout and pinned snapshot state.
+    pub fn get_storage_layout(&self) -> MidgeResult<StorageLayoutSnapshot> {
+        let response = self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::GetStorageLayout {
+                request_id: next_request_id()?,
+            })?;
+
+        match response {
+            RuntimeResponse::StorageLayoutSnapshot { snapshot, .. } => Ok(snapshot),
+            RuntimeResponse::Error { error, .. } => Err(error),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response from GetStorageLayout".to_string(),
+            )),
+        }
+    }
+
+    /// Run a non-mutating integrity pass over manifest, intent-log, WAL, and SST files.
+    pub fn verify_storage(&self) -> MidgeResult<StorageVerificationReport> {
+        if self.memory_mode {
+            return Err(MidgeError::NotSupported(
+                "storage verification is not supported in memory mode".to_string(),
+            ));
+        }
+
+        let manifest = crate::metadata::ManifestPersistence::load_with_policy(
+            &self.db_path,
+            RecoveryPolicy::Strict,
+        )
+        .map_err(MidgeError::RecoveryFailed)?;
+        let intents = crate::runtime::IntentPersistence::load_with_policy(
+            &self.db_path,
+            RecoveryPolicy::Strict,
+        )
+        .map_err(MidgeError::RecoveryFailed)?;
+
+        let fs =
+            std::sync::Arc::new(crate::io::real::RealFs::new(&self.db_path).map_err(|e| {
+                MidgeError::RecoveryFailed(format!("failed to open filesystem: {e}"))
+            })?) as Arc<dyn crate::io::Fs>;
+
+        for file in &manifest.files {
+            let rel = std::path::PathBuf::from("sst").join(&file.name);
+            let path_str = rel.to_string_lossy().to_string();
+            crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&fs)).map_err(|e| {
+                MidgeError::Corruption(format!("failed to verify SST {}: {}", file.name, e))
+            })?;
+        }
+
+        let wal_storage =
+            crate::storage::LocalFsStorage::new(self.db_path.join("wal")).map_err(|e| {
+                MidgeError::RecoveryFailed(format!("failed to open WAL directory: {e}"))
+            })?;
+        let wal_stats = crate::wal::recovery::replay_wal(
+            &wal_storage,
+            &crate::storage::abstraction::StoragePath::new(""),
+            &mut std::collections::HashMap::new(),
+        )
+        .map_err(|e| MidgeError::RecoveryFailed(format!("WAL verification failed: {e}")))?;
+
+        Ok(StorageVerificationReport {
+            manifest_files_verified: manifest.files.len(),
+            sst_files_verified: manifest.files.len(),
+            wal_recovery_records_replayed: wal_stats.record_count,
+            wal_recovery_bytes_replayed: wal_stats.bytes,
+            intent_entries_loaded: intents.len(),
+            health: match self.get_runtime_metrics() {
+                Ok(snapshot) => snapshot.health,
+                Err(_) => EngineHealth::Corrupt,
+            },
+        })
     }
 
     // === Internal helpers ===

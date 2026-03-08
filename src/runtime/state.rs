@@ -3,7 +3,7 @@
 //! All engine state that can change at runtime lives here.
 //! Actors read from and propose updates to this state.
 
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 use crate::metadata::Manifest;
 use crate::runtime::IntentLogEntry;
 use crate::sst::{Memtable, ReadAmpMetrics, SkipListMemtable};
@@ -168,6 +168,10 @@ pub struct RuntimeState {
     pub read_only: bool,
     /// If true, never touch filesystem (pure in-memory mode)
     pub memory_mode: bool,
+    /// Recovery policy selected at engine open.
+    pub recovery_policy: crate::engine::RecoveryPolicy,
+    /// True if startup had to salvage around metadata or WAL issues.
+    pub opened_in_salvage_mode: bool,
     /// Whether background compaction is enabled
     pub enable_compaction: bool,
 
@@ -220,7 +224,17 @@ impl RuntimeState {
     /// Create new runtime state with the given database path.
     /// If memory_mode is true, filesystem is never touched.
     pub fn new(db_path: PathBuf, memory_mode: bool) -> Self {
-        Self::new_with_recovery_dir(db_path, memory_mode, None)
+        Self::try_new(db_path, memory_mode, crate::engine::RecoveryPolicy::Strict)
+            .expect("runtime state initialization failed")
+    }
+
+    /// Create new runtime state with an explicit recovery policy.
+    pub fn try_new(
+        db_path: PathBuf,
+        memory_mode: bool,
+        recovery_policy: crate::engine::RecoveryPolicy,
+    ) -> MidgeResult<Self> {
+        Self::try_new_with_recovery_dir(db_path, memory_mode, None, recovery_policy)
     }
 
     /// Create new runtime state with an optional override for WAL recovery.
@@ -233,27 +247,69 @@ impl RuntimeState {
         memory_mode: bool,
         recovery_wal_dir: Option<PathBuf>,
     ) -> Self {
+        Self::try_new_with_recovery_dir(
+            db_path,
+            memory_mode,
+            recovery_wal_dir,
+            crate::engine::RecoveryPolicy::Strict,
+        )
+        .expect("runtime state initialization with recovery dir failed")
+    }
+
+    /// Create new runtime state with an optional override for WAL recovery and
+    /// an explicit recovery policy.
+    pub fn try_new_with_recovery_dir(
+        db_path: PathBuf,
+        memory_mode: bool,
+        recovery_wal_dir: Option<PathBuf>,
+        recovery_policy: crate::engine::RecoveryPolicy,
+    ) -> MidgeResult<Self> {
         let (wal_dir, sst_dir) = Self::ensure_directories(&db_path, memory_mode);
+        let mut opened_in_salvage_mode = false;
 
         // Initialize filesystem abstraction (use MockFs in memory mode)
         let fs: std::sync::Arc<dyn Fs> = if memory_mode {
             std::sync::Arc::new(crate::io::MockFs::new())
         } else {
-            std::sync::Arc::new(
-                crate::io::real::RealFs::new(&db_path).expect("failed to initialize RealFs"),
-            )
+            std::sync::Arc::new(crate::io::real::RealFs::new(&db_path).map_err(|e| {
+                MidgeError::RecoveryFailed(format!("failed to initialize filesystem: {}", e))
+            })?)
         };
 
         // Load manifest (prefer snapshot + journal replay) — only if not in memory mode
         let manifest = if !memory_mode {
-            match crate::metadata::ManifestPersistence::load_with_fs(&fs) {
+            let strict_manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+                &fs,
+                crate::engine::RecoveryPolicy::Strict,
+            );
+            match strict_manifest {
                 Ok(m) => {
                     tracing::info!("manifest loaded from disk");
                     m
                 }
                 Err(e) => {
-                    tracing::warn!("failed to load manifest, using default: {}", e);
-                    Manifest::default()
+                    if recovery_policy == crate::engine::RecoveryPolicy::Strict {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "failed to load manifest: {}",
+                            e
+                        )));
+                    }
+                    opened_in_salvage_mode = true;
+                    tracing::warn!(
+                        "failed to load manifest strictly, retrying in salvage mode: {}",
+                        e
+                    );
+                    crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+                        &fs,
+                        crate::engine::RecoveryPolicy::Salvage,
+                    )
+                    .unwrap_or_else(|salvage_error| {
+                        tracing::warn!(
+                            "failed to load manifest in salvage mode, using default: {}",
+                            salvage_error
+                        );
+                        Manifest::default()
+                    })
                 }
             }
         } else {
@@ -262,11 +318,35 @@ impl RuntimeState {
 
         // Load intent log if present (using FS via persistence helpers)
         let intent_log = if !memory_mode {
-            match crate::runtime::IntentPersistence::load_with_fs(&fs) {
+            let strict_intent = crate::runtime::IntentPersistence::load_with_fs_and_policy(
+                &fs,
+                crate::engine::RecoveryPolicy::Strict,
+            );
+            match strict_intent {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to load intent log, starting empty");
-                    Vec::new()
+                    if recovery_policy == crate::engine::RecoveryPolicy::Strict {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "failed to load intent log: {}",
+                            e
+                        )));
+                    }
+                    opened_in_salvage_mode = true;
+                    tracing::warn!(
+                        error = %e,
+                        "failed to load intent log strictly, retrying in salvage mode"
+                    );
+                    crate::runtime::IntentPersistence::load_with_fs_and_policy(
+                        &fs,
+                        crate::engine::RecoveryPolicy::Salvage,
+                    )
+                    .unwrap_or_else(|salvage_error| {
+                        tracing::warn!(
+                            error = %salvage_error,
+                            "failed to load intent log in salvage mode, starting empty"
+                        );
+                        Vec::new()
+                    })
                 }
             }
         } else {
@@ -306,10 +386,10 @@ impl RuntimeState {
                             t.metrics()
                                 .record_wal_recovery(stats.record_count, stats.bytes);
                         }
-                        wal_recovery_records_replayed = wal_recovery_records_replayed
-                            .saturating_add(stats.record_count);
-                        wal_recovery_bytes_replayed = wal_recovery_bytes_replayed
-                            .saturating_add(stats.bytes);
+                        wal_recovery_records_replayed =
+                            wal_recovery_records_replayed.saturating_add(stats.record_count);
+                        wal_recovery_bytes_replayed =
+                            wal_recovery_bytes_replayed.saturating_add(stats.bytes);
 
                         tracing::info!(
                             records_recovered = stats.record_count,
@@ -335,12 +415,26 @@ impl RuntimeState {
                         stats.max_sequence.unwrap_or(0)
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "WAL recovery failed, continuing without recovered state");
+                        if recovery_policy == crate::engine::RecoveryPolicy::Strict {
+                            return Err(MidgeError::RecoveryFailed(format!(
+                                "WAL recovery failed: {}",
+                                e
+                            )));
+                        }
+                        opened_in_salvage_mode = true;
+                        tracing::error!(error = %e, "WAL recovery failed, continuing without recovered state in salvage mode");
                         0
                     }
                 },
                 Err(e) => {
-                    tracing::error!(error = %e, "failed to initialize WAL recovery storage");
+                    if recovery_policy == crate::engine::RecoveryPolicy::Strict {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "failed to initialize WAL recovery storage: {}",
+                            e
+                        )));
+                    }
+                    opened_in_salvage_mode = true;
+                    tracing::error!(error = %e, "failed to initialize WAL recovery storage in salvage mode");
                     0
                 }
             }
@@ -382,7 +476,7 @@ impl RuntimeState {
             1
         };
 
-        Self {
+        Ok(Self {
             db_path,
             wal_dir,
             sst_dir,
@@ -409,6 +503,8 @@ impl RuntimeState {
             memtable_size_limit: 64 * 1024 * 1024, // 64MB
             read_only: false,
             memory_mode,
+            recovery_policy,
+            opened_in_salvage_mode,
             intent_log,
             memtable_flush_threshold: 64 * 1024 * 1024, // 64MB
             max_immutable_memtables: 10,                // Hard limit on immutable memtable queue
@@ -428,6 +524,121 @@ impl RuntimeState {
             )),
             ingest_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_compaction_waits: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        })
+    }
+
+    pub fn health(&self) -> crate::engine::EngineHealth {
+        if self.opened_in_salvage_mode {
+            crate::engine::EngineHealth::SalvageMode
+        } else if self.write_stalled {
+            crate::engine::EngineHealth::WriteStalled
+        } else {
+            crate::engine::EngineHealth::Healthy
+        }
+    }
+
+    pub fn runtime_metrics_snapshot(&self) -> crate::engine::RuntimeMetricsSnapshot {
+        let active_memtables = self.column_families.len();
+        let immutable_memtables = self
+            .column_families
+            .values()
+            .map(|cf| cf.immutable_memtables.len())
+            .sum();
+        let sst_count = self.manifest.files.len();
+        let sst_bytes = self.manifest.files.iter().map(|file| file.size_bytes).sum();
+
+        crate::engine::RuntimeMetricsSnapshot {
+            health: self.health(),
+            current_sequence: self.sequence,
+            manifest_last_persisted_sequence: self.manifest.last_persisted_sequence,
+            manifest_next_wal_seq: self.manifest.next_wal_seq,
+            active_memtables,
+            immutable_memtables,
+            total_memtable_bytes: self.total_memtable_bytes,
+            memtable_size_limit: self.memtable_size_limit,
+            memtable_flush_threshold: self.memtable_flush_threshold,
+            write_stalled: self.write_stalled,
+            wal_current_segment_id: self.wal.current_segment_id,
+            wal_pending_writes: self.wal.pending_writes,
+            wal_last_synced_seq: self.wal.last_synced_seq,
+            wal_local_durable_seq: self.wal.local_durable_seq,
+            wal_cloud_durable_seq: self.wal.cloud_durable_seq,
+            pending_compactions: self.compaction.pending_tasks,
+            compacting_ssts: self.compaction.compacting_ssts.len(),
+            active_compactions: self
+                .active_compactions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            pending_cloud_uploads: self.cloud.pending_uploads.len(),
+            active_snapshots: self.snapshots.active_snapshots.len(),
+            sst_count,
+            sst_bytes,
+            salvage_mode_opens: u64::from(self.opened_in_salvage_mode),
+            no_space_events: 0,
+            wal_recovery_records_replayed: self.wal_recovery_records_replayed,
+            wal_recovery_bytes_replayed: self.wal_recovery_bytes_replayed,
+            intent_log_replay_runs: self.intent_log_replay_runs,
+            intent_log_entries_replayed: self.intent_log_entries_replayed,
+        }
+    }
+
+    pub fn storage_layout_snapshot(&self) -> crate::engine::StorageLayoutSnapshot {
+        let mut levels =
+            std::collections::BTreeMap::<u32, Vec<crate::engine::StorageFileLayout>>::new();
+        for file in &self.manifest.files {
+            levels
+                .entry(file.level)
+                .or_default()
+                .push(crate::engine::StorageFileLayout {
+                    name: file.name.clone(),
+                    level: file.level,
+                    cf_id: file.cf_id,
+                    size_bytes: file.size_bytes,
+                    smallest_key: file.smallest_key.clone(),
+                    largest_key: file.largest_key.clone(),
+                    smallest_seq: file.smallest_seq,
+                    largest_seq: file.largest_seq,
+                });
+        }
+
+        let levels = levels
+            .into_iter()
+            .map(|(level, mut files)| {
+                files.sort_by(|a, b| a.name.cmp(&b.name));
+                let total_bytes = files.iter().map(|file| file.size_bytes).sum();
+                crate::engine::StorageLayoutLevel {
+                    level,
+                    file_count: files.len(),
+                    total_bytes,
+                    files,
+                }
+            })
+            .collect();
+
+        let now = Instant::now();
+        let mut active_snapshots: Vec<_> = self
+            .snapshots
+            .active_snapshots
+            .iter()
+            .map(|(snapshot_id, (sequence, created_at, ref_count))| {
+                crate::engine::SnapshotPinSnapshot {
+                    snapshot_id: *snapshot_id,
+                    sequence: *sequence,
+                    age_seconds: now.duration_since(*created_at).as_secs(),
+                    ref_count: *ref_count,
+                }
+            })
+            .collect();
+        active_snapshots.sort_by_key(|snapshot| snapshot.snapshot_id);
+
+        crate::engine::StorageLayoutSnapshot {
+            health: self.health(),
+            manifest_last_persisted_sequence: self.manifest.last_persisted_sequence,
+            manifest_next_wal_seq: self.manifest.next_wal_seq,
+            levels,
+            active_snapshots,
+            pending_compactions: self.compaction.pending_tasks,
+            compacting_ssts: self.compaction.compacting_ssts.clone(),
+            obsolete_files: Vec::new(),
         }
     }
 
@@ -679,8 +890,21 @@ impl RuntimeState {
                     // Replay compaction: remove old SSTs, add new ones
                     self.manifest.files.retain(|f| !removed.contains(&f.name));
 
-                    // Note: We don't have full FileMeta info, so just track file names
-                    // The actual file metadata will be reconstructed from disk on next persist
+                    for file_meta in added {
+                        let manifest_meta = crate::metadata::FileMeta {
+                            name: file_meta.name.clone(),
+                            level: file_meta.level,
+                            size_bytes: file_meta.size_bytes,
+                            cf_id: file_meta.cf_id,
+                            smallest_key: file_meta.smallest_key.clone(),
+                            largest_key: file_meta.largest_key.clone(),
+                            smallest_seq: file_meta.smallest_seq,
+                            largest_seq: file_meta.largest_seq,
+                            ..Default::default()
+                        };
+                        self.manifest.files.push(manifest_meta);
+                    }
+
                     tracing::info!(
                         removed_count = removed.len(),
                         added_count = added.len(),

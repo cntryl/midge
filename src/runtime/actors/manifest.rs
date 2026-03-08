@@ -64,9 +64,7 @@ impl ManifestActor {
                 largest_seq: file_meta.largest_seq,
                 ..Default::default()
             });
-            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
-                tracing::warn!(error = ?e, "failed to append AddSst to journal");
-            }
+            crate::metadata::append_edit(&state.db_path, &edit)?;
         }
 
         // Now that intent is durable, apply mutation to in-memory manifest
@@ -107,7 +105,7 @@ impl ManifestActor {
         // This ensures we can recover incomplete mutations on crash
         let intent = crate::runtime::IntentLogEntry::CompactionApplied {
             removed: removed.clone(),
-            added: added.iter().map(|m| m.name.clone()).collect(),
+            added: added.clone(),
         };
 
         // Persist the intent before applying mutations
@@ -134,9 +132,7 @@ impl ManifestActor {
             ));
         }
         if !edits.is_empty() {
-            if let Err(e) = crate::metadata::append_edit_batch(&state.db_path, &edits) {
-                tracing::warn!(error = ?e, "failed to append compaction edit batch to journal");
-            }
+            crate::metadata::append_edit_batch(&state.db_path, &edits)?;
         }
 
         // Now that intent is durable, apply mutations to in-memory manifest
@@ -224,9 +220,7 @@ impl ManifestActor {
                 name: name.clone(),
                 created_at,
             };
-            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
-                tracing::warn!(error = ?e, "failed to append CreateColumnFamily to journal");
-            }
+            crate::metadata::append_edit(&state.db_path, &edit)?;
         }
 
         self.pending_edits += 1;
@@ -263,9 +257,7 @@ impl ManifestActor {
         // Append drop CF edit to journal (skip in memory mode)
         if !state.memory_mode {
             let edit = crate::metadata::ManifestEdit::DropColumnFamily { id: cf_id };
-            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
-                tracing::warn!(error = ?e, "failed to append DropColumnFamily to journal");
-            }
+            crate::metadata::append_edit(&state.db_path, &edit)?;
         }
 
         // Remove ColumnFamilyState

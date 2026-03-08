@@ -32,6 +32,14 @@ impl ManifestPersistence {
     pub fn load_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     ) -> Result<Manifest, String> {
+        Self::load_with_fs_and_policy(fs, crate::engine::RecoveryPolicy::Salvage)
+    }
+
+    /// Load manifest using the requested recovery policy.
+    pub fn load_with_fs_and_policy(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        recovery_policy: crate::engine::RecoveryPolicy,
+    ) -> Result<Manifest, String> {
         use crate::io::traits::FsPath;
 
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
@@ -124,6 +132,12 @@ impl ManifestPersistence {
             return Ok(manifest);
         }
 
+        let journal_path = FsPath::new("manifest.journal");
+        if !fs.exists(&journal_path).unwrap_or(false) {
+            tracing::debug!(path = ?journal_path, "manifest journal not found, skipping replay");
+            return Ok(manifest);
+        }
+
         // Replay journal edits on top of snapshot/manifest
         match crate::metadata::journal::replay_journal_with_fs(fs) {
             Ok(edits) => {
@@ -133,6 +147,9 @@ impl ManifestPersistence {
                 tracing::info!(replayed = edits.len(), "manifest journal replayed");
             }
             Err(e) => {
+                if recovery_policy == crate::engine::RecoveryPolicy::Strict {
+                    return Err(format!("failed to replay manifest journal: {}", e));
+                }
                 tracing::warn!(error = %e, "failed to replay manifest journal; proceeding with snapshot only");
             }
         }
@@ -248,13 +265,21 @@ impl ManifestPersistence {
 
     /// Load manifest using a RealFs (compat wrapper)
     pub fn load(db_path: &Path) -> Result<Manifest, String> {
+        Self::load_with_policy(db_path, crate::engine::RecoveryPolicy::Salvage)
+    }
+
+    /// Load manifest using a RealFs with an explicit recovery policy.
+    pub fn load_with_policy(
+        db_path: &Path,
+        recovery_policy: crate::engine::RecoveryPolicy,
+    ) -> Result<Manifest, String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;
 
         let real =
             RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
         let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
-        Self::load_with_fs(&fs)
+        Self::load_with_fs_and_policy(&fs, recovery_policy)
     }
 
     /// Save a full manifest snapshot and truncate journal (atomic as possible).

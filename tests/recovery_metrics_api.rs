@@ -33,7 +33,9 @@ fn should_report_wal_recovery_metrics_after_reopen_when_wal_replay_occurs() {
 
     // Act
     let reopened = Engine::open(OpenOptions::local(db_path).build()).expect("reopen engine");
-    let recovery = reopened.get_recovery_metrics().expect("get recovery metrics");
+    let recovery = reopened
+        .get_recovery_metrics()
+        .expect("get recovery metrics");
 
     // Assert
     assert!(

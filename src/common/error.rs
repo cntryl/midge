@@ -30,6 +30,15 @@ pub enum MidgeError {
     /// Invalid path
     InvalidPath,
 
+    /// Operation could not complete because the underlying storage is full.
+    NoSpace(String),
+
+    /// Recovery failed and the engine refused to continue in strict mode.
+    RecoveryFailed(String),
+
+    /// On-disk data or configuration is incompatible with this build.
+    CompatibilityError(String),
+
     /// Write stall - memtable full or compaction lagging behind
     /// Application must apply backpressure
     WriteStall(String),
@@ -51,6 +60,9 @@ impl fmt::Display for MidgeError {
             MidgeError::NotSupported(msg) => write!(f, "Not supported: {}", msg),
             MidgeError::Internal(msg) => write!(f, "Internal error: {}", msg),
             MidgeError::InvalidPath => write!(f, "Invalid path"),
+            MidgeError::NoSpace(msg) => write!(f, "No space left on device: {}", msg),
+            MidgeError::RecoveryFailed(msg) => write!(f, "Recovery failed: {}", msg),
+            MidgeError::CompatibilityError(msg) => write!(f, "Compatibility error: {}", msg),
             MidgeError::WriteStall(msg) => write!(f, "Write stall: {}", msg),
             MidgeError::MemoryModeViolation(msg) => write!(f, "Memory mode violation: {}", msg),
             MidgeError::Fenced(msg) => write!(f, "Fenced: writer epoch is stale: {}", msg),
@@ -62,7 +74,16 @@ impl std::error::Error for MidgeError {}
 
 impl From<io::Error> for MidgeError {
     fn from(err: io::Error) -> Self {
-        MidgeError::Io(err)
+        let raw_code = err.raw_os_error();
+        let text = err.to_string().to_ascii_lowercase();
+        if matches!(raw_code, Some(28 | 112))
+            || text.contains("no space")
+            || text.contains("disk full")
+        {
+            MidgeError::NoSpace(err.to_string())
+        } else {
+            MidgeError::Io(err)
+        }
     }
 }
 

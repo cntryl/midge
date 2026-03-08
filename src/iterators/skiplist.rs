@@ -6,7 +6,7 @@
 //! - Designed for LSM memtable use: no physical deletion, tombstones only.
 //!
 //! Snapshot rule (LSM-style):
-//!   - A version is visible to a snapshot if `vn.seq < snapshot_seq`.
+//!   - A version is visible to a snapshot if `vn.seq <= snapshot_seq`.
 
 use bytes::Bytes;
 use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Shared};
@@ -246,7 +246,7 @@ impl SkipList {
     /// Internal helper: find first visible version at or before snapshot_seq.
     ///
     /// LSM snapshot semantics:
-    ///   - visible if vn.seq < snapshot_seq (strictly less-than).
+    ///   - visible if vn.seq <= snapshot_seq.
     #[inline]
     fn visible_version<'g>(
         versions_head: &Atomic<VersionNode>,
@@ -257,7 +257,7 @@ impl SkipList {
         // SAFETY: v was loaded with Acquire under the epoch guard. Version nodes
         // are never physically freed while the guard is pinned.
         while let Some(vn) = unsafe { v.as_ref() } {
-            if vn.seq < snapshot_seq {
+            if vn.seq <= snapshot_seq {
                 return Some(vn);
             }
             // Version nodes are immutable after publishing, relaxed is fine.
@@ -1530,9 +1530,9 @@ mod tests {
         sl.delete_range(Some(b"k"), Some(b"l"), 2);
 
         // Assert
-        // - At snapshot_seq=2, delete seq=2 is NOT visible (strictly less-than), so we see put.
-        assert_eq!(sl.get(b"k", 2), Some(Bytes::from_static(b"v")));
-        // - At snapshot_seq=3, delete seq=2 is visible, so key is deleted.
+        // - At snapshot_seq=2, delete seq=2 is visible, so key is deleted.
+        assert_eq!(sl.get(b"k", 2), None);
+        // - At snapshot_seq=3, delete seq=2 remains visible, so key is deleted.
         assert_eq!(sl.get(b"k", 3), None);
     }
 

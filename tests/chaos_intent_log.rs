@@ -21,8 +21,7 @@ use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
-const CHILD_TEST_NAME: &str =
-    "should_crash_in_child_when_wal_compaction_crash_scenario_requested";
+const CHILD_TEST_NAME: &str = "should_crash_in_child_when_wal_compaction_crash_scenario_requested";
 const ENV_SCENARIO: &str = "MIDGE_WAL_COMPACTION_CHAOS_SCENARIO";
 const ENV_DB_PATH: &str = "MIDGE_WAL_COMPACTION_CHAOS_DB_PATH";
 
@@ -43,30 +42,31 @@ fn should_recover_all_data_after_wal_compaction_crash() {
     // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
-    
+
     // Act: Spawn child that performs WAL writes, flush, compaction, then crashes
     run_child_crash_after_manifest_persist(db_path);
-    
+
     // Stale the leader file to allow reopen
     expire_crashed_process_lease(db_path);
-    
+
     // Assert: All data recoverable after crash + reopen
     {
         let engine = open_local_engine(db_path);
         let default_cf = default_cf(&engine);
-        
+
         // Read what was committed before crash
         let committed = read_committed_records(db_path);
-        assert!(!committed.is_empty(), "should have committed records before crash");
-        
+        assert!(
+            !committed.is_empty(),
+            "should have committed records before crash"
+        );
+
         // Verify all committed data is present after recovery
         for record in &committed {
             let query_tx = engine
                 .begin_tx(default_cf.id(), TransactionMode::ReadOnly)
                 .expect("begin query tx");
-            let result = query_tx
-                .get(&record.key)
-                .expect("query should succeed");
+            let result = query_tx.get(&record.key).expect("query should succeed");
             assert!(
                 result.is_some(),
                 "key {:?} should be recoverable after WAL + compaction crash",
@@ -95,12 +95,9 @@ fn child_create_data_flush_compact_and_crash() {
         .expect("env var MIDGE_WAL_COMPACTION_CHAOS_DB_PATH");
     let db_path = PathBuf::from(&db_path_str);
 
-    let engine = Engine::open(OpenOptions::local(&db_path).build())
-        .expect("open engine");
+    let engine = Engine::open(OpenOptions::local(&db_path).build()).expect("open engine");
 
-    let default_cf = engine
-        .get_column_family("default")
-        .expect("default cf");
+    let default_cf = engine.get_column_family("default").expect("default cf");
 
     let mut commits = Vec::new();
 
@@ -182,7 +179,7 @@ fn should_crash_in_child_when_wal_compaction_crash_scenario_requested() {
     let scenario = std::env::var(ENV_SCENARIO).unwrap_or_default();
     if scenario.is_empty() {
         return; // Not running as child
-    // Act
+                // Act
     }
 
     match scenario.as_str() {
@@ -192,7 +189,7 @@ fn should_crash_in_child_when_wal_compaction_crash_scenario_requested() {
         }
         _ => {
             panic!("unknown scenario: {}", scenario);
-        // Assert (implicit: panics above prove test executed)
+            // Assert (implicit: panics above prove test executed)
         }
     }
 }
