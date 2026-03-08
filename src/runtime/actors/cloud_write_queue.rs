@@ -1,4 +1,4 @@
-//! CloudFirst Write Queue Management
+//! CloudAsync Write Queue Management
 //!
 //! Manages pending writes waiting for cloud durability acknowledgment.
 //! Isolated from WalActor to reduce complexity and improve testability.
@@ -63,7 +63,7 @@ pub enum TransactionApplyOp {
     },
 }
 
-/// CloudFirst write queue with backpressure management
+/// CloudAsync write queue with backpressure management
 pub struct CloudWriteQueue {
     /// Queue of pending writes
     queue: VecDeque<PendingCloudWrite>,

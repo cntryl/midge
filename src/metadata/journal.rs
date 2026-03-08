@@ -564,6 +564,7 @@ mod tests {
     use super::*;
     use crate::metadata::FileMeta;
     use crate::metadata::{Manifest, ManifestPersistence};
+    use proptest::prelude::*;
     use tempfile::tempdir;
 
     #[test]
@@ -820,5 +821,51 @@ mod tests {
 
         // Cleanup
         std::env::remove_var("MIDGE_MANIFEST_SYNC_POLICY");
+    }
+
+    proptest! {
+        #[test]
+        fn should_preserve_batch_order_when_replaying_bump_wal_seq_edits(
+            seqs in proptest::collection::vec(0u64..10_000, 1..32)
+        ) {
+            let td = tempdir().unwrap();
+            let db = td.path();
+            let batch: Vec<ManifestEdit> = seqs
+                .iter()
+                .copied()
+                .map(|seq| ManifestEdit::BumpWalSeq { seq })
+                .collect();
+
+            append_edit_batch(db, &batch).expect("append batch failed");
+
+            let replayed = replay_journal(db).expect("replay_journal failed");
+            prop_assert_eq!(replayed.len(), 1);
+
+            match &replayed[0] {
+                ManifestEdit::Batch(inner) => {
+                    prop_assert_eq!(inner.len(), batch.len());
+                    for (observed, expected) in inner.iter().zip(batch.iter()) {
+                        match (observed, expected) {
+                            (
+                                ManifestEdit::BumpWalSeq { seq: observed_seq },
+                                ManifestEdit::BumpWalSeq { seq: expected_seq },
+                            ) => prop_assert_eq!(observed_seq, expected_seq),
+                            other => prop_assert!(false, "unexpected replayed edit pair: {:?}", other),
+                        }
+                    }
+                }
+                other => prop_assert!(false, "expected batch replay, got {:?}", other),
+            }
+
+            let mut direct_manifest = Manifest::default();
+            direct_manifest.apply_edit(&ManifestEdit::Batch(batch.clone()));
+            let mut replayed_manifest = Manifest::default();
+            replayed_manifest.apply_edit(&replayed[0]);
+
+            prop_assert_eq!(
+                replayed_manifest.last_persisted_sequence,
+                direct_manifest.last_persisted_sequence
+            );
+        }
     }
 }

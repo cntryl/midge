@@ -22,7 +22,7 @@ Midge spawns background threads for various subsystems. Understanding the thread
 |-----------|---------|---------|-----------------|
 | BlockCache (per instance) | 16 | Cache admission workers (1 per shard) | Always |
 | WAL Writer | 1 | Background write coalescing | Always |
-| HybridStorage Upload Worker | 1 | CloudFirst WAL upload pipeline | Cloud storage mode |
+| HybridStorage Upload Worker | 1 | CloudAsync WAL upload pipeline | Cloud storage mode |
 | CloudExecutor Runtime | ~4-8 | Embedded tokio runtime for cloud I/O | Cloud storage mode |
 | Compaction Runtime | 4 | Parallel compaction jobs | Configurable |
 | Metadata Writer | 1 | Manifest persistence | Always |
@@ -300,7 +300,7 @@ thread 'name' panicked at 'failed to spawn thread: ...'
 - Added inline fallback for cache admission and WAL upload
 - Increased buffer pool size from 16 to 64
 
-**Problem: CloudFirst writes hanging**
+**Problem: CloudAsync writes hanging**
 ```
 write() call never returns, no error
 ```
@@ -323,3 +323,5 @@ RSS grows continuously under sustained load
 - [Performance Tuning Guide](./performance-tuning.md) - High-level configuration and optimization
 - [API Guide](../user-guides/api-guide.md) - API reference and examples
 - [Cloud Setup Guide](./cloud-setup.md) - Cloud storage configuration
+
+

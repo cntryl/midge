@@ -15,7 +15,7 @@ use crate::{ColumnFamilyHandle, Engine, MidgeEngine, MidgeError, MidgeResult};
 use super::config::MidgeOptions;
 
 pub const KEY_SIZE: usize = 16;
-pub const VALUE_SIZE: usize = 128;
+pub const DEFAULT_VALUE_SIZE: usize = 128;
 
 pub const TIER4_MEMTABLE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -39,21 +39,53 @@ impl XorShift64 {
     }
 }
 
+pub fn configured_initial_keys(default: usize) -> usize {
+    std::env::var("MIDGE_YCSB_INITIAL_KEYS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+pub fn configured_value_size() -> usize {
+    std::env::var("MIDGE_YCSB_VALUE_SIZE_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_VALUE_SIZE)
+}
+
+pub fn logical_entry_size_bytes() -> usize {
+    KEY_SIZE + configured_value_size()
+}
+
+pub fn logical_dataset_bytes(initial_keys: usize) -> u64 {
+    initial_keys as u64 * logical_entry_size_bytes() as u64
+}
+
 pub fn make_key(id: u64) -> [u8; KEY_SIZE] {
     let mut k = [0u8; KEY_SIZE];
     k[..8].copy_from_slice(&id.to_be_bytes());
     k
 }
 
-pub fn make_value(fill: u8) -> [u8; VALUE_SIZE] {
-    [fill; VALUE_SIZE]
+pub fn make_value(fill: u8) -> Vec<u8> {
+    vec![fill; configured_value_size()]
 }
 
 pub fn open_tier4_engine(mut opts: MidgeOptions) -> Engine {
     // Tier-4 workloads should exercise the full system shape.
     opts.enable_compaction = true;
     // Avoid tiny testkit memtables causing constant flush.
-    opts.memtable_size = TIER4_MEMTABLE_SIZE_BYTES;
+    opts.memtable_size = std::env::var("MIDGE_BENCH_MEMTABLE_SIZE_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(TIER4_MEMTABLE_SIZE_BYTES);
+    opts.memory_budget = std::env::var("MIDGE_BENCH_MEMORY_BUDGET_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0);
 
     Engine::open_with_options(opts).expect("open tier4 engine")
 }
@@ -102,7 +134,7 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
             let k = make_key(i);
             let v = make_value((i as usize % 251) as u8);
 
-            tx.put(k.to_vec(), v.to_vec(), None).expect("put failed");
+            tx.put(k.to_vec(), v, None).expect("put failed");
             count += 1;
 
             if count >= batch_ops {
@@ -151,7 +183,7 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
                         let i = i as u64;
                         let k = make_key(i);
                         let v = make_value((i as usize % 251) as u8);
-                        tx.put(k.to_vec(), v.to_vec(), None).expect("put failed");
+                        tx.put(k.to_vec(), v, None).expect("put failed");
                         count += 1;
                         if count >= batch_ops {
                             engine

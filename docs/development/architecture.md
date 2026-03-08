@@ -303,7 +303,7 @@ pub trait Actor {
 - Allows group commit (multiple writes, single fsync)
 
 **Bypassed for:**
-- CloudFirst mode (cloud has own batching)
+- CloudAsync mode (cloud has own batching)
 - DeleteRange operations (rare, go direct)
 
 ## Data Flow
@@ -593,10 +593,10 @@ pub trait Scheduler {
 - `rotate()` → Start new segment
 - `replay()` → Read records on recovery
 
-**Policies** (when to fsync):
+**Policies** (when to fsync / what frontier they use):
 - `Strict`: After every write
-- `Batched`: Every 1024 ops / 4MB / 500μs
-- `CloudFirst`: After cloud upload
+- `Batched`: Periodic local fsync / group commit
+- `CloudAsync`: Visible after the local append barrier, cloud durability later
 - `BestEffort`: Never (no WAL)
 
 ### SST (Sorted String Table)
@@ -761,10 +761,10 @@ let iter = tx.scan(&query)?;
 - `best_effort()`: Skip WAL
 
 **WAL DurabilityPolicy** (runtime level):
-- Controls when WAL fsync happens
+- Controls the local/cloud durability frontier
 - `Strict`: Every write
 - `Batched`: Group commit
-- `CloudFirst`: After cloud upload
+- `CloudAsync`: Local append visibility now, cloud durability later
 
 **Relationship:**
 ```rust
@@ -999,3 +999,5 @@ cargo doc --document-private-items
 - **API usage**: [../user-guides/api-guide.md](../user-guides/api-guide.md)
 - **Testing guide**: [testing.md](testing.md)
 - **Benchmark guide**: [benchmarks.md](benchmarks.md)
+
+

@@ -1,6 +1,6 @@
 //! Cloud / hybrid storage integration
 //!
-//! Handles CloudFirst WAL flush, cloud upload ack/fail events,
+//! Handles CloudAsync WAL flush, cloud upload ack/fail events,
 //! and hybrid storage polling/push-channel draining.
 
 use super::durability_sync::CompletionSource;
@@ -59,7 +59,7 @@ impl EventLoop {
                         if let Some(enqueued_at) = self.durability.take_cloud_segment_timing(seg_id)
                         {
                             if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                                telemetry.metrics().record_cloudfirst_wal_ack_latency_us(
+                                telemetry.metrics().record_cloud_async_wal_ack_latency_us(
                                     enqueued_at.elapsed().as_micros() as u64,
                                 );
                             }
@@ -139,8 +139,8 @@ impl EventLoop {
         }
     }
 
-    pub(super) fn maybe_flush_cloudfirst_wal(&mut self) {
-        if !self.wal_actor.is_cloud_first() {
+    pub(super) fn maybe_flush_cloud_async_wal(&mut self) {
+        if !self.wal_actor.is_cloud_async() {
             return;
         }
         let Some(storage) = &self.hybrid_storage else {
@@ -161,7 +161,7 @@ impl EventLoop {
 
         if !self
             .durability
-            .should_flush_cloudfirst(cloud_pending, bytes_buffered)
+            .should_flush_cloud_async(cloud_pending, bytes_buffered)
         {
             return;
         }
@@ -170,13 +170,13 @@ impl EventLoop {
 
         let seal_start = Instant::now();
         if let Err(e) = self.wal_actor.flush_for_cloud_upload(&mut self.state) {
-            tracing::error!(error = %e, "CloudFirst: WAL flush failed");
+            tracing::error!(error = %e, "CloudAsync: WAL flush failed");
             return;
         }
         let seal_latency_us = seal_start.elapsed().as_micros() as u64;
 
         if let Err(e) = self.wal_actor.rotate(&mut self.state) {
-            tracing::error!(error = %e, "CloudFirst: WAL rotate failed");
+            tracing::error!(error = %e, "CloudAsync: WAL rotate failed");
             return;
         }
 
@@ -194,14 +194,14 @@ impl EventLoop {
         if let Some(telemetry) = crate::telemetry::Telemetry::global() {
             telemetry
                 .metrics()
-                .record_cloudfirst_wal_segment_sealed(bytes_buffered as u64, seal_latency_us);
+                .record_cloud_async_wal_segment_sealed(bytes_buffered as u64, seal_latency_us);
         }
 
-        if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some() {
+        if std::env::var_os("MIDGE_TRACE_CLOUD_ASYNC").is_some() {
             // Throttle: log every 1000 segments to avoid noise.
             if segment_id.is_multiple_of(1000) {
                 eprintln!(
-                    "[midge] CloudFirst flush: segment_id={segment_id} max_sequence={max_sequence} pending_cloud={} ",
+                    "[midge] CloudAsync flush: segment_id={segment_id} max_sequence={max_sequence} pending_cloud={} ",
                     self.wal_actor.has_pending_cloud_writes()
                 );
             }
@@ -266,13 +266,13 @@ mod tests {
     }
 
     #[test]
-    fn should_cloudfirst_ack_confirm_idempotent_request() -> crate::common::MidgeResult<()> {
-        // Arrange: create state and event loop with CloudFirst policy
+    fn should_cloud_async_ack_confirm_idempotent_request() -> crate::common::MidgeResult<()> {
+        // Arrange: create state and event loop with CloudAsync policy
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let state = RuntimeState::new(tmp.path().to_path_buf(), false);
         let router = Arc::new(ResponseRouter::new());
         let config = crate::runtime::RuntimeConfig {
-            wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
+            wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
             ..Default::default()
         };
         let mut el = EventLoop::new(state, false, router, config, None)?;
@@ -297,7 +297,7 @@ mod tests {
 
         assert!(
             deferred,
-            "CloudFirst append should be deferred waiting for CloudAck"
+            "CloudAsync append should be deferred waiting for CloudAck"
         );
 
         // Queue waiter for this append (simulates EventLoop behavior)
@@ -307,7 +307,7 @@ mod tests {
                 sequence: seq,
             });
 
-        // Simulate sealing & uploading segment for CloudFirst as EventLoop would do
+        // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
         let seg_id = el.state.wal.current_segment_id;
         // Flush and rotate to create a sealed segment
         el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
@@ -340,14 +340,14 @@ mod tests {
     }
 
     #[test]
-    fn should_cloudfirst_retry_after_ack_return_same_sequence_without_queueing(
+    fn should_cloud_async_retry_after_ack_return_same_sequence_without_queueing(
     ) -> crate::common::MidgeResult<()> {
-        // Arrange: create state and event loop with CloudFirst policy
+        // Arrange: create state and event loop with CloudAsync policy
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let state = RuntimeState::new(tmp.path().to_path_buf(), false);
         let router = Arc::new(ResponseRouter::new());
         let config = crate::runtime::RuntimeConfig {
-            wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
+            wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
             ..Default::default()
         };
         let mut el = EventLoop::new(state, false, router, config, None)?;
@@ -372,7 +372,7 @@ mod tests {
 
         assert!(
             deferred1,
-            "CloudFirst append should be deferred waiting for CloudAck"
+            "CloudAsync append should be deferred waiting for CloudAck"
         );
 
         // Queue waiter for this append (simulates EventLoop behavior)
@@ -382,7 +382,7 @@ mod tests {
                 sequence: seq1,
             });
 
-        // Simulate sealing & uploading segment for CloudFirst as EventLoop would do
+        // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
         let seg_id = el.state.wal.current_segment_id;
         // Flush and rotate to create a sealed segment
         el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
@@ -436,14 +436,14 @@ mod tests {
     }
 
     #[test]
-    fn should_cloudfirst_fail_invalidates_idempotency_then_retry_allocates_new_seq(
+    fn should_cloud_async_fail_invalidates_idempotency_then_retry_allocates_new_seq(
     ) -> crate::common::MidgeResult<()> {
-        // Arrange: create state and event loop with CloudFirst policy
+        // Arrange: create state and event loop with CloudAsync policy
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let state = RuntimeState::new(tmp.path().to_path_buf(), false);
         let router = Arc::new(ResponseRouter::new());
         let config = crate::runtime::RuntimeConfig {
-            wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
+            wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
             ..Default::default()
         };
         let mut el = EventLoop::new(state, false, router, config, None)?;
@@ -468,7 +468,7 @@ mod tests {
 
         assert!(
             deferred1,
-            "CloudFirst append should be deferred waiting for CloudAck"
+            "CloudAsync append should be deferred waiting for CloudAck"
         );
 
         // Queue waiter for this append (simulates EventLoop behavior)
@@ -478,7 +478,7 @@ mod tests {
                 sequence: seq1,
             });
 
-        // Simulate sealing & uploading segment for CloudFirst as EventLoop would do
+        // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
         let seg_id = el.state.wal.current_segment_id;
         // Flush and rotate to create a sealed segment
         el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
@@ -516,7 +516,7 @@ mod tests {
         );
         assert!(
             deferred2,
-            "retry should be deferred when retried after fail (CloudFirst)"
+            "retry should be deferred when retried after fail (CloudAsync)"
         );
 
         Ok(())

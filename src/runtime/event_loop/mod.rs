@@ -14,7 +14,7 @@
 //!
 //! - `read_path` — point reads, range scans, durability-aware message handlers
 //! - `durability_sync` — WAL sync, group commit, durability waiter completion
-//! - `cloud_integration` — CloudFirst WAL flush, cloud ack/fail handling
+//! - `cloud_integration` — CloudAsync WAL flush, cloud ack/fail handling
 //! - `write_batch` — group commit write draining, backpressure / write stall
 
 mod cloud_integration;
@@ -138,10 +138,10 @@ impl EventLoop {
         }
 
         // 🔑 CRITICAL: Use the correct key for durability_waiters based on mode
-        // - CloudFirst: key is segment_id (for rotate_to/complete calls)
+        // - CloudAsync: key is segment_id (for rotate_to/complete calls)
         // - Batched: key is flush_generation (returned from wal_actor.sync())
-        let is_cloud_first = wal_actor.is_cloud_first();
-        let initial_durability_key = if is_cloud_first {
+        let is_cloud_async = wal_actor.is_cloud_async();
+        let initial_durability_key = if is_cloud_async {
             initial_segment_id
         } else {
             wal_actor.current_flush_generation()
@@ -162,7 +162,7 @@ impl EventLoop {
             loop_debug: std::env::var_os("MIDGE_LOOP_DEBUG").is_some(),
             loop_debug_wakes: 0,
             loop_debug_batch_total: 0,
-            durability: DurabilityCoordinator::new(initial_durability_key, is_cloud_first),
+            durability: DurabilityCoordinator::new(initial_durability_key, is_cloud_async),
             router,
             pending_msg: None,
             worker_msg_tx,
@@ -293,6 +293,7 @@ impl EventLoop {
                 self.state.manifest.last_persisted_sequence = sequence;
             }
             if let Err(error) = self.manifest_actor.persist(&self.state) {
+                self.state.mark_persistence_anomaly();
                 tracing::warn!(%error, sst_name, "manifest checkpoint after flush failed; journal remains authoritative");
             }
             self.state.clear_flush_publication_intent(sst_name)?;
@@ -356,7 +357,7 @@ impl EventLoop {
 
     fn progress_pass(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
         self.sync_batched_wal_if_needed(msg_rx);
-        self.maybe_flush_cloudfirst_wal();
+        self.maybe_flush_cloud_async_wal();
         self.tick_hybrid_storage();
         self.drain_hybrid_storage_events();
     }
@@ -383,7 +384,7 @@ impl EventLoop {
     }
 
     fn process_one(&mut self, msg: RuntimeMsg, msg_rx: &Receiver<RuntimeMsg>) -> HandleOutcome {
-        self.maybe_flush_cloudfirst_wal();
+        self.maybe_flush_cloud_async_wal();
         self.tick_hybrid_storage();
         self.drain_hybrid_storage_events();
         self.handle_runtime_msg(msg, msg_rx)
@@ -493,11 +494,11 @@ impl EventLoop {
             RuntimeMsg::Shutdown => {
                 tracing::info!("Runtime shutting down");
 
-                // CRITICAL: Flush and wait for pending CloudFirst segments before shutdown.
+                // CRITICAL: Flush and wait for pending CloudAsync segments before shutdown.
                 // This ensures all writes are cloud-durable for recovery.
-                if self.wal_actor.is_cloud_first() && self.state.wal.pending_writes > 0 {
+                if self.wal_actor.is_cloud_async() && self.state.wal.pending_writes > 0 {
                     if let Err(e) = self.wal_actor.flush_for_cloud_upload(&mut self.state) {
-                        tracing::error!(error = %e, "Failed to flush CloudFirst segments during shutdown");
+                        tracing::error!(error = %e, "Failed to flush CloudAsync segments during shutdown");
                     } else if let Err(e) = self.wal_actor.rotate(&mut self.state) {
                         tracing::error!(error = %e, "Failed to rotate WAL during shutdown");
                     } else if let Some(storage) = &self.hybrid_storage {
@@ -505,12 +506,12 @@ impl EventLoop {
                         let max_sequence = self.state.wal.local_durable_seq;
                         let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
                         storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
-                        tracing::info!(segment_id, "Enqueued final CloudFirst segment on shutdown");
+                        tracing::info!(segment_id, "Enqueued final CloudAsync segment on shutdown");
                     }
                 }
 
                 // Wait for pending uploads to complete (with timeout)
-                if self.wal_actor.is_cloud_first() {
+                if self.wal_actor.is_cloud_async() {
                     if let Some(storage) = &self.hybrid_storage {
                         let storage_arc = storage.clone();
                         let shutdown_start = std::time::Instant::now();
@@ -529,11 +530,11 @@ impl EventLoop {
                         if storage_arc.pending_upload_count() > 0 {
                             tracing::warn!(
                                 pending = storage_arc.pending_upload_count(),
-                                "Shutdown timeout: {} pending CloudFirst uploads not completed",
+                                "Shutdown timeout: {} pending CloudAsync uploads not completed",
                                 storage_arc.pending_upload_count()
                             );
                         } else {
-                            tracing::info!("All CloudFirst uploads completed on shutdown");
+                            tracing::info!("All CloudAsync uploads completed on shutdown");
                         }
                     }
                 }
@@ -893,13 +894,13 @@ impl EventLoop {
                     return HandleOutcome::Continue;
                 }
 
-                if self.wal_actor.is_cloud_first() && self.hybrid_storage.is_none() {
+                if self.wal_actor.is_cloud_async() && self.hybrid_storage.is_none() {
                     self.respond(
                         request_id,
                         RuntimeResponse::Error {
                             request_id,
                             error: crate::common::MidgeError::Internal(
-                                "CloudFirst requires HybridStorage".to_string(),
+                                "CloudAsync requires HybridStorage".to_string(),
                             ),
                         },
                     );
@@ -916,7 +917,7 @@ impl EventLoop {
                             self.publish_snapshot();
 
                             if self.should_ack_immediately(deferred) {
-                                if self.wal_actor.is_cloud_first() {
+                                if self.wal_actor.is_cloud_async() {
                                     // Accepted but not yet cloud-durable; confirm later on CloudAck.
                                     self.durability.queue_waiter(
                                         DurabilityWaiter::ConfirmTransactionApply { request_id },
@@ -960,8 +961,8 @@ impl EventLoop {
                     }
                 }
                 // Auto-sync batched writes if needed (group commit completes all waiters).
-                // Do this for local durability mode; CloudFirst uses rotate/upload logic.
-                if !self.wal_actor.is_cloud_first() {
+                // Do this for local durability mode; CloudAsync uses rotate/upload logic.
+                if !self.wal_actor.is_cloud_async() {
                     const MAX_DRAIN_WRITES_AFTER_BATCH: usize = 1024;
                     let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN_WRITES_AFTER_BATCH);
                     self.sync_batched_wal_if_needed(msg_rx);
@@ -1000,7 +1001,7 @@ impl EventLoop {
                     }
                 }
 
-                self.maybe_flush_cloudfirst_wal();
+                self.maybe_flush_cloud_async_wal();
             }
 
             // =============================================================
@@ -1274,6 +1275,9 @@ impl EventLoop {
                 );
 
                 if !succeeded {
+                    if let Some(t) = crate::telemetry::Telemetry::global() {
+                        t.metrics().record_compaction_failure();
+                    }
                     tracing::warn!(
                         input_count = input_ssts.len(),
                         output_count = output_ssts.len(),
@@ -1308,6 +1312,10 @@ impl EventLoop {
                             crate::runtime::PublicationPhase::ManifestPublished,
                         )
                     }) {
+                        if let Some(t) = crate::telemetry::Telemetry::global() {
+                            t.metrics().record_compaction_failure();
+                        }
+                        self.state.mark_persistence_anomaly();
                         tracing::error!(error = ?e, "failed to apply compaction to manifest");
                         self.respond(
                             request_id,
@@ -1327,6 +1335,10 @@ impl EventLoop {
                         );
 
                         if let Err(e) = self.manifest_actor.persist(&self.state) {
+                            if let Some(t) = crate::telemetry::Telemetry::global() {
+                                t.metrics().record_compaction_failure();
+                            }
+                            self.state.mark_persistence_anomaly();
                             tracing::error!(error = ?e, "failed to persist manifest after compaction");
                             self.respond(
                                 request_id,
@@ -1346,6 +1358,7 @@ impl EventLoop {
                             // Queue GC deletion of input SSTs
                             if let Err(e) = self.gc_actor.delete_ssts(&mut self.state, &input_ssts)
                             {
+                                self.state.mark_persistence_anomaly();
                                 tracing::warn!(
                                     error = ?e,
                                     "GC deletion of compaction input SSTs failed (non-fatal)"
@@ -1360,10 +1373,22 @@ impl EventLoop {
                             if let Err(error) =
                                 self.state.clear_compaction_publication_intent(&output_ssts)
                             {
+                                self.state.mark_persistence_anomaly();
                                 tracing::warn!(
                                     %error,
                                     "failed to clear compaction publication intent after GC"
                                 );
+                            }
+                            if let Some(t) = crate::telemetry::Telemetry::global() {
+                                let bytes_rewritten: u64 = self
+                                    .state
+                                    .manifest
+                                    .files
+                                    .iter()
+                                    .filter(|file| output_ssts.contains(&file.name))
+                                    .map(|file| file.size_bytes)
+                                    .sum();
+                                t.metrics().record_compaction(bytes_rewritten);
                             }
                             self.publish_snapshot();
                             self.respond(request_id, RuntimeResponse::Ok { request_id });
@@ -1445,13 +1470,13 @@ impl EventLoop {
                     return HandleOutcome::Continue;
                 }
 
-                if self.wal_actor.is_cloud_first() && self.hybrid_storage.is_none() {
+                if self.wal_actor.is_cloud_async() && self.hybrid_storage.is_none() {
                     self.respond(
                         request_id,
                         RuntimeResponse::Error {
                             request_id,
                             error: crate::common::MidgeError::Internal(
-                                "CloudFirst requires HybridStorage".to_string(),
+                                "CloudAsync requires HybridStorage".to_string(),
                             ),
                         },
                     );
@@ -1475,8 +1500,8 @@ impl EventLoop {
                         self.publish_snapshot();
 
                         if self.should_ack_immediately(deferred) {
-                            if self.wal_actor.is_cloud_first() {
-                                // Background CloudFirst: confirm sequences immediately after local WAL write.
+                            if self.wal_actor.is_cloud_async() {
+                                // Background CloudAsync: confirm sequences immediately after local WAL write.
                                 // Cloud upload runs asynchronously; no need to queue waiters since we
                                 // respond immediately and make data visible for reads.
                                 self.state.confirm_sequences(request_id);
@@ -1514,7 +1539,7 @@ impl EventLoop {
                 // Auto-sync batched writes if needed (group commit completes all waiters)
                 self.sync_batched_wal_if_needed(msg_rx);
 
-                self.maybe_flush_cloudfirst_wal();
+                self.maybe_flush_cloud_async_wal();
             }
 
             RuntimeMsg::WalAppendDeleteRange {
@@ -1535,13 +1560,13 @@ impl EventLoop {
                     return HandleOutcome::Continue;
                 }
 
-                if self.wal_actor.is_cloud_first() && self.hybrid_storage.is_none() {
+                if self.wal_actor.is_cloud_async() && self.hybrid_storage.is_none() {
                     self.respond(
                         request_id,
                         RuntimeResponse::Error {
                             request_id,
                             error: crate::common::MidgeError::Internal(
-                                "CloudFirst requires HybridStorage".to_string(),
+                                "CloudAsync requires HybridStorage".to_string(),
                             ),
                         },
                     );
@@ -1561,8 +1586,8 @@ impl EventLoop {
                         self.publish_snapshot();
 
                         if self.should_ack_immediately(deferred) {
-                            if self.wal_actor.is_cloud_first() {
-                                // Background CloudFirst: confirm sequences immediately after local WAL write.
+                            if self.wal_actor.is_cloud_async() {
+                                // Background CloudAsync: confirm sequences immediately after local WAL write.
                                 self.state.confirm_sequences(request_id);
                             } else if deferred {
                                 self.maybe_queue_confirm_only_waiter(deferred, request_id, false);
@@ -1596,7 +1621,7 @@ impl EventLoop {
                 }
 
                 self.sync_batched_wal_if_needed(msg_rx);
-                self.maybe_flush_cloudfirst_wal();
+                self.maybe_flush_cloud_async_wal();
             }
 
             RuntimeMsg::WalSync { request_id } => {
@@ -2127,7 +2152,8 @@ pub(super) mod tests {
     #[test]
     fn should_handle_filesystem_mode_initialization() {
         // Arrange - Create state in filesystem mode
-        let state = RuntimeState::new("/tmp/test_filesystem".into(), false);
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
 
         // Act
         let router = Arc::new(ResponseRouter::new());

@@ -1360,7 +1360,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(stats.had_corruption);
+        assert!(!stats.had_corruption);
         assert_eq!(stats.record_count, 1);
         assert_eq!(memtables[&0].get(b"good").unwrap(), Some(b"value".to_vec()));
         assert_eq!(memtables[&0].get(b"tail").unwrap(), None);

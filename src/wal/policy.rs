@@ -35,11 +35,14 @@ pub enum DurabilityPolicy {
     /// Use for: cloud-native deployments with geo-persistence.
     CloudMirrored,
 
-    /// Write to local WAL + WAIT for cloud acknowledgment.
-    /// Durability = cloud upload complete (local is just a cache).
-    /// Use for: true cloud-first deployments where local disk is ephemeral.
-    /// WalActor tracks cloud_durable_seq and blocks responses until cloud confirms.
-    CloudFirst,
+    /// Write to local WAL, make the write visible after the local append barrier,
+    /// and upload sealed WAL segments to cloud asynchronously.
+    /// Durability = local append visibility now, cloud durability later via
+    /// `cloud_durable_seq`.
+    /// Use for: cloud-backed deployments that want ordinary commits to remain
+    /// low-latency while allowing callers to opt into `cloud_strict()` when they
+    /// must wait for cloud durability explicitly.
+    CloudAsync,
 
     /// Best-effort persistence - write directly to memtable only.
     /// Behavior: data visible for reads and flushes to SST, but NO durability guarantee on crash before flush.

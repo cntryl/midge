@@ -761,6 +761,7 @@ unsafe impl Sync for SkipList {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::sync::Arc;
     use std::thread;
 
@@ -1578,5 +1579,35 @@ mod tests {
         assert_eq!(at_3.len(), 1);
         assert_eq!(at_7.len(), 0);
         assert_eq!(at_15.len(), 1);
+    }
+
+    proptest! {
+        #[test]
+        fn should_match_latest_visible_version_for_single_key(
+            versions in proptest::collection::btree_map(
+                0u64..4096,
+                proptest::option::of(proptest::collection::vec(any::<u8>(), 0..32)),
+                1..32
+            ),
+            snapshot_seq in 0u64..4096
+        ) {
+            let sl = SkipList::new();
+            let key = Bytes::from_static(b"prop_key");
+
+            for (seq, value) in &versions {
+                match value {
+                    Some(bytes) => sl.upsert(key.clone(), Some(Bytes::from(bytes.clone())), *seq),
+                    None => sl.delete(key.clone(), *seq),
+                }
+            }
+
+            let expected = versions
+                .range(..=snapshot_seq)
+                .next_back()
+                .and_then(|(_, value)| value.clone())
+                .map(Bytes::from);
+
+            prop_assert_eq!(sl.get(key.as_ref(), snapshot_seq), expected);
+        }
     }
 }

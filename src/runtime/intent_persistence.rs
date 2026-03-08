@@ -180,6 +180,7 @@ impl IntentPersistence {
 mod tests {
     use super::*;
     use crate::runtime::IntentLogEntry;
+    use proptest::prelude::*;
 
     fn create_test_dir() -> std::path::PathBuf {
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -220,5 +221,44 @@ mod tests {
             "expected WalSynced entry, got: {:?}",
             loaded[0]
         );
+    }
+
+    proptest! {
+        #[test]
+        fn should_roundtrip_arbitrary_wal_synced_intents(
+            pairs in proptest::collection::vec((0u64..10_000, 0u64..10_000), 0..32)
+        ) {
+            let test_dir = create_test_dir();
+            let intents: Vec<IntentLogEntry> = pairs
+                .iter()
+                .map(|(segment_id, seqno)| IntentLogEntry::WalSynced {
+                    segment_id: *segment_id,
+                    seqno: *seqno,
+                })
+                .collect();
+
+            IntentPersistence::save(&test_dir, &intents).expect("save should succeed");
+            let loaded = IntentPersistence::load(&test_dir).expect("load should succeed");
+
+            prop_assert_eq!(loaded.len(), intents.len());
+            for (loaded_entry, expected_entry) in loaded.iter().zip(intents.iter()) {
+                match (loaded_entry, expected_entry) {
+                    (
+                        IntentLogEntry::WalSynced {
+                            segment_id: loaded_segment,
+                            seqno: loaded_seqno,
+                        },
+                        IntentLogEntry::WalSynced {
+                            segment_id: expected_segment,
+                            seqno: expected_seqno,
+                        },
+                    ) => {
+                        prop_assert_eq!(loaded_segment, expected_segment);
+                        prop_assert_eq!(loaded_seqno, expected_seqno);
+                    }
+                    other => prop_assert!(false, "unexpected intent roundtrip pair: {:?}", other),
+                }
+            }
+        }
     }
 }

@@ -80,18 +80,28 @@ impl FlushActor {
                     // Proceed with flush
                 }
                 crate::storage::hybrid::actor::ReservationResult::WaitForCloudUpload => {
+                    if let Some(t) = crate::telemetry::Telemetry::global() {
+                        t.metrics().record_write_stall_cloud();
+                    }
                     tracing::warn!(cf_id = cf_id, "Flush blocked: waiting for cloud upload");
                     return Err(MidgeError::Internal(
                         "Flush blocked: waiting for cloud upload".to_string(),
                     ));
                 }
                 crate::storage::hybrid::actor::ReservationResult::WaitForCompaction => {
+                    if let Some(t) = crate::telemetry::Telemetry::global() {
+                        t.metrics().record_write_stall_compaction();
+                    }
                     tracing::warn!(cf_id = cf_id, "Flush blocked: waiting for compaction");
                     return Err(MidgeError::Internal(
                         "Flush blocked: waiting for compaction".to_string(),
                     ));
                 }
                 crate::storage::hybrid::actor::ReservationResult::RejectNoSpace => {
+                    if let Some(t) = crate::telemetry::Telemetry::global() {
+                        t.metrics().record_no_space_event();
+                        t.metrics().record_write_stall_no_space();
+                    }
                     tracing::error!(cf_id = cf_id, "Flush rejected: no disk space available");
                     return Err(MidgeError::NoSpace(
                         "no disk space available for flush".to_string(),
@@ -116,6 +126,9 @@ impl FlushActor {
                 max_immutable = max_immutable,
                 "Write stall: immutable memtable queue at capacity"
             );
+            if let Some(t) = crate::telemetry::Telemetry::global() {
+                t.metrics().record_write_stall_memory();
+            }
             return Err(MidgeError::WriteStall(format!(
                 "immutable memtable queue full ({}/{}); flush in progress",
                 immutable_count, max_immutable

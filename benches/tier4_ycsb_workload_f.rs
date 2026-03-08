@@ -16,7 +16,7 @@ use cntryl_midge::testkit::ycsb;
 use cntryl_midge::testkit::zipfian::ZipfianGenerator;
 use cntryl_midge::testkit::MidgeOptions;
 
-const INITIAL_KEYS: usize = 50_000; // Reduced from 100k: still exercises LSM multi-level reads
+const DEFAULT_INITIAL_KEYS: usize = 50_000; // Overridable for larger-than-RAM nightly runs
 const WARMUP: Duration = Duration::from_secs(1);
 const MEASURED: Duration = Duration::from_secs(5);
 
@@ -29,14 +29,16 @@ const CLIENTS_64: usize = 64;
 const WORKLOAD_SEED: u64 = 0xF0F0_EA5E_5678_9ABC;
 
 fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
+    let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
+
     // Phase 1: Load (not measured)
     let engine = Arc::new(ycsb::open_tier4_engine(opts));
     let cf = engine.create_column_family("cf1").unwrap();
-    ycsb::load_initial_dataset(engine.as_ref(), &cf, INITIAL_KEYS);
+    ycsb::load_initial_dataset(engine.as_ref(), &cf, initial_keys);
 
     // Phase 2: Warm-up (not measured)
     {
-        let zipf = Arc::new(ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA));
+        let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
         let cf_id = cf.id();
         let _warmup_ops = ycsb::run_multi_client_for_duration(
             Arc::clone(&engine),
@@ -61,7 +63,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         let mut tx = e
                             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                             .expect("begin");
-                        tx.put(k.to_vec(), v.to_vec(), None).expect("warmup put");
+                        tx.put(k.to_vec(), v.clone(), None).expect("warmup put");
                         e.commit(tx, cntryl_midge::WriteOptions::best_effort()) // Fast warmup
                     })
                     .expect("commit");
@@ -75,7 +77,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
 
     // Phase 3: Measured (duration-based; multi-client)
     let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
-        let zipf = Arc::new(ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA));
+        let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
         let write_opts = cntryl_midge::WriteOptions::buffered(); // Back to buffered for measured phase
         ycsb::run_multi_client_for_duration(
             Arc::clone(&engine),
@@ -102,7 +104,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         let mut tx = e
                             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                             .expect("measured begin");
-                        tx.put(k.to_vec(), v.to_vec(), None).expect("measured put");
+                        tx.put(k.to_vec(), v.clone(), None).expect("measured put");
                         e.commit(tx, write_opts)
                     })
                     .expect("measured commit");
@@ -112,7 +114,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     });
 
     ctx.set_elements(measured_ops);
-    ctx.set_bytes(measured_ops * (ycsb::KEY_SIZE + ycsb::VALUE_SIZE) as u64);
+    ctx.set_bytes(measured_ops * ycsb::logical_entry_size_bytes() as u64);
 }
 
 #[stress_test]

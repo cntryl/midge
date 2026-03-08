@@ -172,6 +172,8 @@ pub struct RuntimeState {
     pub recovery_policy: crate::engine::RecoveryPolicy,
     /// True if startup had to salvage around metadata or WAL issues.
     pub opened_in_salvage_mode: bool,
+    /// True when runtime detected non-fatal persistence anomalies that operators should investigate.
+    pub persistence_anomaly_detected: bool,
     /// Whether background compaction is enabled
     pub enable_compaction: bool,
 
@@ -240,7 +242,7 @@ impl RuntimeState {
     /// Create new runtime state with an optional override for WAL recovery.
     ///
     /// When `recovery_wal_dir` is provided, recovery replays WAL from that
-    /// directory (instead of `db_path/wal`). This is used for CloudFirst mode
+    /// directory (instead of `db_path/wal`). This is used for CloudAsync mode
     /// where cloud WAL is the source of truth.
     pub fn new_with_recovery_dir(
         db_path: PathBuf,
@@ -266,6 +268,10 @@ impl RuntimeState {
     ) -> MidgeResult<Self> {
         let (wal_dir, sst_dir) = Self::ensure_directories(&db_path, memory_mode);
         let mut opened_in_salvage_mode = false;
+
+        if !memory_mode {
+            crate::metadata::ensure_or_create_format_marker(&db_path)?;
+        }
 
         // Initialize filesystem abstraction (use MockFs in memory mode)
         let fs: std::sync::Arc<dyn Fs> = if memory_mode {
@@ -459,7 +465,7 @@ impl RuntimeState {
 
         // WAL segment id recovery:
         // On restart, we must continue segment ids beyond the highest existing rotated segment
-        // to avoid overwriting previously-uploaded cloud WAL segments (CloudFirst) or local
+        // to avoid overwriting previously-uploaded cloud WAL segments (CloudAsync) or local
         // WAL segments (LocalDisk). The source of truth is the replay directory.
         let recovered_next_segment_id = if !memory_mode && replay_dir.exists() {
             let mut max_segment_id: u64 = 0;
@@ -520,6 +526,7 @@ impl RuntimeState {
             memory_mode,
             recovery_policy,
             opened_in_salvage_mode,
+            persistence_anomaly_detected: false,
             intent_log,
             memtable_flush_threshold: 64 * 1024 * 1024, // 64MB
             max_immutable_memtables: 10,                // Hard limit on immutable memtable queue
@@ -547,6 +554,11 @@ impl RuntimeState {
             crate::engine::EngineHealth::SalvageMode
         } else if self.write_stalled {
             crate::engine::EngineHealth::WriteStalled
+        } else if self.persistence_anomaly_detected
+            || !self.intent_log.is_empty()
+            || !self.obsolete_sst_files().is_empty()
+        {
+            crate::engine::EngineHealth::Degraded
         } else {
             crate::engine::EngineHealth::Healthy
         }
@@ -561,6 +573,7 @@ impl RuntimeState {
             .sum();
         let sst_count = self.manifest.files.len();
         let sst_bytes = self.manifest.files.iter().map(|file| file.size_bytes).sum();
+        let obsolete_files = self.obsolete_sst_files();
         let telemetry = crate::telemetry::Telemetry::global().map(|t| t.metrics().snapshot());
 
         crate::engine::RuntimeMetricsSnapshot {
@@ -589,12 +602,20 @@ impl RuntimeState {
             sst_count,
             sst_bytes,
             salvage_mode_opens: u64::from(self.opened_in_salvage_mode),
-            no_space_events: 0,
+            no_space_events: telemetry.as_ref().map_or(0, |m| m.no_space_events),
             compactions_run: telemetry.as_ref().map_or(0, |m| m.compactions_run),
             compaction_bytes_rewritten: telemetry
                 .as_ref()
                 .map_or(0, |m| m.compaction_bytes_rewritten),
+            compaction_failures: telemetry.as_ref().map_or(0, |m| m.compaction_failures),
+            obsolete_file_backlog: obsolete_files.len(),
             write_stalls_total: telemetry.as_ref().map_or(0, |m| m.write_stalls),
+            write_stalls_memory_total: telemetry.as_ref().map_or(0, |m| m.write_stalls_memory),
+            write_stalls_compaction_total: telemetry
+                .as_ref()
+                .map_or(0, |m| m.write_stalls_compaction),
+            write_stalls_cloud_total: telemetry.as_ref().map_or(0, |m| m.write_stalls_cloud),
+            write_stalls_no_space_total: telemetry.as_ref().map_or(0, |m| m.write_stalls_no_space),
             wal_append_count: telemetry.as_ref().map_or(0, |m| m.wal_append_count),
             wal_flush_count: telemetry.as_ref().map_or(0, |m| m.wal_flush_count),
             wal_fsync_count: telemetry.as_ref().map_or(0, |m| m.wal_fsync_count),
@@ -655,6 +676,7 @@ impl RuntimeState {
             })
             .collect();
         active_snapshots.sort_by_key(|snapshot| snapshot.snapshot_id);
+        let obsolete_files = self.obsolete_sst_files();
 
         crate::engine::StorageLayoutSnapshot {
             health: self.health(),
@@ -664,8 +686,45 @@ impl RuntimeState {
             active_snapshots,
             pending_compactions: self.compaction.pending_tasks,
             compacting_ssts: self.compaction.compacting_ssts.clone(),
-            obsolete_files: Vec::new(),
+            obsolete_files,
         }
+    }
+
+    pub fn mark_persistence_anomaly(&mut self) {
+        self.persistence_anomaly_detected = true;
+    }
+
+    fn obsolete_sst_files(&self) -> Vec<String> {
+        if self.memory_mode {
+            return Vec::new();
+        }
+
+        let published: std::collections::HashSet<_> = self
+            .manifest
+            .files
+            .iter()
+            .map(|file| file.name.clone())
+            .collect();
+        let mut obsolete = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&self.sst_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+
+                let is_candidate = path.extension().and_then(|ext| ext.to_str()) == Some("sst")
+                    || name.ends_with(".sst.tmp")
+                    || name.ends_with(".tmp");
+                if is_candidate && !published.contains(name) {
+                    obsolete.push(name.to_string());
+                }
+            }
+        }
+
+        obsolete.sort();
+        obsolete
     }
 
     fn ensure_directories(
@@ -804,7 +863,7 @@ impl RuntimeState {
     }
 
     /// Confirm sequences for a request_id with an explicit confirmed_at sequence
-    /// Useful for CloudFirst paths where the confirmation frontier is `cloud_durable_seq`.
+    /// Useful for CloudAsync paths where the confirmation frontier is `cloud_durable_seq`.
     pub fn confirm_sequences_at(&mut self, request_id: u64, confirmed_at_seq: u64) {
         if let Some(entry) = self.sequence_idempotency_cache.get_mut(&request_id) {
             entry.2 = confirmed_at_seq;
@@ -1126,6 +1185,7 @@ impl RuntimeState {
         }
 
         self.opened_in_salvage_mode = true;
+        self.persistence_anomaly_detected = true;
         tracing::warn!("{}", message);
         Ok(false)
     }
@@ -1161,6 +1221,7 @@ impl RuntimeState {
                     )))
                 } else {
                     self.opened_in_salvage_mode = true;
+                    self.persistence_anomaly_detected = true;
                     tracing::warn!(
                         sst_name,
                         error = %error,
@@ -1732,6 +1793,7 @@ mod tests {
         let test_dir = std::env::temp_dir().join("midge_state_intent_test");
         let _ = std::fs::remove_dir_all(&test_dir);
         std::fs::create_dir_all(&test_dir).expect("create test dir");
+        crate::metadata::ensure_or_create_format_marker(&test_dir).expect("create format marker");
 
         let intents = vec![crate::runtime::IntentLogEntry::WalSynced {
             segment_id: 2,

@@ -432,16 +432,16 @@ fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
 }
 
 // ============================================================================
-// PHASE 0 GUARDRAILS - CLOUDFIRST BACKPRESSURE
+// PHASE 0 GUARDRAILS - CloudAsync BACKPRESSURE
 // ============================================================================
 
-// Phase 0 Guardrail #1: CloudFirst write rejection on backpressure
+// Phase 0 Guardrail #1: CloudAsync write rejection on backpressure
 //
-// Validates that CloudFirst mode returns WriteStall error when
+// Validates that CloudAsync mode returns WriteStall error when
 // pending cloud write queue reaches capacity (100k entries).
 //
 // NOTE: This functionality is validated via internal unit tests:
 // 1. WalActor unit tests in src/runtime/actors/wal.rs
 // 2. CloudWriteQueue unit tests in src/runtime/actors/cloud_write_queue.rs
 // 3. Internal integration tests with mock cloud backends
-// (CloudFirst durability policy is not exposed in public API)
+// (CloudAsync durability policy is not exposed in public API)

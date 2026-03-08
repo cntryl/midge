@@ -9,11 +9,12 @@
 //    b) WAL Durability: WAL segments ONLY use enqueue_wal_segment + process_uploads.
 //    NEVER mix these two paths. WAL NEVER calls submit_write(). SSTs ALWAYS call it.
 //
-// 2. CLOUD-FIRST WAL DURABILITY
-//    - Memtables MUST NOT apply updates until CloudAck is received.
-//    - CloudAck is emitted ONLY by HybridStorage when cloud upload succeeds.
+// 2. CLOUD-BACKED ASYNC WAL DURABILITY
+//    - Local WAL append is the visibility barrier for ordinary cloud-backed commits.
+//    - CloudAck is emitted by HybridStorage when a sealed segment becomes cloud-durable.
 //    - CloudFail MUST also be emitted if cloud upload fails.
-//    - WAL ordering guarantee: local write → cloud upload → CloudAck → memtable update.
+//    - WAL ordering guarantee: local write → memtable visibility → async cloud upload
+//      → CloudAck / CloudFail frontier update.
 //
 // 3. CLOUD EXECUTOR REQUIREMENTS
 //    - CloudExecutor MUST embed its own single-threaded tokio runtime:
@@ -48,10 +49,10 @@
 //
 // 8. CORRECTNESS GUARANTEES
 //    - Local writes MUST complete before cloud uploads begin.
-//    - Memtable state MUST reflect only sequences with CloudAck.
-//    - No write becomes visible unless fully durable in cloud.
+//    - Ordinary cloud-backed commits become visible after the local WAL append barrier.
+//    - CloudStrict callers wait for CloudAck before returning.
 //    - WAL NEVER becomes inconsistent due to partial upload.
-//    - SST writes may be persisted to cloud, but do NOT block memtables.
+//    - SST writes may be persisted to cloud, but do NOT block memtable visibility.
 //
 // 9. TESTING REQUIREMENTS FOR COPILOT
 //    When generating tests, enforce:
@@ -64,7 +65,7 @@
 //
 // 10. WHAT COPILOT MUST NEVER DO
 //    - Never send WAL through submit_write().
-//    - Never update a memtable before CloudAck.
+//    - Never claim cloud durability before CloudAck.
 //    - Never spawn async tasks directly without going through CloudExecutor.rt.
 //    - Never block the main runtime thread.
 //    - Never drop cloud upload results.
@@ -74,8 +75,8 @@
 
 //! # Storage Subsystem
 //!
-//! Provides durability abstractions for SSTs (synchronous local/cloud) and WAL segments
-//! (cloud-first with local fallback).
+//! Provides durability abstractions for SSTs (synchronous local/cloud) and WAL
+//! segments (cloud-backed async with local staging).
 //!
 //! ## Architecture: Two Abstraction Layers
 //!
@@ -135,21 +136,22 @@
 //!   → StorageEvent::WriteComplete
 //! ```
 //!
-//! ### WAL Durability Path (Cloud-First)
+//! ### WAL Durability Path (Cloud-Backed Async)
 //! ```text
-//! Memtable → WAL segment (local)
+//! WAL append barrier (local)
+//!   → memtable visibility
 //!   → HybridStorage::enqueue_wal_segment()
 //!   → [Pending] → [InProgress] → [Completed]
 //!   → CloudStorage (upload via CloudExecutor)
 //!   → StorageEvent::CloudAck(segment_id)
-//!   → WAL Actor (memtable commit)
+//!   → cloud durability frontier advance
 //! ```
 //!
 //! ## Key Guarantees
 //!
 //! 1. **No futures in engine thread**: All async work happens in `CloudExecutor`'s embedded tokio runtime
 //! 2. **Callback-driven hot path**: No blocking or waiting; results sent via mpsc channels
-//! 3. **WAL ordering**: Local write → cloud upload → CloudAck → memtable update
+//! 3. **WAL ordering**: Local write → memtable visibility → cloud upload → CloudAck
 //! 4. **Deterministic testing**: `MockCloudBackend` for synchronous test execution
 
 pub(crate) mod cloud;
@@ -171,15 +173,15 @@ pub use hybrid::backend::HybridStorage;
 
 // COPILOT: CLOUD-DURABLE STORAGE RULES
 //
-// Storage subsystem must support CloudFirst durability for WAL and SST.
+// Storage subsystem must support CloudAsync durability for WAL and SST.
 //
-// In CloudFirst mode:
+// In CloudAsync mode:
 //
-//   1. Local filesystem is ephemeral durability.
-//      Local writes must NOT mark data visible.
+//   1. Local WAL append is the ordinary commit visibility barrier.
+//      Cloud upload is a separate durability frontier.
 //
-//   2. Cloud storage is authoritative durability.
-//      A write becomes visible only after CloudBackend acknowledges upload.
+//   2. Cloud storage is the cloud durability target.
+//      A write becomes cloud-durable only after CloudBackend acknowledges upload.
 //
 //   3. HybridStorage orchestrates:
 //        - local write
@@ -207,11 +209,12 @@ pub use hybrid::backend::HybridStorage;
 //   8. HybridStorage MAY stream the WAL segment rather than load into memory.
 //
 //   9. On CloudAck:
-//        - HybridStorage deletes local WAL segment if configured
-//        - HybridStorage notifies WalActor via StorageEvent
+//        - HybridStorage may delete local WAL segment if configured
+//        - HybridStorage notifies WalActor via StorageEvent so cloud frontiers advance
 //
 //  10. WAL Actor:
-//        must NOT apply writes to memtable until CloudAck is received.
+//        applies writes after the local append barrier and uses CloudAck only for
+//        cloud durability bookkeeping or explicit `cloud_strict()` waits.
 //
 // Implementations MUST NOT modify memtables directly, only send StorageEvent.
 // Implement only coordination logic here; WAL ordering logic stays in WalActor.

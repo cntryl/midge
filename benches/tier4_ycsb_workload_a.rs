@@ -16,7 +16,7 @@ use cntryl_midge::testkit::ycsb;
 use cntryl_midge::testkit::zipfian::ZipfianGenerator;
 use cntryl_midge::testkit::MidgeOptions;
 
-const INITIAL_KEYS: usize = 50_000;
+const DEFAULT_INITIAL_KEYS: usize = 50_000;
 const WARMUP: Duration = Duration::from_secs(1);
 const MEASURED: Duration = Duration::from_secs(5);
 
@@ -38,16 +38,18 @@ fn run_workload_a_with_distribution(
     clients: usize,
     distribution: KeyDistribution,
 ) {
+    let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
+
     // Phase 1: Load (not measured)
     let engine = Arc::new(ycsb::open_tier4_engine(opts));
     let cf = engine.create_column_family("cf1").unwrap();
-    ycsb::load_initial_dataset(engine.as_ref(), &cf, INITIAL_KEYS);
+    ycsb::load_initial_dataset(engine.as_ref(), &cf, initial_keys);
 
     // Phase 2: Warm-up (not measured)
     {
         let zipf = match distribution {
             KeyDistribution::Zipf { theta } => {
-                Some(Arc::new(ZipfianGenerator::new(INITIAL_KEYS, theta)))
+                Some(Arc::new(ZipfianGenerator::new(initial_keys, theta)))
             }
         };
         let write_opts = cntryl_midge::WriteOptions::best_effort(); // Fast warmup: skip WAL I/O
@@ -92,7 +94,7 @@ fn run_workload_a_with_distribution(
                             let mut tx = e
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("begin");
-                            tx.put(k.to_vec(), v.to_vec(), None).expect("warmup put");
+                            tx.put(k.to_vec(), v.clone(), None).expect("warmup put");
                             e.commit(tx, write_opts)
                         })
                         .expect("warmup commit");
@@ -109,7 +111,7 @@ fn run_workload_a_with_distribution(
     let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
         let zipf = match distribution {
             KeyDistribution::Zipf { theta } => {
-                Some(Arc::new(ZipfianGenerator::new(INITIAL_KEYS, theta)))
+                Some(Arc::new(ZipfianGenerator::new(initial_keys, theta)))
             }
         };
         let write_opts = cntryl_midge::WriteOptions::buffered(); // Back to buffered for measured phase
@@ -154,7 +156,7 @@ fn run_workload_a_with_distribution(
                             let mut tx = e
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("measured begin");
-                            tx.put(k.to_vec(), v.to_vec(), None).expect("measured put");
+                            tx.put(k.to_vec(), v.clone(), None).expect("measured put");
                             e.commit(tx, write_opts)
                         })
                         .expect("measured commit");
@@ -165,7 +167,7 @@ fn run_workload_a_with_distribution(
     });
 
     ctx.set_elements(measured_ops);
-    ctx.set_bytes(measured_ops * (ycsb::KEY_SIZE + ycsb::VALUE_SIZE) as u64);
+    ctx.set_bytes(measured_ops * ycsb::logical_entry_size_bytes() as u64);
 }
 
 fn run_workload_a(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {

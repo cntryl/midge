@@ -189,7 +189,7 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
     });
 
     // Assert
-    // CloudFirst uses a different backpressure mechanism (cloud_write_queue size)
+    // CloudAsync uses a different backpressure mechanism (cloud_write_queue size)
     // rather than memory budget, so skip the stall assertion for cloud mode.
     // Memory mode doesn't have meaningful backpressure (everything stays in memory).
     for (mode, total_stalls) in results.into_inner() {

@@ -62,6 +62,7 @@ pub struct Metrics {
     // Compaction
     pub compactions_run: Arc<AtomicU64>,
     pub compaction_bytes_rewritten: Arc<AtomicU64>,
+    pub compaction_failures: Arc<AtomicU64>,
 
     // Cloud operations
     pub cloud_uploads: Arc<AtomicU64>,
@@ -69,17 +70,17 @@ pub struct Metrics {
     pub cloud_bytes_uploaded: Arc<AtomicU64>,
     pub cloud_bytes_downloaded: Arc<AtomicU64>,
 
-    // CloudFirst WAL durability flow
-    pub cloudfirst_wal_segments_sealed: Arc<AtomicU64>,
-    pub cloudfirst_wal_bytes_sealed: Arc<AtomicU64>,
-    pub cloudfirst_wal_seal_latency_us: Arc<AtomicU64>,
+    // CloudAsync WAL durability flow
+    pub cloud_async_wal_segments_sealed: Arc<AtomicU64>,
+    pub cloud_async_wal_bytes_sealed: Arc<AtomicU64>,
+    pub cloud_async_wal_seal_latency_us: Arc<AtomicU64>,
 
-    pub cloudfirst_wal_uploads_started: Arc<AtomicU64>,
-    pub cloudfirst_wal_uploads_completed: Arc<AtomicU64>,
-    pub cloudfirst_wal_uploads_failed: Arc<AtomicU64>,
-    pub cloudfirst_wal_upload_latency_us: Arc<AtomicU64>,
+    pub cloud_async_wal_uploads_started: Arc<AtomicU64>,
+    pub cloud_async_wal_uploads_completed: Arc<AtomicU64>,
+    pub cloud_async_wal_uploads_failed: Arc<AtomicU64>,
+    pub cloud_async_wal_upload_latency_us: Arc<AtomicU64>,
 
-    pub cloudfirst_wal_ack_latency_us: Arc<AtomicU64>,
+    pub cloud_async_wal_ack_latency_us: Arc<AtomicU64>,
 
     // Cache
     pub cache_hits: Arc<AtomicU64>,
@@ -87,6 +88,11 @@ pub struct Metrics {
 
     // Write stalls
     pub write_stalls: Arc<AtomicU64>,
+    pub write_stalls_memory: Arc<AtomicU64>,
+    pub write_stalls_compaction: Arc<AtomicU64>,
+    pub write_stalls_cloud: Arc<AtomicU64>,
+    pub write_stalls_no_space: Arc<AtomicU64>,
+    pub no_space_events: Arc<AtomicU64>,
 
     // Phase 0 guardrails: Idempotency cache telemetry
     pub idempotency_cache_evictions: Arc<AtomicU64>,
@@ -153,24 +159,30 @@ impl Metrics {
             sst_loaded: Arc::new(AtomicU64::new(0)),
             compactions_run: Arc::new(AtomicU64::new(0)),
             compaction_bytes_rewritten: Arc::new(AtomicU64::new(0)),
+            compaction_failures: Arc::new(AtomicU64::new(0)),
             cloud_uploads: Arc::new(AtomicU64::new(0)),
             cloud_downloads: Arc::new(AtomicU64::new(0)),
             cloud_bytes_uploaded: Arc::new(AtomicU64::new(0)),
             cloud_bytes_downloaded: Arc::new(AtomicU64::new(0)),
 
-            cloudfirst_wal_segments_sealed: Arc::new(AtomicU64::new(0)),
-            cloudfirst_wal_bytes_sealed: Arc::new(AtomicU64::new(0)),
-            cloudfirst_wal_seal_latency_us: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_segments_sealed: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_bytes_sealed: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_seal_latency_us: Arc::new(AtomicU64::new(0)),
 
-            cloudfirst_wal_uploads_started: Arc::new(AtomicU64::new(0)),
-            cloudfirst_wal_uploads_completed: Arc::new(AtomicU64::new(0)),
-            cloudfirst_wal_uploads_failed: Arc::new(AtomicU64::new(0)),
-            cloudfirst_wal_upload_latency_us: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_uploads_started: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_uploads_completed: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_uploads_failed: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_upload_latency_us: Arc::new(AtomicU64::new(0)),
 
-            cloudfirst_wal_ack_latency_us: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_ack_latency_us: Arc::new(AtomicU64::new(0)),
             cache_hits: Arc::new(AtomicU64::new(0)),
             cache_misses: Arc::new(AtomicU64::new(0)),
             write_stalls: Arc::new(AtomicU64::new(0)),
+            write_stalls_memory: Arc::new(AtomicU64::new(0)),
+            write_stalls_compaction: Arc::new(AtomicU64::new(0)),
+            write_stalls_cloud: Arc::new(AtomicU64::new(0)),
+            write_stalls_no_space: Arc::new(AtomicU64::new(0)),
+            no_space_events: Arc::new(AtomicU64::new(0)),
             idempotency_cache_evictions: Arc::new(AtomicU64::new(0)),
             pending_txn_started: Arc::new(AtomicU64::new(0)),
             pending_txn_duration_ms_total: Arc::new(AtomicU64::new(0)),
@@ -199,47 +211,47 @@ impl Metrics {
     }
 
     #[inline]
-    pub fn record_cloudfirst_wal_segment_sealed(&self, bytes: u64, seal_latency_us: u64) {
+    pub fn record_cloud_async_wal_segment_sealed(&self, bytes: u64, seal_latency_us: u64) {
         if self.enabled {
-            self.cloudfirst_wal_segments_sealed
+            self.cloud_async_wal_segments_sealed
                 .fetch_add(1, Ordering::Relaxed);
-            self.cloudfirst_wal_bytes_sealed
+            self.cloud_async_wal_bytes_sealed
                 .fetch_add(bytes, Ordering::Relaxed);
-            self.cloudfirst_wal_seal_latency_us
+            self.cloud_async_wal_seal_latency_us
                 .fetch_add(seal_latency_us, Ordering::Relaxed);
         }
     }
 
     #[inline]
-    pub fn record_cloudfirst_wal_upload_started(&self) {
+    pub fn record_cloud_async_wal_upload_started(&self) {
         if self.enabled {
-            self.cloudfirst_wal_uploads_started
+            self.cloud_async_wal_uploads_started
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
 
     #[inline]
-    pub fn record_cloudfirst_wal_upload_completed(&self, upload_latency_us: u64) {
+    pub fn record_cloud_async_wal_upload_completed(&self, upload_latency_us: u64) {
         if self.enabled {
-            self.cloudfirst_wal_uploads_completed
+            self.cloud_async_wal_uploads_completed
                 .fetch_add(1, Ordering::Relaxed);
-            self.cloudfirst_wal_upload_latency_us
+            self.cloud_async_wal_upload_latency_us
                 .fetch_add(upload_latency_us, Ordering::Relaxed);
         }
     }
 
     #[inline]
-    pub fn record_cloudfirst_wal_upload_failed(&self) {
+    pub fn record_cloud_async_wal_upload_failed(&self) {
         if self.enabled {
-            self.cloudfirst_wal_uploads_failed
+            self.cloud_async_wal_uploads_failed
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
 
     #[inline]
-    pub fn record_cloudfirst_wal_ack_latency_us(&self, ack_latency_us: u64) {
+    pub fn record_cloud_async_wal_ack_latency_us(&self, ack_latency_us: u64) {
         if self.enabled {
-            self.cloudfirst_wal_ack_latency_us
+            self.cloud_async_wal_ack_latency_us
                 .fetch_add(ack_latency_us, Ordering::Relaxed);
         }
     }
@@ -464,6 +476,13 @@ impl Metrics {
         }
     }
 
+    #[inline]
+    pub fn record_compaction_failure(&self) {
+        if self.enabled {
+            self.compaction_failures.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Record cloud upload
     #[inline]
     pub fn record_cloud_upload(&self, bytes: u64) {
@@ -505,6 +524,45 @@ impl Metrics {
     pub fn record_write_stall(&self) {
         if self.enabled {
             self.write_stalls.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_write_stall_memory(&self) {
+        if self.enabled {
+            self.write_stalls.fetch_add(1, Ordering::Relaxed);
+            self.write_stalls_memory.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_write_stall_compaction(&self) {
+        if self.enabled {
+            self.write_stalls.fetch_add(1, Ordering::Relaxed);
+            self.write_stalls_compaction.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_write_stall_cloud(&self) {
+        if self.enabled {
+            self.write_stalls.fetch_add(1, Ordering::Relaxed);
+            self.write_stalls_cloud.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_write_stall_no_space(&self) {
+        if self.enabled {
+            self.write_stalls.fetch_add(1, Ordering::Relaxed);
+            self.write_stalls_no_space.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_no_space_event(&self) {
+        if self.enabled {
+            self.no_space_events.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -598,6 +656,7 @@ impl Metrics {
             sst_loaded: self.sst_loaded.load(Ordering::Relaxed),
             compactions_run: self.compactions_run.load(Ordering::Relaxed),
             compaction_bytes_rewritten: self.compaction_bytes_rewritten.load(Ordering::Relaxed),
+            compaction_failures: self.compaction_failures.load(Ordering::Relaxed),
             cloud_uploads: self.cloud_uploads.load(Ordering::Relaxed),
             cloud_downloads: self.cloud_downloads.load(Ordering::Relaxed),
             cloud_bytes_uploaded: self.cloud_bytes_uploaded.load(Ordering::Relaxed),
@@ -605,6 +664,11 @@ impl Metrics {
             cache_hits: self.cache_hits.load(Ordering::Relaxed),
             cache_misses: self.cache_misses.load(Ordering::Relaxed),
             write_stalls: self.write_stalls.load(Ordering::Relaxed),
+            write_stalls_memory: self.write_stalls_memory.load(Ordering::Relaxed),
+            write_stalls_compaction: self.write_stalls_compaction.load(Ordering::Relaxed),
+            write_stalls_cloud: self.write_stalls_cloud.load(Ordering::Relaxed),
+            write_stalls_no_space: self.write_stalls_no_space.load(Ordering::Relaxed),
+            no_space_events: self.no_space_events.load(Ordering::Relaxed),
             // New debug fields
             wal_append_count: self.wal_append_count.load(Ordering::Relaxed),
             wal_flush_count: self.wal_flush_count.load(Ordering::Relaxed),
@@ -638,6 +702,7 @@ pub struct MetricsSnapshot {
     pub sst_loaded: u64,
     pub compactions_run: u64,
     pub compaction_bytes_rewritten: u64,
+    pub compaction_failures: u64,
     pub cloud_uploads: u64,
     pub cloud_downloads: u64,
     pub cloud_bytes_uploaded: u64,
@@ -645,6 +710,11 @@ pub struct MetricsSnapshot {
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub write_stalls: u64,
+    pub write_stalls_memory: u64,
+    pub write_stalls_compaction: u64,
+    pub write_stalls_cloud: u64,
+    pub write_stalls_no_space: u64,
+    pub no_space_events: u64,
     // New debug fields
     pub wal_append_count: u64,
     pub wal_flush_count: u64,

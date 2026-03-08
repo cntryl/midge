@@ -68,7 +68,7 @@ impl EventLoop {
         msg_rx: &Receiver<RuntimeMsg>,
         max: usize,
     ) -> usize {
-        if self.wal_actor.is_cloud_first() {
+        if self.wal_actor.is_cloud_async() {
             return 0;
         }
 

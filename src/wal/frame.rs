@@ -62,3 +62,42 @@ pub fn verify_frame_crc(payload: &[u8], expected_crc: u32) -> MidgeResult<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn should_roundtrip_arbitrary_payloads(payload in proptest::collection::vec(any::<u8>(), 0..8192)) {
+            let mut buf = Vec::new();
+            append_frame(&mut buf, &payload)?;
+
+            prop_assert_eq!(buf.len(), WAL_FRAME_HEADER_LEN + payload.len());
+
+            let (payload_len, expected_crc) = decode_frame_header(&buf[..WAL_FRAME_HEADER_LEN])?;
+            prop_assert_eq!(payload_len, payload.len());
+            prop_assert_eq!(&buf[WAL_FRAME_HEADER_LEN..], payload.as_slice());
+            verify_frame_crc(&buf[WAL_FRAME_HEADER_LEN..], expected_crc)?;
+        }
+
+        #[test]
+        fn should_detect_crc_mismatch_after_payload_corruption(
+            payload in proptest::collection::vec(any::<u8>(), 1..4096),
+            flip_index in 0usize..4096
+        ) {
+            let mut buf = Vec::new();
+            append_frame(&mut buf, &payload)?;
+            let (payload_len, expected_crc) = decode_frame_header(&buf[..WAL_FRAME_HEADER_LEN])?;
+            prop_assert_eq!(payload_len, payload.len());
+
+            let payload_start = WAL_FRAME_HEADER_LEN;
+            let idx = payload_start + (flip_index % payload.len());
+            buf[idx] ^= 0x5a;
+
+            let err = verify_frame_crc(&buf[payload_start..], expected_crc).unwrap_err();
+            prop_assert!(matches!(err, MidgeError::Corruption(_)));
+        }
+    }
+}

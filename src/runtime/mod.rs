@@ -796,7 +796,7 @@ impl RuntimeHandle {
 
         // Block waiting for the single response.
         // If debug-wait mode is enabled, emit a periodic warning to help
-        // diagnose hangs (e.g., CloudFirst waiting on CloudAck).
+        // diagnose hangs (e.g., CloudAsync waiting on CloudAck).
         if std::env::var_os("MIDGE_DEBUG_WAIT").is_some() {
             let mut waited = std::time::Duration::from_secs(0);
             loop {

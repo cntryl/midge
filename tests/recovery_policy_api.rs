@@ -78,3 +78,28 @@ fn should_fail_strict_open_when_intent_log_is_corrupt() {
         Err(other) => panic!("expected RecoveryFailed, got: {other}"),
     }
 }
+
+#[test]
+fn should_fail_open_given_legacy_persisted_state_without_format_marker() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+
+    fs::write(
+        db_path.join("manifest.yaml"),
+        "last_persisted_sequence: 1\n",
+    )
+    .expect("write legacy manifest");
+
+    let result = Engine::open(OpenOptions::local(db_path).build());
+
+    match result {
+        Err(MidgeError::CompatibilityError(message)) => {
+            assert!(
+                message.contains("FORMAT"),
+                "expected format-marker compatibility context, got: {message}"
+            );
+        }
+        Ok(_) => panic!("expected compatibility failure, got successful open"),
+        Err(other) => panic!("expected CompatibilityError, got: {other}"),
+    }
+}

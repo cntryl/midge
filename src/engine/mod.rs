@@ -93,7 +93,7 @@ pub struct RecoveryMetricsSnapshot {
 }
 
 /// High-level engine health state for operators and diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum EngineHealth {
     Healthy,
     Degraded,
@@ -103,7 +103,7 @@ pub enum EngineHealth {
 }
 
 /// Stable operator-facing snapshot of runtime metrics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RuntimeMetricsSnapshot {
     pub health: EngineHealth,
     pub current_sequence: u64,
@@ -131,7 +131,13 @@ pub struct RuntimeMetricsSnapshot {
     pub no_space_events: u64,
     pub compactions_run: u64,
     pub compaction_bytes_rewritten: u64,
+    pub compaction_failures: u64,
+    pub obsolete_file_backlog: usize,
     pub write_stalls_total: u64,
+    pub write_stalls_memory_total: u64,
+    pub write_stalls_compaction_total: u64,
+    pub write_stalls_cloud_total: u64,
+    pub write_stalls_no_space_total: u64,
     pub wal_append_count: u64,
     pub wal_flush_count: u64,
     pub wal_fsync_count: u64,
@@ -144,7 +150,7 @@ pub struct RuntimeMetricsSnapshot {
 }
 
 /// Active snapshot pin observed by the runtime.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SnapshotPinSnapshot {
     pub snapshot_id: u64,
     pub sequence: u64,
@@ -153,7 +159,7 @@ pub struct SnapshotPinSnapshot {
 }
 
 /// Single SST entry in a storage layout report.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StorageFileLayout {
     pub name: String,
     pub level: u32,
@@ -166,7 +172,7 @@ pub struct StorageFileLayout {
 }
 
 /// Per-level storage layout summary.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StorageLayoutLevel {
     pub level: u32,
     pub file_count: usize,
@@ -175,7 +181,7 @@ pub struct StorageLayoutLevel {
 }
 
 /// Stable operator-facing snapshot of on-disk layout and pinned state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StorageLayoutSnapshot {
     pub health: EngineHealth,
     pub manifest_last_persisted_sequence: u64,
@@ -188,7 +194,7 @@ pub struct StorageLayoutSnapshot {
 }
 
 /// Non-mutating verification report for a storage directory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StorageVerificationReport {
     pub manifest_files_verified: usize,
     pub sst_files_verified: usize,
@@ -304,6 +310,8 @@ impl Engine {
         db_path: &Path,
         runtime_health: Option<EngineHealth>,
     ) -> MidgeResult<StorageVerificationReport> {
+        crate::metadata::validate_format_marker(db_path)?;
+
         let manifest =
             crate::metadata::ManifestPersistence::load_with_policy(db_path, RecoveryPolicy::Strict)
                 .map_err(MidgeError::RecoveryFailed)?;
@@ -336,14 +344,53 @@ impl Engine {
         )
         .map_err(|e| MidgeError::RecoveryFailed(format!("WAL verification failed: {e}")))?;
 
+        let obsolete_files = Self::list_obsolete_sst_files(db_path, &manifest);
+        let health = match runtime_health.unwrap_or(EngineHealth::Healthy) {
+            EngineHealth::Healthy if !intents.is_empty() || !obsolete_files.is_empty() => {
+                EngineHealth::Degraded
+            }
+            other => other,
+        };
+
         Ok(StorageVerificationReport {
             manifest_files_verified: manifest.files.len(),
             sst_files_verified: manifest.files.len(),
             wal_recovery_records_replayed: wal_stats.record_count,
             wal_recovery_bytes_replayed: wal_stats.bytes,
             intent_entries_loaded: intents.len(),
-            health: runtime_health.unwrap_or(EngineHealth::Healthy),
+            health,
         })
+    }
+
+    fn list_obsolete_sst_files(
+        db_path: &Path,
+        manifest: &crate::metadata::Manifest,
+    ) -> Vec<String> {
+        let published: std::collections::HashSet<_> = manifest
+            .files
+            .iter()
+            .map(|file| file.name.clone())
+            .collect();
+        let sst_dir = db_path.join("sst");
+        let mut obsolete = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(sst_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                let is_candidate = path.extension().and_then(|ext| ext.to_str()) == Some("sst")
+                    || name.ends_with(".sst.tmp")
+                    || name.ends_with(".tmp");
+                if is_candidate && !published.contains(name) {
+                    obsolete.push(name.to_string());
+                }
+            }
+        }
+
+        obsolete.sort();
+        obsolete
     }
 
     /// Open a database with explicit environment selection.
@@ -424,7 +471,7 @@ impl Engine {
         let leader_store = lease.get_leader_store();
 
         // Build runtime state/config.
-        // Cloud storage mode uses CloudFirst durability + HybridStorage.
+        // Cloud storage mode uses CloudAsync durability + HybridStorage.
         // Local/Memory modes use Batched durability with optional custom batch config.
 
         // Shared lease health flag — heartbeat sets it to false on renewal failure;
@@ -445,7 +492,7 @@ impl Engine {
                 )?;
 
                 let config = crate::runtime::RuntimeConfig {
-                    wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
+                    wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
                     hybrid_storage: Some(cloud.hybrid_storage),
                     hybrid_storage_events: Some(cloud.events),
                     compression_policy: opts.compression_policy.clone(),
@@ -667,14 +714,11 @@ impl Engine {
 
     /// Check if ingest batching should be used based on durability policy.
     ///
-    /// CloudFirst mode bypasses ingest batching because:
-    /// 1. It already performs cloud-level batching via cloud_write_queue
-    /// 2. Writes are intentionally NOT immediately visible in memtables
-    /// 3. Visibility is gated on cloud acknowledgment, not local apply
-    ///
-    /// Ingest batching is always enabled for throughput.
-    /// All durability modes benefit from batching which reduces event loop round-trips.
     /// Return whether an ingest barrier is currently active.
+    ///
+    /// Ingest batching is orthogonal to cloud durability. Cloud-backed async mode
+    /// still makes writes visible after the local WAL append barrier; it simply
+    /// advances cloud durability later in the background.
     pub(crate) fn is_ingesting(&self) -> MidgeResult<bool> {
         let request_id = crate::runtime::next_request_id()?;
         let resp = self

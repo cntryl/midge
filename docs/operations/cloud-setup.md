@@ -25,7 +25,7 @@ Midge provides cloud storage integration with the following capabilities:
 
 ✅ **Hybrid storage architecture** - Local cache + cloud backend for optimal performance  
 ✅ **Multiple cloud providers** - AWS S3, Azure Blob, Google Cloud Storage, Cloudflare R2, MinIO  
-✅ **CloudFirst durability** - WAL upload pipeline with acknowledgment guarantees  
+✅ **Cloud-backed async durability** - Local visibility plus asynchronous cloud WAL upload  
 ✅ **Automatic credential management** - Environment-based credential discovery  
 ✅ **Consistent API** - Same operations across all storage modes  
 ✅ **Performance optimization** - Smart caching, prefetching, and batching
@@ -98,19 +98,17 @@ The core hybrid storage model is **fully implemented** and tested. This architec
 - REST API clients with native authentication
 - All use `CloudBackend` trait for uniformity
 
-### CloudFirst Durability Policy
+### Cloud-Backed Async Durability
 
-When `Storage::Cloud` is used, the engine automatically uses **CloudFirst durability**:
+When `Storage::Cloud` is used, the engine automatically uses cloud-backed async WAL durability:
 
 1. Write to local WAL segment
-2. Enqueue segment for cloud upload
-3. Cloud upload completes → emit `CloudAck` event
-4. Runtime receives `CloudAck` → apply to memtable
-5. Data becomes visible to reads
+2. Apply the write to the memtable after the local append barrier
+3. Enqueue the WAL segment for cloud upload
+4. Cloud upload completes → advance the cloud durability frontier
+5. `cloud_strict()` callers wait for that frontier before returning
 
-**Correctness guarantee:** No write is visible until cloud upload succeeds.
-
-**Correctness guarantee:** No write is visible until cloud upload succeeds.
+**Correctness guarantee:** Ordinary cloud-backed commits become visible after the local WAL append barrier, but they are not cloud-durable until upload completes. Use `cloud_strict()` when the caller must wait for cloud durability explicitly.
 
 This is the same durability model used by modern cloud-native databases (Neon, PlanetScale, CockroachDB).
 

@@ -1,6 +1,6 @@
-﻿//! CloudFirst durability policy verification tests
+//! CloudAsync durability policy verification tests
 //!
-//! Ensures CloudFirst background mode never blocks on single writes,
+//! Ensures CloudAsync background mode never blocks on single writes,
 //! while CloudStrict mode provides explicit cloud durability guarantees.
 
 use cntryl_midge::testkit::{open_with_mode, opts_for_mode};
@@ -14,8 +14,8 @@ fn should_batch_writes_when_using_cloud_mode() {
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 
-    // Act: Write multiple records with buffered policy (default CloudFirst background mode)
-    // CloudFirst batches uploads in the background, so commits should not block
+    // Act: Write multiple records with buffered policy (default CloudAsync background mode)
+    // CloudAsync batches uploads in the background, so commits should not block
     for i in 0..100 {
         let mut tx = engine
             .begin_tx(cf_id, TransactionMode::ReadWrite)
@@ -73,7 +73,7 @@ fn should_flush_cloud_segments_on_shutdown() {
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 
-    // Act: Write data with background CloudFirst
+    // Act: Write data with background CloudAsync
     for i in 0..50 {
         let mut tx = engine
             .begin_tx(cf_id, TransactionMode::ReadWrite)
@@ -89,5 +89,5 @@ fn should_flush_cloud_segments_on_shutdown() {
     drop(engine);
 
     // Assert: Shutdown should complete without panics, and all pending
-    // CloudFirst uploads should be flushed (verified implicitly by clean drop)
+    // CloudAsync uploads should be flushed (verified implicitly by clean drop)
 }

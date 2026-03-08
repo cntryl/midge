@@ -27,7 +27,7 @@ impl EventLoop {
     #[inline]
     pub(super) fn should_ack_immediately(&self, deferred: bool) -> bool {
         // Ack policy:
-        // - CloudFirst (background mode): ack immediately after local WAL write.
+        // - CloudAsync (background mode): ack immediately after local WAL write.
         //   Cloud upload runs asynchronously; commits never block on upload.
         // - CloudStrict (explicit): never ack until cloud confirms (blocking durability).
         // - Batched/Strict: ack immediately; durability is enforced via explicit sync/flush barriers
@@ -36,10 +36,10 @@ impl EventLoop {
         // In Batched mode, deferring the ack until fsync would serialize callers and
         // defeat group commit (and can make tests look hung).
         //
-        // CRITICAL: Background CloudFirst must NOT wait for cloud confirmation.
+        // CRITICAL: Background CloudAsync must NOT wait for cloud confirmation.
         // Only CloudStrict policy (explicit opt-in) blocks on cloud upload.
-        if self.wal_actor.is_cloud_first() {
-            // CloudFirst background mode: always ack immediately.
+        if self.wal_actor.is_cloud_async() {
+            // CloudAsync background mode: always ack immediately.
             // Cloud upload runs asynchronously; commits never block on upload.
             //
             // NOTE: WriteOptions::cloud_strict() is handled at the transaction commit
@@ -47,11 +47,11 @@ impl EventLoop {
             // flush-and-upload sequence. By the time we reach should_ack_immediately,
             // the commit path has already ensured cloud durability for cloud_strict
             // writes. Therefore, runtime-level ack policy is always "immediate" for
-            // CloudFirst — the blocking wait happens in the commit path, not here.
+            // CloudAsync — the blocking wait happens in the commit path, not here.
             return true;
         }
 
-        // Non-CloudFirst always acks immediately.
+        // Non-CloudAsync always acks immediately.
         // `deferred` still matters for whether we queue confirm-only waiters.
         let _ = deferred;
         true
@@ -64,7 +64,8 @@ impl EventLoop {
         request_id: u64,
         is_transaction: bool,
     ) {
-        // If we already waited for durability (deferred==false for local; or cloud-first with non-immediate ack)
+        // If we already waited for durability (deferred==false for local, or cloud-backed
+        // strict durability handled earlier in the commit path)
         // then the request will be confirmed at response time.
         if !deferred {
             return;
@@ -193,8 +194,8 @@ impl EventLoop {
     /// Sync batched WAL if threshold exceeded or if there are pending writes.
     /// In group commit mode, this completes all waiters for the sealed generation.
     pub(super) fn sync_batched_wal_if_needed(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
-        if self.wal_actor.is_cloud_first() {
-            return; // CloudFirst has separate logic
+        if self.wal_actor.is_cloud_async() {
+            return; // CloudAsync has separate logic
         }
 
         // Sync if any of these conditions are true:
@@ -246,8 +247,8 @@ impl EventLoop {
     /// Without this, tests with patterns like "write → read/range/delete" hang forever.
     #[allow(dead_code)]
     pub(super) fn sync_if_waiters_exist(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
-        if self.wal_actor.is_cloud_first() {
-            return; // CloudFirst has separate logic
+        if self.wal_actor.is_cloud_async() {
+            return; // CloudAsync has separate logic
         }
 
         let has_waiters = self.durability.has_pending_waiters();
@@ -261,8 +262,8 @@ impl EventLoop {
     /// Required before CF metadata mutations to guarantee durability fences.
     /// CRITICAL: Must drain pending writes first so they are included in the sync.
     pub(super) fn force_wal_sync(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
-        if self.wal_actor.is_cloud_first() {
-            return; // CloudFirst has separate logic
+        if self.wal_actor.is_cloud_async() {
+            return; // CloudAsync has separate logic
         }
 
         // 🔑 Drain any pending writes so they are included in this sync
