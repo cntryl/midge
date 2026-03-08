@@ -187,6 +187,12 @@ pub struct RuntimeState {
     /// Read amplification metrics across all reads
     pub read_amp_metrics: ReadAmpMetrics,
 
+    // Startup recovery metrics
+    pub wal_recovery_records_replayed: u64,
+    pub wal_recovery_bytes_replayed: u64,
+    pub intent_log_replay_runs: u64,
+    pub intent_log_entries_replayed: u64,
+
     // === Ingest control & coordination ===
     /// Ingest epoch counter used to cooperatively cancel long-running jobs.
     /// Bumping this value invalidates currently running compactions which should
@@ -285,6 +291,8 @@ impl RuntimeState {
 
         // WAL recovery (skip in memory mode)
         let replay_dir = recovery_wal_dir.as_deref().unwrap_or(&wal_dir);
+        let mut wal_recovery_records_replayed = 0_u64;
+        let mut wal_recovery_bytes_replayed = 0_u64;
         let recovered_sequence = if !memory_mode && replay_dir.exists() {
             let mut recovery_memtables = HashMap::new();
             match crate::storage::LocalFsStorage::new(replay_dir) {
@@ -298,6 +306,10 @@ impl RuntimeState {
                             t.metrics()
                                 .record_wal_recovery(stats.record_count, stats.bytes);
                         }
+                        wal_recovery_records_replayed = wal_recovery_records_replayed
+                            .saturating_add(stats.record_count);
+                        wal_recovery_bytes_replayed = wal_recovery_bytes_replayed
+                            .saturating_add(stats.bytes);
 
                         tracing::info!(
                             records_recovered = stats.record_count,
@@ -404,6 +416,10 @@ impl RuntimeState {
             total_memtable_bytes: 0,
             enable_compaction: !memory_mode,
             read_amp_metrics: ReadAmpMetrics::new(),
+            wal_recovery_records_replayed,
+            wal_recovery_bytes_replayed,
+            intent_log_replay_runs: 0,
+            intent_log_entries_replayed: 0,
             ingest_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             active_compactions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             active_compactions_notify: std::sync::Arc::new((
@@ -646,6 +662,11 @@ impl RuntimeState {
             t.metrics()
                 .record_intent_log_replay(self.intent_log.len() as u64);
         }
+
+        self.intent_log_replay_runs = self.intent_log_replay_runs.saturating_add(1);
+        self.intent_log_entries_replayed = self
+            .intent_log_entries_replayed
+            .saturating_add(self.intent_log.len() as u64);
 
         tracing::info!(
             intent_count = self.intent_log.len(),

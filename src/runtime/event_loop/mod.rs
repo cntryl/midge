@@ -543,6 +543,19 @@ impl EventLoop {
                 );
             }
 
+            RuntimeMsg::GetRecoveryMetrics { request_id } => {
+                self.respond(
+                    request_id,
+                    RuntimeResponse::RecoveryMetricsSnapshot {
+                        request_id,
+                        wal_recovery_records_replayed: self.state.wal_recovery_records_replayed,
+                        wal_recovery_bytes_replayed: self.state.wal_recovery_bytes_replayed,
+                        intent_log_replay_runs: self.state.intent_log_replay_runs,
+                        intent_log_entries_replayed: self.state.intent_log_entries_replayed,
+                    },
+                );
+            }
+
             RuntimeMsg::SetRuntimeConfig {
                 request_id,
                 memtable_size_limit,

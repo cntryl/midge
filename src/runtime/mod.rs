@@ -336,6 +336,9 @@ pub enum RuntimeMsg {
     /// Get read amplification metrics snapshot.
     GetReadAmpMetrics { request_id: u64 },
 
+    /// Get startup recovery metrics snapshot.
+    GetRecoveryMetrics { request_id: u64 },
+
     // === Sequencing ===
     /// Get the runtime's authoritative current sequence number.
     ///
@@ -428,6 +431,7 @@ impl RuntimeMsg {
             | Read { request_id, .. }
             | RangeScan { request_id, .. }
             | GetReadAmpMetrics { request_id }
+            | GetRecoveryMetrics { request_id }
             | GetCurrentSequence { request_id }
             | CaptureReadSnapshot { request_id, .. }
             | BeginTransaction { request_id, .. }
@@ -475,6 +479,7 @@ impl RuntimeMsg {
             Read { .. } => "Read",
             RangeScan { .. } => "RangeScan",
             GetReadAmpMetrics { .. } => "GetReadAmpMetrics",
+            GetRecoveryMetrics { .. } => "GetRecoveryMetrics",
             GetCurrentSequence { .. } => "GetCurrentSequence",
             CaptureReadSnapshot { .. } => "CaptureReadSnapshot",
             BeginTransaction { .. } => "BeginTransaction",
@@ -559,6 +564,14 @@ pub enum RuntimeResponse {
         block_budget_violation_rate: f64,
     },
 
+    RecoveryMetricsSnapshot {
+        request_id: u64,
+        wal_recovery_records_replayed: u64,
+        wal_recovery_bytes_replayed: u64,
+        intent_log_replay_runs: u64,
+        intent_log_entries_replayed: u64,
+    },
+
     /// Current authoritative runtime sequence.
     CurrentSequence {
         request_id: u64,
@@ -615,6 +628,7 @@ impl RuntimeResponse {
             | RuntimeResponse::CompactionComplete { request_id, .. }
             | RuntimeResponse::ColumnFamilyCreated { request_id, .. }
             | RuntimeResponse::ReadAmpMetricsSnapshot { request_id, .. }
+            | RuntimeResponse::RecoveryMetricsSnapshot { request_id, .. }
             | RuntimeResponse::CurrentSequence { request_id, .. }
             | RuntimeResponse::ReadSnapshot { request_id, .. }
             | RuntimeResponse::BeginTransactionResult { request_id, .. }

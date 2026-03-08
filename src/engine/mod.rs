@@ -79,6 +79,19 @@ pub struct ReadAmpMetricsSnapshot {
     pub block_budget_violation_rate: f64,
 }
 
+/// Snapshot of startup recovery metrics.
+///
+/// These counters capture what was replayed during engine open:
+/// - WAL records and bytes recovered
+/// - Intent-log replay runs and entries processed
+#[derive(Debug, Clone)]
+pub struct RecoveryMetricsSnapshot {
+    pub wal_recovery_records_replayed: u64,
+    pub wal_recovery_bytes_replayed: u64,
+    pub intent_log_replay_runs: u64,
+    pub intent_log_entries_replayed: u64,
+}
+
 impl ColumnFamilyHandle {
     pub fn new(id: ColumnFamilyId, name: String) -> Self {
         Self { id, name }
@@ -1090,6 +1103,36 @@ impl Engine {
             RuntimeResponse::Error { error, .. } => Err(error),
             _ => Err(MidgeError::Internal(
                 "Unexpected response from GetReadAmpMetrics".to_string(),
+            )),
+        }
+    }
+
+    /// Get startup recovery metrics snapshot.
+    ///
+    /// Returns counters from the runtime's recovery phase executed during engine open.
+    pub fn get_recovery_metrics(&self) -> MidgeResult<RecoveryMetricsSnapshot> {
+        let response = self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::GetRecoveryMetrics {
+                request_id: next_request_id()?,
+            })?;
+
+        match response {
+            RuntimeResponse::RecoveryMetricsSnapshot {
+                wal_recovery_records_replayed,
+                wal_recovery_bytes_replayed,
+                intent_log_replay_runs,
+                intent_log_entries_replayed,
+                ..
+            } => Ok(RecoveryMetricsSnapshot {
+                wal_recovery_records_replayed,
+                wal_recovery_bytes_replayed,
+                intent_log_replay_runs,
+                intent_log_entries_replayed,
+            }),
+            RuntimeResponse::Error { error, .. } => Err(error),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response from GetRecoveryMetrics".to_string(),
             )),
         }
     }
