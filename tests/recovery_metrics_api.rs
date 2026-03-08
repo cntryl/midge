@@ -3,6 +3,8 @@
 //! Validates engine-level visibility into startup recovery work.
 
 use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
+use serde::Serialize;
+use std::fs;
 use tempfile::TempDir;
 
 #[test]
@@ -63,4 +65,44 @@ fn should_expose_zero_recovery_metrics_on_fresh_engine_when_no_replay_needed() {
     assert_eq!(recovery.wal_recovery_bytes_replayed, 0);
     assert_eq!(recovery.intent_log_replay_runs, 0);
     assert_eq!(recovery.intent_log_entries_replayed, 0);
+}
+
+#[test]
+fn should_report_intent_log_replay_metrics_after_reopen_when_manifest_intents_persisted() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+
+    #[derive(Serialize)]
+    enum TestIntentLogEntry {
+        WalSynced { segment_id: u64, seqno: u64 },
+    }
+
+    let intents = vec![
+        TestIntentLogEntry::WalSynced {
+            segment_id: 7,
+            seqno: 11,
+        },
+        TestIntentLogEntry::WalSynced {
+            segment_id: 8,
+            seqno: 12,
+        },
+    ];
+
+    let intent_yaml = serde_yaml::to_string(&intents).expect("serialize intent fixture");
+    fs::write(db_path.join("intent_log.yaml"), intent_yaml).expect("write intent fixture");
+
+    // Act
+    let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+    let recovery = engine.get_recovery_metrics().expect("get recovery metrics");
+
+    // Assert
+    assert_eq!(
+        recovery.intent_log_replay_runs, 1,
+        "expected exactly one intent replay run during startup"
+    );
+    assert!(
+        recovery.intent_log_entries_replayed >= 2,
+        "expected fixture intent entries to be replayed"
+    );
 }
