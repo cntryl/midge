@@ -55,12 +55,14 @@ struct CommitRecord {
 
 #[test]
 fn should_abort_in_child_process_when_chaos_scenario_requested() {
+    // Arrange
     let Some(scenario) = std::env::var_os(ENV_SCENARIO) else {
         return;
     };
 
     let db_path = PathBuf::from(std::env::var_os(ENV_DB_PATH).expect("db path env"));
 
+    // Act
     match scenario.to_string_lossy().as_ref() {
         "flush_after_sst_write" => child_flush_after_sst_write(&db_path),
         "manifest_crash_after_sync" => child_manifest_crash_after_sync(&db_path),
@@ -68,6 +70,7 @@ fn should_abort_in_child_process_when_chaos_scenario_requested() {
         other => panic!("unknown child scenario: {other}"),
     }
 
+    // Assert
     panic!("child scenario returned without abort");
 }
 
@@ -83,20 +86,15 @@ fn should_recover_sync_commits_when_crashing_after_sst_write_before_manifest_pub
     // WHY THIS IS HONEST:
     // The child dies inside the production flush path; the parent then deletes the unpublished SSTs
     // and proves recovery came from WAL rather than a fake clean shutdown.
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
-    run_child_expect_abort("flush_after_sst_write", db_path, &[]);
-    expire_crashed_process_lease(db_path);
+    // Act
+    let committed = act_flush_crash_before_publish(db_path);
 
-    let sst_dir = db_path.join("sst");
-    if sst_dir.exists() {
-        fs::remove_dir_all(&sst_dir).expect("remove unpublished sst dir");
-    }
-
-    let committed = read_committed_records(db_path);
+    // Assert
     assert!(!committed.is_empty(), "child did not persist tracked commits");
-
     let engine = open_local_engine(db_path);
     assert_committed_records_visible(&engine, &committed);
 }
@@ -112,24 +110,16 @@ fn should_preserve_complete_wal_records_when_partial_final_record_is_missing_one
     // Recovery preserves every complete record before the partial tail and never fabricates a value from the cut record.
     // WHY THIS IS HONEST:
     // The corruption is applied to the real on-disk WAL file between crash and reopen; recovery runs through the production WAL parser.
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
-    run_child_expect_abort(
-        "manifest_crash_after_sync",
-        db_path,
-        &[(ENV_TRIGGER_CF, "truncate-one-byte-trigger")],
-    );
-    expire_crashed_process_lease(db_path);
-
-    let wal_path = wal_log_path(db_path);
-    append_complete_wal_record(&wal_path, b"synthetic_tail", b"synthetic_value");
-    truncate_file_by(&wal_path, 1);
-
-    let committed = read_committed_records(db_path);
+    // Act
+    let committed = act_manifest_crash_with_partial_final_record(db_path);
     let engine = open_local_engine(db_path);
     assert_committed_records_visible(&engine, &committed);
 
+    // Assert
     let default_cf = default_cf(&engine);
     let tx = engine
         .begin_tx(default_cf.id(), TransactionMode::ReadOnly)
@@ -152,25 +142,16 @@ fn should_preserve_complete_wal_prefix_when_truncated_to_one_byte_past_last_comp
     // Recovery keeps the complete prefix and drops the one-byte tail fragment.
     // WHY THIS IS HONEST:
     // The file is mutated on disk and reopened through the real recovery implementation.
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
-    run_child_expect_abort(
-        "manifest_crash_after_sync",
-        db_path,
-        &[(ENV_TRIGGER_CF, "truncate-to-prefix-trigger")],
-    );
-    expire_crashed_process_lease(db_path);
-
-    let wal_path = wal_log_path(db_path);
-    let original_len = fs::metadata(&wal_path).expect("wal metadata").len();
-    append_complete_wal_record(&wal_path, b"synthetic_prefix_tail", b"synthetic_value");
-    truncate_file_to(&wal_path, original_len + 1);
-
-    let committed = read_committed_records(db_path);
+    // Act
+    let committed = act_manifest_crash_with_prefix_fragment(db_path);
     let engine = open_local_engine(db_path);
     assert_committed_records_visible(&engine, &committed);
 
+    // Assert
     let default_cf = default_cf(&engine);
     let tx = engine
         .begin_tx(default_cf.id(), TransactionMode::ReadOnly)
@@ -194,21 +175,14 @@ fn should_recover_all_sync_commits_when_manifest_file_is_zeroed_after_crash() {
     // Reopen must recover every sync-committed key exactly, never a partial view.
     // WHY THIS IS HONEST:
     // The crash and the corruption both happen against real files and the reopen path is production recovery.
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
-    run_child_expect_abort(
-        "manifest_crash_after_sync",
-        db_path,
-        &[(ENV_TRIGGER_CF, "manifest-zero-trigger")],
-    );
-    expire_crashed_process_lease(db_path);
+    // Act
+    let committed = act_manifest_crash_with_zeroed_manifest(db_path);
 
-    let manifest_path = manifest_path(db_path);
-    assert!(manifest_path.exists(), "manifest file should exist before corruption");
-    zero_file(&manifest_path);
-
-    let committed = read_committed_records(db_path);
+    // Assert
     match Engine::open(OpenOptions::local(db_path).build()) {
         Ok(engine) => assert_committed_records_visible(&engine, &committed),
         Err(error) => {
@@ -232,15 +206,15 @@ fn should_expose_only_successful_commits_when_random_wal_append_crash_interrupts
     // Every visible key after recovery must match a commit that actually returned Ok in the child.
     // WHY THIS IS HONEST:
     // The process dies inside the real WAL append path while concurrent client threads are actively writing.
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
-    run_child_expect_abort("concurrent_random_wal_append", db_path, &[]);
-    expire_crashed_process_lease(db_path);
+    // Act
+    let committed = act_concurrent_random_wal_append_crash(db_path);
 
-    let committed = committed_map_by_key(&read_committed_records(db_path));
+    // Assert
     assert!(!committed.is_empty(), "expected at least one successful commit before crash");
-
     let engine = open_local_engine(db_path);
     let default_cf = default_cf(&engine);
     for thread_id in 0..4 {
@@ -275,9 +249,83 @@ fn should_preserve_recovered_data_when_two_crash_recovery_cycles_reuse_same_dire
     // Data that survived the first recovery is still present after the second crash/recovery cycle.
     // WHY THIS IS HONEST:
     // Both failures are real process aborts on the same on-disk database directory.
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
+    // Act
+    let committed = act_two_manifest_crash_cycles(db_path);
+
+    // Assert
+    let engine = open_local_engine(db_path);
+    assert_committed_records_visible(&engine, &committed);
+}
+
+fn act_flush_crash_before_publish(db_path: &Path) -> Vec<CommitRecord> {
+    run_child_expect_abort("flush_after_sst_write", db_path, &[]);
+    expire_crashed_process_lease(db_path);
+
+    let sst_dir = db_path.join("sst");
+    if sst_dir.exists() {
+        fs::remove_dir_all(&sst_dir).expect("remove unpublished sst dir");
+    }
+
+    read_committed_records(db_path)
+}
+
+fn act_manifest_crash_with_partial_final_record(db_path: &Path) -> Vec<CommitRecord> {
+    run_child_expect_abort(
+        "manifest_crash_after_sync",
+        db_path,
+        &[(ENV_TRIGGER_CF, "truncate-one-byte-trigger")],
+    );
+    expire_crashed_process_lease(db_path);
+
+    let wal_path = wal_log_path(db_path);
+    append_complete_wal_record(&wal_path, b"synthetic_tail", b"synthetic_value");
+    truncate_file_by(&wal_path, 1);
+
+    read_committed_records(db_path)
+}
+
+fn act_manifest_crash_with_prefix_fragment(db_path: &Path) -> Vec<CommitRecord> {
+    run_child_expect_abort(
+        "manifest_crash_after_sync",
+        db_path,
+        &[(ENV_TRIGGER_CF, "truncate-to-prefix-trigger")],
+    );
+    expire_crashed_process_lease(db_path);
+
+    let wal_path = wal_log_path(db_path);
+    let original_len = fs::metadata(&wal_path).expect("wal metadata").len();
+    append_complete_wal_record(&wal_path, b"synthetic_prefix_tail", b"synthetic_value");
+    truncate_file_to(&wal_path, original_len + 1);
+
+    read_committed_records(db_path)
+}
+
+fn act_manifest_crash_with_zeroed_manifest(db_path: &Path) -> Vec<CommitRecord> {
+    run_child_expect_abort(
+        "manifest_crash_after_sync",
+        db_path,
+        &[(ENV_TRIGGER_CF, "manifest-zero-trigger")],
+    );
+    expire_crashed_process_lease(db_path);
+
+    let manifest_path = manifest_path(db_path);
+    assert!(manifest_path.exists(), "manifest file should exist before corruption");
+    zero_file(&manifest_path);
+
+    read_committed_records(db_path)
+}
+
+fn act_concurrent_random_wal_append_crash(db_path: &Path) -> HashMap<Vec<u8>, Vec<u8>> {
+    run_child_expect_abort("concurrent_random_wal_append", db_path, &[]);
+    expire_crashed_process_lease(db_path);
+    committed_map_by_key(&read_committed_records(db_path))
+}
+
+fn act_two_manifest_crash_cycles(db_path: &Path) -> Vec<CommitRecord> {
     run_child_expect_abort(
         "manifest_crash_after_sync",
         db_path,
@@ -297,8 +345,7 @@ fn should_preserve_recovered_data_when_two_crash_recovery_cycles_reuse_same_dire
     );
     expire_crashed_process_lease(db_path);
 
-    let engine = open_local_engine(db_path);
-    assert_committed_records_visible(&engine, &committed);
+    committed
 }
 
 fn child_flush_after_sst_write(db_path: &Path) {
