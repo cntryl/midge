@@ -665,7 +665,7 @@ impl WalActor {
     /// - allocates a single transaction id
     /// - writes TxnBegin marker (unless BestEffort)
     /// - writes all operation records (in order, unless BestEffort)
-    /// - writes TxnCommit marker (unless BestEffort)
+    /// - writes TxnCommit marker at the end of the transaction path (unless BestEffort)
     /// - applies all operations to memtables (in order)
     ///
     /// The `durability_policy` parameter allows per-request durability control.
@@ -741,12 +741,13 @@ impl WalActor {
         let skip_wal = matches!(effective_durability, DurabilityPolicy::BestEffort);
         let mut total_wal_bytes: usize = 0;
 
-        // Build op records and apply_ops using deterministic sequences
+        // Build begin + op records first. The commit marker is appended only at the
+        // end of the transaction path so recovery cannot observe a "committed"
+        // transaction if the process crashes before append_transaction returns.
         let mut wal_records: Vec<WalRecord> = if skip_wal {
             Vec::new() // Don't allocate WAL records for BestEffort
         } else {
-            // Pre-allocate WAL records batch: begin + N ops + commit
-            let mut records = Vec::with_capacity(ops_count + 2);
+            let mut records = Vec::with_capacity(ops_count + 1);
 
             // Create and write begin record
             let mut begin_record = WalRecord::new_cf(
@@ -765,9 +766,9 @@ impl WalActor {
         let apply_ops =
             self.build_apply_ops(ops, first_op_seq, txn_id, state, skip_wal, &mut wal_records);
 
-        // Write commit record (only if not skipping WAL)
+        let mut commit_record = None;
         if !skip_wal {
-            let mut commit_record = WalRecord::new_cf(
+            let mut record = WalRecord::new_cf(
                 0,
                 WalOpKind::TxnCommit,
                 marker_key,
@@ -775,10 +776,9 @@ impl WalActor {
                 commit_seq,
                 self.current_epoch,
             );
-            commit_record.txn_id = Some(txn_id);
-            wal_records.push(commit_record);
+            record.txn_id = Some(txn_id);
+            commit_record = Some(record);
 
-            // Compute total WAL bytes for bookkeeping
             for r in &wal_records {
                 total_wal_bytes += r.estimated_size();
             }
@@ -790,6 +790,7 @@ impl WalActor {
             if let Some(writer) = &mut self.writer {
                 let a_start = Instant::now();
                 writer.append_batch(&wal_records)?;
+                fail::fail_point!("midge::wal::after_append_batch_before_sync");
                 let a_elapsed = a_start.elapsed();
                 self.append_calls += 1;
                 self.append_total += a_elapsed;
@@ -914,6 +915,26 @@ impl WalActor {
             );
         } else {
             self.apply_ops_to_memtables(state, apply_ops)?;
+        }
+
+        if let Some(commit_record) = commit_record {
+            if let Some(writer) = &mut self.writer {
+                let a_start = Instant::now();
+                writer.append_record(&commit_record)?;
+                let a_elapsed = a_start.elapsed();
+                self.append_calls += 1;
+                self.append_total += a_elapsed;
+                if let Some(t) = crate::telemetry::Telemetry::global() {
+                    t.metrics().record_wal_append(commit_record.estimated_size() as u64);
+                    t.metrics().record_wal_append_count();
+                    t.metrics()
+                        .record_wal_append_ns(a_elapsed.as_nanos() as u64);
+                }
+            }
+
+            state.wal.pending_writes += 1;
+            self.pending_sync_count += 1;
+            self.bytes_since_sync += commit_record.estimated_size();
         }
 
         tracing::trace!(txn_id, last_sequence, op_count, "WAL transaction apply");
@@ -1214,6 +1235,8 @@ impl WalActor {
                     avg_ms
                 );
             }
+
+            fail::fail_point!("midge::wal::after_fsync_before_durable_frontier");
         }
 
         state.wal.last_synced_seq = state.sequence;

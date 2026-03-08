@@ -163,6 +163,8 @@ impl FlushActor {
 
         tracing::info!(cf_id = cf_id, sst_name = %sst_name, write_ms = (write_ns as f64) / 1_000_000.0, "SST file written");
 
+        fail::fail_point!("midge::flush::after_sst_write_before_publish");
+
         // Signal flush completion to SBA if available
         if let Some(hybrid) = sba {
             let sst_path_obj = std::fs::metadata(&sst_path)?;

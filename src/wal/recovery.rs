@@ -1145,4 +1145,52 @@ mod tests {
             Some(b"value".to_vec())
         );
     }
+
+    #[test]
+    fn should_not_apply_transaction_ops_without_commit_marker_during_recovery() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = LocalFsStorage::new(dir.path()).unwrap();
+        let wal_dir = StoragePath::new("wal");
+
+        {
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
+
+            let mut begin_record = WalRecord::new(
+                WalOpKind::TxnBegin,
+                Bytes::from_static(b"txn"),
+                None,
+                1,
+                1,
+            );
+            begin_record.txn_id = Some(42);
+            writer.append_record(&begin_record).unwrap();
+
+            let mut put_record = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"key"),
+                Some(Bytes::from_static(b"value")),
+                2,
+                1,
+            );
+            put_record.txn_id = Some(42);
+            writer.append_record(&put_record).unwrap();
+
+            writer.sync().unwrap();
+        }
+
+        // Act
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        assert_eq!(stats.record_count, 2);
+        assert!(
+            memtables.get(&0).is_none(),
+            "incomplete transactions must not materialize a recovered memtable entry"
+        );
+    }
 }

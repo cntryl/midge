@@ -176,6 +176,8 @@ impl ManifestPersistence {
         f.sync(Durability::Durable)
             .map_err(|e| format!("failed to sync temp manifest: {:?}", e))?;
 
+        fail::fail_point!("midge::manifest::after_temp_sync_before_rename");
+
         // Atomic rename
         fs.rename_atomic(&temp_path, &FsPath::new(Self::MANIFEST_FILE))
             .map_err(|e| format!("failed to rename manifest file atomically: {:?}", e))?;

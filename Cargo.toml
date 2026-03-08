@@ -25,6 +25,7 @@ crossbeam = "0.8"
 crossbeam-channel = "0.5"
 crossbeam-epoch = "0.9"
 dashmap = "6.1"
+fail = { version = "0.5", features = ["failpoints"] }
 parking_lot = "0.12"
 
 # Utilities used by stress workloads
