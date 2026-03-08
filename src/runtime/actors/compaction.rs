@@ -69,13 +69,17 @@ impl CompactionActor {
             "Compaction check"
         );
 
-        // Try to pick a compaction for the default column family (cf_id=0)
-        let cf_id = 0u32;
-        let mut plan = self
-            .compactor
-            .pick_compaction(&state.manifest.files, cf_id)?;
-        plan.snapshot_horizon = state.oldest_active_snapshot_sequence();
-        Some(plan)
+        let mut cf_ids: Vec<u32> = state.column_families.keys().copied().collect();
+        cf_ids.sort_unstable();
+
+        for cf_id in cf_ids {
+            if let Some(mut plan) = self.compactor.pick_compaction(&state.manifest.files, cf_id) {
+                plan.snapshot_horizon = state.oldest_active_snapshot_sequence();
+                return Some(plan);
+            }
+        }
+
+        None
     }
 
     /// Execute a compaction plan
@@ -296,6 +300,23 @@ impl Clone for CompactionActor {
 mod tests {
     use super::*;
 
+    fn make_l0_file(
+        name: &str,
+        cf_id: u32,
+        smallest_key: &[u8],
+        largest_key: &[u8],
+    ) -> crate::metadata::FileMeta {
+        crate::metadata::FileMeta {
+            name: name.to_string(),
+            level: 0,
+            size_bytes: 1,
+            cf_id,
+            smallest_key: Some(smallest_key.to_vec()),
+            largest_key: Some(largest_key.to_vec()),
+            ..Default::default()
+        }
+    }
+
     fn create_test_compaction_actor() -> CompactionActor {
         // Use the modern io::Fs-backed factory
         let fs = Arc::new(crate::io::MockFs::new());
@@ -379,5 +400,64 @@ mod tests {
 
         // Assert
         assert!(!actor.compaction_running);
+    }
+
+    #[test]
+    fn should_pick_non_default_column_family_when_default_has_no_candidates() {
+        // Arrange
+        let mut actor = create_test_compaction_actor();
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.enable_compaction = true;
+        let cf_id = state
+            .create_cf("tenant_cf".to_string())
+            .expect("create non-default cf");
+
+        state.manifest.files.extend([
+            make_l0_file("cf1_0001.sst", cf_id, b"a00", b"a99"),
+            make_l0_file("cf1_0002.sst", cf_id, b"b00", b"b99"),
+            make_l0_file("cf1_0003.sst", cf_id, b"c00", b"c99"),
+            make_l0_file("cf1_0004.sst", cf_id, b"d00", b"d99"),
+        ]);
+
+        // Act
+        let plan = actor
+            .check_compaction(&state)
+            .expect("expected compaction plan for non-default cf");
+
+        // Assert
+        assert_eq!(plan.cf_id, cf_id);
+        assert_eq!(plan.source_level, 0);
+        assert_eq!(plan.target_level, 1);
+        assert_eq!(plan.input_files.len(), 4);
+    }
+
+    #[test]
+    fn should_pick_lowest_column_family_id_when_multiple_non_default_families_need_compaction() {
+        // Arrange
+        let mut actor = create_test_compaction_actor();
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.enable_compaction = true;
+        let cf1_id = state.create_cf("cf1".to_string()).expect("create cf1");
+        let cf2_id = state.create_cf("cf2".to_string()).expect("create cf2");
+
+        state.manifest.files.extend([
+            make_l0_file("cf1_0001.sst", cf1_id, b"a00", b"a99"),
+            make_l0_file("cf1_0002.sst", cf1_id, b"b00", b"b99"),
+            make_l0_file("cf1_0003.sst", cf1_id, b"c00", b"c99"),
+            make_l0_file("cf1_0004.sst", cf1_id, b"d00", b"d99"),
+            make_l0_file("cf2_0001.sst", cf2_id, b"m00", b"m99"),
+            make_l0_file("cf2_0002.sst", cf2_id, b"n00", b"n99"),
+            make_l0_file("cf2_0003.sst", cf2_id, b"o00", b"o99"),
+            make_l0_file("cf2_0004.sst", cf2_id, b"p00", b"p99"),
+        ]);
+
+        // Act
+        let plan = actor
+            .check_compaction(&state)
+            .expect("expected compaction plan when multiple cfs need work");
+
+        // Assert
+        assert_eq!(plan.cf_id, cf1_id);
+        assert!(plan.input_files.iter().all(|name| name.starts_with("cf1_")));
     }
 }
