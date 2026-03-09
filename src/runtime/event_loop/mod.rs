@@ -272,6 +272,23 @@ impl EventLoop {
         })
     }
 
+    fn mirror_ssts_to_authoritative_cloud(
+        &self,
+        sst_names: &[String],
+    ) -> crate::common::MidgeResult<()> {
+        let Some(hybrid) = self.hybrid_storage.as_ref() else {
+            return Ok(());
+        };
+
+        for sst_name in sst_names {
+            let path = self.state.sst_dir.join(sst_name);
+            let data = std::fs::read(&path)?;
+            hybrid.write_sst_object(sst_name, data)?;
+        }
+
+        Ok(())
+    }
+
     fn publish_flushed_sst(
         &mut self,
         cf_id: crate::engine::ColumnFamilyId,
@@ -516,12 +533,29 @@ impl EventLoop {
                         let storage_arc = storage.clone();
                         let shutdown_start = std::time::Instant::now();
                         let shutdown_timeout = std::time::Duration::from_secs(30);
+                        let mut last_pending = usize::MAX;
+                        let mut stagnant_rounds = 0usize;
                         while storage_arc.pending_upload_count() > 0
                             && shutdown_start.elapsed() < shutdown_timeout
                         {
                             // Process uploads
                             self.tick_hybrid_storage();
                             self.drain_hybrid_storage_events();
+
+                            let pending = storage_arc.pending_upload_count();
+                            if pending < last_pending {
+                                last_pending = pending;
+                                stagnant_rounds = 0;
+                            } else if self.state.persistence_anomaly_detected {
+                                stagnant_rounds = stagnant_rounds.saturating_add(1);
+                                if stagnant_rounds >= 25 {
+                                    tracing::warn!(
+                                        pending,
+                                        "aborting cloud shutdown wait after repeated failed upload progress"
+                                    );
+                                    break;
+                                }
+                            }
 
                             // Small sleep to avoid busy-waiting
                             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1261,6 +1295,8 @@ impl EventLoop {
                 target_level,
                 succeeded,
             } => {
+                let mut allow_emergent_followup = false;
+
                 // Decrement active compactions
                 let _prev = self
                     .state
@@ -1292,6 +1328,7 @@ impl EventLoop {
 
                     // Publish compaction changes to manifest (update and persist)
                     if let Err(e) = added.and_then(|added| {
+                        self.mirror_ssts_to_authoritative_cloud(&output_ssts)?;
                         self.state.record_compaction_publication_intent(
                             cf_id,
                             input_ssts.clone(),
@@ -1390,6 +1427,7 @@ impl EventLoop {
                                     .sum();
                                 t.metrics().record_compaction(bytes_rewritten);
                             }
+                            allow_emergent_followup = true;
                             self.publish_snapshot();
                             self.respond(request_id, RuntimeResponse::Ok { request_id });
                         }
@@ -1407,7 +1445,7 @@ impl EventLoop {
                     // Only chain more compactions after a successful completion.
                     // If the just-finished compaction failed, the manifest is unchanged and
                     // blindly rescheduling here can spin forever on the same failing plan.
-                    if succeeded {
+                    if allow_emergent_followup {
                         while let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
                             if self
                                 .compaction_actor
@@ -1650,6 +1688,85 @@ impl EventLoop {
                         error: crate::common::MidgeError::Internal(e.to_string()),
                     });
                 self.respond(request_id, resp);
+            }
+
+            RuntimeMsg::SealWalForCloud {
+                request_id,
+                sequence,
+                wait_for_ack,
+            } => {
+                if !self.wal_actor.is_cloud_async() {
+                    let resp = if self.state.wal.local_durable_seq >= sequence {
+                        RuntimeResponse::Ok { request_id }
+                    } else {
+                        RuntimeResponse::Error {
+                            request_id,
+                            error: crate::common::MidgeError::InvalidArgument(
+                                "cloud durability requested outside cloud-backed mode".to_string(),
+                            ),
+                        }
+                    };
+                    self.respond(request_id, resp);
+                    return HandleOutcome::Continue;
+                }
+
+                if let Err(error) = self.check_lease_health() {
+                    self.respond(request_id, RuntimeResponse::Error { request_id, error });
+                    return HandleOutcome::Continue;
+                }
+
+                if self.state.wal.cloud_durable_seq >= sequence {
+                    self.respond(request_id, RuntimeResponse::Ok { request_id });
+                    return HandleOutcome::Continue;
+                }
+
+                let mut inflight_segment = self.durability.inflight_segment_for_sequence(sequence);
+                if inflight_segment.is_none()
+                    && (self.state.wal.pending_writes > 0
+                        || self.state.wal.local_durable_seq < sequence)
+                {
+                    match self.seal_current_cloud_segment() {
+                        Ok(Some((segment_id, max_sequence))) => {
+                            if max_sequence < sequence {
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::Error {
+                                        request_id,
+                                        error: crate::common::MidgeError::Internal(format!(
+                                            "sealed WAL segment up to sequence {max_sequence}, but requested cloud durability for {sequence}"
+                                        )),
+                                    },
+                                );
+                                return HandleOutcome::Continue;
+                            }
+                            inflight_segment = Some(segment_id);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            self.respond(request_id, RuntimeResponse::Error { request_id, error });
+                            return HandleOutcome::Continue;
+                        }
+                    }
+                }
+
+                if !wait_for_ack || self.state.wal.cloud_durable_seq >= sequence {
+                    self.respond(request_id, RuntimeResponse::Ok { request_id });
+                } else if let Some(segment_id) = inflight_segment {
+                    self.durability.queue_waiter_for_key(
+                        segment_id,
+                        DurabilityWaiter::CloudDurability { request_id },
+                    );
+                } else {
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::Error {
+                            request_id,
+                            error: crate::common::MidgeError::Internal(format!(
+                                "no inflight cloud upload covers sequence {sequence}"
+                            )),
+                        },
+                    );
+                }
             }
 
             RuntimeMsg::WalSyncComplete {

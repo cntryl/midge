@@ -35,6 +35,9 @@ pub enum DurabilityWaiter {
     ConfirmTransactionApply {
         request_id: u64,
     },
+    CloudDurability {
+        request_id: u64,
+    },
     Read {
         request_id: u64,
         cf_id: crate::engine::ColumnFamilyId,
@@ -118,6 +121,12 @@ impl DurabilityCoordinator {
         }
     }
 
+    pub fn queue_waiter_for_key(&self, key: u64, waiter: DurabilityWaiter) {
+        if let Some(waiters) = &self.waiters {
+            waiters.join_for_key(key, waiter);
+        }
+    }
+
     /// Get all waiters ready for completion at the given key.
     pub fn complete_waiters_at(&self, key: u64) -> Vec<DurabilityWaiter> {
         self.waiters
@@ -197,6 +206,14 @@ impl DurabilityCoordinator {
         self.inflight
             .remove(&segment_id)
             .map(|info| info.max_sequence)
+    }
+
+    pub fn inflight_segment_for_sequence(&self, sequence: u64) -> Option<u64> {
+        self.inflight
+            .iter()
+            .filter(|(_, info)| info.max_sequence >= sequence)
+            .min_by_key(|(_, info)| info.max_sequence)
+            .map(|(segment_id, _)| *segment_id)
     }
     /// Clear all inflight segments (on error or shutdown).
     pub fn clear_inflight(&mut self) {

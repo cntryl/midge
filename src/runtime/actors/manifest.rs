@@ -55,6 +55,11 @@ impl ManifestActor {
                 largest_seq: file_meta.largest_seq,
                 ..Default::default()
             });
+            fail::fail_point!("midge::manifest::inject_no_space_on_add_sst_edit", |_| Err(
+                crate::common::MidgeError::NoSpace(
+                    "failpoint: no space on manifest add_sst append".to_string()
+                )
+            ));
             crate::metadata::append_edit(&state.db_path, &edit)?;
         }
 
@@ -113,6 +118,12 @@ impl ManifestActor {
             ));
         }
         if !edits.is_empty() {
+            fail::fail_point!(
+                "midge::manifest::inject_no_space_on_compaction_batch_edit",
+                |_| Err(crate::common::MidgeError::NoSpace(
+                    "failpoint: no space on manifest compaction batch append".to_string()
+                ))
+            );
             crate::metadata::append_edit_batch(&state.db_path, &edits)?;
         }
 
@@ -161,7 +172,7 @@ impl ManifestActor {
             "Manifest: persisting"
         );
 
-        // Use ManifestPersistence to save in YAML format
+        // Use ManifestPersistence to save the current manifest JSON checkpoint.
         crate::metadata::ManifestPersistence::save(&state.db_path, &state.manifest)
             .map_err(crate::common::MidgeError::Internal)?;
 

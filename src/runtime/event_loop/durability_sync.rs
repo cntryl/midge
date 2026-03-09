@@ -142,6 +142,9 @@ impl EventLoop {
                     }
                     self.confirm_for_source(request_id, source);
                 }
+                DurabilityWaiter::CloudDurability { request_id } => {
+                    self.respond(request_id, RuntimeResponse::Ok { request_id });
+                }
                 DurabilityWaiter::Read {
                     request_id,
                     cf_id,

@@ -15,6 +15,7 @@
 //! Range tombstones are engine-level operations scoped to a column family.
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::engine::api::DurabilityPolicy as ApiDurabilityPolicy;
 use crate::runtime::{
     next_request_id, Runtime, RuntimeHandle, RuntimeMsg, RuntimeResponse, RuntimeState,
 };
@@ -242,6 +243,8 @@ pub struct Engine {
     db_path: PathBuf,
     /// Pure in-memory mode flag.
     memory_mode: bool,
+    /// True when opened in cloud-backed mode.
+    cloud_mode: bool,
     /// Recovery policy used for this open.
     recovery_policy: RecoveryPolicy,
     /// Latest committed sequence observed by the engine.
@@ -345,12 +348,19 @@ impl Engine {
         )
         .map_err(|e| MidgeError::RecoveryFailed(format!("WAL verification failed: {e}")))?;
 
-        let obsolete_files = Self::list_obsolete_sst_files(db_path, &manifest);
-        let health = match runtime_health.unwrap_or(EngineHealth::Healthy) {
-            EngineHealth::Healthy if !intents.is_empty() || !obsolete_files.is_empty() => {
-                EngineHealth::Degraded
-            }
-            other => other,
+        let residue =
+            crate::storage::residue::StorageResidueAssessment::scan_sst_dir(db_path, &manifest);
+        let health = match runtime_health {
+            Some(EngineHealth::Healthy) | None => crate::storage::residue::classify_engine_health(
+                crate::storage::residue::HealthInputs {
+                    opened_in_salvage_mode: false,
+                    write_stalled: false,
+                    persistence_anomaly_detected: false,
+                    pending_intents: intents.len(),
+                    orphan_ssts: residue.orphan_ssts.len(),
+                },
+            ),
+            Some(other) => other,
         };
 
         Ok(StorageVerificationReport {
@@ -367,31 +377,113 @@ impl Engine {
         db_path: &Path,
         manifest: &crate::metadata::Manifest,
     ) -> Vec<String> {
-        let published: std::collections::HashSet<_> = manifest
-            .files
-            .iter()
-            .map(|file| file.name.clone())
-            .collect();
-        let sst_dir = db_path.join("sst");
-        let mut obsolete = Vec::new();
+        crate::storage::residue::StorageResidueAssessment::scan_sst_dir(db_path, manifest)
+            .orphan_ssts
+    }
 
-        if let Ok(entries) = std::fs::read_dir(sst_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+    fn ensure_local_sst_cache_from_cloud(
+        state: &mut RuntimeState,
+        cloud_root: &Path,
+    ) -> MidgeResult<()> {
+        let remote_sst_dir = cloud_root.join("sst");
+        let mut retained_files = Vec::with_capacity(state.manifest.files.len());
+        let mut manifest_changed = false;
+
+        for file in state.manifest.files.clone() {
+            let remote_path = remote_sst_dir.join(&file.name);
+            let remote_valid = remote_path.exists()
+                && crate::sst::fs::SstFileIo::open_with_real_fs(&remote_path).is_ok();
+
+            if !remote_valid {
+                if state.recovery_policy == RecoveryPolicy::Strict {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "authoritative cloud SST '{}' is missing or corrupt",
+                        file.name
+                    )));
+                }
+
+                state.opened_in_salvage_mode = true;
+                state.persistence_anomaly_detected = true;
+                manifest_changed = true;
+                let local_path = state.sst_dir.join(&file.name);
+                let _ = std::fs::remove_file(&local_path);
+                tracing::warn!(
+                    sst_name = %file.name,
+                    "dropping manifest SST because authoritative cloud object is missing or corrupt"
+                );
+                continue;
+            }
+
+            let local_path = state.sst_dir.join(&file.name);
+            let local_valid = local_path.exists()
+                && crate::sst::fs::SstFileIo::open_with_real_fs(&local_path).is_ok();
+
+            if !local_valid {
+                if let Some(parent) = local_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|error| {
+                        MidgeError::RecoveryFailed(format!(
+                            "failed to create local SST cache directory '{}': {}",
+                            parent.display(),
+                            error
+                        ))
+                    })?;
+                }
+
+                if local_path.exists() {
+                    let _ = std::fs::remove_file(&local_path);
+                }
+
+                if let Err(error) = std::fs::copy(&remote_path, &local_path) {
+                    if state.recovery_policy == RecoveryPolicy::Strict {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "failed to restore local SST cache for '{}' from cloud: {}",
+                            file.name, error
+                        )));
+                    }
+
+                    state.opened_in_salvage_mode = true;
+                    state.persistence_anomaly_detected = true;
+                    manifest_changed = true;
+                    tracing::warn!(
+                        sst_name = %file.name,
+                        error = %error,
+                        "dropping manifest SST because local cache restore from cloud failed"
+                    );
                     continue;
-                };
-                let is_candidate = path.extension().and_then(|ext| ext.to_str()) == Some("sst")
-                    || name.ends_with(".sst.tmp")
-                    || name.ends_with(".tmp");
-                if is_candidate && !published.contains(name) {
-                    obsolete.push(name.to_string());
+                }
+
+                if let Err(error) = crate::sst::fs::SstFileIo::open_with_real_fs(&local_path) {
+                    if state.recovery_policy == RecoveryPolicy::Strict {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "restored local SST cache for '{}' is invalid: {}",
+                            file.name, error
+                        )));
+                    }
+
+                    state.opened_in_salvage_mode = true;
+                    state.persistence_anomaly_detected = true;
+                    manifest_changed = true;
+                    let _ = std::fs::remove_file(&local_path);
+                    tracing::warn!(
+                        sst_name = %file.name,
+                        error = %error,
+                        "dropping manifest SST because restored local cache is invalid"
+                    );
+                    continue;
                 }
             }
+
+            retained_files.push(file);
         }
 
-        obsolete.sort();
-        obsolete
+        if manifest_changed {
+            state.manifest.files = retained_files;
+            crate::metadata::ManifestPersistence::save(&state.db_path, &state.manifest)
+                .map_err(MidgeError::Internal)?;
+            state.restore_sequence_floor_from_manifest();
+        }
+
+        Ok(())
     }
 
     /// Open a database with explicit environment selection.
@@ -479,11 +571,13 @@ impl Engine {
         // the event loop checks it before accepting new writes.
         let lease_healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
+        let mut cloud_root = None;
         let (mut state, runtime_config) = match &opts.storage {
             Storage::Cloud { .. } => {
                 let cloud = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
                     &db_path,
                 )?;
+                cloud_root = Some(cloud.cloud_root.clone());
 
                 let state = RuntimeState::try_new_with_recovery_dir(
                     db_path.clone(),
@@ -529,6 +623,10 @@ impl Engine {
         // 🔑 CRITICAL: Replay intent log to recover any interrupted mutations
         // Must happen BEFORE runtime starts processing messages
         state.replay_intent_log()?;
+        if let Some(root) = cloud_root.as_deref() {
+            Self::ensure_local_sst_cache_from_cloud(&mut state, root)?;
+        }
+        state.cleanup_storage_residue();
         let recovered_sequence = state.sequence;
         let recovered_cf_metas = state.manifest.column_families.clone();
 
@@ -627,6 +725,7 @@ impl Engine {
             runtime_handle,
             db_path,
             memory_mode,
+            cloud_mode: matches!(&opts.storage, Storage::Cloud { .. }),
             recovery_policy: opts.recovery_policy,
             sequence: std::sync::atomic::AtomicU64::new(recovered_sequence),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
@@ -828,6 +927,7 @@ impl Engine {
         end_key: Vec<u8>,
         opts: api::WriteOptions,
     ) -> MidgeResult<()> {
+        let durability_policy = self.effective_wal_durability_policy(opts)?;
         let response = self
             .runtime_handle
             .send_and_wait(RuntimeMsg::WalAppendDeleteRange {
@@ -835,13 +935,13 @@ impl Engine {
                 cf_id: cf.id(),
                 start_key,
                 end_key,
-                durability_policy: Some(opts.to_wal_durability_policy()),
+                durability_policy: Some(durability_policy),
             })?;
 
         match response {
             RuntimeResponse::WalAppended { sequence, .. } => {
                 self.sequence.store(sequence, Ordering::SeqCst);
-                Ok(())
+                self.finalize_write_durability(sequence, opts)
             }
             RuntimeResponse::Error { error, .. } => Err(error),
             _ => Err(MidgeError::Internal(
@@ -863,6 +963,58 @@ impl Engine {
                 "Unexpected response to sync".to_string(),
             )),
         }
+    }
+
+    fn effective_wal_durability_policy(
+        &self,
+        opts: api::WriteOptions,
+    ) -> MidgeResult<crate::wal::DurabilityPolicy> {
+        if self.cloud_mode {
+            return Ok(match opts.policy() {
+                ApiDurabilityPolicy::BestEffort => crate::wal::DurabilityPolicy::BestEffort,
+                ApiDurabilityPolicy::Buffered
+                | ApiDurabilityPolicy::Sync
+                | ApiDurabilityPolicy::CloudStrict => crate::wal::DurabilityPolicy::CloudAsync,
+            });
+        }
+
+        if opts.is_cloud_strict() {
+            return Err(MidgeError::InvalidArgument(
+                "cloud_strict requires cloud-backed storage".to_string(),
+            ));
+        }
+
+        Ok(opts.to_wal_durability_policy())
+    }
+
+    fn finalize_write_durability(&self, sequence: u64, opts: api::WriteOptions) -> MidgeResult<()> {
+        if self.cloud_mode {
+            if opts.is_sync() || opts.is_cloud_strict() {
+                let response = self
+                    .runtime_handle
+                    .send_and_wait(RuntimeMsg::SealWalForCloud {
+                        request_id: next_request_id()?,
+                        sequence,
+                        wait_for_ack: opts.is_cloud_strict(),
+                    })?;
+
+                return match response {
+                    RuntimeResponse::Ok { .. } => Ok(()),
+                    RuntimeResponse::Error { error, .. } => Err(error),
+                    _ => Err(MidgeError::Internal(
+                        "Unexpected response to SealWalForCloud".to_string(),
+                    )),
+                };
+            }
+
+            return Ok(());
+        }
+
+        if opts.is_sync() {
+            self.sync()?;
+        }
+
+        Ok(())
     }
 
     /// Force a flush of a specific column family
@@ -928,6 +1080,7 @@ impl Engine {
             mode,
             start_sequence,
             read_snapshot,
+            self.cloud_mode,
         ))
     }
 
@@ -1030,7 +1183,7 @@ impl Engine {
         // Submit all regular ops as a single batch (one channel alloc, one wait)
         let mut max_sequence = 0u64;
         if !batch_intents.is_empty() {
-            let durability_policy = Some(opts.to_wal_durability_policy());
+            let durability_policy = Some(self.effective_wal_durability_policy(opts)?);
             let sequence =
                 coordinator.submit_batch(&self.runtime_handle, batch_intents, durability_policy)?;
             max_sequence = max_sequence.max(sequence);
@@ -1040,12 +1193,7 @@ impl Engine {
         self.sequence
             .store(max_sequence, std::sync::atomic::Ordering::SeqCst);
 
-        // Apply sync if requested
-        if opts.is_sync() {
-            self.sync()?;
-        }
-
-        Ok(())
+        self.finalize_write_durability(max_sequence, opts)
     }
 
     /// Wait for a write stall to clear for `cf_id`.

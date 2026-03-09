@@ -12,6 +12,7 @@ use super::{HybridStorage, StorageEvent};
 pub(crate) struct CloudBackedTestSetup {
     pub hybrid_storage: Arc<HybridStorage>,
     pub events: crossbeam::channel::Receiver<StorageEvent>,
+    pub cloud_root: PathBuf,
     pub recovery_cloud_wal_dir: PathBuf,
 }
 
@@ -28,7 +29,7 @@ pub(crate) fn build_cloud_backed_filesystem_simulation(
     let _ = std::fs::create_dir_all(&recovery_cloud_wal_dir);
 
     let local_backend = Arc::new(FileSystem::new(db_path.join("hybrid_local"))?);
-    let cloud_backend = Arc::new(FileSystem::new(cloud_root)?);
+    let cloud_backend = Arc::new(FileSystem::new(cloud_root.clone())?);
 
     let (tx, rx) = crossbeam::channel::unbounded::<StorageEvent>();
     let hybrid_storage = Arc::new(HybridStorage::new_with_event_sender(
@@ -40,6 +41,7 @@ pub(crate) fn build_cloud_backed_filesystem_simulation(
     Ok(CloudBackedTestSetup {
         hybrid_storage,
         events: rx,
+        cloud_root,
         recovery_cloud_wal_dir,
     })
 }

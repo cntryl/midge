@@ -263,6 +263,12 @@ pub enum RuntimeMsg {
     WalSync { request_id: u64 },
     /// Rotate WAL segment.
     WalRotate { request_id: u64 },
+    /// Force-seal the current WAL segment for cloud upload and optionally wait for cloud durability.
+    SealWalForCloud {
+        request_id: u64,
+        sequence: u64,
+        wait_for_ack: bool,
+    },
     /// WAL sync completed.
     WalSyncComplete { request_id: u64, segment_id: u64 },
 
@@ -450,6 +456,7 @@ impl RuntimeMsg {
             | ApplyTransaction { request_id, .. }
             | WalSync { request_id }
             | WalRotate { request_id }
+            | SealWalForCloud { request_id, .. }
             | WalSyncComplete { request_id, .. }
             | CloudUploadSst { request_id, .. }
             | CloudUploadWal { request_id, .. }
@@ -500,6 +507,7 @@ impl RuntimeMsg {
             ApplyTransaction { .. } => "ApplyTransaction",
             WalSync { .. } => "WalSync",
             WalRotate { .. } => "WalRotate",
+            SealWalForCloud { .. } => "SealWalForCloud",
             WalSyncComplete { .. } => "WalSyncComplete",
             CloudUploadSst { .. } => "CloudUploadSst",
             CloudUploadWal { .. } => "CloudUploadWal",

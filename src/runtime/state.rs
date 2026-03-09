@@ -223,6 +223,17 @@ pub struct RuntimeState {
 }
 
 impl RuntimeState {
+    fn manifest_visible_sequence_floor(manifest: &Manifest) -> u64 {
+        let file_max_sequence = manifest
+            .files
+            .iter()
+            .filter_map(|file| file.largest_seq.or(file.smallest_seq))
+            .max()
+            .unwrap_or(0);
+
+        manifest.last_persisted_sequence.max(file_max_sequence)
+    }
+
     /// Create new runtime state with the given database path.
     /// If memory_mode is true, filesystem is never touched.
     pub fn new(db_path: PathBuf, memory_mode: bool) -> Self {
@@ -379,7 +390,7 @@ impl RuntimeState {
         let replay_dir = recovery_wal_dir.as_deref().unwrap_or(&wal_dir);
         let mut wal_recovery_records_replayed = 0_u64;
         let mut wal_recovery_bytes_replayed = 0_u64;
-        let recovered_sequence = if !memory_mode && replay_dir.exists() {
+        let wal_recovered_sequence = if !memory_mode && replay_dir.exists() {
             let mut recovery_memtables = HashMap::new();
             match crate::storage::LocalFsStorage::new(replay_dir) {
                 Ok(storage) => match crate::wal::recovery::replay_wal_with_policy(
@@ -462,6 +473,8 @@ impl RuntimeState {
         } else {
             0
         };
+        let recovered_sequence =
+            wal_recovered_sequence.max(Self::manifest_visible_sequence_floor(&manifest));
 
         // WAL segment id recovery:
         // On restart, we must continue segment ids beyond the highest existing rotated segment
@@ -550,18 +563,14 @@ impl RuntimeState {
     }
 
     pub fn health(&self) -> crate::engine::EngineHealth {
-        if self.opened_in_salvage_mode {
-            crate::engine::EngineHealth::SalvageMode
-        } else if self.write_stalled {
-            crate::engine::EngineHealth::WriteStalled
-        } else if self.persistence_anomaly_detected
-            || !self.intent_log.is_empty()
-            || !self.obsolete_sst_files().is_empty()
-        {
-            crate::engine::EngineHealth::Degraded
-        } else {
-            crate::engine::EngineHealth::Healthy
-        }
+        let residue = self.storage_residue_assessment();
+        crate::storage::residue::classify_engine_health(crate::storage::residue::HealthInputs {
+            opened_in_salvage_mode: self.opened_in_salvage_mode,
+            write_stalled: self.write_stalled,
+            persistence_anomaly_detected: self.persistence_anomaly_detected,
+            pending_intents: self.intent_log.len(),
+            orphan_ssts: residue.orphan_ssts.len(),
+        })
     }
 
     pub fn runtime_metrics_snapshot(&self) -> crate::engine::RuntimeMetricsSnapshot {
@@ -573,7 +582,7 @@ impl RuntimeState {
             .sum();
         let sst_count = self.manifest.files.len();
         let sst_bytes = self.manifest.files.iter().map(|file| file.size_bytes).sum();
-        let obsolete_files = self.obsolete_sst_files();
+        let residue = self.storage_residue_assessment();
         let telemetry = crate::telemetry::Telemetry::global().map(|t| t.metrics().snapshot());
 
         crate::engine::RuntimeMetricsSnapshot {
@@ -608,7 +617,7 @@ impl RuntimeState {
                 .as_ref()
                 .map_or(0, |m| m.compaction_bytes_rewritten),
             compaction_failures: telemetry.as_ref().map_or(0, |m| m.compaction_failures),
-            obsolete_file_backlog: obsolete_files.len(),
+            obsolete_file_backlog: residue.orphan_ssts.len(),
             write_stalls_total: telemetry.as_ref().map_or(0, |m| m.write_stalls),
             write_stalls_memory_total: telemetry.as_ref().map_or(0, |m| m.write_stalls_memory),
             write_stalls_compaction_total: telemetry
@@ -676,7 +685,7 @@ impl RuntimeState {
             })
             .collect();
         active_snapshots.sort_by_key(|snapshot| snapshot.snapshot_id);
-        let obsolete_files = self.obsolete_sst_files();
+        let residue = self.storage_residue_assessment();
 
         crate::engine::StorageLayoutSnapshot {
             health: self.health(),
@@ -686,7 +695,7 @@ impl RuntimeState {
             active_snapshots,
             pending_compactions: self.compaction.pending_tasks,
             compacting_ssts: self.compaction.compacting_ssts.clone(),
-            obsolete_files,
+            obsolete_files: residue.orphan_ssts,
         }
     }
 
@@ -694,37 +703,71 @@ impl RuntimeState {
         self.persistence_anomaly_detected = true;
     }
 
-    fn obsolete_sst_files(&self) -> Vec<String> {
+    fn storage_residue_assessment(&self) -> crate::storage::residue::StorageResidueAssessment {
         if self.memory_mode {
-            return Vec::new();
+            return crate::storage::residue::StorageResidueAssessment::default();
         }
 
-        let published: std::collections::HashSet<_> = self
-            .manifest
-            .files
-            .iter()
-            .map(|file| file.name.clone())
-            .collect();
-        let mut obsolete = Vec::new();
+        crate::storage::residue::StorageResidueAssessment::scan_sst_dir(
+            &self.db_path,
+            &self.manifest,
+        )
+    }
 
-        if let Ok(entries) = std::fs::read_dir(&self.sst_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                    continue;
-                };
+    pub fn cleanup_storage_residue(&mut self) {
+        if self.memory_mode {
+            return;
+        }
 
-                let is_candidate = path.extension().and_then(|ext| ext.to_str()) == Some("sst")
-                    || name.ends_with(".sst.tmp")
-                    || name.ends_with(".tmp");
-                if is_candidate && !published.contains(name) {
-                    obsolete.push(name.to_string());
+        let residue = self.storage_residue_assessment();
+
+        for temp_name in residue.temp_files {
+            let path = self.sst_dir.join(&temp_name);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    tracing::info!(path = %path.display(), "deleted non-authoritative SST temp residue");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "failed to delete non-authoritative SST temp residue"
+                    );
                 }
             }
         }
 
-        obsolete.sort();
-        obsolete
+        for orphan_name in residue.orphan_ssts {
+            let path = self.sst_dir.join(&orphan_name);
+            let injected_delete_failure =
+                fail::eval("midge::recovery::inject_orphan_sst_delete_failure", |_| {
+                    true
+                })
+                .unwrap_or(false);
+            if injected_delete_failure {
+                self.persistence_anomaly_detected = true;
+                tracing::warn!(
+                    path = %path.display(),
+                    "failed to delete orphan SST residue during startup cleanup"
+                );
+                continue;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    tracing::info!(path = %path.display(), "deleted orphan SST residue during startup cleanup");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    self.persistence_anomaly_detected = true;
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "failed to delete orphan SST residue during startup cleanup"
+                    );
+                }
+            }
+        }
     }
 
     fn ensure_directories(
@@ -754,6 +797,22 @@ impl RuntimeState {
     pub fn next_sequence(&mut self) -> u64 {
         self.sequence = self.sequence.saturating_add(1);
         self.sequence
+    }
+
+    pub fn restore_sequence_floor_from_manifest(&mut self) {
+        let sequence_floor = Self::manifest_visible_sequence_floor(&self.manifest);
+        if self.manifest.last_persisted_sequence < sequence_floor {
+            self.manifest.last_persisted_sequence = sequence_floor;
+        }
+        if self.sequence < sequence_floor {
+            self.sequence = sequence_floor;
+        }
+        if self.wal.local_durable_seq < sequence_floor {
+            self.wal.local_durable_seq = sequence_floor;
+        }
+        if self.wal.cloud_durable_seq < sequence_floor {
+            self.wal.cloud_durable_seq = sequence_floor;
+        }
     }
 
     /// Check if we have cached sequences for this request_id.
@@ -1375,15 +1434,28 @@ impl RuntimeState {
         }
 
         if manifest_changed {
-            self.persist_manifest_checkpoint()?;
+            if let Err(error) = self.persist_manifest_checkpoint() {
+                let _ = self.handle_recovery_issue(format!(
+                    "failed to persist manifest checkpoint after intent replay: {}",
+                    error
+                ))?;
+            }
         }
+
+        self.restore_sequence_floor_from_manifest();
 
         // Clear the intent log after successful replay
         // New intents will be written during normal operation
         self.intent_log.clear();
         if !self.memory_mode {
-            crate::runtime::IntentPersistence::save(&self.db_path, &self.intent_log)
-                .map_err(crate::common::MidgeError::Internal)?;
+            if let Err(error) =
+                crate::runtime::IntentPersistence::save(&self.db_path, &self.intent_log)
+            {
+                let _ = self.handle_recovery_issue(format!(
+                    "failed to clear intent log after replay: {}",
+                    error
+                ))?;
+            }
         }
 
         tracing::info!("intent log replay complete and cleared");

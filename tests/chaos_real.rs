@@ -202,7 +202,7 @@ fn should_preserve_complete_wal_prefix_when_truncated_to_one_byte_past_last_comp
 fn should_recover_all_sync_commits_when_manifest_file_is_zeroed_after_crash() {
     // WHAT THIS TEST DOES:
     // Runs a child process that writes sync commits, persists a manifest successfully once,
-    // then aborts during a second manifest persist using a real failpoint. The parent zeroes manifest.yaml before reopen.
+    // then aborts during a second manifest persist using a real failpoint. The parent zeroes manifest.json before reopen.
     // FAILURE INJECTED:
     // Real subprocess abort via midge::manifest::after_temp_sync_before_rename plus direct manifest zeroing.
     // EXPECTED INVARIANT:
@@ -712,7 +712,7 @@ fn wal_log_path(db_path: &Path) -> PathBuf {
 }
 
 fn manifest_path(db_path: &Path) -> PathBuf {
-    db_path.join("manifest.yaml")
+    db_path.join("manifest.json")
 }
 
 fn committed_log_path(db_path: &Path) -> PathBuf {

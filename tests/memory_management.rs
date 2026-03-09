@@ -46,6 +46,7 @@ fn should_handle_small_memory_budget_without_unexpected_errors() {
         engine.flush_cf(&cf).expect("final flush");
         let metrics = engine.get_runtime_metrics().expect("runtime metrics");
 
+        // Assert
         if !mode.eq("memory") {
             // Under sustained pressure the engine may either surface WriteStall or
             // keep up by flushing synchronously. Both are acceptable as long as it

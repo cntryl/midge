@@ -9,6 +9,61 @@ use crossbeam::channel::TryRecvError;
 use std::time::Instant;
 
 impl EventLoop {
+    pub(super) fn seal_current_cloud_segment(
+        &mut self,
+    ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
+        if !self.wal_actor.is_cloud_async() {
+            return Ok(None);
+        }
+        let Some(storage) = &self.hybrid_storage else {
+            return Err(crate::common::MidgeError::Internal(
+                "CloudAsync requires HybridStorage".to_string(),
+            ));
+        };
+        if self.state.memory_mode || self.state.wal.pending_writes == 0 {
+            return Ok(None);
+        }
+
+        let segment_id = self.state.wal.current_segment_id;
+        let bytes_buffered = self.wal_actor.bytes_since_sync() as u64;
+        let seal_start = Instant::now();
+        self.wal_actor.flush_for_cloud_upload(&mut self.state)?;
+        if let Err(error) = self.wal_actor.rotate(&mut self.state) {
+            tracing::error!(error = %error, "CloudAsync: WAL rotate failed");
+            return Err(error);
+        }
+
+        self.durability.rotate_to(self.state.wal.current_segment_id);
+
+        let max_sequence = self.state.wal.local_durable_seq;
+        let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
+        storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
+
+        let resource = format!("wal/{segment_id}.wal");
+        if !self
+            .state
+            .cloud
+            .pending_uploads
+            .iter()
+            .any(|item| item == &resource)
+        {
+            self.state.cloud.pending_uploads.push(resource);
+        }
+
+        self.durability
+            .record_cloud_segment_inflight(segment_id, max_sequence);
+        self.durability.record_cloud_flush();
+
+        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+            telemetry.metrics().record_cloud_async_wal_segment_sealed(
+                bytes_buffered,
+                seal_start.elapsed().as_micros() as u64,
+            );
+        }
+
+        Ok(Some((segment_id, max_sequence)))
+    }
+
     pub(super) fn tick_hybrid_storage(&mut self) {
         let Some(storage) = &self.hybrid_storage else {
             return;
@@ -50,6 +105,12 @@ impl EventLoop {
                 max_sequence,
             ) {
                 Ok(()) => {
+                    let resource = format!("wal/{segment_id}.wal");
+                    self.state
+                        .cloud
+                        .pending_uploads
+                        .retain(|item| item != &resource);
+
                     // If cloud_durable_seq advanced past multiple segments,
                     // complete all inflight segments whose max_sequence is now durable.
                     let durable = self.state.wal.cloud_durable_seq;
@@ -74,6 +135,13 @@ impl EventLoop {
                 }
             },
             crate::storage::StorageEvent::CloudFail { segment_id, error } => {
+                let resource = format!("wal/{segment_id}.wal");
+                self.state
+                    .cloud
+                    .pending_uploads
+                    .retain(|item| item != &resource);
+                self.state.mark_persistence_anomaly();
+
                 // Attempt to recover the failed segment's max_sequence so we can
                 // invalidate idempotency allocations that were part of it.
                 let failed_max_seq = self.durability.take_cloud_segment_max_sequence(segment_id);
@@ -103,6 +171,9 @@ impl EventLoop {
                             ..
                         }
                         | super::super::durability::DurabilityWaiter::ConfirmTransactionApply {
+                            request_id,
+                        }
+                        | super::super::durability::DurabilityWaiter::CloudDurability {
                             request_id,
                         }
                         | super::super::durability::DurabilityWaiter::Read { request_id, .. }
@@ -143,9 +214,9 @@ impl EventLoop {
         if !self.wal_actor.is_cloud_async() {
             return;
         }
-        let Some(storage) = &self.hybrid_storage else {
+        if self.hybrid_storage.is_none() {
             return;
-        };
+        }
 
         if self.state.memory_mode {
             return;
@@ -166,36 +237,13 @@ impl EventLoop {
             return;
         }
 
-        let segment_id = self.state.wal.current_segment_id;
-
-        let seal_start = Instant::now();
-        if let Err(e) = self.wal_actor.flush_for_cloud_upload(&mut self.state) {
-            tracing::error!(error = %e, "CloudAsync: WAL flush failed");
+        let seal_result = self.seal_current_cloud_segment();
+        let Ok(Some((segment_id, max_sequence))) = seal_result else {
+            if let Err(error) = seal_result {
+                tracing::error!(error = %error, "CloudAsync: forced WAL seal failed");
+            }
             return;
-        }
-        let seal_latency_us = seal_start.elapsed().as_micros() as u64;
-
-        if let Err(e) = self.wal_actor.rotate(&mut self.state) {
-            tracing::error!(error = %e, "CloudAsync: WAL rotate failed");
-            return;
-        }
-
-        // Move waiters for the sealed segment into an inflight bucket keyed by `segment_id`.
-        self.durability.rotate_to(self.state.wal.current_segment_id);
-
-        let max_sequence = self.state.wal.local_durable_seq;
-        let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
-        storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
-
-        self.durability
-            .record_cloud_segment_inflight(segment_id, max_sequence);
-        self.durability.record_cloud_flush();
-
-        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-            telemetry
-                .metrics()
-                .record_cloud_async_wal_segment_sealed(bytes_buffered as u64, seal_latency_us);
-        }
+        };
 
         if std::env::var_os("MIDGE_TRACE_CLOUD_ASYNC").is_some() {
             // Throttle: log every 1000 segments to avoid noise.

@@ -206,12 +206,10 @@ impl FlushActor {
         if let Some(hybrid) = sba {
             let sst_path_obj = std::fs::metadata(&sst_path)?;
             hybrid.flush_completed(sst_path_obj.len());
-        }
 
-        // Queue SST for cloud upload if using cloud-backed storage
-        if sba.is_some() {
-            state.cloud.pending_uploads.push(sst_name.clone());
-            tracing::debug!(cf_id = cf_id, sst_name = %sst_name, "SST queued for cloud upload");
+            let remote_bytes = std::fs::read(&sst_path)?;
+            hybrid.write_sst_object(&sst_name, remote_bytes)?;
+            tracing::debug!(cf_id = cf_id, sst_name = %sst_name, "SST mirrored to authoritative cloud storage");
         }
 
         Ok(FlushOutput {

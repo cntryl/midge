@@ -7,6 +7,7 @@
 //! - Column-family scoped transactions
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::engine::api::DurabilityPolicy as ApiDurabilityPolicy;
 use crate::engine::ColumnFamilyId;
 use crate::runtime::{next_request_id, RuntimeHandle, RuntimeMsg, RuntimeResponse};
 use serde::{Deserialize, Serialize};
@@ -93,6 +94,8 @@ pub struct Transaction {
     start_sequence: u64,
     /// Immutable snapshot for direct read execution (bypasses event loop)
     read_snapshot: Option<Arc<crate::runtime::ReadSnapshot>>,
+    /// True when opened against cloud-backed storage.
+    cloud_mode: bool,
 }
 
 impl Transaction {
@@ -104,6 +107,7 @@ impl Transaction {
         mode: TransactionMode,
         start_sequence: u64,
         read_snapshot: Option<Arc<crate::runtime::ReadSnapshot>>,
+        cloud_mode: bool,
     ) -> Self {
         Self {
             runtime_handle,
@@ -113,6 +117,7 @@ impl Transaction {
             write_set: Vec::new(),
             start_sequence,
             read_snapshot,
+            cloud_mode,
         }
     }
 
@@ -289,7 +294,8 @@ impl Transaction {
 
         let ops = self
             .write_set
-            .into_iter()
+            .iter()
+            .cloned()
             .map(|intent| -> MidgeResult<crate::runtime::TransactionOp> {
                 Ok(match intent {
                     WriteIntent::Put {
@@ -329,29 +335,12 @@ impl Transaction {
             .send_and_wait(RuntimeMsg::ApplyTransaction {
                 request_id: next_request_id()?,
                 ops,
-                durability_policy: Some(opts.to_wal_durability_policy()),
+                durability_policy: Some(self.effective_wal_durability_policy(opts)?),
             })?;
 
         match response {
-            RuntimeResponse::TransactionApplied { .. } => {
-                if opts.is_sync() {
-                    let sync_resp = self.runtime_handle.send_and_wait(RuntimeMsg::WalSync {
-                        request_id: next_request_id()?,
-                    })?;
-                    match sync_resp {
-                        RuntimeResponse::Ok { .. } => {}
-                        RuntimeResponse::Error { error, .. } => {
-                            return Err(error);
-                        }
-                        _ => {
-                            return Err(MidgeError::Internal(
-                                "Unexpected response to RuntimeMsg::WalSync".to_string(),
-                            ));
-                        }
-                    }
-                }
-
-                Ok(())
+            RuntimeResponse::TransactionApplied { last_sequence, .. } => {
+                self.finalize_write_durability(last_sequence, opts)
             }
             RuntimeResponse::Error { error, .. } => Err(error),
             _ => Err(MidgeError::Internal(
@@ -375,5 +364,70 @@ impl Transaction {
         }
 
         None
+    }
+
+    fn effective_wal_durability_policy(
+        &self,
+        opts: super::WriteOptions,
+    ) -> MidgeResult<crate::wal::DurabilityPolicy> {
+        if self.cloud_mode {
+            return Ok(match opts.policy() {
+                ApiDurabilityPolicy::BestEffort => crate::wal::DurabilityPolicy::BestEffort,
+                ApiDurabilityPolicy::Buffered
+                | ApiDurabilityPolicy::Sync
+                | ApiDurabilityPolicy::CloudStrict => crate::wal::DurabilityPolicy::CloudAsync,
+            });
+        }
+
+        if opts.is_cloud_strict() {
+            return Err(MidgeError::InvalidArgument(
+                "cloud_strict requires cloud-backed storage".to_string(),
+            ));
+        }
+
+        Ok(opts.to_wal_durability_policy())
+    }
+
+    fn finalize_write_durability(
+        &self,
+        sequence: u64,
+        opts: super::WriteOptions,
+    ) -> MidgeResult<()> {
+        if self.cloud_mode {
+            if opts.is_sync() || opts.is_cloud_strict() {
+                let response = self
+                    .runtime_handle
+                    .send_and_wait(RuntimeMsg::SealWalForCloud {
+                        request_id: next_request_id()?,
+                        sequence,
+                        wait_for_ack: opts.is_cloud_strict(),
+                    })?;
+
+                return match response {
+                    RuntimeResponse::Ok { .. } => Ok(()),
+                    RuntimeResponse::Error { error, .. } => Err(error),
+                    _ => Err(MidgeError::Internal(
+                        "Unexpected response to SealWalForCloud".to_string(),
+                    )),
+                };
+            }
+
+            return Ok(());
+        }
+
+        if opts.is_sync() {
+            let sync_resp = self.runtime_handle.send_and_wait(RuntimeMsg::WalSync {
+                request_id: next_request_id()?,
+            })?;
+            return match sync_resp {
+                RuntimeResponse::Ok { .. } => Ok(()),
+                RuntimeResponse::Error { error, .. } => Err(error),
+                _ => Err(MidgeError::Internal(
+                    "Unexpected response to RuntimeMsg::WalSync".to_string(),
+                )),
+            };
+        }
+
+        Ok(())
     }
 }

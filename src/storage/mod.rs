@@ -159,6 +159,7 @@ pub(crate) mod filesystem;
 pub(crate) mod hybrid;
 pub(crate) mod local_fs_storage;
 pub(crate) mod providers;
+pub(crate) mod residue;
 pub(crate) mod test_support;
 
 /// Stable, filesystem-oriented storage abstraction.

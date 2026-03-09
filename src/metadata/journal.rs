@@ -164,6 +164,11 @@ pub fn append_edit_with_fs(
         },
     )?;
 
+    fail::fail_point!("midge::manifest::inject_no_space_on_append_edit", |_| Err(
+        crate::common::MidgeError::NoSpace(
+            "failpoint: no space on manifest journal append".to_string()
+        )
+    ));
     let write_start = std::time::Instant::now();
     f.append(bytes::Bytes::from(buf))
         .map_err(crate::common::MidgeError::from)?;
@@ -412,6 +417,12 @@ pub fn append_edit_batch_with_fs(
         },
     )?;
 
+    fail::fail_point!(
+        "midge::manifest::inject_no_space_on_append_edit_batch",
+        |_| Err(crate::common::MidgeError::NoSpace(
+            "failpoint: no space on manifest journal batch append".to_string()
+        ))
+    );
     let write_start = std::time::Instant::now();
     f.append(bytes::Bytes::from(buf))
         .map_err(crate::common::MidgeError::from)?;

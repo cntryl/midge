@@ -62,11 +62,14 @@ const POST_ACK_RECORDS: &[ExpectedRecord] = &[
 
 #[test]
 fn should_abort_in_child_process_when_txn_crash_scenario_requested() {
+    // Arrange
     let Some(scenario) = std::env::var_os(ENV_SCENARIO) else {
         return;
     };
 
     let db_path = PathBuf::from(std::env::var_os(ENV_DB_PATH).expect("db path env"));
+
+    // Act
     match scenario.to_string_lossy().as_ref() {
         "after_ops_before_commit" => child_abort_after_ops_before_commit(&db_path),
         "after_sync_before_ack" => child_abort_after_sync_before_ack(&db_path),
@@ -74,42 +77,55 @@ fn should_abort_in_child_process_when_txn_crash_scenario_requested() {
         other => panic!("unknown txn crash scenario: {other}"),
     }
 
+    // Assert
     panic!("child scenario returned without abort");
 }
 
 #[test]
 fn should_drop_sync_transaction_when_crashing_after_ops_append_before_commit_marker() {
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
+    // Act
     run_child_expect_abort("after_ops_before_commit", db_path);
     expire_crashed_process_lease(db_path);
 
     let engine = open_local_engine(db_path);
+
+    // Assert
     assert_records_absent(&engine, PRE_COMMIT_RECORDS);
 }
 
 #[test]
 fn should_recover_sync_transaction_when_crashing_after_sync_before_ack() {
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
+    // Act
     run_child_expect_abort("after_sync_before_ack", db_path);
     expire_crashed_process_lease(db_path);
 
     let engine = open_local_engine(db_path);
+
+    // Assert
     assert_records_visible(&engine, POST_SYNC_RECORDS);
 }
 
 #[test]
 fn should_recover_sync_transaction_when_process_aborts_after_commit_ack() {
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
+    // Act
     run_child_expect_abort("after_commit_ack", db_path);
     expire_crashed_process_lease(db_path);
 
     let engine = open_local_engine(db_path);
+
+    // Assert
     assert_records_visible(&engine, POST_ACK_RECORDS);
 }
 

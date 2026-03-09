@@ -175,6 +175,25 @@ impl HybridStorage {
                             telemetry.metrics().record_cloud_upload(bytes);
                         }
 
+                        let forced_failure =
+                            fail::eval("midge::cloud::inject_fail_wal_upload", |_| true)
+                                .unwrap_or(false);
+                        if forced_failure {
+                            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                                telemetry.metrics().record_cloud_async_wal_upload_failed();
+                            }
+                            let mut events = event_queue.lock();
+                            let fail = StorageEvent::CloudFail {
+                                segment_id: upload.segment_id,
+                                error: "failpoint: cloud WAL upload failed".to_string(),
+                            };
+                            events.push_back(fail.clone());
+                            if let Some(tx) = &external_event_tx {
+                                let _ = tx.send(fail);
+                            }
+                            continue;
+                        }
+
                         let (tx, rx) = std::sync::mpsc::channel();
                         let cloud_key = format!("wal/{}.wal", upload.segment_id);
                         cloud.submit_write(cloud_key, data, tx);
@@ -379,6 +398,27 @@ impl HybridStorage {
 
             upload.status = UploadStatus::InFlight { started_at: now };
 
+            let forced_failure =
+                fail::eval("midge::cloud::inject_fail_wal_upload", |_| true).unwrap_or(false);
+            if forced_failure {
+                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                    telemetry.metrics().record_cloud_async_wal_upload_failed();
+                }
+
+                let fail = StorageEvent::CloudFail {
+                    segment_id: upload.segment_id,
+                    error: "failpoint: cloud WAL upload failed".to_string(),
+                };
+                {
+                    let mut events = self.event_queue.lock();
+                    events.push_back(fail.clone());
+                }
+                if let Some(tx) = &self.external_event_tx {
+                    let _ = tx.send(fail);
+                }
+                continue;
+            }
+
             // Send to the dedicated worker; avoid per-upload thread spawn.
             // If worker failed to spawn, perform inline upload as fallback.
             if self.upload_worker_failed {
@@ -465,6 +505,26 @@ impl HybridStorage {
         let bytes = data.len() as u64;
         if let Some(telemetry) = crate::telemetry::Telemetry::global() {
             telemetry.metrics().record_cloud_upload(bytes);
+        }
+
+        let forced_failure =
+            fail::eval("midge::cloud::inject_fail_wal_upload", |_| true).unwrap_or(false);
+        if forced_failure {
+            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                telemetry.metrics().record_cloud_async_wal_upload_failed();
+            }
+            let mut events = self.event_queue.lock();
+            events.push_back(StorageEvent::CloudFail {
+                segment_id: upload.segment_id,
+                error: "failpoint: cloud WAL upload failed".to_string(),
+            });
+            if let Some(tx) = &self.external_event_tx {
+                let _ = tx.send(StorageEvent::CloudFail {
+                    segment_id: upload.segment_id,
+                    error: "failpoint: cloud WAL upload failed".to_string(),
+                });
+            }
+            return;
         }
 
         // Submit to cloud backend
@@ -575,6 +635,76 @@ impl HybridStorage {
     /// Get count of pending uploads (for monitoring)
     pub fn pending_upload_count(&self) -> usize {
         self.upload_queue.lock().len()
+    }
+
+    pub fn write_sst_object(
+        &self,
+        sst_name: &str,
+        data: Vec<u8>,
+    ) -> crate::common::MidgeResult<()> {
+        let key = format!("sst/{sst_name}");
+
+        let (tx_local, rx_local) = std::sync::mpsc::channel();
+        self.local.submit_write(key.clone(), data.clone(), tx_local);
+
+        let local_result = rx_local.recv().map_err(|_| {
+            crate::common::MidgeError::Internal(
+                "local SST cache write callback channel closed".to_string(),
+            )
+        })?;
+
+        match local_result {
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            } => {}
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            } => {
+                return Err(crate::common::MidgeError::Internal(format!(
+                    "local SST cache write failed: {error}"
+                )));
+            }
+            other => {
+                return Err(crate::common::MidgeError::Internal(format!(
+                    "unexpected local SST cache write response: {other:?}"
+                )));
+            }
+        }
+
+        let forced_failure =
+            fail::eval("midge::cloud::inject_fail_sst_upload", |_| true).unwrap_or(false);
+        if forced_failure {
+            return Err(crate::common::MidgeError::Internal(
+                "failpoint: cloud SST upload failed".to_string(),
+            ));
+        }
+
+        let (tx_cloud, rx_cloud) = std::sync::mpsc::channel();
+        self.cloud.submit_write(key, data, tx_cloud);
+
+        let cloud_result = rx_cloud.recv().map_err(|_| {
+            crate::common::MidgeError::Internal(
+                "cloud SST upload callback channel closed".to_string(),
+            )
+        })?;
+
+        match cloud_result {
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            } => Ok(()),
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            } => Err(crate::common::MidgeError::Internal(format!(
+                "cloud SST upload failed: {error}"
+            ))),
+            other => Err(crate::common::MidgeError::Internal(format!(
+                "unexpected cloud SST upload response: {other:?}"
+            ))),
+        }
     }
 }
 

@@ -97,8 +97,8 @@ fn should_report_intent_log_replay_metrics_after_reopen_when_manifest_intents_pe
         },
     ];
 
-    let intent_yaml = serde_yaml::to_string(&intents).expect("serialize intent fixture");
-    fs::write(db_path.join("intent_log.yaml"), intent_yaml).expect("write intent fixture");
+    let intent_json = serde_json::to_string_pretty(&intents).expect("serialize intent fixture");
+    fs::write(db_path.join("intent_log.json"), intent_json).expect("write intent fixture");
 
     // Act
     let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");

@@ -1,6 +1,6 @@
 //! Manifest persistence - serialization and file I/O
 //!
-//! Persists manifest state to disk in YAML format to enable
+//! Persists manifest state to disk in JSON format to enable
 //! recovery of LSM structure across restarts.
 
 use crate::metadata::Manifest;
@@ -12,10 +12,12 @@ pub struct ManifestPersistence;
 
 impl ManifestPersistence {
     /// Manifest file name
-    const MANIFEST_FILE: &'static str = "manifest.yaml";
+    const MANIFEST_FILE: &'static str = "manifest.json";
+    const MANIFEST_FILE_TEMP: &'static str = "manifest.json.tmp";
 
     /// Snapshot file name
-    const MANIFEST_SNAPSHOT: &'static str = "manifest.snapshot";
+    const MANIFEST_SNAPSHOT: &'static str = "manifest.snapshot.json";
+    const MANIFEST_SNAPSHOT_TEMP: &'static str = "manifest.snapshot.json.tmp";
 
     /// Get the manifest file path
     pub fn manifest_path(db_path: &Path) -> PathBuf {
@@ -27,8 +29,56 @@ impl ManifestPersistence {
         db_path.join(Self::MANIFEST_SNAPSHOT)
     }
 
-    /// Load manifest, preferring a binary snapshot plus replaying the journal.
-    /// Falls back to legacy YAML manifest if snapshot missing.
+    fn load_json_manifest_file(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        path: &crate::io::traits::FsPath,
+        context: &str,
+    ) -> Result<Manifest, String> {
+        let start = Instant::now();
+        let file = fs
+            .open(
+                path,
+                crate::io::traits::OpenOptions {
+                    mode: crate::io::traits::OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(|e| format!("failed to open {context}: {:?}", e))?;
+        let len = file
+            .len()
+            .map_err(|e| format!("failed to stat {context}: {:?}", e))?;
+        let data = file
+            .read_at(0, len)
+            .map_err(|e| format!("failed to read {context}: {:?}", e))?;
+        let manifest: Manifest = serde_json::from_slice(&data)
+            .map_err(|e| format!("failed to parse {context} JSON: {}", e))?;
+        let elapsed = start.elapsed();
+        tracing::info!(
+            path = ?path,
+            files = manifest.files.len(),
+            cf = manifest.column_families.len(),
+            elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+            "manifest JSON loaded"
+        );
+        Ok(manifest)
+    }
+
+    fn remove_file_if_exists(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        path: &crate::io::traits::FsPath,
+    ) -> Result<(), String> {
+        match fs.exists(path) {
+            Ok(false) => Ok(()),
+            Ok(true) => fs
+                .remove_file(path)
+                .map_err(|e| format!("failed to remove file {:?}: {:?}", path, e)),
+            Err(e) => Err(format!("fs exists error for {:?}: {:?}", path, e)),
+        }
+    }
+
+    /// Load manifest, preferring a JSON snapshot plus replaying the journal.
     pub fn load_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     ) -> Result<Manifest, String> {
@@ -43,94 +93,18 @@ impl ManifestPersistence {
         use crate::io::traits::FsPath;
 
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
-        let mut manifest = match fs.exists(&snap_path) {
-            Ok(true) => {
-                let start = Instant::now();
-                let file = fs
-                    .open(
-                        &snap_path,
-                        crate::io::traits::OpenOptions {
-                            mode: crate::io::traits::OpenMode::ReadOnly,
-                            create: false,
-                            create_new: false,
-                            truncate: false,
-                        },
-                    )
-                    .map_err(|e| format!("failed to open manifest snapshot: {:?}", e))?;
-                let len = file
-                    .len()
-                    .map_err(|e| format!("failed to stat snapshot: {:?}", e))?;
-                let data = file
-                    .read_at(0, len)
-                    .map_err(|e| format!("failed to read snapshot: {:?}", e))?;
-                let contents = String::from_utf8(data.to_vec())
-                    .map_err(|e| format!("snapshot not utf8: {}", e))?;
-                let manifest: Manifest = serde_yaml::from_str(&contents)
-                    .map_err(|e| format!("failed to parse manifest snapshot YAML: {}", e))?;
-                let elapsed = start.elapsed();
-                tracing::info!(
-                    path = ?snap_path,
-                    files = manifest.files.len(),
-                    cf = manifest.column_families.len(),
-                    elapsed_ms = elapsed.as_secs_f64() * 1000.0,
-                    "manifest snapshot loaded"
-                );
-                Ok(manifest)
-            }
-            Ok(false) => {
-                let manifest_path = FsPath::new(Self::MANIFEST_FILE);
-                if !fs.exists(&manifest_path).unwrap_or(false) {
-                    tracing::debug!(path = ?manifest_path, "manifest file not found, using default");
-                    Ok(Manifest::default())
-                } else {
-                    let start = Instant::now();
-                    let file = fs
-                        .open(
-                            &manifest_path,
-                            crate::io::traits::OpenOptions {
-                                mode: crate::io::traits::OpenMode::ReadOnly,
-                                create: false,
-                                create_new: false,
-                                truncate: false,
-                            },
-                        )
-                        .map_err(|e| format!("failed to open manifest file: {:?}", e))?;
-                    let len = file
-                        .len()
-                        .map_err(|e| format!("failed to stat manifest file: {:?}", e))?;
-                    let data = file
-                        .read_at(0, len)
-                        .map_err(|e| format!("failed to read manifest file: {:?}", e))?;
-                    let contents = String::from_utf8(data.to_vec())
-                        .map_err(|e| format!("manifest not utf8: {}", e))?;
-                    let size_bytes = contents.len() as u64;
-
-                    let manifest: Manifest = serde_yaml::from_str(&contents)
-                        .map_err(|e| format!("failed to parse manifest YAML: {}", e))?;
-
-                    let elapsed = start.elapsed();
-                    tracing::info!(
-                        path = ?manifest_path,
-                        files_count = manifest.files.len(),
-                        cf_count = manifest.column_families.len(),
-                        size_bytes,
-                        elapsed_ms = elapsed.as_secs_f64() * 1000.0,
-                        "manifest loaded successfully"
-                    );
-                    Ok(manifest)
-                }
-            }
-            Err(e) => Err(format!("fs exists error: {:?}", e)),
-        }?;
-
-        // Check for an explicit bench-only trust mode (opt-in via env var)
-        let trust_snapshot_enabled = std::env::var("MIDGE_BENCH_TRUST_SNAPSHOT").ok().as_deref()
-            == Some("1")
-            && (std::env::var("MIDGE_ALLOW_TRUST_SNAPSHOT").ok().as_deref() == Some("1"));
-        if trust_snapshot_enabled {
-            tracing::warn!("trust_snapshot enabled: loading snapshot and skipping journal replay (bench-only mode)");
-            return Ok(manifest);
-        }
+        let manifest_path = FsPath::new(Self::MANIFEST_FILE);
+        let mut manifest = if fs.exists(&snap_path).unwrap_or(false) {
+            Self::load_json_manifest_file(fs, &snap_path, "manifest snapshot")?
+        } else if fs.exists(&manifest_path).unwrap_or(false) {
+            Self::load_json_manifest_file(fs, &manifest_path, "manifest file")?
+        } else {
+            tracing::debug!(
+                current_manifest = ?manifest_path,
+                "manifest file not found, using default"
+            );
+            Manifest::default()
+        };
 
         let journal_path = FsPath::new("manifest.journal");
         if !fs.exists(&journal_path).unwrap_or(false) {
@@ -157,7 +131,7 @@ impl ManifestPersistence {
         Ok(manifest)
     }
 
-    /// Save manifest to disk in YAML format
+    /// Save manifest to disk in JSON format
     ///
     /// # Arguments
     /// * `db_path` - Path to the database directory
@@ -171,12 +145,12 @@ impl ManifestPersistence {
     ) -> Result<(), String> {
         use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
 
-        // Serialize to YAML
-        let yaml = serde_yaml::to_string(manifest)
-            .map_err(|e| format!("failed to serialize manifest to YAML: {}", e))?;
+        // Serialize to pretty JSON for machine parsing with human-debuggability.
+        let json = serde_json::to_vec_pretty(manifest)
+            .map_err(|e| format!("failed to serialize manifest to JSON: {}", e))?;
 
         // Write temp manifest file
-        let temp_path = FsPath::new("manifest.yaml.tmp");
+        let temp_path = FsPath::new(Self::MANIFEST_FILE_TEMP);
         let mut f = fs
             .open(
                 &temp_path,
@@ -188,11 +162,15 @@ impl ManifestPersistence {
                 },
             )
             .map_err(|e| format!("failed to open temp manifest file: {:?}", e))?;
-        f.write_at(0, bytes::Bytes::from(yaml.clone()))
+        f.write_at(0, bytes::Bytes::from(json.clone()))
             .map_err(|e| format!("failed to write temp manifest: {:?}", e))?;
         f.sync(Durability::Durable)
             .map_err(|e| format!("failed to sync temp manifest: {:?}", e))?;
 
+        fail::fail_point!(
+            "midge::manifest::inject_no_space_on_checkpoint_save",
+            |_| Err("failpoint: no space while saving manifest checkpoint".to_string())
+        );
         fail::fail_point!("midge::manifest::after_temp_sync_before_rename");
 
         // Atomic rename
@@ -201,7 +179,7 @@ impl ManifestPersistence {
 
         tracing::debug!(
             path = ?Self::MANIFEST_FILE,
-            size_bytes = yaml.len(),
+            size_bytes = json.len(),
             "manifest persisted successfully"
         );
 
@@ -209,7 +187,7 @@ impl ManifestPersistence {
     }
 
     /// Save a full manifest snapshot and truncate journal (atomic as possible).
-    /// Writes to `manifest.snapshot.tmp` then renames into `manifest.snapshot`.
+    /// Writes to `manifest.snapshot.json.tmp` then renames into `manifest.snapshot.json`.
     pub fn save_snapshot_and_truncate_journal_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
@@ -217,10 +195,10 @@ impl ManifestPersistence {
         use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
 
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
-        let temp = FsPath::new("manifest.snapshot.tmp");
+        let temp = FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP);
 
-        let yaml = serde_yaml::to_string(manifest)
-            .map_err(|e| format!("failed to serialize manifest to YAML: {}", e))?;
+        let json = serde_json::to_vec_pretty(manifest)
+            .map_err(|e| format!("failed to serialize manifest to JSON: {}", e))?;
 
         // Write temp snapshot
         let mut f = fs
@@ -234,7 +212,7 @@ impl ManifestPersistence {
                 },
             )
             .map_err(|e| format!("failed to open temp snapshot: {:?}", e))?;
-        f.write_at(0, bytes::Bytes::from(yaml.clone()))
+        f.write_at(0, bytes::Bytes::from(json.clone()))
             .map_err(|e| format!("failed to write temp snapshot: {:?}", e))?;
         f.sync(Durability::Durable)
             .map_err(|e| format!("failed to sync temp snapshot: {:?}", e))?;
@@ -252,7 +230,7 @@ impl ManifestPersistence {
         Ok(())
     }
 
-    /// Save manifest to disk in YAML format (compat wrapper for tests and callers using Path)
+    /// Save manifest to disk in JSON format (compat wrapper for tests and callers using Path)
     pub fn save(db_path: &Path, manifest: &Manifest) -> Result<(), String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;
@@ -265,7 +243,7 @@ impl ManifestPersistence {
 
     /// Load manifest using a RealFs (compat wrapper)
     pub fn load(db_path: &Path) -> Result<Manifest, String> {
-        Self::load_with_policy(db_path, crate::engine::RecoveryPolicy::Salvage)
+        Self::load_with_policy(db_path, crate::engine::RecoveryPolicy::Strict)
     }
 
     /// Load manifest using a RealFs with an explicit recovery policy.
@@ -297,7 +275,7 @@ impl ManifestPersistence {
         Self::save_snapshot_and_truncate_journal_with_fs(&fs, manifest)
     }
 
-    /// Delete manifest file from disk
+    /// Delete persisted manifest state from disk.
     ///
     /// # Arguments
     /// * `db_path` - Path to the database directory
@@ -308,22 +286,29 @@ impl ManifestPersistence {
         use crate::io::traits::FsPath;
 
         let manifest_path = FsPath::new(Self::MANIFEST_FILE);
+        let snapshot_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
+        let manifest_temp_path = FsPath::new(Self::MANIFEST_FILE_TEMP);
+        let snapshot_temp_path = FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP);
+        let journal_path = FsPath::new("manifest.journal");
+        Self::remove_file_if_exists(fs, &manifest_path)?;
+        Self::remove_file_if_exists(fs, &snapshot_path)?;
+        Self::remove_file_if_exists(fs, &manifest_temp_path)?;
+        Self::remove_file_if_exists(fs, &snapshot_temp_path)?;
+        Self::remove_file_if_exists(fs, &journal_path)?;
 
-        match fs.exists(&manifest_path) {
-            Ok(false) => return Ok(()),
-            Err(e) => return Err(format!("fs exists error: {:?}", e)),
-            Ok(true) => {}
-        }
-
-        fs.remove_file(&manifest_path)
-            .map_err(|e| format!("failed to delete manifest file: {:?}", e))?;
-
-        tracing::debug!(path = ?manifest_path, "manifest file deleted");
+        tracing::debug!(
+            manifest_path = ?manifest_path,
+            snapshot_path = ?snapshot_path,
+            manifest_temp_path = ?manifest_temp_path,
+            snapshot_temp_path = ?snapshot_temp_path,
+            journal_path = ?journal_path,
+            "manifest persistence state deleted"
+        );
 
         Ok(())
     }
 
-    /// Delete manifest file from disk
+    /// Delete persisted manifest state from disk.
     ///
     /// # Arguments
     /// * `db_path` - Path to the database directory
@@ -386,14 +371,38 @@ mod tests {
 
         // Act
         ManifestPersistence::save(&test_dir, &manifest).expect("save should succeed");
+        let manifest_path = ManifestPersistence::manifest_path(&test_dir);
         let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
 
         // Assert
+        assert!(
+            manifest_path.ends_with("manifest.json"),
+            "manifest should persist to manifest.json"
+        );
+        assert!(
+            manifest_path.exists(),
+            "manifest file should exist after save"
+        );
         assert_eq!(loaded.next_wal_seq, 42);
         assert_eq!(loaded.last_persisted_sequence, 100);
         assert_eq!(loaded.column_families.len(), 2);
         assert_eq!(loaded.column_families[0].name, "default");
         assert_eq!(loaded.column_families[1].name, "secondary");
+    }
+
+    #[test]
+    fn should_name_snapshot_file_with_json_extension() {
+        // Arrange
+        let test_dir = create_test_dir();
+
+        // Act
+        let snapshot_path = ManifestPersistence::manifest_snapshot_path(&test_dir);
+
+        // Assert
+        assert!(
+            snapshot_path.ends_with("manifest.snapshot.json"),
+            "snapshot should persist to manifest.snapshot.json"
+        );
     }
 
     #[test]
@@ -411,32 +420,165 @@ mod tests {
     }
 
     #[test]
-    fn should_support_bench_trust_snapshot_env_var() {
+    fn should_fail_default_load_when_manifest_journal_is_corrupt() {
         // Arrange
         let test_dir = create_test_dir();
-        let mut manifest = Manifest::default();
-        manifest.files.push(crate::metadata::FileMeta {
-            name: "only.sst".to_string(),
-            level: 0,
-            size_bytes: 10,
-            ..Default::default()
-        });
-        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &manifest)
-            .expect("save snapshot failed");
+        std::fs::write(
+            test_dir.join("manifest.journal"),
+            b"not-a-valid-manifest-journal",
+        )
+        .expect("write corrupt manifest journal");
 
-        // Act: enable trust snapshot via env var (simulating bench mode)
-        std::env::set_var("MIDGE_BENCH_TRUST_SNAPSHOT", "1");
+        // Act
+        let error =
+            ManifestPersistence::load(&test_dir).expect_err("default manifest load must be strict");
 
-        // Assert: load returns snapshot and does NOT panic when journal is missing
-        let loaded = ManifestPersistence::load(&test_dir)
-            .expect("load should succeed in trust snapshot mode");
-        assert!(loaded.files.iter().any(|f| f.name == "only.sst"));
-
-        // Cleanup env var
-        std::env::remove_var("MIDGE_BENCH_TRUST_SNAPSHOT");
+        // Assert
+        assert!(
+            error.contains("manifest journal"),
+            "expected strict manifest journal error, got: {error}"
+        );
     }
 
     #[test]
+    fn should_ignore_temp_manifest_files_when_loading_default_state() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let manifest = Manifest {
+            last_persisted_sequence: 99,
+            ..Default::default()
+        };
+        std::fs::write(
+            test_dir.join(ManifestPersistence::MANIFEST_FILE_TEMP),
+            serde_json::to_vec_pretty(&manifest).expect("serialize temp manifest"),
+        )
+        .expect("write temp manifest");
+        std::fs::write(
+            test_dir.join(ManifestPersistence::MANIFEST_SNAPSHOT_TEMP),
+            serde_json::to_vec_pretty(&manifest).expect("serialize temp snapshot"),
+        )
+        .expect("write temp snapshot");
+
+        // Act
+        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
+
+        // Assert
+        assert_eq!(
+            loaded.last_persisted_sequence, 0,
+            "temp manifest artifacts must not become authoritative on load"
+        );
+        assert!(
+            loaded.files.is_empty(),
+            "temp manifest artifacts must be ignored"
+        );
+    }
+
+    #[test]
+    fn should_prefer_snapshot_over_manifest_when_both_exist_and_differ() {
+        // Arrange
+        let test_dir = create_test_dir();
+
+        let mut manifest_only = Manifest::default();
+        manifest_only.files.push(crate::metadata::FileMeta {
+            name: "manifest-only.sst".to_string(),
+            level: 1,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        ManifestPersistence::save(&test_dir, &manifest_only).expect("save manifest");
+
+        let mut snapshot_only = Manifest::default();
+        snapshot_only.files.push(crate::metadata::FileMeta {
+            name: "snapshot-only.sst".to_string(),
+            level: 2,
+            size_bytes: 20,
+            ..Default::default()
+        });
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &snapshot_only)
+            .expect("save snapshot");
+
+        // Act
+        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
+
+        // Assert
+        assert!(
+            loaded
+                .files
+                .iter()
+                .any(|file| file.name == "snapshot-only.sst"),
+            "snapshot state should win when both manifest and snapshot exist"
+        );
+        assert!(
+            !loaded
+                .files
+                .iter()
+                .any(|file| file.name == "manifest-only.sst"),
+            "manifest.json should be ignored when a snapshot checkpoint exists"
+        );
+    }
+
+    #[test]
+    fn should_ignore_conflicting_manifest_file_when_replaying_journal_on_top_of_snapshot() {
+        // Arrange
+        let test_dir = create_test_dir();
+
+        let mut manifest_only = Manifest::default();
+        manifest_only.files.push(crate::metadata::FileMeta {
+            name: "manifest-only.sst".to_string(),
+            level: 1,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        ManifestPersistence::save(&test_dir, &manifest_only).expect("save manifest");
+
+        let mut snapshot_manifest = Manifest::default();
+        snapshot_manifest.files.push(crate::metadata::FileMeta {
+            name: "snapshot-base.sst".to_string(),
+            level: 0,
+            size_bytes: 30,
+            ..Default::default()
+        });
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &snapshot_manifest)
+            .expect("save snapshot");
+
+        crate::metadata::append_edit(
+            &test_dir,
+            &crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                name: "journal-added.sst".to_string(),
+                level: 3,
+                size_bytes: 40,
+                ..Default::default()
+            }),
+        )
+        .expect("append manifest edit");
+
+        // Act
+        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
+
+        // Assert
+        assert!(
+            loaded
+                .files
+                .iter()
+                .any(|file| file.name == "snapshot-base.sst"),
+            "snapshot base should be loaded before journal replay"
+        );
+        assert!(
+            loaded
+                .files
+                .iter()
+                .any(|file| file.name == "journal-added.sst"),
+            "journal edits should replay on top of the snapshot"
+        );
+        assert!(
+            !loaded
+                .files
+                .iter()
+                .any(|file| file.name == "manifest-only.sst"),
+            "conflicting manifest.json should not leak into recovery when snapshot exists"
+        );
+    }
+
     fn should_preserve_file_metadata_when_persisting() {
         // Arrange
         let test_dir = create_test_dir();
@@ -487,6 +629,147 @@ mod tests {
         assert!(
             !manifest_path.exists(),
             "manifest file should not exist after delete"
+        );
+    }
+
+    #[test]
+    fn should_clear_snapshot_backed_manifest_state_when_requested() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let mut manifest = Manifest::default();
+        manifest.files.push(crate::metadata::FileMeta {
+            name: "base.sst".to_string(),
+            level: 0,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &manifest)
+            .expect("save snapshot should succeed");
+        crate::metadata::append_edit(
+            &test_dir,
+            &crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                name: "journal-added.sst".to_string(),
+                level: 1,
+                size_bytes: 20,
+                ..Default::default()
+            }),
+        )
+        .expect("append manifest edit");
+
+        let snapshot_path = ManifestPersistence::manifest_snapshot_path(&test_dir);
+        let journal_path = test_dir.join("manifest.journal");
+        assert!(
+            snapshot_path.exists(),
+            "snapshot should exist before delete"
+        );
+        assert!(journal_path.exists(), "journal should exist before delete");
+
+        // Act
+        ManifestPersistence::delete(&test_dir).expect("delete should succeed");
+
+        // Assert
+        assert!(
+            !snapshot_path.exists(),
+            "snapshot should not exist after delete"
+        );
+        assert!(
+            !journal_path.exists(),
+            "journal should not exist after delete"
+        );
+    }
+
+    #[test]
+    fn should_clear_manifest_temp_files_when_requested() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let manifest = Manifest {
+            last_persisted_sequence: 17,
+            ..Default::default()
+        };
+        let manifest_temp_path = test_dir.join(ManifestPersistence::MANIFEST_FILE_TEMP);
+        let snapshot_temp_path = test_dir.join(ManifestPersistence::MANIFEST_SNAPSHOT_TEMP);
+        std::fs::write(
+            &manifest_temp_path,
+            serde_json::to_vec_pretty(&manifest).expect("serialize temp manifest"),
+        )
+        .expect("write temp manifest");
+        std::fs::write(
+            &snapshot_temp_path,
+            serde_json::to_vec_pretty(&manifest).expect("serialize temp snapshot"),
+        )
+        .expect("write temp snapshot");
+
+        // Act
+        ManifestPersistence::delete(&test_dir).expect("delete should succeed");
+
+        // Assert
+        assert!(
+            !manifest_temp_path.exists(),
+            "manifest temp file should not exist after delete"
+        );
+        assert!(
+            !snapshot_temp_path.exists(),
+            "snapshot temp file should not exist after delete"
+        );
+    }
+
+    #[test]
+    fn should_return_default_after_delete_clears_all_persisted_manifest_state() {
+        // Arrange
+        let test_dir = create_test_dir();
+
+        let mut manifest_only = Manifest::default();
+        manifest_only.files.push(crate::metadata::FileMeta {
+            name: "manifest-only.sst".to_string(),
+            level: 1,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        ManifestPersistence::save(&test_dir, &manifest_only).expect("save manifest");
+
+        let mut snapshot_manifest = Manifest::default();
+        snapshot_manifest.files.push(crate::metadata::FileMeta {
+            name: "snapshot-base.sst".to_string(),
+            level: 0,
+            size_bytes: 30,
+            ..Default::default()
+        });
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &snapshot_manifest)
+            .expect("save snapshot");
+
+        crate::metadata::append_edit(
+            &test_dir,
+            &crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                name: "journal-added.sst".to_string(),
+                level: 3,
+                size_bytes: 40,
+                ..Default::default()
+            }),
+        )
+        .expect("append manifest edit");
+        std::fs::write(
+            test_dir.join(ManifestPersistence::MANIFEST_FILE_TEMP),
+            serde_json::to_vec_pretty(&manifest_only).expect("serialize temp manifest"),
+        )
+        .expect("write temp manifest");
+        std::fs::write(
+            test_dir.join(ManifestPersistence::MANIFEST_SNAPSHOT_TEMP),
+            serde_json::to_vec_pretty(&snapshot_manifest).expect("serialize temp snapshot"),
+        )
+        .expect("write temp snapshot");
+
+        // Act
+        ManifestPersistence::delete(&test_dir).expect("delete persisted manifest state");
+        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
+
+        // Assert
+        assert!(
+            loaded.files.is_empty(),
+            "load after delete should not recover manifest files from snapshot or journal"
+        );
+        assert_eq!(
+            loaded.last_persisted_sequence, 0,
+            "load after delete should reset to default manifest state"
         );
     }
 

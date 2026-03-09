@@ -17,9 +17,9 @@ pub fn ensure_or_create_format_marker(db_path: &Path) -> MidgeResult<u32> {
         return validate_format_marker(db_path);
     }
 
-    if has_legacy_persisted_state(db_path)? {
+    if has_persisted_state_without_format_marker(db_path)? {
         return Err(MidgeError::CompatibilityError(format!(
-            "database at '{}' contains persisted state but no {} marker; older on-disk formats are unsupported and must be rebuilt or re-imported",
+            "database at '{}' contains persisted state but no {} marker; on-disk state without an explicit format marker is unsupported and must be rebuilt or re-imported",
             db_path.display(),
             FORMAT_FILE
         )));
@@ -76,8 +76,11 @@ pub fn validate_format_marker(db_path: &Path) -> MidgeResult<u32> {
     Ok(version)
 }
 
-fn has_legacy_persisted_state(db_path: &Path) -> MidgeResult<bool> {
-    const ROOT_STATE_FILES: [&str; 4] = [
+fn has_persisted_state_without_format_marker(db_path: &Path) -> MidgeResult<bool> {
+    const ROOT_STATE_FILES: [&str; 7] = [
+        "manifest.json",
+        "manifest.snapshot.json",
+        "intent_log.json",
         "manifest.yaml",
         "manifest.snapshot",
         "manifest.journal",
@@ -137,6 +140,36 @@ mod tests {
     }
 
     #[test]
+    fn should_fail_given_current_manifest_without_format_marker() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp_dir.path().join("manifest.json"), "{}\n")
+            .expect("write manifest without marker");
+
+        // Act
+        let error =
+            ensure_or_create_format_marker(temp_dir.path()).expect_err("missing format marker");
+
+        // Assert
+        assert!(matches!(error, MidgeError::CompatibilityError(_)));
+    }
+
+    #[test]
+    fn should_fail_given_current_intent_log_without_format_marker() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp_dir.path().join("intent_log.json"), "[]\n")
+            .expect("write intent log without marker");
+
+        // Act
+        let error =
+            ensure_or_create_format_marker(temp_dir.path()).expect_err("missing format marker");
+
+        // Assert
+        assert!(matches!(error, MidgeError::CompatibilityError(_)));
+    }
+
+    #[test]
     fn should_fail_given_unknown_format_version() {
         // Arrange
         let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -148,6 +181,23 @@ mod tests {
 
         // Act
         let error = validate_format_marker(temp_dir.path()).expect_err("unknown version");
+
+        // Assert
+        assert!(matches!(error, MidgeError::CompatibilityError(_)));
+    }
+
+    #[test]
+    fn should_fail_given_previous_format_version() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            format_marker_path(temp_dir.path()),
+            format!("{}{}\n", FORMAT_PREFIX, CURRENT_FORMAT_VERSION - 1),
+        )
+        .expect("write previous format marker");
+
+        // Act
+        let error = validate_format_marker(temp_dir.path()).expect_err("previous version");
 
         // Assert
         assert!(matches!(error, MidgeError::CompatibilityError(_)));

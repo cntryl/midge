@@ -43,6 +43,12 @@ where
         state.pending.push(waiter);
     }
 
+    /// Join an already-sealed key directly.
+    pub fn join_for_key(&self, key: K, waiter: W) {
+        let mut state = self.state.lock();
+        state.inflight.entry(key).or_default().push(waiter);
+    }
+
     /// Seal the current key and begin a new one.
     ///
     /// Returns the sealed key + number of waiters moved to inflight, if any.
