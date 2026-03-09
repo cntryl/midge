@@ -245,7 +245,7 @@ fn should_restore_local_sst_cache_from_authoritative_cloud_object() {
         Some(Bytes::from_static(b"sst-restore-value"))
     );
     assert!(
-        list_files_with_extension(&db_path.join("sst"), "sst").len() >= 1,
+        !list_files_with_extension(&db_path.join("sst"), "sst").is_empty(),
         "reopen should restore local SST cache from the authoritative cloud object"
     );
 }

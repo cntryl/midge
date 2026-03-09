@@ -249,6 +249,8 @@ pub use read_amp_metrics::ReadAmpMetrics;
 
 pub use traits::{SstFactory, SstReader, SstStateReader};
 
+type MemtableEntryWithMeta = (Vec<u8>, Option<Vec<u8>>, u64, Option<u64>, u8);
+
 /// Key-value pair
 #[derive(Clone, Debug)]
 pub struct KvPair {
@@ -303,10 +305,7 @@ impl SkipListMemtable {
     ///
     /// Returns every version in sorted key order and newest-first sequence
     /// order per key so flush/compaction paths can preserve metadata exactly.
-    pub fn iter_all_with_meta(
-        &self,
-        _max_seq: u64,
-    ) -> Vec<(Vec<u8>, Option<Vec<u8>>, u64, Option<u64>, u8)> {
+    pub fn iter_all_with_meta(&self, _max_seq: u64) -> Vec<MemtableEntryWithMeta> {
         self.skiplist
             .drain_with_meta_with_exp()
             .into_iter()

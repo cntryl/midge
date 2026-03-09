@@ -4,9 +4,9 @@
 
 # Midge
 
-The only embedded Rust database that runs the same code against local disk, S3, Azure Blob, and GCS — no server, no surprises.
+Midge is an experimental embedded Rust LSM engine for engineers who want to evaluate explicit durability and recovery behavior without standing up a separate database.
 
-Built for Rust services and edge daemons that need reliable embedded storage without the ops burden of a separate database.
+It is not production-ready. The current goal is narrower: make the crate understandable and failure-tested enough that experienced engineers are willing to try it in controlled environments.
 
 ## Quick start
 
@@ -21,42 +21,41 @@ use cntryl_midge::prelude::*;
 let engine = Engine::open(OpenOptions::local("./db").build())?;
 let cf = engine.create_column_family("cf1")?;
 
-// Write
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 tx.put(b"hello".to_vec(), b"world".to_vec(), None)?;
 engine.commit(tx, WriteOptions::sync())?;
 
-// Read
 let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-let value = tx.get(b"hello")?; // Option<Bytes>
+let value = tx.get(b"hello")?;
 ```
 
-That's it. Everything — local disk, cloud storage, column families — follows the same pattern.
+## What Midge Is Good For
 
-## Is Midge a good fit?
+- evaluating an embedded Rust store with explicit write durability choices
+- local-disk and cloud-backed experiments that use the same API
+- systems work where restart behavior and crash boundaries matter
 
-**Good fit if you're building:**
+## What Midge Is Not Claiming Yet
 
-- A Rust service or daemon that needs embedded storage without running a separate database
-- An app that runs locally in dev and in the cloud in production, with no storage code changes
-- Something where you need to _know_ exactly when data is durable
+- production readiness
+- stable long-term API guarantees
+- a polished operational story for broad deployment
 
-**Probably not the right fit if:**
+## Why Evaluate It
 
-- You need multi-process access to the same store
-- You're not writing in Rust (no stable non-Rust client yet)
+- explicit `sync()`, `buffered()`, `best_effort()`, and cloud durability semantics
+- deterministic recovery-oriented tests for WAL, flush, and compaction paths
+- readable storage engine internals with verification APIs and recovery metrics
 
-## Why Midge?
+## What To Read Before Trying Midge
 
-**It stores data wherever you need it.** Local disk for development, S3 or Azure Blob in production — same API, same code, swap the open options. Most embedded databases are stuck on the local filesystem.
+- [Storage invariants](docs/development/storage-invariants.md)
+- [Storage architecture overview](docs/development/architecture.md)
+- [Durability guarantees](docs/user-guides/durability.md)
+- [Recovery process](docs/development/recovery-internals.md)
+- [Testing and trust matrix](docs/development/testing.md)
 
-**Transactions are explicit and obvious.** Every read and every write happens inside a transaction you own. No hidden flushes, no background writer surprises, no wondering when your data lands. You call `commit`, it commits.
-
-**Durability is your choice.** Use `WriteOptions::sync()` when you need a guarantee. Use `WriteOptions::buffered()` when you want higher throughput with weaker crash guarantees. The control is explicit and the behavior is documented.
-
-**It's predictable.** Deterministic behavior under production load with explicit durability control. Throughput up to 160 MB/s on local disk, 46 MB/s on cloud storage.
-
-**It's designed to be trustworthy.** 1,500+ tests including deterministic crash recovery scenarios and enforced test structure validation. CI runs the full test suite on every commit across Linux, macOS, and Windows. Midge is still pre-1.0, so minor releases may change APIs or operational guidance before 1.0. See the stability policy for the current compatibility contract.
+Those documents define what `commit()` means, how restart recovery works, and which tests back the guarantees.
 
 ## Common operations
 
@@ -72,7 +71,7 @@ engine.commit(tx, WriteOptions::sync())?;
 
 ```rust
 let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-let value = tx.get(b"key")?; // Option<Bytes>
+let value = tx.get(b"key")?;
 ```
 
 **Delete**
@@ -101,7 +100,7 @@ while let Some((k, v)) = iter.next() {
 }
 ```
 
-**Recovery metrics**
+## Recovery metrics
 
 ```rust
 let recovery = engine.get_recovery_metrics()?;
@@ -111,30 +110,22 @@ println!("Intent replay runs: {}", recovery.intent_log_replay_runs);
 println!("Intent entries replayed: {}", recovery.intent_log_entries_replayed);
 ```
 
-Use these counters to confirm startup recovery behavior after crashes or unclean shutdowns.
+Use these counters to confirm the startup path that recovery actually executed.
 
 ## Documentation
 
-**[Full Documentation Hub →](docs/)**
+- [Full documentation hub](docs/)
+- [Quick start](docs/user-guides/quick-start.md)
+- [API guide](docs/user-guides/api-guide.md)
+- [Stability policy](docs/development/stability-policy.md)
+- [Testing](docs/development/testing.md)
 
-### Getting Started
+## Current Position
 
-- **[Quick Start](docs/user-guides/quick-start.md)** — 5-minute hello-world example
-- **[Overview](docs/user-guides/overview.md)** — What is Midge, when to use it
-- **[API Guide](docs/user-guides/api-guide.md)** — Complete API reference
-- **[FAQ](docs/user-guides/faq.md)** — Common questions and answers
+The intended status for Midge right now is:
 
-### Operations
+> Experimental but safe enough for serious engineers to try.
 
-- **[Performance Tuning](docs/operations/performance-tuning.md)** — Optimize for your workload
-- **[Cloud Setup](docs/operations/cloud-setup.md)** — Deploy to S3, Azure, GCS
-- **[Durability](docs/user-guides/durability.md)** — Crash recovery and guarantees
+Not:
 
-### Contributing
-
-- **[Contributing Guide](CONTRIBUTING.md)** — How to contribute
-- **[Stability Policy](docs/development/stability-policy.md)** — Pre-1.0 compatibility and upgrade expectations
-- **[The Big Idea](docs/development/the-big-idea.md)** — Design philosophy
-- **[Architecture](docs/development/architecture.md)** — Technical internals
-- **[Testing](docs/development/testing.md)** — Test conventions
-- **[Benchmarks](docs/development/benchmarks.md)** — Performance benchmarking
+> Production ready.

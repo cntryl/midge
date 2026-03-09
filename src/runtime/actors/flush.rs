@@ -61,6 +61,9 @@ impl FlushActor {
         cf_id: crate::engine::ColumnFamilyId,
         sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<FlushOutput> {
+        // Invariant: a flush may create output files early, but those files are
+        // not authoritative until manifest publication completes. Any error
+        // before publication must leave WAL-backed state recoverable.
         // In memory mode, flushes are no-ops (everything stays in memory)
         if self.memory_mode {
             return Ok(FlushOutput {
@@ -84,8 +87,8 @@ impl FlushActor {
                         t.metrics().record_write_stall_cloud();
                     }
                     tracing::warn!(cf_id = cf_id, "Flush blocked: waiting for cloud upload");
-                    return Err(MidgeError::Internal(
-                        "Flush blocked: waiting for cloud upload".to_string(),
+                    return Err(MidgeError::WriteStall(
+                        "flush blocked until cloud upload frees durable capacity".to_string(),
                     ));
                 }
                 crate::storage::hybrid::actor::ReservationResult::WaitForCompaction => {
@@ -93,8 +96,8 @@ impl FlushActor {
                         t.metrics().record_write_stall_compaction();
                     }
                     tracing::warn!(cf_id = cf_id, "Flush blocked: waiting for compaction");
-                    return Err(MidgeError::Internal(
-                        "Flush blocked: waiting for compaction".to_string(),
+                    return Err(MidgeError::WriteStall(
+                        "flush blocked until compaction frees durable capacity".to_string(),
                     ));
                 }
                 crate::storage::hybrid::actor::ReservationResult::RejectNoSpace => {
@@ -226,6 +229,9 @@ impl FlushActor {
         cf_id: crate::engine::ColumnFamilyId,
         sst_name: &str,
     ) -> MidgeResult<crate::runtime::FileMeta> {
+        // Invariant: this function may write a complete SST file, but it does
+        // not publish that file. Callers must treat the result as staged output
+        // until manifest state makes it authoritative.
         // Create SST writer (should not reach here in memory mode, but be defensive)
         let sst_factory = self.sst_factory.as_ref().ok_or_else(|| {
             MidgeError::Internal("SST factory not available in memory mode".to_string())

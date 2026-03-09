@@ -296,6 +296,9 @@ impl EventLoop {
         sequence: u64,
         file_meta: Option<crate::runtime::FileMeta>,
     ) -> crate::common::MidgeResult<()> {
+        // Invariant: this is the flush authority switch. Before this point the
+        // WAL-backed state remains authoritative; after successful manifest
+        // publication the new SST may replace that state on restart.
         let Some(file_meta) = file_meta else {
             return Ok(());
         };

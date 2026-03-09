@@ -595,48 +595,175 @@ fn should_handle_large_scan_given_many_keys_when_iterating() {
 }
 
 #[test]
-fn should_handle_large_streaming_scan_given_multiple_ssts_when_spanning() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
-        let engine = open_with_mode(opts, mode);
-        let cf = engine.create_column_family("test").expect("create cf");
+fn should_iterate_memtable_plus_multiple_ssts_given_flushed_batches_when_scanning() {
+    // Arrange
+    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let cf = engine.create_column_family("test").expect("create cf");
 
-        // Insert and flush multiple times to create SSTs
-        for batch in 0..5 {
-            for i in 0..20 {
-                let key = format!("k{:04}", batch * 20 + i);
-                let mut tx = engine
-                    .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-                    .unwrap();
-                tx.put(
-                    key.as_bytes().to_vec(),
-                    format!("v{:04}", batch * 20 + i).as_bytes().to_vec(),
-                    None,
-                )
+    for batch in 0..3 {
+        for i in 0..20 {
+            let key = format!("sst{:02}_k{:02}", batch, i);
+            let value = format!("sst{:02}_v{:02}", batch, i);
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
-                engine
-                    .commit(tx, cntryl_midge::WriteOptions::buffered())
-                    .unwrap();
-            }
-            // Note: In real implementation, would call flush() to trigger SST creation
-            // For now, just put all keys in memtable
+            tx.put(key.into_bytes(), value.into_bytes(), None).unwrap();
+            engine
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
+                .unwrap();
         }
+        engine.flush_cf(&cf).expect("flush batch into SST");
+    }
 
-        // Act
-        let query = cntryl_midge::Query::new();
-        let tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+    for i in 0..10 {
+        let key = format!("mem_k{:02}", i);
+        let value = format!("mem_v{:02}", i);
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
-        let results = collect_scan(&tx, query);
+        tx.put(key.into_bytes(), value.into_bytes(), None).unwrap();
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::buffered())
+            .unwrap();
+    }
 
-        // Assert: All 100 keys should be returned in order
-        assert_eq!(results.len(), 100);
+    // Act
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
+    let results = collect_scan(&tx, cntryl_midge::Query::new());
 
-        for (idx, (k, v)) in results.iter().enumerate() {
-            assert_eq!(k, format!("k{:04}", idx).as_bytes());
-            assert_eq!(v, format!("v{:04}", idx).as_bytes());
+    // Assert
+    assert_eq!(results.len(), 70);
+    assert!(results.iter().any(|(k, _)| k.as_slice() == b"sst00_k00"));
+    assert!(results.iter().any(|(k, _)| k.as_slice() == b"sst02_k19"));
+    assert!(results.iter().any(|(k, _)| k.as_slice() == b"mem_k00"));
+    assert!(results.iter().any(|(k, _)| k.as_slice() == b"mem_k09"));
+}
+
+#[test]
+fn should_return_latest_value_across_levels_given_overwrite_in_newer_sst_when_scanning() {
+    // Arrange
+    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let cf = engine.create_column_family("test").expect("create cf");
+
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx.put(b"shared".to_vec(), b"v1".to_vec(), None).unwrap();
+    tx.put(b"stable".to_vec(), b"keep".to_vec(), None).unwrap();
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
+        .unwrap();
+    engine.flush_cf(&cf).expect("flush initial sst");
+
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx.put(b"shared".to_vec(), b"v2".to_vec(), None).unwrap();
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
+        .unwrap();
+    engine.flush_cf(&cf).expect("flush overwrite sst");
+
+    // Act
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
+    let results = collect_scan(&tx, cntryl_midge::Query::new());
+
+    // Assert
+    assert_eq!(results.len(), 2);
+    assert!(results
+        .iter()
+        .any(|(k, v)| k.as_slice() == b"shared" && v.as_slice() == b"v2"));
+    assert!(results
+        .iter()
+        .any(|(k, v)| k.as_slice() == b"stable" && v.as_slice() == b"keep"));
+}
+
+#[test]
+fn should_hide_deleted_keys_across_compacted_ssts_when_scanning() {
+    // Arrange
+    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let cf = engine.create_column_family("test").expect("create cf");
+
+    for batch in 0..4 {
+        for i in 0..25 {
+            let key = format!("k{:03}", batch * 25 + i);
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            tx.put(key.into_bytes(), b"value".to_vec(), None).unwrap();
+            engine
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
+                .unwrap();
         }
-    });
+        engine.flush_cf(&cf).expect("flush seed batch");
+    }
+
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    for deleted in [b"k020", b"k021", b"k050", b"k079"] {
+        tx.delete(deleted.to_vec()).expect("delete compacted key");
+    }
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::buffered())
+        .unwrap();
+    engine.flush_cf(&cf).expect("flush delete tombstones");
+    engine.compact_all().expect("compact levels");
+
+    // Act
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
+    let results = collect_scan(&tx, cntryl_midge::Query::new());
+
+    // Assert
+    for deleted in [b"k020", b"k021", b"k050", b"k079"] {
+        assert!(
+            !results.iter().any(|(k, _)| k.as_slice() == deleted),
+            "deleted key {:?} should stay hidden after compaction",
+            String::from_utf8_lossy(deleted)
+        );
+    }
+    assert!(results.iter().any(|(k, _)| k.as_slice() == b"k000"));
+    assert!(results.iter().any(|(k, _)| k.as_slice() == b"k099"));
+}
+
+#[test]
+fn should_scan_compacted_ssts_given_new_iterator_after_compaction_when_levels_change() {
+    // Arrange
+    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let cf = engine.create_column_family("test").expect("create cf");
+
+    for batch in 0..5 {
+        for i in 0..20 {
+            let key = format!("k{:03}", batch * 20 + i);
+            let value = format!("v{:03}", batch * 20 + i);
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            tx.put(key.into_bytes(), value.into_bytes(), None).unwrap();
+            engine
+                .commit(tx, cntryl_midge::WriteOptions::buffered())
+                .unwrap();
+        }
+        engine.flush_cf(&cf).expect("flush batch");
+    }
+
+    // Act
+    engine.compact_all().expect("compact levels");
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
+    let results = collect_scan(&tx, cntryl_midge::Query::new());
+
+    // Assert
+    assert_eq!(results.len(), 100);
+    assert_eq!(results.first().expect("first result").0.as_slice(), b"k000");
+    assert_eq!(results.last().expect("last result").0.as_slice(), b"k099");
 }
 
 #[test]

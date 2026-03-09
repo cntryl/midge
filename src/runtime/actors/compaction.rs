@@ -93,10 +93,14 @@ impl CompactionActor {
         worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
     ) -> MidgeResult<Vec<String>> {
         if self.compaction_running {
-            return Err(crate::common::MidgeError::Internal(
-                "Compaction already in progress".to_string(),
+            return Err(crate::common::MidgeError::WriteStall(
+                "compaction already in progress".to_string(),
             ));
         }
+
+        // Invariant: input SSTs remain authoritative until runtime publishes a
+        // replacement manifest state. Worker output alone must never make reads
+        // switch to the new file set.
 
         self.compaction_running = true;
 
@@ -273,6 +277,9 @@ impl CompactionActor {
         input_ssts: Vec<String>,
         output_ssts: Vec<String>,
     ) {
+        // Invariant: completion only clears in-memory "running" state. The
+        // actual authority switch happens when manifest publication removes the
+        // old SSTs and adds the replacement set.
         // Remove input files from compacting set
         state
             .compaction

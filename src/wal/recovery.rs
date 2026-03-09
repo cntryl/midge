@@ -139,6 +139,8 @@ pub fn replay_wal_with_policy(
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
     replay_policy: ReplayPolicy,
 ) -> MidgeResult<RecoveryStats> {
+    // Invariant: recovery may keep only a verified prefix of the WAL, but it
+    // must never materialize a partial frame or reorder committed records.
     let mut stats = RecoveryStats::new();
     let replay_start = std::time::Instant::now();
 
@@ -431,6 +433,9 @@ fn apply_record(
     record: &WalRecord,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
 ) -> MidgeResult<()> {
+    // Invariant: memtable reconstruction must match the durable WAL prefix
+    // exactly. Expired or incomplete state may be dropped, but visible durable
+    // records must be applied in sequence order.
     let memtable = memtables
         .entry(record.cf_id)
         .or_insert_with(|| Arc::new(SkipListMemtable::new()));
