@@ -119,6 +119,9 @@ Use these counters to confirm the startup path that recovery actually executed.
 - [API guide](docs/user-guides/api-guide.md)
 - [Stability policy](docs/development/stability-policy.md)
 - [Testing](docs/development/testing.md)
+- [1.0 production contract](docs/development/one-dot-zero-contract.md)
+- [Support matrix](docs/development/support-matrix.md)
+- [Production runbook](docs/operations/production-runbook.md)
 
 ## Current Position
 

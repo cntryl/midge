@@ -2,19 +2,21 @@
 
 ## Current Status
 
-Midge is in the 0.1 release line. It is usable for evaluation and targeted deployments, but it is not yet making a blanket 1.0-style compatibility promise.
+Midge is in the 0.1 release line. It is usable for evaluation and targeted deployments, but it is not yet making a blanket 1.0-style production or compatibility promise.
 
 ## What Pre-1.0 Means
 
 - Minor version updates in the 0.x line may include API, operational, or on-disk compatibility changes.
 - Patch version updates are intended to be low risk, but the strongest compatibility contract will not exist until 1.0.
 - Public docs should describe guarantees only where there is matching implementation and test coverage.
+- The 1.0 production target is defined in [one-dot-zero-contract.md](one-dot-zero-contract.md), not yet claimed by this release line.
 
 ## What Is Expected To Stay Stable
 
 - The crate remains focused on single-process embedded storage.
 - Durability choices stay explicit through `WriteOptions`; callers must choose the policy they want.
 - Upgrade-impacting changes should be called out in the changelog and migration guide.
+- The supported/experimental production surface should be tracked in [support-matrix.md](support-matrix.md).
 
 ## What Is Not Frozen Yet
 
@@ -28,8 +30,24 @@ Before adopting a new version:
 
 1. Review [../operations/migration-guide.md](../operations/migration-guide.md).
 2. Review [../../CHANGELOG.md](../../CHANGELOG.md).
-3. Revalidate the durability and recovery behavior you depend on in your environment.
+3. Run `midge verify` and revalidate the durability and recovery behavior you depend on in your environment.
 
 ## Documentation Rule
 
 Midge docs should not claim production readiness, stability, or durability guarantees that exceed the current tested and documented implementation.
+
+## Path To 1.0
+
+The transition to production-stable `1.x` requires:
+
+- a frozen API and format contract
+- compatibility and rollback guidance
+- qualification gates in CI and release workflow
+- operator runbooks and support matrix documentation
+
+See:
+
+- [one-dot-zero-contract.md](one-dot-zero-contract.md)
+- [format-compatibility.md](format-compatibility.md)
+- [release-policy.md](release-policy.md)
+- [../operations/production-runbook.md](../operations/production-runbook.md)

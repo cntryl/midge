@@ -40,3 +40,12 @@ These five documents define what Midge claims, how it implements those claims, a
 - Production-ready: no
 
 See [development/stability-policy.md](development/stability-policy.md) for the pre-1.0 compatibility contract.
+
+## What To Read Before Calling It Production-Ready
+
+1. [development/one-dot-zero-contract.md](development/one-dot-zero-contract.md)
+2. [development/support-matrix.md](development/support-matrix.md)
+3. [development/format-compatibility.md](development/format-compatibility.md)
+4. [development/release-policy.md](development/release-policy.md)
+5. [operations/production-runbook.md](operations/production-runbook.md)
+6. [operations/release-checklist.md](operations/release-checklist.md)

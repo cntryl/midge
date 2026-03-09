@@ -40,6 +40,9 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 - Benchmarking guide
 - README example for recovery metrics usage
 - Recovery internals observability section for startup replay counters
+- 1.0 production contract draft
+- support matrix, format compatibility policy, and release policy docs
+- production runbook and release checklist
 
 ## [0.1.0] - TBD
 

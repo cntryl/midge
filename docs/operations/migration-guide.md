@@ -9,6 +9,7 @@
 Midge is in early development (0.1.x). APIs and data formats may change between minor versions until 1.0 release.
 
 See [../development/stability-policy.md](../development/stability-policy.md) for the current compatibility contract and what is intentionally not frozen yet.
+See [../development/format-compatibility.md](../development/format-compatibility.md) for the target on-disk compatibility policy on the road to 1.0.
 
 ### Compatibility Policy
 
@@ -21,6 +22,14 @@ See [../development/stability-policy.md](../development/stability-policy.md) for
 - Minor updates (1.0 → 1.1) maintain API compatibility
 - Major updates (1.x → 2.0) may include breaking changes
 - Data format stability within major version
+
+### Supported Upgrade Rule
+
+Each release must explicitly state:
+
+- whether upgrade is supported
+- whether rollback is supported
+- whether `midge verify` is required before or after rollout
 
 ## Upgrade Procedures
 
@@ -40,6 +49,10 @@ See [../development/stability-policy.md](../development/stability-policy.md) for
    ```
 
 3. No data migration needed (format compatible)
+4. Run verification:
+   ```bash
+   midge verify ./db
+   ```
 
 ### Between Minor Versions (0.1 → 0.2)
 
@@ -75,6 +88,10 @@ See [../development/stability-policy.md](../development/stability-policy.md) for
    ```
 
 5. **Deploy to production**
+6. **Run post-upgrade verification:**
+   ```bash
+   midge verify ./db
+   ```
 
 ### Data Format Migration
 
@@ -289,6 +306,8 @@ let opts = OpenOptions::cloud("./cache", "gcs-bucket", "db1/")
 ---
 
 ## Rollback Procedures
+
+Every release should include an explicit rollback statement. If rollback is unsupported for the relevant on-disk format step, restore from backup or use export/import only.
 
 ### Rollback Application Version
 
