@@ -111,7 +111,6 @@ fn should_preserve_range_tombstones_after_flushing_deleted_range() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
-    let cf_id = cf.id();
     for i in 100..900 {
         let key = format!("k{:04}", i);
         let mut tx = engine
@@ -125,14 +124,14 @@ fn should_preserve_range_tombstones_after_flushing_deleted_range() {
     }
     engine.flush_cf(&cf).expect("flush seed range");
 
-    let mut txn = engine
-        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-        .expect("begin delete range tx");
-    txn.delete_range(b"k300".to_vec(), b"k700".to_vec())
-        .expect("delete range");
     engine
-        .commit(txn, cntryl_midge::WriteOptions::buffered())
-        .expect("commit delete range");
+        .delete_range(
+            &cf,
+            b"k300".to_vec(),
+            b"k700".to_vec(),
+            cntryl_midge::WriteOptions::buffered(),
+        )
+        .expect("delete range");
 
     // Act
     engine.flush_cf(&cf).expect("flush tombstone");

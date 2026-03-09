@@ -11,7 +11,8 @@
 //! - Flush and compaction control
 //! - Metrics and observability
 //!
-//! Data operations (get, put, delete, scan) are methods on Transaction.
+//! Point operations (get, put, delete, scan) are methods on Transaction.
+//! Range tombstones are engine-level operations scoped to a column family.
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::{
@@ -816,6 +817,39 @@ impl Engine {
     // Range Operations
     // ========================================================================
 
+    /// Apply a range tombstone to a specific column family.
+    ///
+    /// The tombstone covers `[start_key, end_key)`.
+    /// Range deletes are intentionally not part of the transaction API.
+    pub fn delete_range(
+        &self,
+        cf: &ColumnFamilyHandle,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        opts: api::WriteOptions,
+    ) -> MidgeResult<()> {
+        let response = self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::WalAppendDeleteRange {
+                request_id: next_request_id()?,
+                cf_id: cf.id(),
+                start_key,
+                end_key,
+                durability_policy: Some(opts.to_wal_durability_policy()),
+            })?;
+
+        match response {
+            RuntimeResponse::WalAppended { sequence, .. } => {
+                self.sequence.store(sequence, Ordering::SeqCst);
+                Ok(())
+            }
+            RuntimeResponse::Error { error, .. } => Err(error),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to delete_range".to_string(),
+            )),
+        }
+    }
+
     /// Flush all pending writes to disk (used by tests)
     pub(crate) fn sync(&self) -> MidgeResult<()> {
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalSync {
@@ -936,17 +970,11 @@ impl Engine {
             .map(|intent| match intent {
                 api::WriteIntent::Put { cf_id, .. }
                 | api::WriteIntent::Insert { cf_id, .. }
-                | api::WriteIntent::Delete { cf_id, .. }
-                | api::WriteIntent::DeleteRange { cf_id, .. } => *cf_id,
+                | api::WriteIntent::Delete { cf_id, .. } => *cf_id,
             })
             .unwrap_or(0);
 
-        // PHASE 2.2: Route all writes through ingest batching
-        //
-        // All durability modes use ingest batching for throughput.
-        // Batching reduces event loop contention by grouping concurrent writes into transactions.
-
-        // Route through ingest coordinator for all modes
+        // Route point-only writes through ingest batching for throughput.
         let coordinator = self
             .ingest_coordinators
             .get(&cf_id_for_check)
@@ -957,9 +985,7 @@ impl Engine {
                 ))
             })?;
 
-        // Separate delete-range intents (rare, handled differently) from regular ops
         let mut batch_intents = Vec::with_capacity(write_intents.len());
-        let mut delete_range_sequence = 0u64;
 
         for intent in write_intents {
             match intent {
@@ -998,38 +1024,11 @@ impl Engine {
                         insert_only: false,
                     })
                 }
-                api::WriteIntent::DeleteRange {
-                    cf_id,
-                    start_key,
-                    end_key,
-                    ..
-                } => {
-                    // DeleteRange still goes directly to runtime (rare operation)
-                    let response =
-                        self.runtime_handle
-                            .send_and_wait(RuntimeMsg::WalAppendDeleteRange {
-                                request_id: next_request_id()?,
-                                cf_id,
-                                start_key,
-                                end_key,
-                            })?;
-                    match response {
-                        RuntimeResponse::WalAppended { sequence, .. } => {
-                            delete_range_sequence = delete_range_sequence.max(sequence);
-                        }
-                        RuntimeResponse::Error { error, .. } => return Err(error),
-                        _ => {
-                            return Err(MidgeError::Internal(
-                                "Unexpected response to transaction delete_range".to_string(),
-                            ))
-                        }
-                    }
-                }
             }
         }
 
         // Submit all regular ops as a single batch (one channel alloc, one wait)
-        let mut max_sequence = delete_range_sequence;
+        let mut max_sequence = 0u64;
         if !batch_intents.is_empty() {
             let durability_policy = Some(opts.to_wal_durability_policy());
             let sequence =

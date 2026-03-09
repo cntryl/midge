@@ -1404,23 +1404,27 @@ impl EventLoop {
                 if active == 0 {
                     let mut emergent_scheduled = false;
 
-                    // Also try to schedule emergent compactions for CompactAll
-                    while let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
-                        if self
-                            .compaction_actor
-                            .run_compaction(
-                                &mut self.state,
-                                plan,
-                                self.hybrid_storage.as_ref(),
-                                self.worker_msg_tx.clone(),
-                            )
-                            .is_ok()
-                        {
-                            emergent_scheduled = true;
-                            continue;
-                        }
+                    // Only chain more compactions after a successful completion.
+                    // If the just-finished compaction failed, the manifest is unchanged and
+                    // blindly rescheduling here can spin forever on the same failing plan.
+                    if succeeded {
+                        while let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
+                            if self
+                                .compaction_actor
+                                .run_compaction(
+                                    &mut self.state,
+                                    plan,
+                                    self.hybrid_storage.as_ref(),
+                                    self.worker_msg_tx.clone(),
+                                )
+                                .is_ok()
+                            {
+                                emergent_scheduled = true;
+                                continue;
+                            }
 
-                        break;
+                            break;
+                        }
                     }
 
                     // Send responses to pending requests only when no active compactions remain.
@@ -1547,6 +1551,7 @@ impl EventLoop {
                 cf_id,
                 start_key,
                 end_key,
+                durability_policy,
             } => {
                 // Fencing gate: reject writes if lease is lost
                 if let Err(e) = self.check_lease_health() {
@@ -1579,6 +1584,7 @@ impl EventLoop {
                     cf_id,
                     bytes::Bytes::from(start_key),
                     bytes::Bytes::from(end_key),
+                    durability_policy,
                 );
                 match result {
                     Ok((seq, deferred)) => {

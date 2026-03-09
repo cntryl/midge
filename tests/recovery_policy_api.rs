@@ -2,11 +2,17 @@ use cntryl_midge::{Engine, EngineHealth, MidgeError, OpenOptions, RecoveryPolicy
 use std::fs;
 use tempfile::TempDir;
 
+fn initialize_format_marker(db_path: &std::path::Path) {
+    let engine = Engine::open(OpenOptions::local(db_path).build()).expect("initialize engine");
+    drop(engine);
+}
+
 #[test]
 fn should_fail_strict_open_when_manifest_journal_is_corrupt() {
     // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
+    initialize_format_marker(db_path);
 
     fs::write(
         db_path.join("manifest.journal"),
@@ -39,6 +45,7 @@ fn should_open_in_salvage_mode_when_manifest_journal_is_corrupt() {
     // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
+    initialize_format_marker(db_path);
 
     fs::write(
         db_path.join("manifest.journal"),
@@ -65,6 +72,7 @@ fn should_fail_strict_open_when_intent_log_is_corrupt() {
     // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
+    initialize_format_marker(db_path);
 
     fs::write(db_path.join("intent_log.yaml"), ":\n- broken: [").expect("write corrupt intent log");
 

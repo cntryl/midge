@@ -28,14 +28,14 @@ fn should_delete_only_keys_within_requested_range_when_delete_range_commits() {
             .expect("commit seed transaction");
 
         // Act
-        let mut tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .expect("begin delete_range transaction");
-        tx.delete_range(b"key02".to_vec(), b"key08".to_vec())
-            .expect("delete range");
         engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .expect("commit delete_range transaction");
+            .delete_range(
+                &cf,
+                b"key02".to_vec(),
+                b"key08".to_vec(),
+                cntryl_midge::WriteOptions::buffered(),
+            )
+            .expect("delete range");
 
         // Assert
         let tx = engine

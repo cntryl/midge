@@ -129,12 +129,7 @@ pub fn replay_wal(
     wal_dir: &StoragePath,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
 ) -> MidgeResult<RecoveryStats> {
-    replay_wal_with_policy(
-        storage,
-        wal_dir,
-        memtables,
-        ReplayPolicy::SalvageValidPrefix,
-    )
+    replay_wal_with_policy(storage, wal_dir, memtables, ReplayPolicy::Strict)
 }
 
 #[instrument(level = "info", skip(storage, memtables), fields(wal_dir = ?wal_dir, replay_policy = ?replay_policy))]

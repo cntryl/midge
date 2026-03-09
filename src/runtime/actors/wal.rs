@@ -31,7 +31,6 @@ use super::cloud_write_queue::{
 use crate::common::MidgeError;
 use crate::common::MidgeResult;
 use crate::io::{Fs, FsPath, RealFs};
-use crate::runtime::IntentLogEntry;
 use crate::sst::Memtable;
 use crate::wal::policy::BatchConfig;
 use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalOpKind, WalRecord, WalWriter};
@@ -485,6 +484,7 @@ impl WalActor {
         cf_id: u32,
         start_key: Bytes,
         end_key: Bytes,
+        durability_policy: Option<DurabilityPolicy>,
     ) -> MidgeResult<(u64, bool)> {
         // Allocate sequence idempotently
         let (first_seq, _count) = state.allocate_sequences_idempotent(request_id, 1);
@@ -519,26 +519,38 @@ impl WalActor {
         };
 
         let record_size = record.estimated_size();
+        let effective_durability = durability_policy.unwrap_or(self.durability_policy);
+        let skip_wal = matches!(effective_durability, DurabilityPolicy::BestEffort);
 
-        // Append to local WAL
-        if let Some(writer) = &mut self.writer {
-            let a_start = Instant::now();
-            if let Err(error) = writer.append_record(&record) {
-                if matches!(error, MidgeError::NoSpace(_)) {
-                    Self::record_no_space_event();
+        // Append to local WAL unless the caller explicitly requested best effort.
+        if !skip_wal {
+            if let Some(writer) = &mut self.writer {
+                fail::fail_point!("midge::wal::inject_no_space_on_delete_range_append", |_| {
+                    Err(MidgeError::NoSpace(
+                        "failpoint: no space on delete_range append".to_string(),
+                    ))
+                });
+                let a_start = Instant::now();
+                if let Err(error) = writer.append_record(&record) {
+                    if matches!(error, MidgeError::NoSpace(_)) {
+                        Self::record_no_space_event();
+                    }
+                    return Err(error);
                 }
-                return Err(error);
+                self.finish_append_instrumentation(
+                    record.estimated_size() as u64,
+                    a_start.elapsed(),
+                );
             }
-            self.finish_append_instrumentation(record.estimated_size() as u64, a_start.elapsed());
+
+            // Update state tracking
+            state.wal.pending_writes += 1;
+            self.pending_sync_count += 1;
+            self.bytes_since_sync += record_size;
         }
 
-        // Update state tracking
-        state.wal.pending_writes += 1;
-        self.pending_sync_count += 1;
-        self.bytes_since_sync += record_size;
-
         // Apply durability policy
-        match self.durability_policy {
+        match effective_durability {
             DurabilityPolicy::Strict => {
                 self.sync_internal(state)?;
                 state.wal.local_durable_seq = sequence;
@@ -642,7 +654,7 @@ impl WalActor {
         tracing::trace!(cf_id = cf_id, sequence, policy = ?self.durability_policy, "WAL append_delete_range");
 
         let deferred = matches!(
-            self.durability_policy,
+            effective_durability,
             DurabilityPolicy::Batched | DurabilityPolicy::CloudAsync
         );
         Ok((sequence, deferred))
@@ -711,18 +723,6 @@ impl WalActor {
         // Advance global sequence to commit_seq
         state.sequence = commit_seq;
 
-        // Log seqno allocations for intent tracing (deferred - single persist at end)
-        // Begin seq (cf_id 0)
-        state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
-            seqno: begin_seq,
-            cf_id: 0,
-        });
-        // Commit seq
-        state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
-            seqno: commit_seq,
-            cf_id: 0,
-        });
-
         // Determine effective durability policy: use provided one, or fall back to actor's default
         let effective_durability = durability_policy.unwrap_or(self.durability_policy);
 
@@ -773,10 +773,15 @@ impl WalActor {
             }
         }
 
-        // Single batched WAL write — one writer lock acquisition, one buffer flush
-        // Skip entirely for BestEffort mode
+        // Write begin + op records first. The commit marker is appended separately so we
+        // can inject crash/failure points around the exact transaction publication seam.
         if !skip_wal {
             if let Some(writer) = &mut self.writer {
+                fail::fail_point!("midge::wal::inject_no_space_on_txn_append_batch", |_| Err(
+                    MidgeError::NoSpace(
+                        "failpoint: no space on transaction batch append".to_string()
+                    )
+                ));
                 let a_start = Instant::now();
                 if let Err(error) = writer.append_batch(&wal_records) {
                     if matches!(error, MidgeError::NoSpace(_)) {
@@ -797,12 +802,42 @@ impl WalActor {
 
         let last_sequence = commit_seq;
 
+        if let Some(commit_record) = commit_record {
+            fail::fail_point!("midge::wal::txn_after_ops_append_before_commit");
+
+            if let Some(writer) = &mut self.writer {
+                fail::fail_point!("midge::wal::inject_no_space_on_txn_commit_append", |_| Err(
+                    MidgeError::NoSpace(
+                        "failpoint: no space on transaction commit append".to_string()
+                    )
+                ));
+                let a_start = Instant::now();
+                if let Err(error) = writer.append_record(&commit_record) {
+                    if matches!(error, MidgeError::NoSpace(_)) {
+                        Self::record_no_space_event();
+                    }
+                    return Err(error);
+                }
+                self.finish_append_instrumentation(
+                    commit_record.estimated_size() as u64,
+                    a_start.elapsed(),
+                );
+            }
+
+            state.wal.pending_writes += 1;
+            self.pending_sync_count += 1;
+            self.bytes_since_sync += commit_record.estimated_size();
+        }
+
         // Apply durability policy (single sync for the whole batch, where relevant).
-        // Use effective_durability which may be per-request BestEffort
+        // Use effective_durability which may be per-request BestEffort.
+        // For strict durability, the sync happens only after the commit marker is appended.
         match effective_durability {
             DurabilityPolicy::Strict | DurabilityPolicy::CloudMirrored => {
+                fail::fail_point!("midge::wal::txn_after_commit_append_before_sync");
                 self.sync_internal(state)?;
                 state.wal.local_durable_seq = last_sequence;
+                fail::fail_point!("midge::wal::txn_after_sync_before_ack");
             }
             DurabilityPolicy::Batched => {
                 // no-op; background/timer can sync later
@@ -906,26 +941,6 @@ impl WalActor {
             self.apply_ops_to_memtables(state, apply_ops)?;
         }
 
-        if let Some(commit_record) = commit_record {
-            if let Some(writer) = &mut self.writer {
-                let a_start = Instant::now();
-                if let Err(error) = writer.append_record(&commit_record) {
-                    if matches!(error, MidgeError::NoSpace(_)) {
-                        Self::record_no_space_event();
-                    }
-                    return Err(error);
-                }
-                self.finish_append_instrumentation(
-                    commit_record.estimated_size() as u64,
-                    a_start.elapsed(),
-                );
-            }
-
-            state.wal.pending_writes += 1;
-            self.pending_sync_count += 1;
-            self.bytes_since_sync += commit_record.estimated_size();
-        }
-
         tracing::trace!(txn_id, last_sequence, op_count, "WAL transaction apply");
 
         // Return deferred=true if using group commit (Batched or CloudAsync modes)
@@ -941,7 +956,7 @@ impl WalActor {
         ops: Vec<crate::runtime::TransactionOp>,
         first_op_seq: u64,
         txn_id: u64,
-        state: &mut RuntimeState,
+        _state: &mut RuntimeState,
         skip_wal: bool,
         wal_records: &mut Vec<WalRecord>,
     ) -> Vec<TransactionApplyOp> {
@@ -984,11 +999,6 @@ impl WalActor {
                     };
                     record.txn_id = Some(txn_id);
 
-                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
-                        seqno: seq,
-                        cf_id,
-                    });
-
                     apply_ops.push(TransactionApplyOp::Put {
                         cf_id,
                         key,
@@ -1011,11 +1021,6 @@ impl WalActor {
                         self.current_epoch,
                     );
                     record.txn_id = Some(txn_id);
-
-                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
-                        seqno: seq,
-                        cf_id,
-                    });
 
                     apply_ops.push(TransactionApplyOp::Delete {
                         cf_id,

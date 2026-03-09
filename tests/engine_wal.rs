@@ -177,12 +177,13 @@ fn should_recover_range_tombstones_from_wal() {
     }
 
     // Act: Apply range delete, then flush
-    let mut txn = engine
-        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-        .unwrap();
-    txn.delete_range(b"k020".to_vec(), b"k080".to_vec()).ok();
     engine
-        .commit(txn, cntryl_midge::WriteOptions::buffered())
+        .delete_range(
+            &cf,
+            b"k020".to_vec(),
+            b"k080".to_vec(),
+            cntryl_midge::WriteOptions::buffered(),
+        )
         .ok();
 
     eprintln!("Applied range delete [k020, k080)");
@@ -305,12 +306,13 @@ fn should_recover_mixed_operations_from_wal() {
         engine.commit(tx, WriteOptions::buffered()).ok();
     }
 
-    let mut txn2 = engine
-        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-        .unwrap();
-    txn2.delete_range(b"dr_05".to_vec(), b"dr_15".to_vec()).ok();
     engine
-        .commit(txn2, cntryl_midge::WriteOptions::buffered())
+        .delete_range(
+            &cf,
+            b"dr_05".to_vec(),
+            b"dr_15".to_vec(),
+            cntryl_midge::WriteOptions::buffered(),
+        )
         .ok();
 
     eprintln!("Applied: put, delete, put, delete_range");

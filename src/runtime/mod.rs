@@ -245,6 +245,7 @@ pub enum RuntimeMsg {
         cf_id: crate::engine::ColumnFamilyId,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
+        durability_policy: Option<DurabilityPolicy>,
     },
 
     /// Apply a transaction as a single atomic unit.

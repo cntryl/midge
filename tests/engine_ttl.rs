@@ -335,11 +335,14 @@ fn should_expire_keys_covered_by_range_tombstone_during_compaction() {
         engine.flush_cf(&cf).expect("flush");
 
         // Write range tombstone [k3, k8) - covers k3-k7
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        engine
+            .delete_range(
+                &cf,
+                b"k3".to_vec(),
+                b"k8".to_vec(),
+                WriteOptions::buffered(),
+            )
             .unwrap();
-        tx.delete_range(b"k3".to_vec(), b"k8".to_vec()).unwrap();
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
         engine.flush_cf(&cf).expect("flush");
 
         // Wait for TTL expiry
@@ -456,11 +459,14 @@ fn should_not_expose_ttl_expired_key_covered_by_range_tombstone() {
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Immediately write range tombstone [k1, k10)
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        engine
+            .delete_range(
+                &cf,
+                b"k1".to_vec(),
+                b"k10".to_vec(),
+                WriteOptions::buffered(),
+            )
             .unwrap();
-        tx.delete_range(b"k1".to_vec(), b"k10".to_vec()).unwrap();
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act: Read k5 after TTL expiry
         thread::sleep(Duration::from_millis(1100));

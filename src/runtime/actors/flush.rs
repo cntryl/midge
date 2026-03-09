@@ -235,7 +235,7 @@ impl FlushActor {
         let mut writer = sst_factory.create()?;
 
         // Get all entries from memtable and write to SST
-        let entries = memtable.iter_all(u64::MAX);
+        let entries = memtable.iter_all_with_meta(u64::MAX);
         if entries.is_empty() {
             return Err(MidgeError::Corruption(
                 "attempted to flush an empty memtable".to_string(),
@@ -244,25 +244,22 @@ impl FlushActor {
 
         let smallest_key = entries
             .first()
-            .map(|(key, _, _)| key.clone())
+            .map(|(key, _, _, _, _)| key.clone())
             .ok_or_else(|| MidgeError::Corruption("memtable flush missing smallest key".into()))?;
         let largest_key = entries
             .last()
-            .map(|(key, _, _)| key.clone())
+            .map(|(key, _, _, _, _)| key.clone())
             .ok_or_else(|| MidgeError::Corruption("memtable flush missing largest key".into()))?;
         let mut smallest_seq = u64::MAX;
         let mut largest_seq = 0_u64;
 
         let add_start = std::time::Instant::now();
         let mut added_count: usize = 0;
-        for (key, value, seq) in entries {
+        for (key, value, seq, expiration, op_type) in entries {
             smallest_seq = smallest_seq.min(seq);
             largest_seq = largest_seq.max(seq);
 
-            // Determine op_type: 0=Put, 2=Delete
-            let op_type = if value.is_some() { 0 } else { 2 };
-
-            writer.add_with_meta(&key, value.as_deref(), seq, op_type, None)?;
+            writer.add_with_meta(&key, value.as_deref(), seq, op_type, expiration)?;
             added_count += 1;
         }
         let add_ns = add_start.elapsed().as_nanos();

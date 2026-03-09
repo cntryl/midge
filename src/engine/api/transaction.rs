@@ -18,7 +18,7 @@ use std::sync::Arc;
 pub enum TransactionMode {
     /// Read-only transaction; writes forbidden
     ReadOnly,
-    /// Read-write transaction; all operations allowed
+    /// Read-write transaction; point writes are allowed
     ReadWrite,
 }
 
@@ -41,12 +41,6 @@ pub enum WriteIntent {
     },
     /// Delete operation
     Delete { cf_id: ColumnFamilyId, key: Vec<u8> },
-    /// Delete range operation
-    DeleteRange {
-        cf_id: ColumnFamilyId,
-        start_key: Vec<u8>,
-        end_key: Vec<u8>,
-    },
 }
 
 impl WriteIntent {
@@ -78,15 +72,6 @@ impl WriteIntent {
     /// Create a delete intent
     fn delete(cf_id: ColumnFamilyId, key: Vec<u8>) -> Self {
         Self::Delete { cf_id, key }
-    }
-
-    /// Create a delete range intent
-    fn delete_range(cf_id: ColumnFamilyId, start_key: Vec<u8>, end_key: Vec<u8>) -> Self {
-        Self::DeleteRange {
-            cf_id,
-            start_key,
-            end_key,
-        }
     }
 }
 
@@ -176,21 +161,6 @@ impl Transaction {
         Ok(())
     }
 
-    /// Add a delete_range to the transaction's write set
-    pub fn delete_range(&mut self, start_key: Vec<u8>, end_key: Vec<u8>) -> MidgeResult<()> {
-        if self.is_read_only() {
-            return Err(MidgeError::InvalidArgument(
-                "Cannot write in ReadOnly transaction".to_string(),
-            ));
-        }
-
-        // Add single delete_range intent - commit will handle it efficiently
-        self.write_set
-            .push(WriteIntent::delete_range(self.cf_id, start_key, end_key));
-
-        Ok(())
-    }
-
     // === Internal helpers for engine/mod.rs commit logic ===
 
     pub(crate) fn is_read_only(&self) -> bool {
@@ -273,19 +243,6 @@ impl Transaction {
                 WriteIntent::Delete { key, .. } => {
                     merged.insert(key.clone(), None);
                 }
-                WriteIntent::DeleteRange {
-                    start_key, end_key, ..
-                } => {
-                    // Apply delete-range tombstone: mark all keys within [start_key, end_key) as deleted
-                    // Collect keys to avoid mutating map while iterating
-                    let keys_to_tombstone: Vec<Vec<u8>> = merged
-                        .range(start_key.clone()..end_key.clone())
-                        .map(|(k, _)| k.clone())
-                        .collect();
-                    for k in keys_to_tombstone {
-                        merged.insert(k, None);
-                    }
-                }
             }
         }
 
@@ -363,11 +320,6 @@ impl Transaction {
                         cf_id: self.cf_id,
                         key: bytes::Bytes::from(key),
                     },
-                    WriteIntent::DeleteRange { .. } => {
-                        return Err(MidgeError::InvalidArgument(
-                            "DeleteRange not supported in ApplyTransaction".to_string(),
-                        ));
-                    }
                 })
             })
             .collect::<MidgeResult<Vec<_>>>()?;

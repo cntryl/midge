@@ -299,13 +299,35 @@ impl SkipListMemtable {
         exp_time <= now
     }
 
-    /// Iterate over all entries in the memtable
-    /// Returns (key, value, sequence) tuples in sorted order
-    pub fn iter_all(&self, _max_seq: u64) -> Vec<(Vec<u8>, Option<Vec<u8>>, u64)> {
+    /// Iterate over all entries in the memtable.
+    ///
+    /// Returns every version in sorted key order and newest-first sequence
+    /// order per key so flush/compaction paths can preserve metadata exactly.
+    pub fn iter_all_with_meta(
+        &self,
+        _max_seq: u64,
+    ) -> Vec<(Vec<u8>, Option<Vec<u8>>, u64, Option<u64>, u8)> {
         self.skiplist
             .drain_with_meta_with_exp()
             .into_iter()
-            .map(|(key, value, seq, _, _, _)| (key.to_vec(), value.map(|vb| vb.to_vec()), seq))
+            .map(|(key, value, seq, _, exp, op)| {
+                (
+                    key.to_vec(),
+                    value.map(|vb| vb.to_vec()),
+                    seq,
+                    exp,
+                    op.as_u8(),
+                )
+            })
+            .collect()
+    }
+
+    /// Iterate over all entries in the memtable.
+    /// Returns (key, value, sequence) tuples in sorted order.
+    pub fn iter_all(&self, max_seq: u64) -> Vec<(Vec<u8>, Option<Vec<u8>>, u64)> {
+        self.iter_all_with_meta(max_seq)
+            .into_iter()
+            .map(|(key, value, seq, _, _)| (key, value, seq))
             .collect()
     }
 

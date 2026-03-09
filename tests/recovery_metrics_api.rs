@@ -7,6 +7,11 @@ use serde::Serialize;
 use std::fs;
 use tempfile::TempDir;
 
+fn initialize_format_marker(db_path: &std::path::Path) {
+    let engine = Engine::open(OpenOptions::local(db_path).build()).expect("initialize engine");
+    drop(engine);
+}
+
 #[test]
 fn should_report_wal_recovery_metrics_after_reopen_when_wal_replay_occurs() {
     // Arrange
@@ -74,6 +79,7 @@ fn should_report_intent_log_replay_metrics_after_reopen_when_manifest_intents_pe
     // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
+    initialize_format_marker(db_path);
 
     #[derive(Serialize)]
     enum TestIntentLogEntry {

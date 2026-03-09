@@ -32,7 +32,7 @@ impl ManifestPersistence {
     pub fn load_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     ) -> Result<Manifest, String> {
-        Self::load_with_fs_and_policy(fs, crate::engine::RecoveryPolicy::Salvage)
+        Self::load_with_fs_and_policy(fs, crate::engine::RecoveryPolicy::Strict)
     }
 
     /// Load manifest using the requested recovery policy.

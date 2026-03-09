@@ -318,12 +318,13 @@ fn should_respect_range_tombstones_given_delete_range_when_scanning() {
         }
 
         // Delete range [k02, k07)
-        let mut tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        tx.delete_range(b"k02".to_vec(), b"k07".to_vec()).unwrap();
         engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
+            .delete_range(
+                &cf,
+                b"k02".to_vec(),
+                b"k07".to_vec(),
+                cntryl_midge::WriteOptions::buffered(),
+            )
             .unwrap();
 
         // Act

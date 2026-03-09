@@ -123,6 +123,7 @@ impl EventLoop {
                     cf_id,
                     start_key,
                     end_key,
+                    durability_policy,
                 }) => {
                     let result = self.wal_actor.append_delete_range(
                         &mut self.state,
@@ -130,6 +131,7 @@ impl EventLoop {
                         cf_id,
                         bytes::Bytes::from(start_key),
                         bytes::Bytes::from(end_key),
+                        durability_policy,
                     );
 
                     match result {

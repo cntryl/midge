@@ -109,6 +109,11 @@ pub trait DynSstWriter: Send {
 
         // Write to a temp file first
         let tmp = path.with_extension("tmp");
+        fail::fail_point!("midge::sst::inject_no_space_on_finish_to_path", |_| Err(
+            crate::common::MidgeError::NoSpace(
+                "failpoint: no space while finalizing SST".to_string()
+            )
+        ));
         let write_start = std::time::Instant::now();
         {
             let mut f = std::fs::OpenOptions::new()
