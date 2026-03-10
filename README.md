@@ -17,6 +17,7 @@ cntryl-midge = "0.1"
 
 ```rust
 use cntryl_midge::prelude::*;
+use cntryl_midge::Bytes;
 
 let engine = Engine::open(OpenOptions::local("./db").build())?;
 let cf = engine.create_column_family("cf1")?;
@@ -85,16 +86,15 @@ engine.commit(tx, WriteOptions::sync())?;
 **Delete range**
 
 ```rust
-let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-tx.delete_range(b"start".to_vec(), b"end".to_vec())?;
-engine.commit(tx, WriteOptions::sync())?;
+engine.delete_range(&cf, b"start", b"end", WriteOptions::sync())?;
 ```
 
 **Scan**
 
 ```rust
 let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-let mut iter = tx.scan(&Query::new())?;
+let query = Query::new().prefix(Bytes::from_static(b"user:"));
+let mut iter = tx.scan(&query)?;
 while let Some((k, v)) = iter.next() {
     println!("{:?} = {:?}", k, v);
 }

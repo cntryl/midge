@@ -16,7 +16,7 @@ cntryl-midge = "0.1"  # Check latest version
 Here's a complete example showing basic operations:
 
 ```rust
-use cntryl_midge::{MidgeEngine, OpenOptions, TransactionMode, WriteOptions};
+use cntryl_midge::{Bytes, MidgeEngine, OpenOptions, Query, TransactionMode, WriteOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Open an in-memory database (no persistence)
@@ -39,15 +39,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     // 5. Scan a range
-    let query = tx.scan()
-        .start(b"user:".to_vec())
-        .prefix(b"user:".to_vec())
-        .build()?;
-    
-    for entry in query {
-        let (key, value) = entry?;
-        println!("{} = {}", 
-            String::from_utf8_lossy(&key), 
+    let query = Query::new().prefix(Bytes::from_static(b"user:"));
+    let mut iter = tx.scan(&query)?;
+    while let Some((key, value)) = iter.next() {
+        println!(
+            "{} = {}",
+            String::from_utf8_lossy(&key),
             String::from_utf8_lossy(&value)
         );
     }
@@ -108,7 +105,7 @@ All commits require explicit `WriteOptions`:
 // Full durability (fsync to disk)
 engine.commit(tx, WriteOptions::sync())?;
 
-// Group commit batching (fast, <500ms loss window)
+// Group commit batching (visible after WAL append; local durability follows later fsync)
 engine.commit(tx, WriteOptions::buffered())?;
 
 // No durability until flush (bulk loads only)
@@ -157,13 +154,13 @@ engine.commit(tx, WriteOptions::buffered())?;
 ### Prefix Scan
 
 ```rust
-let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-let query = tx.scan()
-    .prefix(b"user:".to_vec())
-    .build()?;
+use cntryl_midge::{Bytes, Query};
 
-for entry in query {
-    let (key, value) = entry?;
+let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
+let query = Query::new().prefix(Bytes::from_static(b"user:"));
+let mut iter = tx.scan(&query)?;
+
+while let Some((key, value)) = iter.next() {
     // Process entries with "user:" prefix
 }
 ```
@@ -171,13 +168,14 @@ for entry in query {
 ### Bounded Range Scan
 
 ```rust
-let query = tx.scan()
-    .start(b"user:100".to_vec())
-    .end(b"user:200".to_vec())
-    .build()?;
+use cntryl_midge::{Bytes, Query};
 
-for entry in query {
-    let (key, value) = entry?;
+let query = Query::new()
+    .start_key(Bytes::from_static(b"user:100"))
+    .end_key(Bytes::from_static(b"user:200"));
+let mut iter = tx.scan(&query)?;
+
+while let Some((key, value)) = iter.next() {
     // Process entries between user:100 and user:200
 }
 ```
@@ -185,13 +183,14 @@ for entry in query {
 ### Reverse Scan
 
 ```rust
-let query = tx.scan()
-    .prefix(b"user:".to_vec())
-    .direction(Direction::Reverse)
-    .build()?;
+use cntryl_midge::{Bytes, Query};
 
-for entry in query {
-    let (key, value) = entry?;
+let query = Query::new()
+    .prefix(Bytes::from_static(b"user:"))
+    .reverse();
+let mut iter = tx.scan(&query)?;
+
+while let Some((key, value)) = iter.next() {
     // Process entries in reverse order
 }
 ```
@@ -199,13 +198,14 @@ for entry in query {
 ### Limited Scan
 
 ```rust
-let query = tx.scan()
-    .prefix(b"user:".to_vec())
-    .limit(10)
-    .build()?;
+use cntryl_midge::{Bytes, Query};
 
-for entry in query {
-    let (key, value) = entry?;
+let query = Query::new()
+    .prefix(Bytes::from_static(b"user:"))
+    .limit(10);
+let mut iter = tx.scan(&query)?;
+
+while let Some((key, value)) = iter.next() {
     // Process at most 10 entries
 }
 ```
@@ -345,10 +345,8 @@ engine.commit(tx, WriteOptions::buffered())?;
 
 ```rust
 // Flush all column families before shutdown
-for cf_name in engine.list_column_families() {
-    if let Some(cf) = engine.get_column_family(&cf_name) {
-        engine.flush_cf(&cf)?;
-    }
+for cf in engine.list_column_families()? {
+    engine.flush_cf(&cf)?;
 }
 
 // Drop engine (releases locks, closes files)

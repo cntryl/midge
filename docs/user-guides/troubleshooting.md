@@ -196,10 +196,8 @@ println!("Recovery took: {:?}", recovery_time);
 
 ```rust
 // Flush before clean shutdown
-for cf_name in engine.list_column_families() {
-    if let Some(cf) = engine.get_column_family(&cf_name) {
-        engine.flush_cf(&cf)?;
-    }
+for cf in engine.list_column_families()? {
+    engine.flush_cf(&cf)?;
 }
 drop(engine);
 

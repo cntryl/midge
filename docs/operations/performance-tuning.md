@@ -425,10 +425,12 @@ match engine.commit(tx, WriteOptions::buffered()) {
 
 2. **Use limits appropriately:**
    ```rust
-   let query = tx.scan()
-       .prefix(b"user:".to_vec())
-       .limit(100)  // Don't scan entire dataset
-       .build()?;
+   use cntryl_midge::{Bytes, Query};
+
+   let query = Query::new()
+       .prefix(Bytes::from_static(b"user:"))
+       .limit(100);  // Don't scan entire dataset
+   let mut iter = tx.scan(&query)?;
    ```
 
 3. **Consider data layout:**

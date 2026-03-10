@@ -268,10 +268,8 @@ println!("L0 overlap rate: {}", metrics.l0_overlap_rate);
 ```rust
 // 1. Stop accepting new writes
 // 2. Flush all column families
-for cf_name in engine.list_column_families() {
-    if let Some(cf) = engine.get_column_family(&cf_name) {
-        engine.flush_cf(&cf)?;
-    }
+for cf in engine.list_column_families()? {
+    engine.flush_cf(&cf)?;
 }
 
 // 3. Drop engine (releases locks, closes files)

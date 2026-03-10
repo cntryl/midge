@@ -21,7 +21,7 @@ Comprehensive guide to using Midge in your application.
 All database operations start with `Engine::open()`:
 
 ```rust
-use cntryl_midge::{Engine, OpenOptions};
+use cntryl_midge::{Engine, OpenOptions, RecoveryPolicy};
 
 let engine = Engine::open(
     OpenOptions::local("./mydb")
@@ -168,10 +168,10 @@ Deletes are tombstones—removed during compaction.
 Remove all keys in range `[start, end)`:
 
 ```rust
-let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-tx.delete_range(b"user:100".to_vec(), b"user:200".to_vec())?;
-engine.commit(tx, WriteOptions::sync())?;
+engine.delete_range(&cf, b"user:100", b"user:200", WriteOptions::sync())?;
 ```
+
+Range deletes are engine-level operations, not transaction methods.
 
 **Use for:** Bulk deletions, time-series cleanup, partition drops.
 **Cost:** O(1) to write, O(N) at read time.
@@ -196,7 +196,7 @@ Returns `Option<Bytes>`: `Some(value)` if exists and not expired, `None` otherwi
 Iterate over keys using `Query` builder:
 
 ```rust
-use cntryl_midge::Query;
+use cntryl_midge::{Bytes, Query};
 
 let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
 
@@ -207,26 +207,26 @@ while let Some((key, value)) = iter.next() {
 }
 
 // Prefix scan
-let query = Query::new().prefix(b"user:".to_vec().into());
+let query = Query::new().prefix(Bytes::from_static(b"user:"));
 let mut iter = tx.scan(&query)?;
 
 // Range scan (start inclusive, end exclusive)
 let query = Query::new()
-    .start_key(b"user:100".to_vec().into())
-    .end_key(b"user:200".to_vec().into());
+    .start_key(Bytes::from_static(b"user:100"))
+    .end_key(Bytes::from_static(b"user:200"));
 let mut iter = tx.scan(&query)?;
 
 // Limit results
 let query = Query::new()
-    .prefix(b"user:".to_vec().into())
+    .prefix(Bytes::from_static(b"user:"))
     .limit(100);
 let mut iter = tx.scan(&query)?;
 
 // Reverse scan
 let query = Query::new()
     .reverse()
-    .start_key(b"user:999".to_vec().into())
-    .end_key(b"user:000".to_vec().into());
+    .start_key(Bytes::from_static(b"user:999"))
+    .end_key(Bytes::from_static(b"user:000"));
 let mut iter = tx.scan(&query)?;
 ```
 
@@ -262,7 +262,7 @@ Write accepted immediately, fsync batched in background.
 engine.commit(tx, WriteOptions::buffered())?;
 ```
 
-**Guarantees:** Visible immediately. Durable after background group commit. May lose <1s of writes on crash.
+**Guarantees:** Visible after the WAL append barrier and memtable apply. Durable only after a later background fsync.
 
 `buffered()` only returns after the local WAL append barrier succeeds, so acknowledged writes are in `wal.log` before the call returns. Durability still waits for the later fsync barrier.
 
@@ -320,18 +320,13 @@ tx.put(b"user:42".to_vec(), b"alice".to_vec(), None)?;
 engine.commit(tx, WriteOptions::sync())?;
 ```
 
-**Default CF:** Always available:
-
-```rust
-let default_cf = engine.default_column_family();
-```
-
 **Operations:**
 
 ```rust
-let cf = engine.get_column_family("users");  // Get by name
-engine.flush_cf(&cf)?;                        // Flush to SST
-let names = engine.list_column_families();    // List all
+if let Some(cf) = engine.get_column_family("users") {
+    engine.flush_cf(&cf)?;                    // Flush to SST
+}
+let cfs = engine.list_column_families()?;     // List all handles
 ```
 
 ## Lifecycle Management
@@ -364,10 +359,8 @@ Recommended pattern:
 
 ```rust
 // Flush all column families
-for cf_name in engine.list_column_families() {
-    if let Some(cf) = engine.get_column_family(&cf_name) {
-        engine.flush_cf(&cf)?;
-    }
+for cf in engine.list_column_families()? {
+    engine.flush_cf(&cf)?;
 }
 
 drop(engine);  // Engine::drop() cleans up automatically
