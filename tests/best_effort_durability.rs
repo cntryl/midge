@@ -3,7 +3,7 @@
 //! BestEffort mode should:
 //! 1. Skip WAL writes entirely (no I/O overhead)
 //! 2. Update memtable immediately (data visible for reads)
-//! 3. Allow flush to SST (data persists via flush)
+//! 3. Allow flush to SST (data becomes durably restart-safe after flush)
 //! 4. Lose data on crash before flush (documented trade-off)
 
 use cntryl_midge::testkit::*;
@@ -54,8 +54,8 @@ fn should_persist_best_effort_data_when_flushed() -> cntryl_midge::MidgeResult<(
     // Flush to SST - but note: without WAL, BestEffort data relies ONLY on successful flush
     engine.flush_cf(&cf)?;
 
-    // Verify flush completed by writing with durable mode AFTER flush
-    // This ensures the flush has hit disk before we restart
+    // Write a durable marker after flush so restart exercises both WAL replay and
+    // manifest-backed SST visibility on reopen.
     let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite)?;
     tx.put(b"durable_marker".to_vec(), b"marker".to_vec(), None)?;
     engine.commit(tx, WriteOptions::buffered())?;
@@ -64,20 +64,16 @@ fn should_persist_best_effort_data_when_flushed() -> cntryl_midge::MidgeResult<(
     drop(engine);
     let engine = MidgeEngine::open_with_options(opts)?;
 
-    // Assert - Best-effort data should be lost on restart even with flush
-    // (flush may not be synchronous, and without WAL, data is ephemeral)
-    // This demonstrates the trade-off: BestEffort is for bulk loads where
-    // the entire dataset can be reloaded on failure.
+    // Assert - Once flush_cf() succeeds, flushed data must be durable across restart
     let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly)?;
     let val_0 = tx.get(b"key0")?;
+    let marker = tx.get(b"durable_marker")?;
 
-    // Data loss is expected - BestEffort provides no durability guarantee
-    // The safe pattern is: load with best_effort → flush → switch to buffered/sync
-    // If crash happens during load phase, reload from source.
     assert!(
-        val_0.is_none(),
-        "BestEffort data without WAL should not survive restart"
+        val_0.is_some(),
+        "BestEffort data should survive restart once flush_cf() succeeds"
     );
+    assert_eq!(marker.as_deref(), Some(&b"marker"[..]));
 
     Ok(())
 }

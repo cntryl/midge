@@ -1,11 +1,12 @@
 //! Write options for explicit durability control
 //!
 //! Provides explicit control over write durability semantics.
-//! Callers must always specify durability policy - no defaults.
+//! Callers must always specify durability policy - there is intentionally no
+//! `Default` implementation.
 
 /// Write options - MUST be explicitly provided for all commits
 ///
-/// Deliberately NO Default impl to force explicit choices
+/// Deliberately no `Default` impl to force explicit choices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteOptions {
     /// Durability policy
@@ -22,9 +23,9 @@ pub enum DurabilityPolicy {
     /// Best-effort persistence - fastest but no durability on crash before flush
     /// Only use for bulk loads or testing
     BestEffort,
-    /// CloudFirst strict mode - force immediate WAL seal + rotate + upload,
+    /// CloudAsync strict mode - force immediate WAL seal + rotate + upload,
     /// then block until cloud upload completes. Use ONLY when cloud durability
-    /// is explicitly required. Regular CloudFirst uses background uploads and
+    /// is explicitly required. Regular CloudAsync uses background uploads and
     /// never blocks commits.
     CloudStrict,
 }
@@ -72,7 +73,7 @@ impl WriteOptions {
     ///
     /// Forces immediate WAL seal + rotate + cloud upload, then blocks until
     /// upload completes. Use ONLY when cloud durability is explicitly required.
-    /// Regular CloudFirst mode uses background uploads and never blocks commits.
+    /// Regular CloudAsync mode uses background uploads and never blocks commits.
     pub fn cloud_strict() -> Self {
         Self {
             policy: DurabilityPolicy::CloudStrict,
@@ -105,13 +106,13 @@ impl WriteOptions {
     /// - Sync → Strict (fsync after every write)
     /// - Buffered → Batched (periodic fsync)
     /// - BestEffort → BestEffort (skip WAL entirely)
-    /// - CloudStrict → CloudFirst (wait for cloud acknowledgment)
+    /// - CloudStrict → CloudAsync (wait for cloud durability)
     pub(crate) fn to_wal_durability_policy(self) -> crate::wal::DurabilityPolicy {
         match self.policy {
             DurabilityPolicy::Sync => crate::wal::DurabilityPolicy::Strict,
             DurabilityPolicy::Buffered => crate::wal::DurabilityPolicy::Batched,
             DurabilityPolicy::BestEffort => crate::wal::DurabilityPolicy::BestEffort,
-            DurabilityPolicy::CloudStrict => crate::wal::DurabilityPolicy::CloudFirst,
+            DurabilityPolicy::CloudStrict => crate::wal::DurabilityPolicy::CloudAsync,
         }
     }
 }

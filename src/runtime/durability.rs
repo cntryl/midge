@@ -1,4 +1,4 @@
-//! Durability coordination logic — manages waiter groups, CloudFirst inflight state, and frontier checks.
+//! Durability coordination logic — manages waiter groups, CloudAsync inflight state, and frontier checks.
 //!
 //! Extracted from EventLoop to reduce cognitive load and improve testability.
 //! Owns the policy-independent parts of durability enforcement.
@@ -8,9 +8,9 @@ use crate::engine::api::Durability;
 use std::collections::HashMap;
 use std::time::Instant;
 
-/// Single CloudFirst segment being uploaded
+/// Single CloudAsync segment being uploaded
 #[derive(Debug, Clone)]
-pub struct CloudFirstInflightSegment {
+pub struct CloudAsyncInflightSegment {
     pub enqueued_at: Instant,
     pub max_sequence: u64,
 }
@@ -33,6 +33,9 @@ pub enum DurabilityWaiter {
     },
     /// Internal waiter used when caller already acknowledged but needs cleanup.
     ConfirmTransactionApply {
+        request_id: u64,
+    },
+    CloudDurability {
         request_id: u64,
     },
     Read {
@@ -58,7 +61,7 @@ pub enum DurabilityWaiter {
 ///
 /// Owns:
 /// - Group commit waiter queues (KeyedGroupCommit)
-/// - CloudFirst inflight segment tracking
+/// - CloudAsync inflight segment tracking
 /// - Durability frontier checks
 ///
 /// Does NOT own:
@@ -68,24 +71,24 @@ pub struct DurabilityCoordinator {
     /// Group commit: waiters keyed by WAL segment or generation
     waiters: Option<KeyedGroupCommit<u64, DurabilityWaiter>>,
 
-    /// CloudFirst: track enqueue->ack per WAL segment
-    inflight: HashMap<u64, CloudFirstInflightSegment>,
+    /// CloudAsync: track enqueue->ack per WAL segment
+    inflight: HashMap<u64, CloudAsyncInflightSegment>,
 
-    /// CloudFirst: timestamp of last flush/rotate
+    /// CloudAsync: timestamp of last flush/rotate
     last_cloud_flush: Instant,
 
-    /// Is CloudFirst enabled? (read from wal_actor.is_cloud_first())
-    is_cloud_first: bool,
+    /// Is CloudAsync enabled? (read from wal_actor.is_cloud_async())
+    is_cloud_async: bool,
 }
 
 impl DurabilityCoordinator {
     /// Create a new coordinator with initial durability key.
-    pub fn new(initial_durability_key: u64, is_cloud_first: bool) -> Self {
+    pub fn new(initial_durability_key: u64, is_cloud_async: bool) -> Self {
         Self {
             waiters: Some(KeyedGroupCommit::new(initial_durability_key)),
             inflight: HashMap::new(),
             last_cloud_flush: Instant::now(),
-            is_cloud_first,
+            is_cloud_async,
         }
     }
 
@@ -115,6 +118,12 @@ impl DurabilityCoordinator {
     pub fn queue_waiter(&self, waiter: DurabilityWaiter) {
         if let Some(waiters) = &self.waiters {
             waiters.join(waiter);
+        }
+    }
+
+    pub fn queue_waiter_for_key(&self, key: u64, waiter: DurabilityWaiter) {
+        if let Some(waiters) = &self.waiters {
+            waiters.join_for_key(key, waiter);
         }
     }
 
@@ -149,18 +158,18 @@ impl DurabilityCoordinator {
         }
     }
 
-    /// Record a CloudFirst segment enqueued for upload.
+    /// Record a CloudAsync segment enqueued for upload.
     pub fn record_cloud_segment_inflight(&mut self, segment_id: u64, max_sequence: u64) {
         self.inflight.insert(
             segment_id,
-            CloudFirstInflightSegment {
+            CloudAsyncInflightSegment {
                 enqueued_at: Instant::now(),
                 max_sequence,
             },
         );
     }
 
-    /// Get all CloudFirst segments ready for completion (whose max_sequence is now durable).
+    /// Get all CloudAsync segments ready for completion (whose max_sequence is now durable).
     pub fn get_ready_cloud_segments(&mut self, durable_seq: u64) -> Vec<u64> {
         let mut ready: Vec<u64> = self
             .inflight
@@ -183,7 +192,7 @@ impl DurabilityCoordinator {
         ready
     }
 
-    /// Get timing info for a CloudFirst segment (for telemetry).
+    /// Get timing info for a CloudAsync segment (for telemetry).
     pub fn take_cloud_segment_timing(&mut self, segment_id: u64) -> Option<Instant> {
         self.inflight
             .remove(&segment_id)
@@ -198,46 +207,54 @@ impl DurabilityCoordinator {
             .remove(&segment_id)
             .map(|info| info.max_sequence)
     }
+
+    pub fn inflight_segment_for_sequence(&self, sequence: u64) -> Option<u64> {
+        self.inflight
+            .iter()
+            .filter(|(_, info)| info.max_sequence >= sequence)
+            .min_by_key(|(_, info)| info.max_sequence)
+            .map(|(segment_id, _)| *segment_id)
+    }
     /// Clear all inflight segments (on error or shutdown).
     pub fn clear_inflight(&mut self) {
         self.inflight.clear();
     }
 
-    /// Check if CloudFirst should flush based on thresholds.
+    /// Check if CloudAsync should flush based on thresholds.
     ///
     /// **CRITICAL**: This function MUST NOT flush based on pending writer count alone.
     /// Implicit flush-on-writer causes sequential benchmarks to measure cloud upload
-    /// overhead instead of engine throughput. CloudFirst uploads run asynchronously;
+    /// overhead instead of engine throughput. CloudAsync uploads run asynchronously;
     /// commits never block on upload completion unless explicit CloudStrict policy is used.
     ///
     /// Flush triggers (ALL must be satisfied):
     /// - `cloud_pending > 0` (some data exists to flush)
     /// - At least ONE of:
-    ///   * `bytes_buffered >= CLOUDFIRST_MIN_SEGMENT_BYTES`
-    ///   * `cloud_pending >= CLOUDFIRST_MAX_PENDING_WRITES`
-    ///   * `elapsed >= CLOUDFIRST_MAX_FLUSH_DELAY_BACKLOG`
-    pub fn should_flush_cloudfirst(&self, cloud_pending: usize, bytes_buffered: usize) -> bool {
-        if !self.is_cloud_first {
+    ///   * `bytes_buffered >= CLOUD_ASYNC_MIN_SEGMENT_BYTES`
+    ///   * `cloud_pending >= CLOUD_ASYNC_MAX_PENDING_WRITES`
+    ///   * `elapsed >= CLOUD_ASYNC_MAX_FLUSH_DELAY_BACKLOG`
+    pub fn should_flush_cloud_async(&self, cloud_pending: usize, bytes_buffered: usize) -> bool {
+        if !self.is_cloud_async {
             return false;
         }
 
-        // CloudFirst rotate/upload policy thresholds
-        const CLOUDFIRST_MIN_SEGMENT_BYTES: usize = 16 * 1024 * 1024; // 16MB (was 8MB)
-        const CLOUDFIRST_MAX_FLUSH_DELAY_BACKLOG: std::time::Duration =
+        // CloudAsync rotate/upload policy thresholds
+        const CLOUD_ASYNC_MIN_SEGMENT_BYTES: usize = 16 * 1024 * 1024; // 16MB (was 8MB)
+        const CLOUD_ASYNC_MAX_FLUSH_DELAY_BACKLOG: std::time::Duration =
             std::time::Duration::from_millis(500); // 500ms (was 25ms)
-        const CLOUDFIRST_MAX_PENDING_WRITES: usize = 10_000; // 10k (was 2048)
+        const CLOUD_ASYNC_MAX_PENDING_WRITES: usize = 10_000; // 10k (was 2048)
 
         // FORBIDDEN: Never flush based on pending writer count alone.
         // Pending writers may be used for metrics/backpressure, but MUST NOT trigger flushes.
         // Only threshold-based conditions below are allowed to trigger uploads.
 
         cloud_pending > 0
-            && (bytes_buffered >= CLOUDFIRST_MIN_SEGMENT_BYTES
-                || cloud_pending >= CLOUDFIRST_MAX_PENDING_WRITES
-                || self.last_cloud_flush.elapsed() >= CLOUDFIRST_MAX_FLUSH_DELAY_BACKLOG)
+            && (bytes_buffered >= CLOUD_ASYNC_MIN_SEGMENT_BYTES
+                || cloud_pending >= CLOUD_ASYNC_MAX_PENDING_WRITES
+                || self.last_cloud_flush.elapsed() >= CLOUD_ASYNC_MAX_FLUSH_DELAY_BACKLOG)
     }
 
-    /// Update last flush timestamp (call after CloudFirst segment is enqueued).
+    /// Update last flush timestamp (call after CloudAsync segment is enqueued).
     pub fn record_cloud_flush(&mut self) {
         self.last_cloud_flush = Instant::now();
     }

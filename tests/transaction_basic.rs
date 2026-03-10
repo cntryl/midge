@@ -384,7 +384,7 @@ fn should_insert_value_given_nonexistent_key_when_insert_in_transaction() {
 }
 
 #[test]
-fn should_delete_range_given_committed_transaction_when_delete_range() {
+fn should_delete_range_given_committed_engine_operation_when_delete_range() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
@@ -397,13 +397,15 @@ fn should_delete_range_given_committed_transaction_when_delete_range() {
         tx.put(b"key3".to_vec(), b"v3".to_vec(), None).unwrap();
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
-        // Act - delete range in transaction
-        let mut txn = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        // Act - delete key1, key2 (not key3)
+        engine
+            .delete_range(
+                &cf,
+                b"key1".to_vec(),
+                b"key3".to_vec(),
+                WriteOptions::buffered(),
+            )
             .unwrap();
-        txn.delete_range(b"key1".to_vec(), b"key3".to_vec())
-            .unwrap(); // Delete key1, key2 (not key3)
-        engine.commit(txn, WriteOptions::buffered()).unwrap();
 
         // Assert
         let read_tx = engine
@@ -419,7 +421,7 @@ fn should_delete_range_given_committed_transaction_when_delete_range() {
 }
 
 #[test]
-fn should_hide_deleted_range_given_transaction_scan_when_delete_range() {
+fn should_hide_deleted_range_given_scan_after_delete_range_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
@@ -433,13 +435,19 @@ fn should_hide_deleted_range_given_transaction_scan_when_delete_range() {
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act
-        let mut txn = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        txn.delete_range(b"key1".to_vec(), b"key3".to_vec())
+        engine
+            .delete_range(
+                &cf,
+                b"key1".to_vec(),
+                b"key3".to_vec(),
+                WriteOptions::buffered(),
+            )
             .unwrap();
 
-        // Scan within transaction
+        // Scan after the delete_range is committed
+        let txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
         let mut iter = txn
             .scan(
                 &Query::new()

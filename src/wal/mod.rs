@@ -13,6 +13,7 @@
 //! (Real, Mock, Chaos). All production code has been migrated to this interface.
 
 pub mod encoding;
+pub mod frame;
 pub mod fs;
 pub mod policy;
 pub mod recovery;

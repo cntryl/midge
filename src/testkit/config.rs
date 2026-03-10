@@ -213,8 +213,8 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 },
                 wal_sync: true,
                 wal_batch_config: None,
-                // Benchmark-safe: larger memtable delays flushes, allowing CloudFirst
-                // to batch WAL segments efficiently. CloudFirst uses background uploads
+                // Benchmark-safe: larger memtable delays flushes, allowing CloudAsync
+                // to batch WAL segments efficiently. CloudAsync uses background uploads
                 // with thresholds (16MB bytes / 10k writes / 500ms delay) to avoid
                 // per-commit upload overhead. Single commits never trigger uploads.
                 memtable_size: 2 * 1024 * 1024, // 2MB (was 64KB)

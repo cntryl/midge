@@ -64,7 +64,7 @@ In cloud mode:
 
 **This isn't a plugin. It's architecture.**
 
-The cloud-first design influences:
+The cloud-backed async design influences:
 - WAL upload pipeline with acknowledgment flow
 - SST block format (larger blocks optimized for object storage)
 - Recovery from manifest (no filesystem scan required)
@@ -299,7 +299,7 @@ One actor sequences all state mutations, not partitioned by key or level. This m
 
 **Cost:** Throughput ceiling (~50-75k ops/sec) is lower than thread-per-shard designs (RocksDB: 500k-2M+ ops/sec). We choose **predictability over raw speed**.
 
-### Cloud-First → Explicit semantics, more planning required
+### Cloud-Backed Async → Explicit semantics, more planning required
 
 Cloud durability and SST storage are architectural pillars, not plugins. Explicit modes (memory/local/cloud) prevent confusion. Ephemeral local cache is simpler than "maybe sync, maybe don't."
 

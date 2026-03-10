@@ -31,6 +31,9 @@ impl SeqnoAllocActor {
     ) -> MidgeResult<(u64, RuntimeResponse)> {
         // Check if write is stalled due to explicit flag
         if state.write_stalled {
+            if let Some(t) = crate::telemetry::Telemetry::global() {
+                t.metrics().record_write_stall_memory();
+            }
             return Err(crate::common::MidgeError::WriteStall(
                 "write stalled: memtable full or compaction lagging".to_string(),
             ));
@@ -42,6 +45,9 @@ impl SeqnoAllocActor {
             if memtable_size > state.memtable_flush_threshold {
                 // Memtable is too large - signal write stall
                 state.write_stalled = true;
+                if let Some(t) = crate::telemetry::Telemetry::global() {
+                    t.metrics().record_write_stall_memory();
+                }
                 return Err(crate::common::MidgeError::WriteStall(format!(
                     "memtable full: {}MB > threshold {}MB",
                     memtable_size / (1024 * 1024),

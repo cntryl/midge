@@ -19,6 +19,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::instrument;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayPolicy {
+    Strict,
+    SalvageValidPrefix,
+}
+
+fn is_salvageable_tail_corruption(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    (lower.contains("incomplete wal frame header") || lower.contains("incomplete wal record"))
+        && !lower.contains("pos 0 ")
+}
+
 fn map_storage_error(err: StorageError) -> MidgeError {
     match err.kind {
         StorageErrorKind::NotFound => MidgeError::NotFound,
@@ -117,7 +129,20 @@ pub fn replay_wal(
     wal_dir: &StoragePath,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
 ) -> MidgeResult<RecoveryStats> {
+    replay_wal_with_policy(storage, wal_dir, memtables, ReplayPolicy::Strict)
+}
+
+#[instrument(level = "info", skip(storage, memtables), fields(wal_dir = ?wal_dir, replay_policy = ?replay_policy))]
+pub fn replay_wal_with_policy(
+    storage: &dyn Storage,
+    wal_dir: &StoragePath,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
+    replay_policy: ReplayPolicy,
+) -> MidgeResult<RecoveryStats> {
+    // Invariant: recovery may keep only a verified prefix of the WAL, but it
+    // must never materialize a partial frame or reorder committed records.
     let mut stats = RecoveryStats::new();
+    let replay_start = std::time::Instant::now();
 
     // Transaction buffering for atomic recovery.
     //
@@ -181,6 +206,8 @@ pub fn replay_wal(
         }
     }
 
+    stats.total_replay_ns = replay_start.elapsed().as_nanos();
+
     match result {
         Ok(()) => {
             tracing::info!(
@@ -196,11 +223,24 @@ pub fn replay_wal(
             Ok(stats)
         }
         Err(MidgeError::Corruption(e)) => {
-            stats.mark_corruption();
-            tracing::warn!(dir = %wal_dir, error = %e, "wal replay encountered corruption");
-            // Tolerate corruption by returning successfully with whatever state was recovered
-            // before the corruption point (commonly a truncated tail record after a crash).
-            Ok(stats)
+            if is_salvageable_tail_corruption(&e) {
+                tracing::info!(
+                    dir = %wal_dir,
+                    error = %e,
+                    "wal replay dropped a truncated tail and kept the valid prefix"
+                );
+                Ok(stats)
+            } else if replay_policy == ReplayPolicy::SalvageValidPrefix {
+                stats.mark_corruption();
+                tracing::warn!(dir = %wal_dir, error = %e, "wal replay encountered corruption");
+                // Tolerate corruption by returning successfully with whatever state was recovered
+                // before the corruption point (commonly a truncated tail record after a crash).
+                Ok(stats)
+            } else {
+                stats.mark_corruption();
+                tracing::warn!(dir = %wal_dir, error = %e, "wal replay encountered corruption");
+                Err(MidgeError::Corruption(e))
+            }
         }
         Err(e) => {
             tracing::error!(dir = %wal_dir, error = %e, "wal replay failed");
@@ -217,9 +257,6 @@ fn replay_wal_file(
     open_txns: &mut std::collections::HashMap<u64, Vec<WalRecord>>,
     begun_txns: &mut std::collections::HashSet<u64>,
 ) -> MidgeResult<()> {
-    // Guardrail: prevent pathological allocations on corrupted length prefixes.
-    const MAX_WAL_RECORD_LEN: usize = 64 * 1024 * 1024; // 64 MiB
-
     let mut pos: u64 = 0;
     let mut file_read_ns: u128 = 0;
     let mut file_apply_ns: u128 = 0;
@@ -257,41 +294,28 @@ fn replay_wal_file(
                 pos, file_path, file_len
             )));
         }
-        if file_len.saturating_sub(pos) < 4 {
+        if file_len.saturating_sub(pos) < crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 {
             return Err(MidgeError::Corruption(format!(
-                "Incomplete WAL length prefix at pos {} in {} (need 4 bytes, have {})",
+                "Incomplete WAL frame header at pos {} in {} (need {} bytes, have {})",
                 pos,
                 file_path,
+                crate::wal::frame::WAL_FRAME_HEADER_LEN,
                 file_len.saturating_sub(pos)
             )));
         }
 
-        // Read 4-byte length prefix
-        let len_read_start = std::time::Instant::now();
-        let len_bytes = file.read_at(pos, 4).map_err(map_storage_error)?;
-        file_read_ns = file_read_ns.saturating_add(len_read_start.elapsed().as_nanos());
+        // Read 8-byte frame header (len + crc32c).
+        let header_read_start = std::time::Instant::now();
+        let header = file
+            .read_at(pos, crate::wal::frame::WAL_FRAME_HEADER_LEN as u64)
+            .map_err(map_storage_error)?;
+        file_read_ns = file_read_ns.saturating_add(header_read_start.elapsed().as_nanos());
 
-        if len_bytes.len() < 4 {
-            return Err(MidgeError::Corruption(format!(
-                "Incomplete WAL length prefix at pos {} in {} (got {} bytes)",
-                pos,
-                file_path,
-                len_bytes.len()
-            )));
-        }
+        let (len, expected_crc) = crate::wal::frame::decode_frame_header(&header[..])?;
 
-        let mut len_buf = [0u8; 4];
-        len_buf.copy_from_slice(&len_bytes[..4]);
-
-        let len = u32::from_le_bytes(len_buf) as usize;
-        if len > MAX_WAL_RECORD_LEN {
-            return Err(MidgeError::Corruption(format!(
-                "WAL record too large at pos {} in {} (len={})",
-                pos, file_path, len
-            )));
-        }
-
-        let need_end = pos.saturating_add(4).saturating_add(len as u64);
+        let need_end = pos
+            .saturating_add(crate::wal::frame::WAL_FRAME_HEADER_LEN as u64)
+            .saturating_add(len as u64);
         if need_end > file_len {
             return Err(MidgeError::Corruption(format!(
                 "Incomplete WAL record at pos {} in {} (len={}, file_len={})",
@@ -302,7 +326,10 @@ fn replay_wal_file(
         // Read record payload
         let payload_read_start = std::time::Instant::now();
         let buf = file
-            .read_at(pos + 4, len as u64)
+            .read_at(
+                pos + crate::wal::frame::WAL_FRAME_HEADER_LEN as u64,
+                len as u64,
+            )
             .map_err(map_storage_error)?;
         file_read_ns = file_read_ns.saturating_add(payload_read_start.elapsed().as_nanos());
 
@@ -316,6 +343,7 @@ fn replay_wal_file(
             )));
         }
 
+        crate::wal::frame::verify_frame_crc(&buf[..len], expected_crc)?;
         let record = super::encoding::decode(&buf[..])?;
 
         // Always count records, even if buffered/ignored.
@@ -338,7 +366,7 @@ fn replay_wal_file(
                 file = %file_path,
                 "skipping WAL record from stale writer epoch"
             );
-            pos += 4 + len as u64;
+            pos += crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 + len as u64;
             continue;
         }
 
@@ -367,7 +395,7 @@ fn replay_wal_file(
                 if let Some(txn_id) = record.txn_id {
                     if begun_txns.contains(&txn_id) {
                         open_txns.entry(txn_id).or_default().push(record);
-                        pos += 4 + len as u64;
+                        pos += crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 + len as u64;
                         continue;
                     }
                 }
@@ -378,7 +406,7 @@ fn replay_wal_file(
             }
         }
 
-        pos += 4 + len as u64;
+        pos += crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 + len as u64;
     }
 
     stats.wal_read_ns = stats.wal_read_ns.saturating_add(file_read_ns);
@@ -405,6 +433,9 @@ fn apply_record(
     record: &WalRecord,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
 ) -> MidgeResult<()> {
+    // Invariant: memtable reconstruction must match the durable WAL prefix
+    // exactly. Expired or incomplete state may be dropped, but visible durable
+    // records must be applied in sequence order.
     let memtable = memtables
         .entry(record.cf_id)
         .or_insert_with(|| Arc::new(SkipListMemtable::new()));
@@ -464,6 +495,18 @@ mod tests {
     use bytes::Bytes;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    fn append_raw_bytes(path: &std::path::Path, bytes: &[u8]) {
+        use std::io::Write;
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+    }
 
     #[test]
     fn should_initialize_stats_with_zeros_when_created() {
@@ -1144,5 +1187,239 @@ mod tests {
             recovered_memtable.get(b"key").unwrap(),
             Some(b"value".to_vec())
         );
+    }
+
+    #[test]
+    fn should_not_apply_transaction_ops_without_commit_marker_during_recovery() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = LocalFsStorage::new(dir.path()).unwrap();
+        let wal_dir = StoragePath::new("wal");
+
+        {
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
+
+            let mut begin_record =
+                WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 1, 1);
+            begin_record.txn_id = Some(42);
+            writer.append_record(&begin_record).unwrap();
+
+            let mut put_record = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"key"),
+                Some(Bytes::from_static(b"value")),
+                2,
+                1,
+            );
+            put_record.txn_id = Some(42);
+            writer.append_record(&put_record).unwrap();
+
+            writer.sync().unwrap();
+        }
+
+        // Act
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        assert_eq!(stats.record_count, 2);
+        assert!(
+            !memtables.contains_key(&0),
+            "incomplete transactions must not materialize a recovered memtable entry"
+        );
+    }
+
+    #[test]
+    fn should_fail_strict_recovery_on_bad_crc_at_byte_zero() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = LocalFsStorage::new(dir.path()).unwrap();
+        let wal_dir = StoragePath::new("wal");
+        let wal_path = wal_subdir.join("wal.log");
+
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"crc_key"),
+            Some(Bytes::from_static(b"crc_value")),
+            1,
+            9,
+        );
+        let payload = crate::wal::encoding::encode(&record).unwrap();
+        let mut frame = Vec::new();
+        crate::wal::frame::append_frame(&mut frame, &payload).unwrap();
+        frame[4] ^= 0x5a;
+        append_raw_bytes(&wal_path, &frame);
+
+        let mut memtables = HashMap::new();
+
+        // Act
+        let err = replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
+            .unwrap_err();
+
+        // Assert
+        match err {
+            MidgeError::Corruption(msg) => assert!(msg.contains("CRC mismatch")),
+            other => panic!("expected corruption error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_salvage_valid_prefix_on_bad_crc_tail() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = LocalFsStorage::new(dir.path()).unwrap();
+        let wal_dir = StoragePath::new("wal");
+        let wal_path = wal_subdir.join("wal.log");
+
+        {
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
+            let record = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"good"),
+                Some(Bytes::from_static(b"value")),
+                1,
+                2,
+            );
+            writer.append_record(&record).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let bad_record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"bad"),
+            Some(Bytes::from_static(b"value")),
+            2,
+            2,
+        );
+        let payload = crate::wal::encoding::encode(&bad_record).unwrap();
+        let mut frame = Vec::new();
+        crate::wal::frame::append_frame(&mut frame, &payload).unwrap();
+        frame[5] ^= 0x11;
+        append_raw_bytes(&wal_path, &frame);
+
+        let mut memtables = HashMap::new();
+
+        // Act
+        let stats = replay_wal_with_policy(
+            &storage,
+            &wal_dir,
+            &mut memtables,
+            ReplayPolicy::SalvageValidPrefix,
+        )
+        .unwrap();
+
+        // Assert
+        assert!(stats.had_corruption);
+        assert_eq!(stats.record_count, 1);
+        assert_eq!(memtables[&0].get(b"good").unwrap(), Some(b"value".to_vec()));
+        assert_eq!(memtables[&0].get(b"bad").unwrap(), None);
+    }
+
+    #[test]
+    fn should_salvage_valid_prefix_on_truncated_tail_frame() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = LocalFsStorage::new(dir.path()).unwrap();
+        let wal_dir = StoragePath::new("wal");
+        let wal_path = wal_subdir.join("wal.log");
+
+        {
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
+            let record = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"good"),
+                Some(Bytes::from_static(b"value")),
+                1,
+                3,
+            );
+            writer.append_record(&record).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let tail_record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"tail"),
+            Some(Bytes::from_static(b"value")),
+            2,
+            3,
+        );
+        let payload = crate::wal::encoding::encode(&tail_record).unwrap();
+        let mut frame = Vec::new();
+        crate::wal::frame::append_frame(&mut frame, &payload).unwrap();
+        frame.truncate(frame.len() - 3);
+        append_raw_bytes(&wal_path, &frame);
+
+        let mut memtables = HashMap::new();
+
+        // Act
+        let stats = replay_wal_with_policy(
+            &storage,
+            &wal_dir,
+            &mut memtables,
+            ReplayPolicy::SalvageValidPrefix,
+        )
+        .unwrap();
+
+        // Assert
+        assert!(!stats.had_corruption);
+        assert_eq!(stats.record_count, 1);
+        assert_eq!(memtables[&0].get(b"good").unwrap(), Some(b"value".to_vec()));
+        assert_eq!(memtables[&0].get(b"tail").unwrap(), None);
+    }
+
+    #[test]
+    fn should_skip_stale_writer_epoch_records() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = LocalFsStorage::new(dir.path()).unwrap();
+        let wal_dir = StoragePath::new("wal");
+
+        {
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
+
+            let fresh = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"fresh"),
+                Some(Bytes::from_static(b"v2")),
+                1,
+                2,
+            );
+            writer.append_record(&fresh).unwrap();
+
+            let stale = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"stale"),
+                Some(Bytes::from_static(b"v1")),
+                2,
+                1,
+            );
+            writer.append_record(&stale).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let mut memtables = HashMap::new();
+
+        // Act
+        let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        assert_eq!(stats.max_epoch_seen, 2);
+        assert_eq!(stats.stale_records_skipped, 1);
+        assert_eq!(memtables[&0].get(b"fresh").unwrap(), Some(b"v2".to_vec()));
+        assert_eq!(memtables[&0].get(b"stale").unwrap(), None);
     }
 }

@@ -34,6 +34,12 @@ pub struct Metrics {
     pub wal_append_ns_total: Arc<AtomicU64>,
     pub wal_fsync_ns_total: Arc<AtomicU64>,
 
+    // Recovery operations
+    pub wal_recovery_records_replayed: Arc<AtomicU64>,
+    pub wal_recovery_bytes_replayed: Arc<AtomicU64>,
+    pub intent_log_replay_runs: Arc<AtomicU64>,
+    pub intent_log_entries_replayed: Arc<AtomicU64>,
+
     // Breakdowns
     pub wal_encode_count: Arc<AtomicU64>,
     pub wal_encode_ns_total: Arc<AtomicU64>,
@@ -56,6 +62,7 @@ pub struct Metrics {
     // Compaction
     pub compactions_run: Arc<AtomicU64>,
     pub compaction_bytes_rewritten: Arc<AtomicU64>,
+    pub compaction_failures: Arc<AtomicU64>,
 
     // Cloud operations
     pub cloud_uploads: Arc<AtomicU64>,
@@ -63,17 +70,17 @@ pub struct Metrics {
     pub cloud_bytes_uploaded: Arc<AtomicU64>,
     pub cloud_bytes_downloaded: Arc<AtomicU64>,
 
-    // CloudFirst WAL durability flow
-    pub cloudfirst_wal_segments_sealed: Arc<AtomicU64>,
-    pub cloudfirst_wal_bytes_sealed: Arc<AtomicU64>,
-    pub cloudfirst_wal_seal_latency_us: Arc<AtomicU64>,
+    // CloudAsync WAL durability flow
+    pub cloud_async_wal_segments_sealed: Arc<AtomicU64>,
+    pub cloud_async_wal_bytes_sealed: Arc<AtomicU64>,
+    pub cloud_async_wal_seal_latency_us: Arc<AtomicU64>,
 
-    pub cloudfirst_wal_uploads_started: Arc<AtomicU64>,
-    pub cloudfirst_wal_uploads_completed: Arc<AtomicU64>,
-    pub cloudfirst_wal_uploads_failed: Arc<AtomicU64>,
-    pub cloudfirst_wal_upload_latency_us: Arc<AtomicU64>,
+    pub cloud_async_wal_uploads_started: Arc<AtomicU64>,
+    pub cloud_async_wal_uploads_completed: Arc<AtomicU64>,
+    pub cloud_async_wal_uploads_failed: Arc<AtomicU64>,
+    pub cloud_async_wal_upload_latency_us: Arc<AtomicU64>,
 
-    pub cloudfirst_wal_ack_latency_us: Arc<AtomicU64>,
+    pub cloud_async_wal_ack_latency_us: Arc<AtomicU64>,
 
     // Cache
     pub cache_hits: Arc<AtomicU64>,
@@ -81,6 +88,11 @@ pub struct Metrics {
 
     // Write stalls
     pub write_stalls: Arc<AtomicU64>,
+    pub write_stalls_memory: Arc<AtomicU64>,
+    pub write_stalls_compaction: Arc<AtomicU64>,
+    pub write_stalls_cloud: Arc<AtomicU64>,
+    pub write_stalls_no_space: Arc<AtomicU64>,
+    pub no_space_events: Arc<AtomicU64>,
 
     // Phase 0 guardrails: Idempotency cache telemetry
     pub idempotency_cache_evictions: Arc<AtomicU64>,
@@ -127,6 +139,11 @@ impl Metrics {
             wal_append_ns_total: Arc::new(AtomicU64::new(0)),
             wal_fsync_ns_total: Arc::new(AtomicU64::new(0)),
 
+            wal_recovery_records_replayed: Arc::new(AtomicU64::new(0)),
+            wal_recovery_bytes_replayed: Arc::new(AtomicU64::new(0)),
+            intent_log_replay_runs: Arc::new(AtomicU64::new(0)),
+            intent_log_entries_replayed: Arc::new(AtomicU64::new(0)),
+
             wal_encode_count: Arc::new(AtomicU64::new(0)),
             wal_encode_ns_total: Arc::new(AtomicU64::new(0)),
             wal_lock_wait_count: Arc::new(AtomicU64::new(0)),
@@ -142,24 +159,30 @@ impl Metrics {
             sst_loaded: Arc::new(AtomicU64::new(0)),
             compactions_run: Arc::new(AtomicU64::new(0)),
             compaction_bytes_rewritten: Arc::new(AtomicU64::new(0)),
+            compaction_failures: Arc::new(AtomicU64::new(0)),
             cloud_uploads: Arc::new(AtomicU64::new(0)),
             cloud_downloads: Arc::new(AtomicU64::new(0)),
             cloud_bytes_uploaded: Arc::new(AtomicU64::new(0)),
             cloud_bytes_downloaded: Arc::new(AtomicU64::new(0)),
 
-            cloudfirst_wal_segments_sealed: Arc::new(AtomicU64::new(0)),
-            cloudfirst_wal_bytes_sealed: Arc::new(AtomicU64::new(0)),
-            cloudfirst_wal_seal_latency_us: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_segments_sealed: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_bytes_sealed: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_seal_latency_us: Arc::new(AtomicU64::new(0)),
 
-            cloudfirst_wal_uploads_started: Arc::new(AtomicU64::new(0)),
-            cloudfirst_wal_uploads_completed: Arc::new(AtomicU64::new(0)),
-            cloudfirst_wal_uploads_failed: Arc::new(AtomicU64::new(0)),
-            cloudfirst_wal_upload_latency_us: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_uploads_started: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_uploads_completed: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_uploads_failed: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_upload_latency_us: Arc::new(AtomicU64::new(0)),
 
-            cloudfirst_wal_ack_latency_us: Arc::new(AtomicU64::new(0)),
+            cloud_async_wal_ack_latency_us: Arc::new(AtomicU64::new(0)),
             cache_hits: Arc::new(AtomicU64::new(0)),
             cache_misses: Arc::new(AtomicU64::new(0)),
             write_stalls: Arc::new(AtomicU64::new(0)),
+            write_stalls_memory: Arc::new(AtomicU64::new(0)),
+            write_stalls_compaction: Arc::new(AtomicU64::new(0)),
+            write_stalls_cloud: Arc::new(AtomicU64::new(0)),
+            write_stalls_no_space: Arc::new(AtomicU64::new(0)),
+            no_space_events: Arc::new(AtomicU64::new(0)),
             idempotency_cache_evictions: Arc::new(AtomicU64::new(0)),
             pending_txn_started: Arc::new(AtomicU64::new(0)),
             pending_txn_duration_ms_total: Arc::new(AtomicU64::new(0)),
@@ -188,47 +211,47 @@ impl Metrics {
     }
 
     #[inline]
-    pub fn record_cloudfirst_wal_segment_sealed(&self, bytes: u64, seal_latency_us: u64) {
+    pub fn record_cloud_async_wal_segment_sealed(&self, bytes: u64, seal_latency_us: u64) {
         if self.enabled {
-            self.cloudfirst_wal_segments_sealed
+            self.cloud_async_wal_segments_sealed
                 .fetch_add(1, Ordering::Relaxed);
-            self.cloudfirst_wal_bytes_sealed
+            self.cloud_async_wal_bytes_sealed
                 .fetch_add(bytes, Ordering::Relaxed);
-            self.cloudfirst_wal_seal_latency_us
+            self.cloud_async_wal_seal_latency_us
                 .fetch_add(seal_latency_us, Ordering::Relaxed);
         }
     }
 
     #[inline]
-    pub fn record_cloudfirst_wal_upload_started(&self) {
+    pub fn record_cloud_async_wal_upload_started(&self) {
         if self.enabled {
-            self.cloudfirst_wal_uploads_started
+            self.cloud_async_wal_uploads_started
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
 
     #[inline]
-    pub fn record_cloudfirst_wal_upload_completed(&self, upload_latency_us: u64) {
+    pub fn record_cloud_async_wal_upload_completed(&self, upload_latency_us: u64) {
         if self.enabled {
-            self.cloudfirst_wal_uploads_completed
+            self.cloud_async_wal_uploads_completed
                 .fetch_add(1, Ordering::Relaxed);
-            self.cloudfirst_wal_upload_latency_us
+            self.cloud_async_wal_upload_latency_us
                 .fetch_add(upload_latency_us, Ordering::Relaxed);
         }
     }
 
     #[inline]
-    pub fn record_cloudfirst_wal_upload_failed(&self) {
+    pub fn record_cloud_async_wal_upload_failed(&self) {
         if self.enabled {
-            self.cloudfirst_wal_uploads_failed
+            self.cloud_async_wal_uploads_failed
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
 
     #[inline]
-    pub fn record_cloudfirst_wal_ack_latency_us(&self, ack_latency_us: u64) {
+    pub fn record_cloud_async_wal_ack_latency_us(&self, ack_latency_us: u64) {
         if self.enabled {
-            self.cloudfirst_wal_ack_latency_us
+            self.cloud_async_wal_ack_latency_us
                 .fetch_add(ack_latency_us, Ordering::Relaxed);
         }
     }
@@ -361,6 +384,27 @@ impl Metrics {
         }
     }
 
+    /// Record WAL recovery totals from startup replay.
+    #[inline]
+    pub fn record_wal_recovery(&self, records: u64, bytes: u64) {
+        if self.enabled {
+            self.wal_recovery_records_replayed
+                .fetch_add(records, Ordering::Relaxed);
+            self.wal_recovery_bytes_replayed
+                .fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    /// Record intent-log replay performed at startup.
+    #[inline]
+    pub fn record_intent_log_replay(&self, entries: u64) {
+        if self.enabled {
+            self.intent_log_replay_runs.fetch_add(1, Ordering::Relaxed);
+            self.intent_log_entries_replayed
+                .fetch_add(entries, Ordering::Relaxed);
+        }
+    }
+
     /// Record WAL backpressure wait (when queue is full and producer must wait)
     #[inline]
     pub fn record_wal_backpressure_wait(&self, wait_attempts: u64) {
@@ -432,6 +476,13 @@ impl Metrics {
         }
     }
 
+    #[inline]
+    pub fn record_compaction_failure(&self) {
+        if self.enabled {
+            self.compaction_failures.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Record cloud upload
     #[inline]
     pub fn record_cloud_upload(&self, bytes: u64) {
@@ -473,6 +524,45 @@ impl Metrics {
     pub fn record_write_stall(&self) {
         if self.enabled {
             self.write_stalls.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_write_stall_memory(&self) {
+        if self.enabled {
+            self.write_stalls.fetch_add(1, Ordering::Relaxed);
+            self.write_stalls_memory.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_write_stall_compaction(&self) {
+        if self.enabled {
+            self.write_stalls.fetch_add(1, Ordering::Relaxed);
+            self.write_stalls_compaction.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_write_stall_cloud(&self) {
+        if self.enabled {
+            self.write_stalls.fetch_add(1, Ordering::Relaxed);
+            self.write_stalls_cloud.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_write_stall_no_space(&self) {
+        if self.enabled {
+            self.write_stalls.fetch_add(1, Ordering::Relaxed);
+            self.write_stalls_no_space.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_no_space_event(&self) {
+        if self.enabled {
+            self.no_space_events.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -566,6 +656,7 @@ impl Metrics {
             sst_loaded: self.sst_loaded.load(Ordering::Relaxed),
             compactions_run: self.compactions_run.load(Ordering::Relaxed),
             compaction_bytes_rewritten: self.compaction_bytes_rewritten.load(Ordering::Relaxed),
+            compaction_failures: self.compaction_failures.load(Ordering::Relaxed),
             cloud_uploads: self.cloud_uploads.load(Ordering::Relaxed),
             cloud_downloads: self.cloud_downloads.load(Ordering::Relaxed),
             cloud_bytes_uploaded: self.cloud_bytes_uploaded.load(Ordering::Relaxed),
@@ -573,12 +664,23 @@ impl Metrics {
             cache_hits: self.cache_hits.load(Ordering::Relaxed),
             cache_misses: self.cache_misses.load(Ordering::Relaxed),
             write_stalls: self.write_stalls.load(Ordering::Relaxed),
+            write_stalls_memory: self.write_stalls_memory.load(Ordering::Relaxed),
+            write_stalls_compaction: self.write_stalls_compaction.load(Ordering::Relaxed),
+            write_stalls_cloud: self.write_stalls_cloud.load(Ordering::Relaxed),
+            write_stalls_no_space: self.write_stalls_no_space.load(Ordering::Relaxed),
+            no_space_events: self.no_space_events.load(Ordering::Relaxed),
             // New debug fields
             wal_append_count: self.wal_append_count.load(Ordering::Relaxed),
             wal_flush_count: self.wal_flush_count.load(Ordering::Relaxed),
             wal_fsync_count: self.wal_fsync_count.load(Ordering::Relaxed),
             wal_append_ns_total: self.wal_append_ns_total.load(Ordering::Relaxed),
             wal_fsync_ns_total: self.wal_fsync_ns_total.load(Ordering::Relaxed),
+            wal_recovery_records_replayed: self
+                .wal_recovery_records_replayed
+                .load(Ordering::Relaxed),
+            wal_recovery_bytes_replayed: self.wal_recovery_bytes_replayed.load(Ordering::Relaxed),
+            intent_log_replay_runs: self.intent_log_replay_runs.load(Ordering::Relaxed),
+            intent_log_entries_replayed: self.intent_log_entries_replayed.load(Ordering::Relaxed),
         }
     }
 }
@@ -600,6 +702,7 @@ pub struct MetricsSnapshot {
     pub sst_loaded: u64,
     pub compactions_run: u64,
     pub compaction_bytes_rewritten: u64,
+    pub compaction_failures: u64,
     pub cloud_uploads: u64,
     pub cloud_downloads: u64,
     pub cloud_bytes_uploaded: u64,
@@ -607,12 +710,21 @@ pub struct MetricsSnapshot {
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub write_stalls: u64,
+    pub write_stalls_memory: u64,
+    pub write_stalls_compaction: u64,
+    pub write_stalls_cloud: u64,
+    pub write_stalls_no_space: u64,
+    pub no_space_events: u64,
     // New debug fields
     pub wal_append_count: u64,
     pub wal_flush_count: u64,
     pub wal_fsync_count: u64,
     pub wal_append_ns_total: u64,
     pub wal_fsync_ns_total: u64,
+    pub wal_recovery_records_replayed: u64,
+    pub wal_recovery_bytes_replayed: u64,
+    pub intent_log_replay_runs: u64,
+    pub intent_log_entries_replayed: u64,
 }
 
 impl MetricsSnapshot {
@@ -690,5 +802,24 @@ mod tests {
 
         // Assert
         assert_eq!(snap.puts, 0);
+    }
+
+    #[test]
+    fn should_record_recovery_metrics_when_replay_occurs() {
+        // Arrange
+        let config = TelemetryConfig::default().with_enabled(true);
+        let metrics = Metrics::new(&config).unwrap();
+
+        // Act
+        metrics.record_wal_recovery(42, 4096);
+        metrics.record_intent_log_replay(3);
+
+        let snap = metrics.snapshot();
+
+        // Assert
+        assert_eq!(snap.wal_recovery_records_replayed, 42);
+        assert_eq!(snap.wal_recovery_bytes_replayed, 4096);
+        assert_eq!(snap.intent_log_replay_runs, 1);
+        assert_eq!(snap.intent_log_entries_replayed, 3);
     }
 }

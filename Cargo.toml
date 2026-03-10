@@ -25,6 +25,10 @@ crossbeam = "0.8"
 crossbeam-channel = "0.5"
 crossbeam-epoch = "0.9"
 dashmap = "6.1"
+# Note: fail is used for deterministic crash testing in test suites.
+# In production builds, this has minimal overhead. For security-critical environments,
+# consider building without this dependency if failpoint testing is not needed.
+fail = { version = "0.5", features = ["failpoints"] }
 parking_lot = "0.12"
 
 # Utilities used by stress workloads
@@ -40,7 +44,6 @@ bincode = "1.3"
 bytes = { version = "1.10", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
 uuid = { version = "1.18", features = ["v4"] }
 
 # Error Handling
@@ -61,7 +64,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # OpenTelemetry (Observability)
 opentelemetry = { version = "0.20", optional = true, features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.13", optional = true, features = ["tokio"] }
-tracing-opentelemetry = { version = "0.32", optional = true }
+tracing-opentelemetry = { version = "0.21", optional = true }
 
 # System Utilities
 byteorder = "1.5"

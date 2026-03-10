@@ -14,7 +14,10 @@
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
-use cntryl_midge::{TransactionMode, WriteOptions};
+use cntryl_midge::{
+    Engine, MidgeError, OpenOptions, RecoveryPolicy, TransactionMode, WriteOptions,
+};
+use tempfile::TempDir;
 
 // ============================================================================
 // WAL RECOVERY TESTS
@@ -432,16 +435,244 @@ fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
 }
 
 // ============================================================================
-// PHASE 0 GUARDRAILS - CLOUDFIRST BACKPRESSURE
+// PHASE 0 GUARDRAILS - CloudAsync BACKPRESSURE
 // ============================================================================
 
-// Phase 0 Guardrail #1: CloudFirst write rejection on backpressure
+// Phase 0 Guardrail #1: CloudAsync write rejection on backpressure
 //
-// Validates that CloudFirst mode returns WriteStall error when
+// Validates that CloudAsync mode returns WriteStall error when
 // pending cloud write queue reaches capacity (100k entries).
 //
 // NOTE: This functionality is validated via internal unit tests:
 // 1. WalActor unit tests in src/runtime/actors/wal.rs
 // 2. CloudWriteQueue unit tests in src/runtime/actors/cloud_write_queue.rs
 // 3. Internal integration tests with mock cloud backends
-// (CloudFirst durability policy is not exposed in public API)
+// (CloudAsync durability policy is not exposed in public API)
+
+// ============================================================================
+// LOCAL TRUST-BOUNDARY TESTS
+// ============================================================================
+
+#[test]
+fn should_restore_committed_write_given_local_restart_when_sync_commit_returned() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+
+    {
+        let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+        let cf = engine.create_column_family("trust").expect("create cf");
+
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin write tx");
+        tx.put(b"committed".to_vec(), b"value".to_vec(), None)
+            .expect("put committed key");
+        engine
+            .commit(tx, WriteOptions::sync())
+            .expect("sync commit must succeed");
+    }
+
+    // Act
+    let reopened = Engine::open(OpenOptions::local(db_path).build()).expect("reopen engine");
+    let cf = reopened.get_column_family("trust").expect("get trust cf");
+
+    // Assert
+    let tx = reopened
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin read tx");
+    assert_eq!(
+        tx.get(b"committed").expect("get committed key"),
+        Some(Bytes::from_static(b"value"))
+    );
+}
+
+#[test]
+fn should_keep_valid_prefix_given_truncated_wal_tail_when_reopening_in_strict_mode() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+
+    {
+        let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+        let cf = engine.create_column_family("trust").expect("create cf");
+
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin prefix tx");
+        tx.put(b"prefix".to_vec(), b"value".to_vec(), None)
+            .expect("put prefix");
+        engine
+            .commit(tx, WriteOptions::sync())
+            .expect("sync prefix commit");
+
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin torn tx");
+        tx.put(b"torn".to_vec(), b"value".to_vec(), None)
+            .expect("put torn");
+        engine
+            .commit(tx, WriteOptions::sync())
+            .expect("sync torn commit");
+    }
+
+    truncate_last_bytes(&db_path.join("wal").join("wal.log"), 3);
+
+    // Act
+    let reopened = Engine::open(
+        OpenOptions::local(db_path)
+            .recovery_policy(RecoveryPolicy::Strict)
+            .build(),
+    )
+    .expect("strict recovery should keep valid truncated-tail prefix");
+    let cf = reopened.get_column_family("trust").expect("get trust cf");
+
+    // Assert
+    let tx = reopened
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin read tx");
+    assert_eq!(
+        tx.get(b"prefix").expect("get prefix"),
+        Some(Bytes::from_static(b"value"))
+    );
+    assert_eq!(tx.get(b"torn").expect("get torn key"), None);
+}
+
+#[test]
+fn should_fail_strict_but_salvage_valid_prefix_given_corrupted_first_wal_frame_when_reopening() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+
+    {
+        let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+        let cf = engine.create_column_family("trust").expect("create cf");
+
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin write tx");
+        tx.put(b"first".to_vec(), b"value".to_vec(), None)
+            .expect("put first");
+        engine
+            .commit(tx, WriteOptions::sync())
+            .expect("sync commit");
+    }
+
+    corrupt_byte(&db_path.join("wal").join("wal.log"), 4);
+
+    // Act
+    let strict_error = match Engine::open(
+        OpenOptions::local(db_path)
+            .recovery_policy(RecoveryPolicy::Strict)
+            .build(),
+    ) {
+        Ok(_) => panic!("strict recovery must reject corruption at byte zero frame"),
+        Err(error) => error,
+    };
+
+    let salvaged = Engine::open(
+        OpenOptions::local(db_path)
+            .recovery_policy(RecoveryPolicy::Salvage)
+            .build(),
+    )
+    .expect("salvage recovery should preserve valid prefix if possible");
+
+    // Assert
+    match strict_error {
+        MidgeError::RecoveryFailed(message) | MidgeError::Corruption(message) => {
+            assert!(
+                message.to_ascii_lowercase().contains("crc")
+                    || message.to_ascii_lowercase().contains("corrupt"),
+                "unexpected strict recovery error: {message}"
+            );
+        }
+        other => panic!("expected corruption-oriented error, got {other}"),
+    }
+
+    let cf = salvaged.get_column_family("trust").expect("get trust cf");
+    let tx = salvaged
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin salvage read tx");
+    assert_eq!(tx.get(b"first").expect("get first"), None);
+}
+
+#[test]
+fn should_drop_partial_wal_entry_given_manual_tail_append_when_reopening_in_salvage_mode() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+
+    {
+        let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+        let cf = engine.create_column_family("trust").expect("create cf");
+
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin complete tx");
+        tx.put(b"complete".to_vec(), b"value".to_vec(), None)
+            .expect("put complete");
+        engine
+            .commit(tx, WriteOptions::sync())
+            .expect("sync complete commit");
+    }
+
+    append_partial_frame_bytes(&db_path.join("wal").join("wal.log"));
+
+    // Act
+    let reopened = Engine::open(
+        OpenOptions::local(db_path)
+            .recovery_policy(RecoveryPolicy::Salvage)
+            .build(),
+    )
+    .expect("salvage recovery should discard partial entry");
+    let cf = reopened.get_column_family("trust").expect("get trust cf");
+
+    // Assert
+    let tx = reopened
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin read tx");
+    assert_eq!(
+        tx.get(b"complete").expect("get complete"),
+        Some(Bytes::from_static(b"value"))
+    );
+    assert_eq!(tx.get(b"partial").expect("get partial"), None);
+}
+
+fn truncate_last_bytes(path: &std::path::Path, byte_count: u64) {
+    let metadata = std::fs::metadata(path).expect("wal metadata");
+    let new_len = metadata.len().saturating_sub(byte_count);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open wal for truncation");
+    file.set_len(new_len).expect("truncate wal");
+}
+
+fn corrupt_byte(path: &std::path::Path, offset: u64) {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .expect("open wal for corruption");
+    file.seek(SeekFrom::Start(offset)).expect("seek wal");
+    let mut byte = [0u8; 1];
+    file.read_exact(&mut byte).expect("read byte");
+    file.seek(SeekFrom::Start(offset)).expect("seek wal");
+    file.write_all(&[byte[0] ^ 0x5a])
+        .expect("write corrupt byte");
+    file.sync_all().expect("sync corrupt wal");
+}
+
+fn append_partial_frame_bytes(path: &std::path::Path) {
+    use std::io::Write;
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("open wal for append");
+    file.write_all(&[0x34, 0x12, 0x00])
+        .expect("append partial frame");
+    file.sync_all().expect("sync partial frame");
+}

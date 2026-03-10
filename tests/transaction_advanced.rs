@@ -133,22 +133,18 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
             }
         }
 
-        // Act: Phase 2 - Delete range in transaction
+        // Act: Phase 2 - Delete range as a standalone CF-scoped operation
         {
             let engine = open_with_mode(opts_clone.clone(), mode);
             let cf = engine.get_column_family("test").expect("get cf");
-
-            let mut tx = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-                .expect("begin_tx");
-            tx.delete_range(
-                b"key3".to_vec(),
-                b"key7".to_vec(), // [key3, key7)
-            )
-            .expect("delete_range");
             engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .expect("commit");
+                .delete_range(
+                    &cf,
+                    b"key3".to_vec(),
+                    b"key7".to_vec(), // [key3, key7)
+                    cntryl_midge::WriteOptions::buffered(),
+                )
+                .expect("delete_range");
             // crash simulation
         }
 

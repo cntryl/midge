@@ -456,7 +456,7 @@ echo $AWS_SECRET_ACCESS_KEY
 aws s3api head-bucket --bucket my-bucket --region us-east-1
 ```
 
-**Note:** Cloud mode is production-ready. See [../operations/cloud-setup.md](../operations/cloud-setup.md) for configuration details.
+**Note:** Cloud mode is still pre-1.0. See [../operations/cloud-setup.md](../operations/cloud-setup.md) for configuration details and [../development/stability-policy.md](../development/stability-policy.md) for current compatibility expectations.
 
 ---
 

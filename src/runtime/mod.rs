@@ -93,6 +93,15 @@ pub(crate) fn next_request_id() -> MidgeResult<u64> {
 
 use serde::{Deserialize, Serialize};
 
+/// Crash-recovery phase marker for publish workflows.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PublicationPhase {
+    /// Output files are durable, but the manifest journal has not been made authoritative yet.
+    OutputDurable,
+    /// The manifest journal now reflects the new state; replay may finalize cleanup idempotently.
+    ManifestPublished,
+}
+
 /// Simplified compaction plan for message passing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionPlan {
@@ -155,12 +164,26 @@ pub enum IntentLogEntry {
         input_files: Vec<String>,
         output_level: u32,
     },
+    /// Flush output SST is durable and awaiting publication cleanup.
+    FlushPublish {
+        phase: PublicationPhase,
+        cf_id: crate::engine::ColumnFamilyId,
+        sequence: u64,
+        file_meta: FileMeta,
+    },
+    /// Compaction output SSTs are durable and awaiting publication cleanup.
+    CompactionPublish {
+        phase: PublicationPhase,
+        cf_id: crate::engine::ColumnFamilyId,
+        removed: Vec<String>,
+        added: Vec<FileMeta>,
+    },
     /// Manifest updated with new SST
     SstAdded { file_meta: FileMeta },
     /// Manifest updated after compaction
     CompactionApplied {
         removed: Vec<String>,
-        added: Vec<String>,
+        added: Vec<FileMeta>,
     },
     /// WAL segment synced
     WalSynced { segment_id: u64, seqno: u64 },
@@ -200,6 +223,9 @@ pub enum RuntimeMsg {
         request_id: u64,
         input_ssts: Vec<String>,
         output_ssts: Vec<String>,
+        cf_id: crate::engine::ColumnFamilyId,
+        target_level: u32,
+        succeeded: bool,
     },
 
     // === WAL Actor ===
@@ -219,6 +245,7 @@ pub enum RuntimeMsg {
         cf_id: crate::engine::ColumnFamilyId,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
+        durability_policy: Option<DurabilityPolicy>,
     },
 
     /// Apply a transaction as a single atomic unit.
@@ -236,6 +263,12 @@ pub enum RuntimeMsg {
     WalSync { request_id: u64 },
     /// Rotate WAL segment.
     WalRotate { request_id: u64 },
+    /// Force-seal the current WAL segment for cloud upload and optionally wait for cloud durability.
+    SealWalForCloud {
+        request_id: u64,
+        sequence: u64,
+        wait_for_ack: bool,
+    },
     /// WAL sync completed.
     WalSyncComplete { request_id: u64, segment_id: u64 },
 
@@ -336,6 +369,15 @@ pub enum RuntimeMsg {
     /// Get read amplification metrics snapshot.
     GetReadAmpMetrics { request_id: u64 },
 
+    /// Get startup recovery metrics snapshot.
+    GetRecoveryMetrics { request_id: u64 },
+
+    /// Get a stable runtime metrics snapshot for operators.
+    GetRuntimeMetrics { request_id: u64 },
+
+    /// Get a stable storage layout snapshot for operators.
+    GetStorageLayout { request_id: u64 },
+
     // === Sequencing ===
     /// Get the runtime's authoritative current sequence number.
     ///
@@ -414,6 +456,7 @@ impl RuntimeMsg {
             | ApplyTransaction { request_id, .. }
             | WalSync { request_id }
             | WalRotate { request_id }
+            | SealWalForCloud { request_id, .. }
             | WalSyncComplete { request_id, .. }
             | CloudUploadSst { request_id, .. }
             | CloudUploadWal { request_id, .. }
@@ -428,6 +471,9 @@ impl RuntimeMsg {
             | Read { request_id, .. }
             | RangeScan { request_id, .. }
             | GetReadAmpMetrics { request_id }
+            | GetRecoveryMetrics { request_id }
+            | GetRuntimeMetrics { request_id }
+            | GetStorageLayout { request_id }
             | GetCurrentSequence { request_id }
             | CaptureReadSnapshot { request_id, .. }
             | BeginTransaction { request_id, .. }
@@ -461,6 +507,7 @@ impl RuntimeMsg {
             ApplyTransaction { .. } => "ApplyTransaction",
             WalSync { .. } => "WalSync",
             WalRotate { .. } => "WalRotate",
+            SealWalForCloud { .. } => "SealWalForCloud",
             WalSyncComplete { .. } => "WalSyncComplete",
             CloudUploadSst { .. } => "CloudUploadSst",
             CloudUploadWal { .. } => "CloudUploadWal",
@@ -475,6 +522,9 @@ impl RuntimeMsg {
             Read { .. } => "Read",
             RangeScan { .. } => "RangeScan",
             GetReadAmpMetrics { .. } => "GetReadAmpMetrics",
+            GetRecoveryMetrics { .. } => "GetRecoveryMetrics",
+            GetRuntimeMetrics { .. } => "GetRuntimeMetrics",
+            GetStorageLayout { .. } => "GetStorageLayout",
             GetCurrentSequence { .. } => "GetCurrentSequence",
             CaptureReadSnapshot { .. } => "CaptureReadSnapshot",
             BeginTransaction { .. } => "BeginTransaction",
@@ -559,6 +609,26 @@ pub enum RuntimeResponse {
         block_budget_violation_rate: f64,
     },
 
+    RecoveryMetricsSnapshot {
+        request_id: u64,
+        wal_recovery_records_replayed: u64,
+        wal_recovery_bytes_replayed: u64,
+        intent_log_replay_runs: u64,
+        intent_log_entries_replayed: u64,
+    },
+
+    /// Stable operator-facing runtime metrics snapshot.
+    RuntimeMetricsSnapshot {
+        request_id: u64,
+        snapshot: crate::engine::RuntimeMetricsSnapshot,
+    },
+
+    /// Stable operator-facing storage layout snapshot.
+    StorageLayoutSnapshot {
+        request_id: u64,
+        snapshot: crate::engine::StorageLayoutSnapshot,
+    },
+
     /// Current authoritative runtime sequence.
     CurrentSequence {
         request_id: u64,
@@ -574,7 +644,7 @@ pub enum RuntimeResponse {
     /// Combined response for BeginTransaction: sequence + snapshot in one round-trip.
     BeginTransactionResult {
         request_id: u64,
-        /// Start sequence for the transaction (current_sequence + 1).
+        /// Start sequence for the transaction (current committed sequence).
         start_sequence: u64,
         /// Immutable read snapshot (None if the CF doesn't exist).
         snapshot: Option<Arc<super::runtime::read_snapshot::ReadSnapshot>>,
@@ -615,6 +685,9 @@ impl RuntimeResponse {
             | RuntimeResponse::CompactionComplete { request_id, .. }
             | RuntimeResponse::ColumnFamilyCreated { request_id, .. }
             | RuntimeResponse::ReadAmpMetricsSnapshot { request_id, .. }
+            | RuntimeResponse::RecoveryMetricsSnapshot { request_id, .. }
+            | RuntimeResponse::RuntimeMetricsSnapshot { request_id, .. }
+            | RuntimeResponse::StorageLayoutSnapshot { request_id, .. }
             | RuntimeResponse::CurrentSequence { request_id, .. }
             | RuntimeResponse::ReadSnapshot { request_id, .. }
             | RuntimeResponse::BeginTransactionResult { request_id, .. }
@@ -732,7 +805,7 @@ impl RuntimeHandle {
 
         // Block waiting for the single response.
         // If debug-wait mode is enabled, emit a periodic warning to help
-        // diagnose hangs (e.g., CloudFirst waiting on CloudAck).
+        // diagnose hangs (e.g., CloudAsync waiting on CloudAck).
         if std::env::var_os("MIDGE_DEBUG_WAIT").is_some() {
             let mut waited = std::time::Duration::from_secs(0);
             loop {

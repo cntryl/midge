@@ -7,4 +7,4 @@ pub mod factory_io;
 pub mod reader_io;
 
 pub use factory_io::FsSstFactoryIo;
-pub use reader_io::SstFileIo;
+pub use reader_io::{SstFileIo, SstFileSummary};

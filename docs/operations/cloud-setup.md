@@ -2,9 +2,9 @@
 
 Guide to Midge's cloud storage architecture and implementation status.
 
-> **STATUS: Production Ready**
+> **STATUS: Pre-1.0**
 >
-> Midge supports cloud storage as a production-ready durability target. Cloud storage integration is fully implemented for AWS S3, Azure Blob, and Google Cloud Storage with local caching. The hybrid storage architecture (local cache + cloud backend) is tested and suitable for production cloud-native deployments.
+> Midge supports cloud storage as a pre-1.0 durability target with local caching. Cloud storage integration exists for AWS S3, Azure Blob, and Google Cloud Storage, but compatibility and operational guarantees are still being tightened before 1.0. Review the stability policy and validate recovery behavior for your workload before depending on cloud mode in production.
 
 ## Table of Contents
 
@@ -21,11 +21,11 @@ Guide to Midge's cloud storage architecture and implementation status.
 
 ## Cloud Storage Features
 
-Midge provides production-ready cloud storage integration with the following capabilities:
+Midge provides cloud storage integration with the following capabilities:
 
 ✅ **Hybrid storage architecture** - Local cache + cloud backend for optimal performance  
 ✅ **Multiple cloud providers** - AWS S3, Azure Blob, Google Cloud Storage, Cloudflare R2, MinIO  
-✅ **CloudFirst durability** - WAL upload pipeline with acknowledgment guarantees  
+✅ **Cloud-backed async durability** - Local visibility plus asynchronous cloud WAL upload  
 ✅ **Automatic credential management** - Environment-based credential discovery  
 ✅ **Consistent API** - Same operations across all storage modes  
 ✅ **Performance optimization** - Smart caching, prefetching, and batching
@@ -98,19 +98,17 @@ The core hybrid storage model is **fully implemented** and tested. This architec
 - REST API clients with native authentication
 - All use `CloudBackend` trait for uniformity
 
-### CloudFirst Durability Policy
+### Cloud-Backed Async Durability
 
-When `Storage::Cloud` is used, the engine automatically uses **CloudFirst durability**:
+When `Storage::Cloud` is used, the engine automatically uses cloud-backed async WAL durability:
 
 1. Write to local WAL segment
-2. Enqueue segment for cloud upload
-3. Cloud upload completes → emit `CloudAck` event
-4. Runtime receives `CloudAck` → apply to memtable
-5. Data becomes visible to reads
+2. Apply the write to the memtable after the local append barrier
+3. Enqueue the WAL segment for cloud upload
+4. Cloud upload completes → advance the cloud durability frontier
+5. `cloud_strict()` callers wait for that frontier before returning
 
-**Correctness guarantee:** No write is visible until cloud upload succeeds.
-
-**Correctness guarantee:** No write is visible until cloud upload succeeds.
+**Correctness guarantee:** Ordinary cloud-backed commits become visible after the local WAL append barrier, but they are not cloud-durable until upload completes. Use `cloud_strict()` when the caller must wait for cloud durability explicitly.
 
 This is the same durability model used by modern cloud-native databases (Neon, PlanetScale, CockroachDB).
 
@@ -504,11 +502,11 @@ let hybrid = HybridStorage::new(local_backend, Arc::new(mock));
 
 ## Next Steps
 
-**For production deployments today:**
+**For the most conservative deployments today:**
 
 - Use `Storage::Local` with persistent disk
 - Standard filesystem-based durability
-- Well-tested and production-ready
+- Most mature deployment path in the current 0.1 release line
 
 **For cloud storage development:**
 
@@ -520,4 +518,5 @@ let hybrid = HybridStorage::new(local_backend, Arc::new(mock));
 
 - [Architecture](../development/architecture.md) - System design and layer structure
 - [Durability](../user-guides/durability.md) - Durability guarantees and WAL replay
+- [Stability Policy](../development/stability-policy.md) - Pre-1.0 compatibility and upgrade expectations
 - [API Guide](../user-guides/api-guide.md) - Public API surface and usage patterns

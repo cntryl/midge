@@ -23,7 +23,11 @@ All database operations start with `Engine::open()`:
 ```rust
 use cntryl_midge::{Engine, OpenOptions};
 
-let engine = Engine::open(OpenOptions::local("./mydb").build())?;
+let engine = Engine::open(
+    OpenOptions::local("./mydb")
+        .recovery_policy(RecoveryPolicy::Strict)
+        .build()
+)?;
 ```
 
 ### Configuration
@@ -35,6 +39,7 @@ let opts = OpenOptions::local("./mydb")
     .goal(Goal::Throughput)           // Latency | Throughput | Economy
     .memory_budget(MemoryBudget::Auto) // Auto derives from system limits; or Bytes(512_000_000)
     .workload(WorkloadProfile::Mixed)  // ReadMostly | WriteHeavy | Mixed | RangeScan
+    .recovery_policy(RecoveryPolicy::Strict) // Strict (default) | Salvage
     .build();
 
 let engine = Engine::open(opts)?;
@@ -45,6 +50,7 @@ let engine = Engine::open(opts)?;
 - `goal`: Optimization target (affects block sizes, compaction triggers)
 - `memory_budget`: Total memory (Auto = ~50% of effective memory limit; cgroup-aware when available)
 - `workload`: Access pattern hint (affects cache allocation, bloom filters)
+- `recovery_policy`: `Strict` fails open on untrustworthy manifest/intent/WAL state; `Salvage` keeps only the valid prefix and reports degraded health
 
 All low-level parameters are derived automatically from these high-level knobs.
 
@@ -258,6 +264,8 @@ engine.commit(tx, WriteOptions::buffered())?;
 
 **Guarantees:** Visible immediately. Durable after background group commit. May lose <1s of writes on crash.
 
+`buffered()` only returns after the local WAL append barrier succeeds, so acknowledged writes are in `wal.log` before the call returns. Durability still waits for the later fsync barrier.
+
 **Use for:** General workloads, high throughput. ~100x faster than `sync()`.
 
 ### best_effort()
@@ -286,9 +294,11 @@ engine.flush_cf(&cf)?;
 // Now switch to buffered() or sync() for real workload
 ```
 
+`flush_cf()` is a restart-safe publish barrier. If it returns `Ok(())`, the flushed data is durably published into SST state and recovered on restart.
+
 ### cloud_strict()
 
-Forces WAL upload, blocks until complete. Write is durable in cloud when call returns.
+Blocks until the cloud durability frontier covers the write. Ordinary cloud-backed commits become visible after the local WAL append barrier; `cloud_strict()` is only for callers that must wait for cloud durability before continuing.
 
 ```rust
 engine.commit(tx, WriteOptions::cloud_strict())?;
@@ -336,6 +346,8 @@ engine.flush_cf(&cf)?;
 
 **When:** Before shutdown, after `best_effort()` loads, before backups. (Automatic flushes happen when memtable is full.)
 
+**Guarantee:** On `Ok(())`, all data included in that flush is durably published and restart-safe.
+
 ### Compaction
 
 Trigger manual compaction:
@@ -368,6 +380,8 @@ Reopening recovers automatically:
 ```rust
 let engine = Engine::open(opts)?;  // Replays WAL, resumes from last checkpoint
 ```
+
+Strict recovery is the default. If recovery falls back to salvage mode, `engine.get_runtime_metrics()?.health` reports `EngineHealth::SalvageMode`.
 
 See [durability.md](durability.md) for details.
 
@@ -453,7 +467,16 @@ let opts = OpenOptions::local("./db")
 let metrics = engine.get_read_amp_metrics()?;
 println!("Avg SSTs per read: {}", metrics.avg_ssts_per_read);  // lower is better
 println!("L0 overlap rate: {}", metrics.l0_overlap_rate);      // higher = more compaction
+
+let runtime = engine.get_runtime_metrics()?;
+let layout = engine.get_storage_layout()?;
+let report = engine.verify_storage()?;
 ```
+
+- `get_runtime_metrics()` exposes health, WAL frontiers, memtable usage, compaction counters, and WAL latency totals.
+- `get_storage_layout()` exposes published SST metadata grouped by level plus active snapshot pins.
+- `verify_storage()` runs a strict, non-mutating verification pass over manifest, intent log, WAL, and SST files.
+- Offline verification is also available through `midge verify <db-path>`.
 
 ### Performance Tuning
 

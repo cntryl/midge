@@ -11,7 +11,7 @@
 //!
 //! Most tests run on all storage modes to validate cross-platform consistency.
 //! Some intentionally exclude cloud mode when the invariant is not meaningful
-//! under CloudFirst durability semantics.
+//! under CloudAsync durability semantics.
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
@@ -342,7 +342,7 @@ fn should_handle_tombstone_accumulation_when_many_deletes_create_tombstones() {
 }
 
 #[test]
-fn should_batch_concurrent_puts_when_cloudfirst_mode() {
+fn should_batch_concurrent_puts_when_cloud_async_mode() {
     // Arrange
     for_each_storage_mode(&["cloud"], |mode, opts| {
         let cloud_wal_dir = match &opts.storage_mode {

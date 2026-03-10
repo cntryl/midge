@@ -9,15 +9,16 @@
 //!    - Local + cloud merging/fallback
 //!    - Cloud writes only for sst/ prefix
 //!
-//! 2. WAL DURABILITY PIPELINE (CloudFirst mode):
+//! 2. WAL DURABILITY PIPELINE (CloudAsync mode):
 //!    - enqueue_wal_segment() - queue WAL for cloud upload
 //!    - process_uploads() - initiate cloud uploads
 //!    - poll() - retrieve CloudAck/CloudFail events
 //!    - NEVER uses submit_write() for WAL
 //!
 //! WAL Flow:
-//!   WalActor → local write → enqueue_wal_segment() → process_uploads() →
-//!   cloud backend → CloudAck event → WalActor applies to memtable
+//!   WalActor → local append barrier → memtable visibility →
+//!   enqueue_wal_segment() → process_uploads() → cloud backend →
+//!   CloudAck event → WalActor advances cloud durability bookkeeping
 //!
 //! SST Flow:
 //!   Engine → submit_write() → local write + cloud write (if sst/) → done
@@ -58,7 +59,7 @@ pub struct UploadState {
 /// Managed by a Storage Budget Actor to enforce disk constraints, watermarks,
 /// and coordination between local caching and cloud durability.
 ///
-/// CloudFirst Durability:
+/// CloudAsync Durability:
 /// - Tracks pending WAL segment uploads
 /// - Emits CloudAck when cloud confirms durability
 /// - Handles retries and failure reporting
@@ -69,7 +70,7 @@ pub struct HybridStorage {
     cloud: Arc<dyn StorageBackend>,
     /// Storage Budget Actor for disk management
     budget_actor: Arc<Mutex<actor::StorageBudgetActor>>,
-    /// Pending WAL segment uploads (CloudFirst mode)
+    /// Pending WAL segment uploads (CloudAsync mode)
     upload_queue: Arc<Mutex<VecDeque<UploadState>>>,
     /// Completed events ready for polling
     event_queue: Arc<Mutex<VecDeque<StorageEvent>>>,
@@ -130,7 +131,7 @@ impl HybridStorage {
 
         // Single background worker for WAL uploads.
         // This avoids spawning one OS thread per segment, which is extremely
-        // expensive under CloudFirst + synchronous write APIs (e.g. 10k puts).
+        // expensive under CloudAsync + synchronous write APIs (e.g. 10k puts).
         let (wal_upload_tx, wal_upload_rx) = mpsc::channel::<UploadState>();
         let mut upload_worker_failed = false;
         let upload_worker_handle = {
@@ -144,14 +145,14 @@ impl HybridStorage {
                     while let Ok(upload) = wal_upload_rx.recv() {
                         let upload_start = Instant::now();
                         if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                            telemetry.metrics().record_cloudfirst_wal_upload_started();
+                            telemetry.metrics().record_cloud_async_wal_upload_started();
                         }
 
-                        if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some()
+                        if std::env::var_os("MIDGE_TRACE_CLOUD_ASYNC").is_some()
                             && upload.segment_id % 1000 == 0
                         {
                             eprintln!(
-                                "[midge] CloudFirst upload start: segment_id={} max_sequence={} path={:?}",
+                                "[midge] CloudAsync upload start: segment_id={} max_sequence={} path={:?}",
                                 upload.segment_id, upload.max_sequence, upload.local_path
                             );
                         }
@@ -174,6 +175,25 @@ impl HybridStorage {
                             telemetry.metrics().record_cloud_upload(bytes);
                         }
 
+                        let forced_failure =
+                            fail::eval("midge::cloud::inject_fail_wal_upload", |_| true)
+                                .unwrap_or(false);
+                        if forced_failure {
+                            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                                telemetry.metrics().record_cloud_async_wal_upload_failed();
+                            }
+                            let mut events = event_queue.lock();
+                            let fail = StorageEvent::CloudFail {
+                                segment_id: upload.segment_id,
+                                error: "failpoint: cloud WAL upload failed".to_string(),
+                            };
+                            events.push_back(fail.clone());
+                            if let Some(tx) = &external_event_tx {
+                                let _ = tx.send(fail);
+                            }
+                            continue;
+                        }
+
                         let (tx, rx) = std::sync::mpsc::channel();
                         let cloud_key = format!("wal/{}.wal", upload.segment_id);
                         cloud.submit_write(cloud_key, data, tx);
@@ -183,7 +203,7 @@ impl HybridStorage {
                                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                                     telemetry
                                         .metrics()
-                                        .record_cloudfirst_wal_upload_completed(upload_start.elapsed().as_micros() as u64);
+                                        .record_cloud_async_wal_upload_completed(upload_start.elapsed().as_micros() as u64);
                                 }
                                 let mut events = event_queue.lock();
                                 let ack = StorageEvent::CloudAck {
@@ -195,18 +215,18 @@ impl HybridStorage {
                                     let _ = tx.send(ack);
                                 }
 
-                                if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some()
+                                if std::env::var_os("MIDGE_TRACE_CLOUD_ASYNC").is_some()
                                     && upload.segment_id % 1000 == 0
                                 {
                                     eprintln!(
-                                        "[midge] CloudFirst upload ack: segment_id={} max_sequence={}",
+                                        "[midge] CloudAsync upload ack: segment_id={} max_sequence={}",
                                         upload.segment_id, upload.max_sequence
                                     );
                                 }
                             }
                             Ok(StorageEvent::WriteComplete { result, .. }) => {
                                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                                    telemetry.metrics().record_cloudfirst_wal_upload_failed();
+                                    telemetry.metrics().record_cloud_async_wal_upload_failed();
                                 }
                                 let error = match result {
                                     StorageOutcome::Err(e) => e,
@@ -264,7 +284,7 @@ impl HybridStorage {
         }
     }
 
-    /// Enqueue a WAL segment for cloud upload (CloudFirst mode)
+    /// Enqueue a WAL segment for cloud upload (CloudAsync mode)
     ///
     /// This is the WAL durability pipeline entry point.
     pub fn enqueue_wal_segment(&self, segment_id: u64, local_path: PathBuf, max_sequence: u64) {
@@ -285,7 +305,7 @@ impl HybridStorage {
             tracing::error!(
                 queue_size = queue.len(),
                 segment_id,
-                "CloudFirst WAL upload queue exceeded critical threshold (1000 segments); \
+                "CloudAsync WAL upload queue exceeded critical threshold (1000 segments); \
                  WAL generation rate may exceed cloud upload capacity. \
                  This may indicate misconfigured cloud credentials, network issues, or insufficient cloud throughput."
             );
@@ -294,7 +314,7 @@ impl HybridStorage {
             tracing::warn!(
                 queue_size = queue.len(),
                 segment_id,
-                "CloudFirst WAL upload queue growing; cloud uploads may be slow"
+                "CloudAsync WAL upload queue growing; cloud uploads may be slow"
             );
         }
 
@@ -378,6 +398,27 @@ impl HybridStorage {
 
             upload.status = UploadStatus::InFlight { started_at: now };
 
+            let forced_failure =
+                fail::eval("midge::cloud::inject_fail_wal_upload", |_| true).unwrap_or(false);
+            if forced_failure {
+                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                    telemetry.metrics().record_cloud_async_wal_upload_failed();
+                }
+
+                let fail = StorageEvent::CloudFail {
+                    segment_id: upload.segment_id,
+                    error: "failpoint: cloud WAL upload failed".to_string(),
+                };
+                {
+                    let mut events = self.event_queue.lock();
+                    events.push_back(fail.clone());
+                }
+                if let Some(tx) = &self.external_event_tx {
+                    let _ = tx.send(fail);
+                }
+                continue;
+            }
+
             // Send to the dedicated worker; avoid per-upload thread spawn.
             // If worker failed to spawn, perform inline upload as fallback.
             if self.upload_worker_failed {
@@ -429,14 +470,14 @@ impl HybridStorage {
     fn process_upload_inline(&self, upload: UploadState) {
         let upload_start = Instant::now();
         if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-            telemetry.metrics().record_cloudfirst_wal_upload_started();
+            telemetry.metrics().record_cloud_async_wal_upload_started();
         }
 
-        if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some()
+        if std::env::var_os("MIDGE_TRACE_CLOUD_ASYNC").is_some()
             && upload.segment_id.is_multiple_of(1000)
         {
             eprintln!(
-                "[midge] CloudFirst inline upload start: segment_id={} max_sequence={} path={:?}",
+                "[midge] CloudAsync inline upload start: segment_id={} max_sequence={} path={:?}",
                 upload.segment_id, upload.max_sequence, upload.local_path
             );
         }
@@ -466,6 +507,26 @@ impl HybridStorage {
             telemetry.metrics().record_cloud_upload(bytes);
         }
 
+        let forced_failure =
+            fail::eval("midge::cloud::inject_fail_wal_upload", |_| true).unwrap_or(false);
+        if forced_failure {
+            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                telemetry.metrics().record_cloud_async_wal_upload_failed();
+            }
+            let mut events = self.event_queue.lock();
+            events.push_back(StorageEvent::CloudFail {
+                segment_id: upload.segment_id,
+                error: "failpoint: cloud WAL upload failed".to_string(),
+            });
+            if let Some(tx) = &self.external_event_tx {
+                let _ = tx.send(StorageEvent::CloudFail {
+                    segment_id: upload.segment_id,
+                    error: "failpoint: cloud WAL upload failed".to_string(),
+                });
+            }
+            return;
+        }
+
         // Submit to cloud backend
         let (tx, rx) = std::sync::mpsc::channel();
         let cloud_key = format!("wal/{}.wal", upload.segment_id);
@@ -475,7 +536,7 @@ impl HybridStorage {
         match rx.recv() {
             Ok(StorageEvent::WriteComplete { result, .. }) if result.is_ok() => {
                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                    telemetry.metrics().record_cloudfirst_wal_upload_completed(
+                    telemetry.metrics().record_cloud_async_wal_upload_completed(
                         upload_start.elapsed().as_micros() as u64,
                     );
                 }
@@ -489,18 +550,18 @@ impl HybridStorage {
                     let _ = tx.send(ack);
                 }
 
-                if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some()
+                if std::env::var_os("MIDGE_TRACE_CLOUD_ASYNC").is_some()
                     && upload.segment_id.is_multiple_of(1000)
                 {
                     eprintln!(
-                        "[midge] CloudFirst inline upload ack: segment_id={} max_sequence={}",
+                        "[midge] CloudAsync inline upload ack: segment_id={} max_sequence={}",
                         upload.segment_id, upload.max_sequence
                     );
                 }
             }
             Ok(StorageEvent::WriteComplete { result, .. }) => {
                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                    telemetry.metrics().record_cloudfirst_wal_upload_failed();
+                    telemetry.metrics().record_cloud_async_wal_upload_failed();
                 }
                 let error = match result {
                     StorageOutcome::Err(e) => e,
@@ -574,6 +635,76 @@ impl HybridStorage {
     /// Get count of pending uploads (for monitoring)
     pub fn pending_upload_count(&self) -> usize {
         self.upload_queue.lock().len()
+    }
+
+    pub fn write_sst_object(
+        &self,
+        sst_name: &str,
+        data: Vec<u8>,
+    ) -> crate::common::MidgeResult<()> {
+        let key = format!("sst/{sst_name}");
+
+        let (tx_local, rx_local) = std::sync::mpsc::channel();
+        self.local.submit_write(key.clone(), data.clone(), tx_local);
+
+        let local_result = rx_local.recv().map_err(|_| {
+            crate::common::MidgeError::Internal(
+                "local SST cache write callback channel closed".to_string(),
+            )
+        })?;
+
+        match local_result {
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            } => {}
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            } => {
+                return Err(crate::common::MidgeError::Internal(format!(
+                    "local SST cache write failed: {error}"
+                )));
+            }
+            other => {
+                return Err(crate::common::MidgeError::Internal(format!(
+                    "unexpected local SST cache write response: {other:?}"
+                )));
+            }
+        }
+
+        let forced_failure =
+            fail::eval("midge::cloud::inject_fail_sst_upload", |_| true).unwrap_or(false);
+        if forced_failure {
+            return Err(crate::common::MidgeError::Internal(
+                "failpoint: cloud SST upload failed".to_string(),
+            ));
+        }
+
+        let (tx_cloud, rx_cloud) = std::sync::mpsc::channel();
+        self.cloud.submit_write(key, data, tx_cloud);
+
+        let cloud_result = rx_cloud.recv().map_err(|_| {
+            crate::common::MidgeError::Internal(
+                "cloud SST upload callback channel closed".to_string(),
+            )
+        })?;
+
+        match cloud_result {
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            } => Ok(()),
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            } => Err(crate::common::MidgeError::Internal(format!(
+                "cloud SST upload failed: {error}"
+            ))),
+            other => Err(crate::common::MidgeError::Internal(format!(
+                "unexpected cloud SST upload response: {other:?}"
+            ))),
+        }
     }
 }
 

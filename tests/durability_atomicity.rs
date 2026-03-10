@@ -1,11 +1,12 @@
-//! Manifest Atomicity Tests
+//! Manifest Visibility And Reopen Consistency Tests
 //!
-//! Tests manifest atomicity and consistency guarantees, ensuring:
-//! - SST files are not exposed without manifest entries
-//! - Manifest updates are atomic (all-or-nothing)
-//! - WAL precedence when manifest lags behind recovery
-//! - Orphan file cleanup after failures
-//! - No data loss during concurrent flush/manifest operations
+//! Tests visibility and ordering semantics after successful writes, flushes,
+//! and compaction-related operations followed by reopen.
+//! Coverage in this file is limited to normal process teardown via `drop`:
+//! - WAL and SST visibility after reopen
+//! - Tombstone replay over older persisted values
+//! - Data visibility after successful flush/compaction-adjacent operations
+//! - An in-memory transaction atomicity guardrail for concurrent reads
 //!
 //! **Storage Modes**: LocalDisk + CloudBacked ONLY (requires persistence)
 //!
@@ -45,7 +46,7 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
             tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
                 .expect("put");
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
-            // Crash before manifest is updated with new SST (orphan SST file)
+            // Engine is dropped after a flush and a later committed write
         }
 
         // Assert (Phase 2)
@@ -59,12 +60,16 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
                 .expect("begin_tx");
             assert!(tx.get(b"key1").expect("get").is_some(), "mode: {}", mode);
 
-            // key2 may or may not be visible depending on whether orphan SST was recovered
-            // But engine should not crash or corrupt data
+            // key2 should be readable from the later committed write on reopen
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
-            let _ = tx.get(b"key2").expect("get");
+            assert_eq!(
+                tx.get(b"key2").expect("get"),
+                Some(Bytes::from_static(b"value2")),
+                "mode: {}",
+                mode
+            );
         }
     });
 }
@@ -100,7 +105,7 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
                     .expect("put");
                 engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
-            // Crash before next flush
+            // Engine is dropped before a second flush occurs
         }
 
         // Assert (Phase 2)
@@ -159,7 +164,7 @@ fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
             tx.put(b"key".to_vec(), b"value_new".to_vec(), None)
                 .expect("put");
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
-            // Crash before flush (WAL has new value)
+            // Engine is dropped before flushing the newer WAL value
         }
 
         // Assert (Phase 2)
@@ -182,7 +187,7 @@ fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
 }
 
 #[test]
-fn should_not_auto_claim_orphan_sst_given_sst_exists_when_manifest_behind() {
+fn should_apply_wal_tombstone_when_reopening_after_clean_shutdown() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         // Act (Phase 1)
@@ -205,7 +210,7 @@ fn should_not_auto_claim_orphan_sst_given_sst_exists_when_manifest_behind() {
                 .expect("begin_tx");
             tx.delete(b"key".to_vec()).expect("delete");
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
-            // Crash before tombstone is reflected in manifest
+            // Engine is dropped after the tombstone commit
         }
 
         // Assert (Phase 2)
@@ -213,14 +218,11 @@ fn should_not_auto_claim_orphan_sst_given_sst_exists_when_manifest_behind() {
             let engine = open_with_mode(opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
-            // Manifest authority: SST has value, but WAL has delete
-            // Recovery should respect WAL ordering
+            // The WAL tombstone should hide the older flushed value after reopen
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
-            let result = tx.get(b"key").expect("get");
-            // Result depends on WAL recovery order - just ensure no crash
-            let _ = result;
+            assert_eq!(tx.get(b"key").expect("get"), None, "mode: {}", mode);
         }
     });
 }
@@ -230,7 +232,7 @@ fn should_not_auto_claim_orphan_sst_given_sst_exists_when_manifest_behind() {
 // ============================================================================
 
 #[test]
-fn should_not_publish_sst_given_manifest_not_persisted_when_adding_sst() {
+fn should_preserve_data_visibility_when_reopening_after_successful_flush_and_clean_shutdown() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         // Act (Phase 1)
@@ -238,7 +240,7 @@ fn should_not_publish_sst_given_manifest_not_persisted_when_adding_sst() {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
-            // Flush (SST created, manifest update initiated)
+            // Flush the committed writes to persistent storage
             for i in 0..20 {
                 let key = format!("key_{:03}", i);
                 let mut tx = engine
@@ -250,7 +252,7 @@ fn should_not_publish_sst_given_manifest_not_persisted_when_adding_sst() {
             }
             engine.flush_cf(&cf).expect("flush");
 
-            // Immediately crash before manifest persist
+            // Engine is dropped after the successful flush
         }
 
         // Assert (Phase 2)
@@ -258,7 +260,7 @@ fn should_not_publish_sst_given_manifest_not_persisted_when_adding_sst() {
             let engine = open_with_mode(opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
-            // Data should still be visible (recovered from WAL or SST)
+            // Data should still be visible after the successful flush and reopen
             for i in 0..20 {
                 let key = format!("key_{:03}", i);
                 let tx = engine
@@ -310,7 +312,7 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
             for handle in handles {
                 handle.join().expect("thread join");
             }
-            // Crash during concurrent manifest updates
+            // Engine is dropped after all worker threads complete
         }
 
         // Assert (Phase 2)
@@ -337,7 +339,7 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
 }
 
 #[test]
-fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_manifest() {
+fn should_preserve_single_cf_data_when_reopening_after_flush() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         // Act (Phase 1)
@@ -345,7 +347,7 @@ fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_man
             let engine = open_with_mode(opts.clone(), mode);
             let cf_default = engine.create_column_family("test").expect("create cf");
 
-            // Write to default CF (simpler than multi-CF for now)
+            // Write to a single CF, then flush it
             for i in 0..5 {
                 let key = format!("key_{:02}", i);
                 let mut tx = engine
@@ -356,10 +358,10 @@ fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_man
                 engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
 
-            // Flush (concurrent manifest updates)
+            // Flush the CF
             engine.flush_cf(&cf_default).expect("flush");
 
-            // Crash during manifest sync
+            // Engine is dropped after the successful flush
         }
 
         // Assert (Phase 2)
@@ -367,7 +369,7 @@ fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_man
             let engine = open_with_mode(opts, mode);
             let cf_default = engine.create_column_family("test").expect("create cf");
 
-            // All data should be recoverable in order
+            // All data should be recoverable after reopen
             for i in 0..5 {
                 let key = format!("key_{:02}", i);
                 let tx = engine
@@ -384,7 +386,7 @@ fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_man
 }
 
 #[test]
-fn should_commit_ssts_manifest_together_given_compaction_success_when_completing() {
+fn should_preserve_data_when_reopening_after_flush_with_optional_compaction() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         // Act (Phase 1)
@@ -408,7 +410,7 @@ fn should_commit_ssts_manifest_together_given_compaction_success_when_completing
             }
             engine.flush_cf(&cf).expect("flush");
 
-            // Note: compaction may not trigger automatically, but if it does, crash during manifest update
+            // Compaction may or may not run automatically before shutdown
         }
 
         // Assert (Phase 2)
@@ -433,7 +435,7 @@ fn should_commit_ssts_manifest_together_given_compaction_success_when_completing
 }
 
 #[test]
-fn should_cleanup_partial_output_given_compaction_failure_when_recovering() {
+fn should_preserve_original_data_when_reopening_after_flush() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         // Act (Phase 1)
@@ -453,7 +455,7 @@ fn should_cleanup_partial_output_given_compaction_failure_when_recovering() {
             }
             engine.flush_cf(&cf).expect("flush");
 
-            // Crash (if compaction was in progress, partial output should be cleaned)
+            // Engine is dropped after the successful flush
         }
 
         // Assert (Phase 2)
@@ -478,7 +480,7 @@ fn should_cleanup_partial_output_given_compaction_failure_when_recovering() {
 }
 
 #[test]
-fn should_delete_old_ssts_only_after_manifest_persisted_when_compacting() {
+fn should_preserve_updated_values_when_reopening_after_multiple_flushes() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         // Act (Phase 1)
@@ -498,7 +500,7 @@ fn should_delete_old_ssts_only_after_manifest_persisted_when_compacting() {
             }
             engine.flush_cf(&cf).expect("flush");
 
-            // Overwrite (would trigger compaction)
+            // Overwrite the same keys and flush again
             for i in 0..15 {
                 let key = format!("old_{:02}", i);
                 let mut tx = engine
@@ -510,7 +512,7 @@ fn should_delete_old_ssts_only_after_manifest_persisted_when_compacting() {
             }
             engine.flush_cf(&cf).expect("flush");
 
-            // Crash before old SST cleanup
+            // Engine is dropped after the second successful flush
         }
 
         // Assert (Phase 2)
@@ -535,7 +537,7 @@ fn should_delete_old_ssts_only_after_manifest_persisted_when_compacting() {
 }
 
 #[test]
-fn should_not_recover_truncated_wal_append_given_truncate_fallback_when_reopening() {
+fn should_recover_valid_wal_records_when_reopening_after_clean_shutdown() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         // Act (Phase 1)
@@ -554,7 +556,7 @@ fn should_not_recover_truncated_wal_append_given_truncate_fallback_when_reopenin
                 engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
 
-            // Crash with truncated WAL append
+            // Engine is dropped after writing valid WAL records
         }
 
         // Assert (Phase 2)
@@ -562,19 +564,19 @@ fn should_not_recover_truncated_wal_append_given_truncate_fallback_when_reopenin
             let engine = open_with_mode(opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
-            // Valid records before truncation should be recovered
+            // Valid records should be recovered after reopen
             for i in 0..10 {
                 let key = format!("valid_{:02}", i);
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
-                assert!(
-                    tx.get(key.as_bytes()).expect("get").is_some(),
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("get"),
+                    Some(Bytes::from_static(b"value")),
                     "mode: {}",
                     mode
                 );
             }
-            // No crash on truncated tail
         }
     });
 }
@@ -628,7 +630,7 @@ fn should_evict_oldest_entries_when_idempotency_cache_exceeds_limit() {
 /// barrier implementation is internal to the runtime.
 #[test]
 fn should_maintain_atomicity_given_concurrent_reads_when_transaction_commits() {
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
     use std::thread;
 
     // Arrange: Create engine in memory mode
@@ -648,6 +650,10 @@ fn should_maintain_atomicity_given_concurrent_reads_when_transaction_commits() {
 
     // Act: Concurrently execute transaction and reads
     let engine_clone = Arc::clone(&engine);
+    let start_barrier = Arc::new(Barrier::new(2));
+    let release_barrier = Arc::new(Barrier::new(2));
+    let writer_start_barrier = Arc::clone(&start_barrier);
+    let writer_release_barrier = Arc::clone(&release_barrier);
 
     let tx_handle = thread::spawn(move || {
         // Update both keys in a transaction
@@ -660,14 +666,18 @@ fn should_maintain_atomicity_given_concurrent_reads_when_transaction_commits() {
         tx.put(b"key2".to_vec(), b"updated2".to_vec(), None)
             .expect("put2");
 
+        // Signal that both updates have been staged, then wait for the reader
+        writer_start_barrier.wait();
+        writer_release_barrier.wait();
+
         // Commit with buffered (batched) mode
         engine_clone
             .commit(tx, WriteOptions::buffered())
             .expect("commit");
     });
 
-    // Small delay to let transaction start
-    thread::sleep(std::time::Duration::from_millis(5));
+    // Wait until the writer has staged both updates but not yet committed them
+    start_barrier.wait();
 
     // Issue reads while transaction may be in progress
     let tx_read = engine
@@ -676,6 +686,9 @@ fn should_maintain_atomicity_given_concurrent_reads_when_transaction_commits() {
 
     let val1 = tx_read.get(b"key1").expect("get key1");
     let val2 = tx_read.get(b"key2").expect("get key2");
+
+    // Allow the writer to commit after the read snapshot is established
+    release_barrier.wait();
 
     // Wait for transaction to complete
     tx_handle.join().expect("tx thread");

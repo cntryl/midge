@@ -9,7 +9,7 @@
 //! • It must treat EOF mid-record as **corruption**, not success.
 //! • It must not assume the file ends cleanly.
 //! • It must use the canonical format:
-//!       `<u32 length prefix><encoded record bytes>`
+//!       `<u32 length prefix><u32 crc32c><encoded record bytes>`
 //! • It must NOT attempt to fix, truncate, or adjust the file.
 //! • It must update `current_pos` monotonically.
 
@@ -57,9 +57,6 @@ impl WalReader for FsWalReaderIo {
     /// - Ok(None) if clean EOF at `pos`
     /// - Err(Corruption) if EOF occurs mid-record
     fn read_at(&mut self, pos: WalPos) -> MidgeResult<Option<WalRecord>> {
-        // Guardrail: prevent pathological allocations on corrupted length prefixes.
-        const MAX_WAL_RECORD_LEN: u64 = 64 * 1024 * 1024; // 64 MiB
-
         // Open file in read-only mode
         let file = self.fs.open(
             &self.path,
@@ -85,29 +82,22 @@ impl WalReader for FsWalReaderIo {
                 pos, file_len
             )));
         }
-        if file_len.saturating_sub(pos) < 4 {
+        if file_len.saturating_sub(pos) < crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 {
             return Err(MidgeError::Corruption(format!(
-                "Incomplete WAL length prefix at pos {} (need 4 bytes, have {})",
+                "Incomplete WAL frame header at pos {} (need {} bytes, have {})",
                 pos,
+                crate::wal::frame::WAL_FRAME_HEADER_LEN,
                 file_len.saturating_sub(pos)
             )));
         }
 
-        // Read 4-byte length prefix
-        let len_bytes = file.read_at(pos, 4)?;
+        // Read 8-byte frame header: len + crc32c.
+        let header = file.read_at(pos, crate::wal::frame::WAL_FRAME_HEADER_LEN as u64)?;
+        let (len, expected_crc) = crate::wal::frame::decode_frame_header(&header[..])?;
 
-        let mut len_buf = [0u8; 4];
-        len_buf.copy_from_slice(&len_bytes[..4]);
-        let len = u32::from_le_bytes(len_buf) as u64;
-
-        if len > MAX_WAL_RECORD_LEN {
-            return Err(MidgeError::Corruption(format!(
-                "WAL record too large at pos {} (len={})",
-                pos, len
-            )));
-        }
-
-        let need_end = pos.saturating_add(4).saturating_add(len);
+        let need_end = pos
+            .saturating_add(crate::wal::frame::WAL_FRAME_HEADER_LEN as u64)
+            .saturating_add(len as u64);
         if need_end > file_len {
             return Err(MidgeError::Corruption(format!(
                 "Incomplete WAL record at pos {} (len={}, file_len={})",
@@ -116,8 +106,11 @@ impl WalReader for FsWalReaderIo {
         }
 
         // Read the encoded record bytes
-        let buf = file.read_at(pos + 4, len)?;
-        if buf.len() < len as usize {
+        let buf = file.read_at(
+            pos + crate::wal::frame::WAL_FRAME_HEADER_LEN as u64,
+            len as u64,
+        )?;
+        if buf.len() < len {
             return Err(MidgeError::Corruption(format!(
                 "Incomplete WAL record at pos {} (len={}, got={})",
                 pos,
@@ -126,9 +119,11 @@ impl WalReader for FsWalReaderIo {
             )));
         }
 
+        crate::wal::frame::verify_frame_crc(&buf[..len], expected_crc)?;
+
         // Decode the record
-        let record = encoding::decode(&buf[..len as usize])?;
-        self.current_pos = pos + 4 + len;
+        let record = encoding::decode(&buf[..len])?;
+        self.current_pos = pos + crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 + len as u64;
 
         Ok(Some(record))
     }

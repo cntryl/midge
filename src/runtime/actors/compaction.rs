@@ -35,7 +35,7 @@ impl CompactionActor {
     pub fn open_sst_reader(
         &self,
         path: &std::path::Path,
-    ) -> crate::common::MidgeResult<Box<dyn crate::sst::SstReader>> {
+    ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         self.sst_factory.open(path)
     }
 
@@ -69,9 +69,17 @@ impl CompactionActor {
             "Compaction check"
         );
 
-        // Try to pick a compaction for the default column family (cf_id=0)
-        let cf_id = 0u32;
-        self.compactor.pick_compaction(&state.manifest.files, cf_id)
+        let mut cf_ids: Vec<u32> = state.column_families.keys().copied().collect();
+        cf_ids.sort_unstable();
+
+        for cf_id in cf_ids {
+            if let Some(mut plan) = self.compactor.pick_compaction(&state.manifest.files, cf_id) {
+                plan.snapshot_horizon = state.oldest_active_snapshot_sequence();
+                return Some(plan);
+            }
+        }
+
+        None
     }
 
     /// Execute a compaction plan
@@ -85,10 +93,14 @@ impl CompactionActor {
         worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
     ) -> MidgeResult<Vec<String>> {
         if self.compaction_running {
-            return Err(crate::common::MidgeError::Internal(
-                "Compaction already in progress".to_string(),
+            return Err(crate::common::MidgeError::WriteStall(
+                "compaction already in progress".to_string(),
             ));
         }
+
+        // Invariant: input SSTs remain authoritative until runtime publishes a
+        // replacement manifest state. Worker output alone must never make reads
+        // switch to the new file set.
 
         self.compaction_running = true;
 
@@ -156,8 +168,8 @@ impl CompactionActor {
                         Some(&abort_check),
                     );
 
-                    let output_ssts = match result {
-                        Ok(v) => v,
+                    let (output_ssts, succeeded) = match result {
+                        Ok(v) => (v, true),
                         Err(e) => {
                             // Distinguish cooperative aborts due to ingest epoch changes
                             let s = e.to_string();
@@ -186,16 +198,16 @@ impl CompactionActor {
                                     "compaction worker aborted or failed"
                                 );
                             }
-                            Vec::new()
+                            (Vec::new(), false)
                         }
                     };
 
-                    output_ssts
+                    (output_ssts, succeeded)
                 }));
 
                 // Extract output_ssts, handling panic case
-                let output_ssts = match result {
-                    Ok(ssts) => ssts,
+                let (output_ssts, succeeded) = match result {
+                    Ok(result) => result,
                     Err(panic_info) => {
                         // Compaction thread panicked; log the panic and return empty output
                         tracing::error!(
@@ -205,7 +217,7 @@ impl CompactionActor {
                             panic_info = ?panic_info,
                             "compaction worker thread panicked; returning empty output to unblock event loop"
                         );
-                        Vec::new()
+                        (Vec::new(), false)
                     }
                 };
 
@@ -216,6 +228,9 @@ impl CompactionActor {
                     request_id: next_request_id().expect("request ID in compaction worker"),
                     input_ssts: input_files,
                     output_ssts,
+                    cf_id: plan_clone.cf_id,
+                    target_level: plan_clone.target_level,
+                    succeeded,
                 });
             });
 
@@ -262,6 +277,9 @@ impl CompactionActor {
         input_ssts: Vec<String>,
         output_ssts: Vec<String>,
     ) {
+        // Invariant: completion only clears in-memory "running" state. The
+        // actual authority switch happens when manifest publication removes the
+        // old SSTs and adds the replacement set.
         // Remove input files from compacting set
         state
             .compaction
@@ -291,6 +309,23 @@ impl Clone for CompactionActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_l0_file(
+        name: &str,
+        cf_id: u32,
+        smallest_key: &[u8],
+        largest_key: &[u8],
+    ) -> crate::metadata::FileMeta {
+        crate::metadata::FileMeta {
+            name: name.to_string(),
+            level: 0,
+            size_bytes: 1,
+            cf_id,
+            smallest_key: Some(smallest_key.to_vec()),
+            largest_key: Some(largest_key.to_vec()),
+            ..Default::default()
+        }
+    }
 
     fn create_test_compaction_actor() -> CompactionActor {
         // Use the modern io::Fs-backed factory
@@ -375,5 +410,64 @@ mod tests {
 
         // Assert
         assert!(!actor.compaction_running);
+    }
+
+    #[test]
+    fn should_pick_non_default_column_family_when_default_has_no_candidates() {
+        // Arrange
+        let mut actor = create_test_compaction_actor();
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.enable_compaction = true;
+        let cf_id = state
+            .create_cf("tenant_cf".to_string())
+            .expect("create non-default cf");
+
+        state.manifest.files.extend([
+            make_l0_file("cf1_0001.sst", cf_id, b"a00", b"a99"),
+            make_l0_file("cf1_0002.sst", cf_id, b"b00", b"b99"),
+            make_l0_file("cf1_0003.sst", cf_id, b"c00", b"c99"),
+            make_l0_file("cf1_0004.sst", cf_id, b"d00", b"d99"),
+        ]);
+
+        // Act
+        let plan = actor
+            .check_compaction(&state)
+            .expect("expected compaction plan for non-default cf");
+
+        // Assert
+        assert_eq!(plan.cf_id, cf_id);
+        assert_eq!(plan.source_level, 0);
+        assert_eq!(plan.target_level, 1);
+        assert_eq!(plan.input_files.len(), 4);
+    }
+
+    #[test]
+    fn should_pick_lowest_column_family_id_when_multiple_non_default_families_need_compaction() {
+        // Arrange
+        let mut actor = create_test_compaction_actor();
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.enable_compaction = true;
+        let cf1_id = state.create_cf("cf1".to_string()).expect("create cf1");
+        let cf2_id = state.create_cf("cf2".to_string()).expect("create cf2");
+
+        state.manifest.files.extend([
+            make_l0_file("cf1_0001.sst", cf1_id, b"a00", b"a99"),
+            make_l0_file("cf1_0002.sst", cf1_id, b"b00", b"b99"),
+            make_l0_file("cf1_0003.sst", cf1_id, b"c00", b"c99"),
+            make_l0_file("cf1_0004.sst", cf1_id, b"d00", b"d99"),
+            make_l0_file("cf2_0001.sst", cf2_id, b"m00", b"m99"),
+            make_l0_file("cf2_0002.sst", cf2_id, b"n00", b"n99"),
+            make_l0_file("cf2_0003.sst", cf2_id, b"o00", b"o99"),
+            make_l0_file("cf2_0004.sst", cf2_id, b"p00", b"p99"),
+        ]);
+
+        // Act
+        let plan = actor
+            .check_compaction(&state)
+            .expect("expected compaction plan when multiple cfs need work");
+
+        // Assert
+        assert_eq!(plan.cf_id, cf1_id);
+        assert!(plan.input_files.iter().all(|name| name.starts_with("cf1_")));
     }
 }

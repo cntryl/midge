@@ -54,12 +54,14 @@ fn should_delete_keys_in_range_given_delete_range_when_querying() {
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.delete_range(b"key2".to_vec(), b"key4".to_vec())
+        engine
+            .delete_range(
+                &cf,
+                b"key2".to_vec(),
+                b"key4".to_vec(),
+                WriteOptions::buffered(),
+            )
             .expect("delete_range");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert
         // Keys outside range should still exist
@@ -107,12 +109,14 @@ fn should_handle_empty_range_given_start_equals_end_when_delete_range() {
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.delete_range(b"key".to_vec(), b"key".to_vec())
+        engine
+            .delete_range(
+                &cf,
+                b"key".to_vec(),
+                b"key".to_vec(),
+                WriteOptions::buffered(),
+            )
             .expect("delete_range");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert
         // Empty range should not delete anything
@@ -144,13 +148,12 @@ fn should_accept_delete_range_call_with_valid_bounds_when_called() {
         }
 
         // Act
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        let result = tx.delete_range(b"key010".to_vec(), b"key090".to_vec());
-        if result.is_ok() {
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
-        }
+        let result = engine.delete_range(
+            &cf,
+            b"key010".to_vec(),
+            b"key090".to_vec(),
+            WriteOptions::buffered(),
+        );
 
         // Assert: delete_range should not error
         result.expect("delete_range should succeed in mode: {}");
@@ -173,12 +176,14 @@ fn should_delete_key_given_delete_range_with_single_key_when_matching() {
 
         // Act
         // Range [target, targetZ) includes target
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.delete_range(b"target".to_vec(), b"targetZ".to_vec())
+        engine
+            .delete_range(
+                &cf,
+                b"target".to_vec(),
+                b"targetZ".to_vec(),
+                WriteOptions::buffered(),
+            )
             .expect("delete_range");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert
         // Target should be deleted (in range)
@@ -223,12 +228,9 @@ fn should_handle_delete_range_after_put_when_interleaved() {
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.delete_range(b"a".to_vec(), b"c".to_vec())
+        engine
+            .delete_range(&cf, b"a".to_vec(), b"c".to_vec(), WriteOptions::buffered())
             .expect("delete_range");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
@@ -266,18 +268,22 @@ fn should_allow_multiple_delete_ranges_when_called_sequentially() {
         }
 
         // Act
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.delete_range(b"k03".to_vec(), b"k10".to_vec())
+        engine
+            .delete_range(
+                &cf,
+                b"k03".to_vec(),
+                b"k10".to_vec(),
+                WriteOptions::buffered(),
+            )
             .expect("delete_range1");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.delete_range(b"k15".to_vec(), b"k18".to_vec())
+        engine
+            .delete_range(
+                &cf,
+                b"k15".to_vec(),
+                b"k18".to_vec(),
+                WriteOptions::buffered(),
+            )
             .expect("delete_range2");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Assert: Keys in ranges should be deleted
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -330,12 +336,14 @@ fn should_persist_keys_across_delete_range_with_restart_when_durable() {
             tx.put(b"key3".to_vec(), b"val3".to_vec(), None)
                 .expect("put3");
             engine.commit(tx, WriteOptions::buffered()).unwrap();
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .unwrap();
-            tx.delete_range(b"key1".to_vec(), b"key3".to_vec())
+            engine
+                .delete_range(
+                    &cf,
+                    b"key1".to_vec(),
+                    b"key3".to_vec(),
+                    WriteOptions::buffered(),
+                )
                 .expect("delete_range");
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
             let _ = cf;
         }
 
@@ -390,18 +398,18 @@ fn should_handle_concurrent_delete_ranges_when_multiple_threads() {
         let mut handles = vec![];
         for thread_id in 0..5 {
             let engine_clone = engine.clone();
+            let cf_clone = cf.clone();
             let h = std::thread::spawn(move || {
-                let cf = engine_clone
-                    .create_column_family("test")
-                    .expect("create cf");
                 let start = format!("key{:03}", thread_id * 10);
                 let end = format!("key{:03}", (thread_id + 1) * 10);
-                let mut tx = engine_clone
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .unwrap();
-                tx.delete_range(start.as_bytes().to_vec(), end.as_bytes().to_vec())
+                engine_clone
+                    .delete_range(
+                        &cf_clone,
+                        start.as_bytes().to_vec(),
+                        end.as_bytes().to_vec(),
+                        WriteOptions::buffered(),
+                    )
                     .expect("delete_range");
-                engine_clone.commit(tx, WriteOptions::buffered()).unwrap();
             });
             handles.push(h);
         }
@@ -450,18 +458,18 @@ fn should_handle_concurrent_mixed_operations_when_put_delete_interleaved() {
         let mut del_handles = vec![];
         for i in 0..5 {
             let engine_clone = engine.clone();
+            let cf_clone = cf.clone();
             let h = std::thread::spawn(move || {
-                let cf = engine_clone
-                    .create_column_family("test")
-                    .expect("create cf");
                 let start = format!("k{:02}", i * 5);
                 let end = format!("k{:02}", (i + 1) * 5);
-                let mut tx = engine_clone
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .unwrap();
-                tx.delete_range(start.as_bytes().to_vec(), end.as_bytes().to_vec())
+                engine_clone
+                    .delete_range(
+                        &cf_clone,
+                        start.as_bytes().to_vec(),
+                        end.as_bytes().to_vec(),
+                        WriteOptions::buffered(),
+                    )
                     .expect("delete_range");
-                engine_clone.commit(tx, WriteOptions::buffered()).unwrap();
             });
             del_handles.push(h);
         }

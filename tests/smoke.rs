@@ -1,4 +1,4 @@
-﻿//! Smoke tests for Midge.
+//! Smoke tests for Midge.
 //!
 //! Purpose:
 //! - Validate core end-to-end invariants
@@ -15,7 +15,7 @@ use cntryl_midge::testkit::*;
 use cntryl_midge::Query;
 
 #[test]
-fn should_read_written_value_when_in_memory() {
+fn should_read_written_value_given_memory_mode_when_written() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -40,7 +40,7 @@ fn should_read_written_value_when_in_memory() {
 }
 
 #[test]
-fn should_read_written_value_after_flush() {
+fn should_read_written_value_given_flushed_value_when_read() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -67,7 +67,7 @@ fn should_read_written_value_after_flush() {
 }
 
 #[test]
-fn should_hide_value_when_deleted() {
+fn should_hide_value_given_deleted_key_when_read() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -100,7 +100,7 @@ fn should_hide_value_when_deleted() {
 }
 
 #[test]
-fn should_preserve_tombstone_when_flushed() {
+fn should_preserve_tombstone_given_flushed_tombstone_when_read() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -213,12 +213,12 @@ fn should_persist_tombstone_given_delete_when_restarted() {
 }
 
 #[test]
-fn should_maintain_isolation_given_snapshot_when_concurrent_writes() {
+fn should_allow_read_only_snapshot_given_committed_value_when_snapshot_reads() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
-    // Act - Create a snapshot (ReadOnly transaction) and verify it's usable for reads
+    // Act
     let mut tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .unwrap();
@@ -231,7 +231,7 @@ fn should_maintain_isolation_given_snapshot_when_concurrent_writes() {
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
 
-    // Assert - Snapshot should be able to read existing value
+    // Assert
     let snap_value = snapshot.get(b"key").expect("get");
     assert_eq!(
         snap_value,
@@ -239,7 +239,6 @@ fn should_maintain_isolation_given_snapshot_when_concurrent_writes() {
         "Snapshot should be usable for reads"
     );
 
-    // Engine should also see the value
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
@@ -252,7 +251,7 @@ fn should_maintain_isolation_given_snapshot_when_concurrent_writes() {
 }
 
 #[test]
-fn should_preserve_latest_version_when_compacting() {
+fn should_preserve_latest_version_given_repeated_flushes_when_read() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -285,12 +284,12 @@ fn should_preserve_latest_version_when_compacting() {
     assert_eq!(
         result,
         Some(Bytes::from_static(b"v2")),
-        "Compaction should preserve latest version"
+        "Repeated flushes should preserve latest version"
     );
 }
 
 #[test]
-fn should_respect_visibility_rules_when_range_scanning() {
+fn should_respect_visibility_rules_given_range_scan_when_scanning() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -337,7 +336,7 @@ fn should_respect_visibility_rules_when_range_scanning() {
 }
 
 #[test]
-fn should_maintain_monotonic_sequence_numbers_when_writing() {
+fn should_preserve_all_committed_values_given_multiple_writes_when_written() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -354,11 +353,21 @@ fn should_maintain_monotonic_sequence_numbers_when_writing() {
             .unwrap();
     }
 
-    // Assert - If sequence numbers were corrupt, visibility/ordering would be violated
+    // Assert
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
+    for i in 0..10 {
+        assert_eq!(
+            tx.get(format!("key{}", i).as_bytes())
+                .expect("get committed key"),
+            Some(Bytes::from_static(b"val"))
+        );
+    }
 }
 
 #[test]
-fn should_not_corrupt_state_given_unclean_shutdown_when_recovering() {
+fn should_reopen_committed_values_given_engine_dropped_without_close_when_reopened() {
     // Arrange
     let opts = opts_for_mode("local");
 
@@ -376,10 +385,10 @@ fn should_not_corrupt_state_given_unclean_shutdown_when_recovering() {
         engine
             .commit(tx, cntryl_midge::WriteOptions::buffered())
             .unwrap();
-        // Intentionally drop without explicit close (simulates unclean shutdown)
+        // Intentionally drop without an explicit close call.
     }
 
-    // Recovery - Reopen and verify state
+    // Reopen and verify state
     let engine = open_with_mode(opts, "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
@@ -389,14 +398,8 @@ fn should_not_corrupt_state_given_unclean_shutdown_when_recovering() {
         .unwrap();
     let v1 = tx.get(b"key1").expect("get");
     let v2 = tx.get(b"key2").expect("get");
-    assert!(
-        v1.is_some() || v1.is_none(),
-        "Should recover without corruption"
-    );
-    assert!(
-        v2.is_some() || v2.is_none(),
-        "Should recover without corruption"
-    );
+    assert_eq!(v1, Some(Bytes::from_static(b"value1")));
+    assert_eq!(v2, Some(Bytes::from_static(b"value2")));
 }
 
 // Note: Durability frontier enforcement test removed as it requires

@@ -13,6 +13,7 @@
 
 use crate::common::MidgeResult;
 use crate::sst::traits::SstFactory;
+use crate::sst::types::{KeyState, RangeTombstone};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -98,56 +99,106 @@ fn is_expired(version: &CompactionVersion, now_secs: u64) -> bool {
     matches!(version.expiration, Some(exp) if exp <= now_secs)
 }
 
-/// Collect all versions from the given input SST files.
-///
-/// NOTE:
-///   - At the moment this is a **best-effort stub** until the SST reader
-///     traits are fully wired for compaction (e.g. `SstStateReader`).
-///   - It *intentionally* returns an empty collection rather than panicking
-///     or guessing at the concrete SST reader type.
-///   - This function is structured so that it can be upgraded to a streaming
-///     implementation without changing its public signature.
-///
-/// Once the SST layer exposes an iterator that yields logical versions, this
-/// function should:
-///   - Open each file through `sst_factory`.
-///   - Iterate all entries, mapping them to `CompactionVersion`.
-///   - Push into the accumulating `versions` vector.
-pub fn collect_versions(
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SstCompactionInput {
+    pub versions: Vec<CompactionVersion>,
+    pub range_tombstones: Vec<RangeTombstone>,
+}
+
+fn normalize_range_tombstones(mut tombstones: Vec<RangeTombstone>) -> Vec<RangeTombstone> {
+    tombstones.sort_by(|left, right| {
+        left.start
+            .cmp(&right.start)
+            .then_with(|| left.end.cmp(&right.end))
+            .then_with(|| right.seq.cmp(&left.seq))
+    });
+    tombstones.dedup();
+    tombstones
+}
+
+fn collect_reader_input(
+    reader: &dyn crate::sst::traits::SstReaderExt,
+) -> MidgeResult<SstCompactionInput> {
+    let versions = reader
+        .scan_range_state(None, None)?
+        .into_iter()
+        .filter_map(|(key, state)| match state {
+            KeyState::Absent => None,
+            KeyState::Tombstone(seq) => Some(CompactionVersion {
+                key: key.to_vec(),
+                seq,
+                is_tombstone: true,
+                value: None,
+                expiration: None,
+            }),
+            KeyState::Value(value, seq, expiration, _op_type) => Some(CompactionVersion {
+                key: key.to_vec(),
+                seq,
+                is_tombstone: false,
+                value: Some(value.to_vec()),
+                expiration,
+            }),
+        })
+        .collect();
+
+    Ok(SstCompactionInput {
+        versions,
+        range_tombstones: reader.range_tombstones(),
+    })
+}
+
+/// Collect compaction input from the given input SST files.
+pub fn collect_compaction_input(
     sst_factory: &dyn SstFactory,
     input_files: &[String],
     abort_check: Option<&dyn Fn() -> bool>,
-) -> MidgeResult<Vec<CompactionVersion>> {
-    let versions = Vec::new();
+) -> MidgeResult<SstCompactionInput> {
+    let mut versions = Vec::new();
+    let mut range_tombstones = Vec::new();
 
     for filename in input_files {
         // Periodically check whether we should abort (cooperative cancellation)
         if let Some(check) = abort_check {
             if check() {
                 tracing::info!(file = %filename, "compaction aborting due to ingest epoch change");
-                return Ok(Vec::new());
+                return Ok(SstCompactionInput::default());
             }
         }
 
         let path = Path::new(filename);
 
-        // Use the generic SstReader API from the factory to open the file.
-        let _reader = sst_factory.open(path)?;
-
-        // **Note**: The current SstFactory trait returns `Box<dyn SstReader>`, which
-        // doesn't directly expose `SstStateReader` methods (seq, tombstone, expiration).
-        // To properly wire this, we would need either:
-        //   1. An extended trait combining both interfaces, or
-        //   2. A separate factory method for stateful readers, or
-        //   3. Open directly via `SstFile::open()` within compaction.
-        //
-        // For now, we keep the function signature for compatibility with the architecture,
-        // but the real implementation requires SST trait extension. The streaming pipeline
-        // (MergeIterator + StreamDeduplicate) is ready and tested; this is the remaining
-        // integration point.
+        let reader = sst_factory.open(path)?;
+        let input = collect_reader_input(reader.as_ref())?;
+        if !input.range_tombstones.is_empty() {
+            tracing::debug!(
+                file = %filename,
+                count = input.range_tombstones.len(),
+                "compaction observed SST range tombstones"
+            );
+        }
+        versions.extend(input.versions);
+        range_tombstones.extend(input.range_tombstones);
     }
 
-    Ok(versions)
+    versions.sort_by(|left, right| {
+        left.key
+            .cmp(&right.key)
+            .then_with(|| right.seq.cmp(&left.seq))
+    });
+
+    Ok(SstCompactionInput {
+        versions,
+        range_tombstones: normalize_range_tombstones(range_tombstones),
+    })
+}
+
+/// Collect all point-key versions from the given input SST files.
+pub fn collect_versions(
+    sst_factory: &dyn SstFactory,
+    input_files: &[String],
+    abort_check: Option<&dyn Fn() -> bool>,
+) -> MidgeResult<Vec<CompactionVersion>> {
+    Ok(collect_compaction_input(sst_factory, input_files, abort_check)?.versions)
 }
 
 /// Deduplicate versions, keeping only the newest **non-expired** entry per key.
@@ -247,6 +298,16 @@ pub fn write_versions_to_sst(
     versions: &[CompactionVersion],
     abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<()> {
+    write_compaction_output_to_sst(sst_factory, output_filename, versions, &[], abort_check)
+}
+
+pub fn write_compaction_output_to_sst(
+    sst_factory: &dyn SstFactory,
+    output_filename: &str,
+    versions: &[CompactionVersion],
+    range_tombstones: &[RangeTombstone],
+    abort_check: Option<&dyn Fn() -> bool>,
+) -> MidgeResult<()> {
     let mut writer = sst_factory.create()?;
 
     let mut added: usize = 0;
@@ -264,7 +325,7 @@ pub fn write_versions_to_sst(
             }
         }
 
-        let op_type = if version.is_tombstone { 1u8 } else { 0u8 };
+        let op_type = if version.is_tombstone { 2u8 } else { 0u8 };
 
         writer.add_with_meta(
             &version.key,
@@ -275,6 +336,21 @@ pub fn write_versions_to_sst(
             version.expiration,
         )?;
         added += 1;
+    }
+
+    for (i, tombstone) in range_tombstones.iter().enumerate() {
+        if i % 1024 == 0 {
+            if let Some(check) = abort_check {
+                if check() {
+                    tracing::info!(output = %output_filename, "compaction aborting during range tombstone write due to ingest epoch change at {} tombstones", i);
+                    return Err(crate::common::MidgeError::Internal(
+                        "compaction aborted due to ingest epoch change".to_string(),
+                    ));
+                }
+            }
+        }
+
+        writer.add_range_tombstone(&tombstone.start, &tombstone.end, tombstone.seq)?;
     }
     let add_ns = add_start.elapsed().as_nanos();
 
@@ -414,6 +490,85 @@ mod tests {
         // Assert
         assert!(!future_expired);
         assert!(!none_expired);
+    }
+
+    #[test]
+    fn should_collect_versions_when_stateful_reader_exposes_range_tombstones() {
+        use crate::sst::traits::{SstReader, SstStateReader};
+
+        // Arrange
+        struct FakeReader;
+
+        impl SstReader for FakeReader {
+            fn get(&self, _key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
+                Ok(None)
+            }
+
+            fn scan_range(
+                &self,
+                _start: Option<&[u8]>,
+                _end: Option<&[u8]>,
+            ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+                Ok(Vec::new())
+            }
+        }
+
+        impl SstStateReader for FakeReader {
+            fn get_state(&self, _key: &[u8]) -> MidgeResult<KeyState> {
+                Ok(KeyState::Absent)
+            }
+
+            fn scan_range_state(
+                &self,
+                _start: Option<&[u8]>,
+                _end: Option<&[u8]>,
+            ) -> MidgeResult<Vec<(bytes::Bytes, KeyState)>> {
+                Ok(vec![
+                    (
+                        bytes::Bytes::from_static(b"alpha"),
+                        KeyState::Value(bytes::Bytes::from_static(b"v1"), 42, Some(900), 0),
+                    ),
+                    (bytes::Bytes::from_static(b"beta"), KeyState::Tombstone(41)),
+                ])
+            }
+
+            fn range_tombstones(&self) -> Vec<RangeTombstone> {
+                vec![RangeTombstone::new(b"c".to_vec(), b"f".to_vec(), 40)]
+            }
+        }
+
+        // Act
+        let input = collect_reader_input(&FakeReader).expect("collect stateful input");
+
+        // Assert
+        assert_eq!(input.versions.len(), 2);
+        assert_eq!(input.versions[0].key, b"alpha".to_vec());
+        assert_eq!(input.versions[0].seq, 42);
+        assert_eq!(input.versions[0].expiration, Some(900));
+        assert!(input.versions[1].is_tombstone);
+        assert_eq!(input.range_tombstones.len(), 1);
+        assert_eq!(input.range_tombstones[0].start, b"c".to_vec());
+    }
+
+    #[test]
+    fn should_normalize_duplicate_range_tombstones_when_collecting_input() {
+        // Arrange
+        let tombstones = vec![
+            RangeTombstone::new(b"m".to_vec(), b"z".to_vec(), 7),
+            RangeTombstone::new(b"a".to_vec(), b"f".to_vec(), 9),
+            RangeTombstone::new(b"a".to_vec(), b"f".to_vec(), 9),
+            RangeTombstone::new(b"a".to_vec(), b"f".to_vec(), 5),
+        ];
+
+        // Act
+        let normalized = normalize_range_tombstones(tombstones);
+
+        // Assert
+        assert_eq!(normalized.len(), 3);
+        assert_eq!(normalized[0].start, b"a".to_vec());
+        assert_eq!(normalized[0].seq, 9);
+        assert_eq!(normalized[1].seq, 5);
+        assert_eq!(normalized[2].start, b"m".to_vec());
     }
 
     #[test]

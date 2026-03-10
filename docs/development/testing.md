@@ -1,44 +1,83 @@
 # Testing
 
-Midge has a mix of unit tests (in `src/`) and integration tests (in `tests/`).
+Midge has unit tests in `src/` and integration tests in `tests/`. For early-adopter trust work, the important question is not raw test count, but which guarantees are actually proven.
 
-## Running tests
+## Running Tests
 
-- Run everything:
+```bash
+cargo test
+```
 
-  ```bash
-  cargo test
-  ```
+Run a specific integration file:
 
-- Run a subset by name (Rust test filter):
+```bash
+cargo test --test durability_recovery
+```
 
-  ```bash
-  cargo test should_open
-  ```
+Run the trust-critical smoke suite:
 
-- Run a specific integration test file:
+```bash
+cargo test --test external_adopter_smoke
+```
 
-  ```bash
-  cargo test --test engine_basic
-  ```
+Validate naming and AAA structure:
 
-## Test conventions
+```bash
+python ./scripts/validate_tests.py --summary
+```
 
-### Naming
+## Trust Matrix
 
-Use the convention:
+Use this matrix when updating guarantees or reviewing whether Midge is safe enough to evaluate.
 
-- `should_{action}_when_{context}`
+| Guarantee | Representative tests |
+|---|---|
+| restart after committed writes restores state | `tests/durability_recovery.rs`, `tests/durability_wal.rs` |
+| truncated WAL tail keeps valid prefix only | `src/wal/recovery.rs`, `tests/durability_wal.rs` |
+| corrupted durable WAL prefix fails strict recovery | `src/wal/recovery.rs`, `tests/durability_wal.rs` |
+| flush failure does not publish orphan SST state | `tests/failure_injection.rs` |
+| flush restart recovers from WAL after interrupted publish | `tests/failure_injection.rs` |
+| compaction crash before publish keeps input SSTs authoritative | `tests/chaos_compaction.rs`, `tests/failure_injection.rs` |
+| compaction crash after publish keeps data visible and cleanup idempotent | `tests/chaos_compaction.rs`, `tests/failure_injection.rs` |
+| iterators honor tombstones and latest-version resolution across SST boundaries | `tests/engine_iterators.rs`, `tests/engine_compaction.rs` |
+| strict vs salvage recovery is explicit | `tests/failure_injection.rs`, `tests/durability_wal.rs` |
 
-This makes it easy to scan failures and supports automated validation.
+## External-Adopter Gate
 
-### Arrange / Act / Assert (AAA)
+Before inviting external evaluators, run at least:
 
-For non-trivial tests, use a clear AAA structure:
+```bash
+cargo test --test external_adopter_smoke
+cargo test --test durability_wal
+cargo test --test failure_injection
+cargo test --test chaos_compaction
+cargo test --test engine_iterators
+```
+
+This is the minimum “safe enough to try” gate for local-disk evaluation.
+
+## Where To Add Tests
+
+- `src/**`: unit tests for WAL parsing, corruption detection, sequence ordering, and other local invariants
+- `tests/**`: end-to-end recovery, flush publication, compaction publication, iterator correctness, and restart behavior
+
+Prefer extending an existing file when the guarantee already has a home. Add a new file only when it becomes a clearer public test category.
+
+## Naming
+
+Use:
+
+- `should_<behavior>_given_<context>_when_<condition>`
+
+The test name should state the promised behavior, not just the API call being made.
+
+## AAA Structure
+
+For non-trivial tests, use a visible Arrange / Act / Assert structure.
 
 ```rust
 #[test]
-fn should_do_the_thing_when_condition() {
+fn should_preserve_valid_prefix_given_truncated_wal_tail_when_recovering() {
     // Arrange
 
     // Act
@@ -47,36 +86,8 @@ fn should_do_the_thing_when_condition() {
 }
 ```
 
-Keep only one `// Act` section per test (multi-behavior tests are harder to debug).
+## Notes
 
-## Test validation script
-
-There is a lightweight validator that checks naming and AAA structure:
-
-```bash
-python ./scripts/validate_tests.py --summary
-```
-
-Notes:
-
-- The current codebase contains legacy tests that don’t fully comply yet.
-- When adding or modifying tests, prefer making them compliant and avoid increasing the total violation count.
-
-## Where to add tests
-
-- **Unit tests** (`src/**`): good for small components and invariants.
-- **Integration tests** (`tests/**`): preferred for end-to-end behaviors (engine API, recovery, durability, compaction interactions).
-
-## Debugging failures
-
-- Use `RUST_BACKTRACE=1` to get stack traces:
-
-  ```bash
-  RUST_BACKTRACE=1 cargo test
-  ```
-
-- For flaky tests, try running the same test repeatedly:
-
-  ```bash
-  cargo test should_x -- --nocapture
-  ```
+- Legacy tests still exist and are being tightened gradually.
+- Prefer durable local-disk coverage for trust-critical tests unless the behavior is specifically cloud-only.
+- Informational tests that only print status are not sufficient for trust guarantees; each guarantee should have an asserted outcome.

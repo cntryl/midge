@@ -6,7 +6,7 @@
 //! - Measures full scan throughput (iterates through all results)
 //! - Uses deterministic key selection for reproducibility
 //! - Scan length: 64 keys per scan operation
-//! - Initial dataset: 50K keys
+//! - Initial dataset: 50K keys by default (overridable for nightly larger-than-RAM runs)
 //!
 //! **Important:** This benchmark was fixed on 2026-02-14 to actually consume
 //! iterator results. Previously it only measured iterator setup overhead by
@@ -26,7 +26,7 @@ use std::time::Duration;
 use cntryl_midge::testkit::ycsb;
 use cntryl_midge::testkit::MidgeOptions;
 
-const INITIAL_KEYS: usize = 50_000; // Reduced from 100k: still exercises LSM multi-level reads
+const DEFAULT_INITIAL_KEYS: usize = 50_000;
 const WARMUP: Duration = Duration::from_secs(1);
 const MEASURED: Duration = Duration::from_secs(5);
 
@@ -39,10 +39,12 @@ const CLIENTS_64: usize = 64;
 const WORKLOAD_SEED: u64 = 0xE0E0_EA5E_5678_9ABC;
 
 fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
+    let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
+
     // Phase 1: Load (not measured)
     let engine = Arc::new(ycsb::open_tier4_engine(opts));
     let cf = engine.create_column_family("cf1").unwrap();
-    ycsb::load_initial_dataset(engine.as_ref(), &cf, INITIAL_KEYS);
+    ycsb::load_initial_dataset(engine.as_ref(), &cf, initial_keys);
 
     // Workload E: 95% scans, 5% inserts. Use a deterministic, stochastic mix.
     // Scans target the dense initial keyspace for stable scan lengths.
@@ -61,21 +63,21 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                     let cf_id = cf.id();
 
                     if is_insert {
-                        let key_id = INITIAL_KEYS as u64 + ((client_id as u64) << 32) + op_index;
+                        let key_id = initial_keys as u64 + ((client_id as u64) << 32) + op_index;
                         let k = ycsb::make_key(key_id);
                         let v = ycsb::make_value((op_index % 251) as u8);
                         ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
                             let mut tx = e
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("begin");
-                            tx.put(k.to_vec(), v.to_vec(), None).expect("warmup insert");
+                            tx.put(k.to_vec(), v.clone(), None).expect("warmup insert");
                             e.commit(tx, write_opts)
                         })
                         .expect("commit");
                         return;
                     }
 
-                    let max_start = (INITIAL_KEYS as u64).saturating_sub(SCAN_LEN + 1).max(1);
+                    let max_start = (initial_keys as u64).saturating_sub(SCAN_LEN + 1).max(1);
                     let start_id =
                         ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0) % max_start;
                     let start = ycsb::make_key(start_id);
@@ -116,14 +118,14 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                     let cf_id = cf.id();
 
                     if is_insert {
-                        let key_id = INITIAL_KEYS as u64 + ((client_id as u64) << 32) + op_index;
+                        let key_id = initial_keys as u64 + ((client_id as u64) << 32) + op_index;
                         let k = ycsb::make_key(key_id);
                         let v = ycsb::make_value((op_index % 251) as u8);
                         ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
                             let mut tx = e
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("measured begin");
-                            tx.put(k.to_vec(), v.to_vec(), None)
+                            tx.put(k.to_vec(), v.clone(), None)
                                 .expect("measured insert");
                             e.commit(tx, write_opts)
                         })
@@ -131,7 +133,7 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         return;
                     }
 
-                    let max_start = (INITIAL_KEYS as u64).saturating_sub(SCAN_LEN + 1).max(1);
+                    let max_start = (initial_keys as u64).saturating_sub(SCAN_LEN + 1).max(1);
                     let start_id =
                         ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0) % max_start;
                     let start = ycsb::make_key(start_id);
@@ -156,7 +158,7 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     });
 
     // Approximate bytes touched: 95% scans of length SCAN_LEN, 5% inserts.
-    let bytes_per_kv = (ycsb::KEY_SIZE + ycsb::VALUE_SIZE) as u64;
+    let bytes_per_kv = ycsb::logical_entry_size_bytes() as u64;
     let est_inserts = measured_ops / 20;
     let est_scans = measured_ops.saturating_sub(est_inserts);
     let est_bytes = est_inserts * bytes_per_kv + est_scans * (SCAN_LEN * bytes_per_kv);

@@ -20,6 +20,8 @@ pub struct CompactionPlan {
     pub cf_id: u32,
     /// Output SST sequence number (assigned by sequence allocator)
     pub output_seq: u64,
+    /// Oldest active snapshot sequence, if any, used for tombstone retention.
+    pub snapshot_horizon: Option<u64>,
 }
 
 impl CompactionPlan {
@@ -32,11 +34,17 @@ impl CompactionPlan {
             target_level,
             cf_id,
             output_seq: 0,
+            snapshot_horizon: None,
         }
     }
 
     pub fn with_output_seq(mut self, output_seq: u64) -> Self {
         self.output_seq = output_seq;
+        self
+    }
+
+    pub fn with_snapshot_horizon(mut self, snapshot_horizon: Option<u64>) -> Self {
+        self.snapshot_horizon = snapshot_horizon;
         self
     }
 }
@@ -182,6 +190,7 @@ impl Compactor {
             target_level: 1,
             cf_id,
             output_seq: 0,
+            snapshot_horizon: None,
         })
     }
 
@@ -212,6 +221,7 @@ impl Compactor {
             target_level: (level + 1) as u32,
             cf_id,
             output_seq: 0,
+            snapshot_horizon: None,
         })
     }
 }

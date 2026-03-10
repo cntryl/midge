@@ -113,6 +113,37 @@ fn should_persist_ttl_metadata_given_restart_when_reopening() {
 }
 
 #[test]
+fn should_persist_ttl_metadata_given_flush_and_restart_when_reopening() {
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.create_column_family("test").expect("create cf");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .unwrap();
+            tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(3600))
+                .unwrap();
+            engine.commit(tx, WriteOptions::buffered()).unwrap();
+            engine.flush_cf(&cf).unwrap();
+        }
+
+        // Act
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine
+                .get_column_family("test")
+                .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
+            let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+            let result = read_tx.get(b"key1").unwrap();
+
+            // Assert
+            assert_eq!(result, Some(Bytes::from_static(b"value1")));
+        }
+    });
+}
+
+#[test]
 fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
@@ -304,11 +335,14 @@ fn should_expire_keys_covered_by_range_tombstone_during_compaction() {
         engine.flush_cf(&cf).expect("flush");
 
         // Write range tombstone [k3, k8) - covers k3-k7
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        engine
+            .delete_range(
+                &cf,
+                b"k3".to_vec(),
+                b"k8".to_vec(),
+                WriteOptions::buffered(),
+            )
             .unwrap();
-        tx.delete_range(b"k3".to_vec(), b"k8".to_vec()).unwrap();
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
         engine.flush_cf(&cf).expect("flush");
 
         // Wait for TTL expiry
@@ -425,11 +459,14 @@ fn should_not_expose_ttl_expired_key_covered_by_range_tombstone() {
         engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Immediately write range tombstone [k1, k10)
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        engine
+            .delete_range(
+                &cf,
+                b"k1".to_vec(),
+                b"k10".to_vec(),
+                WriteOptions::buffered(),
+            )
             .unwrap();
-        tx.delete_range(b"k1".to_vec(), b"k10".to_vec()).unwrap();
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
 
         // Act: Read k5 after TTL expiry
         thread::sleep(Duration::from_millis(1100));

@@ -164,6 +164,11 @@ pub fn append_edit_with_fs(
         },
     )?;
 
+    fail::fail_point!("midge::manifest::inject_no_space_on_append_edit", |_| Err(
+        crate::common::MidgeError::NoSpace(
+            "failpoint: no space on manifest journal append".to_string()
+        )
+    ));
     let write_start = std::time::Instant::now();
     f.append(bytes::Bytes::from(buf))
         .map_err(crate::common::MidgeError::from)?;
@@ -266,14 +271,19 @@ pub fn replay_journal_with_fs(
 
     let mut edits = Vec::new();
     let mut last_marker_edit_idx: Option<usize> = None;
+    let mut fatal_prefix_error: Option<String> = None;
 
     // Read loop using positional reads
     let mut offset: u64 = 0;
     let file_len = file.len().map_err(crate::common::MidgeError::from)?;
 
     while offset < file_len {
+        let record_start = offset;
         // Read header: type (1) + len (4)
         if offset + 5 > file_len {
+            if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
+                fatal_prefix_error = Some("manifest journal has truncated header at byte 0".into());
+            }
             break; // partial header
         }
         let typ_b = file
@@ -290,6 +300,9 @@ pub fn replay_journal_with_fs(
 
         // Ensure payload + crc present
         if offset + (len as u64) + 4 > file_len {
+            if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
+                fatal_prefix_error = Some("manifest journal has incomplete first record".into());
+            }
             break; // partial payload
         }
 
@@ -309,6 +322,9 @@ pub fn replay_journal_with_fs(
         let calc = hasher.finalize();
         if calc != got_crc {
             tracing::warn!("journal crc mismatch, stopping at tail");
+            if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
+                fatal_prefix_error = Some("manifest journal CRC mismatch at byte 0".into());
+            }
             break;
         }
 
@@ -325,6 +341,11 @@ pub fn replay_journal_with_fs(
                 }
                 Err(e) => {
                     tracing::warn!("fsync marker deserialize failed: {}", e);
+                    if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
+                        fatal_prefix_error = Some(format!(
+                            "manifest journal fsync marker deserialize failed: {e}"
+                        ));
+                    }
                     break;
                 }
             }
@@ -333,6 +354,10 @@ pub fn replay_journal_with_fs(
                 Ok(batch) => edits.push(ManifestEdit::Batch(batch)),
                 Err(e) => {
                     tracing::warn!("journal batch deserialize failed: {}", e);
+                    if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
+                        fatal_prefix_error =
+                            Some(format!("manifest journal batch deserialize failed: {e}"));
+                    }
                     break;
                 }
             }
@@ -341,10 +366,18 @@ pub fn replay_journal_with_fs(
                 Ok(edit) => edits.push(edit),
                 Err(e) => {
                     tracing::warn!("journal record deserialize failed: {}", e);
+                    if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
+                        fatal_prefix_error =
+                            Some(format!("manifest journal record deserialize failed: {e}"));
+                    }
                     break;
                 }
             }
         }
+    }
+
+    if let Some(message) = fatal_prefix_error {
+        return Err(crate::common::MidgeError::Corruption(message));
     }
 
     if let Some(idx) = last_marker_edit_idx {
@@ -384,6 +417,12 @@ pub fn append_edit_batch_with_fs(
         },
     )?;
 
+    fail::fail_point!(
+        "midge::manifest::inject_no_space_on_append_edit_batch",
+        |_| Err(crate::common::MidgeError::NoSpace(
+            "failpoint: no space on manifest journal batch append".to_string()
+        ))
+    );
     let write_start = std::time::Instant::now();
     f.append(bytes::Bytes::from(buf))
         .map_err(crate::common::MidgeError::from)?;
@@ -536,6 +575,7 @@ mod tests {
     use super::*;
     use crate::metadata::FileMeta;
     use crate::metadata::{Manifest, ManifestPersistence};
+    use proptest::prelude::*;
     use tempfile::tempdir;
 
     #[test]
@@ -792,5 +832,54 @@ mod tests {
 
         // Cleanup
         std::env::remove_var("MIDGE_MANIFEST_SYNC_POLICY");
+    }
+
+    proptest! {
+        #[test]
+        fn should_preserve_batch_order_when_replaying_bump_wal_seq_edits(
+            seqs in proptest::collection::vec(0u64..10_000, 1..32)
+        ) {
+            // Arrange
+            let td = tempdir().unwrap();
+            let db = td.path();
+            let batch: Vec<ManifestEdit> = seqs
+                .iter()
+                .copied()
+                .map(|seq| ManifestEdit::BumpWalSeq { seq })
+                .collect();
+
+            // Act
+            append_edit_batch(db, &batch).expect("append batch failed");
+
+            let replayed = replay_journal(db).expect("replay_journal failed");
+            prop_assert_eq!(replayed.len(), 1);
+
+            // Assert
+            match &replayed[0] {
+                ManifestEdit::Batch(inner) => {
+                    prop_assert_eq!(inner.len(), batch.len());
+                    for (observed, expected) in inner.iter().zip(batch.iter()) {
+                        match (observed, expected) {
+                            (
+                                ManifestEdit::BumpWalSeq { seq: observed_seq },
+                                ManifestEdit::BumpWalSeq { seq: expected_seq },
+                            ) => prop_assert_eq!(observed_seq, expected_seq),
+                            other => prop_assert!(false, "unexpected replayed edit pair: {:?}", other),
+                        }
+                    }
+                }
+                other => prop_assert!(false, "expected batch replay, got {:?}", other),
+            }
+
+            let mut direct_manifest = Manifest::default();
+            direct_manifest.apply_edit(&ManifestEdit::Batch(batch.clone()));
+            let mut replayed_manifest = Manifest::default();
+            replayed_manifest.apply_edit(&replayed[0]);
+
+            prop_assert_eq!(
+                replayed_manifest.last_persisted_sequence,
+                direct_manifest.last_persisted_sequence
+            );
+        }
     }
 }

@@ -141,11 +141,8 @@ pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
     capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?; // SEQ
     capacity = add_capacity(capacity, TLV_HEADER_LEN + record.key.len())?;
 
-    // Preserve existing semantics: an empty VALUE behaves like None.
     if let Some(v) = &record.value {
-        if !v.is_empty() {
-            capacity = add_capacity(capacity, TLV_HEADER_LEN + v.len())?;
-        }
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + v.len())?;
     }
 
     if record.expiration.is_some() {
@@ -176,15 +173,13 @@ pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
     put_u64(&mut buf, tags::WRITER_EPOCH, record.writer_epoch);
 
     if let Some(v) = &record.value {
-        if !v.is_empty() {
-            // Compress value if large enough to benefit
-            let (write_val, comp_byte) = crate::sst::compression::compress_wal_value(v);
-            put_tlv(&mut buf, tags::VALUE, &write_val);
-            if let Some(cb) = comp_byte {
-                put_u8(&mut buf, tags::COMPRESSION, cb);
-            } else if let Some(c) = record.compression {
-                put_u8(&mut buf, tags::COMPRESSION, c);
-            }
+        // Preserve Some(empty) distinctly from None by always emitting VALUE when present.
+        let (write_val, comp_byte) = crate::sst::compression::compress_wal_value(v);
+        put_tlv(&mut buf, tags::VALUE, &write_val);
+        if let Some(cb) = comp_byte {
+            put_u8(&mut buf, tags::COMPRESSION, cb);
+        } else if let Some(c) = record.compression {
+            put_u8(&mut buf, tags::COMPRESSION, c);
         }
     } else if let Some(c) = record.compression {
         put_u8(&mut buf, tags::COMPRESSION, c);
@@ -253,11 +248,7 @@ pub fn decode_view<'a>(data: &'a [u8]) -> MidgeResult<WalRecordView<'a>> {
                 key = Some(val);
             }
             tags::VALUE => {
-                // Preserve semantics: empty is treated as absent.
-                // Documented: encoding treats Some(empty) as absent to save space.
-                if !val.is_empty() {
-                    value = Some(val);
-                }
+                value = Some(val);
             }
             tags::EXPIRATION => {
                 if val.len() != 8 {
@@ -355,6 +346,7 @@ pub fn decode(bytes: impl Buf) -> MidgeResult<WalRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn should_roundtrip_put_when_value_present() {
@@ -392,6 +384,26 @@ mod tests {
         assert_eq!(decoded.op, WalOpKind::Delete);
         assert_eq!(decoded.value, None);
         assert_eq!(decoded.key, record.key);
+    }
+
+    #[test]
+    fn should_roundtrip_empty_value_distinct_from_delete() {
+        // Arrange
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"")),
+            8,
+            1,
+        );
+
+        // Act
+        let encoded = encode(&record).unwrap();
+        let decoded = decode(&encoded[..]).unwrap();
+
+        // Assert
+        assert_eq!(decoded.op, WalOpKind::Put);
+        assert_eq!(decoded.value, Some(Bytes::from_static(b"")));
     }
 
     #[test]
@@ -488,6 +500,45 @@ mod tests {
         match err {
             MidgeError::Corruption(_) => {}
             other => panic!("expected corruption error, got: {:?}", other),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn should_roundtrip_arbitrary_put_records(
+            cf_id in any::<u32>(),
+            seq in any::<u64>(),
+            writer_epoch in any::<u64>(),
+            key in proptest::collection::vec(any::<u8>(), 1..33),
+            value in proptest::collection::vec(any::<u8>(), 0..65),
+            expiration in proptest::option::of(any::<u64>()),
+            txn_id in proptest::option::of(any::<u64>()),
+        ) {
+            // Arrange
+            let mut record = WalRecord::new_cf(
+                cf_id,
+                WalOpKind::Put,
+                Bytes::from(key.clone()),
+                Some(Bytes::from(value.clone())),
+                seq,
+                writer_epoch,
+            );
+            record.expiration = expiration;
+            record.txn_id = txn_id;
+
+            // Act
+            let encoded = encode(&record).unwrap();
+            let decoded = decode(&encoded[..]).unwrap();
+
+            // Assert
+            prop_assert_eq!(decoded.cf_id, cf_id);
+            prop_assert_eq!(decoded.op, WalOpKind::Put);
+            prop_assert_eq!(decoded.seq, seq);
+            prop_assert_eq!(decoded.writer_epoch, writer_epoch);
+            prop_assert_eq!(decoded.key, Bytes::from(key));
+            prop_assert_eq!(decoded.value, Some(Bytes::from(value)));
+            prop_assert_eq!(decoded.expiration, expiration);
+            prop_assert_eq!(decoded.txn_id, txn_id);
         }
     }
 }

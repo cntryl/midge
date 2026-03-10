@@ -207,20 +207,20 @@ fn should_allow_overlapping_put_after_delete_range_given_lww_semantics() {
             .unwrap();
 
         // Act
-        let mut txn1 = engine
-            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
         let mut txn2 = engine
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
 
-        txn1.delete_range(b"key1".to_vec(), b"key3".to_vec())
-            .unwrap();
         txn2.put(b"key2".to_vec(), b"newvalue".to_vec(), None)
             .unwrap();
 
         engine
-            .commit(txn1, cntryl_midge::WriteOptions::buffered())
+            .delete_range(
+                &cf,
+                b"key1".to_vec(),
+                b"key3".to_vec(),
+                cntryl_midge::WriteOptions::buffered(),
+            )
             .unwrap();
         engine
             .commit(txn2, cntryl_midge::WriteOptions::buffered())
@@ -246,19 +246,19 @@ fn should_allow_put_then_delete_range_given_lww_semantics() {
         let mut txn1 = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
-        let mut txn2 = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
 
         txn1.put(b"key".to_vec(), b"value".to_vec(), None).unwrap();
-        txn2.delete_range(b"key".to_vec(), b"keyz".to_vec())
-            .unwrap();
 
         engine
             .commit(txn1, cntryl_midge::WriteOptions::buffered())
             .unwrap();
         engine
-            .commit(txn2, cntryl_midge::WriteOptions::buffered())
+            .delete_range(
+                &cf,
+                b"key".to_vec(),
+                b"keyz".to_vec(),
+                cntryl_midge::WriteOptions::buffered(),
+            )
             .unwrap();
 
         // Assert
@@ -291,23 +291,21 @@ fn should_allow_concurrent_delete_ranges_given_lww_semantics() {
             .unwrap();
 
         // Act
-        let mut txn1 = engine
-            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        let mut txn2 = engine
-            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-
-        txn1.delete_range(b"key1".to_vec(), b"key3".to_vec())
-            .unwrap();
-        txn2.delete_range(b"key1".to_vec(), b"key3".to_vec())
-            .unwrap();
-
         engine
-            .commit(txn1, cntryl_midge::WriteOptions::buffered())
+            .delete_range(
+                &cf,
+                b"key1".to_vec(),
+                b"key3".to_vec(),
+                cntryl_midge::WriteOptions::buffered(),
+            )
             .unwrap();
         engine
-            .commit(txn2, cntryl_midge::WriteOptions::buffered())
+            .delete_range(
+                &cf,
+                b"key1".to_vec(),
+                b"key3".to_vec(),
+                cntryl_midge::WriteOptions::buffered(),
+            )
             .unwrap();
 
         // Assert - both succeed
@@ -335,19 +333,19 @@ fn should_allow_delete_range_delete_operations_given_lww_semantics() {
             .unwrap();
 
         // Act
-        let mut txn1 = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
         let mut txn2 = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
 
-        txn1.delete_range(b"key".to_vec(), b"keyz".to_vec())
-            .unwrap();
         txn2.delete(b"key".to_vec()).unwrap();
 
         engine
-            .commit(txn1, cntryl_midge::WriteOptions::buffered())
+            .delete_range(
+                &cf,
+                b"key".to_vec(),
+                b"keyz".to_vec(),
+                cntryl_midge::WriteOptions::buffered(),
+            )
             .unwrap();
         engine
             .commit(txn2, cntryl_midge::WriteOptions::buffered())
@@ -366,7 +364,7 @@ fn should_allow_delete_range_delete_operations_given_lww_semantics() {
 // ============================================================================
 
 #[test]
-fn should_conflict_on_concurrent_inserts_given_same_key_when_one_commits_first() {
+fn should_allow_both_same_key_puts_given_lww_semantics_when_committed_in_order() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
@@ -398,7 +396,7 @@ fn should_conflict_on_concurrent_inserts_given_same_key_when_one_commits_first()
 }
 
 #[test]
-fn should_conflict_on_insert_given_key_already_exists_when_committed() {
+fn should_overwrite_existing_value_given_put_on_existing_key_when_committed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
@@ -1088,10 +1086,10 @@ fn should_preserve_both_writes_when_non_overlapping_keys_given_concurrent_commit
 
         engine
             .commit(txn1, cntryl_midge::WriteOptions::buffered())
-            .ok();
+            .expect("commit first disjoint update");
         engine
             .commit(txn2, cntryl_midge::WriteOptions::buffered())
-            .ok();
+            .expect("commit second disjoint update");
 
         // Assert: Both updates must be visible
         let read_tx = engine

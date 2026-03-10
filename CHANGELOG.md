@@ -3,7 +3,9 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and version numbers use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) formatting.
+
+Midge is currently in the 0.1 release line. Compatibility expectations for pre-1.0 releases are defined in [docs/development/stability-policy.md](docs/development/stability-policy.md).
 
 ## [Unreleased]
 
@@ -24,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tiered benchmarking suite (Tier1-4)
 - YCSB workload support
 - Cross-platform support (Linux, Windows, macOS)
+- Startup recovery metrics API: `Engine::get_recovery_metrics()`
+- Runtime recovery metrics snapshot path (`GetRecoveryMetrics`) for WAL and intent-log replay visibility
+- Integration coverage for recovery metrics API, including deterministic `intent_log.yaml` replay fixture
 
 ### Documentation
 - Architecture guide
@@ -33,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - API guide
 - Testing guide
 - Benchmarking guide
+- README example for recovery metrics usage
+- Recovery internals observability section for startup replay counters
+- 1.0 production contract draft
+- support matrix, format compatibility policy, and release policy docs
+- production runbook and release checklist
 
 ## [0.1.0] - TBD
 

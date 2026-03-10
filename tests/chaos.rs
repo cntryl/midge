@@ -1,13 +1,15 @@
-//! Chaos Engineering Tests — IO Failure Injection
+//! Clean Shutdown Reopen Stress Tests
 //!
-//! Tests crash safety and recovery when IO operations fail:
-//! - Partial writes to WAL/SST/manifest during critical operations
-//! - Corruption detection via CRC/validation checksums
-//! - Graceful recovery and error handling
-//! - Durability guarantees under partial failure conditions
+//! Tests concurrent writes and storage operations followed by clean shutdown
+//! and reopen in local-disk mode.
+//! Coverage in this file is limited to successful operations performed before
+//! normal process teardown via `drop`:
+//! - Recovery of committed WAL-backed and SST-backed writes after reopen
+//! - Visibility after flush, compaction, and manifest-related operations
+//! - Value integrity checks after reopen
+//! - Concurrent best-effort load remaining readable without invalid values
 //!
-//! **Storage Modes**: Local only (IO faults are filesystem-level)
-//! Note: These tests validate crash-safety; failure modes are simulated gracefully.
+//! **Storage Modes**: Local only
 //!
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
@@ -18,19 +20,16 @@ use std::thread;
 use std::time::Duration;
 
 // ============================================================================
-// TEST GROUP: IO Failure Scenarios
+// TEST GROUP: CLEAN SHUTDOWN REOPEN SCENARIOS
 // ============================================================================
 
 #[test]
-fn should_recover_after_io_failure_during_wal_write() {
+fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Chaos: IO Failure During WAL Write (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Reopen After WAL Writes (mode: {}) ===", mode);
 
         // Arrange
-        // Act (Phase 1): Write with potential WAL corruption
+        // Act (Phase 1): Commit WAL-backed writes, then drop the engine
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -42,25 +41,23 @@ fn should_recover_after_io_failure_during_wal_write() {
             for i in 0..100 {
                 let key = format!("wal_fail_key_{:04}", i);
                 tx.put(key.as_bytes().to_vec(), b"wal_value".to_vec(), None)
-                    .ok();
+                    .expect("put");
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
-            // Additional write (in case WAL fails here)
+            // Additional committed writes
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 100..150 {
                 let key = format!("wal_fail_key_{:04}", i);
                 tx.put(key.as_bytes().to_vec(), b"wal_value_2".to_vec(), None)
-                    .ok();
+                    .expect("put");
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
-
-            // Simulate crash by dropping engine
         }
 
-        // Assert (Phase 2): Restart and validate recovery
+        // Assert (Phase 2): Reopen and validate recovery
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -69,41 +66,34 @@ fn should_recover_after_io_failure_during_wal_write() {
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
 
-            // Engine should recover by:
-            // 1. Detecting corruption in failed WAL record (CRC check)
-            // 2. Truncating partial record (not replaying it)
-            // 3. Replaying all complete records
-
-            let mut complete_recoveries = 0;
             for i in 0..150 {
                 let key = format!("wal_fail_key_{:04}", i);
-                if tx.get(key.as_bytes()).ok().flatten().is_some() {
-                    complete_recoveries += 1;
-                }
+                let expected = if i < 100 {
+                    b"wal_value".as_slice()
+                } else {
+                    b"wal_value_2".as_slice()
+                };
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("get"),
+                    Some(expected.into()),
+                    "mode: {} key: {}",
+                    mode,
+                    key
+                );
             }
 
-            // Either full recovery or no data loss (depends on where failure occurs)
-            assert!(
-                complete_recoveries >= 100,
-                "excessive data loss after WAL failure in mode: {}",
-                mode
-            );
-
-            eprintln!(
-                "✓ Recovered from WAL IO failure; {} records recovered",
-                complete_recoveries
-            );
+            eprintln!("✓ Recovered all 150 committed WAL-backed records");
         }
     });
 }
 
 #[test]
-fn should_recover_after_io_failure_during_flush() {
+fn should_recover_committed_writes_when_reopening_after_flush_and_clean_shutdown() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Chaos: IO Failure During Flush (mode: {}) ===", mode);
+        eprintln!("\n=== Reopen After Flush (mode: {}) ===", mode);
 
         // Arrange
-        // Act (Phase 1): Flush with potential SST write failure
+        // Act (Phase 1): Commit writes, flush, then drop the engine
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -115,63 +105,46 @@ fn should_recover_after_io_failure_during_flush() {
             for i in 0..200 {
                 let key = format!("flush_fail_key_{:04}", i);
                 tx.put(key.as_bytes().to_vec(), b"flush_data".to_vec(), None)
-                    .ok();
+                    .expect("put");
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
-            // Attempt flush (SST write may fail)
-            engine.flush_cf(&cf).ok(); // May fail, but should be handled gracefully
-
-            // Crash (drop engine)
+            // Flush the committed data successfully
+            engine.flush_cf(&cf).expect("flush");
         }
 
-        // Assert (Phase 2): Restart and verify SST integrity
+        // Assert (Phase 2): Reopen and verify all flushed data
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
-
-            // Engine should:
-            // 1. Detect partial/corrupted SST (CRC/magic bytes)
-            // 2. Discard partial SST
-            // 3. Replay from WAL
 
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
 
-            let mut valid_records = 0;
             for i in 0..200 {
                 let key = format!("flush_fail_key_{:04}", i);
-                if tx.get(key.as_bytes()).ok().flatten().is_some() {
-                    valid_records += 1;
-                }
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("get"),
+                    Some(b"flush_data".as_slice().into()),
+                    "mode: {} key: {}",
+                    mode,
+                    key
+                );
             }
 
-            // WAL replay should recover most/all data
-            assert!(
-                valid_records >= 150,
-                "excessive data loss after flush failure in mode: {}",
-                mode
-            );
-
-            eprintln!(
-                "✓ Recovered from flush IO failure; {} records recovered",
-                valid_records
-            );
+            eprintln!("✓ Recovered all 200 committed records after flush");
         }
     });
 }
 
 #[test]
-fn should_recover_after_io_failure_during_compaction() {
+fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shutdown() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Chaos: IO Failure During Compaction (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Reopen After Compaction (mode: {}) ===", mode);
 
         // Arrange
-        // Act (Phase 1): Create multi-SST and trigger compaction with failure
+        // Act (Phase 1): Create multiple SSTs, compact, then drop the engine
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -183,7 +156,7 @@ fn should_recover_after_io_failure_during_compaction() {
             for i in 0..100 {
                 let key = format!("compact_fail_key_{:04}", i);
                 tx.put(key.as_bytes().to_vec(), b"gen_a".to_vec(), None)
-                    .ok();
+                    .expect("put");
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush A");
@@ -195,60 +168,52 @@ fn should_recover_after_io_failure_during_compaction() {
             for i in 100..200 {
                 let key = format!("compact_fail_key_{:04}", i);
                 tx.put(key.as_bytes().to_vec(), b"gen_b".to_vec(), None)
-                    .ok();
+                    .expect("put");
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush B");
 
-            // Trigger compaction (output SST write may fail)
-            engine.compact_all().ok();
-
-            // Crash (input SSTs should remain)
+            // Trigger compaction before shutdown
+            engine.compact_all().expect("compact_all");
         }
 
-        // Assert (Phase 2): Restart and verify manifest atomicity
+        // Assert (Phase 2): Reopen and verify all committed data
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
-
-            // Verify:
-            // 1. No partial output SST was applied to manifest
-            // 2. Input SSTs still intact (or fully merged if compaction succeeded)
-            // 3. All data recoverable
 
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
 
-            let mut found = 0;
             for i in 0..200 {
                 let key = format!("compact_fail_key_{:04}", i);
-                if tx.get(key.as_bytes()).ok().flatten().is_some() {
-                    found += 1;
-                }
+                let expected = if i < 100 {
+                    b"gen_a".as_slice()
+                } else {
+                    b"gen_b".as_slice()
+                };
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("get"),
+                    Some(expected.into()),
+                    "mode: {} key: {}",
+                    mode,
+                    key
+                );
             }
 
-            assert!(
-                found >= 150,
-                "data loss after compaction failure in mode: {}",
-                mode
-            );
-
-            eprintln!("✓ Recovered from compaction IO failure; manifest consistent");
+            eprintln!("✓ Recovered all 200 committed records after compaction");
         }
     });
 }
 
 #[test]
-fn should_recover_after_io_failure_during_manifest_write() {
+fn should_preserve_readability_when_reopening_after_manifest_updates_and_clean_shutdown() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Chaos: IO Failure During Manifest Write (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Reopen After Manifest Updates (mode: {}) ===", mode);
 
         // Arrange
-        // Act (Phase 1): Trigger manifest update with failure
+        // Act (Phase 1): Flush data, run compaction-related work, then drop the engine
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -260,18 +225,16 @@ fn should_recover_after_io_failure_during_manifest_write() {
             for i in 0..150 {
                 let key = format!("manifest_io_key_{:04}", i);
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
-                    .ok();
+                    .expect("put");
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
-            // Trigger compaction (updates manifest)
-            engine.compact_all().ok();
-
-            // Crash (manifest write may have partially failed)
+            // Trigger compaction-related manifest updates before shutdown
+            engine.compact_all().expect("compact_all");
         }
 
-        // Assert (Phase 2): Restart (manifest must be either new version OR old version, not corrupt)
+        // Assert (Phase 2): Reopen and verify readability
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -279,41 +242,29 @@ fn should_recover_after_io_failure_during_manifest_write() {
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
-
-            // Verify manifest is in one of two consistent states:
-            // 1. Old version: before-compaction manifest
-            // 2. New version: after-compaction manifest
-            // NOT: Mix of input/output SSTs (corrupt state)
-
-            let mut readable = 0;
             for i in 0..150 {
                 let key = format!("manifest_io_key_{:04}", i);
-                if tx.get(key.as_bytes()).ok().flatten().is_some() {
-                    readable += 1;
-                }
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("get"),
+                    Some(b"value".as_slice().into()),
+                    "mode: {} key: {}",
+                    mode,
+                    key
+                );
             }
 
-            assert!(
-                readable >= 120,
-                "manifest corruption led to significant data loss in mode: {}",
-                mode
-            );
-
-            eprintln!("✓ Manifest atomicity preserved after IO failure");
+            eprintln!("✓ All 150 committed records remained readable after reopen");
         }
     });
 }
 
 #[test]
-fn should_not_corrupt_data_after_partial_sst_write() {
+fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdown() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Chaos: No Corruption After Partial SST (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Reopen After SST Flush (mode: {}) ===", mode);
 
         // Arrange
-        // Act (Phase 1): Write with potential SST corruption
+        // Act (Phase 1): Write, flush, add more writes, then drop the engine
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -325,28 +276,26 @@ fn should_not_corrupt_data_after_partial_sst_write() {
             for i in 0..100 {
                 let key = format!("sst_corrupt_key_{:04}", i);
                 tx.put(key.as_bytes().to_vec(), b"uncorrupted_value".to_vec(), None)
-                    .ok();
+                    .expect("put");
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
-            // Flush (partial write may occur)
-            engine.flush_cf(&cf).ok();
+            // Flush the first batch successfully
+            engine.flush_cf(&cf).expect("flush");
 
-            // Write batch 2 (tries to read from potentially corrupted SST)
+            // Write a second batch that remains WAL-backed until reopen
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 100..150 {
                 let key = format!("sst_corrupt_key_{:04}", i);
                 tx.put(key.as_bytes().to_vec(), b"clean_value".to_vec(), None)
-                    .ok();
+                    .expect("put");
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
-
-            // Crash
         }
 
-        // Assert (Phase 2): Restart and verify no garbage data
+        // Assert (Phase 2): Reopen and verify exact values
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -355,61 +304,43 @@ fn should_not_corrupt_data_after_partial_sst_write() {
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
 
-            // Key assertion: Retrieved values must be either:
-            // 1. Valid data (uncorrupted)
-            // 2. NOT FOUND (key was lost)
-            // 3. NEVER corrupted/garbage bytes
-
-            let mut valid_data_count = 0;
-            let mut missing_count = 0;
-
             for i in 0..100 {
                 let key = format!("sst_corrupt_key_{:04}", i);
-                match tx.get(key.as_bytes()) {
-                    Ok(Some(val)) => {
-                        // Verify we got uncorrupted data
-                        assert!(
-                            val.len() == 17 || val.len() == "uncorrupted_value".len(),
-                            "retrieved garbage data from corrupted SST in mode: {}",
-                            mode
-                        );
-                        valid_data_count += 1;
-                    }
-                    Ok(None) => {
-                        missing_count += 1;
-                    }
-                    Err(_) => {
-                        // Some IO errors are acceptable; data lost but not corrupted
-                        missing_count += 1;
-                    }
-                }
+                let val = tx
+                    .get(key.as_bytes())
+                    .expect("get")
+                    .expect("value should exist");
+                assert_eq!(
+                    val.as_ref(),
+                    b"uncorrupted_value",
+                    "mode: {} key: {}",
+                    mode,
+                    key
+                );
+            }
+            for i in 100..150 {
+                let key = format!("sst_corrupt_key_{:04}", i);
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("get"),
+                    Some(b"clean_value".as_slice().into()),
+                    "mode: {} key: {}",
+                    mode,
+                    key
+                );
             }
 
-            // At least most data should be either valid or missing, not corrupted
-            assert!(
-                valid_data_count + missing_count >= 80,
-                "excessive corruption after partial SST write in mode: {}",
-                mode
-            );
-
-            eprintln!(
-                "✓ No data corruption after partial SST; valid: {}, lost: {}",
-                valid_data_count, missing_count
-            );
+            eprintln!("✓ Recovered exact SST-backed and WAL-backed values after reopen");
         }
     });
 }
 
 #[test]
-fn should_not_corrupt_data_after_partial_wal_write() {
+fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Chaos: No Corruption After Partial WAL (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Reopen After WAL-Backed Writes (mode: {}) ===", mode);
 
         // Arrange
-        // Act (Phase 1): Write with potential WAL corruption
+        // Act (Phase 1): Commit two WAL-backed write batches, then drop the engine
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -421,86 +352,58 @@ fn should_not_corrupt_data_after_partial_wal_write() {
             for i in 0..50 {
                 let key = format!("wal_corrupt_key_{:04}", i);
                 tx.put(key.as_bytes().to_vec(), b"wal_clean".to_vec(), None)
-                    .ok();
+                    .expect("put");
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
-            // Write batch 2 (WAL write may fail partway)
+            // Write batch 2
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 50..100 {
                 let key = format!("wal_corrupt_key_{:04}", i);
                 tx.put(key.as_bytes().to_vec(), b"wal_second".to_vec(), None)
-                    .ok();
+                    .expect("put");
             }
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
-
-            // Crash (WAL record may be partial)
         }
 
-        // Assert (Phase 2): Restart with WAL replay
+        // Assert (Phase 2): Reopen with WAL replay
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
-
-            // Engine should:
-            // 1. Read WAL records sequentially
-            // 2. Detect corruption via CRC on each record
-            // 3. Replay complete records; skip corrupted
-            // 4. Never replay garbage data
 
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
 
-            let mut valid_read = 0;
-            let mut corrupted_read = 0;
-
             for i in 0..100 {
                 let key = format!("wal_corrupt_key_{:04}", i);
-                match tx.get(key.as_bytes()) {
-                    Ok(Some(val)) => {
-                        // Verify value is recognizable (not garbage)
-                        if val.as_ref() == b"wal_clean" || val.as_ref() == b"wal_second" {
-                            valid_read += 1;
-                        } else {
-                            // Unexpected value (potential corruption)
-                            corrupted_read += 1;
-                        }
-                    }
-                    Ok(None) => {
-                        // Record lost (acceptable for partial WAL)
-                    }
-                    Err(_) => {
-                        // IO error acceptable
-                    }
-                }
+                let expected = if i < 50 {
+                    b"wal_clean".as_slice()
+                } else {
+                    b"wal_second".as_slice()
+                };
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("get"),
+                    Some(expected.into()),
+                    "mode: {} key: {}",
+                    mode,
+                    key
+                );
             }
 
-            assert_eq!(
-                corrupted_read, 0,
-                "WAL replay caused data corruption in mode: {}",
-                mode
-            );
-
-            eprintln!(
-                "✓ No corruption after partial WAL; valid: {}, corrupted: {}",
-                valid_read, corrupted_read
-            );
+            eprintln!("✓ Recovered exact WAL-backed values after reopen");
         }
     });
 }
 
 #[test]
-fn should_handle_intermittent_io_failures_under_load() {
+fn should_handle_concurrent_best_effort_writes_under_load_without_invalid_values() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Chaos: Intermittent Failures Under Load (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Concurrent Best-Effort Load (mode: {}) ===", mode);
 
-        // Arrange: High-concurrency write load with intermittent failures
+        // Arrange: High-concurrency best-effort write load
         let engine = std::sync::Arc::new(open_with_mode(opts.clone(), mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
@@ -525,7 +428,7 @@ fn should_handle_intermittent_io_failures_under_load() {
                         engine_clone.commit(t, WriteOptions::best_effort()).ok();
                     }
 
-                    // Random delay
+                    // Small stagger to vary writer interleaving
                     if batch % 3 == 0 {
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -539,35 +442,36 @@ fn should_handle_intermittent_io_failures_under_load() {
             handle.join().ok();
         }
 
-        // Act: Flush and compact under load
+        // Act: Flush and compact after the concurrent load
         engine.flush_cf(&cf).ok();
         engine.compact_all().ok();
 
-        // Assert: Engine remains operational; no panics
+        // Assert: Engine remains readable and sampled keys never return invalid bytes.
+        // Best-effort writes are not treated as a full-durability guarantee here.
         let tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin_tx");
 
-        // Sample reads to verify data consistency
-        let mut readable_keys = 0;
+        let mut sampled_present = 0;
         for tid in 0..5 {
             for batch in 0..20 {
                 let key = format!("chaos_load_t{}_b{}_k000", tid, batch);
-                if tx.get(key.as_bytes()).ok().flatten().is_some() {
-                    readable_keys += 1;
+                if let Some(val) = tx.get(key.as_bytes()).expect("get") {
+                    assert_eq!(val.as_ref(), b"chaos_value", "mode: {} key: {}", mode, key);
+                    sampled_present += 1;
                 }
             }
         }
 
         assert!(
-            readable_keys >= 50,
-            "excessive data loss under intermittent IO failures in mode: {}",
+            sampled_present > 0,
+            "expected at least one sampled key to be present in mode: {}",
             mode
         );
 
         eprintln!(
-            "✓ Engine handled intermittent failures; {} samples readable",
-            readable_keys
+            "✓ Best-effort load remained readable with {} sampled keys present",
+            sampled_present
         );
     });
 }

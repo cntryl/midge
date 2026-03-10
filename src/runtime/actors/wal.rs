@@ -11,24 +11,18 @@
 //! ARCHITECTURAL RULES:
 //! - ALWAYS uses FsWalWriter (never creates new backends)
 //! - Assigns global sequence numbers via state.next_sequence()
-//! - Tracks two durability frontiers for CloudFirst mode
+//! - Tracks two durability frontiers for CloudAsync mode
 //! - Does NOT block event loop waiting for cloud
 //! - Queues pending requests and completes them when cloud_durable_seq advances
 //!
-//! NOTE: `DurabilityPolicy::CloudFirst` is wired end-to-end.
-//! In CloudFirst mode, `append()` queues writes in `pending_cloud_writes` and
-//! defers visibility/response until `handle_cloud_upload_complete()` advances
-//! `cloud_durable_seq` on CloudAck.
+//! NOTE: `DurabilityPolicy::CloudAsync` is wired as an async cloud-backed mode.
+//! Local WAL append is the immediate visibility barrier; cloud durability advances
+//! independently via `cloud_durable_seq`.
 //!
-//! CLOUD-DURABLE MEMTABLE RULE:
-//! In Durability::CloudFirst mode, writes are NOT visible in memtable
-//! until cloud storage acknowledges durability. Local WAL is ephemeral;
-//! cloud WAL is the source of truth. Therefore:
-//! - Append to local WAL immediately (fast path)
-//! - Do NOT update memtable yet
-//! - Do NOT respond to request yet
-//! - Queue as PendingCloudWrite
-//! - When cloud ACKs: apply to memtable + respond to request
+//! CLOUD-BACKED VISIBILITY RULE:
+//! In `DurabilityPolicy::CloudAsync`, writes become visible after the local WAL
+//! append barrier succeeds and the memtable is updated. Cloud upload remains
+//! asynchronous unless the caller explicitly waits on the cloud durability frontier.
 
 use super::super::state::RuntimeState;
 use super::cloud_write_queue::{
@@ -37,7 +31,6 @@ use super::cloud_write_queue::{
 use crate::common::MidgeError;
 use crate::common::MidgeResult;
 use crate::io::{Fs, FsPath, RealFs};
-use crate::runtime::IntentLogEntry;
 use crate::sst::Memtable;
 use crate::wal::policy::BatchConfig;
 use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalOpKind, WalRecord, WalWriter};
@@ -66,7 +59,7 @@ pub struct WalActor {
     pending_sync_count: usize,
     /// Durability policy (determines sync behavior)
     durability_policy: DurabilityPolicy,
-    /// Pending writes waiting for cloud durability (CloudFirst mode only)
+    /// Pending writes waiting for cloud durability (CloudAsync mode only)
     /// These writes are in local WAL but NOT in memtable yet
     cloud_write_queue: CloudWriteQueue,
     /// Bytes written since last sync (for batched mode)
@@ -97,6 +90,23 @@ pub struct WalActor {
 }
 
 impl WalActor {
+    fn record_no_space_event() {
+        if let Some(t) = crate::telemetry::Telemetry::global() {
+            t.metrics().record_no_space_event();
+            t.metrics().record_write_stall_no_space();
+        }
+    }
+
+    fn finish_append_instrumentation(&mut self, bytes_written: u64, elapsed: Duration) {
+        self.append_calls += 1;
+        self.append_total += elapsed;
+        if let Some(t) = crate::telemetry::Telemetry::global() {
+            t.metrics().record_wal_append(bytes_written);
+            t.metrics().record_wal_append_count();
+            t.metrics().record_wal_append_ns(elapsed.as_nanos() as u64);
+        }
+    }
+
     pub fn new(
         wal_dir: PathBuf,
         durability_policy: DurabilityPolicy,
@@ -134,34 +144,13 @@ impl WalActor {
         // Log resolved WAL mode for diagnostics
         tracing::info!(
             wal_policy = ?actor.durability_policy,
-            batching_enabled = matches!(actor.durability_policy, DurabilityPolicy::Batched) || matches!(actor.durability_policy, DurabilityPolicy::CloudFirst),
+            batching_enabled = matches!(actor.durability_policy, DurabilityPolicy::Batched) || matches!(actor.durability_policy, DurabilityPolicy::CloudAsync),
             max_delay_ms = actor.batch_config.max_delay_ms,
             max_bytes = actor.batch_config.max_bytes,
             "WAL actor initialized"
         );
 
         Ok(actor)
-    }
-
-    /// Helper that wraps writer.append_record with local counters and telemetry
-    fn append_record_instrumented(
-        &mut self,
-        writer: &mut Box<dyn WalWriter>,
-        record: &WalRecord,
-    ) -> MidgeResult<()> {
-        let a_start = Instant::now();
-        writer.append_record(record)?;
-        let a_elapsed = a_start.elapsed();
-        self.append_calls += 1;
-        self.append_total += a_elapsed;
-        if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics()
-                .record_wal_append(record.estimated_size() as u64);
-            t.metrics().record_wal_append_count();
-            t.metrics()
-                .record_wal_append_ns(a_elapsed.as_nanos() as u64);
-        }
-        Ok(())
     }
 
     pub fn durability_policy(&self) -> DurabilityPolicy {
@@ -189,8 +178,8 @@ impl WalActor {
         Ok(())
     }
 
-    pub fn is_cloud_first(&self) -> bool {
-        matches!(self.durability_policy, DurabilityPolicy::CloudFirst)
+    pub fn is_cloud_async(&self) -> bool {
+        matches!(self.durability_policy, DurabilityPolicy::CloudAsync)
     }
 
     pub fn has_pending_cloud_writes(&self) -> bool {
@@ -239,9 +228,8 @@ impl WalActor {
     /// - Strict: fsync immediately + apply to memtable + respond
     /// - Batched: batch writes + apply to memtable immediately + respond
     /// - CloudMirrored: fsync + apply to memtable + schedule cloud upload + respond
-    /// - CloudFirst: local write (cache) + queue for cloud + DO NOT apply to memtable yet
+    /// - CloudAsync: local append barrier + apply to memtable + queue for cloud confirmation
     ///
-    /// In CloudFirst mode, writes are NOT visible until cloud acknowledges.
     /// Returns the assigned sequence number.
     ///
     /// IDEMPOTENCY: Uses request_id to detect retries. If the same request_id is seen twice,
@@ -325,18 +313,16 @@ impl WalActor {
         if let Some(writer) = &mut self.writer {
             if !matches!(self.durability_policy, DurabilityPolicy::BestEffort) {
                 let a_start = Instant::now();
-                writer.append_record(&record)?;
-                let a_elapsed = a_start.elapsed();
-                self.append_calls += 1;
-                self.append_total += a_elapsed;
-                // Instrumentation: record wal append bytes/count/latency
-                if let Some(t) = crate::telemetry::Telemetry::global() {
-                    t.metrics()
-                        .record_wal_append(record.estimated_size() as u64);
-                    t.metrics().record_wal_append_count();
-                    t.metrics()
-                        .record_wal_append_ns(a_elapsed.as_nanos() as u64);
+                if let Err(error) = writer.append_record(&record) {
+                    if matches!(error, MidgeError::NoSpace(_)) {
+                        Self::record_no_space_event();
+                    }
+                    return Err(error);
                 }
+                self.finish_append_instrumentation(
+                    record.estimated_size() as u64,
+                    a_start.elapsed(),
+                );
             }
         }
 
@@ -400,18 +386,21 @@ impl WalActor {
                     record.expiration,
                 );
             }
-            DurabilityPolicy::CloudFirst => {
+            DurabilityPolicy::CloudAsync => {
                 // === CRITICAL: Check backpressure before queueing ===
                 // If cloud upload is stalled, pending queue grows without bound.
                 // Prevent memory exhaustion by rejecting writes when queue is full.
                 if self.should_apply_backpressure() {
+                    if let Some(t) = crate::telemetry::Telemetry::global() {
+                        t.metrics().record_write_stall_cloud();
+                    }
                     tracing::warn!(
                         pending_count = self.cloud_write_queue.len(),
                         pending_bytes = self.cloud_write_queue.pending_bytes(),
-                        "CloudFirst write stall: pending queue at capacity"
+                        "CloudAsync write stall: pending queue at capacity"
                     );
                     return Err(MidgeError::WriteStall(
-                        "CloudFirst pending queue at capacity; cloud upload too slow".to_string(),
+                        "CloudAsync pending queue at capacity; cloud upload too slow".to_string(),
                     ));
                 }
 
@@ -421,7 +410,7 @@ impl WalActor {
                     tracing::error!(
                         timed_out_count = timed_out,
                         timeout_secs = CLOUD_UPLOAD_TIMEOUT.as_secs(),
-                        "CloudFirst timeout: pending writes not acknowledged by cloud"
+                        "CloudAsync timeout: pending writes not acknowledged by cloud"
                     );
                     return Err(MidgeError::Internal(format!(
                         "{} pending writes exceeded cloud upload timeout",
@@ -429,10 +418,10 @@ impl WalActor {
                     )));
                 }
 
-                // CRITICAL: Apply to memtable immediately for background CloudFirst.
+                // CRITICAL: Apply to memtable immediately for background CloudAsync.
                 // Cloud upload runs asynchronously; data must be visible for reads
                 // without waiting for upload completion. This is the key difference
-                // from the old CloudFirst behavior which blocked on cloud confirmation.
+                // from the old CloudAsync behavior which blocked on cloud confirmation.
                 self.apply_to_memtable(
                     state,
                     sequence,
@@ -476,10 +465,10 @@ impl WalActor {
             );
         }
 
-        // Return deferred=true if using group commit (Batched or CloudFirst modes)
+        // Return deferred=true if using group commit (Batched or CloudAsync modes)
         let deferred = matches!(
             self.durability_policy,
-            DurabilityPolicy::Batched | DurabilityPolicy::CloudFirst
+            DurabilityPolicy::Batched | DurabilityPolicy::CloudAsync
         );
         Ok((sequence, deferred))
     }
@@ -495,6 +484,7 @@ impl WalActor {
         cf_id: u32,
         start_key: Bytes,
         end_key: Bytes,
+        durability_policy: Option<DurabilityPolicy>,
     ) -> MidgeResult<(u64, bool)> {
         // Allocate sequence idempotently
         let (first_seq, _count) = state.allocate_sequences_idempotent(request_id, 1);
@@ -529,30 +519,38 @@ impl WalActor {
         };
 
         let record_size = record.estimated_size();
+        let effective_durability = durability_policy.unwrap_or(self.durability_policy);
+        let skip_wal = matches!(effective_durability, DurabilityPolicy::BestEffort);
 
-        // Append to local WAL
-        if let Some(writer) = &mut self.writer {
-            let a_start = Instant::now();
-            writer.append_record(&record)?;
-            let a_elapsed = a_start.elapsed();
-            self.append_calls += 1;
-            self.append_total += a_elapsed;
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics()
-                    .record_wal_append(record.estimated_size() as u64);
-                t.metrics().record_wal_append_count();
-                t.metrics()
-                    .record_wal_append_ns(a_elapsed.as_nanos() as u64);
+        // Append to local WAL unless the caller explicitly requested best effort.
+        if !skip_wal {
+            if let Some(writer) = &mut self.writer {
+                fail::fail_point!("midge::wal::inject_no_space_on_delete_range_append", |_| {
+                    Err(MidgeError::NoSpace(
+                        "failpoint: no space on delete_range append".to_string(),
+                    ))
+                });
+                let a_start = Instant::now();
+                if let Err(error) = writer.append_record(&record) {
+                    if matches!(error, MidgeError::NoSpace(_)) {
+                        Self::record_no_space_event();
+                    }
+                    return Err(error);
+                }
+                self.finish_append_instrumentation(
+                    record.estimated_size() as u64,
+                    a_start.elapsed(),
+                );
             }
+
+            // Update state tracking
+            state.wal.pending_writes += 1;
+            self.pending_sync_count += 1;
+            self.bytes_since_sync += record_size;
         }
 
-        // Update state tracking
-        state.wal.pending_writes += 1;
-        self.pending_sync_count += 1;
-        self.bytes_since_sync += record_size;
-
         // Apply durability policy
-        match self.durability_policy {
+        match effective_durability {
             DurabilityPolicy::Strict => {
                 self.sync_internal(state)?;
                 state.wal.local_durable_seq = sequence;
@@ -592,15 +590,18 @@ impl WalActor {
                     )?;
                 }
             }
-            DurabilityPolicy::CloudFirst => {
+            DurabilityPolicy::CloudAsync => {
                 if self.should_apply_backpressure() {
+                    if let Some(t) = crate::telemetry::Telemetry::global() {
+                        t.metrics().record_write_stall_cloud();
+                    }
                     tracing::warn!(
                         pending_count = self.cloud_write_queue.len(),
                         pending_bytes = self.cloud_write_queue.pending_bytes(),
-                        "CloudFirst write stall on delete_range"
+                        "CloudAsync write stall on delete_range"
                     );
                     return Err(MidgeError::WriteStall(
-                        "CloudFirst pending queue at capacity".to_string(),
+                        "CloudAsync pending queue at capacity".to_string(),
                     ));
                 }
 
@@ -612,7 +613,7 @@ impl WalActor {
                     )));
                 }
 
-                // CRITICAL: Apply to memtable immediately for background CloudFirst.
+                // CRITICAL: Apply to memtable immediately for background CloudAsync.
                 // Cloud upload runs asynchronously; deletions must be visible immediately.
                 if let Some(range_end) = record.range_end.as_ref() {
                     self.apply_delete_range_to_memtable(
@@ -653,8 +654,8 @@ impl WalActor {
         tracing::trace!(cf_id = cf_id, sequence, policy = ?self.durability_policy, "WAL append_delete_range");
 
         let deferred = matches!(
-            self.durability_policy,
-            DurabilityPolicy::Batched | DurabilityPolicy::CloudFirst
+            effective_durability,
+            DurabilityPolicy::Batched | DurabilityPolicy::CloudAsync
         );
         Ok((sequence, deferred))
     }
@@ -665,7 +666,7 @@ impl WalActor {
     /// - allocates a single transaction id
     /// - writes TxnBegin marker (unless BestEffort)
     /// - writes all operation records (in order, unless BestEffort)
-    /// - writes TxnCommit marker (unless BestEffort)
+    /// - writes TxnCommit marker at the end of the transaction path (unless BestEffort)
     /// - applies all operations to memtables (in order)
     ///
     /// The `durability_policy` parameter allows per-request durability control.
@@ -722,18 +723,6 @@ impl WalActor {
         // Advance global sequence to commit_seq
         state.sequence = commit_seq;
 
-        // Log seqno allocations for intent tracing (deferred - single persist at end)
-        // Begin seq (cf_id 0)
-        state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
-            seqno: begin_seq,
-            cf_id: 0,
-        });
-        // Commit seq
-        state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
-            seqno: commit_seq,
-            cf_id: 0,
-        });
-
         // Determine effective durability policy: use provided one, or fall back to actor's default
         let effective_durability = durability_policy.unwrap_or(self.durability_policy);
 
@@ -741,12 +730,13 @@ impl WalActor {
         let skip_wal = matches!(effective_durability, DurabilityPolicy::BestEffort);
         let mut total_wal_bytes: usize = 0;
 
-        // Build op records and apply_ops using deterministic sequences
+        // Build begin + op records first. The commit marker is appended only at the
+        // end of the transaction path so recovery cannot observe a "committed"
+        // transaction if the process crashes before append_transaction returns.
         let mut wal_records: Vec<WalRecord> = if skip_wal {
             Vec::new() // Don't allocate WAL records for BestEffort
         } else {
-            // Pre-allocate WAL records batch: begin + N ops + commit
-            let mut records = Vec::with_capacity(ops_count + 2);
+            let mut records = Vec::with_capacity(ops_count + 1);
 
             // Create and write begin record
             let mut begin_record = WalRecord::new_cf(
@@ -765,9 +755,9 @@ impl WalActor {
         let apply_ops =
             self.build_apply_ops(ops, first_op_seq, txn_id, state, skip_wal, &mut wal_records);
 
-        // Write commit record (only if not skipping WAL)
+        let mut commit_record = None;
         if !skip_wal {
-            let mut commit_record = WalRecord::new_cf(
+            let mut record = WalRecord::new_cf(
                 0,
                 WalOpKind::TxnCommit,
                 marker_key,
@@ -775,30 +765,32 @@ impl WalActor {
                 commit_seq,
                 self.current_epoch,
             );
-            commit_record.txn_id = Some(txn_id);
-            wal_records.push(commit_record);
+            record.txn_id = Some(txn_id);
+            commit_record = Some(record);
 
-            // Compute total WAL bytes for bookkeeping
             for r in &wal_records {
                 total_wal_bytes += r.estimated_size();
             }
         }
 
-        // Single batched WAL write — one writer lock acquisition, one buffer flush
-        // Skip entirely for BestEffort mode
+        // Write begin + op records first. The commit marker is appended separately so we
+        // can inject crash/failure points around the exact transaction publication seam.
         if !skip_wal {
             if let Some(writer) = &mut self.writer {
+                fail::fail_point!("midge::wal::inject_no_space_on_txn_append_batch", |_| Err(
+                    MidgeError::NoSpace(
+                        "failpoint: no space on transaction batch append".to_string()
+                    )
+                ));
                 let a_start = Instant::now();
-                writer.append_batch(&wal_records)?;
-                let a_elapsed = a_start.elapsed();
-                self.append_calls += 1;
-                self.append_total += a_elapsed;
-                if let Some(t) = crate::telemetry::Telemetry::global() {
-                    t.metrics().record_wal_append(total_wal_bytes as u64);
-                    t.metrics().record_wal_append_count();
-                    t.metrics()
-                        .record_wal_append_ns(a_elapsed.as_nanos() as u64);
+                if let Err(error) = writer.append_batch(&wal_records) {
+                    if matches!(error, MidgeError::NoSpace(_)) {
+                        Self::record_no_space_event();
+                    }
+                    return Err(error);
                 }
+                self.finish_append_instrumentation(total_wal_bytes as u64, a_start.elapsed());
+                fail::fail_point!("midge::wal::after_append_batch_before_sync");
             }
 
             // Update bookkeeping (single update for entire batch)
@@ -810,17 +802,47 @@ impl WalActor {
 
         let last_sequence = commit_seq;
 
+        if let Some(commit_record) = commit_record {
+            fail::fail_point!("midge::wal::txn_after_ops_append_before_commit");
+
+            if let Some(writer) = &mut self.writer {
+                fail::fail_point!("midge::wal::inject_no_space_on_txn_commit_append", |_| Err(
+                    MidgeError::NoSpace(
+                        "failpoint: no space on transaction commit append".to_string()
+                    )
+                ));
+                let a_start = Instant::now();
+                if let Err(error) = writer.append_record(&commit_record) {
+                    if matches!(error, MidgeError::NoSpace(_)) {
+                        Self::record_no_space_event();
+                    }
+                    return Err(error);
+                }
+                self.finish_append_instrumentation(
+                    commit_record.estimated_size() as u64,
+                    a_start.elapsed(),
+                );
+            }
+
+            state.wal.pending_writes += 1;
+            self.pending_sync_count += 1;
+            self.bytes_since_sync += commit_record.estimated_size();
+        }
+
         // Apply durability policy (single sync for the whole batch, where relevant).
-        // Use effective_durability which may be per-request BestEffort
+        // Use effective_durability which may be per-request BestEffort.
+        // For strict durability, the sync happens only after the commit marker is appended.
         match effective_durability {
             DurabilityPolicy::Strict | DurabilityPolicy::CloudMirrored => {
+                fail::fail_point!("midge::wal::txn_after_commit_append_before_sync");
                 self.sync_internal(state)?;
                 state.wal.local_durable_seq = last_sequence;
+                fail::fail_point!("midge::wal::txn_after_sync_before_ack");
             }
             DurabilityPolicy::Batched => {
                 // no-op; background/timer can sync later
             }
-            DurabilityPolicy::CloudFirst => {
+            DurabilityPolicy::CloudAsync => {
                 // no local durability boundary; visibility gated on cloud ack.
             }
             DurabilityPolicy::BestEffort => {
@@ -842,17 +864,20 @@ impl WalActor {
             }
         }
 
-        if matches!(effective_durability, DurabilityPolicy::CloudFirst) {
+        if matches!(effective_durability, DurabilityPolicy::CloudAsync) {
             // === CRITICAL: Check backpressure before queueing batch ===
             if self.should_apply_backpressure() {
+                if let Some(t) = crate::telemetry::Telemetry::global() {
+                    t.metrics().record_write_stall_cloud();
+                }
                 tracing::warn!(
                     op_count,
                     pending_count = self.cloud_write_queue.len(),
                     pending_bytes = self.cloud_write_queue.pending_bytes(),
-                    "CloudFirst batch stall: pending queue at capacity"
+                    "CloudAsync batch stall: pending queue at capacity"
                 );
                 return Err(MidgeError::WriteStall(
-                    "CloudFirst pending queue at capacity; cloud upload too slow".to_string(),
+                    "CloudAsync pending queue at capacity; cloud upload too slow".to_string(),
                 ));
             }
 
@@ -862,7 +887,7 @@ impl WalActor {
                 tracing::error!(
                     timed_out_count = timed_out,
                     timeout_secs = CLOUD_UPLOAD_TIMEOUT.as_secs(),
-                    "CloudFirst batch timeout: pending writes not acknowledged by cloud"
+                    "CloudAsync batch timeout: pending writes not acknowledged by cloud"
                 );
                 return Err(MidgeError::Internal(format!(
                     "{} pending writes exceeded cloud upload timeout",
@@ -870,10 +895,10 @@ impl WalActor {
                 )));
             }
 
-            // CRITICAL: Apply to memtable immediately for CloudFirst.
+            // CRITICAL: Apply to memtable immediately for CloudAsync.
             // Cloud upload runs asynchronously; data must be visible for reads
             // without waiting for upload completion. This matches append() behavior.
-            // We consume apply_ops here (same as non-CloudFirst path) to avoid cloning.
+            // We consume apply_ops here (same as non-CloudAsync path) to avoid cloning.
             for apply_op in apply_ops {
                 match apply_op {
                     TransactionApplyOp::Put {
@@ -905,12 +930,12 @@ impl WalActor {
             // Note: We no longer queue to cloud_write_queue for batched transactions
             // since memtable apply already happened. Cloud WAL upload is handled
             // separately via segment rotation. The queue is primarily for single-write
-            // CloudFirst tracking which still uses append() -> enqueue_write().
+            // CloudAsync tracking which still uses append() -> enqueue_write().
 
             tracing::trace!(
                 commit_sequence = last_sequence,
                 op_count,
-                "Applied batch to memtable (CloudFirst)"
+                "Applied batch to memtable (CloudAsync)"
             );
         } else {
             self.apply_ops_to_memtables(state, apply_ops)?;
@@ -918,10 +943,10 @@ impl WalActor {
 
         tracing::trace!(txn_id, last_sequence, op_count, "WAL transaction apply");
 
-        // Return deferred=true if using group commit (Batched or CloudFirst modes)
+        // Return deferred=true if using group commit (Batched or CloudAsync modes)
         let deferred = matches!(
             effective_durability,
-            DurabilityPolicy::Batched | DurabilityPolicy::CloudFirst
+            DurabilityPolicy::Batched | DurabilityPolicy::CloudAsync
         );
         Ok((last_sequence, op_count, deferred))
     }
@@ -931,7 +956,7 @@ impl WalActor {
         ops: Vec<crate::runtime::TransactionOp>,
         first_op_seq: u64,
         txn_id: u64,
-        state: &mut RuntimeState,
+        _state: &mut RuntimeState,
         skip_wal: bool,
         wal_records: &mut Vec<WalRecord>,
     ) -> Vec<TransactionApplyOp> {
@@ -974,11 +999,6 @@ impl WalActor {
                     };
                     record.txn_id = Some(txn_id);
 
-                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
-                        seqno: seq,
-                        cf_id,
-                    });
-
                     apply_ops.push(TransactionApplyOp::Put {
                         cf_id,
                         key,
@@ -1001,11 +1021,6 @@ impl WalActor {
                         self.current_epoch,
                     );
                     record.txn_id = Some(txn_id);
-
-                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
-                        seqno: seq,
-                        cf_id,
-                    });
 
                     apply_ops.push(TransactionApplyOp::Delete {
                         cf_id,
@@ -1081,7 +1096,7 @@ impl WalActor {
             return true;
         }
 
-        if !self.is_cloud_first() {
+        if !self.is_cloud_async() {
             return false;
         }
 
@@ -1179,6 +1194,9 @@ impl WalActor {
                     // Success
                 }
                 Ok(Err(e)) => {
+                    if matches!(e, MidgeError::NoSpace(_)) {
+                        Self::record_no_space_event();
+                    }
                     return Err(e);
                 }
                 Err(panic_info) => {
@@ -1214,6 +1232,8 @@ impl WalActor {
                     avg_ms
                 );
             }
+
+            fail::fail_point!("midge::wal::after_fsync_before_durable_frontier");
         }
 
         state.wal.last_synced_seq = state.sequence;
@@ -1227,7 +1247,7 @@ impl WalActor {
 
     /// Sync WAL to disk (public interface).
     ///
-    /// Returns the sealed flush generation. In group commit modes (Batched/CloudFirst),
+    /// Returns the sealed flush generation. In group commit modes (Batched/CloudAsync),
     /// all pending writes at sync time are grouped under this generation.
     pub fn sync(&mut self, state: &mut RuntimeState) -> MidgeResult<u64> {
         let pending = state.wal.pending_writes;
@@ -1251,7 +1271,7 @@ impl WalActor {
 
     /// Flush WAL buffers without fsync.
     ///
-    /// CloudFirst durability uses local WAL as a staging file for upload.
+    /// CloudAsync durability uses local WAL as a staging file for upload.
     /// We avoid fsync on every write, but do a flush+fsync only when sealing
     /// a segment right before upload so the uploader reads a complete file.
     pub fn flush_for_cloud_upload(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
@@ -1274,7 +1294,7 @@ impl WalActor {
         tracing::debug!(
             pending_writes = pending,
             flushed_seq = state.wal.last_synced_seq,
-            "WAL flush (CloudFirst upload)"
+            "WAL flush (CloudAsync upload)"
         );
 
         Ok(())
@@ -1333,7 +1353,7 @@ impl WalActor {
         Ok(())
     }
 
-    /// Handle cloud upload completion (CloudFirst durability)
+    /// Handle cloud upload completion (CloudAsync durability)
     ///
     /// Updates cloud_durable_seq and completes any pending writes
     /// by applying them to memtable.
@@ -1454,7 +1474,7 @@ impl WalActor {
     pub fn handle_cloud_upload_failed(&mut self, segment_id: u64, error: &str) {
         tracing::error!(segment_id, error, "Cloud upload failed");
 
-        // Conservative behavior: fail all pending CloudFirst requests.
+        // Conservative behavior: fail all pending CloudAsync requests.
         // We cannot claim durability for any queued writes.
         self.cloud_write_queue.clear();
     }

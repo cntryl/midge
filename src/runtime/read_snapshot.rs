@@ -5,12 +5,11 @@
 
 use crate::io::Fs;
 use crate::metadata::FileMeta;
-use crate::sst::traits::SstReader;
-use crate::sst::{Memtable, SkipListMemtable};
+use crate::sst::traits::SstStateReader;
+use crate::sst::types::{KeyState, RangeTombstone};
+use crate::sst::SkipListMemtable;
+use std::collections::BTreeMap;
 use std::sync::Arc;
-
-/// Type alias for memtable range scan results
-type MemtableRangeResult = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
 /// Immutable snapshot of readable state for a column family
 ///
@@ -35,6 +34,90 @@ pub struct ReadSnapshot {
 }
 
 impl ReadSnapshot {
+    fn current_time_millis() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    fn is_expired(expiration: Option<u64>) -> bool {
+        expiration.is_some_and(|expiration| expiration <= Self::current_time_millis())
+    }
+
+    fn state_sequence(state: &KeyState) -> Option<u64> {
+        match state {
+            KeyState::Absent => None,
+            KeyState::Tombstone(seq) => Some(*seq),
+            KeyState::Value(_, seq, _, _) => Some(*seq),
+        }
+    }
+
+    fn normalize_state(state: KeyState) -> KeyState {
+        match state {
+            KeyState::Value(_, seq, exp, _) if Self::is_expired(exp) => KeyState::Tombstone(seq),
+            _ => state,
+        }
+    }
+
+    fn candidate_wins(existing: &KeyState, candidate: &KeyState) -> bool {
+        let existing_seq = Self::state_sequence(existing).unwrap_or(0);
+        let candidate_seq = Self::state_sequence(candidate).unwrap_or(0);
+
+        candidate_seq > existing_seq
+            || (candidate_seq == existing_seq
+                && matches!(candidate, KeyState::Tombstone(_))
+                && !matches!(existing, KeyState::Tombstone(_)))
+    }
+
+    fn merge_state(states: &mut BTreeMap<Vec<u8>, KeyState>, key: Vec<u8>, state: KeyState) {
+        let normalized = Self::normalize_state(state);
+        if matches!(normalized, KeyState::Absent) {
+            return;
+        }
+
+        match states.get(&key) {
+            Some(existing) if !Self::candidate_wins(existing, &normalized) => {}
+            _ => {
+                states.insert(key, normalized);
+            }
+        }
+    }
+
+    fn is_visible_state(state: &KeyState, snapshot_seq: u64) -> bool {
+        snapshot_seq == u64::MAX
+            || Self::state_sequence(state).is_some_and(|state_seq| state_seq <= snapshot_seq)
+    }
+
+    fn range_tombstone_overlaps_query(
+        tombstone: &RangeTombstone,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> bool {
+        if let Some(scan_end) = end {
+            if tombstone.start.as_slice() >= scan_end {
+                return false;
+            }
+        }
+        if let Some(scan_start) = start {
+            if tombstone.end.as_slice() <= scan_start {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn range_tombstone_covers_state(
+        tombstones: &[RangeTombstone],
+        key: &[u8],
+        state: &KeyState,
+    ) -> bool {
+        let state_seq = Self::state_sequence(state).unwrap_or(0);
+        tombstones
+            .iter()
+            .any(|tombstone| tombstone.covers(key) && tombstone.seq >= state_seq)
+    }
+
     /// Create a new read snapshot
     pub fn new(
         memtable: Arc<SkipListMemtable>,
@@ -59,216 +142,131 @@ impl ReadSnapshot {
 
     /// Perform a point read on this snapshot
     pub fn get(&self, key: &[u8], seq: u64) -> Option<Vec<u8>> {
-        // Active memtable
-        if seq == u64::MAX {
-            if let Ok(Some(v)) = self.memtable.get(key) {
-                return Some(v);
-            }
-        } else if let Ok(Some(v)) = self.memtable.get_at_seq(key, seq) {
-            return Some(v);
+        let mut states = BTreeMap::new();
+        let mut range_tombstones = Vec::new();
+
+        if let Ok(state) = self.memtable.get_key_state_at(key, seq) {
+            Self::merge_state(&mut states, key.to_vec(), state);
         }
 
-        // Immutable memtables (newest → oldest)
-        for imm in self.immutable_memtables.iter().rev() {
-            if seq == u64::MAX {
-                if let Ok(Some(v)) = imm.get(key) {
-                    return Some(v);
-                }
-            } else if let Ok(Some(v)) = imm.get_at_seq(key, seq) {
-                return Some(v);
+        for imm in &self.immutable_memtables {
+            if let Ok(state) = imm.get_key_state_at(key, seq) {
+                Self::merge_state(&mut states, key.to_vec(), state);
             }
         }
 
         if !self.memory_mode {
-            // SST lookup: check files from newest to oldest across all levels
-            let mut files_by_level: std::collections::BTreeMap<u32, Vec<_>> =
-                std::collections::BTreeMap::new();
-            for file in &self.sst_files {
-                files_by_level
-                    .entry(file.level)
-                    .or_default()
-                    .push(file.clone());
-            }
-
-            // Search L0 first (newest to oldest), then L1, L2, etc.
-            if let Some(l0_files) = files_by_level.get(&0) {
-                for file_meta in l0_files.iter().rev() {
-                    file_meta.record_read();
-                    let sst_path = self.sst_path_prefix.join(&file_meta.name);
-                    let path_str = sst_path.to_string_lossy().to_string();
-                    if let Ok(reader) =
-                        crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))
-                    {
-                        if let Ok(Some(value)) = reader.get(key) {
-                            return Some(value.to_vec());
-                        }
+            for file_meta in &self.sst_files {
+                if let (Some(smallest), Some(largest)) =
+                    (&file_meta.smallest_key, &file_meta.largest_key)
+                {
+                    if key < smallest.as_slice() || key > largest.as_slice() {
+                        continue;
                     }
                 }
-            }
 
-            // Search higher levels (L1+)
-            for level in 1..=6 {
-                if let Some(files) = files_by_level.get(&level) {
-                    for file_meta in files {
-                        // Check key range before opening SST
-                        if let (Some(smallest), Some(largest)) =
-                            (&file_meta.smallest_key, &file_meta.largest_key)
-                        {
-                            if key < smallest.as_slice() || key > largest.as_slice() {
-                                continue;
-                            }
-                        }
-
-                        file_meta.record_read();
-                        let sst_path = self.sst_path_prefix.join(&file_meta.name);
-                        let path_str = sst_path.to_string_lossy().to_string();
-                        if let Ok(reader) =
-                            crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))
-                        {
-                            if let Ok(Some(value)) = reader.get(key) {
-                                return Some(value.to_vec());
-                            }
-                        }
+                file_meta.record_read();
+                let sst_path = self.sst_path_prefix.join(&file_meta.name);
+                let path_str = sst_path.to_string_lossy().to_string();
+                if let Ok(reader) =
+                    crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))
+                {
+                    if let Ok(state) = reader.get_state_at(key, seq) {
+                        Self::merge_state(&mut states, key.to_vec(), state);
                     }
+
+                    range_tombstones.extend(reader.range_tombstones().into_iter().filter(
+                        |tombstone| {
+                            (seq == u64::MAX || tombstone.seq <= seq) && tombstone.covers(key)
+                        },
+                    ));
                 }
             }
         }
 
-        None
+        let state = states.remove(key)?;
+        if Self::range_tombstone_covers_state(&range_tombstones, key, &state) {
+            return None;
+        }
+
+        match state {
+            KeyState::Value(value, _, exp, _) if !Self::is_expired(exp) => Some(value.to_vec()),
+            _ => None,
+        }
     }
 
     /// Perform a range scan on this snapshot
     pub fn range_scan(&self, start: &[u8], end: &[u8], seq: u64) -> Vec<(Vec<u8>, Vec<u8>)> {
-        use std::collections::BTreeMap;
-
-        let mut results: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let mut states: BTreeMap<Vec<u8>, KeyState> = BTreeMap::new();
+        let mut range_tombstones = Vec::new();
 
         // Treat empty bounds as unbounded
         let start_opt = if start.is_empty() { None } else { Some(start) };
         let end_opt = if end.is_empty() { None } else { Some(end) };
 
+        for (key, state) in self.memtable.range_state_at(start_opt, end_opt, seq) {
+            Self::merge_state(&mut states, key, state);
+        }
+
+        for imm in &self.immutable_memtables {
+            for (key, state) in imm.range_state_at(start_opt, end_opt, seq) {
+                Self::merge_state(&mut states, key, state);
+            }
+        }
+
         if !self.memory_mode {
-            // === Phase 1: SST files (oldest -> newest so newer overrides older) ===
-            let mut files_by_level: BTreeMap<u32, Vec<_>> = BTreeMap::new();
-            for file in &self.sst_files {
-                files_by_level
-                    .entry(file.level)
-                    .or_default()
-                    .push(file.clone());
-            }
-
-            // L0: newest -> oldest (may overlap)
-            if let Some(l0_files) = files_by_level.get(&0) {
-                for file_meta in l0_files.iter().rev() {
-                    file_meta.record_read();
-                    let sst_path = self.sst_path_prefix.join(&file_meta.name);
-                    let path_str = sst_path.to_string_lossy().to_string();
-                    if let Ok(reader) =
-                        crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))
+            for file_meta in &self.sst_files {
+                if let (Some(smallest), Some(largest)) =
+                    (&file_meta.smallest_key, &file_meta.largest_key)
+                {
+                    if start_opt.is_some_and(|s| s > largest.as_slice())
+                        || end_opt.is_some_and(|e| e <= smallest.as_slice())
                     {
-                        if let Ok(pairs) = reader.scan_range(start_opt, end_opt) {
-                            for (k, v) in pairs {
-                                // First occurrence from newest file wins (or_insert)
-                                results.entry(k.to_vec()).or_insert(v.to_vec());
-                            }
-                        }
+                        continue;
                     }
                 }
-            }
 
-            // Higher levels (L1+): each level is non-overlapping, sorted by key
-            for (&level, files) in files_by_level.iter() {
-                if level == 0 {
-                    continue;
-                }
-
-                for file_meta in files.iter() {
-                    // Skip if key range doesn't overlap
-                    if let (Some(ref smallest), Some(ref largest)) =
-                        (&file_meta.smallest_key, &file_meta.largest_key)
-                    {
-                        // Check if [start, end) overlaps with [smallest, largest]
-                        if let Some(s) = start_opt {
-                            if s >= largest.as_slice() {
-                                continue; // start is beyond this file
-                            }
-                        }
-                        if let Some(e) = end_opt {
-                            if e <= smallest.as_slice() {
-                                continue; // end is before this file
+                file_meta.record_read();
+                let sst_path = self.sst_path_prefix.join(&file_meta.name);
+                let path_str = sst_path.to_string_lossy().to_string();
+                if let Ok(reader) =
+                    crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))
+                {
+                    if let Ok(entries) = reader.scan_range_state(start_opt, end_opt) {
+                        for (key, state) in entries {
+                            if Self::is_visible_state(&state, seq) {
+                                Self::merge_state(&mut states, key.to_vec(), state);
                             }
                         }
                     }
 
-                    file_meta.record_read();
-                    let sst_path = self.sst_path_prefix.join(&file_meta.name);
-                    let path_str = sst_path.to_string_lossy().to_string();
-                    if let Ok(reader) =
-                        crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))
-                    {
-                        if let Ok(pairs) = reader.scan_range(start_opt, end_opt) {
-                            for (k, v) in pairs {
-                                results.entry(k.to_vec()).or_insert(v.to_vec());
-                            }
-                        }
+                    range_tombstones.extend(reader.range_tombstones().into_iter().filter(
+                        |tombstone| {
+                            (seq == u64::MAX || tombstone.seq <= seq)
+                                && Self::range_tombstone_overlaps_query(
+                                    tombstone, start_opt, end_opt,
+                                )
+                        },
+                    ));
+                }
+            }
+        }
+
+        states
+            .into_iter()
+            .filter_map(|(key, state)| {
+                if Self::range_tombstone_covers_state(&range_tombstones, &key, &state) {
+                    return None;
+                }
+
+                match state {
+                    KeyState::Value(value, _, exp, _) if !Self::is_expired(exp) => {
+                        Some((key, value.to_vec()))
                     }
+                    _ => None,
                 }
-            }
-        }
-
-        // === Phase 2: Immutable memtables (oldest -> newest, newer overrides older) ===
-        for imm in self.immutable_memtables.iter() {
-            if let Ok(entries) = self.collect_memtable_range(imm, start, end, seq) {
-                for (k, v_opt) in entries {
-                    // Insert or update with newer memtable value, but only if not a tombstone
-                    if let Some(v) = v_opt {
-                        results.insert(k, v);
-                    }
-                }
-            }
-        }
-
-        // === Phase 3: Active memtable (newest, overrides everything) ===
-        if let Ok(entries) = self.collect_memtable_range(&self.memtable, start, end, seq) {
-            for (k, v_opt) in entries {
-                if let Some(v) = v_opt {
-                    results.insert(k, v);
-                }
-            }
-        }
-
-        // Convert BTreeMap to Vec, keeping only non-tombstone entries
-        results.into_iter().collect()
-    }
-
-    fn collect_memtable_range(
-        &self,
-        memtable: &Arc<SkipListMemtable>,
-        start: &[u8],
-        end: &[u8],
-        seq: u64,
-    ) -> Result<MemtableRangeResult, ()> {
-        use std::collections::BTreeMap;
-
-        // De-duplicate versions within this memtable (keep first = newest)
-        let all_entries = memtable.iter_all(seq);
-        let mut by_key: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
-
-        for (key, value_opt, entry_seq) in all_entries {
-            if entry_seq < seq {
-                by_key.entry(key).or_insert(value_opt);
-            }
-        }
-
-        // Filter by range
-        let mut results = Vec::new();
-        for (key, value_opt) in by_key {
-            if &key[..] >= start && (end.is_empty() || &key[..] < end) {
-                results.push((key, value_opt));
-            }
-        }
-
-        Ok(results)
+            })
+            .collect()
     }
 }
 

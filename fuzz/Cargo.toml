@@ -1,0 +1,41 @@
+[package]
+name = "cntryl-midge-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3.23"
+cntryl-midge = { path = ".." }
+
+[[bin]]
+name = "wal_frame_recovery"
+path = "fuzz_targets/wal_frame_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest_journal_replay"
+path = "fuzz_targets/manifest_journal_replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "intent_log_replay"
+path = "fuzz_targets/intent_log_replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sst_block_decode"
+path = "fuzz_targets/sst_block_decode.rs"
+test = false
+doc = false
+bench = false

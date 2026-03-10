@@ -42,15 +42,6 @@ impl ManifestActor {
             }
         }
 
-        // 🔑 CRITICAL: Write intent BEFORE applying mutations
-        // This ensures we can recover if crash occurs during SST addition
-        let intent = crate::runtime::IntentLogEntry::SstAdded {
-            file_meta: file_meta.clone(),
-        };
-
-        // Persist the intent before applying mutation
-        state.append_intent(intent)?;
-
         // Append to manifest journal (durable edit log) - skip in memory mode
         if !state.memory_mode {
             let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
@@ -64,9 +55,12 @@ impl ManifestActor {
                 largest_seq: file_meta.largest_seq,
                 ..Default::default()
             });
-            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
-                tracing::warn!(error = ?e, "failed to append AddSst to journal");
-            }
+            fail::fail_point!("midge::manifest::inject_no_space_on_add_sst_edit", |_| Err(
+                crate::common::MidgeError::NoSpace(
+                    "failpoint: no space on manifest add_sst append".to_string()
+                )
+            ));
+            crate::metadata::append_edit(&state.db_path, &edit)?;
         }
 
         // Now that intent is durable, apply mutation to in-memory manifest
@@ -103,16 +97,6 @@ impl ManifestActor {
         removed: Vec<String>,
         added: Vec<FileMeta>,
     ) -> MidgeResult<()> {
-        // 🔑 CRITICAL: Write intent BEFORE applying mutations
-        // This ensures we can recover incomplete mutations on crash
-        let intent = crate::runtime::IntentLogEntry::CompactionApplied {
-            removed: removed.clone(),
-            added: added.iter().map(|m| m.name.clone()).collect(),
-        };
-
-        // Persist the intent before applying mutations
-        state.append_intent(intent)?;
-
         // Append compaction edits to manifest journal as a single batch (reduces fixed overhead)
         let mut edits = Vec::with_capacity(removed.len() + added.len());
         for n in &removed {
@@ -134,9 +118,13 @@ impl ManifestActor {
             ));
         }
         if !edits.is_empty() {
-            if let Err(e) = crate::metadata::append_edit_batch(&state.db_path, &edits) {
-                tracing::warn!(error = ?e, "failed to append compaction edit batch to journal");
-            }
+            fail::fail_point!(
+                "midge::manifest::inject_no_space_on_compaction_batch_edit",
+                |_| Err(crate::common::MidgeError::NoSpace(
+                    "failpoint: no space on manifest compaction batch append".to_string()
+                ))
+            );
+            crate::metadata::append_edit_batch(&state.db_path, &edits)?;
         }
 
         // Now that intent is durable, apply mutations to in-memory manifest
@@ -184,7 +172,7 @@ impl ManifestActor {
             "Manifest: persisting"
         );
 
-        // Use ManifestPersistence to save in YAML format
+        // Use ManifestPersistence to save the current manifest JSON checkpoint.
         crate::metadata::ManifestPersistence::save(&state.db_path, &state.manifest)
             .map_err(crate::common::MidgeError::Internal)?;
 
@@ -224,9 +212,7 @@ impl ManifestActor {
                 name: name.clone(),
                 created_at,
             };
-            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
-                tracing::warn!(error = ?e, "failed to append CreateColumnFamily to journal");
-            }
+            crate::metadata::append_edit(&state.db_path, &edit)?;
         }
 
         self.pending_edits += 1;
@@ -263,9 +249,7 @@ impl ManifestActor {
         // Append drop CF edit to journal (skip in memory mode)
         if !state.memory_mode {
             let edit = crate::metadata::ManifestEdit::DropColumnFamily { id: cf_id };
-            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
-                tracing::warn!(error = ?e, "failed to append DropColumnFamily to journal");
-            }
+            crate::metadata::append_edit(&state.db_path, &edit)?;
         }
 
         // Remove ColumnFamilyState

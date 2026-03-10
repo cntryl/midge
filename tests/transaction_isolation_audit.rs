@@ -1,359 +1,217 @@
-﻿//! Transaction Isolation Level Audit
+//! Isolation audit assertions for the current transaction model.
 //!
-//! Purpose: Definitively determine which isolation level Midge implements.
-//! This audit tests concrete scenarios and documents the actual behavior,
-//! which can then be used to validate/fix other isolation tests.
-//!
-//! Isolation levels in order of strength:
-//! 1. Read Uncommitted - No guarantees (weakest)
-//! 2. Read Committed - No dirty reads
-//! 3. Repeatable Read - No dirty reads, no lost updates
-//! 4. Snapshot Isolation - No dirty reads, no lost updates, no phantom reads
-//! 5. Serializable - All conflicts prevented (strongest)
-//!
-//! Special: Last-Write-Wins (LWW) - Concurrent writes always succeed, last one wins
+//! These tests classify the engine's observable semantics in a deterministic
+//! way instead of printing diagnostics for manual interpretation.
 
+use bytes::Bytes;
 use cntryl_midge::testkit::*;
 use std::sync::Arc;
 
-// ============================================================================
-// DIAGNOSTIC TEST 1: Dirty Read Prevention
-// ============================================================================
-//
-// If Midge prevents dirty reads, it's at least Read Committed level.
-// If Midge allows dirty reads, it's Read Uncommitted.
-
 #[test]
-fn should_prevent_dirty_reads_when_reading_uncommitted_writes() {
-    eprintln!("\n=== AUDIT: DIRTY READ PREVENTION ===");
-    eprintln!("Question: Can a transaction see uncommitted writes from another transaction?");
-
+fn should_hide_uncommitted_writes_when_reading_from_other_transaction() {
+    // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
-    // Transaction 1: Write but don't commit
-    let mut txn1 = engine
+    // Act
+    let mut writer = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-        .unwrap();
-    txn1.put(b"key".to_vec(), b"uncommitted_value".to_vec(), None)
-        .unwrap();
-    // TXN1 NOT COMMITTED
+        .expect("begin writer");
+    writer
+        .put(b"key".to_vec(), b"uncommitted_value".to_vec(), None)
+        .expect("put uncommitted value");
 
-    // Transaction 2: Try to read the same key
-    let txn2 = engine
+    let reader = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-        .unwrap();
-    let value_seen = txn2.get(b"key").unwrap();
+        .expect("begin reader");
 
-    if value_seen.is_some() {
-        eprintln!("âŒ DIRTY READ ALLOWED: Other transaction saw uncommitted write");
-        eprintln!("   Isolation Level: Read Uncommitted or weaker");
-    } else {
-        eprintln!("âœ… NO DIRTY READS: Uncommitted writes are hidden");
-        eprintln!("   Isolation Level: At least Read Committed");
-    }
-
-    // Cleanup
-    drop(txn1);
+    // Assert
+    assert_eq!(reader.get(b"key").expect("read uncommitted key"), None);
 }
 
-// ============================================================================
-// DIAGNOSTIC TEST 2: Concurrent Write Conflict Handling (Lost Update)
-// ============================================================================
-//
-// This distinguishes between:
-// - LWW: Both commits succeed, last write wins
-// - Serializable: One commit fails, no lost update
-// - Repeatable Read: Lost update possible
-
 #[test]
-fn should_resolve_concurrent_write_conflicts_when_concurrent() {
-    eprintln!("\n=== AUDIT: CONCURRENT WRITE CONFLICT ===");
-    eprintln!("Question: What happens when two transactions write to the same key?");
-
+fn should_apply_last_committed_value_when_two_transactions_write_same_key() {
+    // Arrange
     let engine = Arc::new(open_with_mode(opts_for_mode("memory"), "memory"));
     let cf = engine.create_column_family("test").expect("create cf");
 
-    // Initial state
-    let mut tx_init = engine
-        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-        .unwrap();
-    tx_init
-        .put(b"key".to_vec(), b"initial".to_vec(), None)
-        .unwrap();
-    engine
-        .commit(tx_init, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
-
-    // Transaction 1 and 2 both read and modify the same key
+    // Act
     let mut txn1 = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-        .unwrap();
+        .expect("begin txn1");
     let mut txn2 = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-        .unwrap();
+        .expect("begin txn2");
 
-    // Both read current value
-    // (If isolation were perfect, they'd each have snapshot)
-
-    // Both attempt to write
     txn1.put(b"key".to_vec(), b"value_from_txn1".to_vec(), None)
-        .unwrap();
+        .expect("put txn1 value");
     txn2.put(b"key".to_vec(), b"value_from_txn2".to_vec(), None)
-        .unwrap();
+        .expect("put txn2 value");
 
-    // Both attempt to commit
-    let result1 = engine.commit(txn1, cntryl_midge::WriteOptions::buffered());
-    let result2 = engine.commit(txn2, cntryl_midge::WriteOptions::buffered());
-
-    let tx_read = engine
-        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-        .unwrap();
-    let final_value = tx_read.get(b"key").unwrap();
-
-    eprintln!("TXN1 commit result: {:?}", result1);
-    eprintln!("TXN2 commit result: {:?}", result2);
-    eprintln!(
-        "Final value: {:?}",
-        final_value
-            .as_ref()
-            .map(|v| String::from_utf8_lossy(v).to_string())
+    assert!(
+        engine
+            .commit(txn1, cntryl_midge::WriteOptions::buffered())
+            .is_ok(),
+        "first commit should succeed"
+    );
+    assert!(
+        engine
+            .commit(txn2, cntryl_midge::WriteOptions::buffered())
+            .is_ok(),
+        "second commit should also succeed"
     );
 
-    match (result1.is_ok(), result2.is_ok()) {
-        (true, true) => {
-            eprintln!("âœ… Both commits succeeded");
-            match final_value {
-                Some(v) if v.as_ref() == b"value_from_txn2" => {
-                    eprintln!("   Final value: TXN2's value");
-                    eprintln!("   => Last-Write-Wins (LWW) isolation");
-                }
-                Some(v) if v.as_ref() == b"value_from_txn1" => {
-                    eprintln!("   Final value: TXN1's value");
-                    eprintln!("   => Undefined behavior (depends on commit order)");
-                }
-                _ => {
-                    eprintln!("   Final value: Something else or missing");
-                    eprintln!("   => Corruption or merge behavior");
-                }
-            }
-        }
-        (true, false) | (false, true) => {
-            eprintln!("âœ… One commit succeeded, one failed");
-            eprintln!("   => Optimistic conflict detection or write lock");
-            eprintln!("   => Prevents lost update");
-            eprintln!("   => Serializable or Repeatable Read");
-        }
-        (false, false) => {
-            eprintln!("âŒ Both commits failed");
-            eprintln!("   => May indicate error in test or deadlock");
-        }
-    }
+    let reader = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin reader");
+
+    // Assert
+    assert_eq!(
+        reader.get(b"key").expect("read final key"),
+        Some(Bytes::from_static(b"value_from_txn2"))
+    );
 }
 
-// ============================================================================
-// DIAGNOSTIC TEST 3: Read-Modify-Write Lost Update
-// ============================================================================
-//
-// This is the classic "increment counter" test.
-// Serializable: Final count = 2
-// LWW/Repeatable Read: Final count = 1 (lost update possible)
-
 #[test]
-fn should_detect_read_modify_write_conflicts_when_concurrent() {
-    eprintln!("\n=== AUDIT: READ-MODIFY-WRITE LOST UPDATE ===");
-    eprintln!("Question: Does lost update prevention work?");
-
+fn should_allow_lost_update_when_two_transactions_increment_same_counter() {
+    // Arrange
     let engine = Arc::new(open_with_mode(opts_for_mode("memory"), "memory"));
     let cf = engine.create_column_family("test").expect("create cf");
 
-    // Initial counter value
-    let mut tx_init = engine
+    let mut setup = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-        .unwrap();
-    tx_init
+        .expect("begin setup");
+    setup
         .put(b"counter".to_vec(), b"0".to_vec(), None)
-        .unwrap();
+        .expect("put initial counter");
     engine
-        .commit(tx_init, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+        .commit(setup, cntryl_midge::WriteOptions::buffered())
+        .expect("commit setup");
 
-    // Scenario: Two transactions each increment counter
+    // Act
     let mut txn1 = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-        .unwrap();
+        .expect("begin txn1");
     let mut txn2 = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-        .unwrap();
+        .expect("begin txn2");
 
-    // TXN1: Read counter
-    let val1 = txn1.get(b"counter").unwrap();
-    let num1: i32 = val1
-        .as_ref()
-        .map(|v| String::from_utf8_lossy(v).parse().unwrap_or(0))
-        .unwrap_or(0);
+    let count1: i32 = String::from_utf8_lossy(
+        &txn1
+            .get(b"counter")
+            .expect("txn1 read counter")
+            .unwrap_or_default(),
+    )
+    .parse()
+    .expect("parse txn1 counter");
+    let count2: i32 = String::from_utf8_lossy(
+        &txn2
+            .get(b"counter")
+            .expect("txn2 read counter")
+            .unwrap_or_default(),
+    )
+    .parse()
+    .expect("parse txn2 counter");
 
-    // TXN2: Read counter (should see same value)
-    let val2 = txn2.get(b"counter").unwrap();
-    let num2: i32 = val2
-        .as_ref()
-        .map(|v| String::from_utf8_lossy(v).parse().unwrap_or(0))
-        .unwrap_or(0);
-
-    // TXN1: Increment and write
     txn1.put(
         b"counter".to_vec(),
-        (num1 + 1).to_string().into_bytes(),
+        (count1 + 1).to_string().into_bytes(),
         None,
     )
-    .unwrap();
-
-    // TXN2: Increment and write
+    .expect("txn1 write increment");
     txn2.put(
         b"counter".to_vec(),
-        (num2 + 1).to_string().into_bytes(),
+        (count2 + 1).to_string().into_bytes(),
         None,
     )
-    .unwrap();
+    .expect("txn2 write increment");
 
-    // Commit both
     engine
         .commit(txn1, cntryl_midge::WriteOptions::buffered())
-        .ok();
+        .expect("commit txn1");
     engine
         .commit(txn2, cntryl_midge::WriteOptions::buffered())
-        .ok();
+        .expect("commit txn2");
 
-    let tx_read = engine
+    let reader = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-        .unwrap();
-    let final_val = tx_read.get(b"counter").unwrap();
-    let final_count: i32 = String::from_utf8_lossy(&final_val.unwrap_or_default())
-        .parse()
-        .unwrap_or(0);
+        .expect("begin reader");
 
-    eprintln!("Initial counter: 0");
-    eprintln!("TXN1 reads: {}, increments to {}", num1, num1 + 1);
-    eprintln!("TXN2 reads: {}, increments to {}", num2, num2 + 1);
-    eprintln!("Final counter: {}", final_count);
-
-    if final_count == 2 {
-        eprintln!("âœ… Both increments applied");
-        eprintln!("   => Serializable or strong isolation");
-    } else if final_count == 1 {
-        eprintln!("âŒ LOST UPDATE: Only one increment visible");
-        eprintln!("   => LWW or weak isolation (concurrent writes conflict)");
-    } else {
-        eprintln!("â“ Unexpected value: {}", final_count);
-    }
+    // Assert
+    assert_eq!(
+        reader.get(b"counter").expect("read counter after commits"),
+        Some(Bytes::from_static(b"1"))
+    );
 }
 
-// ============================================================================
-// DIAGNOSTIC TEST 4: Snapshot Isolation (Phantom Reads)
-// ============================================================================
-//
-// Note: Snapshot isolation testing removed as the snapshot API is not yet implemented.
-// When snapshots are added, phantom read prevention tests should be reintroduced.
-
-// ============================================================================
-// DIAGNOSTIC TEST 5: Write Conflict on Committed Base
-// ============================================================================
-//
-// Serializable would detect and prevent this.
-// LWW would allow it and last write wins.
-
 #[test]
-fn should_detect_write_skew_when_isolation_enabled() {
-    eprintln!("\n=== AUDIT: WRITE SKEW (Serializable) ===");
-    eprintln!("Question: Is write skew (concurrent reads of same base, disjoint writes) detected?");
-
+fn should_allow_disjoint_writes_after_shared_read_when_transactions_both_commit() {
+    // Arrange
     let engine = Arc::new(open_with_mode(opts_for_mode("memory"), "memory"));
     let cf = engine.create_column_family("test").expect("create cf");
 
-    // Scenario: Two transactions read the same base but write different keys
-    let mut tx_init = engine
+    let mut setup = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-        .unwrap();
-    tx_init
+        .expect("begin setup");
+    setup
         .put(b"shared".to_vec(), b"base_value".to_vec(), None)
-        .unwrap();
-    tx_init
+        .expect("put shared value");
+    setup
         .put(b"flag1".to_vec(), b"false".to_vec(), None)
-        .unwrap();
-    tx_init
+        .expect("put flag1");
+    setup
         .put(b"flag2".to_vec(), b"false".to_vec(), None)
-        .unwrap();
+        .expect("put flag2");
     engine
-        .commit(tx_init, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+        .commit(setup, cntryl_midge::WriteOptions::buffered())
+        .expect("commit setup");
 
+    // Act
     let mut txn1 = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-        .unwrap();
+        .expect("begin txn1");
     let mut txn2 = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-        .unwrap();
+        .expect("begin txn2");
 
-    // Both read the shared key
-    let _shared1 = txn1.get(b"shared").unwrap();
-    let _shared2 = txn2.get(b"shared").unwrap();
+    assert_eq!(
+        txn1.get(b"shared").expect("txn1 read shared"),
+        Some(Bytes::from_static(b"base_value"))
+    );
+    assert_eq!(
+        txn2.get(b"shared").expect("txn2 read shared"),
+        Some(Bytes::from_static(b"base_value"))
+    );
 
-    // TXN1 writes to different key
-    txn1.put(b"flag1".to_vec(), b"true".to_vec(), None).unwrap();
+    txn1.put(b"flag1".to_vec(), b"true".to_vec(), None)
+        .expect("txn1 write flag1");
+    txn2.put(b"flag2".to_vec(), b"true".to_vec(), None)
+        .expect("txn2 write flag2");
 
-    // TXN2 writes to different key
-    txn2.put(b"flag2".to_vec(), b"true".to_vec(), None).unwrap();
+    assert!(
+        engine
+            .commit(txn1, cntryl_midge::WriteOptions::buffered())
+            .is_ok(),
+        "first disjoint write should commit"
+    );
+    assert!(
+        engine
+            .commit(txn2, cntryl_midge::WriteOptions::buffered())
+            .is_ok(),
+        "second disjoint write should also commit"
+    );
 
-    let r1 = engine.commit(txn1, cntryl_midge::WriteOptions::buffered());
-    let r2 = engine.commit(txn2, cntryl_midge::WriteOptions::buffered());
+    let reader = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin reader");
 
-    eprintln!("TXN1 (writes flag1): {:?}", r1);
-    eprintln!("TXN2 (writes flag2): {:?}", r2);
-
-    if r1.is_ok() && r2.is_ok() {
-        eprintln!("âœ… Both succeeded (write skew allowed)");
-        eprintln!("   => NOT strict Serializable");
-    } else {
-        eprintln!("âœ… One or both failed (write skew prevented)");
-        eprintln!("   => Strong isolation (Serializable or MVCC)");
-    }
-}
-
-// ============================================================================
-// COMPREHENSIVE SUMMARY TEST
-// ============================================================================
-
-#[test]
-fn audit_summary_what_isolation_level_is_implemented() {
-    eprintln!("\nâ•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—");
-    eprintln!("â•‘        MIDGE TRANSACTION ISOLATION LEVEL AUDIT              â•‘");
-    eprintln!("â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
-    eprintln!();
-    eprintln!("Run the following tests and check their assertions:");
-    eprintln!();
-    eprintln!("1. audit_dirty_read_prevention_uncommitted_writes");
-    eprintln!("   â†’ If PASSES: Dirty reads prevented (â‰¥ Read Committed)");
-    eprintln!("   â†’ If FAILS: Dirty reads allowed (Read Uncommitted)");
-    eprintln!();
-    eprintln!("2. audit_concurrent_write_conflict_resolution");
-    eprintln!("   â†’ Both succeed, last wins: Last-Write-Wins (LWW)");
-    eprintln!("   â†’ One fails: Conflict detection (â‰¥ Repeatable Read)");
-    eprintln!();
-    eprintln!("3. audit_read_modify_write_conflict");
-    eprintln!("   â†’ Final count = 2: Serializable");
-    eprintln!("   â†’ Final count = 1: Lost update possible (LWW)");
-    eprintln!();
-    eprintln!("4. audit_phantom_read_prevention");
-    eprintln!("   â†’ Snapshot unchanged: Snapshot Isolation");
-    eprintln!("   â†’ Snapshot sees new rows: NOT Snapshot Isolation");
-    eprintln!();
-    eprintln!("5. audit_write_skew_detection");
-    eprintln!("   â†’ Both succeed: Write skew allowed (LWW)");
-    eprintln!("   â†’ One fails: Write skew prevented (Serializable)");
-    eprintln!();
-    eprintln!("Once you know which level Midge implements:");
-    eprintln!("  â€¢ Remove tests for unsupported isolation levels");
-    eprintln!("  â€¢ Align all other transaction tests to match");
-    eprintln!("  â€¢ Document the level clearly in code comments");
-    eprintln!();
+    // Assert
+    assert_eq!(
+        reader.get(b"flag1").expect("read flag1 after commits"),
+        Some(Bytes::from_static(b"true"))
+    );
+    assert_eq!(
+        reader.get(b"flag2").expect("read flag2 after commits"),
+        Some(Bytes::from_static(b"true"))
+    );
 }
