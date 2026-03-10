@@ -70,12 +70,31 @@ def rel(p, root):
     return p.relative_to(root).as_posix()
 
 
-def render_md(src_tests, integration_tests, benches, root):
+def gather_docs(root):
+    """Gather all documentation files in docs/ directory."""
+    docs_dir = root / "docs"
+    doc_files = []
+    if docs_dir.exists():
+        for doc_file in sorted(docs_dir.glob("**/*.md")):
+            doc_files.append(rel(doc_file, root).replace('\\', '/'))
+    return doc_files
+
+
+def render_md(src_tests, integration_tests, benches, docs, root):
     lines = []
     generated_at = datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
     lines.append("# Test & Bench Inventory\n")
     lines.append(f"_Generated {generated_at} by `scripts/generate_inventory.py`._\n")
-    lines.append("Complete inventory of all test and benchmark functions across midge.\n")
+    lines.append("Complete inventory of all test and benchmark functions, documentation, and benchmarks across midge.\n")
+    
+    lines.append("**Documentation (docs/)**\n")
+    if docs:
+        for doc_file in docs:
+            lines.append(f"- `{doc_file}`")
+        lines.append("")
+    else:
+        lines.append("(none)\n")
+    
     lines.append("**Src Tests**\n")
 
     if src_tests:
@@ -128,8 +147,9 @@ def main():
     src_tests = gather_tests(src_files, root)
     integration_tests = gather_tests(test_files, root)
     benches = gather_benches(bench_files, root)
+    docs = gather_docs(root)
 
-    md = render_md(src_tests, integration_tests, benches, root)
+    md = render_md(src_tests, integration_tests, benches, docs, root)
 
     out_path = root / args.output
     out_path.write_text(md, encoding="utf8")
@@ -138,6 +158,7 @@ def main():
     print(f"Found {sum(len(v) for v in src_tests.values())} src tests in {len(src_tests)} files")
     print(f"Found {sum(len(v) for v in integration_tests.values())} integration tests in {len(integration_tests)} files")
     print(f"Found {sum(len(v) for v in benches.values())} benches/stress in {len(benches)} files")
+    print(f"Found {len(docs)} documentation files")
 
     if args.replace:
         target = root / "inventory.md"

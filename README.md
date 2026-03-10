@@ -53,6 +53,7 @@ let value = tx.get(b"hello")?;
 - [Storage invariants](docs/development/storage-invariants.md)
 - [Storage architecture overview](docs/development/architecture.md)
 - [Durability guarantees](docs/user-guides/durability.md)
+- [Transaction and durability contract](docs/user-guides/transaction-durability-contract.md)
 - [Recovery process](docs/development/recovery-internals.md)
 - [Testing and trust matrix](docs/development/testing.md)
 
@@ -120,6 +121,7 @@ Use these counters to confirm the startup path that recovery actually executed.
 - [Stability policy](docs/development/stability-policy.md)
 - [Testing](docs/development/testing.md)
 - [1.0 production contract](docs/development/one-dot-zero-contract.md)
+- [1.0 readiness scorecard](docs/development/one-dot-zero-readiness-scorecard.md)
 - [Support matrix](docs/development/support-matrix.md)
 - [Production runbook](docs/operations/production-runbook.md)
 

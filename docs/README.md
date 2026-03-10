@@ -12,6 +12,8 @@ Midge is an experimental embedded LSM crate with explicit durability controls an
 
 These five documents define what Midge claims, how it implements those claims, and which tests back them up.
 
+For the single-page external behavior contract, read [user-guides/transaction-durability-contract.md](user-guides/transaction-durability-contract.md).
+
 ## Documentation Structure
 
 - [user-guides/](user-guides/) for API and operator-facing usage
@@ -44,8 +46,9 @@ See [development/stability-policy.md](development/stability-policy.md) for the p
 ## What To Read Before Calling It Production-Ready
 
 1. [development/one-dot-zero-contract.md](development/one-dot-zero-contract.md)
-2. [development/support-matrix.md](development/support-matrix.md)
-3. [development/format-compatibility.md](development/format-compatibility.md)
-4. [development/release-policy.md](development/release-policy.md)
-5. [operations/production-runbook.md](operations/production-runbook.md)
-6. [operations/release-checklist.md](operations/release-checklist.md)
+2. [development/one-dot-zero-readiness-scorecard.md](development/one-dot-zero-readiness-scorecard.md)
+3. [development/support-matrix.md](development/support-matrix.md)
+4. [development/format-compatibility.md](development/format-compatibility.md)
+5. [development/release-policy.md](development/release-policy.md)
+6. [operations/production-runbook.md](operations/production-runbook.md)
+7. [operations/release-checklist.md](operations/release-checklist.md)
