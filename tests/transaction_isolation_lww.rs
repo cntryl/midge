@@ -5,7 +5,7 @@ use cntryl_midge::testkit::*;
 use std::sync::Arc;
 
 #[test]
-fn should_hide_uncommitted_writes_across_all_storage_modes() {
+fn should_hide_uncommitted_writes_given_uncommitted_write_when_read_different_mode() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts, mode);
@@ -34,7 +34,7 @@ fn should_hide_uncommitted_writes_across_all_storage_modes() {
 }
 
 #[test]
-fn should_apply_last_committed_write_across_all_storage_modes() {
+fn should_apply_last_committed_write_given_multiple_commits_when_last_write_wins() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
@@ -75,7 +75,7 @@ fn should_apply_last_committed_write_across_all_storage_modes() {
 }
 
 #[test]
-fn should_allow_lost_update_across_all_storage_modes() {
+fn should_allow_lost_update_given_concurrent_writes_when_lost_update_occurs() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));

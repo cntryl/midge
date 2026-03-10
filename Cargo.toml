@@ -25,6 +25,9 @@ crossbeam = "0.8"
 crossbeam-channel = "0.5"
 crossbeam-epoch = "0.9"
 dashmap = "6.1"
+# Note: fail is used for deterministic crash testing in test suites.
+# In production builds, this has minimal overhead. For security-critical environments,
+# consider building without this dependency if failpoint testing is not needed.
 fail = { version = "0.5", features = ["failpoints"] }
 parking_lot = "0.12"
 

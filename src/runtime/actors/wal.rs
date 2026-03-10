@@ -771,10 +771,16 @@ impl WalActor {
             for r in &wal_records {
                 total_wal_bytes += r.estimated_size();
             }
+
+            // Include commit record bytes in total before appending
+            if let Some(ref commit_rec) = commit_record {
+                total_wal_bytes += commit_rec.estimated_size();
+            }
         }
 
-        // Write begin + op records first. The commit marker is appended separately so we
-        // can inject crash/failure points around the exact transaction publication seam.
+        // Write begin + op records + commit marker in one batch to ensure atomicity.
+        // The commit marker must be included in the same WAL append as the ops,
+        // and for Strict mode, must be included in the fsync.
         if !skip_wal {
             if let Some(writer) = &mut self.writer {
                 fail::fail_point!("midge::wal::inject_no_space_on_txn_append_batch", |_| Err(
@@ -782,8 +788,15 @@ impl WalActor {
                         "failpoint: no space on transaction batch append".to_string()
                     )
                 ));
+
+                // Build complete batch with begin, ops, and commit
+                let mut complete_batch = wal_records.clone();
+                if let Some(commit_rec) = commit_record.take() {
+                    complete_batch.push(commit_rec);
+                }
+
                 let a_start = Instant::now();
-                if let Err(error) = writer.append_batch(&wal_records) {
+                if let Err(error) = writer.append_batch(&complete_batch) {
                     if matches!(error, MidgeError::NoSpace(_)) {
                         Self::record_no_space_event();
                     }
@@ -793,8 +806,8 @@ impl WalActor {
                 fail::fail_point!("midge::wal::after_append_batch_before_sync");
             }
 
-            // Update bookkeeping (single update for entire batch)
-            let record_count = wal_records.len();
+            // Update bookkeeping for complete batch (begin + ops + commit)
+            let record_count = wal_records.len() + 1; // +1 for commit
             state.wal.pending_writes += record_count;
             self.pending_sync_count += record_count;
             self.bytes_since_sync += total_wal_bytes;
@@ -802,36 +815,9 @@ impl WalActor {
 
         let last_sequence = commit_seq;
 
-        if let Some(commit_record) = commit_record {
-            fail::fail_point!("midge::wal::txn_after_ops_append_before_commit");
-
-            if let Some(writer) = &mut self.writer {
-                fail::fail_point!("midge::wal::inject_no_space_on_txn_commit_append", |_| Err(
-                    MidgeError::NoSpace(
-                        "failpoint: no space on transaction commit append".to_string()
-                    )
-                ));
-                let a_start = Instant::now();
-                if let Err(error) = writer.append_record(&commit_record) {
-                    if matches!(error, MidgeError::NoSpace(_)) {
-                        Self::record_no_space_event();
-                    }
-                    return Err(error);
-                }
-                self.finish_append_instrumentation(
-                    commit_record.estimated_size() as u64,
-                    a_start.elapsed(),
-                );
-            }
-
-            state.wal.pending_writes += 1;
-            self.pending_sync_count += 1;
-            self.bytes_since_sync += commit_record.estimated_size();
-        }
-
         // Apply durability policy (single sync for the whole batch, where relevant).
-        // Use effective_durability which may be per-request BestEffort.
-        // For strict durability, the sync happens only after the commit marker is appended.
+        // The commit marker is now included in the batch append for Strict mode,
+        // so sync_internal() will durably persist the commit marker as part of the fsync.
         match effective_durability {
             DurabilityPolicy::Strict | DurabilityPolicy::CloudMirrored => {
                 fail::fail_point!("midge::wal::txn_after_commit_append_before_sync");

@@ -15,7 +15,7 @@ use cntryl_midge::testkit::*;
 use cntryl_midge::Query;
 
 #[test]
-fn should_read_written_value_when_in_memory() {
+fn should_read_written_value_given_memory_mode_when_written() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -40,7 +40,7 @@ fn should_read_written_value_when_in_memory() {
 }
 
 #[test]
-fn should_read_written_value_after_flush() {
+fn should_read_written_value_given_flushed_value_when_read() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -67,7 +67,7 @@ fn should_read_written_value_after_flush() {
 }
 
 #[test]
-fn should_hide_value_when_deleted() {
+fn should_hide_value_given_deleted_key_when_read() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -100,7 +100,7 @@ fn should_hide_value_when_deleted() {
 }
 
 #[test]
-fn should_preserve_tombstone_when_flushed() {
+fn should_preserve_tombstone_given_flushed_tombstone_when_read() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -213,7 +213,7 @@ fn should_persist_tombstone_given_delete_when_restarted() {
 }
 
 #[test]
-fn should_allow_read_only_snapshot_to_read_committed_value() {
+fn should_allow_read_only_snapshot_given_committed_value_when_snapshot_reads() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -251,7 +251,7 @@ fn should_allow_read_only_snapshot_to_read_committed_value() {
 }
 
 #[test]
-fn should_preserve_latest_version_after_repeated_flushes() {
+fn should_preserve_latest_version_given_repeated_flushes_when_read() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -289,7 +289,7 @@ fn should_preserve_latest_version_after_repeated_flushes() {
 }
 
 #[test]
-fn should_respect_visibility_rules_when_range_scanning() {
+fn should_respect_visibility_rules_given_range_scan_when_scanning() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -336,7 +336,7 @@ fn should_respect_visibility_rules_when_range_scanning() {
 }
 
 #[test]
-fn should_preserve_all_committed_values_after_multiple_writes() {
+fn should_preserve_all_committed_values_given_multiple_writes_when_written() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -367,7 +367,7 @@ fn should_preserve_all_committed_values_after_multiple_writes() {
 }
 
 #[test]
-fn should_reopen_committed_values_after_dropping_engine_without_explicit_close() {
+fn should_reopen_committed_values_given_engine_dropped_without_close_when_reopened() {
     // Arrange
     let opts = opts_for_mode("local");
 

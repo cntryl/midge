@@ -11,7 +11,7 @@ use std::thread;
 use std::time::Duration;
 
 #[test]
-fn should_preserve_all_values_after_exercising_repeated_read_path() {
+fn should_preserve_all_values_given_repeated_reads_when_values_accessed_repeatedly() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts.clone(), mode);
@@ -48,7 +48,7 @@ fn should_preserve_all_values_after_exercising_repeated_read_path() {
 }
 
 #[test]
-fn should_preserve_all_written_values_after_large_write_batch() {
+fn should_preserve_all_written_values_given_large_write_batch_when_written() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts.clone(), mode);
@@ -85,7 +85,7 @@ fn should_preserve_all_written_values_after_large_write_batch() {
 }
 
 #[test]
-fn should_preserve_all_values_after_compaction_request() {
+fn should_preserve_all_values_given_compaction_when_requested() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts.clone(), mode);
@@ -139,7 +139,7 @@ fn should_preserve_all_values_after_compaction_request() {
 }
 
 #[test]
-fn should_preserve_repeated_reads_across_short_cache_warmup_window() {
+fn should_preserve_repeated_reads_given_short_cache_warmup_window_when_reads_repeated() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts.clone(), mode);
@@ -189,7 +189,7 @@ fn should_preserve_repeated_reads_across_short_cache_warmup_window() {
 }
 
 #[test]
-fn should_preserve_large_values_after_flushing_wal_backed_write_batch() {
+fn should_preserve_large_values_given_wal_backed_write_batch_when_flushed() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts.clone(), mode);
@@ -225,7 +225,7 @@ fn should_preserve_large_values_after_flushing_wal_backed_write_batch() {
 }
 
 #[test]
-fn should_preserve_existing_data_while_adding_new_write_after_placeholder_reset_step() {
+fn should_preserve_existing_data_given_placeholder_reset_when_new_write_added() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts.clone(), mode);

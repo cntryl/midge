@@ -464,8 +464,8 @@ fn should_handle_concurrent_best_effort_writes_under_load_without_invalid_values
         }
 
         assert!(
-            sampled_present <= 100,
-            "sample size invariant violated in mode: {}",
+            sampled_present > 0,
+            "expected at least one sampled key to be present in mode: {}",
             mode
         );
 

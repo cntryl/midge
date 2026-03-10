@@ -5,7 +5,7 @@ use cntryl_midge::testkit::*;
 use cntryl_midge::Query;
 
 #[test]
-fn should_create_column_family_in_cloud_mode() {
+fn should_create_column_family_given_cloud_mode_when_requested() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
 
@@ -20,7 +20,7 @@ fn should_create_column_family_in_cloud_mode() {
 }
 
 #[test]
-fn should_read_written_value_in_cloud_mode() {
+fn should_read_written_value_given_cloud_mode_when_written_and_read() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -46,7 +46,7 @@ fn should_read_written_value_in_cloud_mode() {
 }
 
 #[test]
-fn should_read_committed_transaction_value_in_cloud_mode() {
+fn should_read_committed_transaction_value_given_cloud_mode_when_committed() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -72,7 +72,7 @@ fn should_read_committed_transaction_value_in_cloud_mode() {
 }
 
 #[test]
-fn should_scan_inserted_keys_in_cloud_mode() {
+fn should_scan_inserted_keys_given_cloud_mode_when_range_scanned() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -101,7 +101,7 @@ fn should_scan_inserted_keys_in_cloud_mode() {
 }
 
 #[test]
-fn should_preserve_snapshot_value_after_overwrite_in_cloud_mode() {
+fn should_preserve_snapshot_value_given_cloud_mode_when_overwritten_after_snapshot() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -144,7 +144,7 @@ fn should_preserve_snapshot_value_after_overwrite_in_cloud_mode() {
 }
 
 #[test]
-fn should_hide_deleted_key_in_cloud_mode() {
+fn should_hide_deleted_key_given_cloud_mode_when_deleted() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -175,7 +175,7 @@ fn should_hide_deleted_key_in_cloud_mode() {
 }
 
 #[test]
-fn should_apply_last_write_wins_in_cloud_mode() {
+fn should_apply_last_write_wins_given_cloud_mode_when_multiple_writes() {
     // Arrange
     let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");

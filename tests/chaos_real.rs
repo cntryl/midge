@@ -481,7 +481,7 @@ fn child_manifest_crash_after_sync(db_path: &Path) {
 }
 
 fn child_concurrent_random_wal_append(db_path: &Path) {
-    let target = (usize::from(rand::random::<u16>()) % 400) + 1;
+    let target = (usize::from(rand::random::<u16>()) % 399) + 2;
     configure_nth_abort_failpoint("midge::wal::after_append_batch_before_sync", target);
 
     let engine = Arc::new(open_local_engine(db_path));

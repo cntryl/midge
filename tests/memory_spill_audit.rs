@@ -9,7 +9,7 @@ use cntryl_midge::testkit::*;
 use cntryl_midge::{TransactionMode, WriteOptions};
 
 #[test]
-fn should_commit_large_transaction_above_configured_memory_budget() {
+fn should_commit_large_transaction_given_memory_budget_exceeded_when_committed() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts.memory_budget(128 * 1024), mode);
@@ -49,7 +49,7 @@ fn should_commit_large_transaction_above_configured_memory_budget() {
 }
 
 #[test]
-fn should_preserve_values_from_two_large_transactions_within_configured_budget() {
+fn should_preserve_values_given_two_large_transactions_within_budget_when_read() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts.memory_budget(256 * 1024), mode);
@@ -105,7 +105,7 @@ fn should_preserve_values_from_two_large_transactions_within_configured_budget()
 }
 
 #[test]
-fn should_preserve_sample_keys_after_committing_large_low_budget_transaction() {
+fn should_preserve_sample_keys_given_large_transaction_low_budget_when_committed() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts.memory_budget(64 * 1024), mode);

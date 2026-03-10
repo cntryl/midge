@@ -10,7 +10,7 @@ use cntryl_midge::MidgeResult;
 use cntryl_midge::{TransactionMode, WriteOptions};
 
 #[test]
-fn should_preserve_reads_from_both_flushed_batches_after_repeated_access() -> MidgeResult<()> {
+fn should_preserve_reads_given_two_flushed_batches_when_repeatedly_accessed() -> MidgeResult<()> {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -50,7 +50,8 @@ fn should_preserve_reads_from_both_flushed_batches_after_repeated_access() -> Mi
 }
 
 #[test]
-fn should_return_latest_value_for_overlapping_l0_keys_after_flushes() -> MidgeResult<()> {
+fn should_return_latest_value_given_overlapping_l0_keys_when_multiple_batches_flushed(
+) -> MidgeResult<()> {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -82,7 +83,7 @@ fn should_return_latest_value_for_overlapping_l0_keys_after_flushes() -> MidgeRe
 }
 
 #[test]
-fn should_find_keys_in_middle_range_after_flushing_disjoint_key_ranges() -> MidgeResult<()> {
+fn should_find_keys_given_disjoint_key_ranges_when_flushed() -> MidgeResult<()> {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -122,7 +123,8 @@ fn should_find_keys_in_middle_range_after_flushing_disjoint_key_ranges() -> Midg
 }
 
 #[test]
-fn should_preserve_readability_after_mixed_access_pattern() -> MidgeResult<()> {
+fn should_preserve_readability_given_mixed_access_pattern_when_keys_repeatedly_accessed(
+) -> MidgeResult<()> {
     // Arrange
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
