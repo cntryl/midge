@@ -1,4 +1,7 @@
+mod common;
+
 // Concurrent write test to measure ingest metrics
+use common::opts_for_mode;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -6,8 +9,8 @@ use std::time::Duration;
 #[test]
 fn should_measure_concurrent_ingest_coordinator_metrics_when_multiple_threads_write() {
     // Arrange
-    let opts = cntryl_midge::testkit::opts_for_mode("memory");
-    let engine = Arc::new(cntryl_midge::Engine::open_with_options(opts).unwrap());
+    let opts = opts_for_mode("memory");
+    let engine = Arc::new(cntryl_midge::Engine::open(opts.to_open_options()).unwrap());
     let cf = engine.create_column_family("test_cf").unwrap();
     let cf_id = cf.id();
 

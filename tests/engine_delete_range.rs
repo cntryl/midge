@@ -14,8 +14,9 @@
 //!   should_<behavior>_given_<context>_when_<condition>
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::{Query, TransactionMode, WriteOptions};
+use common::*;
 
 // ============================================================================
 // BASIC RANGE DELETION

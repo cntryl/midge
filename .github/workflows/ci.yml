@@ -3,7 +3,7 @@ name: CI
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 0 * * *"  # Runs daily at midnight UTC
+    - cron: "0 0 * * *" # Runs daily at midnight UTC
   push:
     branches: [main]
     paths:
@@ -22,6 +22,8 @@ on:
 jobs:
   ci:
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: 0
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]

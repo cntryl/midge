@@ -1,3 +1,6 @@
+mod common;
+
+use common::opts_for_mode;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -5,8 +8,9 @@ use std::time::Instant;
 #[test]
 fn should_group_concurrent_batch_submissions_when_multiple_threads_submit() {
     // Arrange
-    let opts = cntryl_midge::testkit::opts_for_mode("memory");
-    let engine = Arc::new(cntryl_midge::Engine::open_with_options(opts).expect("Engine creation"));
+    let opts = opts_for_mode("memory");
+    let engine =
+        Arc::new(cntryl_midge::Engine::open(opts.to_open_options()).expect("Engine creation"));
     let cf = engine.create_column_family("test_cf").expect("create CF");
     let cf_id = cf.id();
 
@@ -67,8 +71,9 @@ fn should_group_concurrent_batch_submissions_when_multiple_threads_submit() {
 #[test]
 fn should_handle_concurrent_writes_correctly_with_write_grouping() {
     // Arrange: Create engine
-    let opts = cntryl_midge::testkit::opts_for_mode("memory");
-    let engine = Arc::new(cntryl_midge::Engine::open_with_options(opts).expect("Engine creation"));
+    let opts = opts_for_mode("memory");
+    let engine =
+        Arc::new(cntryl_midge::Engine::open(opts.to_open_options()).expect("Engine creation"));
     let cf = engine.create_column_family("test_cf2").expect("create CF");
     let cf_id = cf.id();
 
@@ -121,8 +126,8 @@ fn should_handle_concurrent_writes_correctly_with_write_grouping() {
 #[test]
 fn should_maintain_ordering_with_write_grouping() {
     // Arrange
-    let opts = cntryl_midge::testkit::opts_for_mode("memory");
-    let engine = cntryl_midge::Engine::open_with_options(opts).expect("Engine creation");
+    let opts = opts_for_mode("memory");
+    let engine = cntryl_midge::Engine::open(opts.to_open_options()).expect("Engine creation");
     let cf = engine
         .create_column_family("test_counter")
         .expect("create CF");

@@ -1,10 +1,11 @@
-﻿//! WAL (Write-Ahead Log) Integration Tests
+//! WAL (Write-Ahead Log) Integration Tests
 //!
 //! Tests WAL functionality: recovery, data durability, corruption handling,
 //! large values, rotation, and mixed operation recovery.
 
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::WriteOptions;
+use common::*;
 
 // ============================================================================
 // TEST GROUP 1: Basic WAL Recovery

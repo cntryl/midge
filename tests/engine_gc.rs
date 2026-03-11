@@ -12,8 +12,9 @@
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
 
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::{TransactionMode, WriteOptions};
+use common::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;

@@ -1,8 +1,9 @@
 use bytes::Bytes;
-use cntryl_midge::testkit::{opts_for_mode, MidgeOptions, StorageMode};
+mod common;
 use cntryl_midge::{
     Engine, EngineHealth, MidgeError, OpenOptions, RecoveryPolicy, TransactionMode, WriteOptions,
 };
+use common::{opts_for_mode, MidgeOptions, StorageMode};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -17,7 +18,7 @@ fn should_recover_cloud_strict_write_from_authoritative_remote_wal_after_local_c
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
-    let engine = Engine::open_with_options(opts.clone()).expect("open cloud engine");
+    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
 
     put_default(
         &engine,
@@ -29,7 +30,7 @@ fn should_recover_cloud_strict_write_from_authoritative_remote_wal_after_local_c
     reset_dir(&db_path.join("wal"));
 
     // Act
-    let reopened = Engine::open_with_options(opts).expect("reopen cloud engine");
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
 
     // Assert
     assert_eq!(
@@ -48,7 +49,7 @@ fn should_keep_sync_write_local_only_when_cloud_wal_upload_fails() {
     fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
         .expect("configure wal upload failure failpoint");
 
-    let engine = Engine::open_with_options(opts.clone()).expect("open cloud engine");
+    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
 
     // Act
     put_default(
@@ -75,7 +76,7 @@ fn should_keep_sync_write_local_only_when_cloud_wal_upload_fails() {
     scenario.teardown();
 
     reset_dir(&db_path.join("wal"));
-    let reopened = Engine::open_with_options(opts).expect("reopen cloud engine");
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
     assert_eq!(get_default(&reopened, b"sync-local-only"), None);
 }
 
@@ -89,7 +90,7 @@ fn should_keep_buffered_write_local_only_when_cloud_wal_upload_fails() {
     fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
         .expect("configure wal upload failure failpoint");
 
-    let engine = Engine::open_with_options(opts.clone()).expect("open cloud engine");
+    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
     put_default(
         &engine,
         b"buffered-local-only",
@@ -117,7 +118,7 @@ fn should_keep_buffered_write_local_only_when_cloud_wal_upload_fails() {
     scenario.teardown();
 
     reset_dir(&db_path.join("wal"));
-    let reopened = Engine::open_with_options(opts).expect("reopen cloud engine");
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
     assert_eq!(get_default(&reopened, b"buffered-local-only"), None);
 }
 
@@ -131,7 +132,7 @@ fn should_fail_cloud_strict_commit_when_wal_upload_fails() {
     fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
         .expect("configure wal upload failure failpoint");
 
-    let engine = Engine::open_with_options(opts.clone()).expect("open cloud engine");
+    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
     let default_cf = default_cf(&engine);
     let mut tx = engine
         .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
@@ -164,7 +165,7 @@ fn should_fail_cloud_strict_commit_when_wal_upload_fails() {
     scenario.teardown();
 
     reset_dir(&db_path.join("wal"));
-    let reopened = Engine::open_with_options(opts).expect("reopen cloud engine");
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
     assert_eq!(get_default(&reopened, b"cloud-strict-fail"), None);
 }
 
@@ -174,7 +175,7 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
-    let engine = Engine::open_with_options(opts.clone()).expect("open cloud engine");
+    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
 
     put_default(
         &engine,
@@ -195,7 +196,7 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
     reset_dir(&db_path.join("wal"));
 
     // Act
-    let strict_error = match Engine::open_with_options(opts.clone()) {
+    let strict_error = match Engine::open(opts.clone().to_open_options()) {
         Ok(_) => panic!("strict cloud reopen should fail on corrupt authoritative WAL"),
         Err(error) => error,
     };
@@ -222,7 +223,7 @@ fn should_restore_local_sst_cache_from_authoritative_cloud_object() {
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
-    let engine = Engine::open_with_options(opts.clone()).expect("open cloud engine");
+    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
     let default_cf = default_cf(&engine);
 
     put_default(
@@ -237,7 +238,7 @@ fn should_restore_local_sst_cache_from_authoritative_cloud_object() {
     reset_dir(&db_path.join("sst"));
 
     // Act
-    let reopened = Engine::open_with_options(opts).expect("reopen cloud engine");
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
 
     // Assert
     assert_eq!(
@@ -256,7 +257,7 @@ fn should_fail_strict_reopen_when_authoritative_remote_sst_is_missing() {
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
-    let engine = Engine::open_with_options(opts.clone()).expect("open cloud engine");
+    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
     let default_cf = default_cf(&engine);
 
     put_default(
@@ -273,7 +274,7 @@ fn should_fail_strict_reopen_when_authoritative_remote_sst_is_missing() {
     }
 
     // Act
-    let error = match Engine::open_with_options(opts) {
+    let error = match Engine::open(opts.to_open_options()) {
         Ok(_) => panic!("strict reopen should reject missing remote sst"),
         Err(error) => error,
     };

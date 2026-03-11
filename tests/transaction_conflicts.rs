@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2025 Cntryl, Inc.
+// Copyright (c) 2025 Cntryl, Inc.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 //! Transaction conflict tests - validates LWW semantics, write conflict handling, and concurrent transaction behavior.
@@ -7,8 +7,9 @@
 //! These tests validate logical transaction behavior across all storage modes (Memory, FS, Cloud).
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::WriteOptions;
+use common::*;
 use std::sync::Arc;
 
 // ============================================================================

@@ -1,8 +1,9 @@
 //! Cloud-mode integration tests with real assertions.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::Query;
+use common::*;
 
 #[test]
 fn should_create_column_family_given_cloud_mode_when_requested() {

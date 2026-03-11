@@ -9,7 +9,8 @@
 //! isolation for read-write transactions.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
+use common::*;
 use std::sync::Arc;
 
 // ============================================================================

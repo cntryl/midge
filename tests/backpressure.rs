@@ -1,7 +1,8 @@
 //! Backpressure tests (formerly Phase 2: backpressure validation)
 
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::{MidgeError, TransactionMode, WriteOptions};
+use common::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;

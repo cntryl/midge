@@ -6,8 +6,9 @@
 //! compaction scheduling semantics.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::Query;
+use common::*;
 
 // ============================================================================
 // TEST GROUP 1: Snapshot Reads Across Flush

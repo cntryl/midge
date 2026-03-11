@@ -5,9 +5,10 @@
 //! exercises those code paths.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::{open_with_mode, opts_for_mode};
+mod common;
 use cntryl_midge::MidgeResult;
 use cntryl_midge::{TransactionMode, WriteOptions};
+use common::{open_with_mode, opts_for_mode};
 
 #[test]
 fn should_preserve_reads_given_two_flushed_batches_when_repeatedly_accessed() -> MidgeResult<()> {

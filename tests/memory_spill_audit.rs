@@ -5,8 +5,9 @@
 //! visibility into whether spill-to-disk occurred internally.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::{TransactionMode, WriteOptions};
+use common::*;
 
 #[test]
 fn should_commit_large_transaction_given_memory_budget_exceeded_when_committed() {

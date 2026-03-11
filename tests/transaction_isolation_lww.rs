@@ -1,7 +1,8 @@
 //! Cross-mode verification of the documented last-write-wins transaction model.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
+use common::*;
 use std::sync::Arc;
 
 #[test]

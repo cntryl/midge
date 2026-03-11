@@ -14,8 +14,9 @@
 //! under CloudAsync durability semantics.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::{TransactionMode, WriteOptions};
+use common::*;
 
 // ============================================================================
 // SIZE EXTREMES (Tests 1-4)
@@ -346,7 +347,7 @@ fn should_batch_concurrent_puts_when_cloud_async_mode() {
     // Arrange
     for_each_storage_mode(&["cloud"], |mode, opts| {
         let cloud_wal_dir = match &opts.storage_mode {
-            cntryl_midge::testkit::StorageMode::CloudBacked { local_cache_path } => {
+            StorageMode::CloudBacked { local_cache_path } => {
                 local_cache_path.join("cloud_store").join("wal")
             }
             _ => panic!("expected cloud storage mode"),

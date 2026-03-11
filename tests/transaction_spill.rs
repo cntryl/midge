@@ -4,7 +4,8 @@
 //! Test 13: memory-only mode (no spill files)
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
+use common::*;
 
 // ============================================================================
 // TRANSACTION SPILL TESTS

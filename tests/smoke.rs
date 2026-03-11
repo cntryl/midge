@@ -11,8 +11,9 @@
 //! - Stress, chaos, and performance tests live in the external harness
 //! - If all unit tests + this file pass, the database is not fundamentally broken
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::Query;
+use common::*;
 
 #[test]
 fn should_read_written_value_given_memory_mode_when_written() {

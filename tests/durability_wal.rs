@@ -13,10 +13,11 @@
 //!   should_<behavior>_given_<context>_when_<condition>
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::{
     Engine, MidgeError, OpenOptions, RecoveryPolicy, TransactionMode, WriteOptions,
 };
+use common::*;
 use tempfile::TempDir;
 
 // ============================================================================

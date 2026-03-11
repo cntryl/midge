@@ -1,4 +1,5 @@
-use cntryl_midge::testkit::*;
+mod common;
+use common::*;
 
 #[test]
 fn should_create_engine_in_all_modes() {
@@ -7,7 +8,7 @@ fn should_create_engine_in_all_modes() {
 
     // Act
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        let result = cntryl_midge::MidgeEngine::open_with_options(opts);
+        let result = cntryl_midge::MidgeEngine::open(opts.to_open_options());
 
         // Assert
         match result {
@@ -23,7 +24,7 @@ fn should_create_engine_in_memory() {
     let opts = opts_for_mode("memory");
 
     // Act
-    let result = cntryl_midge::MidgeEngine::open_with_options(opts);
+    let result = cntryl_midge::MidgeEngine::open(opts.to_open_options());
 
     // Assert
     match result {
@@ -38,7 +39,7 @@ fn should_create_engine_in_local_mode() {
     let opts = opts_for_mode("local");
 
     // Act
-    let result = cntryl_midge::MidgeEngine::open_with_options(opts);
+    let result = cntryl_midge::MidgeEngine::open(opts.to_open_options());
 
     // Assert
     match result {
@@ -53,7 +54,7 @@ fn should_create_engine_in_cloud_mode() {
     let opts = opts_for_mode("cloud");
 
     // Act
-    let result = cntryl_midge::MidgeEngine::open_with_options(opts);
+    let result = cntryl_midge::MidgeEngine::open(opts.to_open_options());
 
     // Assert
     match result {

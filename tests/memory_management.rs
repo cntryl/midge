@@ -1,7 +1,8 @@
 //! Memory-related tests (formerly Phase 1 fixes)
 
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::{EngineHealth, MidgeError, TransactionMode, WriteOptions};
+use common::*;
 
 #[test]
 fn should_handle_small_memory_budget_without_unexpected_errors() {

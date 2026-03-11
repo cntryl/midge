@@ -5,8 +5,9 @@
 //! environment.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::{Query, TransactionMode, WriteOptions};
+use common::*;
 use std::sync::{Mutex, OnceLock};
 
 #[test]

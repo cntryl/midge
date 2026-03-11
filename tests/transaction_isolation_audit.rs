@@ -4,7 +4,8 @@
 //! way instead of printing diagnostics for manual interpretation.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
+use common::*;
 use std::sync::Arc;
 
 #[test]
