@@ -924,6 +924,14 @@ impl WalActor {
                     } => {
                         self.apply_to_memtable(state, sequence, cf_id, key, None, None)?;
                     }
+                    TransactionApplyOp::DeleteRange {
+                        cf_id,
+                        start_key,
+                        end_key,
+                        sequence,
+                    } => {
+                        self.apply_delete_range_to_memtable(state, sequence, cf_id, &start_key, &end_key)?;
+                    }
                 }
             }
 
@@ -1032,6 +1040,33 @@ impl WalActor {
                         wal_records.push(record);
                     }
                 }
+                crate::runtime::TransactionOp::DeleteRange {
+                    cf_id,
+                    start_key,
+                    end_key,
+                } => {
+                    let mut record = WalRecord::new_cf(
+                        cf_id,
+                        WalOpKind::DeleteRange,
+                        start_key.clone(),
+                        None,
+                        seq,
+                        self.current_epoch,
+                    );
+                    record.range_end = Some(end_key.clone());
+                    record.txn_id = Some(txn_id);
+
+                    apply_ops.push(TransactionApplyOp::DeleteRange {
+                        cf_id,
+                        start_key,
+                        end_key,
+                        sequence: seq,
+                    });
+
+                    if !skip_wal {
+                        wal_records.push(record);
+                    }
+                }
             }
         }
 
@@ -1060,6 +1095,14 @@ impl WalActor {
                     sequence,
                 } => {
                     self.apply_to_memtable(state, sequence, cf_id, key, None, None)?;
+                }
+                TransactionApplyOp::DeleteRange {
+                    cf_id,
+                    start_key,
+                    end_key,
+                    sequence,
+                } => {
+                    self.apply_delete_range_to_memtable(state, sequence, cf_id, &start_key, &end_key)?;
                 }
             }
         }
@@ -1461,6 +1504,14 @@ impl WalActor {
                                 sequence,
                             } => {
                                 self.apply_to_memtable(state, sequence, cf_id, key, None, None)?;
+                            }
+                            TransactionApplyOp::DeleteRange {
+                                cf_id,
+                                start_key,
+                                end_key,
+                                sequence,
+                            } => {
+                                self.apply_delete_range_to_memtable(state, sequence, cf_id, &start_key, &end_key)?;
                             }
                         }
                     }

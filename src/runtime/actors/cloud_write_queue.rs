@@ -61,6 +61,12 @@ pub enum TransactionApplyOp {
         key: bytes::Bytes,
         sequence: u64,
     },
+    DeleteRange {
+        cf_id: crate::engine::ColumnFamilyId,
+        start_key: bytes::Bytes,
+        end_key: bytes::Bytes,
+        sequence: u64,
+    },
 }
 
 /// CloudAsync write queue with backpressure management
@@ -165,6 +171,11 @@ impl CloudWriteQueue {
             .map(|op| match op {
                 TransactionApplyOp::Put { key, value, .. } => key.len() + value.len() + 64,
                 TransactionApplyOp::Delete { key, .. } => key.len() + 64,
+                TransactionApplyOp::DeleteRange {
+                    start_key,
+                    end_key,
+                    ..
+                } => start_key.len() + end_key.len() + 64,
             })
             .sum();
 
@@ -219,6 +230,11 @@ impl CloudWriteQueue {
                     .map(|op| match op {
                         TransactionApplyOp::Put { key, value, .. } => key.len() + value.len() + 64,
                         TransactionApplyOp::Delete { key, .. } => key.len() + 64,
+                        TransactionApplyOp::DeleteRange {
+                            start_key,
+                            end_key,
+                            ..
+                        } => start_key.len() + end_key.len() + 64,
                     })
                     .sum(),
             };
@@ -278,6 +294,9 @@ impl CloudWriteQueue {
                                 if *p_cf == cf_id && &p_key[..] == key {
                                     return true;
                                 }
+                            }
+                            TransactionApplyOp::DeleteRange { .. } => {
+                                // DeleteRange doesn't affect insert-only existence checks
                             }
                         }
                     }

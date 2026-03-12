@@ -117,13 +117,14 @@ let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 tx.put(b"key1".to_vec(), b"value1".to_vec(), None)?;
 tx.put(b"key2".to_vec(), b"value2".to_vec(), None)?;
 tx.delete(b"key3".to_vec())?;
+tx.delete_range(b"key10".to_vec(), b"key20".to_vec())?;
 engine.commit(tx, WriteOptions::sync())?;
 ```
 
 ### Transaction Lifecycle
 
 ```
-begin_tx → put/get/delete → commit (or drop to rollback)
+begin_tx → put/get/delete/delete_range → commit (or drop to rollback)
 ```
 
 **Snapshot isolation:** Captured at `begin_tx()`. All reads see consistent view at that seqno.
@@ -165,16 +166,26 @@ Deletes are tombstones—removed during compaction.
 
 ### Delete Range
 
-Remove all keys in range `[start, end)`:
+Remove all keys in range `[start, end)`. May be used in two ways:
+
+**In a transaction** (atomic with other operations):
+
+```rust
+let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+tx.put(b"user:50".to_vec(), b"alice".to_vec(), None)?;
+tx.delete_range(b"user:100".to_vec(), b"user:200".to_vec())?;
+engine.commit(tx, WriteOptions::sync())?;
+```
+
+**At engine level** (standalone operation):
 
 ```rust
 engine.delete_range(&cf, b"user:100", b"user:200", WriteOptions::sync())?;
 ```
 
-Range deletes are engine-level operations, not transaction methods.
-
 **Use for:** Bulk deletions, time-series cleanup, partition drops.
 **Cost:** O(1) to write, O(N) at read time.
+**Mixing operations:** You can safely mix `put`, `delete`, and `delete_range` in the same transaction.
 
 ## Read Operations
 

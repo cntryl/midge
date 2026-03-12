@@ -42,6 +42,12 @@ pub enum WriteIntent {
     },
     /// Delete operation
     Delete { cf_id: ColumnFamilyId, key: Vec<u8> },
+    /// Delete range operation (atomic range tombstone)
+    DeleteRange {
+        cf_id: ColumnFamilyId,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+    },
 }
 
 impl WriteIntent {
@@ -73,6 +79,19 @@ impl WriteIntent {
     /// Create a delete intent
     fn delete(cf_id: ColumnFamilyId, key: Vec<u8>) -> Self {
         Self::Delete { cf_id, key }
+    }
+
+    /// Create a delete range intent
+    fn delete_range(
+        cf_id: ColumnFamilyId,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+    ) -> Self {
+        Self::DeleteRange {
+            cf_id,
+            start_key,
+            end_key,
+        }
     }
 }
 
@@ -166,6 +185,25 @@ impl Transaction {
         Ok(())
     }
 
+    /// Add a delete range (atomic tombstone) to the transaction's write set
+    ///
+    /// Deletes all keys in the range [start_key, end_key) atomically as part of
+    /// the transaction commit. This is atomic with any puts/deletes in the same transaction.
+    pub fn delete_range(
+        &mut self,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+    ) -> MidgeResult<()> {
+        if self.is_read_only() {
+            return Err(MidgeError::InvalidArgument(
+                "Cannot write in ReadOnly transaction".to_string(),
+            ));
+        }
+        self.write_set
+            .push(WriteIntent::delete_range(self.cf_id, start_key, end_key));
+        Ok(())
+    }
+
     // === Internal helpers for engine/mod.rs commit logic ===
 
     pub(crate) fn is_read_only(&self) -> bool {
@@ -248,6 +286,20 @@ impl Transaction {
                 WriteIntent::Delete { key, .. } => {
                     merged.insert(key.clone(), None);
                 }
+                WriteIntent::DeleteRange {
+                    start_key,
+                    end_key,
+                    ..
+                } => {
+                    // Mark all keys in [start_key, end_key) as deleted
+                    let mut to_delete = Vec::new();
+                    for (key, _) in merged.range(start_key.clone()..end_key.clone()) {
+                        to_delete.push(key.clone());
+                    }
+                    for key in to_delete {
+                        merged.insert(key, None);
+                    }
+                }
             }
         }
 
@@ -326,6 +378,15 @@ impl Transaction {
                         cf_id: self.cf_id,
                         key: bytes::Bytes::from(key),
                     },
+                    WriteIntent::DeleteRange {
+                        start_key,
+                        end_key,
+                        ..
+                    } => crate::runtime::TransactionOp::DeleteRange {
+                        cf_id: self.cf_id,
+                        start_key: bytes::Bytes::from(start_key),
+                        end_key: bytes::Bytes::from(end_key),
+                    },
                 })
             })
             .collect::<MidgeResult<Vec<_>>>()?;
@@ -359,6 +420,13 @@ impl Transaction {
                     return Some(Some(value.clone()));
                 }
                 WriteIntent::Delete { key: k, .. } if k.as_slice() == key => return Some(None),
+                WriteIntent::DeleteRange {
+                    start_key,
+                    end_key,
+                    ..
+                } if key >= start_key.as_slice() && key < end_key.as_slice() => {
+                    return Some(None)
+                }
                 _ => {}
             }
         }

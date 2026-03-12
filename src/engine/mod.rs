@@ -1123,7 +1123,8 @@ impl Engine {
             .map(|intent| match intent {
                 api::WriteIntent::Put { cf_id, .. }
                 | api::WriteIntent::Insert { cf_id, .. }
-                | api::WriteIntent::Delete { cf_id, .. } => *cf_id,
+                | api::WriteIntent::Delete { cf_id, .. }
+                | api::WriteIntent::DeleteRange { cf_id, .. } => *cf_id,
             })
             .unwrap_or(0);
 
@@ -1139,6 +1140,7 @@ impl Engine {
             })?;
 
         let mut batch_intents = Vec::with_capacity(write_intents.len());
+        let mut delete_range_ops = Vec::new();
 
         for intent in write_intents {
             match intent {
@@ -1177,6 +1179,9 @@ impl Engine {
                         insert_only: false,
                     })
                 }
+                api::WriteIntent::DeleteRange { cf_id, start_key, end_key } => {
+                    delete_range_ops.push((cf_id, start_key, end_key));
+                }
             }
         }
 
@@ -1187,6 +1192,32 @@ impl Engine {
             let sequence =
                 coordinator.submit_batch(&self.runtime_handle, batch_intents, durability_policy)?;
             max_sequence = max_sequence.max(sequence);
+        }
+
+        // Apply delete_range operations separately (cannot be batched like point ops)
+        for (cf_id, start_key, end_key) in delete_range_ops {
+            let durability_policy = self.effective_wal_durability_policy(opts)?;
+            let response = self
+                .runtime_handle
+                .send_and_wait(RuntimeMsg::WalAppendDeleteRange {
+                    request_id: next_request_id()?,
+                    cf_id,
+                    start_key,
+                    end_key,
+                    durability_policy: Some(durability_policy),
+                })?;
+
+            match response {
+                RuntimeResponse::WalAppended { sequence, .. } => {
+                    max_sequence = max_sequence.max(sequence);
+                }
+                RuntimeResponse::Error { error, .. } => return Err(error),
+                _ => {
+                    return Err(MidgeError::Internal(
+                        "Unexpected response to delete_range in transaction".to_string(),
+                    ))
+                }
+            }
         }
 
         // Update engine's sequence to reflect completed writes

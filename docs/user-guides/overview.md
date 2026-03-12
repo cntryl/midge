@@ -48,7 +48,7 @@ Midge provides standard key-value operations through a transaction API:
 
 - **Point operations**: `get()`, `put()`, `delete()`
 - **Range operations**: `scan()` with prefix/bounds/limits
-- **Bulk operations**: `delete_range()` for range tombstones
+- **Bulk operations**: `delete_range()` for range tombstones (standalone or within transactions)
 - **Transactions**: Multi-operation atomic commits with snapshot isolation
 
 ### Storage Modes

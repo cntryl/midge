@@ -144,6 +144,11 @@ pub enum TransactionOp {
         cf_id: crate::engine::ColumnFamilyId,
         key: Bytes,
     },
+    DeleteRange {
+        cf_id: crate::engine::ColumnFamilyId,
+        start_key: Bytes,
+        end_key: Bytes,
+    },
 }
 
 /// Intent log entry - records all state transitions for deterministic replay

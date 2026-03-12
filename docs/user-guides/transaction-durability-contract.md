@@ -73,6 +73,8 @@ For non-overlapping writes:
 
 For delete and delete-range interactions:
 
+- `put`, `delete`, and `delete_range` operations may be freely mixed within a single transaction
+- all operations in a transaction commit atomically
 - range tombstones and point operations follow the same sequence-based ordering rules
 - later committed effects win over earlier overlapping effects
 
