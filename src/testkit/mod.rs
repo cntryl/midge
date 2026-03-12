@@ -2,6 +2,7 @@
 //!
 //! Keep `testkit` organized: types/config live in `config`, mocks in `storage_mock`,
 //! compatibility helpers in `engine_compat`, and assertions in `assertions`.
+#![allow(dead_code, unused_imports)]
 
 pub mod bench;
 pub mod kv;

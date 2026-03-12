@@ -4,8 +4,9 @@
 //! printing manual audit output.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::Query;
+use common::*;
 
 #[test]
 fn should_delete_only_keys_within_requested_range_when_delete_range_commits() {

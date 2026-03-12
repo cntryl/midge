@@ -3,8 +3,9 @@
 //! Core transaction functionality: begin, commit, rollback, isolation.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::{Query, WriteOptions};
+use common::*;
 use std::sync::Arc;
 
 // ============================================================================

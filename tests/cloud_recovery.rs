@@ -10,8 +10,9 @@
 //!   should_<behavior>_given_<context>_when_<condition>
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::{TransactionMode, WriteOptions};
+use common::*;
 use std::thread;
 use std::time::Duration;
 

@@ -1,4 +1,4 @@
-﻿//! Memory Mode Isolation Tests
+//! Memory Mode Isolation Tests
 //!
 //! Tests that memory mode creates no persistent filesystem artifacts and isolates
 //! data between engine instances. Memory mode operates entirely in RAM with zero
@@ -10,8 +10,9 @@
 //! These tests run on MEMORY MODE ONLY to validate isolation and filesystem cleanup.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::{TransactionMode, WriteOptions};
+use common::*;
 
 // ============================================================================
 // FILESYSTEM ARTIFACT TESTS

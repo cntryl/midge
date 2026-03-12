@@ -10,8 +10,9 @@
 //! These tests run across all storage modes (Memory, LocalDisk, CloudBacked).
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::{Query, Transaction};
+use common::*;
 
 fn collect_scan(tx: &Transaction, query: Query) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut iter = tx.scan(&query).unwrap();

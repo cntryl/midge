@@ -3,7 +3,8 @@
 //! Tests for column family lifecycle, isolation, and persistence.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
+use common::*;
 use std::sync::Arc;
 
 // ============================================================================

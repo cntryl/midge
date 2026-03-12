@@ -3,8 +3,9 @@
 //! Ensures CloudAsync background mode never blocks on single writes,
 //! while CloudStrict mode provides explicit cloud durability guarantees.
 
-use cntryl_midge::testkit::{open_with_mode, opts_for_mode};
+mod common;
 use cntryl_midge::{TransactionMode, WriteOptions};
+use common::{open_with_mode, opts_for_mode};
 
 #[test]
 fn should_batch_writes_when_using_cloud_mode() {

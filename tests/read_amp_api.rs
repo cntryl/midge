@@ -1,11 +1,12 @@
-﻿//! Integration test for read amplification metrics API
+//! Integration test for read amplification metrics API
 //!
 //! Validates that the engine exposes read amplification metrics
 //! through the public API for observability.
 
-use cntryl_midge::testkit::{open_with_mode, opts_for_mode};
+mod common;
 use cntryl_midge::MidgeResult;
 use cntryl_midge::WriteOptions;
+use common::{open_with_mode, opts_for_mode};
 
 #[test]
 fn should_expose_read_amp_metrics_through_api() -> MidgeResult<()> {

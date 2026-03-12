@@ -53,7 +53,7 @@ pub mod wal;
 #[allow(dead_code)]
 mod engine;
 
-// Test support (public for testkit when testing, otherwise acts as private module)
+// Test support (shared by tests, benches, and optional downstream utilities).
 pub mod testkit;
 
 // ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ pub use engine::Key as Bytes;
 // Re-export BytesMut directly from the `bytes` crate.
 pub use bytes::BytesMut;
 
-#[cfg(any(test, feature = "testkit"))]
+/// Test support types re-exported for benches/tests and compatibility helpers.
 pub use testkit::{MidgeOptions, StorageMode};
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-﻿//! Core KV Engine Integration Tests
+//! Core KV Engine Integration Tests
 //!
 //! Tests the basic put/get/delete operations end-to-end using the public
 //! MidgeEngine API. These tests are **storage-mode invariant**: every supported
@@ -10,8 +10,9 @@
 //! These tests run across all storage modes.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::{TransactionMode, WriteOptions};
+use common::*;
 
 // ============================================================================
 // BASIC PUT/GET/DELETE OPERATIONS

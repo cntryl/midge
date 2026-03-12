@@ -5,8 +5,9 @@
 //! suite does not currently consume a real telemetry API here.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
 use cntryl_midge::{TransactionMode, WriteOptions};
+use common::*;
 use std::thread;
 use std::time::Duration;
 

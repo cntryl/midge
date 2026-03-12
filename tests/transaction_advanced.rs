@@ -4,7 +4,8 @@
 //! Pattern: for_each_storage_mode(&durable_storage_modes(), |mode, opts| { ... })
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
+mod common;
+use common::*;
 
 // ============================================================================
 // TRANSACTION CRASH RECOVERY
