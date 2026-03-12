@@ -7,9 +7,8 @@
 //! - Column-family scoped transactions
 
 use crate::common::{MidgeError, MidgeResult};
-use crate::engine::api::DurabilityPolicy as ApiDurabilityPolicy;
 use crate::engine::ColumnFamilyId;
-use crate::runtime::{next_request_id, RuntimeHandle, RuntimeMsg, RuntimeResponse};
+use crate::runtime::RuntimeHandle;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -51,6 +50,48 @@ pub enum WriteIntent {
 }
 
 impl WriteIntent {
+    pub(crate) fn into_runtime_op(self) -> crate::runtime::TransactionOp {
+        match self {
+            Self::Put {
+                cf_id,
+                key,
+                value,
+                ttl_seconds,
+            } => crate::runtime::TransactionOp::Put {
+                cf_id,
+                key: bytes::Bytes::from(key),
+                value: bytes::Bytes::from(value),
+                ttl_seconds,
+                insert_only: false,
+            },
+            Self::Insert {
+                cf_id,
+                key,
+                value,
+                ttl_seconds,
+            } => crate::runtime::TransactionOp::Put {
+                cf_id,
+                key: bytes::Bytes::from(key),
+                value: bytes::Bytes::from(value),
+                ttl_seconds,
+                insert_only: true,
+            },
+            Self::Delete { cf_id, key } => crate::runtime::TransactionOp::Delete {
+                cf_id,
+                key: bytes::Bytes::from(key),
+            },
+            Self::DeleteRange {
+                cf_id,
+                start_key,
+                end_key,
+            } => crate::runtime::TransactionOp::DeleteRange {
+                cf_id,
+                start_key: bytes::Bytes::from(start_key),
+                end_key: bytes::Bytes::from(end_key),
+            },
+        }
+    }
+
     /// Create a put intent (upsert)
     fn put(cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>, ttl_seconds: Option<u64>) -> Self {
         Self::Put {
@@ -214,12 +255,15 @@ impl Transaction {
         !self.write_set.is_empty()
     }
 
-    pub(crate) fn iter_writes(&self) -> impl Iterator<Item = &WriteIntent> {
-        self.write_set.iter()
+    pub(crate) fn cf_id(&self) -> ColumnFamilyId {
+        self.cf_id
     }
 
-    pub(crate) fn id(&self) -> u64 {
-        self.id
+    pub(crate) fn into_runtime_ops(self) -> Vec<crate::runtime::TransactionOp> {
+        self.write_set
+            .into_iter()
+            .map(WriteIntent::into_runtime_op)
+            .collect()
     }
 
     pub fn start_sequence(&self) -> u64 {
@@ -331,85 +375,6 @@ impl Transaction {
         Ok(iter)
     }
 
-    /// Commit this transaction atomically.
-    ///
-    /// Durability is explicit and ONLY happens here.
-    pub fn commit(self, opts: super::WriteOptions) -> MidgeResult<()> {
-        // ReadOnly transactions are a no-op for commit.
-        if self.is_read_only() {
-            return Ok(());
-        }
-
-        if self.write_set.is_empty() {
-            return Ok(());
-        }
-
-        let ops = self
-            .write_set
-            .iter()
-            .cloned()
-            .map(|intent| -> MidgeResult<crate::runtime::TransactionOp> {
-                Ok(match intent {
-                    WriteIntent::Put {
-                        key,
-                        value,
-                        ttl_seconds,
-                        ..
-                    } => crate::runtime::TransactionOp::Put {
-                        cf_id: self.cf_id,
-                        key: bytes::Bytes::from(key),
-                        value: bytes::Bytes::from(value),
-                        ttl_seconds,
-                        insert_only: false,
-                    },
-                    WriteIntent::Insert {
-                        key,
-                        value,
-                        ttl_seconds,
-                        ..
-                    } => crate::runtime::TransactionOp::Put {
-                        cf_id: self.cf_id,
-                        key: bytes::Bytes::from(key),
-                        value: bytes::Bytes::from(value),
-                        ttl_seconds,
-                        insert_only: true,
-                    },
-                    WriteIntent::Delete { key, .. } => crate::runtime::TransactionOp::Delete {
-                        cf_id: self.cf_id,
-                        key: bytes::Bytes::from(key),
-                    },
-                    WriteIntent::DeleteRange {
-                        start_key,
-                        end_key,
-                        ..
-                    } => crate::runtime::TransactionOp::DeleteRange {
-                        cf_id: self.cf_id,
-                        start_key: bytes::Bytes::from(start_key),
-                        end_key: bytes::Bytes::from(end_key),
-                    },
-                })
-            })
-            .collect::<MidgeResult<Vec<_>>>()?;
-
-        let response = self
-            .runtime_handle
-            .send_and_wait(RuntimeMsg::ApplyTransaction {
-                request_id: next_request_id()?,
-                ops,
-                durability_policy: Some(self.effective_wal_durability_policy(opts)?),
-            })?;
-
-        match response {
-            RuntimeResponse::TransactionApplied { last_sequence, .. } => {
-                self.finalize_write_durability(last_sequence, opts)
-            }
-            RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(MidgeError::Internal(
-                "Unexpected response to Transaction::commit".to_string(),
-            )),
-        }
-    }
-
     fn get_from_write_set(&self, key: &[u8]) -> Option<Option<Vec<u8>>> {
         for intent in self.write_set.iter().rev() {
             match intent {
@@ -432,70 +397,5 @@ impl Transaction {
         }
 
         None
-    }
-
-    fn effective_wal_durability_policy(
-        &self,
-        opts: super::WriteOptions,
-    ) -> MidgeResult<crate::wal::DurabilityPolicy> {
-        if self.cloud_mode {
-            return Ok(match opts.policy() {
-                ApiDurabilityPolicy::BestEffort => crate::wal::DurabilityPolicy::BestEffort,
-                ApiDurabilityPolicy::Buffered
-                | ApiDurabilityPolicy::Sync
-                | ApiDurabilityPolicy::CloudStrict => crate::wal::DurabilityPolicy::CloudAsync,
-            });
-        }
-
-        if opts.is_cloud_strict() {
-            return Err(MidgeError::InvalidArgument(
-                "cloud_strict requires cloud-backed storage".to_string(),
-            ));
-        }
-
-        Ok(opts.to_wal_durability_policy())
-    }
-
-    fn finalize_write_durability(
-        &self,
-        sequence: u64,
-        opts: super::WriteOptions,
-    ) -> MidgeResult<()> {
-        if self.cloud_mode {
-            if opts.is_sync() || opts.is_cloud_strict() {
-                let response = self
-                    .runtime_handle
-                    .send_and_wait(RuntimeMsg::SealWalForCloud {
-                        request_id: next_request_id()?,
-                        sequence,
-                        wait_for_ack: opts.is_cloud_strict(),
-                    })?;
-
-                return match response {
-                    RuntimeResponse::Ok { .. } => Ok(()),
-                    RuntimeResponse::Error { error, .. } => Err(error),
-                    _ => Err(MidgeError::Internal(
-                        "Unexpected response to SealWalForCloud".to_string(),
-                    )),
-                };
-            }
-
-            return Ok(());
-        }
-
-        if opts.is_sync() {
-            let sync_resp = self.runtime_handle.send_and_wait(RuntimeMsg::WalSync {
-                request_id: next_request_id()?,
-            })?;
-            return match sync_resp {
-                RuntimeResponse::Ok { .. } => Ok(()),
-                RuntimeResponse::Error { error, .. } => Err(error),
-                _ => Err(MidgeError::Internal(
-                    "Unexpected response to RuntimeMsg::WalSync".to_string(),
-                )),
-            };
-        }
-
-        Ok(())
     }
 }

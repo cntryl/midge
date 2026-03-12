@@ -464,6 +464,43 @@ fn should_hide_deleted_range_given_scan_after_delete_range_when_scanning() {
 }
 
 #[test]
+fn should_commit_atomically_given_mixed_put_and_delete_range_when_committed_in_transaction() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let mut setup = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        setup.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
+        setup.put(b"key2".to_vec(), b"v2".to_vec(), None).unwrap();
+        setup.put(b"key3".to_vec(), b"v3".to_vec(), None).unwrap();
+        engine.commit(setup, WriteOptions::buffered()).unwrap();
+
+        // Act - put + delete + delete_range all in one transaction
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"key4".to_vec(), b"v4".to_vec(), None).unwrap();
+        tx.delete(b"key3".to_vec()).unwrap();
+        tx.delete_range(b"key1".to_vec(), b"key3".to_vec()).unwrap();
+        engine.commit(tx, WriteOptions::buffered()).unwrap();
+
+        // Assert - key1 and key2 gone via range, key3 gone via delete, key4 present
+        let read = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(read.get(b"key1").unwrap(), None);
+        assert_eq!(read.get(b"key2").unwrap(), None);
+        assert_eq!(read.get(b"key3").unwrap(), None);
+        assert_eq!(
+            read.get(b"key4").unwrap(),
+            Some(Bytes::from_static(b"v4"))
+        );
+    });
+}
+
+#[test]
 fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange

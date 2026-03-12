@@ -1114,21 +1114,11 @@ impl Engine {
             return Ok(());
         }
 
-        // Collect write intents to avoid borrow issues
-        let write_intents: Vec<_> = txn.iter_writes().cloned().collect();
+        // Route all transactional writes through the ingest coordinator so every
+        // operation shape shares the same backpressure, write-group batching, and
+        // atomic ApplyTransaction path.
+        let cf_id_for_check = txn.cf_id();
 
-        // PHASE 2.1: Determine CF for this transaction
-        let cf_id_for_check = write_intents
-            .first()
-            .map(|intent| match intent {
-                api::WriteIntent::Put { cf_id, .. }
-                | api::WriteIntent::Insert { cf_id, .. }
-                | api::WriteIntent::Delete { cf_id, .. }
-                | api::WriteIntent::DeleteRange { cf_id, .. } => *cf_id,
-            })
-            .unwrap_or(0);
-
-        // Route point-only writes through ingest batching for throughput.
         let coordinator = self
             .ingest_coordinators
             .get(&cf_id_for_check)
@@ -1139,92 +1129,15 @@ impl Engine {
                 ))
             })?;
 
-        let mut batch_intents = Vec::with_capacity(write_intents.len());
-        let mut delete_range_ops = Vec::new();
+        let ops = txn.into_runtime_ops();
 
-        for intent in write_intents {
-            match intent {
-                api::WriteIntent::Put {
-                    cf_id,
-                    key,
-                    value,
-                    ttl_seconds,
-                    ..
-                } => batch_intents.push(ingest::BatchWriteOp {
-                    cf_id,
-                    key,
-                    value: Some(value),
-                    ttl_seconds,
-                    insert_only: false,
-                }),
-                api::WriteIntent::Insert {
-                    cf_id,
-                    key,
-                    value,
-                    ttl_seconds,
-                    ..
-                } => batch_intents.push(ingest::BatchWriteOp {
-                    cf_id,
-                    key,
-                    value: Some(value),
-                    ttl_seconds,
-                    insert_only: true,
-                }),
-                api::WriteIntent::Delete { cf_id, key, .. } => {
-                    batch_intents.push(ingest::BatchWriteOp {
-                        cf_id,
-                        key,
-                        value: None,
-                        ttl_seconds: None,
-                        insert_only: false,
-                    })
-                }
-                api::WriteIntent::DeleteRange { cf_id, start_key, end_key } => {
-                    delete_range_ops.push((cf_id, start_key, end_key));
-                }
-            }
-        }
-
-        // Submit all regular ops as a single batch (one channel alloc, one wait)
-        let mut max_sequence = 0u64;
-        if !batch_intents.is_empty() {
-            let durability_policy = Some(self.effective_wal_durability_policy(opts)?);
-            let sequence =
-                coordinator.submit_batch(&self.runtime_handle, batch_intents, durability_policy)?;
-            max_sequence = max_sequence.max(sequence);
-        }
-
-        // Apply delete_range operations separately (cannot be batched like point ops)
-        for (cf_id, start_key, end_key) in delete_range_ops {
-            let durability_policy = self.effective_wal_durability_policy(opts)?;
-            let response = self
-                .runtime_handle
-                .send_and_wait(RuntimeMsg::WalAppendDeleteRange {
-                    request_id: next_request_id()?,
-                    cf_id,
-                    start_key,
-                    end_key,
-                    durability_policy: Some(durability_policy),
-                })?;
-
-            match response {
-                RuntimeResponse::WalAppended { sequence, .. } => {
-                    max_sequence = max_sequence.max(sequence);
-                }
-                RuntimeResponse::Error { error, .. } => return Err(error),
-                _ => {
-                    return Err(MidgeError::Internal(
-                        "Unexpected response to delete_range in transaction".to_string(),
-                    ))
-                }
-            }
-        }
+        let durability_policy = Some(self.effective_wal_durability_policy(opts)?);
+        let sequence = coordinator.submit_ops(&self.runtime_handle, ops, durability_policy)?;
 
         // Update engine's sequence to reflect completed writes
-        self.sequence
-            .store(max_sequence, std::sync::atomic::Ordering::SeqCst);
+        self.sequence.store(sequence, Ordering::SeqCst);
 
-        self.finalize_write_durability(max_sequence, opts)
+        self.finalize_write_durability(sequence, opts)
     }
 
     /// Wait for a write stall to clear for `cf_id`.

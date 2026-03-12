@@ -60,7 +60,7 @@ const WRITE_GROUP_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Pending batch request waiting for leader to group it with others
 pub(crate) struct PendingBatchRequest {
     /// The batch of operations to commit
-    pub intents: Vec<BatchWriteOp>,
+    pub ops: Vec<TransactionOp>,
     /// Durability policy for this batch (None = use default)
     pub durability_policy: Option<crate::wal::DurabilityPolicy>,
     /// Response channel to send result back to caller
@@ -190,8 +190,8 @@ impl WriteGroupCoordinator {
     }
 }
 
-/// Write intent submitted to ingest coordinator
-pub(crate) struct WriteIntent {
+/// Write submitted to the ingest coordinator's point-write queue.
+pub(crate) struct IngestWrite {
     pub cf_id: crate::engine::ColumnFamilyId,
     pub key: Bytes,
     pub value: Option<Bytes>,
@@ -201,7 +201,7 @@ pub(crate) struct WriteIntent {
     pub result_tx: crossbeam::channel::Sender<MidgeResult<u64>>,
 }
 
-impl WriteIntent {
+impl IngestWrite {
     fn estimated_size(&self) -> usize {
         self.key.len() + self.value.as_ref().map(|v| v.len()).unwrap_or(0) + 64
     }
@@ -226,7 +226,7 @@ impl WriteIntent {
 
 /// Accumulated batch of writes
 struct WriteBatch {
-    intents: Vec<WriteIntent>,
+    intents: Vec<IngestWrite>,
     total_bytes: usize,
     first_enqueued: Instant,
 }
@@ -240,7 +240,7 @@ impl WriteBatch {
         }
     }
 
-    fn add(&mut self, intent: WriteIntent) {
+    fn add(&mut self, intent: IngestWrite) {
         self.total_bytes += intent.estimated_size();
         self.intents.push(intent);
     }
@@ -260,19 +260,10 @@ impl WriteBatch {
     }
 }
 
-/// A single write op for batch submission to the ingest coordinator.
-pub(crate) struct BatchWriteOp {
-    pub cf_id: crate::engine::ColumnFamilyId,
-    pub key: Vec<u8>,
-    pub value: Option<Vec<u8>>,
-    pub ttl_seconds: Option<u64>,
-    pub insert_only: bool,
-}
-
 /// Per-CF ingest coordinator
 pub(crate) struct IngestCoordinator {
     cf_id: crate::engine::ColumnFamilyId,
-    write_tx: Sender<WriteIntent>,
+    write_tx: Sender<IngestWrite>,
     stop_tx: Sender<()>,
     thread_handle: Option<thread::JoinHandle<()>>,
     /// Cached write stall status (updated by runtime, read by ingest loop)
@@ -317,7 +308,7 @@ impl IngestCoordinator {
         self.stall_flag.store(stalled, Ordering::Release);
     }
 
-    /// Submit a write intent to the ingest queue
+    /// Submit a point write to the ingest queue.
     ///
     /// Returns WriteStall if queue is full (backpressure), or the sequence number on success.
     pub fn submit_write(
@@ -329,7 +320,7 @@ impl IngestCoordinator {
         insert_only: bool,
     ) -> MidgeResult<u64> {
         let (result_tx, result_rx) = crossbeam::channel::bounded(1);
-        let intent = WriteIntent {
+        let intent = IngestWrite {
             cf_id,
             key: Bytes::from(key),
             value: value.map(Bytes::from),
@@ -369,13 +360,13 @@ impl IngestCoordinator {
     ///
     /// The `durability_policy` parameter allows per-request durability control.
     /// If None, the runtime will use the engine's default durability policy.
-    pub fn submit_batch(
+    pub fn submit_ops(
         &self,
         runtime: &RuntimeHandle,
-        intents: Vec<BatchWriteOp>,
+        ops: Vec<TransactionOp>,
         durability_policy: Option<crate::wal::DurabilityPolicy>,
     ) -> MidgeResult<u64> {
-        if intents.is_empty() {
+        if ops.is_empty() {
             return Ok(0);
         }
 
@@ -390,16 +381,16 @@ impl IngestCoordinator {
         }
 
         if self.write_group_coord.try_acquire_leader() {
-            self.drain_as_leader(runtime, intents, durability_policy)
+            self.drain_as_leader(runtime, ops, durability_policy)
         } else {
-            self.submit_as_follower(runtime, intents, durability_policy)
+            self.submit_as_follower(runtime, ops, durability_policy)
         }
     }
 
     fn drain_as_leader(
         &self,
         runtime: &RuntimeHandle,
-        initial_intents: Vec<BatchWriteOp>,
+        initial_ops: Vec<TransactionOp>,
         durability_policy: Option<crate::wal::DurabilityPolicy>,
     ) -> MidgeResult<u64> {
         let _leader_guard = LeaderGuard::new(Arc::clone(&self.write_group_coord));
@@ -408,31 +399,31 @@ impl IngestCoordinator {
             .leader_runs
             .fetch_add(1, Ordering::Relaxed);
 
-        let mut initial_intents = Some(initial_intents);
+        let mut initial_ops = Some(initial_ops);
         let mut initial_result: Option<MidgeResult<u64>> = None;
 
         loop {
             let mut pending_requests = Vec::new();
 
-            let (mut all_intents, batch_durability, is_initial_batch) = match initial_intents.take()
+            let (mut all_ops, batch_durability, is_initial_batch) = match initial_ops.take()
             {
                 Some(initial) => (initial, durability_policy, true),
                 None => match self.write_group_coord.pending_queue.1.try_recv() {
                     Ok(pending) => {
                         pending_requests.push((pending.result_tx, pending.durability_policy));
-                        (pending.intents, pending.durability_policy, false)
+                        (pending.ops, pending.durability_policy, false)
                     }
                     Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
                 },
             };
 
-            if all_intents.is_empty() {
+            if all_ops.is_empty() {
                 break;
             }
 
-            all_intents = self.drain_pending_queue(all_intents, &mut pending_requests);
+            all_ops = self.drain_pending_queue(all_ops, &mut pending_requests);
 
-            if all_intents.is_empty() {
+            if all_ops.is_empty() {
                 break;
             }
 
@@ -441,8 +432,7 @@ impl IngestCoordinator {
                 .batches_grouped
                 .fetch_add(pending_requests.len() as u64 + 1, Ordering::Relaxed);
 
-            let ops = Self::convert_to_transaction_ops(all_intents);
-            let result = self.apply_transaction(runtime, ops, batch_durability);
+            let result = self.apply_transaction(runtime, all_ops, batch_durability);
 
             self.notify_waiters(&pending_requests, &result);
 
@@ -462,25 +452,25 @@ impl IngestCoordinator {
 
     fn drain_pending_queue(
         &self,
-        mut all_intents: Vec<BatchWriteOp>,
+        mut all_ops: Vec<TransactionOp>,
         pending_requests: &mut Vec<(
             crossbeam::channel::Sender<MidgeResult<u64>>,
             Option<crate::wal::DurabilityPolicy>,
         )>,
-    ) -> Vec<BatchWriteOp> {
+    ) -> Vec<TransactionOp> {
         let drain_start = Instant::now();
         let adaptive_timeout = self.write_group_coord.get_timeout();
 
         loop {
             match self.write_group_coord.pending_queue.1.try_recv() {
                 Ok(pending) => {
-                    all_intents.extend(pending.intents);
+                    all_ops.extend(pending.ops);
                     pending_requests.push((pending.result_tx, pending.durability_policy));
                 }
                 Err(TryRecvError::Empty) => {
                     if drain_start.elapsed() > adaptive_timeout
                         || pending_requests.len() >= MAX_GROUPED_BATCHES
-                        || all_intents.len() > MAX_BATCH_OPS
+                        || all_ops.len() > MAX_BATCH_OPS
                     {
                         break;
                     }
@@ -490,7 +480,7 @@ impl IngestCoordinator {
             }
         }
 
-        all_intents
+        all_ops
     }
 
     fn apply_transaction(
@@ -499,33 +489,14 @@ impl IngestCoordinator {
         ops: Vec<TransactionOp>,
         durability_policy: Option<crate::wal::DurabilityPolicy>,
     ) -> MidgeResult<u64> {
-        let request_id = next_request_id()?;
-        runtime
-            .send_and_wait_timeout(
-                RuntimeMsg::ApplyTransaction {
-                    request_id,
-                    ops,
-                    durability_policy,
-                },
-                WRITE_GROUP_APPLY_TIMEOUT,
-            )
-            .and_then(|resp| match resp {
-                Some(RuntimeResponse::TransactionApplied {
-                    last_sequence,
-                    write_stall_hint,
-                    ..
-                }) => {
-                    self.stall_flag.store(write_stall_hint, Ordering::Release);
-                    Ok(last_sequence)
-                }
-                Some(RuntimeResponse::Error { error, .. }) => Err(error),
-                Some(_) => Err(MidgeError::Internal(
-                    "Unexpected response to ApplyTransaction".to_string(),
-                )),
-                None => Err(MidgeError::Internal(
-                    "Write group commit timed out".to_string(),
-                )),
-            })
+        Self::send_apply_transaction(
+            runtime,
+            ops,
+            durability_policy,
+            &self.stall_flag,
+            Some((WRITE_GROUP_APPLY_TIMEOUT, "Write group commit timed out")),
+            None,
+        )
     }
 
     fn notify_waiters(
@@ -568,13 +539,13 @@ impl IngestCoordinator {
     fn submit_as_follower(
         &self,
         runtime: &RuntimeHandle,
-        intents: Vec<BatchWriteOp>,
+        ops: Vec<TransactionOp>,
         durability_policy: Option<crate::wal::DurabilityPolicy>,
     ) -> MidgeResult<u64> {
         let (result_tx, result_rx) = crossbeam::channel::bounded(1);
 
         let pending = PendingBatchRequest {
-            intents,
+            ops,
             durability_policy,
             result_tx,
         };
@@ -585,7 +556,7 @@ impl IngestCoordinator {
                 .map_err(|_| MidgeError::Internal("Write grouping leader timed out".to_string()))
                 .and_then(|result| result),
             Err(crossbeam::channel::TrySendError::Full(pending)) => {
-                self.submit_direct(runtime, pending.intents, pending.durability_policy)
+                self.submit_direct(runtime, pending.ops, pending.durability_policy)
             }
             Err(crossbeam::channel::TrySendError::Disconnected(_)) => Err(MidgeError::Internal(
                 "Write grouping coordinator disconnected".to_string(),
@@ -596,61 +567,88 @@ impl IngestCoordinator {
     fn submit_direct(
         &self,
         runtime: &RuntimeHandle,
-        intents: Vec<BatchWriteOp>,
+        ops: Vec<TransactionOp>,
         durability_policy: Option<crate::wal::DurabilityPolicy>,
     ) -> MidgeResult<u64> {
-        let ops = Self::convert_to_transaction_ops(intents);
+        Self::send_apply_transaction(
+            runtime,
+            ops,
+            durability_policy,
+            &self.stall_flag,
+            None,
+            None,
+        )
+    }
+
+    fn send_apply_transaction(
+        runtime: &RuntimeHandle,
+        ops: Vec<TransactionOp>,
+        durability_policy: Option<crate::wal::DurabilityPolicy>,
+        stall_flag: &AtomicBool,
+        timeout: Option<(Duration, &'static str)>,
+        expected_op_count: Option<usize>,
+    ) -> MidgeResult<u64> {
         let request_id = next_request_id()?;
 
-        runtime
-            .send_and_wait(RuntimeMsg::ApplyTransaction {
+        let response = if let Some((timeout, timeout_msg)) = timeout {
+            runtime
+                .send_and_wait_timeout(
+                    RuntimeMsg::ApplyTransaction {
+                        request_id,
+                        ops,
+                        durability_policy,
+                    },
+                    timeout,
+                )?
+                .ok_or_else(|| MidgeError::Internal(timeout_msg.to_string()))?
+        } else {
+            runtime.send_and_wait(RuntimeMsg::ApplyTransaction {
                 request_id,
                 ops,
                 durability_policy,
-            })
-            .and_then(|resp| match resp {
-                RuntimeResponse::TransactionApplied {
-                    last_sequence,
-                    write_stall_hint,
-                    ..
-                } => {
-                    self.stall_flag.store(write_stall_hint, Ordering::Release);
-                    Ok(last_sequence)
-                }
-                RuntimeResponse::Error { error, .. } => Err(error),
-                _ => Err(MidgeError::Internal(
-                    "Unexpected response to ApplyTransaction".to_string(),
-                )),
-            })
+            })?
+        };
+
+        Self::decode_apply_transaction_response(response, expected_op_count, stall_flag)
     }
 
-    fn convert_to_transaction_ops(intents: Vec<BatchWriteOp>) -> Vec<TransactionOp> {
-        intents
-            .into_iter()
-            .map(|op| {
-                if let Some(value) = op.value {
-                    TransactionOp::Put {
-                        cf_id: op.cf_id,
-                        key: Bytes::from(op.key),
-                        value: Bytes::from(value),
-                        ttl_seconds: op.ttl_seconds,
-                        insert_only: op.insert_only,
-                    }
-                } else {
-                    TransactionOp::Delete {
-                        cf_id: op.cf_id,
-                        key: Bytes::from(op.key),
+    fn decode_apply_transaction_response(
+        response: RuntimeResponse,
+        expected_op_count: Option<usize>,
+        stall_flag: &AtomicBool,
+    ) -> MidgeResult<u64> {
+        match response {
+            RuntimeResponse::TransactionApplied {
+                last_sequence,
+                op_count,
+                write_stall_hint,
+                ..
+            } => {
+                stall_flag.store(write_stall_hint, Ordering::Release);
+
+                if let Some(expected) = expected_op_count {
+                    if op_count != expected {
+                        return Err(MidgeError::Internal(format!(
+                            "Batch op count mismatch: expected {}, got {}",
+                            expected, op_count
+                        )));
                     }
                 }
-            })
-            .collect()
+
+                Ok(last_sequence)
+            }
+            RuntimeResponse::Error { error, .. } => Err(error),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to ApplyTransaction".to_string(),
+            )),
+        }
     }
 
     /// Ingest loop: batches writes and commits them
     fn ingest_loop(
         cf_id: crate::engine::ColumnFamilyId,
         runtime: RuntimeHandle,
-        write_rx: Receiver<WriteIntent>,
+        write_rx: Receiver<IngestWrite>,
         stop_rx: Receiver<()>,
         stall_flag: Arc<AtomicBool>,
     ) {
@@ -730,20 +728,27 @@ impl IngestCoordinator {
                     }
                 }
 
-                tracing::debug!(cf_id = cf_id, batch_size = batch.len(), "Committing batch");
-
                 // Commit batch immediately after receiving write(s)
                 // This ensures low latency for all commits
                 if !batch.is_empty() {
+                    let batch_len = batch.len();
+                    let batch_bytes = batch.total_bytes;
                     let commit_start = Instant::now();
                     Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
                     let commit_time_us = commit_start.elapsed().as_micros() as u64;
 
                     // Track batch metrics
                     batch_count += 1;
-                    let _batch_size = batch.intents.len() + batch.intents.capacity(); // rough estimate
-                    total_batch_size += batch.len() as u64;
-                    max_batch_size = max_batch_size.max(batch.len());
+                    total_batch_size += batch_len as u64;
+                    max_batch_size = max_batch_size.max(batch_len);
+
+                    tracing::debug!(
+                        cf_id = cf_id,
+                        batch_len,
+                        batch_bytes,
+                        commit_time_us,
+                        "Committed ingest batch"
+                    );
 
                     // Log periodic metrics every 100 batches or 5 seconds
                     if batch_count.is_multiple_of(100)
@@ -754,9 +759,13 @@ impl IngestCoordinator {
                         } else {
                             0
                         };
-                        eprintln!(
-                            "[ingest-cf{}] batches={} avg_size={} max_size={} commit_time={}µs",
-                            cf_id, batch_count, avg_size, max_batch_size, commit_time_us
+                        tracing::info!(
+                            cf_id = cf_id,
+                            batch_count,
+                            avg_batch_size = avg_size,
+                            max_batch_size,
+                            last_commit_time_us = commit_time_us,
+                            "Ingest batching stats"
                         );
                     }
                 }
@@ -770,8 +779,16 @@ impl IngestCoordinator {
             0
         };
         let batches_per_sec = batch_count as f64 / total_elapsed.as_secs_f64();
-        eprintln!("[ingest-cf{}] FINAL: batches={} total_ops={} avg_batch_size={} max_batch_size={} batches/sec={:.1} elapsed={:.2}s",
-            cf_id, batch_count, total_batch_size, avg_batch_size, max_batch_size, batches_per_sec, total_elapsed.as_secs_f64());
+        tracing::info!(
+            cf_id = cf_id,
+            batch_count,
+            total_ops = total_batch_size,
+            avg_batch_size,
+            max_batch_size,
+            batches_per_sec,
+            elapsed_secs = total_elapsed.as_secs_f64(),
+            "Ingest coordinator summary"
+        );
 
         tracing::info!(cf_id = cf_id, "Ingest coordinator stopped");
     }
@@ -796,20 +813,6 @@ impl IngestCoordinator {
             .map(|i| i.to_transaction_op())
             .collect();
 
-        let request_id = match next_request_id() {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!(cf_id = cf_id, error = %e, "request ID space exhausted");
-                for intent in batch.intents.drain(..) {
-                    let _ = intent.result_tx.send(Err(MidgeError::Internal(
-                        "request ID space exhausted".to_string(),
-                    )));
-                }
-                batch.clear();
-                return;
-            }
-        };
-
         // Fast path: check cached stall flag (avoids round-trip in common case)
         // The flag is updated by runtime when memtable pressure changes.
         // If stalled, do a synchronous check to confirm (flag may be stale).
@@ -833,37 +836,14 @@ impl IngestCoordinator {
         }
 
         // Send batch as ApplyTransaction
-        let result = runtime
-            .send_and_wait(RuntimeMsg::ApplyTransaction {
-                request_id,
-                ops,
-                durability_policy: None, // Use engine's default durability policy
-            })
-            .and_then(|resp| match resp {
-                RuntimeResponse::TransactionApplied {
-                    last_sequence,
-                    op_count,
-                    write_stall_hint,
-                    ..
-                } => {
-                    // Update stall flag from response (piggyback pattern)
-                    stall_flag.store(write_stall_hint, Ordering::Release);
-
-                    if op_count != batch.intents.len() {
-                        Err(MidgeError::Internal(format!(
-                            "Batch op count mismatch: expected {}, got {}",
-                            batch.intents.len(),
-                            op_count
-                        )))
-                    } else {
-                        Ok(last_sequence)
-                    }
-                }
-                RuntimeResponse::Error { error, .. } => Err(error),
-                _ => Err(MidgeError::Internal(
-                    "Unexpected response to ApplyTransaction".to_string(),
-                )),
-            });
+        let result = Self::send_apply_transaction(
+            runtime,
+            ops,
+            None,
+            stall_flag,
+            None,
+            Some(batch.intents.len()),
+        );
 
         // Propagate result to all waiters
         match result {
@@ -901,17 +881,16 @@ impl IngestCoordinator {
 
 impl Drop for IngestCoordinator {
     fn drop(&mut self) {
-        // Print write grouping stats
         let (leader_runs, batches_grouped, final_timeout_us) = self.write_group_coord.metrics();
         if leader_runs > 0 {
-            let avg_group_size = if leader_runs > 0 {
-                batches_grouped as f64 / leader_runs as f64
-            } else {
-                0.0
-            };
-            eprintln!(
-                "[write-group-cf{}] leader_runs={} batches_grouped={} avg_group_size={:.2} final_timeout={}µs",
-                self.cf_id, leader_runs, batches_grouped, avg_group_size, final_timeout_us
+            let avg_group_size = batches_grouped as f64 / leader_runs as f64;
+            tracing::debug!(
+                cf_id = self.cf_id,
+                leader_runs,
+                batches_grouped,
+                avg_group_size,
+                final_timeout_us,
+                "Write-group coordinator summary"
             );
         }
 
