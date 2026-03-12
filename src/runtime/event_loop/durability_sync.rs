@@ -27,17 +27,17 @@ impl EventLoop {
     #[inline]
     pub(super) fn should_ack_immediately(&self, deferred: bool) -> bool {
         // Ack policy:
-        // - CloudAsync (background mode): ack immediately after local WAL write.
-        //   Cloud upload runs asynchronously; commits never block on upload.
-        // - CloudStrict (explicit): never ack until cloud confirms (blocking durability).
-        // - Batched/Strict: ack immediately; durability is enforced via explicit sync/flush barriers
-        //   and via read-path durability frontiers when requested.
+        // - Runtime write-path acks are immediate for all local modes and CloudAsync.
+        // - CloudStrict blocking is enforced by the engine commit path via
+        //   SealWalForCloud(wait_for_ack=true) before commit returns.
+        // - Batched/Strict runtime writes still ack immediately; durability is enforced
+        //   by explicit sync/flush barriers and read-path durability frontiers.
         //
         // In Batched mode, deferring the ack until fsync would serialize callers and
         // defeat group commit (and can make tests look hung).
         //
         // CRITICAL: Background CloudAsync must NOT wait for cloud confirmation.
-        // Only CloudStrict policy (explicit opt-in) blocks on cloud upload.
+        // CloudStrict waits happen in commit finalization, not in this runtime helper.
         if self.wal_actor.is_cloud_async() {
             // CloudAsync background mode: always ack immediately.
             // Cloud upload runs asynchronously; commits never block on upload.
@@ -286,5 +286,127 @@ impl EventLoop {
                 tracing::warn!(error = %e, "failed to force WAL sync for durability barrier");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::create_test_state;
+    use super::*;
+    use crate::runtime::{ResponseRouter, RuntimeConfig};
+    use std::sync::Arc;
+
+    fn create_event_loop_with_policy(
+        policy: crate::wal::DurabilityPolicy,
+    ) -> crate::common::MidgeResult<EventLoop> {
+        let state = create_test_state();
+        let router = Arc::new(ResponseRouter::new());
+        let config = RuntimeConfig {
+            wal_durability_policy: policy,
+            ..RuntimeConfig::default()
+        };
+        EventLoop::new(state, false, router, config, None)
+    }
+
+    #[test]
+    fn should_ack_immediately_for_local_mode_regardless_of_deferred_flag() {
+        // Arrange
+        let event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+
+        // Act
+        let ack_not_deferred = event_loop.should_ack_immediately(false);
+        let ack_deferred = event_loop.should_ack_immediately(true);
+
+        // Assert
+        assert!(ack_not_deferred);
+        assert!(ack_deferred);
+    }
+
+    #[test]
+    fn should_ack_immediately_for_cloud_async_mode_regardless_of_deferred_flag() {
+        // Arrange
+        let event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::CloudAsync)
+            .expect("create event loop");
+
+        // Act
+        let ack_not_deferred = event_loop.should_ack_immediately(false);
+        let ack_deferred = event_loop.should_ack_immediately(true);
+
+        // Assert
+        assert!(ack_not_deferred);
+        assert!(ack_deferred);
+    }
+
+    #[test]
+    fn should_queue_confirm_only_waiter_when_deferred_write_is_acked_immediately() {
+        // Arrange
+        let event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        assert!(!event_loop.durability.has_pending_waiters());
+
+        // Act
+        event_loop.maybe_queue_confirm_only_waiter(true, 42, false);
+
+        // Assert
+        assert!(event_loop.durability.has_pending_waiters());
+        let waiters = event_loop.durability.drain_all_waiters();
+        assert_eq!(waiters.len(), 1);
+        match &waiters[0] {
+            DurabilityWaiter::ConfirmWalAppend { request_id } => {
+                assert_eq!(*request_id, 42);
+            }
+            other => panic!("unexpected waiter variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn should_not_queue_confirm_only_waiter_when_not_deferred() {
+        // Arrange
+        let event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        assert!(!event_loop.durability.has_pending_waiters());
+
+        // Act
+        event_loop.maybe_queue_confirm_only_waiter(false, 7, false);
+
+        // Assert
+        assert!(!event_loop.durability.has_pending_waiters());
+    }
+
+    #[test]
+    fn should_queue_confirm_only_transaction_waiter_when_deferred_txn_is_acked_immediately() {
+        // Arrange
+        let event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        assert!(!event_loop.durability.has_pending_waiters());
+
+        // Act
+        event_loop.maybe_queue_confirm_only_waiter(true, 99, true);
+
+        // Assert
+        assert!(event_loop.durability.has_pending_waiters());
+        let waiters = event_loop.durability.drain_all_waiters();
+        assert_eq!(waiters.len(), 1);
+        match &waiters[0] {
+            DurabilityWaiter::ConfirmTransactionApply { request_id } => {
+                assert_eq!(*request_id, 99);
+            }
+            other => panic!("unexpected waiter variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn should_not_queue_confirm_only_transaction_waiter_when_not_deferred() {
+        // Arrange
+        let event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        assert!(!event_loop.durability.has_pending_waiters());
+
+        // Act
+        event_loop.maybe_queue_confirm_only_waiter(false, 100, true);
+
+        // Assert
+        assert!(!event_loop.durability.has_pending_waiters());
     }
 }
