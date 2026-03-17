@@ -156,6 +156,8 @@ pub struct Transaction {
     read_snapshot: Option<Arc<crate::runtime::ReadSnapshot>>,
     /// True when opened against cloud-backed storage.
     cloud_mode: bool,
+    /// Whether this transaction is currently registered as an active snapshot.
+    snapshot_registered: bool,
 }
 
 impl Transaction {
@@ -178,6 +180,7 @@ impl Transaction {
             start_sequence,
             read_snapshot,
             cloud_mode,
+            snapshot_registered: true,
         }
     }
 
@@ -259,11 +262,24 @@ impl Transaction {
         self.cf_id
     }
 
-    pub(crate) fn into_runtime_ops(self) -> Vec<crate::runtime::TransactionOp> {
-        self.write_set
+    pub(crate) fn take_runtime_ops(&mut self) -> Vec<crate::runtime::TransactionOp> {
+        std::mem::take(&mut self.write_set)
             .into_iter()
             .map(WriteIntent::into_runtime_op)
             .collect()
+    }
+
+    pub(crate) fn unregister_snapshot(&mut self) {
+        if !self.snapshot_registered {
+            return;
+        }
+
+        let _ = self
+            .runtime_handle
+            .send(crate::runtime::RuntimeMsg::UnregisterSnapshot {
+                snapshot_id: self.id,
+            });
+        self.snapshot_registered = false;
     }
 
     pub fn start_sequence(&self) -> u64 {
@@ -397,5 +413,11 @@ impl Transaction {
         }
 
         None
+    }
+}
+
+impl Drop for Transaction {
+    fn drop(&mut self) {
+        self.unregister_snapshot();
     }
 }

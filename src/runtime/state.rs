@@ -88,8 +88,8 @@ pub struct CloudState {
 /// while snapshots are reading from those SSTs.
 #[derive(Default)]
 pub struct SnapshotState {
-    /// Active snapshots: snapshot_id → (sequence, created_at, ref_count)
-    pub active_snapshots: HashMap<u64, (u64, Instant, usize)>,
+    /// Active snapshots: snapshot_id → (sequence, created_at, ref_count, pinned_ssts)
+    pub active_snapshots: HashMap<u64, (u64, Instant, usize, HashSet<String>)>,
     /// Maximum time to hold a snapshot (1 hour by default)
     pub max_snapshot_lifetime: std::time::Duration,
 }
@@ -574,6 +574,18 @@ impl RuntimeState {
     }
 
     pub fn runtime_metrics_snapshot(&self) -> crate::engine::RuntimeMetricsSnapshot {
+        let now = Instant::now();
+        let pinned_ssts = self.get_pinned_sst_names().len();
+        let oldest_snapshot_age_seconds = self
+            .snapshots
+            .active_snapshots
+            .values()
+            .map(|(_sequence, created_at, _ref_count, _pinned_ssts)| {
+                now.duration_since(*created_at).as_secs()
+            })
+            .max()
+            .unwrap_or(0);
+
         let active_memtables = self.column_families.len();
         let immutable_memtables = self
             .column_families
@@ -608,6 +620,8 @@ impl RuntimeState {
                 .load(std::sync::atomic::Ordering::SeqCst),
             pending_cloud_uploads: self.cloud.pending_uploads.len(),
             active_snapshots: self.snapshots.active_snapshots.len(),
+            pinned_ssts,
+            oldest_snapshot_age_seconds,
             sst_count,
             sst_bytes,
             salvage_mode_opens: u64::from(self.opened_in_salvage_mode),
@@ -675,7 +689,7 @@ impl RuntimeState {
             .snapshots
             .active_snapshots
             .iter()
-            .map(|(snapshot_id, (sequence, created_at, ref_count))| {
+            .map(|(snapshot_id, (sequence, created_at, ref_count, _pinned_ssts))| {
                 crate::engine::SnapshotPinSnapshot {
                     snapshot_id: *snapshot_id,
                     sequence: *sequence,
@@ -1467,15 +1481,22 @@ impl RuntimeState {
     ///
     /// Returns true if snapshot was registered successfully.
     /// Returns false if snapshot_id already exists (duplicate registration).
-    pub fn register_snapshot(&mut self, snapshot_id: u64, sequence: u64) -> bool {
+    pub fn register_snapshot(
+        &mut self,
+        snapshot_id: u64,
+        sequence: u64,
+        pinned_sst_names: Vec<String>,
+    ) -> bool {
         if self.snapshots.active_snapshots.contains_key(&snapshot_id) {
             tracing::warn!(snapshot_id, "Attempted to register duplicate snapshot ID");
             return false;
         }
 
+        let pinned_ssts = pinned_sst_names.into_iter().collect::<HashSet<_>>();
+
         self.snapshots
             .active_snapshots
-            .insert(snapshot_id, (sequence, Instant::now(), 1));
+            .insert(snapshot_id, (sequence, Instant::now(), 1, pinned_ssts));
 
         tracing::trace!(snapshot_id, sequence, "Snapshot registered for SST pinning");
 
@@ -1499,7 +1520,7 @@ impl RuntimeState {
     pub fn get_pinned_sst_names(&self) -> HashSet<String> {
         let mut pinned = HashSet::new();
 
-        for (snapshot_id, (snapshot_seq, created_at, _ref_count)) in
+        for (snapshot_id, (_snapshot_seq, created_at, _ref_count, pinned_ssts)) in
             &self.snapshots.active_snapshots
         {
             // Check if snapshot has exceeded max lifetime
@@ -1515,16 +1536,7 @@ impl RuntimeState {
                 // but we log it for alerting
             }
 
-            // Find all SSTs with sequence >= snapshot_seq
-            // These contain data visible to the snapshot
-            for file_meta in &self.manifest.files {
-                // Check if this SST overlaps with snapshot's sequence range
-                let smallest = file_meta.smallest_seq.unwrap_or(0);
-                let largest = file_meta.largest_seq.unwrap_or(u64::MAX);
-                if smallest <= *snapshot_seq && largest >= smallest {
-                    pinned.insert(file_meta.name.clone());
-                }
-            }
+            pinned.extend(pinned_ssts.iter().cloned());
         }
 
         pinned
@@ -1535,7 +1547,7 @@ impl RuntimeState {
         self.snapshots
             .active_snapshots
             .iter()
-            .filter(|(_id, (_seq, created_at, _ref_count))| {
+            .filter(|(_id, (_seq, created_at, _ref_count, _pinned_ssts))| {
                 Instant::now().duration_since(*created_at) > self.snapshots.max_snapshot_lifetime
             })
             .count()
@@ -1546,7 +1558,7 @@ impl RuntimeState {
         self.snapshots
             .active_snapshots
             .values()
-            .map(|(sequence, _created_at, _ref_count)| *sequence)
+                .map(|(sequence, _created_at, _ref_count, _pinned_ssts)| *sequence)
             .min()
     }
 

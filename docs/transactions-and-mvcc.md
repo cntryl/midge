@@ -1,0 +1,326 @@
+# Transactions and MVCC in Midge
+
+## Design goals
+
+**Current MVCC summary:**
+
+- Reads use a fixed snapshot captured at transaction start.
+- Writes are buffered client-side until commit.
+- Commit is atomic through WAL bracketing.
+- Concurrent write conflicts are not detected.
+- Last writer wins.
+- Active snapshots are registered so compaction and GC can preserve reader-visible versions.
+
+---
+
+Midge uses MVCC so that reads do not block writes and writes do not block reads. The goals are:
+
+- **Non-blocking reads.** A `ReadOnly` transaction captures a snapshot at start time and executes against it without acquiring any lock or coordinating with the write path.
+- **Atomic multi-key writes.** A `ReadWrite` transaction buffers writes client-side until commit, after which all writes are applied atomically via a single WAL append and a single sequence-number range.
+- **Idempotent crash recovery.** Each committed transaction is bounded by `TxnBegin` / `TxnCommit` records in the WAL, so partial commits are discarded on replay.
+- **TTL and range-delete support.** MVCC sequence numbers propagate into SST files, enabling correct TTL expiry and range tombstone application across the read path.
+
+---
+
+## Transaction model
+
+### Starting a transaction
+
+```rust
+let tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite)?;
+let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly)?;
+```
+
+`begin_tx` executes entirely on the calling thread. It does a wait-free load from a lock-free `ArcSwap`-backed `SnapshotCache` (published by the event loop after every write). The call does **not** send a message to the event loop. The returned `Transaction` stores:
+
+- `start_sequence: u64` — the global sequence at load time. Used as the read horizon.
+- `read_snapshot: Arc<ReadSnapshot>` — `Arc` references to the current active memtable, immutable memtables, and a `Vec<FileMeta>` cloned from the manifest.
+- `write_set: Vec<WriteIntent>` — initially empty.
+
+A transaction is scoped to a single column family. There is no cross-CF atomic transaction.
+
+### How reads work
+
+`Transaction::get(key)`:
+
+1. Checks `write_set` first (read-your-own-writes). Returns the buffered value if found.
+2. Delegates to `ReadSnapshot::get(key, start_sequence)`.
+
+`ReadSnapshot::get(key, seq)` merges `KeyState` across all memtable layers and SST files using highest-sequence-wins. Only entries with `entry_seq <= seq` are considered. TTL-expired entries are treated as tombstones. Range tombstones are applied: if `tombstone.seq <= seq` and the key falls within the tombstone range, the entry is suppressed.
+
+### How writes are buffered
+
+`tx.put(key, value, ttl)`, `tx.delete(key)`, `tx.delete_range(start, end)` append a `WriteIntent` to `Transaction.write_set`. Nothing is written to the WAL or memtable at this point. No other transaction sees the buffered writes.
+
+`tx.insert(key, value, ttl)` additionally checks, at commit time, that no existing entry for the key exists; the commit returns `MidgeError::InvalidArgument` if the key is already present.
+
+### When writes become visible
+
+Writes become visible only after a successful `engine.commit(tx, opts)`. The commit:
+
+1. Sends an `ApplyTransaction` message to the event loop containing all `WriteIntent`s.
+2. The event loop allocates a contiguous sequence-number range for the transaction (one per op, plus begin and commit), appends the full batch to the WAL, applies all ops to the active memtable, and advances the global sequence.
+3. After applying, a new `PublishedSnapshot` is written to the `SnapshotCache`; subsequent `begin_tx` calls see the committed writes.
+
+All ops in a commit become visible atomically. There is no partial visibility.
+
+### Commit behavior
+
+`commit` is synchronous. The caller blocks until the event loop has processed the `ApplyTransaction` message and replied. Durability depends on `WriteOptions`:
+
+| `WriteOptions` | WAL behavior |
+|---|---|
+| `buffered()` | WAL write, no fsync. Crash between write and fsync loses data. |
+| `best_effort()` | WAL skipped entirely. Data lives only in the memtable until flush. |
+| `cloud_strict()` | WAL written, synced, and uploaded to cloud before returning. |
+
+### Rollback behavior
+
+```rust
+engine.rollback_transaction(tx)?;  // no-op; returns Ok(()) immediately
+```
+
+Because writes are never sent to the engine until `commit`, dropping a `Transaction` without committing it is sufficient to discard all pending writes. There is no WAL abort record, no undo log, no two-phase rollback. `rollback_transaction` exists as an explicit API for clarity but does nothing.
+
+### Copy-on-write
+
+Midge does not use copy-on-write for write buffering. `write_set` is a plain `Vec<WriteIntent>` on the `Transaction` struct. There is no in-place divergence tracking.
+
+---
+
+## MVCC model
+
+### Multiple versions per key
+
+Midge uses sequence-versioned visibility for reads, but does not retain long-lived historical version chains as a first-class user-visible feature. The memtable stores one entry per key per sequence number; SST files store entries with embedded sequence numbers. Older versions of a given key are compacted away during merges — only the highest-sequence entry per key survives (subject to the snapshot horizon — see the compaction section for a known limitation).
+
+### Version identifiers
+
+All versions are identified by a single global monotonic `u64` sequence number. There are no timestamps or hybrid clocks. Each record in the WAL and each entry in memtable and SST files carries the sequence number at which it was written.
+
+For a committed transaction of N ops:
+
+```
+begin_seq      = state.sequence + 1
+op[0]          = begin_seq + 1
+op[1]          = begin_seq + 2
+...
+op[N-1]        = begin_seq + N
+commit_seq     = begin_seq + N + 1
+state.sequence = commit_seq   (after commit)
+```
+
+### How readers choose visible versions
+
+Reads use `start_sequence` (captured at `begin_tx` time) as the visibility cutoff. An entry at sequence `s` is visible to a transaction with `start_sequence = h` if and only if `s <= h`. The read path picks the entry with the highest sequence number that satisfies this constraint.
+
+For unconstrained reads (e.g., event loop's own lookups), `seq = u64::MAX` makes all entries visible.
+
+### Write conflicts
+
+There is no optimistic concurrency control and no conflict detection for `ReadWrite` transactions.
+
+Two concurrent `ReadWrite` transactions writing the same key will both commit successfully. The transaction that commits last (highest sequence number) wins. The earlier write is silently overwritten. This is last-write-wins behavior.
+
+The only exception is `tx.insert()`: at commit time (inside the event loop), the engine checks whether the key already exists. If it does, the commit returns an error. This is a server-side existence check, not a conflict check against other in-flight transactions.
+
+### Snapshot isolation and isolation levels
+
+| Mode | Isolation characterization |
+|---|---|
+| `ReadOnly` | **Consistent point-in-time snapshot reads** — all reads see the committed state at `begin_tx` time. Concurrent commits are invisible for the lifetime of the transaction. |
+| `ReadWrite` | **Snapshot reads + read-your-own-writes + last-write-wins commit** — reads are fixed to the snapshot at `begin_tx` time (not re-read on later commits). Write-write conflicts are not detected. Lost updates are allowed. This is not read committed: later committed data remains invisible to the transaction regardless of when it reads. |
+
+---
+
+## Snapshot behavior
+
+### How snapshots are created
+
+Every `begin_tx` call does a single wait-free `ArcSwap::load()` on the `SnapshotCache`. The cache holds the most recently published `PublishedSnapshot`, which contains:
+
+- `sequence: u64` — the sequence at the time of the last publish.
+- A `HashMap<cf_id, CfSnapshotData>` mapping each column family to its `ReadSnapshot`.
+
+A `ReadSnapshot` holds:
+- `Arc<SkipListMemtable>` — reference-counted pointer to the active memtable.
+- `Vec<Arc<SkipListMemtable>>` — reference-counted pointers to immutable memtables awaiting flush.
+- `Vec<FileMeta>` — a clone of the manifest's file list at publish time.
+
+The `Arc` references keep memtables alive as long as any `Transaction` holds a `ReadSnapshot`. `FileMeta` records are plain metadata (file name, level, key range, sequence range); they do not pin SST files on disk.
+
+### How long snapshots live
+
+A snapshot lives as long as the `Transaction` struct that holds it. When the `Transaction` is dropped (after commit, rollback, or explicit drop), the `Arc` counts on the memtables decrement. Memtables are freed when all reference counts reach zero.
+
+There is no engine-level registry of live snapshots in the current implementation. `RuntimeState.active_snapshots` exists but `register_snapshot` and `unregister_snapshot` are never called from the `begin_tx` path.
+
+### Consistency guarantee
+
+A `ReadOnly` transaction guarantees a **consistent point-in-time snapshot**: all reads within the transaction reflect the committed state of the engine at the moment `begin_tx` was called. No write committed after `begin_tx` is visible, regardless of how long the transaction remains open.
+
+A `ReadWrite` transaction provides the same read guarantee but offers no protection against concurrent writes to the same keys.
+
+### Long snapshots and compaction
+
+Transactions are registered as active snapshots on `begin_tx` and unregistered on commit, rollback, or drop. Compaction reads `oldest_active_snapshot_sequence()` and keeps tombstones newer than that horizon. GC also skips SSTs pinned by active snapshots. A long-lived `ReadOnly` transaction can therefore increase retention pressure while it remains open.
+
+---
+
+## Compaction and version GC
+
+### When old versions are removed
+
+Compaction merges SST files across levels. During a merge, each key's entries are sorted by sequence number. All but the highest-sequence entry for a given key are dropped. Tombstones are also dropped (see below). Expired entries (TTL) are dropped based on wall-clock time at compaction time.
+
+### Tombstone handling
+
+The compaction executor calls `filter_tombstones_with_horizon(versions, snapshot_horizon)`:
+
+```rust
+match snapshot_horizon {
+    Some(h) => retain tombstones with seq > h,   // keep tombstones newer than active readers
+    None    => drop all point-key tombstones,     // current behavior
+}
+```
+
+Because `oldest_active_snapshot_sequence()` always returns `None` (snapshots are not registered), **all point-key tombstones are dropped unconditionally** during compaction.
+
+Range tombstones are handled separately and are written into the output SST. They are not subject to this filter.
+
+### How Midge prevents removing versions still needed by readers
+
+**It does not, currently.** There is no mechanism to prevent compaction from removing tombstones or old versions that an active `ReadOnly` transaction might still need. The memtable `Arc`-pinning means unflushed writes survive until all readers have finished, but once a memtable is flushed and a compaction runs over the resulting SST, the version-safety guarantee is absent.
+
+Specifically:
+- A `ReadOnly` transaction capturing a snapshot that includes a delete (tombstone) in a post-flush SST may see a "resurrected" older value after compaction drops that tombstone.
+- A `ReadOnly` transaction that has a `FileMeta` reference to an SST file that is later deleted by GC will encounter a file-not-found error on scan.
+
+### Interaction between compaction and active transactions
+
+None. The compaction actor reads `state.oldest_active_snapshot_sequence()` to set `plan.snapshot_horizon`, but since `active_snapshots` is always empty, the horizon is always `None`. Compaction does not coordinate with the transaction layer.
+
+### SST GC pinning
+
+`get_pinned_sst_names()` always returns an empty set. SST files referenced by live `ReadSnapshot.sst_files` can be GC'd by compaction. Subsequent range scans against those file references will fail.
+
+---
+
+## Isolation guarantees
+
+**`ReadOnly` transactions:**
+
+- Dirty reads: **not possible.** Writes are not visible until commit.
+- Repeatable reads: **guaranteed.** `start_sequence` is fixed at `begin_tx`.
+- Phantom protection: **not guaranteed.** Range scans see only the snapshot at `begin_tx`; new keys inserted after that are invisible. This is snapshot-consistent behavior, not predicate-locking-based phantom prevention. New keys inserted between two sequential scans within the same transaction are invisible — which may be interpreted as phantom protection, but there is no locking mechanism enforcing it; it is a consequence of the fixed snapshot.
+- Write conflicts: **not applicable** — `ReadOnly` transactions do not write.
+
+**`ReadWrite` transactions:**
+
+- Dirty reads: **not possible.** Same snapshot read mechanism.
+- Repeatable reads: **provided for the fixed transaction snapshot**, plus read-your-own-writes for buffered keys. Concurrent commits remain invisible, but conflicting writes are not detected at commit.
+- Phantom protection: **not provided.**
+- Write conflicts: **not detected.** Two concurrent `ReadWrite` transactions writing the same key both succeed. The later commit silently overwrites the earlier.
+- Lost updates: **allowed.** This is a documented property, verified by `tests/transaction_isolation_lww.rs` and `tests/transaction_isolation_audit.rs`.
+
+**Non-guarantees (all modes):**
+
+- Serializable isolation is not implemented.
+- Serializable Snapshot Isolation (SSI) is not implemented.
+- No predicate locking or range locking.
+- No abort-on-conflict.
+- No multi-CF atomic transactions.
+
+---
+
+## Recovery interaction
+
+### WAL replay and MVCC state
+
+WAL records carry four fields relevant to MVCC: `seq`, `txn_id`, `writer_epoch`, and `op_kind` (which includes `TxnBegin` and `TxnCommit`).
+
+Recovery (`src/wal/recovery.rs`) reconstructs state as follows:
+
+1. Scan WAL records in order.
+2. On `TxnBegin`: open a buffer for `txn_id`.
+3. On a transactional op: append to the buffer for `txn_id`.
+4. On `TxnCommit`: apply all buffered ops for `txn_id` to the recovered memtable with their original sequence numbers.
+5. If the scan ends without a `TxnCommit` for an open `txn_id` (crash mid-transaction): the buffer is silently discarded. The transaction is rolled back.
+
+### Partially committed transactions
+
+A transaction is either fully committed (all ops including `TxnCommit` present in the WAL) or fully absent (anything without a `TxnCommit` is discarded). There is no state in which a subset of a transaction's ops are visible after recovery.
+
+The WAL actor includes fail-point annotations at:
+- `midge::wal::txn_after_ops_append_before_commit` — crash here → ops in WAL but no commit → all ops discarded on replay.
+- `midge::wal::txn_after_commit_append_before_sync` — crash here → commit written but not synced → same discard behavior if the commit record is lost.
+
+### Atomicity preservation
+
+Atomicity is preserved by the WAL's `TxnBegin`/`TxnCommit` bracketing combined with recovery's all-or-nothing application. The sequence number range for a transaction is allocated atomically by the single-threaded event loop; no partial allocation is possible.
+
+The `writer_epoch` field on each WAL record prevents zombie writes from stale leaders: recovery skips records from any epoch lower than the maximum epoch seen in the log.
+
+After recovery, `RuntimeState.sequence` is set to the maximum sequence number found in the WAL. There is no separate MVCC metadata file; the sequence number embedded in every WAL record and SST entry is the only version state.
+
+---
+
+## Known limitations
+
+- **Long-lived snapshots increase storage pressure**: while a snapshot is active, compaction retains newer tombstones and GC skips overlapping SSTs. This preserves correctness but can temporarily increase disk usage and compaction debt.
+
+- **No write conflict detection**: Two concurrent `ReadWrite` transactions on the same keys both succeed. The last commit wins. There is no way to detect or prevent lost updates.
+
+- **Single column family per transaction**: `begin_tx` accepts one `cf_id`. There is no mechanism for a single atomic transaction to span multiple column families.
+
+- **No serializable isolation**: Read-write transactions use snapshot reads captured at `begin_tx`, plus read-your-own-writes, with last-writer-wins commit semantics. Serializable isolation, SSI, and write-write conflict detection are not implemented.
+
+- **No explicit abort record in WAL**: Rollback leaves no WAL trace. This is safe (the write_set is discarded), but there is no audit trail for rolled-back transactions.
+
+- **`best_effort` mode loses data on crash**: When `WriteOptions::best_effort()` is used, WAL is skipped. Data in the memtable is lost if the process crashes before flush. This is a documented trade-off.
+
+---
+
+## Future improvements (optional)
+
+- Add richer operator metrics for snapshot retention pressure (for example, pinned SST count and oldest snapshot age alerts).
+- Consider optional conflict detection for `ReadWrite` transactions to prevent lost updates in workloads that need stricter semantics.
+
+---
+
+## Simple example
+
+```rust
+use cntryl_midge::{MidgeEngine, MidgeResult, OpenOptions, TransactionMode, WriteOptions};
+
+fn example(engine: &MidgeEngine, cf_id: u32) -> MidgeResult<()> {
+    // Start a read-write transaction.
+    // Captures the current snapshot sequence synchronously (no event loop round-trip).
+    let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite)?;
+
+    // Read — checks write_set first, then the snapshot at begin_tx time.
+    let existing = tx.get(b"counter")?;
+    let count: u64 = existing
+        .as_deref()
+        .and_then(|b| b.try_into().ok())
+        .map(u64::from_be_bytes)
+        .unwrap_or(0);
+
+    // Write — appended to write_set, not yet visible to other readers.
+    tx.put(b"counter".to_vec(), (count + 1).to_be_bytes().to_vec(), None)?;
+
+    // Commit — sends all writes atomically to the event loop.
+    // WAL write + memtable apply happen before this call returns.
+    engine.commit(tx, WriteOptions::buffered())?;
+
+    // Read-only snapshot transaction — sees the committed state.
+    let ro = engine.begin_tx(cf_id, TransactionMode::ReadOnly)?;
+    let val = ro.get(b"counter")?;
+    assert!(val.is_some());
+    // ro is dropped here; memtable Arc refcounts decrement.
+
+    Ok(())
+}
+```
+
+**Note on concurrent `ReadWrite` transactions:** if two threads execute the above function concurrently, both read the same initial value of `counter`, both write `count + 1`, and both commits succeed. The counter ends at `count + 1` (not `count + 2`). This is the documented lost-update behavior of `ReadWrite` transactions. Use `insert` with application-level versioning, or serialize writes through a single writer, if lost updates are unacceptable.

@@ -661,6 +661,59 @@ mod tests {
     }
 
     #[test]
+    fn should_drop_tombstone_when_sequence_equals_snapshot_horizon() {
+        // Arrange
+        let versions = vec![
+            mk_version("k_old", 5, false, Some("old"), None),
+            mk_version("k_eq", 150, true, None::<&[u8]>, None),
+            mk_version("k_new", 151, true, None::<&[u8]>, None),
+        ];
+
+        // Act
+        let filtered = filter_tombstones_with_horizon(&versions, Some(150));
+
+        // Assert
+        assert!(
+            !filtered.iter().any(|v| v.key == b"k_eq".to_vec() && v.is_tombstone),
+            "tombstone at the exact horizon must be dropped"
+        );
+        assert!(
+            filtered.iter().any(|v| v.key == b"k_new".to_vec() && v.is_tombstone),
+            "tombstone above horizon must be preserved"
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|v| v.key == b"k_old".to_vec() && !v.is_tombstone),
+            "non-tombstone entries should remain"
+        );
+    }
+
+    #[test]
+    fn should_drop_tombstone_when_sequence_is_below_snapshot_horizon() {
+        // Arrange
+        let versions = vec![
+            mk_version("k_low", 149, true, None::<&[u8]>, None),
+            mk_version("k_high", 200, true, None::<&[u8]>, None),
+        ];
+
+        // Act
+        let filtered = filter_tombstones_with_horizon(&versions, Some(150));
+
+        // Assert
+        assert!(
+            !filtered.iter().any(|v| v.key == b"k_low".to_vec() && v.is_tombstone),
+            "tombstone below horizon must be dropped"
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|v| v.key == b"k_high".to_vec() && v.is_tombstone),
+            "tombstone above horizon must be preserved"
+        );
+    }
+
+    #[test]
     fn should_handle_empty_streams_in_merge() {
         use crate::compaction::merge::{MergeEntry, MergeIterator};
         use bytes::Bytes;

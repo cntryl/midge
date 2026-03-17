@@ -652,7 +652,7 @@ impl EventLoop {
                     request_id,
                     RuntimeResponse::RuntimeMetricsSnapshot {
                         request_id,
-                        snapshot: self.state.runtime_metrics_snapshot(),
+                        snapshot: Box::new(self.state.runtime_metrics_snapshot()),
                     },
                 );
             }
@@ -912,6 +912,35 @@ impl EventLoop {
                         snapshot,
                     },
                 );
+            }
+
+            RuntimeMsg::RegisterSnapshot {
+                request_id,
+                snapshot_id,
+                sequence,
+                pinned_sst_names,
+            } => {
+                let inserted =
+                    self.state
+                        .register_snapshot(snapshot_id, sequence, pinned_sst_names);
+                if inserted {
+                    self.respond(request_id, RuntimeResponse::Ok { request_id });
+                } else {
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::Error {
+                            request_id,
+                            error: crate::common::MidgeError::InvalidArgument(format!(
+                                "snapshot {} is already registered",
+                                snapshot_id
+                            )),
+                        },
+                    );
+                }
+            }
+
+            RuntimeMsg::UnregisterSnapshot { snapshot_id } => {
+                self.state.unregister_snapshot(snapshot_id);
             }
 
             RuntimeMsg::ApplyTransaction {
