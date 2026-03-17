@@ -151,6 +151,15 @@ pub enum TransactionOp {
     },
 }
 
+/// Runtime conflict policy used when applying transaction batches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionIsolationPolicy {
+    /// Preserve current behavior: last commit wins for overlapping writes.
+    LastWriteWins,
+    /// Abort when a write-set key changed after transaction start sequence.
+    AbortOnWriteConflict,
+}
+
 /// Intent log entry - records all state transitions for deterministic replay
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IntentLogEntry {
@@ -263,6 +272,8 @@ pub enum RuntimeMsg {
         request_id: u64,
         ops: Vec<TransactionOp>,
         durability_policy: Option<DurabilityPolicy>,
+        start_sequence: Option<u64>,
+        isolation_policy: TransactionIsolationPolicy,
     },
     /// Sync WAL to disk.
     WalSync { request_id: u64 },

@@ -30,8 +30,8 @@ pub(crate) mod api;
 mod ingest;
 
 pub use api::{
-    Direction, Goal, Key, MemoryBudget, OpenOptions, Query, RecoveryPolicy, ScanIterator, Storage,
-    Transaction, TransactionMode, Value, WorkloadProfile, WriteOptions,
+    Direction, Goal, IsolationLevel, Key, MemoryBudget, OpenOptions, Query, RecoveryPolicy,
+    ScanIterator, Storage, Transaction, TransactionMode, Value, WorkloadProfile, WriteOptions,
 };
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<ColumnFamilyId, ColumnFamilyHandle>;
@@ -1157,9 +1157,21 @@ impl Engine {
             })?;
 
         let ops = txn.take_runtime_ops();
+        let isolation_policy = match txn.isolation_level() {
+            api::IsolationLevel::LastWriteWins => crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+            api::IsolationLevel::AbortOnWriteConflict => {
+                crate::runtime::TransactionIsolationPolicy::AbortOnWriteConflict
+            }
+        };
 
         let durability_policy = Some(self.effective_wal_durability_policy(opts)?);
-        let sequence = coordinator.submit_ops(&self.runtime_handle, ops, durability_policy)?;
+        let sequence = coordinator.submit_ops(
+            &self.runtime_handle,
+            ops,
+            durability_policy,
+            Some(txn.start_sequence()),
+            isolation_policy,
+        )?;
 
         // Update engine's sequence to reflect completed writes
         self.sequence.store(sequence, Ordering::SeqCst);

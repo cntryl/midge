@@ -22,6 +22,15 @@ pub enum TransactionMode {
     ReadWrite,
 }
 
+/// Transaction isolation policy for read-write commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationLevel {
+    /// Current behavior: concurrent write conflicts resolve by commit order.
+    LastWriteWins,
+    /// Abort commit when a write-set key changed after transaction start snapshot.
+    AbortOnWriteConflict,
+}
+
 /// Pending write intent collected within a transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WriteIntent {
@@ -148,6 +157,8 @@ pub struct Transaction {
     cf_id: ColumnFamilyId,
     /// Transaction mode (ReadOnly or ReadWrite)
     mode: TransactionMode,
+    /// Isolation behavior used during commit conflict handling.
+    isolation_level: IsolationLevel,
     /// Write set: sequence of write intents
     write_set: Vec<WriteIntent>,
     /// Start sequence number (snapshot point)
@@ -176,6 +187,7 @@ impl Transaction {
             id,
             cf_id,
             mode,
+            isolation_level: IsolationLevel::LastWriteWins,
             write_set: Vec::new(),
             start_sequence,
             read_snapshot,
@@ -260,6 +272,14 @@ impl Transaction {
 
     pub(crate) fn cf_id(&self) -> ColumnFamilyId {
         self.cf_id
+    }
+
+    pub fn isolation_level(&self) -> IsolationLevel {
+        self.isolation_level
+    }
+
+    pub fn set_isolation_level(&mut self, isolation_level: IsolationLevel) {
+        self.isolation_level = isolation_level;
     }
 
     pub(crate) fn take_runtime_ops(&mut self) -> Vec<crate::runtime::TransactionOp> {

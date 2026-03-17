@@ -130,3 +130,50 @@ fn should_allow_lost_update_given_concurrent_writes_when_lost_update_occurs() {
         );
     });
 }
+
+#[test]
+fn should_abort_second_commit_given_conflicting_writes_when_abort_on_write_conflict_enabled() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        let mut tx1 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin tx1");
+        let mut tx2 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin tx2");
+
+        tx1.set_isolation_level(cntryl_midge::IsolationLevel::AbortOnWriteConflict);
+        tx2.set_isolation_level(cntryl_midge::IsolationLevel::AbortOnWriteConflict);
+
+        tx1.put(b"key".to_vec(), b"from_tx1".to_vec(), None)
+            .expect("put tx1 value");
+        tx2.put(b"key".to_vec(), b"from_tx2".to_vec(), None)
+            .expect("put tx2 value");
+
+        // Act
+        engine
+            .commit(tx1, cntryl_midge::WriteOptions::buffered())
+            .expect("commit tx1");
+        let second_commit = engine.commit(tx2, cntryl_midge::WriteOptions::buffered());
+
+        // Assert
+        assert!(
+            matches!(second_commit, Err(cntryl_midge::MidgeError::WriteConflict(_))),
+            "mode: {}",
+            mode
+        );
+
+        let reader = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .expect("begin reader");
+        assert_eq!(
+            reader.get(b"key").expect("read final key"),
+            Some(Bytes::from_static(b"from_tx1")),
+            "mode: {}",
+            mode
+        );
+    });
+}

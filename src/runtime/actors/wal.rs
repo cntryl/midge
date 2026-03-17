@@ -35,6 +35,7 @@ use crate::sst::Memtable;
 use crate::wal::policy::BatchConfig;
 use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalOpKind, WalRecord, WalWriter};
 use bytes::Bytes;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -681,9 +682,24 @@ impl WalActor {
         _request_id: u64,
         ops: Vec<crate::runtime::TransactionOp>,
         durability_policy: Option<DurabilityPolicy>,
+        start_sequence: Option<u64>,
+        isolation_policy: crate::runtime::TransactionIsolationPolicy,
     ) -> MidgeResult<(u64, usize, bool)> {
         if ops.is_empty() {
             return Ok((state.sequence, 0, false));
+        }
+
+        if matches!(
+            isolation_policy,
+            crate::runtime::TransactionIsolationPolicy::AbortOnWriteConflict
+        ) {
+            let start_sequence = start_sequence.ok_or_else(|| {
+                MidgeError::InvalidArgument(
+                    "AbortOnWriteConflict requires transaction start_sequence".to_string(),
+                )
+            })?;
+
+            self.ensure_no_write_conflicts(state, &ops, start_sequence)?;
         }
 
         // Preflight insert-only operations so we can fail without writing any WAL records.
@@ -957,6 +973,75 @@ impl WalActor {
             DurabilityPolicy::Batched | DurabilityPolicy::CloudAsync
         );
         Ok((last_sequence, op_count, deferred))
+    }
+
+    fn ensure_no_write_conflicts(
+        &self,
+        state: &RuntimeState,
+        ops: &[crate::runtime::TransactionOp],
+        start_sequence: u64,
+    ) -> MidgeResult<()> {
+        let mut checked_keys: HashSet<(crate::engine::ColumnFamilyId, Vec<u8>)> = HashSet::new();
+
+        for op in ops {
+            match op {
+                crate::runtime::TransactionOp::Put { cf_id, key, .. }
+                | crate::runtime::TransactionOp::Delete { cf_id, key } => {
+                    let dedupe_key = (*cf_id, key.to_vec());
+                    if !checked_keys.insert(dedupe_key) {
+                        continue;
+                    }
+
+                    if let Some(latest_seq) = self.latest_key_sequence(state, *cf_id, key) {
+                        if latest_seq > start_sequence {
+                            return Err(MidgeError::WriteConflict(format!(
+                                "key conflict on cf {} for key {:?}: latest seq {} > tx start {}",
+                                cf_id, key, latest_seq, start_sequence
+                            )));
+                        }
+                    }
+                }
+                crate::runtime::TransactionOp::DeleteRange { .. } => {
+                    // Range conflict detection is intentionally deferred.
+                    // Initial strict mode only enforces point-key conflict checks.
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn latest_key_sequence(
+        &self,
+        state: &RuntimeState,
+        cf_id: crate::engine::ColumnFamilyId,
+        key: &[u8],
+    ) -> Option<u64> {
+        let cf_state = state.column_families.get(&cf_id)?;
+        let sst_files: Vec<_> = state
+            .manifest
+            .files
+            .iter()
+            .filter(|f| f.cf_id == cf_id)
+            .cloned()
+            .collect();
+
+        let sst_path_prefix = state
+            .sst_dir
+            .strip_prefix(&state.db_path)
+            .unwrap_or_else(|_| std::path::Path::new("sst"))
+            .to_path_buf();
+
+        let mut snapshot = crate::runtime::ReadSnapshot::new(
+            cf_state.memtable.clone(),
+            cf_state.immutable_memtables.clone(),
+            sst_files,
+            Arc::clone(&state.fs),
+            sst_path_prefix,
+            state.memory_mode,
+        );
+        snapshot.cf_id = cf_id;
+        snapshot.latest_state_sequence(key)
     }
 
     fn build_apply_ops(
@@ -1636,7 +1721,14 @@ mod tests {
         ];
 
         let (_last_seq, _count, deferred) =
-            wal_actor.append_transaction(&mut state, 1, ops, None)?;
+            wal_actor.append_transaction(
+                &mut state,
+                1,
+                ops,
+                None,
+                None,
+                crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+            )?;
         assert!(deferred);
 
         // Assert

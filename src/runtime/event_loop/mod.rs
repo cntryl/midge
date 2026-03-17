@@ -947,6 +947,8 @@ impl EventLoop {
                 request_id,
                 ops,
                 durability_policy,
+                start_sequence,
+                isolation_policy,
             } => {
                 // Fencing gate: reject writes if lease is lost
                 if let Err(e) = self.check_lease_health() {
@@ -976,6 +978,8 @@ impl EventLoop {
                         request_id,
                         ops,
                         durability_policy,
+                        start_sequence,
+                        isolation_policy,
                     ) {
                         Ok((last_sequence, op_count, deferred)) => {
                             // Publish snapshot BEFORE responding so that
@@ -1020,7 +1024,7 @@ impl EventLoop {
                                 request_id,
                                 RuntimeResponse::Error {
                                     request_id,
-                                    error: crate::common::MidgeError::Internal(e.to_string()),
+                                    error: e,
                                 },
                             );
                         }
