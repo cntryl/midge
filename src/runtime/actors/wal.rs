@@ -98,6 +98,18 @@ impl WalActor {
         }
     }
 
+    fn record_write_conflict_point() {
+        if let Some(t) = crate::telemetry::Telemetry::global() {
+            t.metrics().record_write_conflict_point();
+        }
+    }
+
+    fn record_write_conflict_range() {
+        if let Some(t) = crate::telemetry::Telemetry::global() {
+            t.metrics().record_write_conflict_range();
+        }
+    }
+
     fn finish_append_instrumentation(&mut self, bytes_written: u64, elapsed: Duration) {
         self.append_calls += 1;
         self.append_total += elapsed;
@@ -994,16 +1006,72 @@ impl WalActor {
 
                     if let Some(latest_seq) = self.latest_key_sequence(state, *cf_id, key) {
                         if latest_seq > start_sequence {
+                            Self::record_write_conflict_point();
                             return Err(MidgeError::WriteConflict(format!(
                                 "key conflict on cf {} for key {:?}: latest seq {} > tx start {}",
                                 cf_id, key, latest_seq, start_sequence
                             )));
                         }
                     }
+
+                    if let Some(range_seq) =
+                        state.latest_covering_delete_range_sequence(*cf_id, key)
+                    {
+                        if range_seq > start_sequence {
+                            Self::record_write_conflict_point();
+                            return Err(MidgeError::WriteConflict(format!(
+                                "key conflict on cf {} for key {:?}: covered by delete-range seq {} > tx start {}",
+                                cf_id, key, range_seq, start_sequence
+                            )));
+                        }
+                    }
                 }
                 crate::runtime::TransactionOp::DeleteRange { .. } => {
-                    // Range conflict detection is intentionally deferred.
-                    // Initial strict mode only enforces point-key conflict checks.
+                    let (cf_id, start_key, end_key) = match op {
+                        crate::runtime::TransactionOp::DeleteRange {
+                            cf_id,
+                            start_key,
+                            end_key,
+                        } => (*cf_id, start_key, end_key),
+                        _ => unreachable!(),
+                    };
+
+                    if let Some(latest_seq) = self.latest_range_sequence(
+                        state,
+                        cf_id,
+                        start_key.as_ref(),
+                        end_key.as_ref(),
+                    ) {
+                        if latest_seq > start_sequence {
+                            Self::record_write_conflict_range();
+                            return Err(MidgeError::WriteConflict(format!(
+                                "range conflict on cf {} for [{:?}, {:?}): latest seq {} > tx start {}",
+                                cf_id,
+                                start_key,
+                                end_key,
+                                latest_seq,
+                                start_sequence
+                            )));
+                        }
+                    }
+
+                    if let Some(range_seq) = state.latest_overlapping_delete_range_sequence(
+                        cf_id,
+                        start_key.as_ref(),
+                        end_key.as_ref(),
+                    ) {
+                        if range_seq > start_sequence {
+                            Self::record_write_conflict_range();
+                            return Err(MidgeError::WriteConflict(format!(
+                                "range conflict on cf {} for [{:?}, {:?}): overlaps delete-range seq {} > tx start {}",
+                                cf_id,
+                                start_key,
+                                end_key,
+                                range_seq,
+                                start_sequence
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -1042,6 +1110,40 @@ impl WalActor {
         );
         snapshot.cf_id = cf_id;
         snapshot.latest_state_sequence(key)
+    }
+
+    fn latest_range_sequence(
+        &self,
+        state: &RuntimeState,
+        cf_id: crate::engine::ColumnFamilyId,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Option<u64> {
+        let cf_state = state.column_families.get(&cf_id)?;
+        let sst_files: Vec<_> = state
+            .manifest
+            .files
+            .iter()
+            .filter(|f| f.cf_id == cf_id)
+            .cloned()
+            .collect();
+
+        let sst_path_prefix = state
+            .sst_dir
+            .strip_prefix(&state.db_path)
+            .unwrap_or_else(|_| std::path::Path::new("sst"))
+            .to_path_buf();
+
+        let mut snapshot = crate::runtime::ReadSnapshot::new(
+            cf_state.memtable.clone(),
+            cf_state.immutable_memtables.clone(),
+            sst_files,
+            Arc::clone(&state.fs),
+            sst_path_prefix,
+            state.memory_mode,
+        );
+        snapshot.cf_id = cf_id;
+        snapshot.latest_sequence_in_range(start_key, end_key)
     }
 
     fn build_apply_ops(
@@ -1271,15 +1373,16 @@ impl WalActor {
         end_key: &[u8],
     ) -> MidgeResult<()> {
         if let Some(cf_state) = state.column_families.get(&cf_id) {
-            let prev = cf_state.memtable.size_bytes();
-            cf_state
-                .memtable
+            let memtable = Arc::clone(&cf_state.memtable);
+            let prev = memtable.size_bytes();
+            memtable
                 .as_ref()
                 .delete_range_with_seq(start_key, end_key, sequence)?;
-            let new = cf_state.memtable.size_bytes();
+            let new = memtable.size_bytes();
             let delta = new.saturating_sub(prev);
             state.total_memtable_bytes = state.total_memtable_bytes.saturating_add(delta);
         }
+        state.record_delete_range(cf_id, start_key, end_key, sequence);
         Ok(())
     }
 

@@ -7,8 +7,8 @@
 - Reads use a fixed snapshot captured at transaction start.
 - Writes are buffered client-side until commit.
 - Commit is atomic through WAL bracketing.
-- Concurrent write conflicts are not detected.
-- Last writer wins.
+- Concurrent write conflicts default to last-writer-wins.
+- Optional strict mode can abort on write conflicts.
 - Active snapshots are registered so compaction and GC can preserve reader-visible versions.
 
 ---
@@ -118,9 +118,12 @@ For unconstrained reads (e.g., event loop's own lookups), `seq = u64::MAX` makes
 
 ### Write conflicts
 
-There is no optimistic concurrency control and no conflict detection for `ReadWrite` transactions.
+`ReadWrite` transactions support two commit policies:
 
-Two concurrent `ReadWrite` transactions writing the same key will both commit successfully. The transaction that commits last (highest sequence number) wins. The earlier write is silently overwritten. This is last-write-wins behavior.
+- `IsolationLevel::LastWriteWins` (default): concurrent overlapping writers both commit; the higher sequence wins.
+- `IsolationLevel::AbortOnWriteConflict`: commit fails with `MidgeError::WriteConflict` if a write-set key or delete-range target has been modified after `start_sequence`.
+
+In strict mode, conflict checks happen in the runtime apply path before WAL append, so aborted conflicting commits do not publish partial writes.
 
 The only exception is `tx.insert()`: at commit time (inside the event loop), the engine checks whether the key already exists. If it does, the commit returns an error. This is a server-side existence check, not a conflict check against other in-flight transactions.
 
@@ -129,7 +132,7 @@ The only exception is `tx.insert()`: at commit time (inside the event loop), the
 | Mode | Isolation characterization |
 |---|---|
 | `ReadOnly` | **Consistent point-in-time snapshot reads** — all reads see the committed state at `begin_tx` time. Concurrent commits are invisible for the lifetime of the transaction. |
-| `ReadWrite` | **Snapshot reads + read-your-own-writes + last-write-wins commit** — reads are fixed to the snapshot at `begin_tx` time (not re-read on later commits). Write-write conflicts are not detected. Lost updates are allowed. This is not read committed: later committed data remains invisible to the transaction regardless of when it reads. |
+| `ReadWrite` | **Snapshot reads + read-your-own-writes + configurable commit conflict policy** — reads are fixed to the snapshot at `begin_tx` time (not re-read on later commits). In default mode, writes are last-write-wins. In strict mode, overlapping writes abort with `WriteConflict`. This is not read committed: later committed data remains invisible to the transaction regardless of when it reads. |
 
 ---
 
@@ -153,7 +156,7 @@ The `Arc` references keep memtables alive as long as any `Transaction` holds a `
 
 A snapshot lives as long as the `Transaction` struct that holds it. When the `Transaction` is dropped (after commit, rollback, or explicit drop), the `Arc` counts on the memtables decrement. Memtables are freed when all reference counts reach zero.
 
-There is no engine-level registry of live snapshots in the current implementation. `RuntimeState.active_snapshots` exists but `register_snapshot` and `unregister_snapshot` are never called from the `begin_tx` path.
+Transactions are registered in `RuntimeState.active_snapshots` during `begin_tx` and unregistered on commit, rollback, or drop. Each registration includes sequence and pinned SST names used by compaction/GC retention logic.
 
 ### Consistency guarantee
 
@@ -184,25 +187,26 @@ match snapshot_horizon {
 }
 ```
 
-Because `oldest_active_snapshot_sequence()` always returns `None` (snapshots are not registered), **all point-key tombstones are dropped unconditionally** during compaction.
+Because active snapshots are registered, `oldest_active_snapshot_sequence()` reflects the oldest live reader. Point-key tombstones older than that horizon can be dropped; newer tombstones are retained.
 
 Range tombstones are handled separately and are written into the output SST. They are not subject to this filter.
 
 ### How Midge prevents removing versions still needed by readers
 
-**It does not, currently.** There is no mechanism to prevent compaction from removing tombstones or old versions that an active `ReadOnly` transaction might still need. The memtable `Arc`-pinning means unflushed writes survive until all readers have finished, but once a memtable is flushed and a compaction runs over the resulting SST, the version-safety guarantee is absent.
+Midge uses two mechanisms:
 
-Specifically:
-- A `ReadOnly` transaction capturing a snapshot that includes a delete (tombstone) in a post-flush SST may see a "resurrected" older value after compaction drops that tombstone.
-- A `ReadOnly` transaction that has a `FileMeta` reference to an SST file that is later deleted by GC will encounter a file-not-found error on scan.
+- Snapshot horizon retention in compaction (`oldest_active_snapshot_sequence`) to keep tombstones needed by active readers.
+- SST pinning in GC via snapshot registrations so files referenced by active snapshots are not deleted.
+
+Long-lived snapshots can increase retention pressure, but the model is wired for correctness.
 
 ### Interaction between compaction and active transactions
 
-None. The compaction actor reads `state.oldest_active_snapshot_sequence()` to set `plan.snapshot_horizon`, but since `active_snapshots` is always empty, the horizon is always `None`. Compaction does not coordinate with the transaction layer.
+Compaction reads `state.oldest_active_snapshot_sequence()` and applies that horizon to tombstone filtering. This coordinates compaction retention with active transaction snapshots.
 
 ### SST GC pinning
 
-`get_pinned_sst_names()` always returns an empty set. SST files referenced by live `ReadSnapshot.sst_files` can be GC'd by compaction. Subsequent range scans against those file references will fail.
+`get_pinned_sst_names()` returns the union of SST names pinned by active snapshots. GC skips deleting those files until snapshots unregister.
 
 ---
 
@@ -220,15 +224,14 @@ None. The compaction actor reads `state.oldest_active_snapshot_sequence()` to se
 - Dirty reads: **not possible.** Same snapshot read mechanism.
 - Repeatable reads: **provided for the fixed transaction snapshot**, plus read-your-own-writes for buffered keys. Concurrent commits remain invisible, but conflicting writes are not detected at commit.
 - Phantom protection: **not provided.**
-- Write conflicts: **not detected.** Two concurrent `ReadWrite` transactions writing the same key both succeed. The later commit silently overwrites the earlier.
-- Lost updates: **allowed.** This is a documented property, verified by `tests/transaction_isolation_lww.rs` and `tests/transaction_isolation_audit.rs`.
+- Write conflicts: **policy-dependent.** Default mode is last-write-wins; strict mode aborts overlapping writes with `WriteConflict`.
+- Lost updates: **allowed in default mode**, prevented for overlapping write-sets in strict conflict-abort mode.
 
 **Non-guarantees (all modes):**
 
 - Serializable isolation is not implemented.
 - Serializable Snapshot Isolation (SSI) is not implemented.
 - No predicate locking or range locking.
-- No abort-on-conflict.
 - No multi-CF atomic transactions.
 
 ---
@@ -269,7 +272,7 @@ After recovery, `RuntimeState.sequence` is set to the maximum sequence number fo
 
 - **Long-lived snapshots increase storage pressure**: while a snapshot is active, compaction retains newer tombstones and GC skips overlapping SSTs. This preserves correctness but can temporarily increase disk usage and compaction debt.
 
-- **No write conflict detection**: Two concurrent `ReadWrite` transactions on the same keys both succeed. The last commit wins. There is no way to detect or prevent lost updates.
+- **Strict mode covers write-write conflicts, not serializability**: `AbortOnWriteConflict` detects overlapping writes (including delete-range overlap checks), but does not provide SSI/serializable guarantees.
 
 - **Single column family per transaction**: `begin_tx` accepts one `cf_id`. There is no mechanism for a single atomic transaction to span multiple column families.
 
@@ -323,4 +326,4 @@ fn example(engine: &MidgeEngine, cf_id: u32) -> MidgeResult<()> {
 }
 ```
 
-**Note on concurrent `ReadWrite` transactions:** if two threads execute the above function concurrently, both read the same initial value of `counter`, both write `count + 1`, and both commits succeed. The counter ends at `count + 1` (not `count + 2`). This is the documented lost-update behavior of `ReadWrite` transactions. Use `insert` with application-level versioning, or serialize writes through a single writer, if lost updates are unacceptable.
+**Note on concurrent `ReadWrite` transactions:** default mode (`LastWriteWins`) allows lost updates under overlap. If that is unacceptable, set `tx.set_isolation_level(IsolationLevel::AbortOnWriteConflict)` before commit.

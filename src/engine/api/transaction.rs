@@ -255,6 +255,11 @@ impl Transaction {
                 "Cannot write in ReadOnly transaction".to_string(),
             ));
         }
+        if start_key.as_slice() > end_key.as_slice() {
+            return Err(MidgeError::InvalidArgument(
+                "delete_range requires start_key <= end_key".to_string(),
+            ));
+        }
         self.write_set
             .push(WriteIntent::delete_range(self.cf_id, start_key, end_key));
         Ok(())

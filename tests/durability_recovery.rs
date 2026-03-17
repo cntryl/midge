@@ -15,7 +15,7 @@
 
 use bytes::Bytes;
 mod common;
-use cntryl_midge::{TransactionMode, WriteOptions};
+use cntryl_midge::{IsolationLevel, TransactionMode, WriteOptions};
 use common::*;
 
 // ============================================================================
@@ -125,6 +125,64 @@ fn should_recover_after_clean_shutdown_when_writes_include_flushed_and_unflushed
             assert_eq!(
                 tx.get(b"unflushed_key").expect("get"),
                 Some(Bytes::from_static(b"unflushed_value")),
+                "mode: {}",
+                mode
+            );
+        }
+    });
+}
+
+#[test]
+fn should_preserve_first_commit_given_conflict_abort_when_reopening() {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.create_column_family("test").expect("create cf");
+
+            let mut tx1 = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin tx1");
+            let mut tx2 = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin tx2");
+
+            tx1.set_isolation_level(IsolationLevel::AbortOnWriteConflict);
+            tx2.set_isolation_level(IsolationLevel::AbortOnWriteConflict);
+
+            tx1.put(b"key".to_vec(), b"from_tx1".to_vec(), None)
+                .expect("tx1 put");
+            tx2.put(b"key".to_vec(), b"from_tx2".to_vec(), None)
+                .expect("tx2 put");
+
+            // Act
+            engine
+                .commit(tx1, WriteOptions::buffered())
+                .expect("commit tx1");
+            let conflict = engine.commit(tx2, WriteOptions::buffered());
+
+            // Assert
+            assert!(
+                matches!(conflict, Err(cntryl_midge::MidgeError::WriteConflict(_))),
+                "mode: {}",
+                mode
+            );
+        }
+
+        // Arrange
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.create_column_family("test").expect("create cf");
+
+            // Read after reopen
+            let tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                .expect("begin tx");
+
+            // Assert
+            assert_eq!(
+                tx.get(b"key").expect("get"),
+                Some(Bytes::from_static(b"from_tx1")),
                 "mode: {}",
                 mode
             );

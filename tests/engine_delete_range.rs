@@ -162,6 +162,30 @@ fn should_accept_delete_range_call_with_valid_bounds_when_called() {
 }
 
 #[test]
+fn should_reject_delete_range_given_reversed_bounds_when_called() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        // Act
+        let result = engine.delete_range(
+            &cf,
+            b"key9".to_vec(),
+            b"key1".to_vec(),
+            WriteOptions::buffered(),
+        );
+
+        // Assert
+        assert!(
+            matches!(result, Err(cntryl_midge::MidgeError::InvalidArgument(_))),
+            "mode: {}",
+            mode
+        );
+    });
+}
+
+#[test]
 fn should_delete_key_given_delete_range_with_single_key_when_matching() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange

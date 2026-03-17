@@ -1130,6 +1130,11 @@ impl EventLoop {
             // Compaction
             // =============================================================
             RuntimeMsg::CheckCompaction { request_id } => {
+                let evicted = self.state.evict_timed_out_snapshots();
+                if evicted > 0 {
+                    tracing::warn!(evicted, "Evicted timed-out snapshots before compaction check");
+                }
+
                 // ─────────────────────────────────────────────────────────────────────
                 // HARD INVARIANT: No compaction scheduling while ingest is active.
                 // This is a programmer error — the caller should not have reached here.
@@ -1858,6 +1863,11 @@ impl EventLoop {
 
             // GC
             RuntimeMsg::CheckGc { request_id } => {
+                let evicted = self.state.evict_timed_out_snapshots();
+                if evicted > 0 {
+                    tracing::warn!(evicted, "Evicted timed-out snapshots before GC check");
+                }
+
                 self.gc_actor.check(&self.state);
                 self.respond(request_id, RuntimeResponse::Ok { request_id });
             }

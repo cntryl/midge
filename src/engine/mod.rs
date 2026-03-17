@@ -142,6 +142,9 @@ pub struct RuntimeMetricsSnapshot {
     pub write_stalls_compaction_total: u64,
     pub write_stalls_cloud_total: u64,
     pub write_stalls_no_space_total: u64,
+    pub write_conflicts_total: u64,
+    pub write_conflicts_point_total: u64,
+    pub write_conflicts_range_total: u64,
     pub wal_append_count: u64,
     pub wal_flush_count: u64,
     pub wal_fsync_count: u64,
@@ -929,6 +932,12 @@ impl Engine {
         end_key: Vec<u8>,
         opts: api::WriteOptions,
     ) -> MidgeResult<()> {
+        if start_key.as_slice() > end_key.as_slice() {
+            return Err(MidgeError::InvalidArgument(
+                "delete_range requires start_key <= end_key".to_string(),
+            ));
+        }
+
         let durability_policy = self.effective_wal_durability_policy(opts)?;
         let response = self
             .runtime_handle

@@ -177,3 +177,87 @@ fn should_abort_second_commit_given_conflicting_writes_when_abort_on_write_confl
         );
     });
 }
+
+#[test]
+fn should_abort_delete_range_commit_given_overlapping_recent_writes_when_abort_on_write_conflict_enabled() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        let mut tx1 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin tx1");
+        let mut tx2 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin tx2");
+
+        tx1.set_isolation_level(cntryl_midge::IsolationLevel::AbortOnWriteConflict);
+        tx2.set_isolation_level(cntryl_midge::IsolationLevel::AbortOnWriteConflict);
+
+        tx1.put(b"m".to_vec(), b"v1".to_vec(), None)
+            .expect("put tx1 value");
+        tx2.delete_range(b"a".to_vec(), b"z".to_vec())
+            .expect("tx2 delete range");
+
+        // Act
+        engine
+            .commit(tx1, cntryl_midge::WriteOptions::buffered())
+            .expect("commit tx1");
+        let second_commit = engine.commit(tx2, cntryl_midge::WriteOptions::buffered());
+
+        // Assert
+        assert!(
+            matches!(second_commit, Err(cntryl_midge::MidgeError::WriteConflict(_))),
+            "mode: {}",
+            mode
+        );
+
+        let reader = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .expect("begin reader");
+        assert_eq!(
+            reader.get(b"m").expect("read final key"),
+            Some(Bytes::from_static(b"v1")),
+            "mode: {}",
+            mode
+        );
+    });
+}
+
+#[test]
+fn should_abort_point_write_commit_given_recent_overlapping_delete_range_when_abort_on_write_conflict_enabled() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        let mut tx1 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin tx1");
+        let mut tx2 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin tx2");
+
+        tx1.set_isolation_level(cntryl_midge::IsolationLevel::AbortOnWriteConflict);
+        tx2.set_isolation_level(cntryl_midge::IsolationLevel::AbortOnWriteConflict);
+
+        tx1.delete_range(b"a".to_vec(), b"z".to_vec())
+            .expect("tx1 delete range");
+        tx2.put(b"m".to_vec(), b"v2".to_vec(), None)
+            .expect("put tx2 value");
+
+        // Act
+        engine
+            .commit(tx1, cntryl_midge::WriteOptions::buffered())
+            .expect("commit tx1");
+        let second_commit = engine.commit(tx2, cntryl_midge::WriteOptions::buffered());
+
+        // Assert
+        assert!(
+            matches!(second_commit, Err(cntryl_midge::MidgeError::WriteConflict(_))),
+            "mode: {} (empty-range overlap must conflict in strict mode)",
+            mode
+        );
+    });
+}
