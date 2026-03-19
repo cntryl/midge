@@ -151,6 +151,15 @@ pub enum TransactionOp {
     },
 }
 
+/// Runtime conflict policy used when applying transaction batches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionIsolationPolicy {
+    /// Preserve current behavior: last commit wins for overlapping writes.
+    LastWriteWins,
+    /// Abort when a write-set key changed after transaction start sequence.
+    AbortOnWriteConflict,
+}
+
 /// Intent log entry - records all state transitions for deterministic replay
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IntentLogEntry {
@@ -263,6 +272,8 @@ pub enum RuntimeMsg {
         request_id: u64,
         ops: Vec<TransactionOp>,
         durability_policy: Option<DurabilityPolicy>,
+        start_sequence: Option<u64>,
+        isolation_policy: TransactionIsolationPolicy,
     },
     /// Sync WAL to disk.
     WalSync { request_id: u64 },
@@ -410,6 +421,19 @@ pub enum RuntimeMsg {
         cf_id: crate::engine::ColumnFamilyId,
     },
 
+    /// Register a transaction snapshot so compaction/GC can respect active readers.
+    RegisterSnapshot {
+        request_id: u64,
+        snapshot_id: u64,
+        sequence: u64,
+        pinned_sst_names: Vec<String>,
+    },
+
+    /// Unregister a previously tracked transaction snapshot.
+    ///
+    /// Fire-and-forget cleanup used on transaction completion/drop.
+    UnregisterSnapshot { snapshot_id: u64 },
+
     // === Control ===
     /// Shutdown the runtime (no request_id; fire-and-forget).
     Shutdown,
@@ -482,6 +506,7 @@ impl RuntimeMsg {
             | GetCurrentSequence { request_id }
             | CaptureReadSnapshot { request_id, .. }
             | BeginTransaction { request_id, .. }
+            | RegisterSnapshot { request_id, .. }
             | SetRuntimeConfig { request_id, .. }
             | GetRuntimeConfig { request_id }
             | GetIngestState { request_id }
@@ -493,7 +518,7 @@ impl RuntimeMsg {
             | CheckWriteStall { request_id, .. }
             | WaitForWriteStallClear { request_id, .. } => Some(*request_id),
 
-            CancelWaitForWriteStallClear { .. } => None,
+            CancelWaitForWriteStallClear { .. } | UnregisterSnapshot { .. } => None,
 
             Shutdown => None,
         }
@@ -533,6 +558,8 @@ impl RuntimeMsg {
             GetCurrentSequence { .. } => "GetCurrentSequence",
             CaptureReadSnapshot { .. } => "CaptureReadSnapshot",
             BeginTransaction { .. } => "BeginTransaction",
+            RegisterSnapshot { .. } => "RegisterSnapshot",
+            UnregisterSnapshot { .. } => "UnregisterSnapshot",
             SetRuntimeConfig { .. } => "SetRuntimeConfig",
             GetRuntimeConfig { .. } => "GetRuntimeConfig",
             GetIngestState { .. } => "GetIngestState",
@@ -625,7 +652,7 @@ pub enum RuntimeResponse {
     /// Stable operator-facing runtime metrics snapshot.
     RuntimeMetricsSnapshot {
         request_id: u64,
-        snapshot: crate::engine::RuntimeMetricsSnapshot,
+        snapshot: Box<crate::engine::RuntimeMetricsSnapshot>,
     },
 
     /// Stable operator-facing storage layout snapshot.

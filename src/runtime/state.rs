@@ -17,6 +17,15 @@ use crate::io::traits::Fs;
 
 /// Maximum size of idempotency cache to prevent unbounded growth under cloud stall
 const MAX_IDEMPOTENCY_CACHE_SIZE: usize = 100_000;
+const MAX_RECENT_DELETE_RANGES: usize = 4096;
+
+#[derive(Debug, Clone)]
+pub struct RecentDeleteRange {
+    pub cf_id: crate::engine::ColumnFamilyId,
+    pub start_key: Vec<u8>,
+    pub end_key: Vec<u8>,
+    pub sequence: u64,
+}
 
 /// Column family state
 pub struct ColumnFamilyState {
@@ -88,8 +97,8 @@ pub struct CloudState {
 /// while snapshots are reading from those SSTs.
 #[derive(Default)]
 pub struct SnapshotState {
-    /// Active snapshots: snapshot_id → (sequence, created_at, ref_count)
-    pub active_snapshots: HashMap<u64, (u64, Instant, usize)>,
+    /// Active snapshots: snapshot_id → (sequence, created_at, ref_count, pinned_ssts)
+    pub active_snapshots: HashMap<u64, (u64, Instant, usize, HashSet<String>)>,
     /// Maximum time to hold a snapshot (1 hour by default)
     pub max_snapshot_lifetime: std::time::Duration,
 }
@@ -162,6 +171,8 @@ pub struct RuntimeState {
     pub compaction: CompactionState,
     pub cloud: CloudState,
     pub snapshots: SnapshotState,
+    /// Recently committed range deletes for strict write-conflict checks.
+    pub recent_delete_ranges: Vec<RecentDeleteRange>,
 
     // === Configuration ===
     pub memtable_size_limit: usize,
@@ -534,6 +545,7 @@ impl RuntimeState {
                 active_snapshots: HashMap::new(),
                 max_snapshot_lifetime: std::time::Duration::from_secs(3600), // 1 hour default
             },
+            recent_delete_ranges: Vec::new(),
             memtable_size_limit: 64 * 1024 * 1024, // 64MB
             read_only: false,
             memory_mode,
@@ -574,6 +586,18 @@ impl RuntimeState {
     }
 
     pub fn runtime_metrics_snapshot(&self) -> crate::engine::RuntimeMetricsSnapshot {
+        let now = Instant::now();
+        let pinned_ssts = self.get_pinned_sst_names().len();
+        let oldest_snapshot_age_seconds = self
+            .snapshots
+            .active_snapshots
+            .values()
+            .map(|(_sequence, created_at, _ref_count, _pinned_ssts)| {
+                now.duration_since(*created_at).as_secs()
+            })
+            .max()
+            .unwrap_or(0);
+
         let active_memtables = self.column_families.len();
         let immutable_memtables = self
             .column_families
@@ -608,6 +632,8 @@ impl RuntimeState {
                 .load(std::sync::atomic::Ordering::SeqCst),
             pending_cloud_uploads: self.cloud.pending_uploads.len(),
             active_snapshots: self.snapshots.active_snapshots.len(),
+            pinned_ssts,
+            oldest_snapshot_age_seconds,
             sst_count,
             sst_bytes,
             salvage_mode_opens: u64::from(self.opened_in_salvage_mode),
@@ -625,6 +651,9 @@ impl RuntimeState {
                 .map_or(0, |m| m.write_stalls_compaction),
             write_stalls_cloud_total: telemetry.as_ref().map_or(0, |m| m.write_stalls_cloud),
             write_stalls_no_space_total: telemetry.as_ref().map_or(0, |m| m.write_stalls_no_space),
+            write_conflicts_total: telemetry.as_ref().map_or(0, |m| m.write_conflicts),
+            write_conflicts_point_total: telemetry.as_ref().map_or(0, |m| m.write_conflicts_point),
+            write_conflicts_range_total: telemetry.as_ref().map_or(0, |m| m.write_conflicts_range),
             wal_append_count: telemetry.as_ref().map_or(0, |m| m.wal_append_count),
             wal_flush_count: telemetry.as_ref().map_or(0, |m| m.wal_flush_count),
             wal_fsync_count: telemetry.as_ref().map_or(0, |m| m.wal_fsync_count),
@@ -675,7 +704,7 @@ impl RuntimeState {
             .snapshots
             .active_snapshots
             .iter()
-            .map(|(snapshot_id, (sequence, created_at, ref_count))| {
+            .map(|(snapshot_id, (sequence, created_at, ref_count, _pinned_ssts))| {
                 crate::engine::SnapshotPinSnapshot {
                     snapshot_id: *snapshot_id,
                     sequence: *sequence,
@@ -1467,15 +1496,23 @@ impl RuntimeState {
     ///
     /// Returns true if snapshot was registered successfully.
     /// Returns false if snapshot_id already exists (duplicate registration).
-    pub fn register_snapshot(&mut self, snapshot_id: u64, sequence: u64) -> bool {
+    pub fn register_snapshot(
+        &mut self,
+        snapshot_id: u64,
+        sequence: u64,
+        pinned_sst_names: Vec<String>,
+    ) -> bool {
         if self.snapshots.active_snapshots.contains_key(&snapshot_id) {
             tracing::warn!(snapshot_id, "Attempted to register duplicate snapshot ID");
             return false;
         }
 
+        let pinned_ssts = pinned_sst_names.into_iter().collect::<HashSet<_>>();
+
         self.snapshots
             .active_snapshots
-            .insert(snapshot_id, (sequence, Instant::now(), 1));
+            .insert(snapshot_id, (sequence, Instant::now(), 1, pinned_ssts));
+        self.prune_recent_delete_ranges_by_snapshot_horizon();
 
         tracing::trace!(snapshot_id, sequence, "Snapshot registered for SST pinning");
 
@@ -1490,6 +1527,7 @@ impl RuntimeState {
             .remove(&snapshot_id)
             .is_some()
         {
+            self.prune_recent_delete_ranges_by_snapshot_horizon();
             tracing::trace!(snapshot_id, "Snapshot unregistered; SSTs eligible for GC");
         }
     }
@@ -1499,7 +1537,7 @@ impl RuntimeState {
     pub fn get_pinned_sst_names(&self) -> HashSet<String> {
         let mut pinned = HashSet::new();
 
-        for (snapshot_id, (snapshot_seq, created_at, _ref_count)) in
+        for (snapshot_id, (_snapshot_seq, created_at, _ref_count, pinned_ssts)) in
             &self.snapshots.active_snapshots
         {
             // Check if snapshot has exceeded max lifetime
@@ -1515,16 +1553,7 @@ impl RuntimeState {
                 // but we log it for alerting
             }
 
-            // Find all SSTs with sequence >= snapshot_seq
-            // These contain data visible to the snapshot
-            for file_meta in &self.manifest.files {
-                // Check if this SST overlaps with snapshot's sequence range
-                let smallest = file_meta.smallest_seq.unwrap_or(0);
-                let largest = file_meta.largest_seq.unwrap_or(u64::MAX);
-                if smallest <= *snapshot_seq && largest >= smallest {
-                    pinned.insert(file_meta.name.clone());
-                }
-            }
+            pinned.extend(pinned_ssts.iter().cloned());
         }
 
         pinned
@@ -1535,10 +1564,41 @@ impl RuntimeState {
         self.snapshots
             .active_snapshots
             .iter()
-            .filter(|(_id, (_seq, created_at, _ref_count))| {
+            .filter(|(_id, (_seq, created_at, _ref_count, _pinned_ssts))| {
                 Instant::now().duration_since(*created_at) > self.snapshots.max_snapshot_lifetime
             })
             .count()
+    }
+
+    /// Remove snapshots that exceeded max lifetime and return the number evicted.
+    pub fn evict_timed_out_snapshots(&mut self) -> usize {
+        let now = Instant::now();
+        let max_lifetime = self.snapshots.max_snapshot_lifetime;
+
+        let mut timed_out_ids = Vec::new();
+        for (snapshot_id, (_seq, created_at, _ref_count, _pinned_ssts)) in
+            &self.snapshots.active_snapshots
+        {
+            if now.duration_since(*created_at) > max_lifetime {
+                timed_out_ids.push(*snapshot_id);
+            }
+        }
+
+        let timed_out_count = timed_out_ids.len();
+        for snapshot_id in timed_out_ids {
+            self.snapshots.active_snapshots.remove(&snapshot_id);
+            tracing::warn!(
+                snapshot_id,
+                max_secs = max_lifetime.as_secs(),
+                "Evicted timed-out snapshot"
+            );
+        }
+
+        if timed_out_count > 0 {
+            self.prune_recent_delete_ranges_by_snapshot_horizon();
+        }
+
+        timed_out_count
     }
 
     /// Return the oldest active snapshot sequence, if any snapshots are pinned.
@@ -1546,8 +1606,76 @@ impl RuntimeState {
         self.snapshots
             .active_snapshots
             .values()
-            .map(|(sequence, _created_at, _ref_count)| *sequence)
+                .map(|(sequence, _created_at, _ref_count, _pinned_ssts)| *sequence)
             .min()
+    }
+
+    pub fn record_delete_range(
+        &mut self,
+        cf_id: crate::engine::ColumnFamilyId,
+        start_key: &[u8],
+        end_key: &[u8],
+        sequence: u64,
+    ) {
+        self.recent_delete_ranges.push(RecentDeleteRange {
+            cf_id,
+            start_key: start_key.to_vec(),
+            end_key: end_key.to_vec(),
+            sequence,
+        });
+
+        let overflow = self
+            .recent_delete_ranges
+            .len()
+            .saturating_sub(MAX_RECENT_DELETE_RANGES);
+        if overflow > 0 {
+            self.recent_delete_ranges.drain(0..overflow);
+        }
+
+        self.prune_recent_delete_ranges_by_snapshot_horizon();
+    }
+
+    fn prune_recent_delete_ranges_by_snapshot_horizon(&mut self) {
+        let Some(oldest_snapshot_seq) = self.oldest_active_snapshot_sequence() else {
+            self.recent_delete_ranges.clear();
+            return;
+        };
+
+        self.recent_delete_ranges
+            .retain(|entry| entry.sequence > oldest_snapshot_seq);
+    }
+
+    pub fn latest_covering_delete_range_sequence(
+        &self,
+        cf_id: crate::engine::ColumnFamilyId,
+        key: &[u8],
+    ) -> Option<u64> {
+        self.recent_delete_ranges
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.cf_id == cf_id
+                    && key >= entry.start_key.as_slice()
+                    && key < entry.end_key.as_slice()
+            })
+            .map(|entry| entry.sequence)
+    }
+
+    pub fn latest_overlapping_delete_range_sequence(
+        &self,
+        cf_id: crate::engine::ColumnFamilyId,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Option<u64> {
+        self.recent_delete_ranges
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.cf_id == cf_id
+                    && entry.start_key.as_slice() < end_key
+                    && entry.end_key.as_slice() > start_key
+            })
+            .map(|entry| entry.sequence)
     }
 
     pub fn get_cf(&self, cf_id: crate::engine::ColumnFamilyId) -> Option<&ColumnFamilyState> {
@@ -1756,6 +1884,84 @@ mod tests {
         let cf0 = state.get_cf(0).expect("Default CF should exist");
         assert_eq!(cf0.id, 0);
         assert_eq!(cf0.name, "default");
+    }
+
+    #[test]
+    fn should_evict_timed_out_snapshots_when_enforcement_runs() {
+        // Arrange
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.snapshots.max_snapshot_lifetime = std::time::Duration::from_millis(0);
+        assert!(state.register_snapshot(1, 10, vec!["001.sst".to_string()]));
+        assert_eq!(state.snapshots.active_snapshots.len(), 1);
+
+        // Act
+        let evicted = state.evict_timed_out_snapshots();
+
+        // Assert
+        assert_eq!(evicted, 1);
+        assert!(state.snapshots.active_snapshots.is_empty());
+    }
+
+    #[test]
+    fn should_preserve_non_expired_snapshots_when_enforcement_runs() {
+        // Arrange
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.snapshots.max_snapshot_lifetime = std::time::Duration::from_secs(3600);
+        assert!(state.register_snapshot(2, 11, vec!["002.sst".to_string()]));
+
+        // Act
+        let evicted = state.evict_timed_out_snapshots();
+
+        // Assert
+        assert_eq!(evicted, 0);
+        assert_eq!(state.snapshots.active_snapshots.len(), 1);
+    }
+
+    #[test]
+    fn should_prune_recent_delete_ranges_when_no_active_snapshots() {
+        // Arrange
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.record_delete_range(0, b"a", b"z", 10);
+
+        // Act
+        state.prune_recent_delete_ranges_by_snapshot_horizon();
+
+        // Assert
+        assert!(state.recent_delete_ranges.is_empty());
+    }
+
+    #[test]
+    fn should_retain_only_delete_ranges_newer_than_oldest_snapshot_when_pruning() {
+        // Arrange
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        assert!(state.register_snapshot(100, 20, vec![]));
+        assert!(state.register_snapshot(101, 40, vec![]));
+
+        state.recent_delete_ranges.push(RecentDeleteRange {
+            cf_id: 0,
+            start_key: b"a".to_vec(),
+            end_key: b"c".to_vec(),
+            sequence: 10,
+        });
+        state.recent_delete_ranges.push(RecentDeleteRange {
+            cf_id: 0,
+            start_key: b"c".to_vec(),
+            end_key: b"e".to_vec(),
+            sequence: 21,
+        });
+        state.recent_delete_ranges.push(RecentDeleteRange {
+            cf_id: 0,
+            start_key: b"e".to_vec(),
+            end_key: b"g".to_vec(),
+            sequence: 35,
+        });
+
+        // Act
+        state.prune_recent_delete_ranges_by_snapshot_horizon();
+
+        // Assert
+        assert_eq!(state.recent_delete_ranges.len(), 2);
+        assert!(state.recent_delete_ranges.iter().all(|entry| entry.sequence > 20));
     }
 
     #[test]

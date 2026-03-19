@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
+use cntryl_midge::{Engine, IsolationLevel, OpenOptions, TransactionMode, WriteOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,6 +60,13 @@ const POST_ACK_RECORDS: &[ExpectedRecord] = &[
     },
 ];
 
+const STRICT_CONFLICT_FIRST_COMMIT_RECORD: ExpectedRecord = ExpectedRecord {
+    key: b"txn-strict-conflict-key",
+    value: b"first-commit",
+};
+
+const STRICT_CONFLICT_SECOND_COMMIT_VALUE: &[u8] = b"second-commit";
+
 #[test]
 fn should_abort_in_child_process_when_txn_crash_scenario_requested() {
     // Arrange
@@ -74,6 +81,7 @@ fn should_abort_in_child_process_when_txn_crash_scenario_requested() {
         "after_ops_before_commit" => child_abort_after_ops_before_commit(&db_path),
         "after_sync_before_ack" => child_abort_after_sync_before_ack(&db_path),
         "after_commit_ack" => child_abort_after_commit_ack(&db_path),
+        "after_strict_conflict_abort" => child_abort_after_strict_conflict_abort(&db_path),
         other => panic!("unknown txn crash scenario: {other}"),
     }
 
@@ -129,6 +137,30 @@ fn should_recover_sync_transaction_when_process_aborts_after_commit_ack() {
     assert_records_visible(&engine, POST_ACK_RECORDS);
 }
 
+#[test]
+fn should_preserve_first_commit_when_process_aborts_after_strict_conflict_abort() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+
+    // Act
+    run_child_expect_abort("after_strict_conflict_abort", db_path);
+    expire_crashed_process_lease(db_path);
+    let engine = open_local_engine(db_path);
+
+    // Assert
+    let default_cf = default_cf(&engine);
+    let tx = engine
+        .begin_tx(default_cf.id(), TransactionMode::ReadOnly)
+        .expect("begin read tx");
+    assert_eq!(
+        tx.get(STRICT_CONFLICT_FIRST_COMMIT_RECORD.key)
+            .expect("get strict conflict key"),
+        Some(Bytes::from_static(STRICT_CONFLICT_FIRST_COMMIT_RECORD.value)),
+        "first strict commit must remain visible after crash"
+    );
+}
+
 fn child_abort_after_ops_before_commit(db_path: &Path) {
     configure_abort_failpoint("midge::wal::txn_after_ops_append_before_commit");
     let engine = open_local_engine(db_path);
@@ -147,6 +179,50 @@ fn child_abort_after_commit_ack(db_path: &Path) {
     let engine = open_local_engine(db_path);
     let default_cf = default_cf(&engine);
     commit_fixed_sync_transaction(&engine, &default_cf, POST_ACK_RECORDS);
+    std::process::abort();
+}
+
+fn child_abort_after_strict_conflict_abort(db_path: &Path) {
+    // Arrange
+    let engine = open_local_engine(db_path);
+    let default_cf = default_cf(&engine);
+
+    let mut tx1 = engine
+        .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
+        .expect("begin tx1");
+    let mut tx2 = engine
+        .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
+        .expect("begin tx2");
+
+    tx1.set_isolation_level(IsolationLevel::AbortOnWriteConflict);
+    tx2.set_isolation_level(IsolationLevel::AbortOnWriteConflict);
+
+    tx1.put(
+        STRICT_CONFLICT_FIRST_COMMIT_RECORD.key.to_vec(),
+        STRICT_CONFLICT_FIRST_COMMIT_RECORD.value.to_vec(),
+        None,
+    )
+    .expect("tx1 put");
+    tx2.put(
+        STRICT_CONFLICT_FIRST_COMMIT_RECORD.key.to_vec(),
+        STRICT_CONFLICT_SECOND_COMMIT_VALUE.to_vec(),
+        None,
+    )
+    .expect("tx2 put");
+
+    // Act
+    engine
+        .commit(tx1, WriteOptions::sync())
+        .expect("commit tx1");
+    let conflict = engine.commit(tx2, WriteOptions::sync());
+
+    // Assert
+    assert!(
+        matches!(conflict, Err(cntryl_midge::MidgeError::WriteConflict(_))),
+        "second strict commit must abort with WriteConflict"
+    );
+
+    // Crash after the conflict outcome has been observed.
     std::process::abort();
 }
 

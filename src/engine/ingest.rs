@@ -57,6 +57,12 @@ const WRITE_GROUP_APPLY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum time a waiter will block waiting for a leader response
 const WRITE_GROUP_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Copy)]
+struct ApplyTransactionOptions {
+    start_sequence: Option<u64>,
+    isolation_policy: crate::runtime::TransactionIsolationPolicy,
+}
+
 /// Pending batch request waiting for leader to group it with others
 pub(crate) struct PendingBatchRequest {
     /// The batch of operations to commit
@@ -365,6 +371,8 @@ impl IngestCoordinator {
         runtime: &RuntimeHandle,
         ops: Vec<TransactionOp>,
         durability_policy: Option<crate::wal::DurabilityPolicy>,
+        start_sequence: Option<u64>,
+        isolation_policy: crate::runtime::TransactionIsolationPolicy,
     ) -> MidgeResult<u64> {
         if ops.is_empty() {
             return Ok(0);
@@ -378,6 +386,23 @@ impl IngestCoordinator {
                 )));
             }
             self.stall_flag.store(false, Ordering::Release);
+        }
+
+        // Transaction commits must preserve per-transaction conflict semantics.
+        // Avoid cross-request write grouping when conflict checks are requested.
+        if start_sequence.is_some()
+            && matches!(
+                isolation_policy,
+                crate::runtime::TransactionIsolationPolicy::AbortOnWriteConflict
+            )
+        {
+            return self.submit_direct(
+                runtime,
+                ops,
+                durability_policy,
+                start_sequence,
+                isolation_policy,
+            );
         }
 
         if self.write_group_coord.try_acquire_leader() {
@@ -493,6 +518,10 @@ impl IngestCoordinator {
             runtime,
             ops,
             durability_policy,
+            ApplyTransactionOptions {
+                start_sequence: None,
+                isolation_policy: crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+            },
             &self.stall_flag,
             Some((WRITE_GROUP_APPLY_TIMEOUT, "Write group commit timed out")),
             None,
@@ -556,7 +585,13 @@ impl IngestCoordinator {
                 .map_err(|_| MidgeError::Internal("Write grouping leader timed out".to_string()))
                 .and_then(|result| result),
             Err(crossbeam::channel::TrySendError::Full(pending)) => {
-                self.submit_direct(runtime, pending.ops, pending.durability_policy)
+                self.submit_direct(
+                    runtime,
+                    pending.ops,
+                    pending.durability_policy,
+                    None,
+                    crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+                )
             }
             Err(crossbeam::channel::TrySendError::Disconnected(_)) => Err(MidgeError::Internal(
                 "Write grouping coordinator disconnected".to_string(),
@@ -569,11 +604,17 @@ impl IngestCoordinator {
         runtime: &RuntimeHandle,
         ops: Vec<TransactionOp>,
         durability_policy: Option<crate::wal::DurabilityPolicy>,
+        start_sequence: Option<u64>,
+        isolation_policy: crate::runtime::TransactionIsolationPolicy,
     ) -> MidgeResult<u64> {
         Self::send_apply_transaction(
             runtime,
             ops,
             durability_policy,
+            ApplyTransactionOptions {
+                start_sequence,
+                isolation_policy,
+            },
             &self.stall_flag,
             None,
             None,
@@ -584,6 +625,7 @@ impl IngestCoordinator {
         runtime: &RuntimeHandle,
         ops: Vec<TransactionOp>,
         durability_policy: Option<crate::wal::DurabilityPolicy>,
+        options: ApplyTransactionOptions,
         stall_flag: &AtomicBool,
         timeout: Option<(Duration, &'static str)>,
         expected_op_count: Option<usize>,
@@ -597,6 +639,8 @@ impl IngestCoordinator {
                         request_id,
                         ops,
                         durability_policy,
+                        start_sequence: options.start_sequence,
+                        isolation_policy: options.isolation_policy,
                     },
                     timeout,
                 )?
@@ -606,6 +650,8 @@ impl IngestCoordinator {
                 request_id,
                 ops,
                 durability_policy,
+                start_sequence: options.start_sequence,
+                isolation_policy: options.isolation_policy,
             })?
         };
 
@@ -840,6 +886,10 @@ impl IngestCoordinator {
             runtime,
             ops,
             None,
+            ApplyTransactionOptions {
+                start_sequence: None,
+                isolation_policy: crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+            },
             stall_flag,
             None,
             Some(batch.intents.len()),

@@ -154,12 +154,16 @@ impl EventLoop {
                     request_id,
                     ops,
                     durability_policy,
+                    start_sequence,
+                    isolation_policy,
                 }) => {
                     match self.wal_actor.append_transaction(
                         &mut self.state,
                         request_id,
                         ops,
                         durability_policy,
+                        start_sequence,
+                        isolation_policy,
                     ) {
                         Ok((last_sequence, op_count, deferred)) => {
                             self.handle_write_success(

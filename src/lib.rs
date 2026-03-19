@@ -68,7 +68,9 @@ pub mod testkit;
 pub use common::{MidgeError, MidgeResult};
 
 // Engine / Transactions
-pub use engine::{ColumnFamilyHandle, ColumnFamilyId, Engine, Transaction, TransactionMode};
+pub use engine::{
+    ColumnFamilyHandle, ColumnFamilyId, Engine, IsolationLevel, Transaction, TransactionMode,
+};
 
 // Backward-compatible alias
 pub type MidgeEngine = Engine;
@@ -146,7 +148,7 @@ pub mod prelude {
     /// Use `use midge::prelude::*;` to import the essential types needed
     /// for the standard transaction-based workflow.
     pub use crate::{
-        ColumnFamilyId, Direction, Engine, Key, MidgeError, MidgeResult, OpenOptions, Query,
+        ColumnFamilyId, Direction, Engine, IsolationLevel, Key, MidgeError, MidgeResult, OpenOptions, Query,
         ScanIterator, Storage, Transaction, TransactionMode, Value, WriteOptions,
     };
 }

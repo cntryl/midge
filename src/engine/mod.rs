@@ -30,8 +30,8 @@ pub(crate) mod api;
 mod ingest;
 
 pub use api::{
-    Direction, Goal, Key, MemoryBudget, OpenOptions, Query, RecoveryPolicy, ScanIterator, Storage,
-    Transaction, TransactionMode, Value, WorkloadProfile, WriteOptions,
+    Direction, Goal, IsolationLevel, Key, MemoryBudget, OpenOptions, Query, RecoveryPolicy,
+    ScanIterator, Storage, Transaction, TransactionMode, Value, WorkloadProfile, WriteOptions,
 };
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<ColumnFamilyId, ColumnFamilyHandle>;
@@ -127,6 +127,8 @@ pub struct RuntimeMetricsSnapshot {
     pub active_compactions: usize,
     pub pending_cloud_uploads: usize,
     pub active_snapshots: usize,
+    pub pinned_ssts: usize,
+    pub oldest_snapshot_age_seconds: u64,
     pub sst_count: usize,
     pub sst_bytes: u64,
     pub salvage_mode_opens: u64,
@@ -140,6 +142,9 @@ pub struct RuntimeMetricsSnapshot {
     pub write_stalls_compaction_total: u64,
     pub write_stalls_cloud_total: u64,
     pub write_stalls_no_space_total: u64,
+    pub write_conflicts_total: u64,
+    pub write_conflicts_point_total: u64,
+    pub write_conflicts_range_total: u64,
     pub wal_append_count: u64,
     pub wal_flush_count: u64,
     pub wal_fsync_count: u64,
@@ -927,6 +932,12 @@ impl Engine {
         end_key: Vec<u8>,
         opts: api::WriteOptions,
     ) -> MidgeResult<()> {
+        if start_key.as_slice() > end_key.as_slice() {
+            return Err(MidgeError::InvalidArgument(
+                "delete_range requires start_key <= end_key".to_string(),
+            ));
+        }
+
         let durability_policy = self.effective_wal_durability_policy(opts)?;
         let response = self
             .runtime_handle
@@ -1070,8 +1081,33 @@ impl Engine {
             .cf_snapshots
             .get(&cf_id)
             .map(|data| data.snapshot.clone());
+        let pinned_sst_names = read_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .sst_files
+                    .iter()
+                    .map(|file| file.name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         // Drop the guard ASAP to avoid holding the ArcSwap lease.
         drop(cache_guard);
+
+        match self.runtime_handle.send_and_wait(RuntimeMsg::RegisterSnapshot {
+            request_id: next_request_id()?,
+            snapshot_id: txn_id,
+            sequence: start_sequence,
+            pinned_sst_names,
+        })? {
+            RuntimeResponse::Ok { .. } => {}
+            RuntimeResponse::Error { error, .. } => return Err(error),
+            _ => {
+                return Err(MidgeError::Internal(
+                    "Unexpected response to RegisterSnapshot".to_string(),
+                ))
+            }
+        }
 
         Ok(api::Transaction::new(
             self.runtime_handle.clone(),
@@ -1093,9 +1129,10 @@ impl Engine {
     /// # Errors
     /// - `MidgeError::WriteStall` if memory budget is exceeded. Client must retry
     ///   after backoff (10-100ms exponential recommended).
-    pub fn commit(&self, txn: api::Transaction, opts: api::WriteOptions) -> MidgeResult<()> {
+    pub fn commit(&self, mut txn: api::Transaction, opts: api::WriteOptions) -> MidgeResult<()> {
         // ReadOnly transactions are a no-op for commit
         if txn.is_read_only() {
+            txn.unregister_snapshot();
             return Ok(());
         }
 
@@ -1108,10 +1145,9 @@ impl Engine {
         if !txn.has_writes() {
             // Read-write transaction with no writes
             // Apply sync if requested
-            if opts.is_sync() {
-                self.sync()?;
-            }
-            return Ok(());
+            let sync_result = if opts.is_sync() { self.sync() } else { Ok(()) };
+            txn.unregister_snapshot();
+            return sync_result;
         }
 
         // Route all transactional writes through the ingest coordinator so every
@@ -1129,15 +1165,29 @@ impl Engine {
                 ))
             })?;
 
-        let ops = txn.into_runtime_ops();
+        let ops = txn.take_runtime_ops();
+        let isolation_policy = match txn.isolation_level() {
+            api::IsolationLevel::LastWriteWins => crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+            api::IsolationLevel::AbortOnWriteConflict => {
+                crate::runtime::TransactionIsolationPolicy::AbortOnWriteConflict
+            }
+        };
 
         let durability_policy = Some(self.effective_wal_durability_policy(opts)?);
-        let sequence = coordinator.submit_ops(&self.runtime_handle, ops, durability_policy)?;
+        let sequence = coordinator.submit_ops(
+            &self.runtime_handle,
+            ops,
+            durability_policy,
+            Some(txn.start_sequence()),
+            isolation_policy,
+        )?;
 
         // Update engine's sequence to reflect completed writes
         self.sequence.store(sequence, Ordering::SeqCst);
 
-        self.finalize_write_durability(sequence, opts)
+        let durability_result = self.finalize_write_durability(sequence, opts);
+        txn.unregister_snapshot();
+        durability_result
     }
 
     /// Wait for a write stall to clear for `cf_id`.
@@ -1177,7 +1227,8 @@ impl Engine {
     /// This is a no-op because Midge transactions are designed for atomic commit only.
     /// Writes are accumulated in the transaction and only applied when `commit()` is called.
     /// Simply dropping the transaction (without commit) discards all pending writes.
-    pub fn rollback_transaction(&self, _txn: api::Transaction) -> MidgeResult<()> {
+    pub fn rollback_transaction(&self, mut txn: api::Transaction) -> MidgeResult<()> {
+        txn.unregister_snapshot();
         Ok(())
     }
 
@@ -1438,7 +1489,7 @@ impl Engine {
             })?;
 
         match response {
-            RuntimeResponse::RuntimeMetricsSnapshot { snapshot, .. } => Ok(snapshot),
+            RuntimeResponse::RuntimeMetricsSnapshot { snapshot, .. } => Ok(*snapshot),
             RuntimeResponse::Error { error, .. } => Err(error),
             _ => Err(MidgeError::Internal(
                 "Unexpected response from GetRuntimeMetrics".to_string(),

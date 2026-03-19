@@ -22,6 +22,15 @@ pub enum TransactionMode {
     ReadWrite,
 }
 
+/// Transaction isolation policy for read-write commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationLevel {
+    /// Current behavior: concurrent write conflicts resolve by commit order.
+    LastWriteWins,
+    /// Abort commit when a write-set key changed after transaction start snapshot.
+    AbortOnWriteConflict,
+}
+
 /// Pending write intent collected within a transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WriteIntent {
@@ -148,6 +157,8 @@ pub struct Transaction {
     cf_id: ColumnFamilyId,
     /// Transaction mode (ReadOnly or ReadWrite)
     mode: TransactionMode,
+    /// Isolation behavior used during commit conflict handling.
+    isolation_level: IsolationLevel,
     /// Write set: sequence of write intents
     write_set: Vec<WriteIntent>,
     /// Start sequence number (snapshot point)
@@ -156,6 +167,8 @@ pub struct Transaction {
     read_snapshot: Option<Arc<crate::runtime::ReadSnapshot>>,
     /// True when opened against cloud-backed storage.
     cloud_mode: bool,
+    /// Whether this transaction is currently registered as an active snapshot.
+    snapshot_registered: bool,
 }
 
 impl Transaction {
@@ -174,10 +187,12 @@ impl Transaction {
             id,
             cf_id,
             mode,
+            isolation_level: IsolationLevel::LastWriteWins,
             write_set: Vec::new(),
             start_sequence,
             read_snapshot,
             cloud_mode,
+            snapshot_registered: true,
         }
     }
 
@@ -240,6 +255,11 @@ impl Transaction {
                 "Cannot write in ReadOnly transaction".to_string(),
             ));
         }
+        if start_key.as_slice() > end_key.as_slice() {
+            return Err(MidgeError::InvalidArgument(
+                "delete_range requires start_key <= end_key".to_string(),
+            ));
+        }
         self.write_set
             .push(WriteIntent::delete_range(self.cf_id, start_key, end_key));
         Ok(())
@@ -259,11 +279,32 @@ impl Transaction {
         self.cf_id
     }
 
-    pub(crate) fn into_runtime_ops(self) -> Vec<crate::runtime::TransactionOp> {
-        self.write_set
+    pub fn isolation_level(&self) -> IsolationLevel {
+        self.isolation_level
+    }
+
+    pub fn set_isolation_level(&mut self, isolation_level: IsolationLevel) {
+        self.isolation_level = isolation_level;
+    }
+
+    pub(crate) fn take_runtime_ops(&mut self) -> Vec<crate::runtime::TransactionOp> {
+        std::mem::take(&mut self.write_set)
             .into_iter()
             .map(WriteIntent::into_runtime_op)
             .collect()
+    }
+
+    pub(crate) fn unregister_snapshot(&mut self) {
+        if !self.snapshot_registered {
+            return;
+        }
+
+        let _ = self
+            .runtime_handle
+            .send(crate::runtime::RuntimeMsg::UnregisterSnapshot {
+                snapshot_id: self.id,
+            });
+        self.snapshot_registered = false;
     }
 
     pub fn start_sequence(&self) -> u64 {
@@ -397,5 +438,11 @@ impl Transaction {
         }
 
         None
+    }
+}
+
+impl Drop for Transaction {
+    fn drop(&mut self) {
+        self.unregister_snapshot();
     }
 }

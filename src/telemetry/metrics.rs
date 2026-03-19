@@ -93,6 +93,9 @@ pub struct Metrics {
     pub write_stalls_cloud: Arc<AtomicU64>,
     pub write_stalls_no_space: Arc<AtomicU64>,
     pub no_space_events: Arc<AtomicU64>,
+    pub write_conflicts: Arc<AtomicU64>,
+    pub write_conflicts_point: Arc<AtomicU64>,
+    pub write_conflicts_range: Arc<AtomicU64>,
 
     // Phase 0 guardrails: Idempotency cache telemetry
     pub idempotency_cache_evictions: Arc<AtomicU64>,
@@ -183,6 +186,9 @@ impl Metrics {
             write_stalls_cloud: Arc::new(AtomicU64::new(0)),
             write_stalls_no_space: Arc::new(AtomicU64::new(0)),
             no_space_events: Arc::new(AtomicU64::new(0)),
+            write_conflicts: Arc::new(AtomicU64::new(0)),
+            write_conflicts_point: Arc::new(AtomicU64::new(0)),
+            write_conflicts_range: Arc::new(AtomicU64::new(0)),
             idempotency_cache_evictions: Arc::new(AtomicU64::new(0)),
             pending_txn_started: Arc::new(AtomicU64::new(0)),
             pending_txn_duration_ms_total: Arc::new(AtomicU64::new(0)),
@@ -566,6 +572,22 @@ impl Metrics {
         }
     }
 
+    #[inline]
+    pub fn record_write_conflict_point(&self) {
+        if self.enabled {
+            self.write_conflicts.fetch_add(1, Ordering::Relaxed);
+            self.write_conflicts_point.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_write_conflict_range(&self) {
+        if self.enabled {
+            self.write_conflicts.fetch_add(1, Ordering::Relaxed);
+            self.write_conflicts_range.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Record idempotency cache evictions (Phase 0 guardrail telemetry)
     #[inline]
     pub fn record_idempotency_cache_evictions(&self, count: u64) {
@@ -669,6 +691,9 @@ impl Metrics {
             write_stalls_cloud: self.write_stalls_cloud.load(Ordering::Relaxed),
             write_stalls_no_space: self.write_stalls_no_space.load(Ordering::Relaxed),
             no_space_events: self.no_space_events.load(Ordering::Relaxed),
+            write_conflicts: self.write_conflicts.load(Ordering::Relaxed),
+            write_conflicts_point: self.write_conflicts_point.load(Ordering::Relaxed),
+            write_conflicts_range: self.write_conflicts_range.load(Ordering::Relaxed),
             // New debug fields
             wal_append_count: self.wal_append_count.load(Ordering::Relaxed),
             wal_flush_count: self.wal_flush_count.load(Ordering::Relaxed),
@@ -715,6 +740,9 @@ pub struct MetricsSnapshot {
     pub write_stalls_cloud: u64,
     pub write_stalls_no_space: u64,
     pub no_space_events: u64,
+    pub write_conflicts: u64,
+    pub write_conflicts_point: u64,
+    pub write_conflicts_range: u64,
     // New debug fields
     pub wal_append_count: u64,
     pub wal_flush_count: u64,
@@ -821,5 +849,24 @@ mod tests {
         assert_eq!(snap.wal_recovery_bytes_replayed, 4096);
         assert_eq!(snap.intent_log_replay_runs, 1);
         assert_eq!(snap.intent_log_entries_replayed, 3);
+    }
+
+    #[test]
+    fn should_record_strict_write_conflict_metrics_with_breakdown() {
+        // Arrange
+        let config = TelemetryConfig::default().with_enabled(true);
+        let metrics = Metrics::new(&config).unwrap();
+
+        // Act
+        metrics.record_write_conflict_point();
+        metrics.record_write_conflict_range();
+        metrics.record_write_conflict_range();
+
+        let snap = metrics.snapshot();
+
+        // Assert
+        assert_eq!(snap.write_conflicts, 3);
+        assert_eq!(snap.write_conflicts_point, 1);
+        assert_eq!(snap.write_conflicts_range, 2);
     }
 }

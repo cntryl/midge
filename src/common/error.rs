@@ -48,6 +48,9 @@ pub enum MidgeError {
 
     /// Writer fenced — epoch is stale, another leader has taken over
     Fenced(String),
+
+    /// Transaction write conflict detected under strict conflict policy
+    WriteConflict(String),
 }
 
 impl fmt::Display for MidgeError {
@@ -66,6 +69,7 @@ impl fmt::Display for MidgeError {
             MidgeError::WriteStall(msg) => write!(f, "Write stall: {}", msg),
             MidgeError::MemoryModeViolation(msg) => write!(f, "Memory mode violation: {}", msg),
             MidgeError::Fenced(msg) => write!(f, "Fenced: writer epoch is stale: {}", msg),
+            MidgeError::WriteConflict(msg) => write!(f, "Write conflict: {}", msg),
         }
     }
 }

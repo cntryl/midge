@@ -64,7 +64,7 @@ Evidence:
   - `transaction_isolation_audit.rs`
   - `transaction_isolation_lww.rs`
   - `transaction_spill.rs`
-  - `txn_crash_boundaries.rs`
+  - `transaction_crash_boundaries.rs`
 - The live suite explicitly exercises LWW behavior, lost-update cases, crash atomicity, and restart behavior.
 - The gap is not lack of testing. The gap is that the current `1.0` contract reads more like a release target than a single canonical public transaction contract.
 - Before `1.0`, external semantics should be easy to answer in one place:

@@ -195,6 +195,131 @@ impl ReadSnapshot {
         }
     }
 
+    /// Return the latest sequence touching `key` across memtables + SSTs.
+    ///
+    /// Includes tombstones and range tombstones so conflict detection can
+    /// identify any write after a transaction start snapshot.
+    pub fn latest_state_sequence(&self, key: &[u8]) -> Option<u64> {
+        let mut states = BTreeMap::new();
+        let mut range_tombstones = Vec::new();
+
+        if let Ok(state) = self.memtable.get_key_state_at(key, u64::MAX) {
+            Self::merge_state(&mut states, key.to_vec(), state);
+        }
+
+        for imm in &self.immutable_memtables {
+            if let Ok(state) = imm.get_key_state_at(key, u64::MAX) {
+                Self::merge_state(&mut states, key.to_vec(), state);
+            }
+        }
+
+        if !self.memory_mode {
+            for file_meta in &self.sst_files {
+                if let (Some(smallest), Some(largest)) =
+                    (&file_meta.smallest_key, &file_meta.largest_key)
+                {
+                    if key < smallest.as_slice() || key > largest.as_slice() {
+                        continue;
+                    }
+                }
+
+                let sst_path = self.sst_path_prefix.join(&file_meta.name);
+                let path_str = sst_path.to_string_lossy().to_string();
+                if let Ok(reader) =
+                    crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))
+                {
+                    if let Ok(state) = reader.get_state_at(key, u64::MAX) {
+                        Self::merge_state(&mut states, key.to_vec(), state);
+                    }
+
+                    range_tombstones.extend(
+                        reader
+                            .range_tombstones()
+                            .into_iter()
+                            .filter(|tombstone| tombstone.covers(key)),
+                    );
+                }
+            }
+        }
+
+        let state_seq = states
+            .get(key)
+            .and_then(Self::state_sequence)
+            .unwrap_or(0);
+        let range_tombstone_seq = range_tombstones.iter().map(|t| t.seq).max().unwrap_or(0);
+        let max_seq = state_seq.max(range_tombstone_seq);
+
+        if max_seq == 0 {
+            None
+        } else {
+            Some(max_seq)
+        }
+    }
+
+    /// Return the latest sequence touching any key in [start, end).
+    ///
+    /// Includes value/tombstone state and overlapping range tombstones.
+    pub fn latest_sequence_in_range(&self, start: &[u8], end: &[u8]) -> Option<u64> {
+        let start_opt = if start.is_empty() { None } else { Some(start) };
+        let end_opt = if end.is_empty() { None } else { Some(end) };
+
+        let mut max_seq = 0u64;
+
+        for (_key, state) in self.memtable.range_state_at(start_opt, end_opt, u64::MAX) {
+            if let Some(seq) = Self::state_sequence(&state) {
+                max_seq = max_seq.max(seq);
+            }
+        }
+
+        for imm in &self.immutable_memtables {
+            for (_key, state) in imm.range_state_at(start_opt, end_opt, u64::MAX) {
+                if let Some(seq) = Self::state_sequence(&state) {
+                    max_seq = max_seq.max(seq);
+                }
+            }
+        }
+
+        if !self.memory_mode {
+            for file_meta in &self.sst_files {
+                if let (Some(smallest), Some(largest)) =
+                    (&file_meta.smallest_key, &file_meta.largest_key)
+                {
+                    if start_opt.is_some_and(|s| s > largest.as_slice())
+                        || end_opt.is_some_and(|e| e <= smallest.as_slice())
+                    {
+                        continue;
+                    }
+                }
+
+                let sst_path = self.sst_path_prefix.join(&file_meta.name);
+                let path_str = sst_path.to_string_lossy().to_string();
+                if let Ok(reader) =
+                    crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))
+                {
+                    if let Ok(entries) = reader.scan_range_state(start_opt, end_opt) {
+                        for (_key, state) in entries {
+                            if let Some(seq) = Self::state_sequence(&state) {
+                                max_seq = max_seq.max(seq);
+                            }
+                        }
+                    }
+
+                    for tombstone in reader.range_tombstones() {
+                        if Self::range_tombstone_overlaps_query(&tombstone, start_opt, end_opt) {
+                            max_seq = max_seq.max(tombstone.seq);
+                        }
+                    }
+                }
+            }
+        }
+
+        if max_seq == 0 {
+            None
+        } else {
+            Some(max_seq)
+        }
+    }
+
     /// Perform a range scan on this snapshot
     pub fn range_scan(&self, start: &[u8], end: &[u8], seq: u64) -> Vec<(Vec<u8>, Vec<u8>)> {
         let mut states: BTreeMap<Vec<u8>, KeyState> = BTreeMap::new();

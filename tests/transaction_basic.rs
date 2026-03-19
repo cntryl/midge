@@ -501,6 +501,28 @@ fn should_commit_atomically_given_mixed_put_and_delete_range_when_committed_in_t
 }
 
 #[test]
+fn should_reject_delete_range_given_reversed_bounds_when_added_to_transaction() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        // Act
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        let result = tx.delete_range(b"key9".to_vec(), b"key1".to_vec());
+
+        // Assert
+        assert!(
+            matches!(result, Err(cntryl_midge::MidgeError::InvalidArgument(_))),
+            "mode: {}",
+            mode
+        );
+    });
+}
+
+#[test]
 fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
