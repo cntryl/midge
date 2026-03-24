@@ -6,7 +6,7 @@
 
 - Reads use a fixed snapshot captured at transaction start.
 - Writes are buffered client-side until commit.
-- Commit is atomic through WAL bracketing.
+- Commit is atomic through runtime sequencing and WAL bracketing.
 - Concurrent write conflicts default to last-writer-wins.
 - Optional strict mode can abort on write conflicts.
 - Active snapshots are registered so compaction and GC can preserve reader-visible versions.
@@ -31,7 +31,7 @@ let tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite)?;
 let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly)?;
 ```
 
-`begin_tx` executes entirely on the calling thread. It does a wait-free load from a lock-free `ArcSwap`-backed `SnapshotCache` (published by the event loop after every write). The call does **not** send a message to the event loop. The returned `Transaction` stores:
+`begin_tx` starts with a fast-path read from a lock-free `ArcSwap`-backed `SnapshotCache` (published by the event loop after every write), then registers the snapshot with the runtime so compaction and GC can respect it. The returned `Transaction` stores:
 
 - `start_sequence: u64` — the global sequence at load time. Used as the read horizon.
 - `read_snapshot: Arc<ReadSnapshot>` — `Arc` references to the current active memtable, immutable memtables, and a `Vec<FileMeta>` cloned from the manifest.
@@ -58,21 +58,22 @@ A transaction is scoped to a single column family. There is no cross-CF atomic t
 
 Writes become visible only after a successful `engine.commit(tx, opts)`. The commit:
 
-1. Sends an `ApplyTransaction` message to the event loop containing all `WriteIntent`s.
-2. The event loop allocates a contiguous sequence-number range for the transaction (one per op, plus begin and commit), appends the full batch to the WAL, applies all ops to the active memtable, and advances the global sequence.
+1. Submits the transaction's runtime operations through the ingest coordinator for the target column family.
+2. The runtime allocates a contiguous sequence-number range for the transaction (one per op, plus begin and commit), appends the full batch to the WAL unless the caller chose `best_effort()`, applies all ops to the active memtable, and advances the global sequence.
 3. After applying, a new `PublishedSnapshot` is written to the `SnapshotCache`; subsequent `begin_tx` calls see the committed writes.
 
 All ops in a commit become visible atomically. There is no partial visibility.
 
 ### Commit behavior
 
-`commit` is synchronous. The caller blocks until the event loop has processed the `ApplyTransaction` message and replied. Durability depends on `WriteOptions`:
+`commit` is synchronous. The caller blocks until the runtime has accepted, sequenced, and applied the transaction according to the selected durability policy. Durability depends on `WriteOptions`:
 
 | `WriteOptions` | WAL behavior |
 |---|---|
+| `sync()` | WAL append plus local fsync before returning. |
 | `buffered()` | WAL write, no fsync. Crash between write and fsync loses data. |
 | `best_effort()` | WAL skipped entirely. Data lives only in the memtable until flush. |
-| `cloud_strict()` | WAL written, synced, and uploaded to cloud before returning. |
+| `cloud_strict()` | Uses the cloud durability path and waits for the cloud durability frontier before returning. |
 
 ### Rollback behavior
 

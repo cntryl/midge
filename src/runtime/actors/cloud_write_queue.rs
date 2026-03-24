@@ -172,9 +172,7 @@ impl CloudWriteQueue {
                 TransactionApplyOp::Put { key, value, .. } => key.len() + value.len() + 64,
                 TransactionApplyOp::Delete { key, .. } => key.len() + 64,
                 TransactionApplyOp::DeleteRange {
-                    start_key,
-                    end_key,
-                    ..
+                    start_key, end_key, ..
                 } => start_key.len() + end_key.len() + 64,
             })
             .sum();
@@ -231,9 +229,7 @@ impl CloudWriteQueue {
                         TransactionApplyOp::Put { key, value, .. } => key.len() + value.len() + 64,
                         TransactionApplyOp::Delete { key, .. } => key.len() + 64,
                         TransactionApplyOp::DeleteRange {
-                            start_key,
-                            end_key,
-                            ..
+                            start_key, end_key, ..
                         } => start_key.len() + end_key.len() + 64,
                     })
                     .sum(),

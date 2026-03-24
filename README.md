@@ -46,7 +46,7 @@ let value = tx.get(b"hello")?;
 
 - explicit `sync()`, `buffered()`, `best_effort()`, and cloud durability semantics
 - deterministic recovery-oriented tests for WAL, flush, and compaction paths
-- readable storage engine internals with verification APIs and recovery metrics
+- public observability and verification APIs such as `get_recovery_metrics()`, `get_runtime_metrics()`, `get_storage_layout()`, and `verify_storage()`
 
 ## What To Read Before Trying Midge
 
@@ -101,7 +101,7 @@ while let Some((k, v)) = iter.next() {
 }
 ```
 
-## Recovery metrics
+## Observability
 
 ```rust
 let recovery = engine.get_recovery_metrics()?;
@@ -109,15 +109,21 @@ println!("WAL records replayed: {}", recovery.wal_recovery_records_replayed);
 println!("WAL bytes replayed: {}", recovery.wal_recovery_bytes_replayed);
 println!("Intent replay runs: {}", recovery.intent_log_replay_runs);
 println!("Intent entries replayed: {}", recovery.intent_log_entries_replayed);
+
+let runtime = engine.get_runtime_metrics()?;
+println!("Health: {:?}", runtime.health);
+println!("Current sequence: {}", runtime.current_sequence);
+println!("Write stalled: {}", runtime.write_stalled);
 ```
 
-Use these counters to confirm the startup path that recovery actually executed.
+Use these snapshots to confirm what recovery ran at startup and what the runtime is doing now.
 
 ## Documentation
 
 - [Full documentation hub](docs/)
 - [Quick start](docs/user-guides/quick-start.md)
 - [API guide](docs/user-guides/api-guide.md)
+- [Transactions and MVCC](docs/transactions-and-mvcc.md)
 - [Stability policy](docs/development/stability-policy.md)
 - [Testing](docs/development/testing.md)
 - [1.0 production contract](docs/development/one-dot-zero-contract.md)

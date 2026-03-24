@@ -48,7 +48,7 @@ Midge provides standard key-value operations through a transaction API:
 
 - **Point operations**: `get()`, `put()`, `delete()`
 - **Range operations**: `scan()` with prefix/bounds/limits
-- **Bulk operations**: `delete_range()` for range tombstones (standalone or within transactions)
+- **Bulk operations**: `Transaction::delete_range()` or `Engine::delete_range()` for range tombstones
 - **Transactions**: Multi-operation atomic commits with snapshot isolation
 
 ### Storage Modes
@@ -72,10 +72,10 @@ All writes require explicit `WriteOptions`:
 
 | Mode | Guarantee | Latency | Use Case |
 |------|-----------|---------|----------|
-| `sync()` | Fsynced to disk | ~10ms | Critical data, financial transactions |
-| `buffered()` | Group commit batching | ~1-5ms | General production workloads |
-| `best_effort()` | No WAL, must flush | ~0.1ms | Bulk loads, reloadable data |
-| `cloud_strict()` | Cloud upload confirmed | ~100ms | Explicit cloud durability checkpoints |
+| `sync()` | Local fsync completed before return | Highest | Critical data, financial transactions |
+| `buffered()` | Visible after WAL append; fsync follows later | Lower | General workloads |
+| `best_effort()` | WAL skipped; durable only after flush publication | Lowest | Bulk loads, reloadable data |
+| `cloud_strict()` | Waits for the cloud durability frontier | Highest in cloud mode | Explicit cloud durability checkpoints |
 
 See [durability.md](durability.md) for detailed guarantees and recovery behavior.
 
@@ -83,9 +83,9 @@ See [durability.md](durability.md) for detailed guarantees and recovery behavior
 
 Midge prioritizes **predictability over raw speed**:
 
-- **Write latency**: 1-10ms (depends on durability mode)
-- **Read latency**: Sub-ms for cached, 10-100ms for cloud (with local cache)
-- **Throughput**: ~50-75k ops/sec (typical workload: 1KB values, buffered mode, concurrent clients; limited by WAL I/O and memtable work, not event loop)
+- **Write latency**: strongly depends on durability mode and storage backend
+- **Read latency**: dominated by cache warmth, SST layout, and storage mode
+- **Throughput**: workload-dependent; measure with the included benches for your target profile
 - **Cache overhead**: ~10-20% of cache size for metadata
 
 Midge optimizes for predictable behavior and explicitness over raw throughput maximization.

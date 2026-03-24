@@ -42,7 +42,7 @@ Background work (I/O, compression, uploads) is performed by **task executors** o
 - Debuggability: full state visible at any message boundary
 
 **Cost:**
-- Throughput ceiling (~50-75k ops/sec) lower than multi-threaded designs
+- Throughput is lower than aggressively sharded multi-threaded designs
 - Single serialization point can become bottleneck
 - We choose predictability over raw speed
 
@@ -200,8 +200,8 @@ Here's what happens when an application calls `put` within a transaction:
 ```
 1. Application creates transaction and calls: txn.put("user:42", value)
 
-2. EventLoop receives ApplyTransaction message
-   - Assign seqno (e.g., 1005)
+2. Runtime sequencing path accepts the transaction
+   - Assign seqno range (e.g., 1005 and onward)
    - Check write stall conditions
 
 3. WAL append
@@ -297,7 +297,7 @@ All public APIs are synchronous and blocking. No async/await, no hidden executor
 
 One actor sequences all state mutations, not partitioned by key or level. This makes ordering explicit, recovery simple (replay, not repair), and visibility trivial.
 
-**Cost:** Throughput ceiling (~50-75k ops/sec) is lower than thread-per-shard designs (RocksDB: 500k-2M+ ops/sec). We choose **predictability over raw speed**.
+**Cost:** Throughput is lower than thread-per-shard designs. We choose **predictability over raw speed**.
 
 ### Cloud-Backed Async → Explicit semantics, more planning required
 
@@ -323,9 +323,9 @@ Midge is **not a raw-speed benchmark champion**. It is a **predictable, auditabl
 
 Expected characteristics:
 
-- **Write latency:** 1–10ms (depends on WAL upload strategy)
-- **Read latency:** Sub-ms for in-cache, 10–100ms for cloud (with local cache)
-- **Throughput:** ~50-75k ops/sec (limited by WAL I/O and per-operation work; event loop itself handles 67M msgs/sec)
+- **Write latency:** depends on durability mode and backend
+- **Read latency:** depends on cache warmth, SST layout, and storage mode
+- **Throughput:** workload-dependent and bounded by storage and compaction behavior
 - **Cache overhead:** ~10–20% of cache size for metadata
 
 If you need **raw throughput** (500k+ ops/sec), use **RocksDB** or a sharded design.

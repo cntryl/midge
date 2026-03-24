@@ -161,7 +161,10 @@ fn should_abort_second_commit_given_conflicting_writes_when_abort_on_write_confl
 
         // Assert
         assert!(
-            matches!(second_commit, Err(cntryl_midge::MidgeError::WriteConflict(_))),
+            matches!(
+                second_commit,
+                Err(cntryl_midge::MidgeError::WriteConflict(_))
+            ),
             "mode: {}",
             mode
         );
@@ -179,7 +182,8 @@ fn should_abort_second_commit_given_conflicting_writes_when_abort_on_write_confl
 }
 
 #[test]
-fn should_abort_delete_range_commit_given_overlapping_recent_writes_when_abort_on_write_conflict_enabled() {
+fn should_abort_delete_range_commit_given_overlapping_recent_writes_when_abort_on_write_conflict_enabled(
+) {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
@@ -208,7 +212,10 @@ fn should_abort_delete_range_commit_given_overlapping_recent_writes_when_abort_o
 
         // Assert
         assert!(
-            matches!(second_commit, Err(cntryl_midge::MidgeError::WriteConflict(_))),
+            matches!(
+                second_commit,
+                Err(cntryl_midge::MidgeError::WriteConflict(_))
+            ),
             "mode: {}",
             mode
         );
@@ -226,7 +233,8 @@ fn should_abort_delete_range_commit_given_overlapping_recent_writes_when_abort_o
 }
 
 #[test]
-fn should_abort_point_write_commit_given_recent_overlapping_delete_range_when_abort_on_write_conflict_enabled() {
+fn should_abort_point_write_commit_given_recent_overlapping_delete_range_when_abort_on_write_conflict_enabled(
+) {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
@@ -255,7 +263,10 @@ fn should_abort_point_write_commit_given_recent_overlapping_delete_range_when_ab
 
         // Assert
         assert!(
-            matches!(second_commit, Err(cntryl_midge::MidgeError::WriteConflict(_))),
+            matches!(
+                second_commit,
+                Err(cntryl_midge::MidgeError::WriteConflict(_))
+            ),
             "mode: {} (empty-range overlap must conflict in strict mode)",
             mode
         );

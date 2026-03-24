@@ -430,8 +430,7 @@ impl IngestCoordinator {
         loop {
             let mut pending_requests = Vec::new();
 
-            let (mut all_ops, batch_durability, is_initial_batch) = match initial_ops.take()
-            {
+            let (mut all_ops, batch_durability, is_initial_batch) = match initial_ops.take() {
                 Some(initial) => (initial, durability_policy, true),
                 None => match self.write_group_coord.pending_queue.1.try_recv() {
                     Ok(pending) => {
@@ -584,15 +583,13 @@ impl IngestCoordinator {
                 .recv_timeout(WRITE_GROUP_WAIT_TIMEOUT)
                 .map_err(|_| MidgeError::Internal("Write grouping leader timed out".to_string()))
                 .and_then(|result| result),
-            Err(crossbeam::channel::TrySendError::Full(pending)) => {
-                self.submit_direct(
-                    runtime,
-                    pending.ops,
-                    pending.durability_policy,
-                    None,
-                    crate::runtime::TransactionIsolationPolicy::LastWriteWins,
-                )
-            }
+            Err(crossbeam::channel::TrySendError::Full(pending)) => self.submit_direct(
+                runtime,
+                pending.ops,
+                pending.durability_policy,
+                None,
+                crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+            ),
             Err(crossbeam::channel::TrySendError::Disconnected(_)) => Err(MidgeError::Internal(
                 "Write grouping coordinator disconnected".to_string(),
             )),

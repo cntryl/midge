@@ -1132,7 +1132,10 @@ impl EventLoop {
             RuntimeMsg::CheckCompaction { request_id } => {
                 let evicted = self.state.evict_timed_out_snapshots();
                 if evicted > 0 {
-                    tracing::warn!(evicted, "Evicted timed-out snapshots before compaction check");
+                    tracing::warn!(
+                        evicted,
+                        "Evicted timed-out snapshots before compaction check"
+                    );
                 }
 
                 // ─────────────────────────────────────────────────────────────────────

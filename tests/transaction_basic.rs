@@ -493,10 +493,7 @@ fn should_commit_atomically_given_mixed_put_and_delete_range_when_committed_in_t
         assert_eq!(read.get(b"key1").unwrap(), None);
         assert_eq!(read.get(b"key2").unwrap(), None);
         assert_eq!(read.get(b"key3").unwrap(), None);
-        assert_eq!(
-            read.get(b"key4").unwrap(),
-            Some(Bytes::from_static(b"v4"))
-        );
+        assert_eq!(read.get(b"key4").unwrap(), Some(Bytes::from_static(b"v4")));
     });
 }
 

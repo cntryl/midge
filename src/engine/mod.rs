@@ -1094,12 +1094,14 @@ impl Engine {
         // Drop the guard ASAP to avoid holding the ArcSwap lease.
         drop(cache_guard);
 
-        match self.runtime_handle.send_and_wait(RuntimeMsg::RegisterSnapshot {
-            request_id: next_request_id()?,
-            snapshot_id: txn_id,
-            sequence: start_sequence,
-            pinned_sst_names,
-        })? {
+        match self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::RegisterSnapshot {
+                request_id: next_request_id()?,
+                snapshot_id: txn_id,
+                sequence: start_sequence,
+                pinned_sst_names,
+            })? {
             RuntimeResponse::Ok { .. } => {}
             RuntimeResponse::Error { error, .. } => return Err(error),
             _ => {
@@ -1167,7 +1169,9 @@ impl Engine {
 
         let ops = txn.take_runtime_ops();
         let isolation_policy = match txn.isolation_level() {
-            api::IsolationLevel::LastWriteWins => crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+            api::IsolationLevel::LastWriteWins => {
+                crate::runtime::TransactionIsolationPolicy::LastWriteWins
+            }
             api::IsolationLevel::AbortOnWriteConflict => {
                 crate::runtime::TransactionIsolationPolicy::AbortOnWriteConflict
             }

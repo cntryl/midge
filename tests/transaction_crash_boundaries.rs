@@ -156,7 +156,9 @@ fn should_preserve_first_commit_when_process_aborts_after_strict_conflict_abort(
     assert_eq!(
         tx.get(STRICT_CONFLICT_FIRST_COMMIT_RECORD.key)
             .expect("get strict conflict key"),
-        Some(Bytes::from_static(STRICT_CONFLICT_FIRST_COMMIT_RECORD.value)),
+        Some(Bytes::from_static(
+            STRICT_CONFLICT_FIRST_COMMIT_RECORD.value
+        )),
         "first strict commit must remain visible after crash"
     );
 }

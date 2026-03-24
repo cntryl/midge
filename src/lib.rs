@@ -148,7 +148,8 @@ pub mod prelude {
     /// Use `use midge::prelude::*;` to import the essential types needed
     /// for the standard transaction-based workflow.
     pub use crate::{
-        ColumnFamilyId, Direction, Engine, IsolationLevel, Key, MidgeError, MidgeResult, OpenOptions, Query,
-        ScanIterator, Storage, Transaction, TransactionMode, Value, WriteOptions,
+        ColumnFamilyId, Direction, Engine, IsolationLevel, Key, MidgeError, MidgeResult,
+        OpenOptions, Query, ScanIterator, Storage, Transaction, TransactionMode, Value,
+        WriteOptions,
     };
 }

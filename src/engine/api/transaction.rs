@@ -132,11 +132,7 @@ impl WriteIntent {
     }
 
     /// Create a delete range intent
-    fn delete_range(
-        cf_id: ColumnFamilyId,
-        start_key: Vec<u8>,
-        end_key: Vec<u8>,
-    ) -> Self {
+    fn delete_range(cf_id: ColumnFamilyId, start_key: Vec<u8>, end_key: Vec<u8>) -> Self {
         Self::DeleteRange {
             cf_id,
             start_key,
@@ -245,11 +241,7 @@ impl Transaction {
     ///
     /// Deletes all keys in the range [start_key, end_key) atomically as part of
     /// the transaction commit. This is atomic with any puts/deletes in the same transaction.
-    pub fn delete_range(
-        &mut self,
-        start_key: Vec<u8>,
-        end_key: Vec<u8>,
-    ) -> MidgeResult<()> {
+    pub fn delete_range(&mut self, start_key: Vec<u8>, end_key: Vec<u8>) -> MidgeResult<()> {
         if self.is_read_only() {
             return Err(MidgeError::InvalidArgument(
                 "Cannot write in ReadOnly transaction".to_string(),
@@ -372,9 +364,7 @@ impl Transaction {
                     merged.insert(key.clone(), None);
                 }
                 WriteIntent::DeleteRange {
-                    start_key,
-                    end_key,
-                    ..
+                    start_key, end_key, ..
                 } => {
                     // Mark all keys in [start_key, end_key) as deleted
                     let mut to_delete = Vec::new();
@@ -427,12 +417,8 @@ impl Transaction {
                 }
                 WriteIntent::Delete { key: k, .. } if k.as_slice() == key => return Some(None),
                 WriteIntent::DeleteRange {
-                    start_key,
-                    end_key,
-                    ..
-                } if key >= start_key.as_slice() && key < end_key.as_slice() => {
-                    return Some(None)
-                }
+                    start_key, end_key, ..
+                } if key >= start_key.as_slice() && key < end_key.as_slice() => return Some(None),
                 _ => {}
             }
         }

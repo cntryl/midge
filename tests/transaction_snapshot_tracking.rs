@@ -191,7 +191,8 @@ fn should_unregister_snapshot_when_drop_ends_transaction() -> MidgeResult<()> {
 }
 
 #[test]
-fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active() -> MidgeResult<()> {
+fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active() -> MidgeResult<()>
+{
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts, mode);
@@ -241,14 +242,20 @@ fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active(
         let current = engine
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin current read tx");
-        assert_eq!(current.get(b"k").expect("current get"), None, "mode: {}", mode);
+        assert_eq!(
+            current.get(b"k").expect("current get"),
+            None,
+            "mode: {}",
+            mode
+        );
     });
 
     Ok(())
 }
 
 #[test]
-fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_active() -> MidgeResult<()> {
+fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_active(
+) -> MidgeResult<()> {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts, mode);
@@ -378,7 +385,9 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() ->
         }
 
         // Assert
-        let mut iter = snapshot.scan(&Query::new()).expect("snapshot scan after compaction");
+        let mut iter = snapshot
+            .scan(&Query::new())
+            .expect("snapshot scan after compaction");
         let rows: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
         assert_eq!(rows.len(), 32, "mode: {}", mode);
         for (_key, value) in rows {

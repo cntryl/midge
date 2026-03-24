@@ -242,10 +242,7 @@ impl ReadSnapshot {
             }
         }
 
-        let state_seq = states
-            .get(key)
-            .and_then(Self::state_sequence)
-            .unwrap_or(0);
+        let state_seq = states.get(key).and_then(Self::state_sequence).unwrap_or(0);
         let range_tombstone_seq = range_tombstones.iter().map(|t| t.seq).max().unwrap_or(0);
         let max_seq = state_seq.max(range_tombstone_seq);
 

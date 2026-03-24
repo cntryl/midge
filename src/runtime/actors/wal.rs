@@ -958,7 +958,9 @@ impl WalActor {
                         end_key,
                         sequence,
                     } => {
-                        self.apply_delete_range_to_memtable(state, sequence, cf_id, &start_key, &end_key)?;
+                        self.apply_delete_range_to_memtable(
+                            state, sequence, cf_id, &start_key, &end_key,
+                        )?;
                     }
                 }
             }
@@ -1289,7 +1291,9 @@ impl WalActor {
                     end_key,
                     sequence,
                 } => {
-                    self.apply_delete_range_to_memtable(state, sequence, cf_id, &start_key, &end_key)?;
+                    self.apply_delete_range_to_memtable(
+                        state, sequence, cf_id, &start_key, &end_key,
+                    )?;
                 }
             }
         }
@@ -1699,7 +1703,9 @@ impl WalActor {
                                 end_key,
                                 sequence,
                             } => {
-                                self.apply_delete_range_to_memtable(state, sequence, cf_id, &start_key, &end_key)?;
+                                self.apply_delete_range_to_memtable(
+                                    state, sequence, cf_id, &start_key, &end_key,
+                                )?;
                             }
                         }
                     }
@@ -1823,15 +1829,14 @@ mod tests {
             },
         ];
 
-        let (_last_seq, _count, deferred) =
-            wal_actor.append_transaction(
-                &mut state,
-                1,
-                ops,
-                None,
-                None,
-                crate::runtime::TransactionIsolationPolicy::LastWriteWins,
-            )?;
+        let (_last_seq, _count, deferred) = wal_actor.append_transaction(
+            &mut state,
+            1,
+            ops,
+            None,
+            None,
+            crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+        )?;
         assert!(deferred);
 
         // Assert
