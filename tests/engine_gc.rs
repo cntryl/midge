@@ -55,7 +55,7 @@ fn should_collect_orphaned_sst_files_after_compaction() {
             let key = format!("key_{:04}", i);
             tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush initial");
 
         // Insert more keys and flush again to create second L0 SST
@@ -66,7 +66,7 @@ fn should_collect_orphaned_sst_files_after_compaction() {
             let key = format!("key_{:04}", i);
             tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush second");
 
         // Act: Trigger compaction (merge L0 SSTs)
@@ -91,7 +91,7 @@ fn should_collect_orphaned_sst_files_after_compaction() {
         if mode != "memory" {
             // In local mode, compaction should mark old SSTs for deletion
             // Subsequent flush or background GC should remove them
-            eprintln!("✓ Compaction completed; orphan SSTs should be deleted");
+            eprintln!("âœ“ Compaction completed; orphan SSTs should be deleted");
         }
     });
 }
@@ -117,7 +117,7 @@ fn should_not_collect_sst_files_referenced_by_manifest() {
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Act: Don't trigger compaction; SST remains active
@@ -136,7 +136,7 @@ fn should_not_collect_sst_files_referenced_by_manifest() {
             );
         }
 
-        eprintln!("✓ SST files referenced by manifest are preserved");
+        eprintln!("âœ“ SST files referenced by manifest are preserved");
     });
 }
 
@@ -160,7 +160,7 @@ fn should_run_gc_after_configurable_interval() {
             let key = format!("batch1_key_{:04}", i);
             tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush batch 1");
 
         // Act: Write and flush batch 2 (triggers potential compaction)
@@ -171,7 +171,7 @@ fn should_run_gc_after_configurable_interval() {
             let key = format!("batch2_key_{:04}", i);
             tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None).ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush batch 2");
 
         // Wait for background compaction/GC (if configured)
@@ -190,7 +190,7 @@ fn should_run_gc_after_configurable_interval() {
             );
         }
 
-        eprintln!("✓ GC interval completed without data loss");
+        eprintln!("âœ“ GC interval completed without data loss");
     });
 }
 
@@ -216,7 +216,7 @@ fn should_persist_gc_state_across_restart() {
                 let key = format!("persist_key_{:04}", i);
                 tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
             }
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             // Write batch 2
@@ -227,7 +227,7 @@ fn should_persist_gc_state_across_restart() {
                 let key = format!("persist_key_{:04}", i);
                 tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None).ok();
             }
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             // Trigger manual compaction (marks orphans for deletion)
@@ -253,7 +253,7 @@ fn should_persist_gc_state_across_restart() {
                 );
             }
 
-            eprintln!("✓ GC state persisted correctly across restart");
+            eprintln!("âœ“ GC state persisted correctly across restart");
         }
     });
 }
@@ -275,7 +275,7 @@ fn should_handle_gc_with_active_readers() {
             tx.put(key.as_bytes().to_vec(), b"snapshot_value".to_vec(), None)
                 .ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Act: Create snapshot (read lock on SSTs)
@@ -318,7 +318,7 @@ fn should_handle_gc_with_active_readers() {
             );
         }
 
-        eprintln!("✓ Active readers protected during GC");
+        eprintln!("âœ“ Active readers protected during GC");
     });
 }
 
@@ -347,7 +347,7 @@ fn should_collect_orphaned_wal_segments_after_flush() {
             tx.put(key.as_bytes().to_vec(), b"wal_value".to_vec(), None)
                 .ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Act: Flush to SST (WAL segment becomes obsolete)
         engine.flush_cf(&cf).expect("flush");
@@ -364,7 +364,7 @@ fn should_collect_orphaned_wal_segments_after_flush() {
 
         // For local/cloud modes, old WAL segments should be marked for deletion
         if mode != "memory" {
-            eprintln!("✓ WAL segment orphaned and eligible for collection");
+            eprintln!("âœ“ WAL segment orphaned and eligible for collection");
         }
     });
 }
@@ -389,7 +389,7 @@ fn should_not_collect_wal_segments_still_needed_for_recovery() {
                 tx.put(key.as_bytes().to_vec(), b"recovery_value".to_vec(), None)
                     .ok();
             }
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
             // Do NOT flush; simulate crash by dropping engine
         }
 
@@ -412,7 +412,7 @@ fn should_not_collect_wal_segments_still_needed_for_recovery() {
                 );
             }
 
-            eprintln!("✓ WAL segments preserved for recovery across restart");
+            eprintln!("âœ“ WAL segments preserved for recovery across restart");
         }
     });
 }

@@ -26,7 +26,7 @@ fn should_preserve_all_values_given_repeated_reads_when_values_accessed_repeated
             tx.put(key.as_bytes().to_vec(), b"metric_value".to_vec(), None)
                 .expect("put read-path value");
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Act
@@ -66,7 +66,7 @@ fn should_preserve_all_written_values_given_large_write_batch_when_written() {
             tx.put(key.as_bytes().to_vec(), value.to_vec(), None)
                 .expect("put write-batch value");
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Assert
         let tx = engine
@@ -100,7 +100,7 @@ fn should_preserve_all_values_given_compaction_when_requested() {
             tx.put(key.as_bytes().to_vec(), b"gen1".to_vec(), None)
                 .expect("put first compaction batch value");
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush first batch");
 
         let mut tx = engine
@@ -111,7 +111,7 @@ fn should_preserve_all_values_given_compaction_when_requested() {
             tx.put(key.as_bytes().to_vec(), b"gen2".to_vec(), None)
                 .expect("put second compaction batch value");
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush second batch");
 
         // Act
@@ -154,7 +154,7 @@ fn should_preserve_repeated_reads_given_short_cache_warmup_window_when_reads_rep
             tx.put(key.as_bytes().to_vec(), b"cached_value".to_vec(), None)
                 .expect("put cache seed value");
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Act
@@ -207,7 +207,7 @@ fn should_preserve_large_values_given_wal_backed_write_batch_when_flushed() {
             tx.put(key.as_bytes().to_vec(), value.clone(), None)
                 .expect("put wal-sized value");
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Assert
@@ -240,7 +240,7 @@ fn should_preserve_existing_data_given_placeholder_reset_when_new_write_added() 
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put initial reset key");
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Act
         let mut tx = engine
@@ -248,7 +248,7 @@ fn should_preserve_existing_data_given_placeholder_reset_when_new_write_added() 
             .expect("begin follow-up transaction");
         tx.put(b"single_key".to_vec(), b"single_value".to_vec(), None)
             .expect("put follow-up key");
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Assert
         let tx = engine

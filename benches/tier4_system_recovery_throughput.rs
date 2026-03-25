@@ -1,4 +1,4 @@
-//! Tier 4 — Recovery & Reopen Behavior
+//! Tier 4 â€” Recovery & Reopen Behavior
 //!
 //! Measures: engine reopen latency after state-dependent lifecycle events.
 //! NOT: single primitive cost (Tier 3)
@@ -44,7 +44,7 @@ fn write_some(engine: &MidgeEngine, num_keys: usize) {
             let v = vec![(i % 251) as u8; VALUE_SIZE];
             tx.put(k.to_vec(), v, None).unwrap();
         }
-        engine.commit(tx, write_opts).unwrap();
+        tx.commit(write_opts).unwrap();
     }
 }
 

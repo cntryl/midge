@@ -40,7 +40,7 @@ fn should_recover_writes_given_unflushed_memtable_when_reopening() {
                 .expect("put");
             tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
+            tx.commit(WriteOptions::buffered()).unwrap();
             // Engine dropped here, simulating crash with unflushed memtable
         }
 
@@ -81,7 +81,7 @@ fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
             tx.put(b"critical_key".to_vec(), b"critical_value".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
+            tx.commit(WriteOptions::buffered()).unwrap();
             // Simulate immediate crash
         }
 
@@ -116,7 +116,7 @@ fn should_call_fsync_given_wal_sync_enabled_when_put() {
 
         // Assert: Put succeeds (fsync was called without blocking)
         assert!(result.is_ok(), "put should succeed in mode: {}", mode);
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
+        tx.commit(WriteOptions::buffered()).unwrap();
     });
 }
 
@@ -142,7 +142,7 @@ fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
                 tx.put(key.into_bytes(), value.into_bytes(), None)
                     .expect("put");
             }
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
+            tx.commit(WriteOptions::buffered()).unwrap();
             // Force checkpoint to ensure WAL segments are created
             engine.flush_cf(&cf).expect("flush");
         }
@@ -197,7 +197,7 @@ fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
                     tx.put(key.into_bytes(), value.into_bytes(), None)
                         .expect("put");
                 }
-                engine.commit(tx, WriteOptions::buffered()).unwrap();
+                tx.commit(WriteOptions::buffered()).unwrap();
             }
         }
 
@@ -247,7 +247,7 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
                             .unwrap();
                         tx.put(key.into_bytes(), value.into_bytes(), None)
                             .expect("put");
-                        engine_clone.commit(tx, WriteOptions::buffered()).unwrap();
+                        tx.commit(WriteOptions::buffered()).unwrap();
                     }
                 });
                 handles.push(handle);
@@ -302,7 +302,7 @@ fn should_skip_corrupted_wal_tail_given_truncated_tail_when_recovering() {
                 tx.put(key.into_bytes(), b"value".to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
+            tx.commit(WriteOptions::buffered()).unwrap();
             // Simulate crash without flushing final records
         }
 
@@ -336,7 +336,7 @@ fn should_not_recover_data_given_truncated_wal_append_when_reopening() {
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
             tx.put(b"unsafe_key".to_vec(), b"unsafe_value".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
+            tx.commit(WriteOptions::buffered()).unwrap();
             // Immediate crash before fsync
         }
 
@@ -373,7 +373,7 @@ fn should_allow_data_loss_given_skipped_fsync_when_crash_occurs() {
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
             tx.put(b"transient_key".to_vec(), b"transient_value".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
+            tx.commit(WriteOptions::buffered()).unwrap();
             // Crash
         }
 
@@ -409,7 +409,7 @@ fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
                 .expect("put");
             tx.put(b"valid_key_2".to_vec(), b"value_2".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
+            tx.commit(WriteOptions::buffered()).unwrap();
             // Simulate corruption by crashing mid-record
         }
 
@@ -469,8 +469,7 @@ fn should_restore_committed_write_given_local_restart_when_sync_commit_returned(
             .expect("begin write tx");
         tx.put(b"committed".to_vec(), b"value".to_vec(), None)
             .expect("put committed key");
-        engine
-            .commit(tx, WriteOptions::sync())
+        tx.commit(WriteOptions::sync())
             .expect("sync commit must succeed");
     }
 
@@ -503,18 +502,14 @@ fn should_keep_valid_prefix_given_truncated_wal_tail_when_reopening_in_strict_mo
             .expect("begin prefix tx");
         tx.put(b"prefix".to_vec(), b"value".to_vec(), None)
             .expect("put prefix");
-        engine
-            .commit(tx, WriteOptions::sync())
-            .expect("sync prefix commit");
+        tx.commit(WriteOptions::sync()).expect("sync prefix commit");
 
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin torn tx");
         tx.put(b"torn".to_vec(), b"value".to_vec(), None)
             .expect("put torn");
-        engine
-            .commit(tx, WriteOptions::sync())
-            .expect("sync torn commit");
+        tx.commit(WriteOptions::sync()).expect("sync torn commit");
     }
 
     truncate_last_bytes(&db_path.join("wal").join("wal.log"), 3);
@@ -554,9 +549,7 @@ fn should_fail_strict_but_salvage_valid_prefix_given_corrupted_first_wal_frame_w
             .expect("begin write tx");
         tx.put(b"first".to_vec(), b"value".to_vec(), None)
             .expect("put first");
-        engine
-            .commit(tx, WriteOptions::sync())
-            .expect("sync commit");
+        tx.commit(WriteOptions::sync()).expect("sync commit");
     }
 
     corrupt_byte(&db_path.join("wal").join("wal.log"), 4);
@@ -612,8 +605,7 @@ fn should_drop_partial_wal_entry_given_manual_tail_append_when_reopening_in_salv
             .expect("begin complete tx");
         tx.put(b"complete".to_vec(), b"value".to_vec(), None)
             .expect("put complete");
-        engine
-            .commit(tx, WriteOptions::sync())
+        tx.commit(WriteOptions::sync())
             .expect("sync complete commit");
     }
 

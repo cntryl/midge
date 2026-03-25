@@ -50,9 +50,7 @@ fn should_iterate_all_keys_in_order_given_populated_db_when_scanning() {
                 None,
             )
             .unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
 
         // Act
@@ -87,9 +85,7 @@ fn should_iterate_in_reverse_given_reverse_query_when_scanning() {
                 None,
             )
             .unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
 
         // Act
@@ -126,9 +122,7 @@ fn should_limit_results_given_limit_query_when_scanning() {
                 None,
             )
             .unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
 
         // Act
@@ -178,9 +172,7 @@ fn should_return_next_key_given_seek_to_missing_key_when_scanning() {
         tx.put(b"k01".to_vec(), b"v01".to_vec(), None).unwrap();
         tx.put(b"k03".to_vec(), b"v03".to_vec(), None).unwrap();
         tx.put(b"k05".to_vec(), b"v05".to_vec(), None).unwrap();
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
         // Act: Scan from k00 (doesn't exist)
         let tx = engine
@@ -208,9 +200,7 @@ fn should_return_empty_given_seek_past_end_when_scanning() {
             .unwrap();
         tx.put(b"k01".to_vec(), b"v01".to_vec(), None).unwrap();
         tx.put(b"k03".to_vec(), b"v03".to_vec(), None).unwrap();
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
         // Act: Scan starting after all keys
         let tx = engine
@@ -235,9 +225,7 @@ fn should_return_empty_given_invalid_range_when_start_greater_than_end() {
             .unwrap();
         tx.put(b"k01".to_vec(), b"v01".to_vec(), None).unwrap();
         tx.put(b"k05".to_vec(), b"v05".to_vec(), None).unwrap();
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
         // Act: Invalid range (start > end)
         let tx = engine
@@ -267,9 +255,7 @@ fn should_skip_deleted_keys_given_tombstones_when_scanning() {
                 None,
             )
             .unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
 
         // Delete k01 and k03
@@ -278,9 +264,7 @@ fn should_skip_deleted_keys_given_tombstones_when_scanning() {
             .unwrap();
         tx.delete(b"k01".to_vec()).unwrap();
         tx.delete(b"k03".to_vec()).unwrap();
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
         // Act
         let tx = engine
@@ -313,20 +297,15 @@ fn should_respect_range_tombstones_given_delete_range_when_scanning() {
                 None,
             )
             .unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
 
         // Delete range [k02, k07)
-        engine
-            .delete_range(
-                &cf,
-                b"k02".to_vec(),
-                b"k07".to_vec(),
-                cntryl_midge::WriteOptions::buffered(),
-            )
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
+        tx.delete_range(b"k02".to_vec(), b"k07".to_vec()).unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
         // Act
         let tx = engine
@@ -356,34 +335,26 @@ fn should_return_latest_value_given_interleaved_puts_deletes_when_scanning() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key".to_vec(), b"value1".to_vec(), None).unwrap();
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
         // Overwrite
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key".to_vec(), b"value2".to_vec(), None).unwrap();
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
         // Delete and re-put
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx.delete(b"key".to_vec()).unwrap();
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key".to_vec(), b"value3".to_vec(), None).unwrap();
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
         // Act
         let tx = engine
@@ -415,9 +386,7 @@ fn should_match_regular_scan_given_streaming_scan_when_comparing() {
                 None,
             )
             .unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
 
         // Act: Regular range scan
@@ -452,9 +421,7 @@ fn should_respect_limit_given_streaming_scan_when_limited() {
                 None,
             )
             .unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
 
         // Act: Query with limit
@@ -490,9 +457,7 @@ fn should_respect_limit_in_reverse_query_when_limited() {
                 None,
             )
             .unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
 
         // Act: Reverse query with limit
@@ -527,9 +492,7 @@ fn should_apply_tombstones_given_streaming_scan_when_keys_deleted() {
                 None,
             )
             .unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
 
         let mut tx = engine
@@ -537,9 +500,7 @@ fn should_apply_tombstones_given_streaming_scan_when_keys_deleted() {
             .unwrap();
         tx.delete(b"k02".to_vec()).unwrap();
         tx.delete(b"k05".to_vec()).unwrap();
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
         // Act: Scan with query
         let query = cntryl_midge::Query::new();
@@ -574,9 +535,7 @@ fn should_handle_large_scan_given_many_keys_when_iterating() {
             )
             .unwrap();
         }
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
         // Act
         let tx = engine
@@ -609,9 +568,7 @@ fn should_iterate_memtable_plus_multiple_ssts_given_flushed_batches_when_scannin
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(key.into_bytes(), value.into_bytes(), None).unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
         engine.flush_cf(&cf).expect("flush batch into SST");
     }
@@ -623,9 +580,7 @@ fn should_iterate_memtable_plus_multiple_ssts_given_flushed_batches_when_scannin
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx.put(key.into_bytes(), value.into_bytes(), None).unwrap();
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     }
 
     // Act
@@ -653,18 +608,14 @@ fn should_return_latest_value_across_levels_given_overwrite_in_newer_sst_when_sc
         .unwrap();
     tx.put(b"shared".to_vec(), b"v1".to_vec(), None).unwrap();
     tx.put(b"stable".to_vec(), b"keep".to_vec(), None).unwrap();
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     engine.flush_cf(&cf).expect("flush initial sst");
 
     let mut tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .unwrap();
     tx.put(b"shared".to_vec(), b"v2".to_vec(), None).unwrap();
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     engine.flush_cf(&cf).expect("flush overwrite sst");
 
     // Act
@@ -696,9 +647,7 @@ fn should_hide_deleted_keys_across_compacted_ssts_when_scanning() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(key.into_bytes(), b"value".to_vec(), None).unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
         engine.flush_cf(&cf).expect("flush seed batch");
     }
@@ -709,9 +658,7 @@ fn should_hide_deleted_keys_across_compacted_ssts_when_scanning() {
     for deleted in [b"k020", b"k021", b"k050", b"k079"] {
         tx.delete(deleted.to_vec()).expect("delete compacted key");
     }
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     engine.flush_cf(&cf).expect("flush delete tombstones");
     engine.compact_all().expect("compact levels");
 
@@ -747,9 +694,7 @@ fn should_scan_compacted_ssts_given_new_iterator_after_compaction_when_levels_ch
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(key.into_bytes(), value.into_bytes(), None).unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
         engine.flush_cf(&cf).expect("flush batch");
     }
@@ -788,9 +733,7 @@ fn should_handle_concurrent_streaming_scans_when_multiple_threads() {
                 None,
             )
             .unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
 
         // Act: Spawn multiple threads doing concurrent scans
@@ -838,9 +781,7 @@ fn should_produce_identical_results_given_repeated_scans_when_rewinding() {
                 None,
             )
             .unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
 
         // Act: Perform multiple identical scans

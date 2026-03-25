@@ -35,7 +35,7 @@ fn should_return_write_stall_when_memory_budget_exceeded() {
             txn.put(key.as_bytes().to_vec(), value.clone(), None)
                 .expect("put");
 
-            match engine.commit(txn, WriteOptions::buffered()) {
+            match txn.commit(WriteOptions::buffered()) {
                 Ok(()) => {}
                 Err(MidgeError::WriteStall(_msg)) => {
                     write_stall_observed = true;
@@ -80,7 +80,7 @@ fn should_succeed_after_backoff_when_write_stall_cleared() {
             txn.put(key.as_bytes().to_vec(), value.clone(), None)
                 .expect("put");
 
-            match engine.commit(txn, WriteOptions::buffered()) {
+            match txn.commit(WriteOptions::buffered()) {
                 Ok(()) => {}
                 Err(MidgeError::WriteStall(_)) => {
                     first_stall_observed = true;
@@ -102,7 +102,7 @@ fn should_succeed_after_backoff_when_write_stall_cleared() {
         txn.put(key.as_bytes().to_vec(), value.clone(), None)
             .expect("put");
 
-        let second_write_ok_or_stall = match engine.commit(txn, WriteOptions::buffered()) {
+        let second_write_ok_or_stall = match txn.commit(WriteOptions::buffered()) {
             Ok(()) => true,
             Err(MidgeError::WriteStall(_)) => true,
             Err(e) => panic!("unexpected error: {:?}", e),
@@ -165,7 +165,7 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
                 txn.put(key.as_bytes().to_vec(), value.clone(), None)
                     .expect("put");
 
-                match engine_clone.commit(txn, WriteOptions::buffered()) {
+                match txn.commit(WriteOptions::buffered()) {
                     Ok(()) => total_writes += 1,
                     Err(MidgeError::WriteStall(_)) => {
                         total_stalls += 1;
@@ -233,7 +233,7 @@ fn should_handle_concurrent_writes_with_consistent_backpressure() {
                     txn.put(key.as_bytes().to_vec(), value.clone(), None)
                         .expect("put");
 
-                    match engine_clone.commit(txn, WriteOptions::buffered()) {
+                    match txn.commit(WriteOptions::buffered()) {
                         Ok(()) => writes += 1,
                         Err(MidgeError::WriteStall(_)) => {
                             stalls += 1;

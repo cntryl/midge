@@ -145,8 +145,8 @@ fn should_fail_cloud_strict_commit_when_wal_upload_fails() {
     .expect("put strict-fail value");
 
     // Act
-    let error = engine
-        .commit(tx, WriteOptions::cloud_strict())
+    let error = tx
+        .commit(WriteOptions::cloud_strict())
         .expect_err("cloud_strict should fail when the authoritative upload fails");
     drop(engine);
 
@@ -321,7 +321,7 @@ fn put_default(engine: &Engine, key: &[u8], value: &[u8], opts: WriteOptions) {
         .expect("begin write tx");
     tx.put(key.to_vec(), value.to_vec(), None)
         .expect("put default value");
-    engine.commit(tx, opts).expect("commit default value");
+    tx.commit(opts).expect("commit default value");
 }
 
 fn get_default(engine: &Engine, key: &[u8]) -> Option<Bytes> {

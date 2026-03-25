@@ -24,7 +24,7 @@ let cf = engine.create_column_family("cf1")?;
 
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 tx.put(b"hello".to_vec(), b"world".to_vec(), None)?;
-engine.commit(tx, WriteOptions::sync())?;
+tx.commit(WriteOptions::sync())?;
 
 let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
 let value = tx.get(b"hello")?;
@@ -66,7 +66,7 @@ Those documents define what `commit()` means, how restart recovery works, and wh
 ```rust
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 tx.put(b"key".to_vec(), b"value".to_vec(), None)?;
-engine.commit(tx, WriteOptions::sync())?;
+tx.commit(WriteOptions::sync())?;
 ```
 
 **Get**
@@ -81,13 +81,15 @@ let value = tx.get(b"key")?;
 ```rust
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 tx.delete(b"key".to_vec())?;
-engine.commit(tx, WriteOptions::sync())?;
+tx.commit(WriteOptions::sync())?;
 ```
 
 **Delete range**
 
 ```rust
-engine.delete_range(&cf, b"start", b"end", WriteOptions::sync())?;
+let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+tx.delete_range(b"start".to_vec(), b"end".to_vec())?;
+tx.commit(WriteOptions::sync())?;
 ```
 
 **Scan**

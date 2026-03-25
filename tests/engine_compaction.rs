@@ -26,8 +26,7 @@ fn should_preserve_snapshot_reads_when_flushing_while_snapshot_is_open() {
             .expect("begin write tx");
         tx.put(key.as_bytes().to_vec(), b"initial_value".to_vec(), None)
             .expect("put initial value");
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::best_effort()) // Fast setup
+        tx.commit(cntryl_midge::WriteOptions::best_effort()) // Fast setup
             .expect("commit initial value");
     }
 
@@ -73,8 +72,7 @@ fn should_preserve_both_write_batches_after_flushing_between_batches() {
             tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None)
                 .expect("put first batch value");
         }
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::best_effort()) // Fast setup
+        tx.commit(cntryl_midge::WriteOptions::best_effort()) // Fast setup
             .expect("commit first batch");
     }
 
@@ -90,8 +88,7 @@ fn should_preserve_both_write_batches_after_flushing_between_batches() {
             tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None)
                 .expect("put second batch value");
         }
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
+        tx.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit second batch");
     }
 
@@ -119,20 +116,18 @@ fn should_preserve_range_tombstones_after_flushing_deleted_range() {
             .expect("begin seed tx");
         tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
             .expect("put seed value");
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
+        tx.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit seed value");
     }
     engine.flush_cf(&cf).expect("flush seed range");
 
-    engine
-        .delete_range(
-            &cf,
-            b"k300".to_vec(),
-            b"k700".to_vec(),
-            cntryl_midge::WriteOptions::buffered(),
-        )
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin delete range tx");
+    tx.delete_range(b"k300".to_vec(), b"k700".to_vec())
         .expect("delete range");
+    tx.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("commit delete range");
 
     // Act
     engine.flush_cf(&cf).expect("flush tombstone");
@@ -168,8 +163,7 @@ fn should_preserve_large_values_after_flushing() {
             .expect("begin large value tx");
         tx.put(key.as_bytes().to_vec(), large_value.clone(), None)
             .expect("put large value");
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
+        tx.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit large value");
     }
 
@@ -199,8 +193,7 @@ fn should_preserve_latest_overwritten_value_after_flushing() {
             .expect("begin overwrite tx");
         tx.put(b"hotkey".to_vec(), value.as_bytes().to_vec(), None)
             .expect("put overwrite value");
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
+        tx.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit overwrite value");
     }
 
@@ -235,8 +228,7 @@ fn should_preserve_all_keys_after_repeated_flushes() {
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put batch value");
         }
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
+        tx.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit batch");
         engine.flush_cf(&cf).expect("flush batch");
     }
@@ -260,7 +252,7 @@ fn should_preserve_all_keys_after_repeated_flushes() {
 /// Slice 5: Verify that compaction output SSTs are published in the manifest
 /// and become the source of truth for subsequent reads.
 ///
-/// This test validates that `CompactionComplete` → `ManifestCompactionComplete`
+/// This test validates that `CompactionComplete` â†’ `ManifestCompactionComplete`
 /// routing correctly updates the manifest with:
 /// - Input SSTs removed from active set
 /// - Output SSTs added to manifest
@@ -284,8 +276,7 @@ fn should_publish_compacted_ssts_in_manifest_when_compaction_completes() {
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put batch value");
         }
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
+        tx.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit batch");
         engine.flush_cf(&cf).expect("flush batch");
     }
@@ -331,7 +322,7 @@ fn should_publish_compacted_ssts_in_manifest_when_compaction_completes() {
 /// old files were deleted after round 1's manifest publish.
 #[test]
 fn should_cleanup_input_ssts_after_compaction_manifest_publishes() {
-    // Arrange: Create 5 L0 files (5 batches × 100 keys each)
+    // Arrange: Create 5 L0 files (5 batches Ã— 100 keys each)
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     for batch in 0..5 {
@@ -343,14 +334,13 @@ fn should_cleanup_input_ssts_after_compaction_manifest_publishes() {
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put batch value");
         }
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
+        tx.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit batch");
         engine.flush_cf(&cf).expect("flush batch");
     }
 
     // Act: Compact twice, verifying cleanup between rounds
-    // Round 1: Merges 5 L0 files → 1 L1 file, deletes input L0s
+    // Round 1: Merges 5 L0 files â†’ 1 L1 file, deletes input L0s
     engine.compact_all().expect("first compaction");
 
     // Add new batch (creates new L0)
@@ -362,8 +352,7 @@ fn should_cleanup_input_ssts_after_compaction_manifest_publishes() {
         tx.put(key.as_bytes().to_vec(), b"new_value".to_vec(), None)
             .expect("put new batch value");
     }
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
+    tx.commit(cntryl_midge::WriteOptions::buffered())
         .expect("commit new batch");
     engine.flush_cf(&cf).expect("flush new batch");
 

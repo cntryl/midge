@@ -1,4 +1,4 @@
-//! Tier 4 — YCSB Workload F (Read-modify-write)
+//! Tier 4 â€” YCSB Workload F (Read-modify-write)
 //!
 //! Workload F: read-modify-write on an existing keyspace.
 
@@ -64,7 +64,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                             .expect("begin");
                         tx.put(k.to_vec(), v.clone(), None).expect("warmup put");
-                        e.commit(tx, cntryl_midge::WriteOptions::best_effort()) // Fast warmup
+                        tx.commit(cntryl_midge::WriteOptions::best_effort()) // Fast warmup
                     })
                     .expect("commit");
                 }
@@ -105,7 +105,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                             .expect("measured begin");
                         tx.put(k.to_vec(), v.clone(), None).expect("measured put");
-                        e.commit(tx, write_opts)
+                        tx.commit(write_opts)
                     })
                     .expect("measured commit");
                 }

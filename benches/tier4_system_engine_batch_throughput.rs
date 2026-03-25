@@ -1,4 +1,4 @@
-//! Tier 4 — Engine Batch Throughput
+//! Tier 4 â€” Engine Batch Throughput
 //!
 //! Measures: throughput of batched writes (multiple ops per tx)
 //! NOT: single primitive cost (Tier 3)
@@ -47,7 +47,7 @@ fn run_batch_commit_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops: u
         for (k, v) in &keys_vals {
             tx.put(k.to_vec(), v.clone(), None).expect("put");
         }
-        e.commit(tx, cntryl_midge::WriteOptions::buffered())
+        tx.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit")
     });
 

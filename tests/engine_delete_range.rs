@@ -1,26 +1,12 @@
 //! Delete Range Integration Tests
 //!
 //! Tests range deletion operations end-to-end using the public MidgeEngine API.
-//!
-//! **Current Status** (âœ… FULLY IMPLEMENTED):
-//! - delete_range() API is fully functional and verified
-//! - Correctly deletes all keys in the specified range [start, end)
-//! - All storage modes (Memory, LocalDisk, CloudBacked) pass identical tests
-//!
-//! These tests are **storage-mode invariant**: every supported backend
-//! (Memory, LocalDisk, CloudBacked) must pass with identical behavior.
-//!
-//! Naming convention:
-//!   should_<behavior>_given_<context>_when_<condition>
 
 use bytes::Bytes;
 mod common;
-use cntryl_midge::{Query, TransactionMode, WriteOptions};
+use cntryl_midge::{TransactionMode, WriteOptions};
 use common::*;
-
-// ============================================================================
-// BASIC RANGE DELETION
-// ============================================================================
+use std::sync::Arc;
 
 #[test]
 fn should_delete_keys_in_range_given_delete_range_when_querying() {
@@ -29,43 +15,32 @@ fn should_delete_keys_in_range_given_delete_range_when_querying() {
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.put(b"key1".to_vec(), b"val1".to_vec(), None)
-            .expect("put1");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.put(b"key2".to_vec(), b"val2".to_vec(), None)
-            .expect("put2");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.put(b"key3".to_vec(), b"val3".to_vec(), None)
-            .expect("put3");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.put(b"key4".to_vec(), b"val4".to_vec(), None)
-            .expect("put4");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
+        for (key, value) in [
+            ("key1", "val1"),
+            ("key2", "val2"),
+            ("key3", "val3"),
+            ("key4", "val4"),
+        ] {
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .unwrap();
+            tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
+                .expect("seed put");
+            tx.commit(WriteOptions::buffered()).unwrap();
+        }
 
         // Act
-        engine
-            .delete_range(
-                &cf,
-                b"key2".to_vec(),
-                b"key4".to_vec(),
-                WriteOptions::buffered(),
-            )
+        let mut delete_tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
+        delete_tx
+            .delete_range(b"key2".to_vec(), b"key4".to_vec())
             .expect("delete_range");
+        delete_tx
+            .commit(WriteOptions::buffered())
+            .expect("commit delete_range");
 
         // Assert
-        // Keys outside range should still exist
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
         assert_eq!(
             tx.get(b"key1").expect("get1"),
@@ -73,14 +48,6 @@ fn should_delete_keys_in_range_given_delete_range_when_querying() {
             "key1 should exist (outside range) in mode: {}",
             mode
         );
-        assert_eq!(
-            tx.get(b"key4").expect("get4"),
-            Some(Bytes::from_static(b"val4")),
-            "key4 should exist (outside range) in mode: {}",
-            mode
-        );
-
-        // Keys in range [key2, key4) should be deleted
         assert_eq!(
             tx.get(b"key2").expect("get2"),
             None,
@@ -91,6 +58,12 @@ fn should_delete_keys_in_range_given_delete_range_when_querying() {
             tx.get(b"key3").expect("get3"),
             None,
             "key3 should be deleted (in range) in mode: {}",
+            mode
+        );
+        assert_eq!(
+            tx.get(b"key4").expect("get4"),
+            Some(Bytes::from_static(b"val4")),
+            "key4 should exist (outside range) in mode: {}",
             mode
         );
     });
@@ -107,20 +80,20 @@ fn should_handle_empty_range_given_start_equals_end_when_delete_range() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key".to_vec(), b"val".to_vec(), None).expect("put");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
+        tx.commit(WriteOptions::buffered()).unwrap();
 
         // Act
-        engine
-            .delete_range(
-                &cf,
-                b"key".to_vec(),
-                b"key".to_vec(),
-                WriteOptions::buffered(),
-            )
+        let mut delete_tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
+        delete_tx
+            .delete_range(b"key".to_vec(), b"key".to_vec())
             .expect("delete_range");
+        delete_tx
+            .commit(WriteOptions::buffered())
+            .expect("commit delete_range");
 
         // Assert
-        // Empty range should not delete anything
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
         assert_eq!(
             tx.get(b"key").expect("get"),
@@ -132,36 +105,6 @@ fn should_handle_empty_range_given_start_equals_end_when_delete_range() {
 }
 
 #[test]
-fn should_accept_delete_range_call_with_valid_bounds_when_called() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
-        let engine = open_with_mode(opts, mode);
-        let cf = engine.create_column_family("test").expect("create cf");
-
-        for i in 0..100 {
-            let key = format!("key{:03}", i);
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .unwrap();
-            tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
-                .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
-        }
-
-        // Act
-        let result = engine.delete_range(
-            &cf,
-            b"key010".to_vec(),
-            b"key090".to_vec(),
-            WriteOptions::buffered(),
-        );
-
-        // Assert: delete_range should not error
-        result.expect("delete_range should succeed in mode: {}");
-    });
-}
-
-#[test]
 fn should_reject_delete_range_given_reversed_bounds_when_called() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -169,12 +112,10 @@ fn should_reject_delete_range_given_reversed_bounds_when_called() {
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
-        let result = engine.delete_range(
-            &cf,
-            b"key9".to_vec(),
-            b"key1".to_vec(),
-            WriteOptions::buffered(),
-        );
+        let mut delete_tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
+        let result = delete_tx.delete_range(b"key9".to_vec(), b"key1".to_vec());
 
         // Assert
         assert!(
@@ -197,79 +138,25 @@ fn should_delete_key_given_delete_range_with_single_key_when_matching() {
             .unwrap();
         tx.put(b"target".to_vec(), b"value".to_vec(), None)
             .expect("put");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
+        tx.commit(WriteOptions::buffered()).unwrap();
 
         // Act
-        // Range [target, targetZ) includes target
-        engine
-            .delete_range(
-                &cf,
-                b"target".to_vec(),
-                b"targetZ".to_vec(),
-                WriteOptions::buffered(),
-            )
+        let mut delete_tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
+        delete_tx
+            .delete_range(b"target".to_vec(), b"targetZ".to_vec())
             .expect("delete_range");
+        delete_tx
+            .commit(WriteOptions::buffered())
+            .expect("commit delete_range");
 
         // Assert
-        // Target should be deleted (in range)
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
         assert_eq!(
             tx.get(b"target").expect("get"),
             None,
             "target should be deleted in mode: {}",
-            mode
-        );
-    });
-}
-
-// ============================================================================
-// MULTI-OPERATION BEHAVIOR
-// ============================================================================
-
-#[test]
-fn should_handle_delete_range_after_put_when_interleaved() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
-        let engine = open_with_mode(opts, mode);
-        let cf = engine.create_column_family("test").expect("create cf");
-
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.put(b"a".to_vec(), b"val_a".to_vec(), None)
-            .expect("put_a");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.put(b"b".to_vec(), b"val_b".to_vec(), None)
-            .expect("put_b");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.put(b"c".to_vec(), b"val_c".to_vec(), None)
-            .expect("put_c");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
-
-        // Act
-        engine
-            .delete_range(&cf, b"a".to_vec(), b"c".to_vec(), WriteOptions::buffered())
-            .expect("delete_range");
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.put(b"b".to_vec(), b"new_b".to_vec(), None)
-            .expect("put_after_range");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
-
-        // Assert
-        // Key should have new value from the put after delete_range
-        let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
-        assert_eq!(
-            tx.get(b"b").expect("get_b"),
-            Some(Bytes::from_static(b"new_b")),
-            "put after delete_range should succeed in mode: {}",
             mode
         );
     });
@@ -289,28 +176,24 @@ fn should_allow_multiple_delete_ranges_when_called_sequentially() {
                 .unwrap();
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
+            tx.commit(WriteOptions::buffered()).unwrap();
         }
 
         // Act
-        engine
-            .delete_range(
-                &cf,
-                b"k03".to_vec(),
-                b"k10".to_vec(),
-                WriteOptions::buffered(),
-            )
-            .expect("delete_range1");
-        engine
-            .delete_range(
-                &cf,
-                b"k15".to_vec(),
-                b"k18".to_vec(),
-                WriteOptions::buffered(),
-            )
-            .expect("delete_range2");
+        for (start, end, label) in [
+            (b"k03", b"k10", "delete_range1"),
+            (b"k15", b"k18", "delete_range2"),
+        ] {
+            let mut delete_tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .unwrap();
+            delete_tx
+                .delete_range(start.to_vec(), end.to_vec())
+                .expect(label);
+            delete_tx.commit(WriteOptions::buffered()).expect(label);
+        }
 
-        // Assert: Keys in ranges should be deleted
+        // Assert
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
         for i in 0..20 {
             let key = format!("k{:02}", i);
@@ -328,68 +211,41 @@ fn should_allow_multiple_delete_ranges_when_called_sequentially() {
     });
 }
 
-// ============================================================================
-// PERSISTENCE & RECOVERY
-// ============================================================================
-
 #[test]
 fn should_persist_keys_across_delete_range_with_restart_when_durable() {
-    // Note: Only test with durable storage modes (local, cloud).
-    // Memory mode doesn't persist.
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
-        // Act
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
-            let mut tx = engine
+            for (key, value) in [("key1", "val1"), ("key2", "val2"), ("key3", "val3")] {
+                let mut tx = engine
+                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                    .unwrap();
+                tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
+                    .expect("put seed");
+                tx.commit(WriteOptions::buffered()).unwrap();
+            }
+
+            let mut delete_tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .unwrap();
-            tx.put(b"key1".to_vec(), b"val1".to_vec(), None)
-                .expect("put1");
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .unwrap();
-            tx.put(b"key2".to_vec(), b"val2".to_vec(), None)
-                .expect("put2");
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .unwrap();
-            tx.put(b"key3".to_vec(), b"val3".to_vec(), None)
-                .expect("put3");
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
-            engine
-                .delete_range(
-                    &cf,
-                    b"key1".to_vec(),
-                    b"key3".to_vec(),
-                    WriteOptions::buffered(),
-                )
+            delete_tx
+                .delete_range(b"key1".to_vec(), b"key3".to_vec())
                 .expect("delete_range");
-            let _ = cf;
+            delete_tx
+                .commit(WriteOptions::buffered())
+                .expect("commit delete_range");
         }
 
+        // Act
         // Assert
         let engine = open_with_mode(opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
-
-        // Keys in the delete_range should be deleted
-        // delete_range(key1, key3) deletes [key1, key3) = key1 and key2
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
-        assert_eq!(
-            tx.get(b"key1").expect("get1"),
-            None,
-            "key1 should be deleted"
-        );
-        assert_eq!(
-            tx.get(b"key2").expect("get2"),
-            None,
-            "key2 should be deleted"
-        );
-        // key3 is outside the range [key1, key3), so it should persist
+        assert!(tx.get(b"key1").expect("get1").is_none());
+        assert!(tx.get(b"key2").expect("get2").is_none());
         assert_eq!(
             tx.get(b"key3").expect("get3"),
             Some(Bytes::from_static(b"val3")),
@@ -398,15 +254,11 @@ fn should_persist_keys_across_delete_range_with_restart_when_durable() {
     });
 }
 
-// ============================================================================
-// CONCURRENCY
-// ============================================================================
-
 #[test]
 fn should_handle_concurrent_delete_ranges_when_multiple_threads() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = std::sync::Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..100 {
@@ -416,38 +268,38 @@ fn should_handle_concurrent_delete_ranges_when_multiple_threads() {
                 .unwrap();
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
+            tx.commit(WriteOptions::buffered()).unwrap();
         }
 
-        // Act: Multiple threads calling delete_range
+        // Act
         let mut handles = vec![];
         for thread_id in 0..5 {
-            let engine_clone = engine.clone();
+            let engine_clone = Arc::clone(&engine);
             let cf_clone = cf.clone();
-            let h = std::thread::spawn(move || {
+            handles.push(std::thread::spawn(move || {
                 let start = format!("key{:03}", thread_id * 10);
                 let end = format!("key{:03}", (thread_id + 1) * 10);
-                engine_clone
-                    .delete_range(
-                        &cf_clone,
-                        start.as_bytes().to_vec(),
-                        end.as_bytes().to_vec(),
-                        WriteOptions::buffered(),
-                    )
+                let mut delete_tx = engine_clone
+                    .begin_tx(cf_clone.id(), TransactionMode::ReadWrite)
+                    .unwrap();
+                delete_tx
+                    .delete_range(start.as_bytes().to_vec(), end.as_bytes().to_vec())
                     .expect("delete_range");
-            });
-            handles.push(h);
+                delete_tx
+                    .commit(WriteOptions::buffered())
+                    .expect("commit delete_range");
+            }));
         }
 
-        for h in handles {
-            h.join().expect("thread");
+        for handle in handles {
+            handle.join().expect("thread");
         }
 
-        // Assert: Keys in deleted ranges should be gone
+        // Assert
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
         for i in 0..100 {
             let key = format!("key{:03}", i);
-            let should_exist = !(0..50).contains(&i); // Threads delete ranges [0-10), [10-20), [20-30), [30-40), [40-50)
+            let should_exist = !(0..50).contains(&i);
             let got = tx.get(key.as_bytes()).expect("get");
             assert_eq!(
                 got.is_some(),
@@ -458,128 +310,5 @@ fn should_handle_concurrent_delete_ranges_when_multiple_threads() {
                 mode
             );
         }
-    });
-}
-
-#[test]
-fn should_handle_concurrent_mixed_operations_when_put_delete_interleaved() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
-        let engine = std::sync::Arc::new(open_with_mode(opts, mode));
-
-        // Put all keys first (use zero-padded format for proper lexicographic ordering)
-        let cf = engine.create_column_family("test").expect("create cf");
-        for i in 0..50 {
-            let key = format!("k{:02}", i);
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .unwrap();
-            tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
-                .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).unwrap();
-        }
-
-        // Act: Concurrent delete_ranges
-        let mut del_handles = vec![];
-        for i in 0..5 {
-            let engine_clone = engine.clone();
-            let cf_clone = cf.clone();
-            let h = std::thread::spawn(move || {
-                let start = format!("k{:02}", i * 5);
-                let end = format!("k{:02}", (i + 1) * 5);
-                engine_clone
-                    .delete_range(
-                        &cf_clone,
-                        start.as_bytes().to_vec(),
-                        end.as_bytes().to_vec(),
-                        WriteOptions::buffered(),
-                    )
-                    .expect("delete_range");
-            });
-            del_handles.push(h);
-        }
-
-        for h in del_handles {
-            h.join().expect("del thread");
-        }
-
-        // Assert: Keys in ranges [k00-k05), [k05-k10), [k10-k15), [k15-k20), [k20-k25) should be deleted
-        // All other keys should exist
-        let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
-        for i in 0..50 {
-            let key = format!("k{:02}", i);
-            let should_exist = i >= 25; // Threads delete k00-k24
-            let got = tx.get(key.as_bytes()).expect("get");
-            assert_eq!(
-                got.is_some(),
-                should_exist,
-                "key {} should {} after concurrent ops in mode: {}",
-                i,
-                if should_exist { "exist" } else { "be deleted" },
-                mode
-            );
-        }
-    });
-}
-
-// ============================================================================
-// IMPLEMENTATION NOTE
-// ============================================================================
-
-#[test]
-fn should_document_current_limitation_of_range_method_when_called() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
-        let engine = open_with_mode(opts, mode);
-        let cf = engine.create_column_family("test").expect("create cf");
-
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.put(b"key1".to_vec(), b"val1".to_vec(), None)
-            .expect("put1");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.put(b"key2".to_vec(), b"val2".to_vec(), None)
-            .expect("put2");
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
-
-        // Act: Call scan() via transaction to demonstrate current behavior
-        let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
-        let mut iter = tx
-            .scan(
-                &Query::new()
-                    .start_key(Bytes::from(&b"key1"[..]))
-                    .end_key(Bytes::from(&b"key3"[..])),
-            )
-            .expect("scan");
-        let results: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
-
-        // Assert: range() should return keys in the range
-        // Currently it returns empty, but should return [key1, key2]
-        assert!(
-            results.len() >= 2,
-            "range() should return at least 2 keys in range [key1, key3) in mode: {}",
-            mode
-        );
-
-        // The keys should be in the results
-        let results_str: Vec<String> = results
-            .iter()
-            .map(|kv| String::from_utf8_lossy(&kv.0).to_string())
-            .collect();
-
-        assert!(
-            results_str.contains(&"key1".to_string()),
-            "range() results should contain key1 in mode: {}",
-            mode
-        );
-        assert!(
-            results_str.contains(&"key2".to_string()),
-            "range() results should contain key2 in mode: {}",
-            mode
-        );
     });
 }

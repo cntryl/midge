@@ -102,7 +102,7 @@ fn should_collect_orphaned_cloud_objects_after_compaction() {
             tx.put(key.as_bytes().to_vec(), b"cloud_value_a".to_vec(), None)
                 .ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush A");
 
         // Batch 2: Create SST B
@@ -114,10 +114,10 @@ fn should_collect_orphaned_cloud_objects_after_compaction() {
             tx.put(key.as_bytes().to_vec(), b"cloud_value_b".to_vec(), None)
                 .ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush B");
 
-        // Act: Compact (merge A+B → C, orphaning A and B)
+        // Act: Compact (merge A+B â†’ C, orphaning A and B)
         engine.compact_all().ok();
 
         // Assert: All data still readable (proof GC didn't delete active SSTs)
@@ -134,7 +134,7 @@ fn should_collect_orphaned_cloud_objects_after_compaction() {
             );
         }
 
-        eprintln!("✓ Cloud GC successfully cleaned up orphaned objects");
+        eprintln!("âœ“ Cloud GC successfully cleaned up orphaned objects");
     });
 }
 
@@ -159,7 +159,7 @@ fn should_not_collect_cloud_objects_referenced_by_manifest() {
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Act: Don't compact; SST remains in manifest
@@ -182,7 +182,7 @@ fn should_not_collect_cloud_objects_referenced_by_manifest() {
             mode
         );
 
-        eprintln!("✓ All manifest-referenced cloud objects preserved");
+        eprintln!("âœ“ All manifest-referenced cloud objects preserved");
     });
 }
 
@@ -204,7 +204,7 @@ fn should_handle_gc_when_cloud_list_fails() {
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Batch 2
@@ -216,7 +216,7 @@ fn should_handle_gc_when_cloud_list_fails() {
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Act: Trigger compaction (which may fail to list cloud objects)
@@ -238,7 +238,7 @@ fn should_handle_gc_when_cloud_list_fails() {
             mode
         );
 
-        eprintln!("✓ Engine gracefully handled cloud list failure");
+        eprintln!("âœ“ Engine gracefully handled cloud list failure");
     });
 }
 
@@ -260,7 +260,7 @@ fn should_handle_gc_when_cloud_delete_fails() {
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Create second SST
@@ -272,7 +272,7 @@ fn should_handle_gc_when_cloud_delete_fails() {
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Act: Trigger compaction
@@ -305,6 +305,6 @@ fn should_handle_gc_when_cloud_delete_fails() {
             readable
         );
 
-        eprintln!("✓ Engine gracefully handled cloud delete failure");
+        eprintln!("âœ“ Engine gracefully handled cloud delete failure");
     });
 }

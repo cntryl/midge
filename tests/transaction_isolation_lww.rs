@@ -54,11 +54,9 @@ fn should_apply_last_committed_write_given_multiple_commits_when_last_write_wins
         txn2.put(b"key".to_vec(), b"from_txn2".to_vec(), None)
             .expect("put txn2 value");
 
-        engine
-            .commit(txn1, cntryl_midge::WriteOptions::buffered())
+        txn1.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit txn1");
-        engine
-            .commit(txn2, cntryl_midge::WriteOptions::buffered())
+        txn2.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit txn2");
 
         let reader = engine
@@ -88,8 +86,8 @@ fn should_allow_lost_update_given_concurrent_writes_when_lost_update_occurs() {
         setup
             .put(b"counter".to_vec(), b"0".to_vec(), None)
             .expect("put initial counter");
-        engine
-            .commit(setup, cntryl_midge::WriteOptions::buffered())
+        setup
+            .commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit setup");
 
         // Act
@@ -110,11 +108,9 @@ fn should_allow_lost_update_given_concurrent_writes_when_lost_update_occurs() {
         txn2.put(b"counter".to_vec(), b"1".to_vec(), None)
             .expect("txn2 write increment");
 
-        engine
-            .commit(txn1, cntryl_midge::WriteOptions::buffered())
+        txn1.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit txn1");
-        engine
-            .commit(txn2, cntryl_midge::WriteOptions::buffered())
+        txn2.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit txn2");
 
         let reader = engine
@@ -154,10 +150,9 @@ fn should_abort_second_commit_given_conflicting_writes_when_abort_on_write_confl
             .expect("put tx2 value");
 
         // Act
-        engine
-            .commit(tx1, cntryl_midge::WriteOptions::buffered())
+        tx1.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit tx1");
-        let second_commit = engine.commit(tx2, cntryl_midge::WriteOptions::buffered());
+        let second_commit = tx2.commit(cntryl_midge::WriteOptions::buffered());
 
         // Assert
         assert!(
@@ -205,10 +200,9 @@ fn should_abort_delete_range_commit_given_overlapping_recent_writes_when_abort_o
             .expect("tx2 delete range");
 
         // Act
-        engine
-            .commit(tx1, cntryl_midge::WriteOptions::buffered())
+        tx1.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit tx1");
-        let second_commit = engine.commit(tx2, cntryl_midge::WriteOptions::buffered());
+        let second_commit = tx2.commit(cntryl_midge::WriteOptions::buffered());
 
         // Assert
         assert!(
@@ -256,10 +250,9 @@ fn should_abort_point_write_commit_given_recent_overlapping_delete_range_when_ab
             .expect("put tx2 value");
 
         // Act
-        engine
-            .commit(tx1, cntryl_midge::WriteOptions::buffered())
+        tx1.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit tx1");
-        let second_commit = engine.commit(tx2, cntryl_midge::WriteOptions::buffered());
+        let second_commit = tx2.commit(cntryl_midge::WriteOptions::buffered());
 
         // Assert
         assert!(

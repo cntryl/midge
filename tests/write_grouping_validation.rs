@@ -33,7 +33,7 @@ fn should_group_concurrent_batch_submissions_when_multiple_threads_submit() {
                         .expect("begin_tx");
                     tx.put(key.into_bytes(), value.into_bytes(), None)
                         .expect("put");
-                    let result = engine_clone.commit(tx, cntryl_midge::WriteOptions::buffered());
+                    let result = tx.commit(cntryl_midge::WriteOptions::buffered());
                     assert!(result.is_ok(), "commit should succeed");
                 }
             })
@@ -60,7 +60,7 @@ fn should_group_concurrent_batch_submissions_when_multiple_threads_submit() {
     }
 
     println!(
-        "✓ Write grouping: {} ops from {} threads in {:.3}s, {:.0} ops/sec",
+        "âœ“ Write grouping: {} ops from {} threads in {:.3}s, {:.0} ops/sec",
         total_ops as u64,
         num_threads,
         elapsed.as_secs_f64(),
@@ -95,7 +95,7 @@ fn should_handle_concurrent_writes_correctly_with_write_grouping() {
                         .expect("begin_tx");
                     tx.put(key.into_bytes(), value.into_bytes(), None)
                         .expect("put");
-                    let _ = engine_clone.commit(tx, cntryl_midge::WriteOptions::buffered());
+                    let _ = tx.commit(cntryl_midge::WriteOptions::buffered());
                 }
             })
         })
@@ -118,7 +118,7 @@ fn should_handle_concurrent_writes_correctly_with_write_grouping() {
     let total_ops = (ops_per_thread * num_threads) as f64;
     let throughput = total_ops / elapsed.as_secs_f64();
     println!(
-        "✓ Write grouping with backpressure: {} ops from {} threads, {:.0} ops/sec",
+        "âœ“ Write grouping with backpressure: {} ops from {} threads, {:.0} ops/sec",
         total_ops as u64, num_threads, throughput
     );
 }
@@ -146,8 +146,7 @@ fn should_maintain_ordering_with_write_grouping() {
             None,
         )
         .expect("put");
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
+        tx.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit");
     }
 
@@ -170,7 +169,7 @@ fn should_maintain_ordering_with_write_grouping() {
     }
 
     println!(
-        "✓ Ordering maintained across {} sequential operations",
+        "âœ“ Ordering maintained across {} sequential operations",
         num_sequential_ops
     );
 }

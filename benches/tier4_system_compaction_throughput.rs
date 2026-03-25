@@ -1,4 +1,4 @@
-//! Tier 4 — Compaction Throughput & Scaling Behavior
+//! Tier 4 â€” Compaction Throughput & Scaling Behavior
 //!
 //! Measures: cascading compaction performance, overlap impact, and degradation
 //! under realistic multi-level, multi-batch workloads.
@@ -69,7 +69,7 @@ fn run_compact_all_many_sst_case(
             tx.put(keys[idx].to_vec(), values[idx].clone(), None)
                 .expect("setup put");
         }
-        engine.commit(tx, write_opts).expect("setup commit");
+        tx.commit(write_opts).expect("setup commit");
         engine.flush_cf(&cf).expect("setup flush"); // Ensure durability after each batch
     }
 
@@ -113,7 +113,7 @@ fn run_many_overlapping_l0_files_case(
                 tx.put(k.to_vec(), base_values[idx].clone(), None)
                     .expect("setup put");
             }
-            engine.commit(tx, write_opts).expect("setup commit");
+            tx.commit(write_opts).expect("setup commit");
             offset = tx_end;
         }
         engine.flush_cf(&cf).expect("setup flush");
@@ -158,7 +158,7 @@ fn run_overlap_pressure_compact_case(
                 tx.put(k.to_vec(), base_values[idx].clone(), None)
                     .expect("setup put");
             }
-            engine.commit(tx, write_opts).expect("setup commit");
+            tx.commit(write_opts).expect("setup commit");
             offset = tx_end;
         }
         engine.flush_cf(&cf).expect("setup flush");

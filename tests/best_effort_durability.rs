@@ -21,7 +21,7 @@ fn should_skip_wal_when_using_best_effort() -> cntryl_midge::MidgeResult<()> {
     let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
     tx.put(b"key1".to_vec(), b"value1".to_vec(), None)?;
     tx.put(b"key2".to_vec(), b"value2".to_vec(), None)?;
-    engine.commit(tx, WriteOptions::best_effort())?;
+    tx.commit(WriteOptions::best_effort())?;
 
     // Assert - Data is visible in memtable
     let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
@@ -50,7 +50,7 @@ fn should_persist_best_effort_data_when_flushed() -> cntryl_midge::MidgeResult<(
             None,
         )?;
     }
-    engine.commit(tx, WriteOptions::best_effort())?;
+    tx.commit(WriteOptions::best_effort())?;
 
     // Flush to SST - but note: without WAL, BestEffort data relies ONLY on successful flush
     engine.flush_cf(&cf)?;
@@ -59,7 +59,7 @@ fn should_persist_best_effort_data_when_flushed() -> cntryl_midge::MidgeResult<(
     // manifest-backed SST visibility on reopen.
     let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite)?;
     tx.put(b"durable_marker".to_vec(), b"marker".to_vec(), None)?;
-    engine.commit(tx, WriteOptions::buffered())?;
+    tx.commit(WriteOptions::buffered())?;
 
     // Reopen engine (simulates restart)
     drop(engine);
@@ -90,7 +90,7 @@ fn should_lose_best_effort_data_when_not_flushed() -> cntryl_midge::MidgeResult<
     // Act - Write with BestEffort but DON'T flush
     let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite)?;
     tx.put(b"ephemeral_key".to_vec(), b"ephemeral_value".to_vec(), None)?;
-    engine.commit(tx, WriteOptions::best_effort())?;
+    tx.commit(WriteOptions::best_effort())?;
 
     // Verify data is in memtable before restart
     let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly)?;
@@ -134,7 +134,7 @@ fn should_handle_large_batches_with_best_effort() -> cntryl_midge::MidgeResult<(
     }
 
     // This should NOT panic with "WAL queue full" anymore
-    engine.commit(tx, WriteOptions::best_effort())?;
+    tx.commit(WriteOptions::best_effort())?;
 
     // Assert - All data is visible
     let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;

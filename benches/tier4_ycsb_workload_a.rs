@@ -1,4 +1,4 @@
-//! Tier 4 — YCSB Workload A (Update heavy)
+//! Tier 4 â€” YCSB Workload A (Update heavy)
 //!
 //! Workload A: 50% reads, 50% updates on an existing keyspace.
 
@@ -95,7 +95,7 @@ fn run_workload_a_with_distribution(
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("begin");
                             tx.put(k.to_vec(), v.clone(), None).expect("warmup put");
-                            e.commit(tx, write_opts)
+                            tx.commit(write_opts)
                         })
                         .expect("warmup commit");
                     }
@@ -157,7 +157,7 @@ fn run_workload_a_with_distribution(
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("measured begin");
                             tx.put(k.to_vec(), v.clone(), None).expect("measured put");
-                            e.commit(tx, write_opts)
+                            tx.commit(write_opts)
                         })
                         .expect("measured commit");
                     }

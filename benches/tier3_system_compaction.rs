@@ -1,4 +1,4 @@
-//! Tier 3 — Flush cost (single primitive operation)
+//! Tier 3 â€” Flush cost (single primitive operation)
 //!
 //! Measures: cost of a single flush call
 //! Subsystem: flush orchestration (engine/runtime boundary).
@@ -41,7 +41,7 @@ fn run_flush_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize, 
     let engine = setup_engine(opts);
     let cf = engine.create_column_family("cf1").unwrap();
 
-    // All setup outside measurement — write in TARGET_BATCH-sized transactions
+    // All setup outside measurement â€” write in TARGET_BATCH-sized transactions
     let cf_id = cf.id();
     let write_opts = cntryl_midge::WriteOptions::best_effort(); // Fast setup: skip WAL I/O
     let total = keys.len();
@@ -54,7 +54,7 @@ fn run_flush_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize, 
             tx.put(keys[i].to_vec(), values[i].clone(), None)
                 .expect("setup put");
         }
-        engine.commit(tx, write_opts).expect("commit");
+        tx.commit(write_opts).expect("commit");
     }
 
     // Ensure durability before measurement

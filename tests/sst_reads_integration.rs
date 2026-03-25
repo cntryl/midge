@@ -16,7 +16,7 @@ fn should_read_from_sst_after_flush() -> MidgeResult<()> {
         let key = format!("key_{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value_from_sst".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::buffered())?;
+        tx.commit(WriteOptions::buffered())?;
     }
 
     // Force flush to SST
@@ -50,7 +50,7 @@ fn should_track_l0_sst_reads() -> MidgeResult<()> {
             let key = format!("batch{}_key{}", batch, i);
             let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)?;
-            engine.commit(tx, WriteOptions::buffered())?;
+            tx.commit(WriteOptions::buffered())?;
         }
         engine.flush_cf(&cf)?;
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -82,7 +82,7 @@ fn should_use_key_ranges_for_higher_levels() -> MidgeResult<()> {
         let key = format!("key_{:03}", i);
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None)?;
-        engine.commit(tx, WriteOptions::buffered())?;
+        tx.commit(WriteOptions::buffered())?;
     }
 
     engine.flush_cf(&cf)?;
@@ -114,14 +114,14 @@ fn should_handle_memtable_and_sst_reads() -> MidgeResult<()> {
     // Write to SST
     let mut tx1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
     tx1.put(b"sst_key".to_vec(), b"sst_value".to_vec(), None)?;
-    engine.commit(tx1, WriteOptions::buffered())?;
+    tx1.commit(WriteOptions::buffered())?;
     engine.flush_cf(&cf)?;
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Write to memtable
     let mut tx2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
     tx2.put(b"mem_key".to_vec(), b"mem_value".to_vec(), None)?;
-    engine.commit(tx2, WriteOptions::buffered())?;
+    tx2.commit(WriteOptions::buffered())?;
 
     // Act: Read from both
     let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
@@ -135,7 +135,7 @@ fn should_handle_memtable_and_sst_reads() -> MidgeResult<()> {
     // Update SST key in memtable (newer version should win)
     let mut tx3 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
     tx3.put(b"sst_key".to_vec(), b"updated_value".to_vec(), None)?;
-    engine.commit(tx3, WriteOptions::buffered())?;
+    tx3.commit(WriteOptions::buffered())?;
     let read_tx2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
     let updated = read_tx2.get(b"sst_key")?;
     assert_eq!(updated, Some(b"updated_value".to_vec().into()));

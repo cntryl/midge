@@ -7,10 +7,13 @@
 //! - Column-family scoped transactions
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::engine::api::write_options::effective_wal_durability_policy;
+use crate::engine::ingest::IngestCoordinator;
 use crate::engine::ColumnFamilyId;
 use crate::runtime::RuntimeHandle;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Transaction mode controls read/write capabilities
@@ -147,6 +150,8 @@ impl WriteIntent {
 /// Thread-safe; multiple transactions can be in flight simultaneously.
 pub struct Transaction {
     runtime_handle: RuntimeHandle,
+    coordinator: Arc<IngestCoordinator>,
+    sequence_publisher: Arc<AtomicU64>,
     /// Unique transaction ID
     id: u64,
     /// Column family this transaction is bound to
@@ -167,27 +172,33 @@ pub struct Transaction {
     snapshot_registered: bool,
 }
 
+pub(crate) struct TransactionInit {
+    pub(crate) runtime_handle: RuntimeHandle,
+    pub(crate) coordinator: Arc<IngestCoordinator>,
+    pub(crate) sequence_publisher: Arc<AtomicU64>,
+    pub(crate) id: u64,
+    pub(crate) cf_id: ColumnFamilyId,
+    pub(crate) mode: TransactionMode,
+    pub(crate) start_sequence: u64,
+    pub(crate) read_snapshot: Option<Arc<crate::runtime::ReadSnapshot>>,
+    pub(crate) cloud_mode: bool,
+}
+
 impl Transaction {
     /// Create a new transaction with the given ID and mode.
-    pub(crate) fn new(
-        runtime_handle: RuntimeHandle,
-        id: u64,
-        cf_id: ColumnFamilyId,
-        mode: TransactionMode,
-        start_sequence: u64,
-        read_snapshot: Option<Arc<crate::runtime::ReadSnapshot>>,
-        cloud_mode: bool,
-    ) -> Self {
+    pub(crate) fn new(init: TransactionInit) -> Self {
         Self {
-            runtime_handle,
-            id,
-            cf_id,
-            mode,
+            runtime_handle: init.runtime_handle,
+            coordinator: init.coordinator,
+            sequence_publisher: init.sequence_publisher,
+            id: init.id,
+            cf_id: init.cf_id,
+            mode: init.mode,
             isolation_level: IsolationLevel::LastWriteWins,
             write_set: Vec::new(),
-            start_sequence,
-            read_snapshot,
-            cloud_mode,
+            start_sequence: init.start_sequence,
+            read_snapshot: init.read_snapshot,
+            cloud_mode: init.cloud_mode,
             snapshot_registered: true,
         }
     }
@@ -279,6 +290,54 @@ impl Transaction {
         self.isolation_level = isolation_level;
     }
 
+    pub fn commit(mut self, opts: crate::engine::api::WriteOptions) -> MidgeResult<()> {
+        if self.is_read_only() {
+            self.unregister_snapshot();
+            return Ok(());
+        }
+
+        if !self.has_writes() {
+            let sync_result = if opts.is_sync() { self.sync() } else { Ok(()) };
+            self.unregister_snapshot();
+            return sync_result;
+        }
+
+        let ops = self.take_runtime_ops();
+        let isolation_policy = match self.isolation_level() {
+            IsolationLevel::LastWriteWins => {
+                crate::runtime::TransactionIsolationPolicy::LastWriteWins
+            }
+            IsolationLevel::AbortOnWriteConflict => {
+                crate::runtime::TransactionIsolationPolicy::AbortOnWriteConflict
+            }
+        };
+
+        let durability_policy = Some(effective_wal_durability_policy(self.cloud_mode, opts)?);
+        let commit_result = self.coordinator.submit_ops(
+            &self.runtime_handle,
+            ops,
+            durability_policy,
+            Some(self.start_sequence()),
+            isolation_policy,
+        );
+
+        let result = match commit_result {
+            Ok(sequence) => {
+                self.sequence_publisher.store(sequence, Ordering::SeqCst);
+                self.finalize_write_durability(sequence, opts)
+            }
+            Err(error) => Err(error),
+        };
+
+        self.unregister_snapshot();
+        result
+    }
+
+    pub fn rollback(mut self) -> MidgeResult<()> {
+        self.unregister_snapshot();
+        Ok(())
+    }
+
     pub(crate) fn take_runtime_ops(&mut self) -> Vec<crate::runtime::TransactionOp> {
         std::mem::take(&mut self.write_set)
             .into_iter()
@@ -301,6 +360,56 @@ impl Transaction {
 
     pub fn start_sequence(&self) -> u64 {
         self.start_sequence
+    }
+
+    fn sync(&self) -> MidgeResult<()> {
+        let response = self
+            .runtime_handle
+            .send_and_wait(crate::runtime::RuntimeMsg::WalSync {
+                request_id: crate::runtime::next_request_id()?,
+            })?;
+
+        match response {
+            crate::runtime::RuntimeResponse::Ok { .. } => Ok(()),
+            crate::runtime::RuntimeResponse::Error { error, .. } => Err(error),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to sync".to_string(),
+            )),
+        }
+    }
+
+    fn finalize_write_durability(
+        &self,
+        sequence: u64,
+        opts: crate::engine::api::WriteOptions,
+    ) -> MidgeResult<()> {
+        if self.cloud_mode {
+            if opts.is_sync() || opts.is_cloud_strict() {
+                let response = self.runtime_handle.send_and_wait(
+                    crate::runtime::RuntimeMsg::SealWalForCloud {
+                        request_id: crate::runtime::next_request_id()?,
+                        sequence,
+                        wait_for_ack: opts.is_cloud_strict(),
+                    },
+                )?;
+
+                return match response {
+                    crate::runtime::RuntimeResponse::Ok { .. } => Ok(()),
+                    crate::runtime::RuntimeResponse::Error { error, .. } => Err(error),
+                    _ => Err(MidgeError::Internal(
+                        "Unexpected response to SealWalForCloud".to_string(),
+                    )),
+                };
+            }
+
+            return Ok(());
+        }
+
+        if opts.is_sync() {
+            self.sync()?;
+        }
+
+        Ok(())
     }
 
     /// Get a value within this transaction (read-your-own-writes semantics)

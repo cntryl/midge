@@ -23,8 +23,7 @@ fn should_expose_local_engine_observability_surfaces() {
         .expect("put alpha");
     tx.put(b"bravo".to_vec(), b"value-bravo".to_vec(), None)
         .expect("put bravo");
-    engine
-        .commit(tx, WriteOptions::best_effort())
+    tx.commit(WriteOptions::best_effort())
         .expect("commit best effort");
     engine.flush_cf(&default_cf).expect("flush default cf");
 
@@ -113,8 +112,7 @@ fn should_report_degraded_health_given_obsolete_sst_files_and_json_verification(
         .expect("begin tx");
     tx.put(b"charlie".to_vec(), b"value-charlie".to_vec(), None)
         .expect("put charlie");
-    engine
-        .commit(tx, WriteOptions::best_effort())
+    tx.commit(WriteOptions::best_effort())
         .expect("commit best effort");
     engine.flush_cf(&default_cf).expect("flush default cf");
 
@@ -211,8 +209,7 @@ fn should_delete_orphan_sst_residue_during_startup_cleanup() {
             .expect("begin tx");
         tx.put(b"delta".to_vec(), b"value-delta".to_vec(), None)
             .expect("put delta");
-        engine
-            .commit(tx, WriteOptions::best_effort())
+        tx.commit(WriteOptions::best_effort())
             .expect("commit best effort");
         engine.flush_cf(&default_cf).expect("flush default cf");
     }
@@ -253,8 +250,7 @@ fn should_report_degraded_health_when_orphan_sst_cleanup_is_blocked() {
             .expect("begin tx");
         tx.put(b"echo".to_vec(), b"value-echo".to_vec(), None)
             .expect("put echo");
-        engine
-            .commit(tx, WriteOptions::best_effort())
+        tx.commit(WriteOptions::best_effort())
             .expect("commit best effort");
         engine.flush_cf(&default_cf).expect("flush default cf");
     }

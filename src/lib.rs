@@ -132,7 +132,7 @@ pub use testkit::{MidgeOptions, StorageMode};
 /// // Write: explicit transaction, explicit commit, explicit durability
 /// let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 /// tx.put(b"key".to_vec(), b"value".to_vec(), None)?;
-/// engine.commit(tx, WriteOptions::sync())?;
+/// tx.commit(WriteOptions::sync())?;
 ///
 /// // Read: explicit transaction
 /// let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;

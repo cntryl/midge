@@ -31,7 +31,7 @@ fn should_get_value_given_existing_key_when_put() {
             .expect("begin_tx");
         tx.put(b"key".to_vec(), b"value".to_vec(), None)
             .expect("put");
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Assert
         let tx = engine
@@ -76,7 +76,7 @@ fn should_overwrite_value_given_existing_key_when_put() {
             .expect("begin_tx");
         tx.put(b"key".to_vec(), b"value1".to_vec(), None)
             .expect("put initial");
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Act
         let mut tx = engine
@@ -84,7 +84,7 @@ fn should_overwrite_value_given_existing_key_when_put() {
             .expect("begin_tx");
         tx.put(b"key".to_vec(), b"value2".to_vec(), None)
             .expect("put overwrite");
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Assert
         let tx = engine
@@ -113,7 +113,7 @@ fn should_handle_empty_value_when_put() {
             .expect("begin_tx");
         tx.put(b"key".to_vec(), b"".to_vec(), None)
             .expect("put empty");
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Assert
         let tx = engine
@@ -138,7 +138,7 @@ fn should_handle_binary_data_when_put() {
             .expect("begin_tx");
         tx.put(b"binary_key".to_vec(), data.clone(), None)
             .expect("put binary");
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Assert
         let tx = engine
@@ -166,14 +166,14 @@ fn should_return_none_given_deleted_key_when_get() {
             .expect("begin_tx");
         tx.put(b"key".to_vec(), b"value".to_vec(), None)
             .expect("put");
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Act
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         tx.delete(b"key".to_vec()).expect("delete");
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Assert
         let tx = engine
@@ -196,7 +196,7 @@ fn should_succeed_given_nonexistent_key_when_delete() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         tx.delete(b"nonexistent".to_vec()).expect("delete");
-        let result = engine.commit(tx, WriteOptions::buffered());
+        let result = tx.commit(WriteOptions::buffered());
 
         // Assert
         result.expect("delete nonexistent");
@@ -220,7 +220,7 @@ fn should_handle_many_operations_when_sequential() {
                 .expect("begin_tx");
             tx.put(key.as_bytes().to_vec(), val.as_bytes().to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
         }
 
         // Assert
@@ -259,7 +259,7 @@ fn should_retrieve_written_data_across_storage_modes() {
                 .expect("begin_tx");
             tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
         }
 
         // Assert: All data is readable (operations succeeded)

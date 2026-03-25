@@ -1,4 +1,4 @@
-//! Tier 3 — SST primitives (single operation measurement)
+//! Tier 3 â€” SST primitives (single operation measurement)
 //!
 //! Measures: cost of point seek, iterator construction, first advance
 //! NOT: full scans, iteration, payload processing
@@ -45,7 +45,7 @@ fn run_sst_point_seek_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
             let v = vec![(idx % 251) as u8; VALUE_SIZE];
             tx.put(k.to_vec(), v, None).unwrap();
         }
-        engine.commit(tx, write_opts).unwrap();
+        tx.commit(write_opts).unwrap();
     }
     engine.flush_cf(&cf).unwrap();
 
@@ -83,7 +83,7 @@ fn run_sst_range_seek_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
             let v = vec![(idx % 251) as u8; VALUE_SIZE];
             tx.put(k.to_vec(), v, None).unwrap();
         }
-        engine.commit(tx, write_opts).unwrap();
+        tx.commit(write_opts).unwrap();
     }
     engine.flush_cf(&cf).unwrap();
 
@@ -129,7 +129,7 @@ fn run_sst_sparse_keyspace_seek_case(ctx: &mut StressContext, opts: MidgeOptions
             let v = vec![(i % 251) as u8; VALUE_SIZE];
             tx.put(k.to_vec(), v, None).unwrap();
         }
-        engine.commit(tx, write_opts).unwrap();
+        tx.commit(write_opts).unwrap();
     }
     engine.flush_cf(&cf).unwrap();
 

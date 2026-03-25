@@ -37,7 +37,7 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
                 .expect("begin_tx");
             tx.put(b"key1".to_vec(), b"value1".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             // Write more data (will create another SST)
@@ -46,7 +46,7 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
                 .expect("begin_tx");
             tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
             // Engine is dropped after a flush and a later committed write
         }
 
@@ -92,7 +92,7 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
                     .expect("begin_tx");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
-                engine.commit(tx, WriteOptions::buffered()).expect("commit");
+                tx.commit(WriteOptions::buffered()).expect("commit");
             }
             engine.flush_cf(&cf).expect("flush");
 
@@ -104,7 +104,7 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
                     .expect("begin_tx");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
-                engine.commit(tx, WriteOptions::buffered()).expect("commit");
+                tx.commit(WriteOptions::buffered()).expect("commit");
             }
             // Engine is dropped before a second flush occurs
         }
@@ -156,7 +156,7 @@ fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
                 .expect("begin_tx");
             tx.put(b"key".to_vec(), b"value_old".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             let mut tx = engine
@@ -164,7 +164,7 @@ fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
                 .expect("begin_tx");
             tx.put(b"key".to_vec(), b"value_new".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
             // Engine is dropped before flushing the newer WAL value
         }
 
@@ -202,7 +202,7 @@ fn should_apply_wal_tombstone_when_reopening_after_clean_shutdown() {
                 .expect("begin_tx");
             tx.put(b"key".to_vec(), b"value".to_vec(), None)
                 .expect("put");
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             // Delete the key (creates tombstone in WAL)
@@ -210,7 +210,7 @@ fn should_apply_wal_tombstone_when_reopening_after_clean_shutdown() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             tx.delete(b"key".to_vec()).expect("delete");
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
             // Engine is dropped after the tombstone commit
         }
 
@@ -249,7 +249,7 @@ fn should_preserve_data_visibility_when_reopening_after_successful_flush_and_cle
                     .expect("begin_tx");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
-                engine.commit(tx, WriteOptions::buffered()).expect("commit");
+                tx.commit(WriteOptions::buffered()).expect("commit");
             }
             engine.flush_cf(&cf).expect("flush");
 
@@ -301,9 +301,7 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
                             .expect("begin_tx");
                         tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                             .expect("put");
-                        engine_clone
-                            .commit(tx, WriteOptions::buffered())
-                            .expect("commit");
+                        tx.commit(WriteOptions::buffered()).expect("commit");
                     }
                     engine_clone.flush_cf(&cf).expect("flush");
                 });
@@ -356,7 +354,7 @@ fn should_preserve_single_cf_data_when_reopening_after_flush() {
                     .expect("begin_tx");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
-                engine.commit(tx, WriteOptions::buffered()).expect("commit");
+                tx.commit(WriteOptions::buffered()).expect("commit");
             }
 
             // Flush the CF
@@ -407,7 +405,7 @@ fn should_preserve_data_when_reopening_after_flush_with_optional_compaction() {
                     None,
                 )
                 .expect("put");
-                engine.commit(tx, WriteOptions::buffered()).expect("commit");
+                tx.commit(WriteOptions::buffered()).expect("commit");
             }
             engine.flush_cf(&cf).expect("flush");
 
@@ -452,7 +450,7 @@ fn should_preserve_original_data_when_reopening_after_flush() {
                     .expect("begin_tx");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
-                engine.commit(tx, WriteOptions::buffered()).expect("commit");
+                tx.commit(WriteOptions::buffered()).expect("commit");
             }
             engine.flush_cf(&cf).expect("flush");
 
@@ -497,7 +495,7 @@ fn should_preserve_updated_values_when_reopening_after_multiple_flushes() {
                     .expect("begin_tx");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
-                engine.commit(tx, WriteOptions::buffered()).expect("commit");
+                tx.commit(WriteOptions::buffered()).expect("commit");
             }
             engine.flush_cf(&cf).expect("flush");
 
@@ -509,7 +507,7 @@ fn should_preserve_updated_values_when_reopening_after_multiple_flushes() {
                     .expect("begin_tx");
                 tx.put(key.as_bytes().to_vec(), b"new_value".to_vec(), None)
                     .expect("put");
-                engine.commit(tx, WriteOptions::buffered()).expect("commit");
+                tx.commit(WriteOptions::buffered()).expect("commit");
             }
             engine.flush_cf(&cf).expect("flush");
 
@@ -554,7 +552,7 @@ fn should_recover_valid_wal_records_when_reopening_after_clean_shutdown() {
                     .expect("begin_tx");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
-                engine.commit(tx, WriteOptions::buffered()).expect("commit");
+                tx.commit(WriteOptions::buffered()).expect("commit");
             }
 
             // Engine is dropped after writing valid WAL records
@@ -610,7 +608,7 @@ fn should_evict_oldest_entries_when_idempotency_cache_exceeds_limit() {
         tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
             .expect("put");
 
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
     }
 
     // Assert: Engine should not OOM, cache should be bounded
@@ -647,7 +645,7 @@ fn should_maintain_atomicity_given_concurrent_reads_when_transaction_commits() {
         .expect("put");
     tx.put(b"key2".to_vec(), b"initial2".to_vec(), None)
         .expect("put");
-    engine.commit(tx, WriteOptions::sync()).expect("commit");
+    tx.commit(WriteOptions::sync()).expect("commit");
 
     // Act: Concurrently execute transaction and reads
     let engine_clone = Arc::clone(&engine);
@@ -672,9 +670,7 @@ fn should_maintain_atomicity_given_concurrent_reads_when_transaction_commits() {
         writer_release_barrier.wait();
 
         // Commit with buffered (batched) mode
-        engine_clone
-            .commit(tx, WriteOptions::buffered())
-            .expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
     });
 
     // Wait until the writer has staged both updates but not yet committed them

@@ -50,15 +50,11 @@ fn should_apply_last_committed_value_when_two_transactions_write_same_key() {
         .expect("put txn2 value");
 
     assert!(
-        engine
-            .commit(txn1, cntryl_midge::WriteOptions::buffered())
-            .is_ok(),
+        txn1.commit(cntryl_midge::WriteOptions::buffered()).is_ok(),
         "first commit should succeed"
     );
     assert!(
-        engine
-            .commit(txn2, cntryl_midge::WriteOptions::buffered())
-            .is_ok(),
+        txn2.commit(cntryl_midge::WriteOptions::buffered()).is_ok(),
         "second commit should also succeed"
     );
 
@@ -85,8 +81,8 @@ fn should_allow_lost_update_when_two_transactions_increment_same_counter() {
     setup
         .put(b"counter".to_vec(), b"0".to_vec(), None)
         .expect("put initial counter");
-    engine
-        .commit(setup, cntryl_midge::WriteOptions::buffered())
+    setup
+        .commit(cntryl_midge::WriteOptions::buffered())
         .expect("commit setup");
 
     // Act
@@ -127,11 +123,9 @@ fn should_allow_lost_update_when_two_transactions_increment_same_counter() {
     )
     .expect("txn2 write increment");
 
-    engine
-        .commit(txn1, cntryl_midge::WriteOptions::buffered())
+    txn1.commit(cntryl_midge::WriteOptions::buffered())
         .expect("commit txn1");
-    engine
-        .commit(txn2, cntryl_midge::WriteOptions::buffered())
+    txn2.commit(cntryl_midge::WriteOptions::buffered())
         .expect("commit txn2");
 
     let reader = engine
@@ -163,8 +157,8 @@ fn should_allow_disjoint_writes_after_shared_read_when_transactions_both_commit(
     setup
         .put(b"flag2".to_vec(), b"false".to_vec(), None)
         .expect("put flag2");
-    engine
-        .commit(setup, cntryl_midge::WriteOptions::buffered())
+    setup
+        .commit(cntryl_midge::WriteOptions::buffered())
         .expect("commit setup");
 
     // Act
@@ -190,15 +184,11 @@ fn should_allow_disjoint_writes_after_shared_read_when_transactions_both_commit(
         .expect("txn2 write flag2");
 
     assert!(
-        engine
-            .commit(txn1, cntryl_midge::WriteOptions::buffered())
-            .is_ok(),
+        txn1.commit(cntryl_midge::WriteOptions::buffered()).is_ok(),
         "first disjoint write should commit"
     );
     assert!(
-        engine
-            .commit(txn2, cntryl_midge::WriteOptions::buffered())
-            .is_ok(),
+        txn2.commit(cntryl_midge::WriteOptions::buffered()).is_ok(),
         "second disjoint write should also commit"
     );
 

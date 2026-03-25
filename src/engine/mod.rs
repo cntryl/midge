@@ -6,16 +6,15 @@
 //! All reads and writes execute within explicit transactions.
 //!
 //! Key responsibilities:
-//! - Transaction lifecycle (begin_tx, commit, rollback)
+//! - Transaction lifecycle entry (begin_tx)
 //! - Column family management
 //! - Flush and compaction control
 //! - Metrics and observability
 //!
 //! Point operations (get, put, delete, scan) are methods on Transaction.
-//! Range tombstones are engine-level operations scoped to a column family.
+//! Transaction finalization and range tombstones are also transaction-scoped.
 
 use crate::common::{MidgeError, MidgeResult};
-use crate::engine::api::DurabilityPolicy as ApiDurabilityPolicy;
 use crate::runtime::{
     next_request_id, Runtime, RuntimeHandle, RuntimeMsg, RuntimeResponse, RuntimeState,
 };
@@ -256,7 +255,7 @@ pub struct Engine {
     ///
     /// Sequence numbers are allocated inside the runtime (at WAL append time) and
     /// returned via `RuntimeResponse::WalAppended { sequence, .. }`.
-    sequence: std::sync::atomic::AtomicU64,
+    sequence: Arc<std::sync::atomic::AtomicU64>,
     /// Next snapshot ID counter (local only, not related to sequence numbers)
     next_snapshot_id: std::sync::atomic::AtomicU64,
     /// Column families registry (CF ID -> Handle)
@@ -732,7 +731,7 @@ impl Engine {
             memory_mode,
             cloud_mode: matches!(&opts.storage, Storage::Cloud { .. }),
             recovery_policy: opts.recovery_policy,
-            sequence: std::sync::atomic::AtomicU64::new(recovered_sequence),
+            sequence: Arc::new(std::sync::atomic::AtomicU64::new(recovered_sequence)),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
             column_families,
             _lease: Some(lease),
@@ -917,50 +916,6 @@ impl Engine {
         }
     }
 
-    // ========================================================================
-    // Range Operations
-    // ========================================================================
-
-    /// Apply a range tombstone to a specific column family.
-    ///
-    /// The tombstone covers `[start_key, end_key)`.
-    /// Range deletes are intentionally not part of the transaction API.
-    pub fn delete_range(
-        &self,
-        cf: &ColumnFamilyHandle,
-        start_key: Vec<u8>,
-        end_key: Vec<u8>,
-        opts: api::WriteOptions,
-    ) -> MidgeResult<()> {
-        if start_key.as_slice() > end_key.as_slice() {
-            return Err(MidgeError::InvalidArgument(
-                "delete_range requires start_key <= end_key".to_string(),
-            ));
-        }
-
-        let durability_policy = self.effective_wal_durability_policy(opts)?;
-        let response = self
-            .runtime_handle
-            .send_and_wait(RuntimeMsg::WalAppendDeleteRange {
-                request_id: next_request_id()?,
-                cf_id: cf.id(),
-                start_key,
-                end_key,
-                durability_policy: Some(durability_policy),
-            })?;
-
-        match response {
-            RuntimeResponse::WalAppended { sequence, .. } => {
-                self.sequence.store(sequence, Ordering::SeqCst);
-                self.finalize_write_durability(sequence, opts)
-            }
-            RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(MidgeError::Internal(
-                "Unexpected response to delete_range".to_string(),
-            )),
-        }
-    }
-
     /// Flush all pending writes to disk (used by tests)
     pub(crate) fn sync(&self) -> MidgeResult<()> {
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalSync {
@@ -974,58 +929,6 @@ impl Engine {
                 "Unexpected response to sync".to_string(),
             )),
         }
-    }
-
-    fn effective_wal_durability_policy(
-        &self,
-        opts: api::WriteOptions,
-    ) -> MidgeResult<crate::wal::DurabilityPolicy> {
-        if self.cloud_mode {
-            return Ok(match opts.policy() {
-                ApiDurabilityPolicy::BestEffort => crate::wal::DurabilityPolicy::BestEffort,
-                ApiDurabilityPolicy::Buffered
-                | ApiDurabilityPolicy::Sync
-                | ApiDurabilityPolicy::CloudStrict => crate::wal::DurabilityPolicy::CloudAsync,
-            });
-        }
-
-        if opts.is_cloud_strict() {
-            return Err(MidgeError::InvalidArgument(
-                "cloud_strict requires cloud-backed storage".to_string(),
-            ));
-        }
-
-        Ok(opts.to_wal_durability_policy())
-    }
-
-    fn finalize_write_durability(&self, sequence: u64, opts: api::WriteOptions) -> MidgeResult<()> {
-        if self.cloud_mode {
-            if opts.is_sync() || opts.is_cloud_strict() {
-                let response = self
-                    .runtime_handle
-                    .send_and_wait(RuntimeMsg::SealWalForCloud {
-                        request_id: next_request_id()?,
-                        sequence,
-                        wait_for_ack: opts.is_cloud_strict(),
-                    })?;
-
-                return match response {
-                    RuntimeResponse::Ok { .. } => Ok(()),
-                    RuntimeResponse::Error { error, .. } => Err(error),
-                    _ => Err(MidgeError::Internal(
-                        "Unexpected response to SealWalForCloud".to_string(),
-                    )),
-                };
-            }
-
-            return Ok(());
-        }
-
-        if opts.is_sync() {
-            self.sync()?;
-        }
-
-        Ok(())
     }
 
     /// Force a flush of a specific column family
@@ -1111,87 +1014,21 @@ impl Engine {
             }
         }
 
-        Ok(api::Transaction::new(
-            self.runtime_handle.clone(),
-            txn_id,
+        let coordinator = self.ingest_coordinators.get(&cf_id).ok_or_else(|| {
+            MidgeError::InvalidArgument(format!("column family {} does not exist", cf_id))
+        })?;
+
+        Ok(api::Transaction::new(api::TransactionInit {
+            runtime_handle: self.runtime_handle.clone(),
+            coordinator: coordinator.clone(),
+            sequence_publisher: Arc::clone(&self.sequence),
+            id: txn_id,
             cf_id,
             mode,
             start_sequence,
             read_snapshot,
-            self.cloud_mode,
-        ))
-    }
-
-    /// Commit a transaction atomically
-    ///
-    /// # Arguments
-    /// * `txn` - Transaction to commit
-    /// * `opts` - Write options specifying durability guarantees
-    ///
-    /// # Errors
-    /// - `MidgeError::WriteStall` if memory budget is exceeded. Client must retry
-    ///   after backoff (10-100ms exponential recommended).
-    pub fn commit(&self, mut txn: api::Transaction, opts: api::WriteOptions) -> MidgeResult<()> {
-        // ReadOnly transactions are a no-op for commit
-        if txn.is_read_only() {
-            txn.unregister_snapshot();
-            return Ok(());
-        }
-
-        // NOTE: BestEffort is only safe for bulk loads and initialization where:
-        // - Data loss is acceptable (test/setup phase)
-        // - Durability is not required before client sees results
-        // - Engine crash/restart is followed by reload
-        // NEVER use BestEffort for production data or measured workloads.
-
-        if !txn.has_writes() {
-            // Read-write transaction with no writes
-            // Apply sync if requested
-            let sync_result = if opts.is_sync() { self.sync() } else { Ok(()) };
-            txn.unregister_snapshot();
-            return sync_result;
-        }
-
-        // Route all transactional writes through the ingest coordinator so every
-        // operation shape shares the same backpressure, write-group batching, and
-        // atomic ApplyTransaction path.
-        let cf_id_for_check = txn.cf_id();
-
-        let coordinator = self
-            .ingest_coordinators
-            .get(&cf_id_for_check)
-            .ok_or_else(|| {
-                MidgeError::InvalidArgument(format!(
-                    "column family {} does not exist",
-                    cf_id_for_check
-                ))
-            })?;
-
-        let ops = txn.take_runtime_ops();
-        let isolation_policy = match txn.isolation_level() {
-            api::IsolationLevel::LastWriteWins => {
-                crate::runtime::TransactionIsolationPolicy::LastWriteWins
-            }
-            api::IsolationLevel::AbortOnWriteConflict => {
-                crate::runtime::TransactionIsolationPolicy::AbortOnWriteConflict
-            }
-        };
-
-        let durability_policy = Some(self.effective_wal_durability_policy(opts)?);
-        let sequence = coordinator.submit_ops(
-            &self.runtime_handle,
-            ops,
-            durability_policy,
-            Some(txn.start_sequence()),
-            isolation_policy,
-        )?;
-
-        // Update engine's sequence to reflect completed writes
-        self.sequence.store(sequence, Ordering::SeqCst);
-
-        let durability_result = self.finalize_write_durability(sequence, opts);
-        txn.unregister_snapshot();
-        durability_result
+            cloud_mode: self.cloud_mode,
+        }))
     }
 
     /// Wait for a write stall to clear for `cf_id`.
@@ -1224,16 +1061,6 @@ impl Engine {
                 Ok(false)
             }
         }
-    }
-
-    /// Rollback a transaction.
-    ///
-    /// This is a no-op because Midge transactions are designed for atomic commit only.
-    /// Writes are accumulated in the transaction and only applied when `commit()` is called.
-    /// Simply dropping the transaction (without commit) discards all pending writes.
-    pub fn rollback_transaction(&self, mut txn: api::Transaction) -> MidgeResult<()> {
-        txn.unregister_snapshot();
-        Ok(())
     }
 
     // === Internal Transaction Helpers ===

@@ -1,4 +1,4 @@
-//! Tier 4 — YCSB Workload B (Read mostly)
+//! Tier 4 â€” YCSB Workload B (Read mostly)
 //!
 //! Workload B: 95% reads, 5% updates.
 
@@ -71,7 +71,7 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("begin");
                             tx.put(k.to_vec(), v.clone(), None).expect("warmup put");
-                            e.commit(tx, cntryl_midge::WriteOptions::best_effort())
+                            tx.commit(cntryl_midge::WriteOptions::best_effort())
                             // Fast warmup
                         })
                         .expect("warmup commit");
@@ -119,7 +119,7 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("measured begin");
                             tx.put(k.to_vec(), v.clone(), None).expect("measured put");
-                            e.commit(tx, write_opts)
+                            tx.commit(write_opts)
                         })
                         .expect("measured commit");
                     }

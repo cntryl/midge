@@ -1,4 +1,4 @@
-//! Tier 4 — MVCC Isolation Under Concurrent Load
+//! Tier 4 â€” MVCC Isolation Under Concurrent Load
 //!
 //! **Purpose**: Validate snapshot isolation semantics under realistic multi-threaded pressure.
 //! MVCC bugs are subtle (dirty reads, lost updates, isolation violations).
@@ -12,10 +12,10 @@
 //! 5. Compaction under snapshots: Old versions are retained correctly
 //!
 //! **Failure Modes to Catch**:
-//! - Snapshot not pinning versions → compaction deletes data reader needs
-//! - Version chain not properly released → memory bloat
-//! - Dirty read under concurrent write → isolation violation
-//! - Writer timeout under snapshot contention → deadlock or timeout
+//! - Snapshot not pinning versions â†’ compaction deletes data reader needs
+//! - Version chain not properly released â†’ memory bloat
+//! - Dirty read under concurrent write â†’ isolation violation
+//! - Writer timeout under snapshot contention â†’ deadlock or timeout
 //!
 //! **High Priority**: MVCC is critical for multi-tenant isolation.
 //! If one tenant's long read blocks compaction, all tenants degrade.
@@ -82,9 +82,7 @@ fn tier4_mvcc_snapshot_isolation_under_concurrency_4threads(ctx: &mut StressCont
                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(k.to_vec(), v, None).unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
     }
 
@@ -145,7 +143,7 @@ fn tier4_mvcc_snapshot_isolation_under_concurrency_4threads(ctx: &mut StressCont
                         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                         .unwrap();
                     tx.put(k.to_vec(), v, None).unwrap();
-                    engine.commit(tx, write_opts).unwrap();
+                    tx.commit(write_opts).unwrap();
                     let elapsed_us = start.elapsed().as_micros() as u64;
 
                     writer_samples.lock().unwrap().push(elapsed_us);
@@ -258,7 +256,7 @@ fn tier4_mvcc_long_snapshot_fairness_10sec(ctx: &mut StressContext) {
                         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                         .unwrap();
                     tx.put(k.to_vec(), v, None).unwrap();
-                    engine.commit(tx, write_opts).unwrap();
+                    tx.commit(write_opts).unwrap();
                     let elapsed_us = start.elapsed().as_micros() as u64;
 
                     writer_latencies.lock().unwrap().push(elapsed_us);
@@ -295,9 +293,9 @@ fn tier4_mvcc_long_snapshot_fairness_10sec(ctx: &mut StressContext) {
         ctx.tag("writer_max_latency_us", format!("{}", max_us).as_str());
 
         // Sanity check: p99 should not be catastrophically high
-        // (expected range: 10-1000µs depending on machine)
+        // (expected range: 10-1000Âµs depending on machine)
         if p99_us > 10_000 {
-            eprintln!("Warning: writer p99 latency is very high: {}µs", p99_us);
+            eprintln!("Warning: writer p99 latency is very high: {}Âµs", p99_us);
         }
     }
 

@@ -1,4 +1,4 @@
-//! Tier 3 — Scan seek behavior (iterator construction + first advance)
+//! Tier 3 â€” Scan seek behavior (iterator construction + first advance)
 //!
 //! Measures: cost of seeking and advancing once across different storage layouts.
 //! Value size is IRRELEVANT to the measured primitive (seek behavior independent of payload).
@@ -34,7 +34,7 @@ fn write_prefixed_keys(engine: &MidgeEngine, num_keys: usize, prefix: u8) {
             let v = vec![(i % 251) as u8; VALUE_SIZE];
             tx.put(k.to_vec(), v, None).unwrap();
         }
-        engine.commit(tx, write_opts).unwrap();
+        tx.commit(write_opts).unwrap();
     }
     engine.flush_cf(&cf).unwrap(); // Ensure durability before measurement
 }

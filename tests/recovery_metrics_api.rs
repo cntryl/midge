@@ -32,7 +32,7 @@ fn should_report_wal_recovery_metrics_after_reopen_when_wal_replay_occurs() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin tx");
             tx.put(key, value, None).expect("put");
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
         }
     }
 

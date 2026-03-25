@@ -1,8 +1,8 @@
 //! Crash Testing: WAL-Compaction Integration and Durability
 //!
 //! Validates end-to-end WAL and compaction alignment. This test complements crash tests
-//! from Slice 7 by ensuring the complete pipeline (WAL → memtable → flush → SST → compaction
-//! → manifest) maintains durability guarantees when crashes occur.
+//! from Slice 7 by ensuring the complete pipeline (WAL â†’ memtable â†’ flush â†’ SST â†’ compaction
+//! â†’ manifest) maintains durability guarantees when crashes occur.
 //!
 //! Slice 8 specifically validates:
 //! 1. WAL entries are preserved across compaction
@@ -121,9 +121,7 @@ fn child_create_data_flush_compact_and_crash() {
         }
 
         // Commit writes (goes to WAL)
-        engine
-            .commit(tx, WriteOptions::buffered())
-            .expect("commit tx");
+        tx.commit(WriteOptions::buffered()).expect("commit tx");
 
         // Flush memtable to SST (creates L0 file)
         engine.flush_cf(&default_cf).expect("flush_cf");

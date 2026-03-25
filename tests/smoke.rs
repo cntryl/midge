@@ -3,7 +3,7 @@
 //! Purpose:
 //! - Validate core end-to-end invariants
 //! - Exercise real engine wiring with minimal data
-//! - Catch â€œgreen unit tests, broken databaseâ€ failures
+//! - Catch Ã¢â‚¬Å“green unit tests, broken databaseÃ¢â‚¬Â failures
 //!
 //! Philosophy:
 //! - Tests are intentionally small and deterministic
@@ -27,9 +27,7 @@ fn should_read_written_value_given_memory_mode_when_written() {
         .unwrap();
     tx.put(b"key".to_vec(), b"value".to_vec(), None)
         .expect("put");
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -52,9 +50,7 @@ fn should_read_written_value_given_flushed_value_when_read() {
         .unwrap();
     tx.put(b"key".to_vec(), b"value".to_vec(), None)
         .expect("put");
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
     engine.flush_cf(&cf).expect("flush");
 
@@ -79,17 +75,13 @@ fn should_hide_value_given_deleted_key_when_read() {
         .unwrap();
     tx.put(b"key".to_vec(), b"value".to_vec(), None)
         .expect("put");
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
     let mut tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .unwrap();
     tx.delete(b"key".to_vec()).expect("delete");
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -112,17 +104,13 @@ fn should_preserve_tombstone_given_flushed_tombstone_when_read() {
         .unwrap();
     tx.put(b"key".to_vec(), b"value".to_vec(), None)
         .expect("put");
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
     let mut tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .unwrap();
     tx.delete(b"key".to_vec()).expect("delete");
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
     engine.flush_cf(&cf).expect("flush");
 
@@ -153,9 +141,7 @@ fn should_persist_data_given_write_when_restarted() {
             None,
         )
         .expect("put");
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     }
 
     // Reopen engine
@@ -188,17 +174,13 @@ fn should_persist_tombstone_given_delete_when_restarted() {
             .unwrap();
         tx.put(b"key".to_vec(), b"value".to_vec(), None)
             .expect("put");
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx.delete(b"key".to_vec()).expect("delete");
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     }
 
     // Reopen engine
@@ -224,9 +206,7 @@ fn should_allow_read_only_snapshot_given_committed_value_when_snapshot_reads() {
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .unwrap();
     tx.put(b"key".to_vec(), b"v1".to_vec(), None).expect("put");
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
     let snapshot = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -262,18 +242,14 @@ fn should_preserve_latest_version_given_repeated_flushes_when_read() {
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .unwrap();
     tx.put(b"key".to_vec(), b"v1".to_vec(), None).expect("put");
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     engine.flush_cf(&cf).expect("flush");
 
     let mut tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .unwrap();
     tx.put(b"key".to_vec(), b"v2".to_vec(), None).expect("put");
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     engine.flush_cf(&cf).expect("flush");
 
     let tx = engine
@@ -302,17 +278,13 @@ fn should_respect_visibility_rules_given_range_scan_when_scanning() {
     tx.put(b"a".to_vec(), b"1".to_vec(), None).expect("put");
     tx.put(b"b".to_vec(), b"2".to_vec(), None).expect("put");
     tx.put(b"c".to_vec(), b"3".to_vec(), None).expect("put");
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
     let mut tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .unwrap();
     tx.delete(b"b".to_vec()).expect("delete");
-    engine
-        .commit(tx, cntryl_midge::WriteOptions::buffered())
-        .unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
 
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -349,9 +321,7 @@ fn should_preserve_all_committed_values_given_multiple_writes_when_written() {
             .unwrap();
         tx.put(format!("key{}", i).into_bytes(), b"val".to_vec(), None)
             .expect("put");
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     }
 
     // Assert
@@ -383,9 +353,7 @@ fn should_reopen_committed_values_given_engine_dropped_without_close_when_reopen
             .expect("put");
         tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
             .expect("put");
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         // Intentionally drop without an explicit close call.
     }
 

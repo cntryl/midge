@@ -48,10 +48,11 @@ jobs:
       - name: Run Tier 4 benchmarks (YCSB & streaming)
         run: cargo bench --bench 'tier4_*'
 
-      - name: Upload Criterion artifacts
+      - name: Generate benchmark summary
+        run: python scripts/benchmark_summary.py
+
+      - name: Upload benchmark summary
         uses: actions/upload-artifact@v7
         with:
-          name: bench-artifacts-${{ matrix.os }}
-          path: |
-            target/criterion/**
-            target/stress/**
+          name: bench-summary-${{ matrix.os }}
+          path: target/bench_summary.md

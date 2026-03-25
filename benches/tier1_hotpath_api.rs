@@ -1,4 +1,4 @@
-//! Tier 1 — Hot Path API Benchmarks
+//! Tier 1 â€” Hot Path API Benchmarks
 //!
 //! **Target Runtime:** < 1 second total
 //! **Run Frequency:** Every PR (CI gate)
@@ -93,7 +93,7 @@ fn bench_batch_put(c: &mut Criterion) {
                     for i in 0..size {
                         tx.put(keys[i].to_vec(), vals[i].to_vec(), None).unwrap();
                     }
-                    engine.commit(tx, write_opts).unwrap();
+                    tx.commit(write_opts).unwrap();
                     black_box(())
                 })
             },
@@ -128,9 +128,7 @@ fn bench_single_get(c: &mut Criterion) {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin");
         tx.put(keys[i].to_vec(), vals[i].to_vec(), None).unwrap();
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     }
     // Note: intentionally NOT flushing to keep data in memtable
 
@@ -202,9 +200,7 @@ fn bench_single_put(c: &mut Criterion) {
                 .expect("begin");
             tx.put(keys[idx].to_vec(), vals[idx].to_vec(), None)
                 .unwrap();
-            engine
-                .commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
             black_box(());
         })
     });

@@ -18,9 +18,9 @@ pub use iterator::{Direction, Iterator as ScanIterator};
 pub use kv::{Key, Value};
 pub use options::{Goal, MemoryBudget, OpenOptions, RecoveryPolicy, Storage, WorkloadProfile};
 pub use query::Query;
+pub(crate) use transaction::TransactionInit;
 pub use transaction::{IsolationLevel, Transaction, TransactionMode};
 pub use write_options::WriteOptions;
 
 // Internal types needed by runtime but not part of public API
 pub(crate) use options::Durability;
-pub(crate) use write_options::DurabilityPolicy;

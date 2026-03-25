@@ -1,4 +1,4 @@
-//! Tier 2 — Local Durability Throughput Regression Guard
+//! Tier 2 â€” Local Durability Throughput Regression Guard
 //!
 //! Measures: batched write throughput for local vs memory mode
 //! Purpose: Catch unintended local throughput collapse (regression guard)
@@ -64,7 +64,7 @@ fn benchmark_batched_writes(c: &mut Criterion) {
                             tx.put(k.as_bytes().to_vec(), v.clone(), None).expect("put");
                         }
 
-                        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+                        tx.commit(WriteOptions::buffered()).expect("commit");
                     }
                 },
                 criterion::BatchSize::SmallInput,
@@ -106,7 +106,7 @@ fn verify_local_throughput_minimum(c: &mut Criterion) {
                     for (k, v) in &keys_vals {
                         tx.put(k.as_bytes().to_vec(), v.clone(), None).expect("put");
                     }
-                    engine.commit(tx, WriteOptions::buffered()).expect("commit");
+                    tx.commit(WriteOptions::buffered()).expect("commit");
                 }
             },
             criterion::BatchSize::SmallInput,
@@ -137,7 +137,7 @@ fn verify_local_throughput_minimum(c: &mut Criterion) {
                     for (k, v) in &keys_vals {
                         tx.put(k.as_bytes().to_vec(), v.clone(), None).expect("put");
                     }
-                    engine.commit(tx, WriteOptions::buffered()).expect("commit");
+                    tx.commit(WriteOptions::buffered()).expect("commit");
                 }
             },
             criterion::BatchSize::SmallInput,
