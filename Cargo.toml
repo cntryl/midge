@@ -79,7 +79,7 @@ tempfile = "3.23"
 # Cloud Backend Support (optional)
 base64 = { version = "0.22", optional = true }
 futures = { version = "0.3", optional = true }
-hmac = { version = "0.12", optional = true }
+hmac = { version = "0.13", optional = true }
 md5 = { version = "0.8", optional = true }
 native-tls = { version = "0.2.18", optional = true }
 percent-encoding = { version = "2.3", optional = true }
