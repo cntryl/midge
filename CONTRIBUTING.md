@@ -22,7 +22,8 @@ Be respectful, constructive, and professional. We're here to build reliable infr
 ### Prerequisites
 
 - Rust 1.70+ (latest stable recommended)
-- Python 3.8+ (for test validation scripts)
+- cntryl-tools (install with `cargo install --git https://github.com/cntryl/tools --locked`)
+- Python 3.8+ (only for `scripts/test_watchdog.py`)
 - Git
 
 ### Fork and Clone
@@ -43,7 +44,7 @@ cargo build --workspace
 cargo test
 
 # Validate test structure (recommended)
-python ./scripts/validate_tests.py --summary
+cntryl-tools validate-tests
 
 # Note: the current codebase contains some legacy violations; when changing or
 # adding tests, prefer making them compliant and avoid increasing violations.
@@ -99,7 +100,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 
 # 4. Optional: test naming/AAA validator (not CI-gated yet)
-python ./scripts/validate_tests.py --summary
+cntryl-tools validate-tests
 ```
 
 **Fix issues:**
@@ -230,7 +231,7 @@ fn test_should_get_value() { }  // 'test_' prefix unnecessary
 - Enforces descriptive test names
 - Acts as documentation
 - Makes test failures self-explanatory
-- The validator script can check this convention
+- cntryl-tools validate-tests can check this convention
 
 ### AAA Pattern (Arrange-Act-Assert)
 
@@ -357,7 +358,7 @@ group.bench_function("get", |b| {
 Recommended before submitting PR:
 
 ```bash
-python ./scripts/validate_tests.py --summary
+cntryl-tools validate-tests
 ```
 
 This checks:
@@ -377,7 +378,7 @@ Before opening a PR, ensure:
 - [ ] All tests pass: `cargo test`
 - [ ] No clippy warnings: `cargo clippy --all-targets -- -D warnings`
 - [ ] Code formatted: `cargo fmt`
-- [ ] Test validator reviewed: `python ./scripts/validate_tests.py --summary` (aim for compliance on new/changed tests)
+- [ ] Test validator reviewed: `cntryl-tools validate-tests` (aim for compliance on new/changed tests)
 - [ ] New tests added for new functionality
 - [ ] Documentation updated (if API changed)
 - [ ] Commit messages are clear and descriptive
@@ -417,7 +418,7 @@ All PRs must pass CI checks:
 - ✅ `cargo test` (all tests pass)
 - ✅ `cargo clippy` (zero warnings)
 - ✅ `cargo fmt --check` (code formatted)
-- ✅ `validate_tests.py` (test structure validation)
+- ✅ `cntryl-tools validate-tests` (test structure validation)
 - ✅ No layer dependency violations
 
 ### Draft PRs

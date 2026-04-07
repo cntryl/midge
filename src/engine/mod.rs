@@ -1380,8 +1380,10 @@ mod tests {
 
     #[test]
     fn should_use_zero_as_default_column_family_id() {
-        // Arrange / Act
+        // Arrange
         let cf_id: ColumnFamilyId = 0;
+
+        // Act
 
         // Assert
         assert_eq!(cf_id, 0);
@@ -1391,6 +1393,8 @@ mod tests {
     fn should_preserve_custom_column_family_id_value() {
         // Arrange
         let custom_id: ColumnFamilyId = 42;
+
+        // Act
 
         // Assert
         assert_eq!(custom_id, 42);
@@ -1402,6 +1406,8 @@ mod tests {
         let id1: ColumnFamilyId = 5;
         let id2: ColumnFamilyId = 5;
         let id3: ColumnFamilyId = 6;
+
+        // Act
 
         // Assert
         assert_eq!(id1, id2);
@@ -1447,6 +1453,8 @@ mod tests {
         let name = "test_cf".to_string();
         let handle = ColumnFamilyHandle::new(cf_id, name);
 
+        // Act
+
         // Assert: id() and name() return exact values
         assert_eq!(handle.id(), 10);
         assert_eq!(handle.name(), "test_cf");
@@ -1467,8 +1475,10 @@ mod tests {
 
     #[test]
     fn should_support_empty_column_family_name() {
-        // Arrange / Act
+        // Arrange
         let handle = ColumnFamilyHandle::new(1, "".to_string());
+
+        // Act
 
         // Assert
         assert_eq!(handle.name(), "");
@@ -1492,8 +1502,10 @@ mod tests {
 
     #[test]
     fn should_handle_maximum_column_family_id() {
-        // Arrange / Act
+        // Arrange
         let max_id: ColumnFamilyId = u32::MAX;
+
+        // Act
 
         // Assert
         assert_eq!(max_id, u32::MAX);
@@ -1501,8 +1513,10 @@ mod tests {
 
     #[test]
     fn should_handle_zero_column_family_id() {
-        // Arrange / Act
+        // Arrange
         let zero_id: ColumnFamilyId = 0;
+
+        // Act
 
         // Assert
         assert_eq!(zero_id, 0);
@@ -1524,18 +1538,20 @@ mod tests {
     }
 
     #[test]
-    fn memory_flush_and_compact_noop() {
-        // Open a memory-mode engine and verify flush/compact succeed and do not touch disk
+    fn should_treat_flush_compact_as_noop_in_memory_mode() {
+        // Arrange
         let opts = crate::testkit::MidgeOptions {
             storage_mode: crate::testkit::StorageMode::Memory,
             ..Default::default()
         };
 
+        // Act
         let engine = Engine::open_with_options(opts).expect("open memory engine");
         let cf = engine
             .create_column_family("test")
             .expect("create column family");
-        // These operations should be no-ops and return Ok
+
+        // Assert
         engine.flush_cf(&cf).expect("memory flush should succeed");
         engine
             .compact_all()
@@ -1548,8 +1564,10 @@ mod tests {
 
     #[test]
     fn should_create_handle_for_default_column_family() {
-        // Arrange / Act
+        // Arrange
         let handle = ColumnFamilyHandle::new(0, "default".to_string());
+
+        // Act
 
         // Assert
         assert_eq!(handle.id(), 0);
@@ -1558,10 +1576,12 @@ mod tests {
 
     #[test]
     fn should_create_multiple_handles_with_different_ids() {
-        // Arrange / Act
+        // Arrange
         let handle1 = ColumnFamilyHandle::new(1, "cf1".to_string());
         let handle2 = ColumnFamilyHandle::new(2, "cf2".to_string());
         let handle3 = ColumnFamilyHandle::new(3, "cf3".to_string());
+
+        // Act
 
         // Assert: all distinct
         assert_ne!(handle1.id(), handle2.id());

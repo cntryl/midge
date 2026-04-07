@@ -9,7 +9,7 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] `cargo test --test failure_injection`
 - [ ] `cargo test --test chaos_compaction`
 - [ ] `cargo test --test engine_iterators`
-- [ ] `python ./scripts/validate_tests.py --summary`
+- [ ] `cntryl-tools validate-tests`
 - [ ] production contract docs present:
       `docs/development/one-dot-zero-contract.md`,
       `docs/development/support-matrix.md`,

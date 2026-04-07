@@ -326,7 +326,7 @@ cargo test
 cargo test --test '*'
 
 # Validate test structure (required)
-python ./scripts/validate_tests.py --summary
+cntryl-tools validate-tests
 ```
 
 ### Benchmark Comparisons
