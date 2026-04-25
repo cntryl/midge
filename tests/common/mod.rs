@@ -272,7 +272,7 @@ pub fn bulk_put(
     for (key, value) in kvs {
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(key.to_vec(), value.to_vec(), None)?;
-        engine.commit(tx, WriteOptions::buffered())?;
+        tx.commit(WriteOptions::buffered())?;
     }
     Ok(())
 }

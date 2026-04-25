@@ -94,9 +94,7 @@ fn should_report_snapshot_retention_pressure_metrics_when_snapshot_pins_ssts() -
             seed.put(key.into_bytes(), b"v".to_vec(), None)
                 .expect("seed put");
         }
-        engine
-            .commit(seed, WriteOptions::buffered())
-            .expect("seed commit");
+        seed.commit(WriteOptions::buffered()).expect("seed commit");
         engine.flush_cf(&cf).expect("seed flush");
 
         // Act
@@ -135,9 +133,7 @@ fn should_unregister_snapshot_when_commit_finishes_transaction() -> MidgeResult<
             .expect("put value");
         wait_for_active_snapshots(&engine, 1, Duration::from_secs(1))
             .expect("wait for one active snapshot before commit");
-        engine
-            .commit(tx, WriteOptions::buffered())
-            .expect("commit tx");
+        tx.commit(WriteOptions::buffered()).expect("commit tx");
 
         // Assert
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
@@ -159,7 +155,7 @@ fn should_unregister_snapshot_when_rollback_ends_transaction() -> MidgeResult<()
             .expect("begin read-only tx");
         wait_for_active_snapshots(&engine, 1, Duration::from_secs(1))
             .expect("wait for one active snapshot before rollback");
-        engine.rollback_transaction(tx1).expect("rollback tx");
+        tx1.rollback().expect("rollback tx");
 
         // Assert
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
@@ -191,7 +187,8 @@ fn should_unregister_snapshot_when_drop_ends_transaction() -> MidgeResult<()> {
 }
 
 #[test]
-fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active() -> MidgeResult<()> {
+fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active() -> MidgeResult<()>
+{
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts, mode);
@@ -202,9 +199,7 @@ fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active(
             .expect("begin seed tx");
         seed.put(b"k".to_vec(), b"v1".to_vec(), None)
             .expect("seed put");
-        engine
-            .commit(seed, WriteOptions::buffered())
-            .expect("seed commit");
+        seed.commit(WriteOptions::buffered()).expect("seed commit");
         engine.flush_cf(&cf).expect("seed flush");
 
         let snapshot = engine
@@ -217,8 +212,8 @@ fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active(
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin delete tx");
         deleter.delete(b"k".to_vec()).expect("delete key");
-        engine
-            .commit(deleter, WriteOptions::buffered())
+        deleter
+            .commit(WriteOptions::buffered())
             .expect("delete commit");
         engine.flush_cf(&cf).expect("delete flush");
 
@@ -241,14 +236,20 @@ fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active(
         let current = engine
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin current read tx");
-        assert_eq!(current.get(b"k").expect("current get"), None, "mode: {}", mode);
+        assert_eq!(
+            current.get(b"k").expect("current get"),
+            None,
+            "mode: {}",
+            mode
+        );
     });
 
     Ok(())
 }
 
 #[test]
-fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_active() -> MidgeResult<()> {
+fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_active(
+) -> MidgeResult<()> {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts, mode);
@@ -262,9 +263,7 @@ fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_act
             seed.put(key.into_bytes(), b"old".to_vec(), None)
                 .expect("seed put");
         }
-        engine
-            .commit(seed, WriteOptions::buffered())
-            .expect("seed commit");
+        seed.commit(WriteOptions::buffered()).expect("seed commit");
         engine.flush_cf(&cf).expect("seed flush");
 
         let snapshot = engine
@@ -283,8 +282,8 @@ fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_act
                     .put(key.into_bytes(), generation.as_bytes().to_vec(), None)
                     .expect("overwrite put");
             }
-            engine
-                .commit(overwrite, WriteOptions::buffered())
+            overwrite
+                .commit(WriteOptions::buffered())
                 .expect("overwrite commit");
             engine.flush_cf(&cf).expect("overwrite flush");
             engine.compact_all().expect("compact all");
@@ -334,9 +333,7 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() ->
             seed.put(key.into_bytes(), b"baseline".to_vec(), None)
                 .expect("seed put");
         }
-        engine
-            .commit(seed, WriteOptions::buffered())
-            .expect("seed commit");
+        seed.commit(WriteOptions::buffered()).expect("seed commit");
         engine.flush_cf(&cf).expect("seed flush");
 
         let snapshot = engine
@@ -356,8 +353,7 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() ->
                 tx.put(key.into_bytes(), value, None)
                     .expect("overwrite put");
             }
-            engine
-                .commit(tx, WriteOptions::buffered())
+            tx.commit(WriteOptions::buffered())
                 .expect("overwrite commit");
             engine.flush_cf(&cf).expect("overwrite flush");
             engine.compact_all().expect("compact all");
@@ -378,7 +374,9 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() ->
         }
 
         // Assert
-        let mut iter = snapshot.scan(&Query::new()).expect("snapshot scan after compaction");
+        let mut iter = snapshot
+            .scan(&Query::new())
+            .expect("snapshot scan after compaction");
         let rows: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
         assert_eq!(rows.len(), 32, "mode: {}", mode);
         for (_key, value) in rows {

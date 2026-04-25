@@ -704,14 +704,16 @@ impl RuntimeState {
             .snapshots
             .active_snapshots
             .iter()
-            .map(|(snapshot_id, (sequence, created_at, ref_count, _pinned_ssts))| {
-                crate::engine::SnapshotPinSnapshot {
-                    snapshot_id: *snapshot_id,
-                    sequence: *sequence,
-                    age_seconds: now.duration_since(*created_at).as_secs(),
-                    ref_count: *ref_count,
-                }
-            })
+            .map(
+                |(snapshot_id, (sequence, created_at, ref_count, _pinned_ssts))| {
+                    crate::engine::SnapshotPinSnapshot {
+                        snapshot_id: *snapshot_id,
+                        sequence: *sequence,
+                        age_seconds: now.duration_since(*created_at).as_secs(),
+                        ref_count: *ref_count,
+                    }
+                },
+            )
             .collect();
         active_snapshots.sort_by_key(|snapshot| snapshot.snapshot_id);
         let residue = self.storage_residue_assessment();
@@ -1606,7 +1608,7 @@ impl RuntimeState {
         self.snapshots
             .active_snapshots
             .values()
-                .map(|(sequence, _created_at, _ref_count, _pinned_ssts)| *sequence)
+            .map(|(sequence, _created_at, _ref_count, _pinned_ssts)| *sequence)
             .min()
     }
 
@@ -1961,7 +1963,10 @@ mod tests {
 
         // Assert
         assert_eq!(state.recent_delete_ranges.len(), 2);
-        assert!(state.recent_delete_ranges.iter().all(|entry| entry.sequence > 20));
+        assert!(state
+            .recent_delete_ranges
+            .iter()
+            .all(|entry| entry.sequence > 20));
     }
 
     #[test]

@@ -33,6 +33,9 @@ jobs:
         with:
           shared-key: "bench"
 
+      - name: Install cntryl-tools
+        run: cargo install --git https://github.com/cntryl/tools --locked
+
       - name: Build all benchmarks
         run: cargo bench --no-run
 
@@ -48,10 +51,11 @@ jobs:
       - name: Run Tier 4 benchmarks (YCSB & streaming)
         run: cargo bench --bench 'tier4_*'
 
-      - name: Upload Criterion artifacts
+      - name: Generate benchmark summary
+        run: cntryl-tools summarize-benchmarks
+
+      - name: Upload benchmark summary
         uses: actions/upload-artifact@v7
         with:
-          name: bench-artifacts-${{ matrix.os }}
-          path: |
-            target/criterion/**
-            target/stress/**
+          name: bench-summary-${{ matrix.os }}
+          path: target/bench_summary.md

@@ -1,7 +1,7 @@
-//! Tier 4 — Streaming Workload
+//! Tier 4 â€” Streaming Workload
 //!
 //! Models append-heavy streaming with tail-follow reads.
-//! Focuses on stability, lag, and interference — not peak throughput.
+//! Focuses on stability, lag, and interference â€” not peak throughput.
 
 #[path = "./stress_config.rs"]
 mod stress_config;
@@ -86,7 +86,7 @@ fn run_streaming_phase(
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                     .expect("begin");
                 tx.put(key.to_vec(), value.to_vec(), None).ok();
-                let _ = engine.commit(tx, cntryl_midge::WriteOptions::buffered());
+                let _ = tx.commit(cntryl_midge::WriteOptions::buffered());
 
                 if count {
                     local_writes = local_writes.wrapping_add(1);

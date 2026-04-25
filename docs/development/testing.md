@@ -23,7 +23,7 @@ cargo test --test external_adopter_smoke
 Validate naming and AAA structure:
 
 ```bash
-python ./scripts/validate_tests.py --summary
+cntryl-tools validate-tests
 ```
 
 ## Trust Matrix

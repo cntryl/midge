@@ -81,7 +81,7 @@ fn should_recover_all_data_when_crashing_after_compaction_but_before_manifest_pe
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
-    // Act: Write data and flush to create L0 files, then crash during compaction → manifest
+    // Act: Write data and flush to create L0 files, then crash during compaction â†’ manifest
     let committed = run_child_crash_at_compaction_before_persist(db_path);
 
     // Assert
@@ -232,9 +232,7 @@ fn child_create_data_and_compact_with_crash_before_persist(db_path: &Path) {
                 .write_all(format!("{}\n", json).as_bytes())
                 .expect("write commit record");
         }
-        engine
-            .commit(tx, WriteOptions::buffered())
-            .expect("commit batch");
+        tx.commit(WriteOptions::buffered()).expect("commit batch");
         engine.flush_cf(&default_cf).expect("flush batch");
     }
 
@@ -282,9 +280,7 @@ fn child_create_data_and_compact_with_crash_before_publish(db_path: &Path) {
                 .write_all(format!("{}\n", json).as_bytes())
                 .expect("write commit record");
         }
-        engine
-            .commit(tx, WriteOptions::buffered())
-            .expect("commit batch");
+        tx.commit(WriteOptions::buffered()).expect("commit batch");
         engine.flush_cf(&default_cf).expect("flush batch");
     }
 
@@ -331,9 +327,7 @@ fn child_create_data_and_compact_with_crash_before_gc(db_path: &Path) {
                 .write_all(format!("{}\n", json).as_bytes())
                 .expect("write commit record");
         }
-        engine
-            .commit(tx, WriteOptions::buffered())
-            .expect("commit batch");
+        tx.commit(WriteOptions::buffered()).expect("commit batch");
         engine.flush_cf(&default_cf).expect("flush batch");
     }
 

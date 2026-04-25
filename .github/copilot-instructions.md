@@ -11,7 +11,7 @@ the project's architecture, conventions, and developer workflows.
 
 STOP!
 
-- did you validate tests? `python ./scripts/validate_tests.py --summary`
+- did you validate tests? `cntryl-tools validate-tests`
 - did you fix all clippy warnings? `cargo clippy --all-targets`
 
 - **Big picture**: Midge is an embedded LSM-tree engine in Rust. Key
@@ -30,18 +30,18 @@ STOP!
 
   - `cargo build --workspace`
   - `cargo test` (runs unit + integration tests)
-  - `python ./scripts/validate_tests.py --summary` (test naming/structure validation)
+  - `cntryl-tools validate-tests` (test naming/structure validation)
   - `cargo bench` / `cargo bench --bench <name>` (Criterion benches)
 
 - **Where examples live**:
 
   - Bench patterns: `benches/` (see `benches/criterion_helper.rs`).
   - Integration tests: top-level `tests/` (uses `should_{action}_when_{context}`).
-  - Automation scripts: `scripts/` (Python preferred).
+  - Automation tooling: `cntryl-tools` for validation, inventory, and benchmark summaries; `scripts/test_watchdog.py` remains the repo-specific hang detector.
 
 - **Test conventions (required)**:
 
-  - Name: `should_{action}_when_{context}`. Validator script checks this.
+  - Name: `should_{action}_when_{context}`. cntryl-tools validate-tests checks this.
   - Structure for non-trivial tests: include `// Arrange`, `// Act`,
     `// Assert`. Only one `// Act` per test. Small tests (<5 lines)
     may omit full AAA.

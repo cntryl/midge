@@ -543,8 +543,10 @@ mod tests {
 
     #[test]
     fn should_roundtrip_none_code() {
-        // Arrange & Act
+        // Arrange
         let algo = CompressionAlgo::from_u8(0).unwrap();
+
+        // Act
 
         // Assert
         assert_eq!(algo, CompressionAlgo::None);
@@ -553,8 +555,10 @@ mod tests {
 
     #[test]
     fn should_roundtrip_lz4_code() {
-        // Arrange & Act
+        // Arrange
         let algo = CompressionAlgo::from_u8(1).unwrap();
+
+        // Act
 
         // Assert
         assert_eq!(algo, CompressionAlgo::Lz4);
@@ -563,8 +567,10 @@ mod tests {
 
     #[test]
     fn should_roundtrip_zstd3_code() {
-        // Arrange & Act
+        // Arrange
         let algo = CompressionAlgo::from_u8(2).unwrap();
+
+        // Act
 
         // Assert
         assert_eq!(algo, CompressionAlgo::Zstd3);
@@ -573,8 +579,10 @@ mod tests {
 
     #[test]
     fn should_roundtrip_zstd9_code() {
-        // Arrange & Act
+        // Arrange
         let algo = CompressionAlgo::from_u8(3).unwrap();
+
+        // Act
 
         // Assert
         assert_eq!(algo, CompressionAlgo::Zstd9);
@@ -583,8 +591,10 @@ mod tests {
 
     #[test]
     fn should_roundtrip_zlib_code() {
-        // Arrange & Act
+        // Arrange
         let algo = CompressionAlgo::from_u8(4).unwrap();
+
+        // Act
 
         // Assert
         assert_eq!(algo, CompressionAlgo::Zlib);
@@ -593,8 +603,10 @@ mod tests {
 
     #[test]
     fn should_roundtrip_snappy_code() {
-        // Arrange & Act
+        // Arrange
         let algo = CompressionAlgo::from_u8(5).unwrap();
+
+        // Act
 
         // Assert
         assert_eq!(algo, CompressionAlgo::Snappy);
@@ -606,17 +618,21 @@ mod tests {
         // Arrange
         let valid_codes = (0..=5).collect::<Vec<_>>();
 
-        // Act & Assert
+        // Act
         for code in valid_codes {
             let algo = CompressionAlgo::from_u8(code).expect("valid code");
             assert_eq!(algo.to_u8(), code, "roundtrip failed for code {}", code);
         }
+
+        // Assert
     }
 
     #[test]
     fn should_reject_invalid_compression_code_6() {
-        // Arrange & Act
+        // Arrange
         let result = CompressionAlgo::from_u8(6);
+
+        // Act
 
         // Assert
         assert!(result.is_none());
@@ -624,8 +640,10 @@ mod tests {
 
     #[test]
     fn should_reject_invalid_compression_code_255() {
-        // Arrange & Act
+        // Arrange
         let result = CompressionAlgo::from_u8(255);
+
+        // Act
 
         // Assert
         assert!(result.is_none());
@@ -633,9 +651,12 @@ mod tests {
 
     #[test]
     fn should_reject_all_invalid_codes() {
-        // Arrange & Act & Assert
+        // Arrange
         for code in 6..=255 {
+            // Act
             let result = CompressionAlgo::from_u8(code);
+
+            // Assert
             assert!(result.is_none(), "code {} should be invalid", code);
         }
     }
@@ -667,7 +688,9 @@ mod tests {
 
     #[test]
     fn should_have_exact_u8_repr() {
-        // Arrange & Act & Assert
+        // Arrange
+        // Act
+        // Assert
         assert_eq!(CompressionAlgo::None.to_u8(), 0);
         assert_eq!(CompressionAlgo::Lz4.to_u8(), 1);
         assert_eq!(CompressionAlgo::Zstd3.to_u8(), 2);
@@ -680,8 +703,10 @@ mod tests {
 
     #[test]
     fn should_create_none_policy() {
-        // Arrange & Act
+        // Arrange
         let policy = CompressionPolicy::None;
+
+        // Act
 
         // Assert - should not panic
         assert!(matches!(policy, CompressionPolicy::None));
@@ -689,8 +714,10 @@ mod tests {
 
     #[test]
     fn should_create_fixed_policy() {
-        // Arrange & Act
+        // Arrange
         let policy = CompressionPolicy::Fixed(CompressionAlgo::Lz4);
+
+        // Act
 
         // Assert
         assert!(matches!(
@@ -701,12 +728,14 @@ mod tests {
 
     #[test]
     fn should_create_adaptive_policy_with_custom_params() {
-        // Arrange & Act
+        // Arrange
         let policy = CompressionPolicy::Adaptive {
             min_savings_bytes: 512,
             min_ratio: 1.1,
             check_algorithms: vec![CompressionAlgo::Zstd3],
         };
+
+        // Act
 
         // Assert
         match policy {
@@ -726,8 +755,10 @@ mod tests {
 
     #[test]
     fn should_have_default_adaptive_policy() {
-        // Arrange & Act
+        // Arrange
         let policy = CompressionPolicy::default();
+
+        // Act
 
         // Assert
         match policy {
@@ -803,8 +834,8 @@ mod tests {
         // Act
         let (compressed, algo) = compress_block(&boundary_data, &policy).unwrap();
 
-        // Assert - should attempt compression
-        assert_eq!(algo, CompressionAlgo::None); // Fallback when not implemented
+        // Assert
+        assert_eq!(algo, CompressionAlgo::None);
         assert_eq!(compressed.len(), boundary_data.len());
     }
 
@@ -893,7 +924,7 @@ mod tests {
         let policy = CompressionPolicy::Fixed(CompressionAlgo::Zlib);
         let data = vec![6u8; 1024];
 
-        // Act - Zlib is not supported
+        // Act
         let result = compress_block(&data, &policy);
 
         // Assert
@@ -1117,8 +1148,9 @@ mod tests {
             },
         ];
 
-        // Act & Assert
+        // Act
         for policy in policies {
+            // Assert
             let (compressed, algo) = compress_block(&data, &policy).unwrap();
             let decompressed = decompress_block(&compressed, algo).unwrap();
             assert_eq!(decompressed.as_ref(), data.as_slice());
@@ -1129,19 +1161,25 @@ mod tests {
 
     #[test]
     fn should_have_correct_min_compress_size() {
-        // Arrange & Act & Assert
+        // Arrange
+        // Act
+        // Assert
         assert_eq!(MIN_COMPRESS_SIZE, 256);
     }
 
     #[test]
     fn should_have_correct_max_block_size() {
-        // Arrange & Act & Assert
+        // Arrange
+        // Act
+        // Assert
         assert_eq!(MAX_BLOCK_SIZE, 64 * 1024);
     }
 
     #[test]
     fn should_have_correct_block_trailer_size() {
-        // Arrange & Act & Assert
+        // Arrange
+        // Act
+        // Assert
         assert_eq!(BLOCK_TRAILER_SIZE, 5);
     }
 
@@ -1150,7 +1188,8 @@ mod tests {
         // Arrange
         // Block trailer: compression_type (1) + crc32c (4) = 5 bytes
 
-        // Act & Assert
+        // Act
+        // Assert
         assert_eq!(BLOCK_TRAILER_SIZE, 1 + 4);
     }
 

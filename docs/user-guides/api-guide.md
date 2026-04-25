@@ -2,7 +2,7 @@
 
 Comprehensive guide to using Midge in your application.
 
-**Thread Safety:** The `Engine` type is `Send + Sync` and can be safely shared across threads (wrap in `Arc<Engine>` for multi-threaded access). All operations are synchronous (no async/await). Concurrent API calls are serialized internally via actor-based message passing. For threading model details, see [../development/architecture.md#threading-model](../development/architecture.md#threading-model).
+**Thread Safety:** The `Engine` type is `Send + Sync` and can be safely shared across threads (wrap in `Arc<Engine>` for multi-threaded access). All operations are synchronous (no async/await). Write coordination and lifecycle operations go through the runtime; read transactions execute against immutable snapshots captured at `begin_tx()`. For threading model details, see [../development/architecture.md#threading-model](../development/architecture.md#threading-model).
 
 ## Table of Contents
 
@@ -38,7 +38,7 @@ let engine = Engine::open(
 let opts = OpenOptions::local("./mydb")
     .goal(Goal::Throughput)           // Latency | Throughput | Economy
     .memory_budget(MemoryBudget::Auto) // Auto derives from system limits; or Bytes(512_000_000)
-    .workload(WorkloadProfile::Mixed)  // ReadMostly | WriteHeavy | Mixed | RangeScan
+    .workload(WorkloadProfile::Mixed)  // Mixed | WriteHeavy | ReadMostly | RangeScan | TtlHeavy
     .recovery_policy(RecoveryPolicy::Strict) // Strict (default) | Salvage
     .build();
 

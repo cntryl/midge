@@ -26,7 +26,7 @@ fn should_recover_data_from_wal_after_flush() {
             .unwrap();
         tx.put(key.as_bytes().to_vec(), b"wal_value".to_vec(), None)
             .unwrap();
-        engine.commit(tx, WriteOptions::buffered()).ok();
+        tx.commit(WriteOptions::buffered()).ok();
     }
 
     eprintln!("Wrote 50 keys to WAL+memtable");
@@ -45,9 +45,9 @@ fn should_recover_data_from_wal_after_flush() {
     eprintln!("Keys after flush: {}", count);
 
     if count >= 50 {
-        eprintln!("âœ“ WAL recovery successful");
+        eprintln!("Ã¢Å“â€œ WAL recovery successful");
     } else {
-        eprintln!("âœ— Data loss: {} keys < 50 expected", count);
+        eprintln!("Ã¢Å“â€” Data loss: {} keys < 50 expected", count);
     }
 }
 
@@ -71,7 +71,7 @@ fn should_handle_large_values_in_wal() {
         .unwrap();
     tx.put(b"large_wal_key".to_vec(), large_value.clone(), None)
         .unwrap();
-    engine.commit(tx, WriteOptions::buffered()).ok();
+    tx.commit(WriteOptions::buffered()).ok();
     eprintln!("Wrote 1MB value to WAL");
 
     engine.flush_cf(&cf).ok();
@@ -84,10 +84,10 @@ fn should_handle_large_values_in_wal() {
 
     match retrieved {
         Some(val) if val.len() == 1_000_000 => {
-            eprintln!("âœ“ Large value persisted and recovered from WAL");
+            eprintln!("Ã¢Å“â€œ Large value persisted and recovered from WAL");
         }
         _ => {
-            eprintln!("âœ— Large value corrupted or lost in WAL");
+            eprintln!("Ã¢Å“â€” Large value corrupted or lost in WAL");
         }
     }
 }
@@ -111,7 +111,7 @@ fn should_recover_deletes_from_wal() {
             .unwrap();
         tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
             .unwrap();
-        engine.commit(tx, WriteOptions::buffered()).ok();
+        tx.commit(WriteOptions::buffered()).ok();
     }
 
     // Act: Delete some keys via transaction, then flush
@@ -122,9 +122,7 @@ fn should_recover_deletes_from_wal() {
         let key = format!("del_key_{:04}", i);
         txn.delete(key.into_bytes()).ok();
     }
-    engine
-        .commit(txn, cntryl_midge::WriteOptions::buffered())
-        .ok();
+    txn.commit(cntryl_midge::WriteOptions::buffered()).ok();
 
     eprintln!("Deleted 10 of 30 keys via transaction");
 
@@ -146,10 +144,10 @@ fn should_recover_deletes_from_wal() {
     eprintln!("Confirmed {} keys deleted", deleted_count);
 
     if deleted_count == 10 {
-        eprintln!("âœ“ Deletes recovered correctly from WAL");
+        eprintln!("Ã¢Å“â€œ Deletes recovered correctly from WAL");
     } else {
         eprintln!(
-            "âœ— Delete recovery failed: {} deletes not persisted",
+            "Ã¢Å“â€” Delete recovery failed: {} deletes not persisted",
             10 - deleted_count
         );
     }
@@ -174,18 +172,15 @@ fn should_recover_range_tombstones_from_wal() {
             .unwrap();
         tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
             .unwrap();
-        engine.commit(tx, WriteOptions::buffered()).ok();
+        tx.commit(WriteOptions::buffered()).ok();
     }
 
     // Act: Apply range delete, then flush
-    engine
-        .delete_range(
-            &cf,
-            b"k020".to_vec(),
-            b"k080".to_vec(),
-            cntryl_midge::WriteOptions::buffered(),
-        )
-        .ok();
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx.delete_range(b"k020".to_vec(), b"k080".to_vec()).unwrap();
+    tx.commit(cntryl_midge::WriteOptions::buffered()).ok();
 
     eprintln!("Applied range delete [k020, k080)");
 
@@ -207,9 +202,12 @@ fn should_recover_range_tombstones_from_wal() {
     eprintln!("Keys remaining in deleted range: {}", in_range);
 
     if in_range == 0 {
-        eprintln!("âœ“ Range tombstone recovered from WAL");
+        eprintln!("Ã¢Å“â€œ Range tombstone recovered from WAL");
     } else {
-        eprintln!("âœ— Range tombstone lost: {} keys still present", in_range);
+        eprintln!(
+            "Ã¢Å“â€” Range tombstone lost: {} keys still present",
+            in_range
+        );
     }
 }
 
@@ -236,7 +234,7 @@ fn should_handle_wal_rotation_multiple_segments() {
                 .unwrap();
             tx.put(key.as_bytes().to_vec(), b"batch_value".to_vec(), None)
                 .unwrap();
-            engine.commit(tx, WriteOptions::buffered()).ok();
+            tx.commit(WriteOptions::buffered()).ok();
         }
 
         engine.flush_cf(&cf).ok();
@@ -254,9 +252,9 @@ fn should_handle_wal_rotation_multiple_segments() {
     eprintln!("Total keys after {} batches: {}", batch_count, total);
 
     if total >= 450 {
-        eprintln!("âœ“ WAL rotation handled correctly");
+        eprintln!("Ã¢Å“â€œ WAL rotation handled correctly");
     } else {
-        eprintln!("âœ— Data loss during WAL rotation: {} keys", total);
+        eprintln!("Ã¢Å“â€” Data loss during WAL rotation: {} keys", total);
     }
 }
 
@@ -277,16 +275,14 @@ fn should_recover_mixed_operations_from_wal() {
         .unwrap();
     tx0.put(b"put_key".to_vec(), b"put_value".to_vec(), None)
         .unwrap();
-    engine.commit(tx0, WriteOptions::buffered()).ok();
+    tx0.commit(WriteOptions::buffered()).ok();
 
     // Act: Apply delete + put + range delete, then flush
     let mut txn1 = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .unwrap();
     txn1.delete(b"put_key".to_vec()).ok();
-    engine
-        .commit(txn1, cntryl_midge::WriteOptions::buffered())
-        .ok();
+    txn1.commit(cntryl_midge::WriteOptions::buffered()).ok();
 
     // Put again
     let mut tx1 = engine
@@ -294,7 +290,7 @@ fn should_recover_mixed_operations_from_wal() {
         .unwrap();
     tx1.put(b"put_key".to_vec(), b"put_value_v2".to_vec(), None)
         .unwrap();
-    engine.commit(tx1, WriteOptions::buffered()).ok();
+    tx1.commit(WriteOptions::buffered()).ok();
 
     // Delete range
     for i in 0..20 {
@@ -304,16 +300,17 @@ fn should_recover_mixed_operations_from_wal() {
             .unwrap();
         tx.put(key.as_bytes().to_vec(), b"v".to_vec(), None)
             .unwrap();
-        engine.commit(tx, WriteOptions::buffered()).ok();
+        tx.commit(WriteOptions::buffered()).ok();
     }
 
-    engine
-        .delete_range(
-            &cf,
-            b"dr_05".to_vec(),
-            b"dr_15".to_vec(),
-            cntryl_midge::WriteOptions::buffered(),
-        )
+    let mut delete_tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    delete_tx
+        .delete_range(b"dr_05".to_vec(), b"dr_15".to_vec())
+        .ok();
+    delete_tx
+        .commit(cntryl_midge::WriteOptions::buffered())
         .ok();
 
     eprintln!("Applied: put, delete, put, delete_range");
@@ -343,9 +340,9 @@ fn should_recover_mixed_operations_from_wal() {
 
     let mixed_ok = put_val.is_some() && dr_remaining == 0;
     if mixed_ok {
-        eprintln!("âœ“ Mixed operations recovered correctly");
+        eprintln!("Ã¢Å“â€œ Mixed operations recovered correctly");
     } else {
-        eprintln!("âœ— Mixed operation recovery failed");
+        eprintln!("Ã¢Å“â€” Mixed operation recovery failed");
     }
 }
 

@@ -1,4 +1,4 @@
-//! Tier 4 — Cloud durability semantics scenarios (stress harness)
+//! Tier 4 â€” Cloud durability semantics scenarios (stress harness)
 //!
 //! Cloud runs are dominated by network/object-store latency and are inherently
 //! slower/less deterministic than local-only durability. Keeping these in Tier 4
@@ -32,8 +32,7 @@ fn run_durability_puts_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops
                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin");
             tx.put(k.to_vec(), v, None).unwrap();
-            e.commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
     });
 

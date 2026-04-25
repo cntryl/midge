@@ -543,7 +543,7 @@ fn put_and_track_commit(
         .expect("begin write tx");
     tx.put(key.to_vec(), value.to_vec(), None)
         .expect("put value");
-    engine.commit(tx, opts).expect("commit value");
+    tx.commit(opts).expect("commit value");
     append_commit_record(committed_path, key, value);
 }
 

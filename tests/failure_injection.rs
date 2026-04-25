@@ -31,8 +31,8 @@ fn should_reject_transaction_when_no_space_hits_before_batch_append_and_remain_u
         .expect("put b");
 
     // Act
-    let error = engine
-        .commit(tx, WriteOptions::sync())
+    let error = tx
+        .commit(WriteOptions::sync())
         .expect_err("txn append batch should fail with no space");
 
     // Assert
@@ -48,8 +48,8 @@ fn should_reject_transaction_when_no_space_hits_before_batch_append_and_remain_u
     recovery_tx
         .put(b"batch-recovery".to_vec(), b"value".to_vec(), None)
         .expect("put recovery value");
-    engine
-        .commit(recovery_tx, WriteOptions::sync())
+    recovery_tx
+        .commit(WriteOptions::sync())
         .expect("commit recovery txn");
 
     drop(engine);
@@ -85,8 +85,8 @@ fn should_not_leak_partial_transaction_when_no_space_hits_before_commit_marker_a
         .expect("put c");
 
     // Act
-    let error = engine
-        .commit(tx, WriteOptions::sync())
+    let error = tx
+        .commit(WriteOptions::sync())
         .expect_err("txn commit append should fail with no space");
 
     // Assert
@@ -118,20 +118,17 @@ fn should_preserve_existing_keys_when_delete_range_wal_append_hits_no_space() {
     seed_range(&engine, &cf, 0..10, "range");
 
     let scenario = fail::FailScenario::setup();
-    fail::cfg(
-        "midge::wal::inject_no_space_on_delete_range_append",
-        "return",
-    )
-    .expect("configure delete_range no-space failpoint");
+    fail::cfg("midge::wal::inject_no_space_on_txn_append_batch", "return")
+        .expect("configure delete_range no-space failpoint");
 
     // Act
-    let error = engine
-        .delete_range(
-            &cf,
-            b"range-03".to_vec(),
-            b"range-07".to_vec(),
-            WriteOptions::sync(),
-        )
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin delete_range tx");
+    tx.delete_range(b"range-03".to_vec(), b"range-07".to_vec())
+        .expect("stage delete_range");
+    let error = tx
+        .commit(WriteOptions::sync())
         .expect_err("delete_range should fail with no space");
 
     // Assert
@@ -142,7 +139,7 @@ fn should_preserve_existing_keys_when_delete_range_wal_append_hits_no_space() {
         let value = format!("value-{index:02}");
         assert_visible(&engine, &cf, key.as_bytes(), value.as_bytes());
     }
-    fail::remove("midge::wal::inject_no_space_on_delete_range_append");
+    fail::remove("midge::wal::inject_no_space_on_txn_append_batch");
     scenario.teardown();
 
     drop(engine);
@@ -313,8 +310,7 @@ fn should_restore_sequence_floor_from_flushed_ssts_without_wal_recovery() {
             .expect("begin write tx");
         tx.put(key.into_bytes(), value.into_bytes(), None)
             .expect("put sequence-floor value");
-        engine
-            .commit(tx, WriteOptions::best_effort())
+        tx.commit(WriteOptions::best_effort())
             .expect("commit best-effort value");
     }
 
@@ -506,8 +502,7 @@ fn should_open_in_salvage_mode_when_replay_cannot_checkpoint_manifest() {
             .expect("begin write tx");
         tx.put(key.into_bytes(), value.into_bytes(), None)
             .expect("put best-effort value");
-        engine
-            .commit(tx, WriteOptions::best_effort())
+        tx.commit(WriteOptions::best_effort())
             .expect("commit best-effort value");
     }
     engine.flush_cf(&cf).expect("flush replay checkpoint seed");
@@ -600,8 +595,7 @@ fn should_fail_strict_open_when_replay_cannot_checkpoint_manifest() {
             .expect("begin write tx");
         tx.put(key.into_bytes(), value.into_bytes(), None)
             .expect("put best-effort value");
-        engine
-            .commit(tx, WriteOptions::best_effort())
+        tx.commit(WriteOptions::best_effort())
             .expect("commit best-effort value");
     }
     engine.flush_cf(&cf).expect("flush replay checkpoint seed");
@@ -694,8 +688,7 @@ fn should_recover_flushed_best_effort_data_when_manifest_checkpoint_save_hits_no
             .expect("begin write tx");
         tx.put(key.into_bytes(), value.into_bytes(), None)
             .expect("put best-effort value");
-        engine
-            .commit(tx, WriteOptions::best_effort())
+        tx.commit(WriteOptions::best_effort())
             .expect("commit best-effort value");
     }
 
@@ -754,8 +747,7 @@ fn should_preserve_compacted_input_state_when_compaction_output_hits_no_space() 
                 .expect("begin batch tx");
             tx.put(key.into_bytes(), value.into_bytes(), None)
                 .expect("put compaction seed");
-            engine
-                .commit(tx, WriteOptions::sync())
+            tx.commit(WriteOptions::sync())
                 .expect("commit compaction seed");
         }
         engine.flush_cf(&cf).expect("flush compaction seed");
@@ -821,8 +813,7 @@ fn should_publish_compaction_output_on_reopen_when_manifest_batch_append_hits_no
                 .expect("begin batch tx");
             tx.put(key.into_bytes(), value.into_bytes(), None)
                 .expect("put compaction seed");
-            engine
-                .commit(tx, WriteOptions::sync())
+            tx.commit(WriteOptions::sync())
                 .expect("commit compaction seed");
         }
         engine.flush_cf(&cf).expect("flush compaction seed");
@@ -894,8 +885,7 @@ fn should_recover_compaction_from_manifest_checkpoint_save_failure_after_batch_j
                 .expect("begin batch tx");
             tx.put(key.into_bytes(), value.into_bytes(), None)
                 .expect("put best-effort compaction seed");
-            engine
-                .commit(tx, WriteOptions::best_effort())
+            tx.commit(WriteOptions::best_effort())
                 .expect("commit best-effort compaction seed");
         }
         engine.flush_cf(&cf).expect("flush compaction seed");
@@ -984,9 +974,7 @@ fn seed_range(
             .expect("begin seed tx");
         tx.put(key.into_bytes(), value.into_bytes(), None)
             .expect("put seed value");
-        engine
-            .commit(tx, WriteOptions::sync())
-            .expect("commit seed value");
+        tx.commit(WriteOptions::sync()).expect("commit seed value");
     }
 }
 

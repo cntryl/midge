@@ -19,6 +19,7 @@ For the single-page external behavior contract, read [user-guides/transaction-du
 - [user-guides/](user-guides/) for API and operator-facing usage
 - [operations/](operations/) for deployment and tuning
 - [development/](development/) for architecture, recovery, invariants, and tests
+- [transactions-and-mvcc.md](transactions-and-mvcc.md) for transaction semantics and snapshot behavior
 
 ## Recommended Reading Paths
 

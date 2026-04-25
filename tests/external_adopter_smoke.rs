@@ -25,9 +25,7 @@ fn should_recover_wal_backed_commit_when_reopening_local_engine() {
             .expect("begin write tx");
         tx.put(b"wal-key".to_vec(), b"wal-value".to_vec(), None)
             .expect("put wal value");
-        engine
-            .commit(tx, WriteOptions::sync())
-            .expect("sync commit");
+        tx.commit(WriteOptions::sync()).expect("sync commit");
     }
 
     let engine = open_with_mode(opts, "local");
@@ -61,9 +59,7 @@ fn should_keep_data_recoverable_when_flush_publication_is_interrupted() {
             .expect("begin write tx");
         tx.put(key.into_bytes(), value.into_bytes(), None)
             .expect("put flush seed");
-        engine
-            .commit(tx, WriteOptions::sync())
-            .expect("commit flush seed");
+        tx.commit(WriteOptions::sync()).expect("commit flush seed");
     }
 
     // Act
@@ -117,8 +113,7 @@ fn should_keep_compacted_data_visible_when_compaction_crashes_before_publish() {
                 .expect("begin write tx");
             tx.put(key.into_bytes(), value.into_bytes(), None)
                 .expect("put compaction seed");
-            engine
-                .commit(tx, WriteOptions::sync())
+            tx.commit(WriteOptions::sync())
                 .expect("commit compaction seed");
         }
         engine.flush_cf(&cf).expect("flush compaction seed");
@@ -172,8 +167,7 @@ fn should_filter_point_delete_tombstones_during_cross_sst_iteration() {
                 .expect("begin write tx");
             tx.put(key.into_bytes(), value.into_bytes(), None)
                 .expect("put iterator seed");
-            engine
-                .commit(tx, WriteOptions::buffered())
+            tx.commit(WriteOptions::buffered())
                 .expect("commit iterator seed");
         }
         engine.flush_cf(&cf).expect("flush iterator batch");
@@ -186,8 +180,7 @@ fn should_filter_point_delete_tombstones_during_cross_sst_iteration() {
     for deleted in [b"k010", b"k011", b"k024"] {
         tx.delete(deleted.to_vec()).expect("delete iterator key");
     }
-    engine
-        .commit(tx, WriteOptions::buffered())
+    tx.commit(WriteOptions::buffered())
         .expect("commit iterator deletes");
     engine.flush_cf(&cf).expect("flush iterator tombstones");
 

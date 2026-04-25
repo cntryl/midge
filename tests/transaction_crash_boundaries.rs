@@ -156,7 +156,9 @@ fn should_preserve_first_commit_when_process_aborts_after_strict_conflict_abort(
     assert_eq!(
         tx.get(STRICT_CONFLICT_FIRST_COMMIT_RECORD.key)
             .expect("get strict conflict key"),
-        Some(Bytes::from_static(STRICT_CONFLICT_FIRST_COMMIT_RECORD.value)),
+        Some(Bytes::from_static(
+            STRICT_CONFLICT_FIRST_COMMIT_RECORD.value
+        )),
         "first strict commit must remain visible after crash"
     );
 }
@@ -211,10 +213,8 @@ fn child_abort_after_strict_conflict_abort(db_path: &Path) {
     .expect("tx2 put");
 
     // Act
-    engine
-        .commit(tx1, WriteOptions::sync())
-        .expect("commit tx1");
-    let conflict = engine.commit(tx2, WriteOptions::sync());
+    tx1.commit(WriteOptions::sync()).expect("commit tx1");
+    let conflict = tx2.commit(WriteOptions::sync());
 
     // Assert
     assert!(
@@ -238,8 +238,7 @@ fn commit_fixed_sync_transaction(
         tx.put(record.key.to_vec(), record.value.to_vec(), None)
             .expect("put record");
     }
-    engine
-        .commit(tx, WriteOptions::sync())
+    tx.commit(WriteOptions::sync())
         .expect("commit fixed sync transaction");
 }
 

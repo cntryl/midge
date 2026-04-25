@@ -37,8 +37,7 @@ fn should_measure_concurrent_ingest_coordinator_metrics_when_multiple_threads_wr
                     .expect("begin");
                 tx.put(key.into_bytes(), value.into_bytes(), None)
                     .expect("put");
-                engine_clone
-                    .commit(tx, cntryl_midge::WriteOptions::buffered())
+                tx.commit(cntryl_midge::WriteOptions::buffered())
                     .expect("commit");
             }
         });

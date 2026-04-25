@@ -102,10 +102,10 @@ Yes! Each transaction commit specifies its own WriteOptions. You can use `sync()
 
 Midge is designed for **predictability** not raw speed:
 
-- **Write latency**: 1-10ms (depends on WriteOptions)
-- **Read latency**: <1ms cached, 10-100ms cloud
-- **Throughput**: ~50-75k ops/sec (typical workload: 1KB values, buffered mode; limited by WAL I/O and per-operation work)
-- **Event loop**: 67M messages/sec (not the bottleneck)
+- **Write latency**: depends strongly on `WriteOptions` and storage mode
+- **Read latency**: depends on cache warmth, SST layout, and storage mode
+- **Throughput**: workload-dependent; use the included benches to measure your profile
+- **Event loop**: not usually the first limit you hit in real workloads
 
 For hundreds of thousands or millions of ops/sec, use RocksDB or a sharded design.
 
@@ -251,9 +251,13 @@ See [../operations/migration-guide.md](../operations/migration-guide.md) for bac
 Expose metrics via engine APIs:
 
 ```rust
-let metrics = engine.read_amplification_metrics(&cf)?;
+let metrics = engine.get_read_amp_metrics()?;
 println!("Avg SSTs per read: {}", metrics.avg_ssts_per_read);
 println!("L0 overlap rate: {}", metrics.l0_overlap_rate);
+
+let runtime = engine.get_runtime_metrics()?;
+println!("Health: {:?}", runtime.health);
+println!("Write stalled: {}", runtime.write_stalled);
 ```
 
 **Key metrics:**

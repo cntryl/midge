@@ -26,7 +26,7 @@ fn should_handle_small_memory_budget_without_unexpected_errors() {
                 .unwrap();
             tx.put(key.into_bytes(), value, None).unwrap();
 
-            match engine.commit(tx, WriteOptions::buffered()) {
+            match tx.commit(WriteOptions::buffered()) {
                 Ok(_) => {
                     _write_count += 1;
                 }
@@ -79,7 +79,7 @@ fn should_complete_shutdown_when_wal_writer_drops() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key".to_vec(), b"value".to_vec(), None).unwrap();
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
+        tx.commit(WriteOptions::buffered()).unwrap();
 
         // Assert
         drop(engine);

@@ -9,7 +9,7 @@
 ///
 /// **set_elements(N)** in each `#[stress_test]`: N must match the logical number of operations
 /// inside `ctx.measure(|| { ... })` so that throughput (elements/time) reported by
-/// `scripts/benchmark_summary.py` is meaningful and comparable across scenarios.
+/// `cntryl-tools summarize-benchmarks` is meaningful and comparable across scenarios.
 ///
 /// **Signal Discipline (High Priority)**
 ///

@@ -674,11 +674,15 @@ mod tests {
 
         // Assert
         assert!(
-            !filtered.iter().any(|v| v.key == b"k_eq".to_vec() && v.is_tombstone),
+            !filtered
+                .iter()
+                .any(|v| v.key == b"k_eq".to_vec() && v.is_tombstone),
             "tombstone at the exact horizon must be dropped"
         );
         assert!(
-            filtered.iter().any(|v| v.key == b"k_new".to_vec() && v.is_tombstone),
+            filtered
+                .iter()
+                .any(|v| v.key == b"k_new".to_vec() && v.is_tombstone),
             "tombstone above horizon must be preserved"
         );
         assert!(
@@ -702,7 +706,9 @@ mod tests {
 
         // Assert
         assert!(
-            !filtered.iter().any(|v| v.key == b"k_low".to_vec() && v.is_tombstone),
+            !filtered
+                .iter()
+                .any(|v| v.key == b"k_low".to_vec() && v.is_tombstone),
             "tombstone below horizon must be dropped"
         );
         assert!(

@@ -44,7 +44,7 @@ fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
                 tx.put(key.as_bytes().to_vec(), b"wal_value".to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
 
             // Additional committed writes
             let mut tx = engine
@@ -55,7 +55,7 @@ fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
                 tx.put(key.as_bytes().to_vec(), b"wal_value_2".to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
         }
 
         // Assert (Phase 2): Reopen and validate recovery
@@ -83,7 +83,7 @@ fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
                 );
             }
 
-            eprintln!("✓ Recovered all 150 committed WAL-backed records");
+            eprintln!("âœ“ Recovered all 150 committed WAL-backed records");
         }
     });
 }
@@ -108,7 +108,7 @@ fn should_recover_committed_writes_when_reopening_after_flush_and_clean_shutdown
                 tx.put(key.as_bytes().to_vec(), b"flush_data".to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
 
             // Flush the committed data successfully
             engine.flush_cf(&cf).expect("flush");
@@ -134,7 +134,7 @@ fn should_recover_committed_writes_when_reopening_after_flush_and_clean_shutdown
                 );
             }
 
-            eprintln!("✓ Recovered all 200 committed records after flush");
+            eprintln!("âœ“ Recovered all 200 committed records after flush");
         }
     });
 }
@@ -159,7 +159,7 @@ fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shu
                 tx.put(key.as_bytes().to_vec(), b"gen_a".to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush A");
 
             // Create SST B
@@ -171,7 +171,7 @@ fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shu
                 tx.put(key.as_bytes().to_vec(), b"gen_b".to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush B");
 
             // Trigger compaction before shutdown
@@ -203,7 +203,7 @@ fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shu
                 );
             }
 
-            eprintln!("✓ Recovered all 200 committed records after compaction");
+            eprintln!("âœ“ Recovered all 200 committed records after compaction");
         }
     });
 }
@@ -228,7 +228,7 @@ fn should_preserve_readability_when_reopening_after_manifest_updates_and_clean_s
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             // Trigger compaction-related manifest updates before shutdown
@@ -254,7 +254,7 @@ fn should_preserve_readability_when_reopening_after_manifest_updates_and_clean_s
                 );
             }
 
-            eprintln!("✓ All 150 committed records remained readable after reopen");
+            eprintln!("âœ“ All 150 committed records remained readable after reopen");
         }
     });
 }
@@ -279,7 +279,7 @@ fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdo
                 tx.put(key.as_bytes().to_vec(), b"uncorrupted_value".to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
 
             // Flush the first batch successfully
             engine.flush_cf(&cf).expect("flush");
@@ -293,7 +293,7 @@ fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdo
                 tx.put(key.as_bytes().to_vec(), b"clean_value".to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
         }
 
         // Assert (Phase 2): Reopen and verify exact values
@@ -330,7 +330,7 @@ fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdo
                 );
             }
 
-            eprintln!("✓ Recovered exact SST-backed and WAL-backed values after reopen");
+            eprintln!("âœ“ Recovered exact SST-backed and WAL-backed values after reopen");
         }
     });
 }
@@ -355,7 +355,7 @@ fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
                 tx.put(key.as_bytes().to_vec(), b"wal_clean".to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
 
             // Write batch 2
             let mut tx = engine
@@ -366,7 +366,7 @@ fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
                 tx.put(key.as_bytes().to_vec(), b"wal_second".to_vec(), None)
                     .expect("put");
             }
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
         }
 
         // Assert (Phase 2): Reopen with WAL replay
@@ -394,7 +394,7 @@ fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
                 );
             }
 
-            eprintln!("✓ Recovered exact WAL-backed values after reopen");
+            eprintln!("âœ“ Recovered exact WAL-backed values after reopen");
         }
     });
 }
@@ -426,7 +426,7 @@ fn should_handle_concurrent_best_effort_writes_under_load_without_invalid_values
                             t.put(key.as_bytes().to_vec(), b"chaos_value".to_vec(), None)
                                 .ok();
                         }
-                        engine_clone.commit(t, WriteOptions::best_effort()).ok();
+                        t.commit(WriteOptions::best_effort()).ok();
                     }
 
                     // Small stagger to vary writer interleaving
@@ -471,7 +471,7 @@ fn should_handle_concurrent_best_effort_writes_under_load_without_invalid_values
         );
 
         eprintln!(
-            "✓ Best-effort load remained readable with {} sampled keys present",
+            "âœ“ Best-effort load remained readable with {} sampled keys present",
             sampled_present
         );
     });

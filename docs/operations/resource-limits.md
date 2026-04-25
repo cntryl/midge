@@ -61,11 +61,7 @@ storage.write(data);  // Uploads synchronously (adds ~10-50ms latency)
 ```
 
 **Monitoring:**
-```rust
-let metrics = telemetry.metrics();
-let failures = metrics.thread_spawn_failures();  // Total spawn failures
-let inline_cache = metrics.cache_inline_fallback_count();  // Cache inline operations
-```
+Use `engine.get_runtime_metrics()?`, `engine.get_read_amp_metrics()?`, and `engine.get_storage_layout()?` for stable operator-facing snapshots. Internal fallback counters for thread-spawn failures are not currently exposed as public API.
 
 ### Thread Cleanup
 
@@ -95,17 +91,11 @@ const MAX_QUEUE_DEPTH: usize = 5000;     // Max pending writes
 **Behavior:**
 - Pool starts empty and grows up to 64 buffers as writes arrive
 - When pool is full, oldest buffers are dropped instead of pooled
-- Dropped buffers are tracked via `wal_buffer_pool_overflow_count` metric
+- The overflow counter is currently an internal telemetry metric, not part of the stable public API
 - Backpressure triggers when queue depth exceeds 5,000 entries
 
 **Monitoring:**
-```rust
-let overflow = metrics.wal_buffer_pool_overflow_count();
-if overflow > 0 {
-    // Pool is churning - sustained high write rate
-    tracing::warn!("WAL buffer pool overflowing: {} drops", overflow);
-}
-```
+Use `engine.get_runtime_metrics()?` to watch `wal_pending_writes`, `write_stalled`, and compaction backlog. Those public counters tell you when the write path is under sustained pressure even though the buffer-pool overflow counter itself is internal.
 
 **Tuning:** If overflow is frequent, consider:
 1. Increasing flush rate (reduce memtable size)
@@ -118,7 +108,7 @@ BlockCache uses a strict capacity limit configured via `OpenOptions`:
 
 ```rust
 let opts = OpenOptions::local("./db")
-    .memory_budget(MemoryBudget::MB(512))  // 512 MiB total
+    .memory_budget(MemoryBudget::Bytes(512 << 20))  // 512 MiB total
     .build();
 // BlockCache gets ~60% = ~307 MiB (Goal::Latency)
 // BlockCache gets ~30% = ~154 MiB (Goal::Economy)
@@ -141,9 +131,9 @@ Memtables are bounded by configuration:
 ```
 
 **Backpressure:** When memtables are full and compaction can't keep up:
-1. Writes block until flush completes
-2. `write()` returns only after space is available
-3. No unbounded memory growth - strict blocking
+1. Commits can return `MidgeError::WriteStall`
+2. `wait_for_write_stall_clear()` can be used to wait for recovery
+3. No unbounded memory growth - the engine applies backpressure instead
 
 ## Performance Characteristics
 
@@ -199,48 +189,49 @@ When resources are constrained, Midge degrades gracefully:
 
 ### Key Metrics
 
-Monitor these metrics to detect resource constraints:
+Monitor these public snapshots to detect resource constraints:
 
 ```rust
-let metrics = telemetry.metrics();
+let runtime = engine.get_runtime_metrics()?;
+let read_amp = engine.get_read_amp_metrics()?;
+let layout = engine.get_storage_layout()?;
 
-// Thread management
-let spawn_failures = metrics.thread_spawn_failures();
-let inline_cache_ops = metrics.cache_inline_fallback_count();
-
-// Memory management
-let buffer_overflows = metrics.wal_buffer_pool_overflow_count();
-let cache_evictions = metrics.cache_evictions();
-let memtable_flushes = metrics.memtable_flushes();
-
-// Performance indicators
-let cache_hit_rate = metrics.cache_hits() / (metrics.cache_hits() + metrics.cache_misses());
-let read_amplification = metrics.sst_blocks_read() / metrics.get_count();
+println!("health={:?}", runtime.health);
+println!("write_stalled={}", runtime.write_stalled);
+println!("wal_pending_writes={}", runtime.wal_pending_writes);
+println!("pending_compactions={}", runtime.pending_compactions);
+println!("avg_ssts_per_read={}", read_amp.avg_ssts_per_read);
+println!("sst_count={}", runtime.sst_count);
+println!("levels={}", layout.levels.len());
 ```
 
 ### Warning Signs
 
-**High thread spawn failures:**
+**Degraded runtime health:**
 ```
-thread_spawn_failures: 145
-cache_inline_fallback_count: 8,234
+health: Degraded
+write_stalled: true
+pending_compactions: 27
 ```
-**Diagnosis:** OS thread limit reached  
-**Action:** Reduce number of engine instances or use fewer BlockCache instances
+**Diagnosis:** The engine is under sustained write or compaction pressure  
+**Action:** Reduce concurrent writers, increase memory budget, or compact and flush more aggressively
 
-**High buffer pool overflow:**
+**High read amplification:**
 ```
-wal_buffer_pool_overflow_count: 12,456
+avg_ssts_per_read: 13.4
+l0_overlap_rate: 0.62
 ```
-**Diagnosis:** Sustained high write rate exceeding flush capacity  
-**Action:** Reduce write rate, increase flush frequency, or batch writes
+**Diagnosis:** Too many SSTs are being touched per read  
+**Action:** Increase memory budget, use a read-heavy profile, or trigger compaction
 
-**Low cache hit rate:**
+**Large layout backlog:**
 ```
-cache_hit_rate: 0.23  (target: >0.80)
+sst_count: 412
+pending_compactions: 19
+obsolete_files: 87
 ```
-**Diagnosis:** Insufficient cache capacity or poor locality  
-**Action:** Increase `MemoryBudget` or adjust `Goal` to allocate more cache
+**Diagnosis:** File cleanup and compaction are lagging  
+**Action:** Run `compact_all()`, review workload profile, and inspect storage layout for hot levels
 
 ## Production Recommendations
 
@@ -251,7 +242,7 @@ cache_hit_rate: 0.23  (target: >0.80)
 // Allocate 50-70% of available RAM to Midge
 let total_ram_mb = 8192;  // 8 GiB host
 let opts = OpenOptions::local("./db")
-    .memory_budget(MemoryBudget::MB(total_ram_mb * 60 / 100))  // 60% = ~5 GiB
+    .memory_budget(MemoryBudget::Bytes((total_ram_mb as usize * 60 / 100) << 20))
     .build();
 ```
 
@@ -262,32 +253,31 @@ let opts = OpenOptions::local("./db")
 const MAX_ENGINES: usize = if cfg!(windows) { 50 } else { 500 };
 ```
 
-**3. Monitor resource metrics:**
+**3. Monitor public engine metrics:**
 ```rust
-// Set up periodic monitoring
-tokio::spawn(async move {
-    loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        let metrics = telemetry.metrics();
-        
-        if metrics.thread_spawn_failures() > 0 {
-            tracing::warn!("Thread spawn failures detected");
-        }
-        
-        if metrics.wal_buffer_pool_overflow_count() > 1000 {
-            tracing::warn!("WAL buffer pool churning");
-        }
+loop {
+    std::thread::sleep(std::time::Duration::from_secs(60));
+
+    let runtime = engine.get_runtime_metrics()?;
+    if runtime.write_stalled || runtime.pending_compactions > 0 {
+        println!(
+            "health={:?} write_stalled={} pending_compactions={}",
+            runtime.health,
+            runtime.write_stalled,
+            runtime.pending_compactions
+        );
     }
-});
+}
 ```
 
-**4. Configure appropriate timeouts:**
+**4. Keep cloud configuration to the supported builder surface:**
 ```rust
-// Cloud storage environments may need longer timeouts
-let opts = OpenOptions::cloud("./db", cloud_provider)
-    .cloud_timeout(Duration::from_secs(60))  // Default: 30s
+let opts = OpenOptions::cloud("./cache", "my-bucket", "prod/")
+    .goal(Goal::Throughput)
     .build();
 ```
+
+Provider credentials, endpoints, and regions are configured through the selected cloud provider environment rather than additional public timeout builders.
 
 ### Troubleshooting
 
@@ -316,7 +306,7 @@ RSS grows continuously under sustained load
 **Solution:** WAL buffer pool had no upper bound. Solution implemented:
 - Added `MAX_BUFFER_POOL_SIZE = 64` limit
 - Drops buffers instead of pooling when limit reached
-- Tracks drops via `wal_buffer_pool_overflow_count` metric
+- Tracks drops via an internal telemetry counter
 
 ## Related Documentation
 

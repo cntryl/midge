@@ -1,4 +1,4 @@
-//! Tier 3 — Durability sync call cost (single commit measurement)
+//! Tier 3 â€” Durability sync call cost (single commit measurement)
 //!
 //! Measures: cost of sync vs async commit call (wal sync only, not data volume)
 //! mem skips durability by definition.
@@ -34,8 +34,7 @@ fn run_single_durability_call(ctx: &mut StressContext, opts: MidgeOptions) {
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin");
         tx.put(k.to_vec(), v.clone(), None).unwrap();
-        e.commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     });
 
     drop(engine);

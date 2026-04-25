@@ -1,4 +1,4 @@
-//! Tier 4 — YCSB Workload E (Scan heavy)
+//! Tier 4 â€” YCSB Workload E (Scan heavy)
 //!
 //! Workload E: 95% scans, 5% inserts.
 //!
@@ -71,7 +71,7 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("begin");
                             tx.put(k.to_vec(), v.clone(), None).expect("warmup insert");
-                            e.commit(tx, write_opts)
+                            tx.commit(write_opts)
                         })
                         .expect("commit");
                         return;
@@ -127,7 +127,7 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                                 .expect("measured begin");
                             tx.put(k.to_vec(), v.clone(), None)
                                 .expect("measured insert");
-                            e.commit(tx, write_opts)
+                            tx.commit(write_opts)
                         })
                         .expect("measured commit");
                         return;

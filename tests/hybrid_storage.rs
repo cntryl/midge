@@ -52,7 +52,7 @@ fn should_trigger_eviction_at_high_watermark() {
             tx.put(key.as_bytes().to_vec(), large_value.clone(), None)
                 .ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Act: Flush to SST (triggers potential eviction to cloud)
         engine.flush_cf(&cf).expect("flush");
@@ -80,7 +80,7 @@ fn should_trigger_eviction_at_high_watermark() {
         );
 
         eprintln!(
-            "✓ High watermark eviction triggered safely; {} keys readable",
+            "âœ“ High watermark eviction triggered safely; {} keys readable",
             readable
         );
     });
@@ -113,7 +113,7 @@ fn should_block_writes_at_emergency_watermark() {
             match tx.put(key.as_bytes().to_vec(), large_value.clone(), None) {
                 Ok(_) => {
                     // Write succeeded in transaction
-                    match engine.commit(tx, WriteOptions::buffered()) {
+                    match tx.commit(WriteOptions::buffered()) {
                         Ok(_) => {
                             writes_completed += 1;
                         }
@@ -149,7 +149,7 @@ fn should_block_writes_at_emergency_watermark() {
         );
 
         eprintln!(
-            "✓ Emergency watermark handling active; writes: {}, blocked: {}",
+            "âœ“ Emergency watermark handling active; writes: {}, blocked: {}",
             writes_completed, emergency_write_blocked
         );
     });
@@ -178,7 +178,7 @@ fn should_resume_writes_after_eviction_clears_pressure() {
             tx.put(key.as_bytes().to_vec(), medium_value.clone(), None)
                 .ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Act: Trigger eviction and wait
         engine.flush_cf(&cf).expect("flush");
@@ -194,7 +194,7 @@ fn should_resume_writes_after_eviction_clears_pressure() {
             if tx
                 .put(key.as_bytes().to_vec(), medium_value.clone(), None)
                 .is_ok()
-                && engine.commit(tx, WriteOptions::buffered()).is_ok()
+                && tx.commit(WriteOptions::buffered()).is_ok()
             {
                 resume_writes += 1;
             }
@@ -208,7 +208,7 @@ fn should_resume_writes_after_eviction_clears_pressure() {
         );
 
         eprintln!(
-            "✓ Writes resumed after eviction; {} resume writes succeeded",
+            "âœ“ Writes resumed after eviction; {} resume writes succeeded",
             resume_writes
         );
     });
@@ -233,7 +233,7 @@ fn should_prefer_local_reads_before_eviction() {
             tx.put(key.as_bytes().to_vec(), small_value.to_vec(), None)
                 .ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Act: Read from cached SST (should be local, not cloud)
@@ -257,7 +257,10 @@ fn should_prefer_local_reads_before_eviction() {
             mode
         );
 
-        eprintln!("✓ Local read preference working; {} cache hits", local_hits);
+        eprintln!(
+            "âœ“ Local read preference working; {} cache hits",
+            local_hits
+        );
     });
 }
 
@@ -283,7 +286,7 @@ fn should_fetch_from_cloud_after_local_eviction() {
             let key = format!("evict_fetch_key_{:02}", i);
             tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Act: Eviction should happen during flush
@@ -310,7 +313,7 @@ fn should_fetch_from_cloud_after_local_eviction() {
         );
 
         eprintln!(
-            "✓ Cloud fetch working after eviction; {} keys fetched",
+            "âœ“ Cloud fetch working after eviction; {} keys fetched",
             cloud_fetched
         );
     });
@@ -336,7 +339,7 @@ fn should_persist_eviction_state_across_restart() {
                 let key = format!("persist_evict_key_{:02}", i);
                 tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
             }
-            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::buffered()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             // Eviction occurs
@@ -373,7 +376,7 @@ fn should_persist_eviction_state_across_restart() {
             );
 
             eprintln!(
-                "✓ Eviction state persisted; {} keys still accessible",
+                "âœ“ Eviction state persisted; {} keys still accessible",
                 persisted
             );
         }
@@ -402,7 +405,7 @@ fn should_handle_cloud_unavailable_during_eviction() {
             tx.put(key.as_bytes().to_vec(), large_value.clone(), None)
                 .ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Act: Flush with cloud down (upload fails)
         engine.flush_cf(&cf).ok(); // May fail, but should handle gracefully
@@ -434,7 +437,7 @@ fn should_handle_cloud_unavailable_during_eviction() {
         );
 
         eprintln!(
-            "✓ Handled cloud unavailability gracefully; {} keys still accessible",
+            "âœ“ Handled cloud unavailability gracefully; {} keys still accessible",
             accessible
         );
     });
@@ -461,7 +464,7 @@ fn should_not_evict_ssts_with_active_readers() {
             let key = format!("reader_protect_key_{:02}", i);
             tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
         }
-        engine.commit(tx, WriteOptions::buffered()).expect("commit");
+        tx.commit(WriteOptions::buffered()).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Create read snapshot (holds reference to SST)
@@ -497,7 +500,7 @@ fn should_not_evict_ssts_with_active_readers() {
         );
 
         eprintln!(
-            "✓ Active readers protected from eviction; {} snapshot reads successful",
+            "âœ“ Active readers protected from eviction; {} snapshot reads successful",
             snapshot_reads
         );
     });

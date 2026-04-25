@@ -116,3 +116,25 @@ impl WriteOptions {
         }
     }
 }
+
+pub(crate) fn effective_wal_durability_policy(
+    cloud_mode: bool,
+    opts: WriteOptions,
+) -> crate::common::MidgeResult<crate::wal::DurabilityPolicy> {
+    if cloud_mode {
+        return Ok(match opts.policy() {
+            DurabilityPolicy::BestEffort => crate::wal::DurabilityPolicy::BestEffort,
+            DurabilityPolicy::Buffered | DurabilityPolicy::Sync | DurabilityPolicy::CloudStrict => {
+                crate::wal::DurabilityPolicy::CloudAsync
+            }
+        });
+    }
+
+    if opts.is_cloud_strict() {
+        return Err(crate::common::MidgeError::InvalidArgument(
+            "cloud_strict requires cloud-backed storage".to_string(),
+        ));
+    }
+
+    Ok(opts.to_wal_durability_policy())
+}

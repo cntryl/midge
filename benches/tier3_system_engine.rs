@@ -1,4 +1,4 @@
-//! Tier 3 — Engine primitives (single operation measurement)
+//! Tier 3 â€” Engine primitives (single operation measurement)
 //!
 //! Measures: cost of individual put/get/commit calls
 //! NOT: bulk operations, batch throughput, or volume scaling
@@ -25,7 +25,7 @@ use cntryl_midge::testkit::MidgeOptions;
 const VALUE_SIZE: usize = 128;
 
 fn run_single_put_case(ctx: &mut StressContext, opts: MidgeOptions) {
-    ctx.set_elements(50_000); // cheap (µs-scale)
+    ctx.set_elements(50_000); // cheap (Âµs-scale)
 
     let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
     let cf = engine.create_column_family("cf1").unwrap();
@@ -41,15 +41,14 @@ fn run_single_put_case(ctx: &mut StressContext, opts: MidgeOptions) {
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin");
         tx.put(k.to_vec(), v.clone(), None).unwrap();
-        e.commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     });
 
     drop(engine);
 }
 
 fn run_single_get_case(ctx: &mut StressContext, opts: MidgeOptions) {
-    ctx.set_elements(50_000); // cheap (µs-scale)
+    ctx.set_elements(50_000); // cheap (Âµs-scale)
 
     let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
     let cf = engine.create_column_family("cf1").unwrap();
@@ -63,8 +62,7 @@ fn run_single_get_case(ctx: &mut StressContext, opts: MidgeOptions) {
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin");
         tx.put(k.to_vec(), v, None).unwrap();
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::best_effort())
+        tx.commit(cntryl_midge::WriteOptions::best_effort())
             .unwrap();
         engine.flush_cf(&cf).unwrap(); // Ensure durability before measurement
     }

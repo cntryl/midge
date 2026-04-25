@@ -24,19 +24,17 @@ fn should_delete_only_keys_within_requested_range_when_delete_range_commits() {
             tx.put(key.into_bytes(), value.into_bytes(), None)
                 .expect("seed key");
         }
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
+        tx.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit seed transaction");
 
         // Act
-        engine
-            .delete_range(
-                &cf,
-                b"key02".to_vec(),
-                b"key08".to_vec(),
-                cntryl_midge::WriteOptions::buffered(),
-            )
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin delete_range transaction");
+        tx.delete_range(b"key02".to_vec(), b"key08".to_vec())
             .expect("delete range");
+        tx.commit(cntryl_midge::WriteOptions::buffered())
+            .expect("commit delete range transaction");
 
         // Assert
         let tx = engine
@@ -79,8 +77,7 @@ fn should_return_all_inserted_keys_when_scanning_unbounded_query() {
             )
             .expect("seed scan key");
         }
-        engine
-            .commit(tx, cntryl_midge::WriteOptions::buffered())
+        tx.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit seed transaction");
 
         // Act

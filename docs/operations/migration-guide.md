@@ -107,11 +107,10 @@ let cf = old_engine.get_column_family("default")
 
 // Export all data
 let tx = old_engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-let query = tx.scan().build()?;
+let mut query = tx.scan(&Query::new())?;
 
 let mut export = std::fs::File::create("export.bin")?;
-for entry in query {
-    let (key, value) = entry?;
+while let Some((key, value)) = query.next() {
     // Write key length, key, value length, value
     export.write_u32::<LittleEndian>(key.len() as u32)?;
     export.write_all(&key)?;
@@ -251,14 +250,15 @@ fn should_restore_from_backup() {
 ```rust
 // 1. Export from Local mode
 let local_engine = MidgeEngine::open(OpenOptions::local("./db").build())?;
-let cf = local_engine.get_column_family("default")?;
+let cf = local_engine
+    .get_column_family("default")
+    .ok_or("CF not found")?;
 
 // Export all key-value pairs
 let tx = local_engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-let query = tx.scan().build()?;
+let mut query = tx.scan(&Query::new())?;
 let mut data = Vec::new();
-for entry in query {
-    let (key, value) = entry?;
+while let Some((key, value)) = query.next() {
     data.push((key, value));
 }
 drop(local_engine);
@@ -369,7 +369,8 @@ println!("Midge version: {}", env!("CARGO_PKG_VERSION"));
 
 // Verify data integrity
 let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-let count = tx.scan().build()?.count();
+let mut iter = tx.scan(&Query::new())?;
+let count = iter.collect_all().len();
 println!("Total keys: {}", count);
 
 // Check recovery time
@@ -378,7 +379,7 @@ let engine = MidgeEngine::open(opts)?;
 println!("Recovery: {:?}", start.elapsed());
 
 // Monitor performance
-let metrics = engine.read_amplification_metrics(&cf)?;
+let metrics = engine.get_read_amp_metrics()?;
 println!("Read amp: {}", metrics.avg_ssts_per_read);
 ```
 

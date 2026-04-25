@@ -86,7 +86,7 @@ engine.commit(tx, WriteOptions::buffered())?;  // Commit batch
 
 ```rust
 // Check read amplification
-let metrics = engine.read_amplification_metrics(&cf)?;
+let metrics = engine.get_read_amp_metrics()?;
 println!("Avg SSTs per read: {}", metrics.avg_ssts_per_read);
 println!("L0 overlap rate: {}", metrics.l0_overlap_rate);
 
@@ -474,7 +474,7 @@ env_logger::Builder::from_env(Env::default().default_filter_or("debug")).init();
 
 ```rust
 // Read amplification
-let metrics = engine.read_amplification_metrics(&cf)?;
+let metrics = engine.get_read_amp_metrics()?;
 println!("SSTs per read: {}", metrics.avg_ssts_per_read);
 println!("L0 overlap: {}", metrics.l0_overlap_rate);
 

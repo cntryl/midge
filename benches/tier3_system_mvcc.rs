@@ -1,4 +1,4 @@
-//! Tier 3 — MVCC primitives (single version operation measurement)
+//! Tier 3 â€” MVCC primitives (single version operation measurement)
 //!
 //! Measures: cost of version checks and single version lookups
 //! NOT: sustained overwrites, version chain length scaling
@@ -20,7 +20,7 @@ fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
 }
 
 fn run_single_version_write_case(ctx: &mut StressContext, opts: MidgeOptions) {
-    ctx.set_elements(50_000); // cheap (µs-scale)
+    ctx.set_elements(50_000); // cheap (Âµs-scale)
 
     let engine = setup_engine(opts);
     let cf = engine.create_column_family("cf1").unwrap();
@@ -36,8 +36,7 @@ fn run_single_version_write_case(ctx: &mut StressContext, opts: MidgeOptions) {
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin");
         tx.put(k.to_vec(), v.clone(), None).unwrap();
-        e.commit(tx, cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     });
 
     drop(engine);
@@ -65,7 +64,7 @@ fn run_read_old_version_case(ctx: &mut StressContext, opts: MidgeOptions, num_ke
             keys.push(k);
             tx.put(k.to_vec(), vec![1u8; VALUE_SIZE], None).unwrap();
         }
-        engine.commit(tx, write_opts).unwrap();
+        tx.commit(write_opts).unwrap();
     }
     engine.flush_cf(&cf).unwrap();
 
@@ -81,7 +80,7 @@ fn run_read_old_version_case(ctx: &mut StressContext, opts: MidgeOptions, num_ke
             .expect("begin");
         tx.put(keys[0].to_vec(), vec![2u8; VALUE_SIZE], None)
             .unwrap();
-        engine.commit(tx, write_opts).unwrap();
+        tx.commit(write_opts).unwrap();
     }
     engine.flush_cf(&cf).unwrap();
     engine.compact_all().unwrap();

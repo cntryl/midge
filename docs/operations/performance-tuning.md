@@ -41,9 +41,9 @@ let opts = OpenOptions::local("./db")
 - Tail latency matters more than throughput
 
 **Performance characteristics:**
-- Read latency: <1ms cached, 5-10ms uncached
-- Write latency: 1-5ms (buffered mode)
-- Throughput: ~10-30k ops/sec (latency-optimized, fewer concurrent clients)
+- Read latency: usually best for point-lookups and hot-cache workloads
+- Write latency: lowest among the durable modes for latency-sensitive configurations
+- Throughput: lower than throughput-optimized settings, but more predictable
 
 ---
 
@@ -70,9 +70,9 @@ let opts = OpenOptions::local("./db")
 - Sustained high write rate
 
 **Performance characteristics:**
-- Read latency: 5-50ms (larger blocks to scan)
-- Write latency: 1-10ms (larger batches)
-- Throughput: ~50-75k ops/sec (typical workload: concurrent clients, 1KB values, buffered mode)
+- Read latency: often higher than `Goal::Latency` because blocks and files are larger
+- Write latency: optimized for sustained ingest rather than lowest p99
+- Throughput: best suited to bulk operations and steady write-heavy workloads
 
 ---
 
@@ -254,7 +254,7 @@ let opts = OpenOptions::local("./db")
 Monitor how many SSTs are accessed per read:
 
 ```rust
-let metrics = engine.read_amplification_metrics(&cf)?;
+let metrics = engine.get_read_amp_metrics()?;
 
 println!("Total reads: {}", metrics.reads_total);
 println!("Avg SSTs per read: {}", metrics.avg_ssts_per_read);
@@ -332,7 +332,7 @@ Monitor background activity:
 **Diagnosis:**
 
 ```rust
-let metrics = engine.read_amplification_metrics(&cf)?;
+let metrics = engine.get_read_amp_metrics()?;
 if metrics.avg_ssts_per_read > 10.0 {
     println!("High read amplification detected");
 }

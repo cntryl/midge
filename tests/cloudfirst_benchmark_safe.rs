@@ -25,7 +25,7 @@ fn should_batch_writes_when_using_cloud_mode() {
         let value = format!("value_{:04}", i);
         tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
             .unwrap();
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
+        tx.commit(WriteOptions::buffered()).unwrap();
     }
 
     // Assert: Verify all data is readable (correctness check)
@@ -55,7 +55,7 @@ fn should_support_cloud_strict_for_explicit_durability() {
         .unwrap();
 
     // CloudStrict forces immediate WAL seal + rotate + upload, blocking until complete
-    engine.commit(tx, WriteOptions::cloud_strict()).unwrap();
+    tx.commit(WriteOptions::cloud_strict()).unwrap();
 
     // Assert: Data should be readable immediately
     let tx = engine
@@ -83,7 +83,7 @@ fn should_flush_cloud_segments_on_shutdown() {
         let value = format!("shutdown_value_{:04}", i);
         tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
             .unwrap();
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
+        tx.commit(WriteOptions::buffered()).unwrap();
     }
 
     // Drop engine (triggers shutdown)

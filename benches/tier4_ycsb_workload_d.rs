@@ -1,4 +1,4 @@
-//! Tier 4 — YCSB Workload D (Read latest)
+//! Tier 4 â€” YCSB Workload D (Read latest)
 //!
 //! Workload D: 95% reads, 5% inserts; reads bias toward the most recent keys.
 
@@ -61,7 +61,7 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("begin");
                             tx.put(k.to_vec(), v.clone(), None).expect("warmup insert");
-                            e.commit(tx, cntryl_midge::WriteOptions::best_effort())
+                            tx.commit(cntryl_midge::WriteOptions::best_effort())
                             // Fast warmup
                         })
                         .expect("commit");
@@ -121,7 +121,7 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                                 .expect("measured begin");
                             tx.put(k.to_vec(), v.clone(), None)
                                 .expect("measured insert");
-                            e.commit(tx, write_opts)
+                            tx.commit(write_opts)
                         })
                         .expect("measured commit");
                         return;

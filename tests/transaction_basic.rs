@@ -26,7 +26,7 @@ fn should_commit_transaction_given_multiple_operations_when_committed() {
         txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
         txn.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
         txn.delete(b"key3".to_vec()).unwrap();
-        engine.commit(txn, WriteOptions::buffered()).unwrap();
+        txn.commit(WriteOptions::buffered()).unwrap();
 
         // Assert
         let read_tx = engine
@@ -55,7 +55,7 @@ fn should_succeed_given_empty_transaction_when_committed() {
         let txn = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
-        let result = engine.commit(txn, WriteOptions::buffered());
+        let result = txn.commit(WriteOptions::buffered());
 
         // Assert
         assert!(result.is_ok());
@@ -74,14 +74,14 @@ fn should_succeed_given_read_only_transaction_when_committed() {
         write_tx
             .put(b"key1".to_vec(), b"value1".to_vec(), None)
             .unwrap();
-        engine.commit(write_tx, WriteOptions::buffered()).unwrap();
+        write_tx.commit(WriteOptions::buffered()).unwrap();
 
         // Act
         let txn = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
         let _value = txn.get(b"key1").unwrap();
-        let result = engine.commit(txn, WriteOptions::buffered());
+        let result = txn.commit(WriteOptions::buffered());
 
         // Assert
         assert!(result.is_ok());
@@ -127,7 +127,7 @@ fn should_rollback_all_writes_given_multiple_operations_when_dropped() {
             .unwrap();
         tx.put(b"key1".to_vec(), b"original".to_vec(), None)
             .unwrap();
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
+        tx.commit(WriteOptions::buffered()).unwrap();
 
         // Act
         {
@@ -176,7 +176,7 @@ fn should_release_locks_given_aborted_transaction_when_cleanup() {
             .unwrap();
         txn2.put(b"key1".to_vec(), b"value2".to_vec(), None)
             .unwrap();
-        engine.commit(txn2, WriteOptions::buffered()).unwrap();
+        txn2.commit(WriteOptions::buffered()).unwrap();
 
         // Assert
         let read_tx = engine
@@ -203,7 +203,7 @@ fn should_allow_concurrent_writes_with_lww_semantics_given_transaction_when_acti
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
+        tx.commit(WriteOptions::buffered()).unwrap();
 
         // Act - start transaction (captures snapshot)
         let txn = engine
@@ -215,7 +215,7 @@ fn should_allow_concurrent_writes_with_lww_semantics_given_transaction_when_acti
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx2.put(b"key1".to_vec(), b"v2".to_vec(), None).unwrap();
-        engine.commit(tx2, WriteOptions::buffered()).unwrap();
+        tx2.commit(WriteOptions::buffered()).unwrap();
 
         // Assert - Midge implements Last-Write-Wins (LWW) semantics
         // Transactions see latest committed data (not true snapshot isolation)
@@ -248,7 +248,7 @@ fn should_read_own_writes_given_transaction_when_reading() {
         // Assert - should see own uncommitted write
         assert_eq!(value, Some(Bytes::from_static(b"value1")));
 
-        engine.commit(txn, WriteOptions::buffered()).unwrap();
+        txn.commit(WriteOptions::buffered()).unwrap();
     });
 }
 
@@ -305,7 +305,7 @@ fn should_persist_writes_given_kv_transaction_when_committed_boxed() {
             .unwrap();
         txn.put(b"key_commit".to_vec(), b"value_commit".to_vec(), None)
             .unwrap();
-        engine.commit(txn, WriteOptions::buffered()).unwrap();
+        txn.commit(WriteOptions::buffered()).unwrap();
 
         // Assert
         let read_tx = engine
@@ -334,7 +334,7 @@ fn should_succeed_given_best_effort_when_committing_transaction_during_bulk_load
             let key = format!("bulk_key_{}", i).into_bytes();
             let value = format!("bulk_value_{}", i).into_bytes();
             txn.put(key, value, None).unwrap();
-            engine.commit(txn, write_opts).unwrap();
+            txn.commit(write_opts).unwrap();
         }
 
         // Flush to ensure data reaches storage
@@ -371,7 +371,7 @@ fn should_insert_value_given_nonexistent_key_when_insert_in_transaction() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-        engine.commit(txn, WriteOptions::buffered()).unwrap();
+        txn.commit(WriteOptions::buffered()).unwrap();
 
         // Assert
         let read_tx = engine
@@ -396,17 +396,16 @@ fn should_delete_range_given_committed_engine_operation_when_delete_range() {
         tx.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
         tx.put(b"key2".to_vec(), b"v2".to_vec(), None).unwrap();
         tx.put(b"key3".to_vec(), b"v3".to_vec(), None).unwrap();
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
+        tx.commit(WriteOptions::buffered()).unwrap();
 
         // Act - delete key1, key2 (not key3)
-        engine
-            .delete_range(
-                &cf,
-                b"key1".to_vec(),
-                b"key3".to_vec(),
-                WriteOptions::buffered(),
-            )
+        let mut delete_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
+        delete_tx
+            .delete_range(b"key1".to_vec(), b"key3".to_vec())
+            .unwrap();
+        delete_tx.commit(WriteOptions::buffered()).unwrap();
 
         // Assert
         let read_tx = engine
@@ -433,17 +432,16 @@ fn should_hide_deleted_range_given_scan_after_delete_range_when_scanning() {
         tx.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
         tx.put(b"key2".to_vec(), b"v2".to_vec(), None).unwrap();
         tx.put(b"key3".to_vec(), b"v3".to_vec(), None).unwrap();
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
+        tx.commit(WriteOptions::buffered()).unwrap();
 
         // Act
-        engine
-            .delete_range(
-                &cf,
-                b"key1".to_vec(),
-                b"key3".to_vec(),
-                WriteOptions::buffered(),
-            )
+        let mut delete_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
+        delete_tx
+            .delete_range(b"key1".to_vec(), b"key3".to_vec())
+            .unwrap();
+        delete_tx.commit(WriteOptions::buffered()).unwrap();
 
         // Scan after the delete_range is committed
         let txn = engine
@@ -475,7 +473,7 @@ fn should_commit_atomically_given_mixed_put_and_delete_range_when_committed_in_t
         setup.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
         setup.put(b"key2".to_vec(), b"v2".to_vec(), None).unwrap();
         setup.put(b"key3".to_vec(), b"v3".to_vec(), None).unwrap();
-        engine.commit(setup, WriteOptions::buffered()).unwrap();
+        setup.commit(WriteOptions::buffered()).unwrap();
 
         // Act - put + delete + delete_range all in one transaction
         let mut tx = engine
@@ -484,7 +482,7 @@ fn should_commit_atomically_given_mixed_put_and_delete_range_when_committed_in_t
         tx.put(b"key4".to_vec(), b"v4".to_vec(), None).unwrap();
         tx.delete(b"key3".to_vec()).unwrap();
         tx.delete_range(b"key1".to_vec(), b"key3".to_vec()).unwrap();
-        engine.commit(tx, WriteOptions::buffered()).unwrap();
+        tx.commit(WriteOptions::buffered()).unwrap();
 
         // Assert - key1 and key2 gone via range, key3 gone via delete, key4 present
         let read = engine
@@ -493,10 +491,7 @@ fn should_commit_atomically_given_mixed_put_and_delete_range_when_committed_in_t
         assert_eq!(read.get(b"key1").unwrap(), None);
         assert_eq!(read.get(b"key2").unwrap(), None);
         assert_eq!(read.get(b"key3").unwrap(), None);
-        assert_eq!(
-            read.get(b"key4").unwrap(),
-            Some(Bytes::from_static(b"v4"))
-        );
+        assert_eq!(read.get(b"key4").unwrap(), Some(Bytes::from_static(b"v4")));
     });
 }
 
@@ -578,7 +573,7 @@ fn should_allow_operations_given_previous_commit_failed_when_disk_full() {
             .unwrap();
         txn2.put(b"key2".to_vec(), b"value2".to_vec(), None)
             .unwrap();
-        engine.commit(txn2, WriteOptions::buffered()).unwrap();
+        txn2.commit(WriteOptions::buffered()).unwrap();
 
         // Assert
         let read_tx = engine
@@ -607,7 +602,7 @@ fn should_persist_transaction_given_commit_when_crash_after() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-            engine.commit(txn, WriteOptions::buffered()).unwrap();
+            txn.commit(WriteOptions::buffered()).unwrap();
             // Engine dropped (simulated crash)
         }
 
@@ -668,14 +663,14 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
                 .unwrap();
             txn1.put(b"key1".to_vec(), b"value1".to_vec(), None)
                 .unwrap();
-            engine.commit(txn1, WriteOptions::buffered()).unwrap();
+            txn1.commit(WriteOptions::buffered()).unwrap();
 
             let mut txn2 = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             txn2.put(b"key2".to_vec(), b"value2".to_vec(), None)
                 .unwrap();
-            engine.commit(txn2, WriteOptions::buffered()).unwrap();
+            txn2.commit(WriteOptions::buffered()).unwrap();
 
             // Engine dropped
         }
@@ -721,7 +716,7 @@ fn should_support_best_effort_during_bulk_load_phase_when_followed_by_flush() {
             let key = format!("bulk_{:05}", i).into_bytes();
             let value = format!("data_{}", i * 2).into_bytes();
             txn.put(key, value, None).unwrap();
-            engine.commit(txn, best_effort_opts).unwrap();
+            txn.commit(best_effort_opts).unwrap();
         }
 
         // Act: Flush to ensure bulk-loaded data reaches storage, then write a "measured" key.
@@ -731,7 +726,7 @@ fn should_support_best_effort_during_bulk_load_phase_when_followed_by_flush() {
             .unwrap();
         txn.put(b"measured_key".to_vec(), b"measured_value".to_vec(), None)
             .unwrap();
-        engine.commit(txn, buffered_opts).unwrap();
+        txn.commit(buffered_opts).unwrap();
 
         // Assert: Verify all data is readable
         let read_tx = engine

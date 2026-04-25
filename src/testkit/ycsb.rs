@@ -138,8 +138,7 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
             count += 1;
 
             if count >= batch_ops {
-                engine
-                    .commit(tx, api::WriteOptions::best_effort())
+                tx.commit(api::WriteOptions::best_effort())
                     .expect("commit failed");
                 if trace {
                     eprintln!("[midge][ycsb] loaded {} keys", i + 1);
@@ -152,8 +151,7 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
         }
 
         if count > 0 {
-            engine
-                .commit(tx, api::WriteOptions::best_effort())
+            tx.commit(api::WriteOptions::best_effort())
                 .expect("commit failed");
             if trace {
                 eprintln!("[midge][ycsb] loaded {} keys (final)", initial_keys);
@@ -186,8 +184,7 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
                         tx.put(k.to_vec(), v, None).expect("put failed");
                         count += 1;
                         if count >= batch_ops {
-                            engine
-                                .commit(tx, api::WriteOptions::best_effort())
+                            tx.commit(api::WriteOptions::best_effort())
                                 .expect("commit failed");
                             if trace {
                                 eprintln!(
@@ -204,8 +201,7 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
                         }
                     }
                     if count > 0 {
-                        engine
-                            .commit(tx, api::WriteOptions::best_effort())
+                        tx.commit(api::WriteOptions::best_effort())
                             .expect("commit failed");
                         if trace {
                             eprintln!(

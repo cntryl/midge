@@ -1,14 +1,14 @@
-//! Tier 4 — Cloud Durability: Failure Scenarios
+//! Tier 4 â€” Cloud Durability: Failure Scenarios
 //!
 //! **Purpose**: Validate cloud durability under realistic failure modes.
 //! Cloud writes fail in production: network timeouts, partial uploads, cascading failures.
 //! This suite models actual failure patterns and validates recovery correctness.
 //!
 //! **Failure Modes Tested**:
-//! 1. Transient network failure → retry succeeds
-//! 2. Partial object write → metadata commit fails
-//! 3. Crash during in-flight write → recovery via idempotent replay
-//! 4. Cascading failure → commitment atomicity
+//! 1. Transient network failure â†’ retry succeeds
+//! 2. Partial object write â†’ metadata commit fails
+//! 3. Crash during in-flight write â†’ recovery via idempotent replay
+//! 4. Cascading failure â†’ commitment atomicity
 //!
 //! **Coverage**: Cloud durability is not just happy-path throughput; it's recovery correctness.
 //!
@@ -50,8 +50,7 @@ fn run_puts_and_validate(
                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin");
             tx.put(k.to_vec(), v, None).unwrap();
-            e.commit(tx, cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
     });
 
