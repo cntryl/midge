@@ -51,8 +51,10 @@ fn assert_compatibility_error(error: MidgeError) {
 
 #[test]
 fn should_verify_release_v1_fixture_given_supported_format_when_reopening() {
+    // Arrange
     let temp = copy_fixture_dir("v1_empty_db");
 
+    // Act
     let report = Engine::verify_path(temp.path()).expect("verify release fixture");
     assert_eq!(report.health, EngineHealth::Healthy);
     assert_eq!(report.manifest_files_verified, 0);
@@ -68,13 +70,16 @@ fn should_verify_release_v1_fixture_given_supported_format_when_reopening() {
     )
     .expect("open release fixture");
     let runtime = engine.get_runtime_metrics().expect("runtime metrics");
+    // Assert
     assert_eq!(runtime.health, EngineHealth::Healthy);
 }
 
 #[test]
 fn should_reject_future_format_fixture_given_unsupported_version_when_reopening() {
+    // Arrange
     let temp = copy_fixture_dir("future_v2");
 
+    // Act
     let verify_error =
         Engine::verify_path(temp.path()).expect_err("future fixture should fail verify");
     assert_compatibility_error(verify_error);
@@ -87,5 +92,6 @@ fn should_reject_future_format_fixture_given_unsupported_version_when_reopening(
         Ok(_) => panic!("future fixture should fail open"),
         Err(error) => error,
     };
+    // Assert
     assert_compatibility_error(open_error);
 }

@@ -9,6 +9,7 @@ use common::*;
 
 #[test]
 fn should_recover_data_from_wal_after_flush() {
+    // Arrange
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
@@ -22,6 +23,7 @@ fn should_recover_data_from_wal_after_flush() {
         tx.commit(WriteOptions::buffered()).expect("commit");
     }
 
+    // Act
     engine.flush_cf(&cf).expect("flush cf");
 
     let tx = engine
@@ -30,11 +32,13 @@ fn should_recover_data_from_wal_after_flush() {
     let mut iter = tx.scan(&cntryl_midge::Query::new()).expect("scan");
     let count = std::iter::from_fn(|| iter.next()).count();
 
+    // Assert
     assert_eq!(count, 50, "expected all WAL-backed keys to survive flush");
 }
 
 #[test]
 fn should_handle_large_values_in_wal() {
+    // Arrange
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
@@ -47,6 +51,7 @@ fn should_handle_large_values_in_wal() {
         .expect("put");
     tx.commit(WriteOptions::buffered()).expect("commit");
 
+    // Act
     engine.flush_cf(&cf).expect("flush cf");
 
     let read_tx = engine
@@ -54,6 +59,7 @@ fn should_handle_large_values_in_wal() {
         .expect("begin read tx");
     let retrieved = read_tx.get(b"large_wal_key").expect("get");
 
+    // Assert
     assert_eq!(
         retrieved.as_ref().map(|val| val.len()),
         Some(1_000_000),
@@ -63,6 +69,7 @@ fn should_handle_large_values_in_wal() {
 
 #[test]
 fn should_recover_deletes_from_wal() {
+    // Arrange
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
@@ -86,6 +93,7 @@ fn should_recover_deletes_from_wal() {
     txn.commit(WriteOptions::buffered())
         .expect("commit deletes");
 
+    // Act
     engine.flush_cf(&cf).expect("flush cf");
 
     let mut deleted_count = 0;
@@ -99,11 +107,13 @@ fn should_recover_deletes_from_wal() {
         }
     }
 
+    // Assert
     assert_eq!(deleted_count, 10, "expected all deletes to be recovered");
 }
 
 #[test]
 fn should_recover_range_tombstones_from_wal() {
+    // Arrange
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
@@ -125,6 +135,7 @@ fn should_recover_range_tombstones_from_wal() {
     tx.commit(WriteOptions::buffered())
         .expect("commit range delete");
 
+    // Act
     engine.flush_cf(&cf).expect("flush cf");
 
     let scan_tx = engine
@@ -138,11 +149,13 @@ fn should_recover_range_tombstones_from_wal() {
         })
         .count();
 
+    // Assert
     assert_eq!(in_range, 0, "expected the tombstoned range to be empty");
 }
 
 #[test]
 fn should_handle_wal_rotation_multiple_segments() {
+    // Arrange
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
@@ -163,17 +176,20 @@ fn should_handle_wal_rotation_multiple_segments() {
         batch_count += 1;
     }
 
+    // Act
     let final_tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin read tx");
     let mut iter = final_tx.scan(&cntryl_midge::Query::new()).expect("scan");
     let total = std::iter::from_fn(|| iter.next()).count();
 
+    // Assert
     assert_eq!(total, batch_count * 100, "expected every batch to survive");
 }
 
 #[test]
 fn should_recover_mixed_operations_from_wal() {
+    // Arrange
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
@@ -219,6 +235,7 @@ fn should_recover_mixed_operations_from_wal() {
         .commit(WriteOptions::buffered())
         .expect("commit range delete");
 
+    // Act
     engine.flush_cf(&cf).expect("flush cf");
 
     let verify_tx = engine
@@ -233,6 +250,7 @@ fn should_recover_mixed_operations_from_wal() {
         })
         .count();
 
+    // Assert
     assert_eq!(
         put_val.as_deref(),
         Some(&b"put_value_v2"[..]),
