@@ -19,7 +19,6 @@ A Midge write has three distinct states:
 | `WriteOptions::sync()` | WAL append and local fsync complete | Yes | write survives local crash assuming local storage survives | WAL replay or later SST state |
 | `WriteOptions::buffered()` | WAL append barrier and memtable apply complete | Not yet guaranteed | write may be lost if crash happens before the batched fsync | WAL replay only if the later fsync completed |
 | `WriteOptions::best_effort()` | memtable apply complete; WAL skipped | No | write is lost unless a later `flush_cf()` publishes it | SST state only if flush completed successfully |
-| `WriteOptions::cloud_strict()` | local visibility barrier and cloud durability frontier complete | Yes, with cloud durability | survives local disk loss once cloud acknowledgment is complete | cloud-backed recovery path |
 
 ## Per-Mode Semantics
 
@@ -53,14 +52,6 @@ Use `best_effort()` only for data that can be regenerated.
 
 The write becomes durable only after a successful `flush_cf()` publishes new SST state.
 
-### `cloud_strict()`
-
-Use `cloud_strict()` only when the caller must wait for the cloud durability frontier, not just local visibility.
-
-- Local append still defines immediate visibility.
-- `commit()` additionally waits for cloud durability to advance past the write sequence.
-- This is the strongest durability mode for cloud-backed evaluation.
-
 ## Fsync and Ordering
 
 Midge relies on ordered WAL replay and explicit durability frontiers.
@@ -77,7 +68,6 @@ Midge relies on ordered WAL replay and explicit durability frontiers.
 - `sync()` waits for the local fsync boundary.
 - `buffered()` does not wait for fsync; later batched sync makes the write durable.
 - `best_effort()` does not use the WAL durability path.
-- Cloud-backed durability is separate from local fsync; a visible write is not automatically cloud-durable unless the caller waits for the cloud frontier.
 
 ## Crash Outcomes
 

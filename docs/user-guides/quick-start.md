@@ -81,22 +81,6 @@ let engine = MidgeEngine::open(opts)?;
 
 Data persists to local disk. Use for traditional single-node deployments.
 
-### Cloud Storage (Cloud-Native)
-
-```rust
-let opts = OpenOptions::cloud(
-    "./cache",           // Local cache directory
-    "my-bucket",         // S3/GCS/Azure bucket name
-    "databases/prod/"    // Object key prefix
-).build();
-
-let engine = MidgeEngine::open(opts)?;
-```
-
-Cloud is source of truth, local disk is ephemeral cache. Use for serverless and distributed deployments.
-
-See [../operations/cloud-setup.md](../operations/cloud-setup.md) for cloud provider configuration.
-
 ## Write Durability
 
 All commits require explicit `WriteOptions`:
@@ -357,7 +341,6 @@ drop(engine);
 
 - **Complete API reference**: [api-guide.md](api-guide.md)
 - **Durability guarantees**: [durability.md](durability.md)
-- **Cloud deployment**: [../operations/cloud-setup.md](../operations/cloud-setup.md)
 - **Performance tuning**: [../operations/performance-tuning.md](../operations/performance-tuning.md)
 - **FAQ**: [faq.md](faq.md)
 - **Troubleshooting**: [troubleshooting.md](troubleshooting.md)

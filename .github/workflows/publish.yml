@@ -8,7 +8,11 @@ permissions:
   id-token: write
 
 jobs:
+  release-gate:
+    uses: ./.github/workflows/release-gate.yml
+
   publish:
+    needs: release-gate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -17,24 +21,10 @@ jobs:
       - name: Update Rust toolchain
         run: rustup update stable
 
-      - name: Verify production contract docs are present
-        shell: bash
-        run: |
-          test -f docs/development/one-dot-zero-contract.md
-          test -f docs/development/support-matrix.md
-          test -f docs/development/format-compatibility.md
-          test -f docs/development/release-policy.md
-          test -f docs/operations/production-runbook.md
-          test -f docs/operations/release-checklist.md
-          test -f docs/development/stability-policy.md
-          test -f docs/operations/migration-guide.md
-          test -f CHANGELOG.md
-
-      - name: Check clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Qualification smoke
-        run: cargo test --test external_adopter_smoke
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "publish"
 
       - name: Build release
         run: cargo build --release
@@ -43,7 +33,7 @@ jobs:
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
 
-      - name: Publish ${{ github.event.inputs.crate }} to crates.io
+      - name: Publish crate to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish

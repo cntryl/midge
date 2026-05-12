@@ -56,7 +56,7 @@ All low-level parameters are derived automatically from these high-level knobs.
 
 ## Storage Modes
 
-Midge has three storage modes. **Choose via named constructor**—there are no defaults.
+Midge's general guide centers on the local-first storage modes. **Choose via named constructor**—there are no defaults.
 
 ### InMemory
 
@@ -78,31 +78,13 @@ let engine = Engine::open(OpenOptions::local("/var/lib/myapp/db").build())?;
 
 **Use for:** Traditional deployments, single-node apps, durable local disk.
 
-### Cloud
-
-Persists to cloud object storage (S3, Azure, GCS, R2). Local disk is ephemeral cache only.
-
-```rust
-let opts = OpenOptions::cloud(
-    "/tmp/cache",           // local cache path
-    "my-bucket",            // bucket/container name
-    "prod/instance-1/"      // object key prefix
-).build();
-
-let engine = Engine::open(opts)?;
-```
-
-**Use for:** Cloud-native deployments, serverless, when local disk can disappear.
-
-**Authentication:** Uses standard environment variables (`AWS_ACCESS_KEY_ID`, etc.) and IAM roles. See [../operations/cloud-setup.md](../operations/cloud-setup.md).
-
 ## Transactions
 
 All data operations happen inside explicit transactions. No auto-commit.
 
 ### Transaction Modes
 
-**ReadOnly**: Snapshot-isolated reads, no writes allowed.
+**ReadOnly**: Snapshot-based reads, no writes allowed.
 
 ```rust
 let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
@@ -127,7 +109,7 @@ engine.commit(tx, WriteOptions::sync())?;
 begin_tx → put/get/delete/delete_range → commit (or drop to rollback)
 ```
 
-**Snapshot isolation:** Captured at `begin_tx()`. All reads see consistent view at that seqno.
+**Snapshot-based reads:** Captured at `begin_tx()`. All reads see a consistent view at that seqno.
 
 **Atomic commits:** All writes succeed or fail together. Single seqno for entire batch. Visibility is atomic.
 
@@ -307,16 +289,6 @@ engine.flush_cf(&cf)?;
 
 `flush_cf()` is a restart-safe publish barrier. If it returns `Ok(())`, the flushed data is durably published into SST state and recovered on restart.
 
-### cloud_strict()
-
-Blocks until the cloud durability frontier covers the write. Ordinary cloud-backed commits become visible after the local WAL append barrier; `cloud_strict()` is only for callers that must wait for cloud durability before continuing.
-
-```rust
-engine.commit(tx, WriteOptions::cloud_strict())?;
-```
-
-**Use ONLY when:** You need guaranteed cloud persistence before proceeding. Regular cloud mode uses background uploads.
-
 ## Column Families
 
 Logical partitioning within a database. Separate keyspaces, independent compaction.
@@ -495,7 +467,6 @@ See [../operations/performance-tuning.md](../operations/performance-tuning.md) f
 
 ## Next Steps
 
-- **Cloud deployments**: [../operations/cloud-setup.md](../operations/cloud-setup.md)
 - **Durability guarantees**: [durability.md](durability.md)
 - **Architecture details**: [../development/the-big-idea.md](../development/the-big-idea.md)
 - **Benchmarks**: [../development/benchmarks.md](../development/benchmarks.md)

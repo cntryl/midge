@@ -41,6 +41,7 @@ Use this matrix when updating guarantees or reviewing whether Midge is safe enou
 | compaction crash after publish keeps data visible and cleanup idempotent | `tests/chaos_compaction.rs`, `tests/failure_injection.rs` |
 | iterators honor tombstones and latest-version resolution across SST boundaries | `tests/engine_iterators.rs`, `tests/engine_compaction.rs` |
 | strict vs salvage recovery is explicit | `tests/failure_injection.rs`, `tests/durability_wal.rs` |
+| released-format fixtures open and future-format fixtures fail with `CompatibilityError` | `tests/compatibility_fixtures.rs`, `src/metadata/format.rs` |
 
 ## External-Adopter Gate
 
@@ -52,6 +53,7 @@ cargo test --test durability_wal
 cargo test --test failure_injection
 cargo test --test chaos_compaction
 cargo test --test engine_iterators
+cargo test --test compatibility_fixtures
 ```
 
 This is the minimum “safe enough to try” gate for local-disk evaluation.
