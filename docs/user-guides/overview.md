@@ -4,14 +4,14 @@
 
 ## What is Midge?
 
-Midge is an actor-sequenced, cloud-native embedded LSM storage engine designed for predictable behavior and explicit control. It runs in-process as a library, providing durability guarantees tailored to modern cloud infrastructure.
+Midge is a local-first embedded LSM storage engine designed for predictable behavior and explicit control. It runs in-process as a library, with durability guarantees defined by the local-disk contract and explicit write options.
 
 ### Key Features
 
-- **Three storage modes**: InMemory (ephemeral), Local (disk), and Cloud (object storage)
-- **Explicit durability control**: Choose between sync, buffered, best-effort, and cloud-strict modes
+- **Two core storage modes**: InMemory (ephemeral) and Local (disk)
+- **Explicit durability control**: Choose between sync, buffered, and best-effort modes
 - **Actor-based architecture**: Single-threaded event loop for predictable state transitions
-- **Transaction support**: ACID transactions with snapshot isolation
+- **Transaction support**: ACID transactions with snapshot-based reads
 - **Smart configuration**: Automatically derive tuning parameters from high-level goals
 
 ### Design Philosophy
@@ -20,7 +20,7 @@ Midge optimizes for:
 
 - **Predictability**: Bounded latency, deterministic behavior, no surprise thread explosions
 - **Auditability**: Every state transition is explicit, loggable, and reproducible
-- **Cloud-native**: Object storage (S3, Azure, GCS) as a first-class durability target
+- **Local-first**: Clear durable local storage semantics and explicit recovery behavior
 - **Embeddability**: Synchronous APIs, explicit control, no hidden background threads
 
 ## When to Use Midge
@@ -32,12 +32,12 @@ Midge optimizes for:
 - Local materialization for edge/serverless workloads
 - Applications requiring deterministic testability and replay
 - Durable queues or changelogs in message brokers
-- Cloud-native applications with ephemeral compute
+- Applications that need deterministic embedded storage semantics
 
 **Choose Midge when you need:**
 
 - Predictable behavior over raw throughput
-- Cloud storage as primary durability target
+- Explicit durability choices for local disk
 - Explicit control over durability and lifecycle
 - Deterministic state transitions for testing/debugging
 - Synchronous APIs without async/await complexity
@@ -49,7 +49,7 @@ Midge provides standard key-value operations through a transaction API:
 - **Point operations**: `get()`, `put()`, `delete()`
 - **Range operations**: `scan()` with prefix/bounds/limits
 - **Bulk operations**: `Transaction::delete_range()` or `Engine::delete_range()` for range tombstones
-- **Transactions**: Multi-operation atomic commits with snapshot isolation
+- **Transactions**: Multi-operation atomic commits with snapshot-based reads
 
 ### Storage Modes
 
@@ -61,11 +61,6 @@ Midge provides standard key-value operations through a transaction API:
 - Persists to local filesystem
 - Use for: traditional deployments, single-node databases
 
-**Cloud**
-- Persists to object storage (S3, Azure, GCS, R2, MinIO)
-- Local disk is cache only, cloud is source of truth
-- Use for: cloud-native deployments, serverless, distributed systems
-
 ### Durability Levels
 
 All writes require explicit `WriteOptions`:
@@ -75,8 +70,6 @@ All writes require explicit `WriteOptions`:
 | `sync()` | Local fsync completed before return | Highest | Critical data, financial transactions |
 | `buffered()` | Visible after WAL append; fsync follows later | Lower | General workloads |
 | `best_effort()` | WAL skipped; durable only after flush publication | Lowest | Bulk loads, reloadable data |
-| `cloud_strict()` | Waits for the cloud durability frontier | Highest in cloud mode | Explicit cloud durability checkpoints |
-
 See [durability.md](durability.md) for detailed guarantees and recovery behavior.
 
 ## Performance Characteristics
@@ -108,7 +101,7 @@ let engine = MidgeEngine::open(opts)?;
 
 **Configuration levels:**
 
-1. **Storage mode** (required): InMemory, Local, or Cloud
+1. **Storage mode** (required): InMemory or Local
 2. **Goal** (optional): Latency, Throughput, or Economy
 3. **Memory budget** (optional): Auto or explicit bytes
 4. **Workload profile** (optional): Mixed, WriteHeavy, ReadMostly, RangeScan, TtlHeavy
@@ -134,6 +127,5 @@ All configuration is explicit - no hidden magic constants or adaptive tuning.
 - **API reference**: [api-guide.md](api-guide.md) — Complete API documentation
 - **Durability**: [durability.md](durability.md) — Recovery guarantees and crash behavior
 - **FAQ**: [faq.md](faq.md) — Common questions and troubleshooting
-- **Cloud deployment**: [../operations/cloud-setup.md](../operations/cloud-setup.md) — Cloud provider setup
 - **Performance tuning**: [../operations/performance-tuning.md](../operations/performance-tuning.md) — Optimization guide
 - **Architecture deep-dive**: [../development/the-big-idea.md](../development/the-big-idea.md) — Design philosophy and internals

@@ -4,13 +4,13 @@
 
 ### What is Midge?
 
-Midge is an embedded LSM-tree key-value storage engine designed for predictable behavior and cloud-native deployments. It runs in-process as a library with explicit control over durability, memory, and lifecycle.
+Midge is an embedded LSM-tree key-value storage engine designed for predictable behavior and local-first deployments. It runs in-process as a library with explicit control over durability, memory, and lifecycle.
 
 ### When should I use Midge vs RocksDB?
 
 **Use Midge when you need:**
 - Predictable, deterministic behavior for testing/debugging
-- Cloud object storage as primary durability target
+- Explicit local durability choices
 - Synchronous APIs without async/await complexity
 - Explicit control over state transitions
 
@@ -42,12 +42,6 @@ Rust only. Native library written in Rust with Rust APIs. C bindings or FFI wrap
 - Data persists to local disk
 - Standard embedded database semantics
 
-**Cloud**
-- Use for: Cloud-native apps, serverless, distributed systems
-- Cloud is source of truth (S3, GCS, Azure Blob)
-- Local disk is ephemeral cache
-- **Status**: Pre-1.0; validate for your workload and recovery requirements
-
 ### Can I migrate between storage modes?
 
 Not directly. Storage modes have different durability semantics and file formats. To migrate:
@@ -55,22 +49,6 @@ Not directly. Storage modes have different durability semantics and file formats
 1. Export data from old mode (iterate and write to file)
 2. Create new engine with target mode
 3. Import data into new mode
-
-### Does Cloud mode work offline?
-
-No. Cloud mode requires network connectivity to cloud storage. For offline operation, use Local mode.
-
-### What cloud providers are supported?
-
-Production-supported providers:
-- AWS S3
-- Azure Blob Storage
-- Google Cloud Storage
-- Cloudflare R2
-- MinIO (S3-compatible)
-- Any S3-compatible object storage
-
-See [../operations/cloud-setup.md](../operations/cloud-setup.md) for provider configuration, and [../development/stability-policy.md](../development/stability-policy.md) for pre-1.0 compatibility expectations.
 
 ## Durability
 
@@ -209,8 +187,8 @@ Yes, within a single process:
 
 - **Atomicity**: All writes in a transaction commit together or not at all
 - **Consistency**: Transactions see consistent snapshots
-- **Isolation**: Snapshot isolation - reads see stable view from transaction start
-- **Durability**: Per WriteOptions (sync/buffered/best_effort/cloud_strict)
+- **Isolation**: Snapshot-based reads - reads see a stable view from transaction start
+- **Durability**: Per WriteOptions (sync/buffered/best_effort)
 
 **Note:** Midge is single-process embedded storage. No distributed ACID across processes.
 
@@ -222,7 +200,7 @@ Read-write transactions should be short-lived. Commit before starting long-runni
 
 ### What isolation level do transactions provide?
 
-**Snapshot isolation** - reads within a transaction see a consistent view from transaction start. Written values become visible only after commit.
+**Snapshot-based reads** - reads within a transaction see a consistent view from transaction start. Written values become visible only after commit.
 
 ### Can multiple transactions run concurrently?
 
@@ -236,12 +214,6 @@ Yes. Multiple transactions can be in flight simultaneously. Commits are serializ
 ```bash
 # Stop writes, flush, then backup files
 tar -czf backup-$(date +%Y%m%d).tar.gz ./db/
-```
-
-**Cloud mode:**
-```bash
-# Backup cloud storage
-aws s3 sync s3://my-bucket/db1/ ./backups/$(date +%Y%m%d)/
 ```
 
 See [../operations/migration-guide.md](../operations/migration-guide.md) for backup strategies.
@@ -288,7 +260,6 @@ Recovery time depends on WAL size and manifest complexity:
 
 - **Clean shutdown**: <100ms (no WAL to replay)
 - **Dirty shutdown**: 1-10s (WAL replay required)
-- **Cloud recovery**: 10-30s (download from cloud)
 
 **Optimization:**
 - Flush before shutdown (reduces WAL size)
@@ -325,16 +296,14 @@ Also check for write stalls (memtable queue full).
 
 ## Advanced Topics
 
-### Can I run Midge in serverless environments?
+### Can I run Midge on a constrained host?
 
-Yes, with Cloud mode. Local disk is ephemeral cache only. Cloud storage is source of truth.
+Yes, in Local mode with an explicit memory budget. Midge is designed to degrade gracefully under memory pressure by applying backpressure rather than losing correctness.
 
-**Requirements:**
-- Cloud storage credentials in environment
-- Network access to cloud provider
-- Ephemeral local storage for cache
-
-**Current status**: Development/testing only.
+**Use:**
+- Set an explicit `MemoryBudget` or use `Auto`
+- Monitor `write_stalled` and `pending_compactions`
+- Reduce concurrent writers if the host is under sustained pressure
 
 ### What compression algorithms are supported?
 
@@ -364,5 +333,4 @@ No. Compaction is essential for LSM-tree health (prevents unbounded L0 growth). 
 - **API reference**: [api-guide.md](api-guide.md)
 - **Durability guide**: [durability.md](durability.md)
 - **Troubleshooting**: [troubleshooting.md](troubleshooting.md)
-- **Cloud setup**: [../operations/cloud-setup.md](../operations/cloud-setup.md)
 - **Performance tuning**: [../operations/performance-tuning.md](../operations/performance-tuning.md)

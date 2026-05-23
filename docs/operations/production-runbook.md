@@ -12,7 +12,12 @@ Current production target:
 - local-disk storage mode
 - strict recovery policy
 
-Cloud-backed production use should remain experimental until it passes the same release and qualification gates as local mode.
+## Sizing And Restart
+
+- Size memory so normal traffic does not spend most of its time in `WriteStall`; `write_stalled` should be an exception state, not the baseline.
+- Keep disk headroom for current SSTs, active WAL files, manifest state, and cleanup lag from compaction or failed publishes.
+- After any unclean shutdown, run `midge verify --json <db-path>` before reopening the database to traffic.
+- If `verify` reports degraded or salvage health, stop rollout and restore or repair before reopening.
 
 ## Pre-Deployment Checklist
 

@@ -470,46 +470,6 @@ match engine.commit(tx, WriteOptions::buffered()) {
 
 ---
 
-## Cloud-Specific Tuning
-
-### Cloud Mode Performance
-
-For cloud storage backends (S3, GCS, Azure):
-
-**Local cache sizing:**
-- Cache size critically affects read latency
-- Recommendation: 10-50 GiB SSD cache for hot data
-- Monitor cache hit rate
-
-**Network considerations:**
-- Write latency: Expect 50-200ms with `cloud_strict()`
-- Use `buffered()` for normal writes (background upload)
-- Batch writes to amortize network overhead
-
-**Configuration:**
-
-```rust
-let opts = OpenOptions::cloud(
-    // Fast local SSD for cache
-    "/mnt/ssd/cache",
-    "my-bucket",
-    "db1/"
-)
-.goal(Goal::Throughput)  // Larger blocks reduce object count
-.memory_budget(MemoryBudget::Bytes(8 << 30))  // Large cache
-.build();
-```
-
-**Best practices:**
-- Use Throughput goal (larger blocks, fewer objects)
-- Large memory budget for caching
-- Fast local SSD for cache directory
-- Monitor cloud API rate limits
-
-See [cloud-setup.md](cloud-setup.md) for cloud deployment details.
-
----
-
 ## Measuring Performance
 
 ### Benchmarking
@@ -599,28 +559,8 @@ let opts = OpenOptions::local("./db")
 
 ---
 
-### Cloud-Native Deployment
-
-```rust
-let opts = OpenOptions::cloud(
-    "/mnt/nvme/cache",  // Fast local cache
-    "prod-bucket",
-    "databases/app1/"
-)
-.goal(Goal::Throughput)  // Optimize for cloud object sizes
-.memory_budget(MemoryBudget::Bytes(8 << 30))
-.workload(WorkloadProfile::Mixed)
-.build();
-
-// Use buffered() - cloud upload happens in background
-engine.commit(tx, WriteOptions::buffered())?;
-```
-
----
-
 ## Next Steps
 
 - **Benchmarking guide**: [../development/benchmarks.md](../development/benchmarks.md)
-- **Cloud deployment**: [cloud-setup.md](cloud-setup.md)
 - **API reference**: [../user-guides/api-guide.md](../user-guides/api-guide.md)
 - **Troubleshooting**: [../user-guides/troubleshooting.md](../user-guides/troubleshooting.md)

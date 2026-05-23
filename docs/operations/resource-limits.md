@@ -22,14 +22,12 @@ Midge spawns background threads for various subsystems. Understanding the thread
 |-----------|---------|---------|-----------------|
 | BlockCache (per instance) | 16 | Cache admission workers (1 per shard) | Always |
 | WAL Writer | 1 | Background write coalescing | Always |
-| HybridStorage Upload Worker | 1 | CloudAsync WAL upload pipeline | Cloud storage mode |
-| CloudExecutor Runtime | ~4-8 | Embedded tokio runtime for cloud I/O | Cloud storage mode |
 | Compaction Runtime | 4 | Parallel compaction jobs | Configurable |
 | Metadata Writer | 1 | Manifest persistence | Always |
 
 **Example: Multiple Engine Instances:**
 ```rust
-// Each engine spawns ~25-35 threads (local mode) or ~30-45 threads (cloud mode)
+// Each engine spawns ~25-35 threads in local mode
 let engine1 = Engine::open(opts1)?;  // +30 threads
 let engine2 = Engine::open(opts2)?;  // +30 threads
 let engine3 = Engine::open(opts3)?;  // +30 threads
@@ -51,15 +49,6 @@ cache.put(key, value);  // Enqueues to admission worker
 cache.put(key, value);  // Processes admission immediately (adds ~1-5µs latency)
 ```
 
-**HybridStorage Upload:**
-```rust
-// Normal: Background worker uploads WAL to cloud
-storage.write(data);  // Enqueues to upload worker
-
-// Fallback: Inline upload on spawn failure
-storage.write(data);  // Uploads synchronously (adds ~10-50ms latency)
-```
-
 **Monitoring:**
 Use `engine.get_runtime_metrics()?`, `engine.get_read_amp_metrics()?`, and `engine.get_storage_layout()?` for stable operator-facing snapshots. Internal fallback counters for thread-spawn failures are not currently exposed as public API.
 
@@ -69,8 +58,6 @@ All background threads are explicitly joined on `Drop` with generous timeouts to
 
 **Cleanup Timeouts:**
 - BlockCache workers: 30 seconds
-- HybridStorage upload worker: 30 seconds
-- CloudExecutor runtime: 10 seconds
 - WAL writer: 30 seconds
 
 If a thread doesn't join within the timeout, a warning is logged but the Drop continues to prevent hangs.
@@ -135,6 +122,18 @@ Memtables are bounded by configuration:
 2. `wait_for_write_stall_clear()` can be used to wait for recovery
 3. No unbounded memory growth - the engine applies backpressure instead
 
+### Disk Pressure And Write Stalls
+
+When disk pressure becomes visible, treat it as a resource event rather than corruption:
+
+1. stop or slow writers
+2. free disk space
+3. flush or compact to reduce temporary file pressure
+4. rerun `midge verify --json <db-path>`
+5. reopen in strict mode only after the health report is clean
+
+If `write_stalled` stays true after space is recovered, the host still needs more headroom or lower concurrency.
+
 ## Performance Characteristics
 
 ### Hot Path Overhead
@@ -152,17 +151,6 @@ if self.admission_inline.load(Ordering::Relaxed) {
 ```
 **Overhead:** <10 nanoseconds (single atomic load, no contention)
 
-**Upload Worker Check:**
-```rust
-// Single atomic load with Relaxed ordering
-if self.upload_worker_failed.load(Ordering::Relaxed) {
-    self.process_upload_inline(batch);  // Inline fallback
-} else {
-    self.upload_tx.send(batch);  // Enqueue to worker
-}
-```
-**Overhead:** <10 nanoseconds (single atomic load, no contention)
-
 ### Graceful Degradation
 
 When resources are constrained, Midge degrades gracefully:
@@ -172,8 +160,6 @@ When resources are constrained, Midge degrades gracefully:
 | Component | Normal Performance | Degraded Performance | Correctness |
 |-----------|-------------------|---------------------|-------------|
 | BlockCache | Async admission, <1µs put() | Inline admission, ~1-5µs put() | ✅ Preserved |
-| HybridStorage | Async upload, ~100µs write() | Inline upload, ~10-50ms write() | ✅ Preserved |
-| CloudExecutor | Full async I/O | Degraded throughput | ✅ Preserved |
 
 **Scenario: Memory Pressure**
 
@@ -270,15 +256,6 @@ loop {
 }
 ```
 
-**4. Keep cloud configuration to the supported builder surface:**
-```rust
-let opts = OpenOptions::cloud("./cache", "my-bucket", "prod/")
-    .goal(Goal::Throughput)
-    .build();
-```
-
-Provider credentials, endpoints, and regions are configured through the selected cloud provider environment rather than additional public timeout builders.
-
 ### Troubleshooting
 
 **Problem: Benchmark thread pool panic**
@@ -289,15 +266,6 @@ thread 'name' panicked at 'failed to spawn thread: ...'
 - Added `Drop` implementations to join worker threads
 - Added inline fallback for cache admission and WAL upload
 - Increased buffer pool size from 16 to 64
-
-**Problem: CloudAsync writes hanging**
-```
-write() call never returns, no error
-```
-**Solution:** HybridStorage upload worker failed to spawn, no fallback. Solution implemented:
-- Added `process_upload_inline()` fallback method
-- Detects worker spawn failure and processes uploads synchronously
-- Prevents CloudAck deadlock
 
 **Problem: Memory grows unbounded**
 ```
@@ -312,6 +280,3 @@ RSS grows continuously under sustained load
 
 - [Performance Tuning Guide](./performance-tuning.md) - High-level configuration and optimization
 - [API Guide](../user-guides/api-guide.md) - API reference and examples
-- [Cloud Setup Guide](./cloud-setup.md) - Cloud storage configuration
-
-

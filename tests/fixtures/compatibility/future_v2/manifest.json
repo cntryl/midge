@@ -1,0 +1,8 @@
+{
+  "last_persisted_sequence": 0,
+  "ssts": [],
+  "files": [],
+  "column_families": [],
+  "next_wal_seq": 1,
+  "next_sst_seqs": {}
+}

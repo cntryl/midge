@@ -179,9 +179,9 @@ drop(tx);
    - Many uncommitted writes need replay
    - **Solution**: Flush before shutdown in production
 
-2. **Cloud download latency**
-   - Downloading manifest + WAL from cloud
-   - **Solution**: Expected for cloud mode, use Local for faster recovery
+2. **Slow local storage or cache misses**
+   - Recovery is reading a large amount of local data from disk
+   - **Solution**: Use faster storage, reduce WAL size, or flush before shutdown
 
 **Diagnostic:**
 
@@ -246,9 +246,6 @@ Error: Manifest corruption: invalid JSON
 rm -rf ./db
 tar -xzf backup-YYYYMMDD.tar.gz
 
-# For cloud mode: redownload from cloud
-rm -rf ./cache
-# Engine will redownload on next open
 ```
 
 ---
@@ -403,58 +400,6 @@ df -h
 # Check for stale lock file
 rm ./db/LOCK  # Only if no other instance running!
 ```
-
----
-
-## Cloud Mode Issues
-
-### Cloud Upload Failures
-
-**Symptoms:**
-- Slow commits with `cloud_strict()`
-- Logs show upload errors
-
-**Possible causes:**
-
-1. **Network connectivity**
-   - Check internet connection
-   - Check cloud provider status
-
-2. **Invalid credentials**
-   - Check environment variables
-   - Check IAM permissions
-
-3. **Bucket doesn't exist**
-   - Verify bucket name
-   - Check region
-
-**Diagnostic:**
-
-Check logs for specific error:
-
-```
-Error: Cloud upload failed: 403 Forbidden
-Error: Cloud upload failed: Network timeout
-Error: Cloud upload failed: NoSuchBucket
-```
-
-**Fixes:**
-
-```bash
-# Verify credentials
-aws s3 ls s3://my-bucket/  # For AWS
-az storage blob list -c my-container  # For Azure
-gsutil ls gs://my-bucket/  # For GCS
-
-# Check environment variables
-echo $AWS_ACCESS_KEY_ID
-echo $AWS_SECRET_ACCESS_KEY
-
-# Verify bucket exists and region is correct
-aws s3api head-bucket --bucket my-bucket --region us-east-1
-```
-
-**Note:** Cloud mode is still pre-1.0. See [../operations/cloud-setup.md](../operations/cloud-setup.md) for configuration details and [../development/stability-policy.md](../development/stability-policy.md) for current compatibility expectations.
 
 ---
 

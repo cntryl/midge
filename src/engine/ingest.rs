@@ -797,11 +797,7 @@ impl IngestCoordinator {
                     if batch_count.is_multiple_of(100)
                         || loop_start.elapsed().as_secs().is_multiple_of(5)
                     {
-                        let avg_size = if batch_count > 0 {
-                            total_batch_size / batch_count
-                        } else {
-                            0
-                        };
+                        let avg_size = total_batch_size.checked_div(batch_count).unwrap_or(0);
                         tracing::info!(
                             cf_id = cf_id,
                             batch_count,
@@ -816,11 +812,7 @@ impl IngestCoordinator {
         }
 
         let total_elapsed = loop_start.elapsed();
-        let avg_batch_size = if batch_count > 0 {
-            total_batch_size / batch_count
-        } else {
-            0
-        };
+        let avg_batch_size = total_batch_size.checked_div(batch_count).unwrap_or(0);
         let batches_per_sec = batch_count as f64 / total_elapsed.as_secs_f64();
         tracing::info!(
             cf_id = cf_id,

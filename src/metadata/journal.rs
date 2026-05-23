@@ -195,11 +195,9 @@ pub fn append_edit_with_fs(
                     state.batches_since_fsync = 0;
                 }
             }
-            ManifestSyncPolicy::TimeBased(dur) => {
-                if state.last_fsync.elapsed() >= dur {
-                    should_sync = true;
-                    state.last_fsync = std::time::Instant::now();
-                }
+            ManifestSyncPolicy::TimeBased(dur) if state.last_fsync.elapsed() >= dur => {
+                should_sync = true;
+                state.last_fsync = std::time::Instant::now();
             }
             _ => {}
         }
@@ -449,11 +447,9 @@ pub fn append_edit_batch_with_fs(
                     state.batches_since_fsync = 0;
                 }
             }
-            ManifestSyncPolicy::TimeBased(dur) => {
-                if state.last_fsync.elapsed() >= dur {
-                    should_sync = true;
-                    state.last_fsync = std::time::Instant::now();
-                }
+            ManifestSyncPolicy::TimeBased(dur) if state.last_fsync.elapsed() >= dur => {
+                should_sync = true;
+                state.last_fsync = std::time::Instant::now();
             }
             _ => {}
         }
