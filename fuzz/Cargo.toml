@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-tempfile = "3.23"
+tempfile = "3.27"
 cntryl-midge = { path = ".." }
 
 [[bin]]

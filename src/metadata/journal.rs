@@ -1,9 +1,16 @@
 use crate::common::MidgeResult;
 use crate::metadata::manifest::{CloudCheckpoint, FileMeta};
-use bincode;
 use crc32fast::Hasher as Crc32;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+fn journal_serialize<T: ?Sized + serde::Serialize>(value: &T) -> MidgeResult<Vec<u8>> {
+    serde_json::to_vec(value).map_err(|e| crate::common::MidgeError::Internal(e.to_string()))
+}
+
+fn journal_deserialize<T: serde::de::DeserializeOwned>(payload: &[u8]) -> MidgeResult<T> {
+    serde_json::from_slice(payload).map_err(|e| crate::common::MidgeError::Internal(e.to_string()))
+}
 
 /// TLV-encoded manifest edit record
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,8 +148,7 @@ pub fn append_edit_with_fs(
 ) -> MidgeResult<()> {
     use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
 
-    let payload =
-        bincode::serialize(edit).map_err(|e| crate::common::MidgeError::Internal(e.to_string()))?;
+    let payload = journal_serialize(edit)?;
     let mut hasher = Crc32::new();
     hasher.update(&payload);
     let crc = hasher.finalize();
@@ -328,7 +334,7 @@ pub fn replay_journal_with_fs(
 
         // Dispatch
         if typ == FSYNC_MARKER_TYPE {
-            match bincode::deserialize::<FsyncMarker>(&payload) {
+            match journal_deserialize::<FsyncMarker>(&payload) {
                 Ok(marker) => {
                     tracing::info!(
                         last_seq = marker.last_persisted_sequence,
@@ -348,7 +354,7 @@ pub fn replay_journal_with_fs(
                 }
             }
         } else if typ == BATCH_RECORD_TYPE {
-            match bincode::deserialize::<Vec<ManifestEdit>>(&payload) {
+            match journal_deserialize::<Vec<ManifestEdit>>(&payload) {
                 Ok(batch) => edits.push(ManifestEdit::Batch(batch)),
                 Err(e) => {
                     tracing::warn!("journal batch deserialize failed: {}", e);
@@ -360,7 +366,7 @@ pub fn replay_journal_with_fs(
                 }
             }
         } else {
-            match bincode::deserialize::<ManifestEdit>(&payload) {
+            match journal_deserialize::<ManifestEdit>(&payload) {
                 Ok(edit) => edits.push(edit),
                 Err(e) => {
                     tracing::warn!("journal record deserialize failed: {}", e);
@@ -392,8 +398,7 @@ pub fn append_edit_batch_with_fs(
 ) -> MidgeResult<()> {
     use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
 
-    let payload = bincode::serialize(&batch)
-        .map_err(|e| crate::common::MidgeError::Internal(e.to_string()))?;
+    let payload = journal_serialize(batch)?;
     let mut hasher = Crc32::new();
     hasher.update(&payload);
     let crc = hasher.finalize();
@@ -501,8 +506,7 @@ pub fn append_fsync_marker_with_fs(
             .unwrap_or_default()
             .as_millis() as u64,
     };
-    let payload = bincode::serialize(&marker)
-        .map_err(|e| crate::common::MidgeError::Internal(e.to_string()))?;
+    let payload = journal_serialize(&marker)?;
     let mut hasher = Crc32::new();
     hasher.update(&payload);
     let crc = hasher.finalize();
@@ -633,7 +637,7 @@ mod tests {
         let fake = ManifestEdit::RemoveSst {
             name: "missing.sst".to_string(),
         };
-        let payload = bincode::serialize(&fake).unwrap();
+        let payload = serde_json::to_vec(&fake).unwrap();
         let mut hasher = Crc32::new();
         hasher.update(&payload);
         let _crc = hasher.finalize();

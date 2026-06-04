@@ -2,6 +2,7 @@
 name = "cntryl-midge"
 version = "0.1.0"
 edition = "2021"
+resolver = "2"
 rust-version = "1.93"
 description = "A high-performance embedded key-value database with LSM-tree storage"
 license = "Apache-2.0"
@@ -20,11 +21,11 @@ path = "src/lib.rs"
 
 [dependencies]
 # Concurrency & Synchronization
-arc-swap = "1.7"
+arc-swap = "1.9"
 crossbeam = "0.8"
 crossbeam-channel = "0.5"
 crossbeam-epoch = "0.9"
-dashmap = "6.1"
+dashmap = "6.2"
 # Note: fail is used for deterministic crash testing in test suites.
 # In production builds, this has minimal overhead. For security-critical environments,
 # consider building without this dependency if failpoint testing is not needed.
@@ -33,18 +34,17 @@ parking_lot = "0.12"
 
 # Utilities used by stress workloads
 rand = "0.10"
-hdrhistogram = "7.3"
+hdrhistogram = "7.5"
 
 # Compression
 lz4_flex = "0.13"
 zstd = "0.13"
 
 # Data Types & Serialization
-bincode = "1.3"
-bytes = { version = "1.10", features = ["serde"] }
+bytes = { version = "1.11", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-uuid = { version = "1.18", features = ["v4"] }
+uuid = { version = "1.23", features = ["v4"] }
 
 # Error Handling
 anyhow = "1.0"
@@ -62,30 +62,31 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # OpenTelemetry (Observability)
-opentelemetry = { version = "0.20", optional = true, features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.13", optional = true, features = ["tokio"] }
-tracing-opentelemetry = { version = "0.32", optional = true }
+opentelemetry = { version = "0.32", optional = true }
+opentelemetry-otlp = { version = "0.32", optional = true, features = ["grpc-tonic"] }
+opentelemetry_sdk = { version = "0.32", optional = true, features = ["rt-tokio"] }
+tracing-opentelemetry = { version = "0.33", optional = true }
 
 # System Utilities
 byteorder = "1.5"
 hex = "0.4"
 hostname = "0.4"
-num_cpus = "1.16"
+num_cpus = "1.17"
 once_cell = "1.21"
-regex = "1.11"
+regex = "1.12"
 sysinfo = "0.39"
-tempfile = "3.23"
+tempfile = "3.27"
 
 # Cloud Backend Support (optional)
 base64 = { version = "0.22", optional = true }
 futures = { version = "0.3", optional = true }
-hmac = { version = "0.12", optional = true }
+hmac = { version = "0.13", optional = true }
 md5 = { version = "0.8", optional = true }
 native-tls = { version = "0.2.18", optional = true }
 percent-encoding = { version = "2.3", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "blocking"], optional = true }
-sha2 = { version = "0.10", optional = true }
-tokio = { version = "1.40", features = ["rt-multi-thread", "macros"], optional = true }
+sha2 = { version = "0.11", optional = true }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros"], optional = true }
 ureq = { version = "3", features = ["rustls", "json"], optional = true }
 url = { version = "2.5", optional = true }
 urlencoding = { version = "2.1", optional = true }
@@ -101,11 +102,11 @@ io-uring = { version = "0.7", optional = true }
 winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 
 [dev-dependencies]
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 criterion = "0.8"
 paste = "1.0"
-proptest = "1.8"
-cntryl-stress = "0.2.1"
+proptest = "1.11"
+cntryl-stress = "0.2.3"
 
 # =============================================================================
 # Features
@@ -113,11 +114,11 @@ cntryl-stress = "0.2.1"
 
 [features]
 default = ["cloud-common"]
-telemetry = ["dep:opentelemetry", "dep:tracing-opentelemetry"]
+telemetry = ["dep:opentelemetry", "dep:tracing-opentelemetry", "dep:opentelemetry_sdk"]
 telemetry-otlp = ["telemetry", "dep:opentelemetry-otlp"]
 uring = ["dep:io-uring"]
 
-# Cloud Storage Backends
+# Cloud storage backend support enabled by default for current deployment profiles.
 cloud-common = [
     "dep:ureq",
     "dep:hmac",

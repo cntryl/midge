@@ -15,8 +15,6 @@ This contract describes the current intended semantics for the supported local-f
 - local-disk storage mode
 - `RecoveryPolicy::Strict`
 
-Cloud-backed mode and salvage workflows are described where relevant, but they are not part of the initial local-first `1.0` promise unless promoted explicitly in the support matrix and `1.0` contract docs.
-
 ## Core Model
 
 Midge uses explicit transactions. There is no auto-commit mode.
@@ -148,18 +146,6 @@ At return:
 - recovery can keep the write only if later SST publication completed successfully
 
 Use `best_effort()` only for data that can be rebuilt or safely discarded.
-
-### `WriteOptions::cloud_strict()`
-
-`commit()` waits for local visibility plus the cloud durability frontier.
-
-At return:
-
-- the transaction is visible
-- the transaction has crossed the cloud durability acknowledgment boundary
-- recovery can rely on the cloud-backed path once that acknowledgment completes
-
-This mode is meaningful for cloud-backed evaluation, but cloud-backed production is still outside the initial local-first `1.0` promise.
 
 ## Recovery Policy Contract
 
