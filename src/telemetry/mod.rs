@@ -91,7 +91,7 @@ impl Telemetry {
                         .tonic()
                         .with_endpoint(&otel_config.endpoint),
                 )
-                .install_batch(opentelemetry::runtime::Tokio)
+                .install_batch(opentelemetry_sdk::runtime::Tokio)
                 .map_err(|e| {
                     crate::common::MidgeError::Internal(format!(
                         "Failed to initialize OTLP tracer: {}",

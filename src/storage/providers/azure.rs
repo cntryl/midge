@@ -14,7 +14,7 @@ use super::super::cloud::{
 use crate::common::{MidgeError, MidgeResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as Base64Engine};
 use chrono::Utc;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::Method;
 use sha2::Sha256;

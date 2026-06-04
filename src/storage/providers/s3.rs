@@ -14,7 +14,7 @@ use super::super::cloud::{CloudCallback, CloudEvent, CloudOutcome};
 use crate::common::{MidgeError, MidgeResult};
 use chrono::Utc;
 use hex;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::blocking::Client;
 use reqwest::Method;
