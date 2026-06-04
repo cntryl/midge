@@ -12,6 +12,9 @@ on:
       - ".github/workflows/**"
       - "*.toml"
 
+permissions:
+  contents: read
+
 jobs:
   release-gate:
     uses: ./.github/workflows/release-gate.yml
