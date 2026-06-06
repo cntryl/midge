@@ -1,16 +1,16 @@
-//! Local placeholder for a cloud-backed primary lease.
+//! Cloud-backed primary lease.
 //!
-//! IMPORTANT: this implementation only writes a coordination file to the local
-//! `local_cache_path` and does NOT perform any remote conditional PUTs or use a
-//! cloud backend. It therefore does NOT provide distributed exclusivity and is
-//! suitable only for single-node testing and local development.
+//! Real cloud mode coordinates through a provider-backed lease object using
+//! conditional create/update semantics. The local cache path is still used for
+//! staged diagnostics and the local epoch store.
 //!
-//! Replace with a cloud-backed implementation (conditional writes / provider
-//! lease APIs) before using in multi-node production deployments.
+//! Filesystem-simulated cloud mode can still construct this type without a
+//! provider backend; that path remains local-only for deterministic tests.
 
 use super::fs_leader_store::FsLeaderStore;
 use super::traits::{LeaderStore, LeaseError, LeaseGuard, PrimaryLease};
 use crate::io::RealFs;
+use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -34,13 +34,14 @@ pub struct CloudLeaseConfig {
     pub region: Option<String>,
 }
 
-/// Local-only placeholder for a cloud-backed lease implementation.
+/// Primary lease implementation for cloud-backed storage.
 ///
-/// This implementation stores a coordination document only in the local cache
-/// directory (not remotely). It is intended as a scaffold for a future
-/// cloud-backed implementation and does NOT provide distributed exclusivity.
+/// When constructed with `new_provider_backed`, the coordination document is
+/// written to object storage with conditional create/update headers. When
+/// constructed with `new`, it falls back to the local coordination file used by
+/// filesystem-simulated cloud tests.
 ///
-/// The local coordination document looks like:
+/// The coordination document looks like:
 /// ```text
 /// holder_id: <pid@host>
 /// acquired_at: <rfc3339>
@@ -63,6 +64,8 @@ pub struct CloudStorageLease {
     acquired_epoch: std::sync::atomic::AtomicU64,
     /// Leader store for epoch-based fencing (backed by local cache path).
     leader_store: Option<Arc<FsLeaderStore>>,
+    /// Real cloud object backend for distributed lease coordination.
+    cloud: Option<Arc<CloudStorage>>,
 }
 
 impl CloudStorageLease {
@@ -94,13 +97,25 @@ impl CloudStorageLease {
             last_renewal: Mutex::new(None),
             acquired_epoch: std::sync::atomic::AtomicU64::new(0),
             leader_store,
+            cloud: None,
         }
+    }
+
+    pub fn new_provider_backed(
+        config: CloudLeaseConfig,
+        local_cache_path: std::path::PathBuf,
+        cloud: Arc<CloudStorage>,
+    ) -> Self {
+        let mut lease = Self::new(config, local_cache_path);
+        lease.cloud = Some(cloud);
+        lease
     }
 
     /// Full object key for the lease file.
     ///
-    /// Scaffolding for a future cloud-backed implementation — currently unused
-    /// for remote writes (local-only implementation). Kept for diagnostic use.
+    /// Logical object key for the lease file. `CloudStorage` applies the
+    /// configured namespace/prefix, so remote writes use `LEASE_OBJECT_KEY`
+    /// directly and keep this helper for diagnostics.
     #[allow(dead_code)]
     fn lease_key(&self) -> String {
         if self.config.prefix.is_empty() {
@@ -147,6 +162,191 @@ impl CloudStorageLease {
         }
         Ok(())
     }
+
+    fn remote_head(&self) -> Result<Option<ObjectMetadata>, LeaseError> {
+        let Some(cloud) = self.cloud.as_ref() else {
+            return Ok(None);
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_head(LEASE_OBJECT_KEY.to_string(), tx);
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(CloudEvent::HeadComplete { result, .. }) => match result {
+                CloudOutcome::Ok(metadata) => Ok(Some(metadata)),
+                CloudOutcome::Err(error) if is_remote_not_found(&error) => Ok(None),
+                CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
+                    "cloud lease HEAD failed: {}",
+                    error
+                ))),
+            },
+            Ok(other) => Err(LeaseError::IoError(format!(
+                "unexpected cloud lease HEAD response: {:?}",
+                other
+            ))),
+            Err(error) => Err(LeaseError::IoError(format!(
+                "cloud lease HEAD timed out: {}",
+                error
+            ))),
+        }
+    }
+
+    fn remote_read_doc(&self) -> Result<Option<LeaseDocument>, LeaseError> {
+        let Some(cloud) = self.cloud.as_ref() else {
+            return Ok(None);
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_get(LEASE_OBJECT_KEY.to_string(), tx);
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(CloudEvent::GetComplete { result, .. }) => match result {
+                CloudOutcome::Ok(bytes) => {
+                    let content = String::from_utf8(bytes).map_err(|error| {
+                        LeaseError::IoError(format!("cloud lease document is not UTF-8: {}", error))
+                    })?;
+                    Ok(parse_lease_document(&content))
+                }
+                CloudOutcome::Err(error) if is_remote_not_found(&error) => Ok(None),
+                CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
+                    "cloud lease GET failed: {}",
+                    error
+                ))),
+            },
+            Ok(other) => Err(LeaseError::IoError(format!(
+                "unexpected cloud lease GET response: {:?}",
+                other
+            ))),
+            Err(error) => Err(LeaseError::IoError(format!(
+                "cloud lease GET timed out: {}",
+                error
+            ))),
+        }
+    }
+
+    fn remote_write_doc(
+        &self,
+        doc: &LeaseDocument,
+        headers: Vec<(String, String)>,
+    ) -> Result<(), LeaseError> {
+        let Some(cloud) = self.cloud.as_ref() else {
+            return self.write_lease_file(doc);
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_put(
+            LEASE_OBJECT_KEY.to_string(),
+            format_lease_document(doc).into_bytes(),
+            headers,
+            tx,
+        );
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(CloudEvent::PutComplete { result, .. }) => match result {
+                CloudOutcome::Ok(()) => Ok(()),
+                CloudOutcome::Err(error) => Err(LeaseError::AcquisitionFailed(format!(
+                    "cloud lease conditional write failed: {}",
+                    error
+                ))),
+            },
+            Ok(other) => Err(LeaseError::IoError(format!(
+                "unexpected cloud lease PUT response: {:?}",
+                other
+            ))),
+            Err(error) => Err(LeaseError::IoError(format!(
+                "cloud lease PUT timed out: {}",
+                error
+            ))),
+        }
+    }
+
+    fn remote_delete_doc(&self, headers: Vec<(String, String)>) -> Result<(), LeaseError> {
+        let Some(cloud) = self.cloud.as_ref() else {
+            return self.remove_lease_file();
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_delete_with_headers(LEASE_OBJECT_KEY.to_string(), headers, tx);
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(CloudEvent::DeleteComplete { result, .. }) => match result {
+                CloudOutcome::Ok(()) => Ok(()),
+                CloudOutcome::Err(error) if is_remote_not_found(&error) => Ok(()),
+                CloudOutcome::Err(error) if is_remote_precondition_failed(&error) => Ok(()),
+                CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
+                    "cloud lease DELETE failed: {}",
+                    error
+                ))),
+            },
+            Ok(other) => Err(LeaseError::IoError(format!(
+                "unexpected cloud lease DELETE response: {:?}",
+                other
+            ))),
+            Err(error) => Err(LeaseError::IoError(format!(
+                "cloud lease DELETE timed out: {}",
+                error
+            ))),
+        }
+    }
+
+    fn remote_release_if_still_holder(&self) -> Result<(), LeaseError> {
+        let metadata = self.remote_head()?;
+        let current = self.remote_read_doc()?;
+        let Some(current) = current else {
+            return Ok(());
+        };
+
+        if current.holder_id != self.holder_id {
+            tracing::warn!(
+                holder_id = %self.holder_id,
+                current_holder = %current.holder_id,
+                "skipping cloud lease release because another holder owns the lease"
+            );
+            return Ok(());
+        }
+
+        let Some(metadata) = metadata else {
+            tracing::warn!(
+                holder_id = %self.holder_id,
+                "skipping cloud lease release because the lease has no HEAD metadata"
+            );
+            return Ok(());
+        };
+        let Some(headers) = delete_precondition_headers(&metadata) else {
+            tracing::warn!(
+                holder_id = %self.holder_id,
+                "skipping cloud lease release because no conditional delete token is available"
+            );
+            return Ok(());
+        };
+
+        self.remote_delete_doc(headers)
+    }
+
+    fn read_current_doc(&self) -> Result<Option<LeaseDocument>, LeaseError> {
+        if self.cloud.is_some() {
+            self.remote_read_doc()
+        } else {
+            Ok(self.read_lease_file())
+        }
+    }
+
+    fn write_current_doc(
+        &self,
+        doc: &LeaseDocument,
+        headers: Vec<(String, String)>,
+    ) -> Result<(), LeaseError> {
+        if self.cloud.is_some() {
+            self.remote_write_doc(doc, headers)
+        } else {
+            self.write_lease_file(doc)
+        }
+    }
+
+    fn delete_current_doc(&self) -> Result<(), LeaseError> {
+        if self.cloud.is_some() {
+            self.remote_release_if_still_holder()
+        } else {
+            if let Some(current) = self.read_lease_file() {
+                if current.holder_id != self.holder_id {
+                    return Ok(());
+                }
+            }
+            self.remove_lease_file()
+        }
+    }
 }
 
 impl PrimaryLease for CloudStorageLease {
@@ -160,8 +360,14 @@ impl PrimaryLease for CloudStorageLease {
             ));
         }
 
+        let existing_head = if inner.cloud.is_some() {
+            inner.remote_head()?
+        } else {
+            None
+        };
+
         // Check if an existing lease is still valid (held by another instance)
-        if let Some(existing) = inner.read_lease_file() {
+        if let Some(existing) = inner.read_current_doc()? {
             if existing.holder_id != inner.holder_id && !existing.is_expired() {
                 return Err(LeaseError::AcquisitionFailed(format!(
                     "another instance holds the lease (holder: {}, expires: {})",
@@ -177,7 +383,21 @@ impl PrimaryLease for CloudStorageLease {
             acquired_at: now.to_rfc3339(),
             expires_at: (now + chrono::Duration::seconds(inner.ttl.as_secs() as i64)).to_rfc3339(),
         };
-        inner.write_lease_file(&doc)?;
+        let headers = match existing_head {
+            Some(metadata) if !metadata.etag.is_empty() => {
+                vec![("If-Match".to_string(), metadata.etag)]
+            }
+            Some(_) => {
+                return Err(LeaseError::AcquisitionFailed(
+                    "existing cloud lease has no ETag for conditional update".to_string(),
+                ))
+            }
+            None if inner.cloud.is_some() => {
+                vec![("If-None-Match".to_string(), "*".to_string())]
+            }
+            None => Vec::new(),
+        };
+        inner.write_current_doc(&doc, headers)?;
 
         // Acquire epoch from local leader store for fencing.
         let epoch = if let Some(ref store) = inner.leader_store {
@@ -210,7 +430,8 @@ impl PrimaryLease for CloudStorageLease {
         }
 
         // Verify we still hold the lease
-        if let Some(existing) = self.read_lease_file() {
+        let metadata = self.remote_head()?;
+        if let Some(existing) = self.read_current_doc()? {
             if existing.holder_id != self.holder_id {
                 self.acquired.store(false, Ordering::Release);
                 return Err(LeaseError::RenewalFailed(format!(
@@ -230,7 +451,22 @@ impl PrimaryLease for CloudStorageLease {
             acquired_at: now.to_rfc3339(),
             expires_at: (now + chrono::Duration::seconds(self.ttl.as_secs() as i64)).to_rfc3339(),
         };
-        self.write_lease_file(&doc)?;
+        let headers = match metadata {
+            Some(metadata) if !metadata.etag.is_empty() => {
+                vec![("If-Match".to_string(), metadata.etag)]
+            }
+            Some(_) if self.cloud.is_some() => {
+                return Err(LeaseError::RenewalFailed(
+                    "cloud lease has no ETag for conditional renewal".to_string(),
+                ))
+            }
+            Some(_) => Vec::new(),
+            None if self.cloud.is_some() => {
+                vec![("If-None-Match".to_string(), "*".to_string())]
+            }
+            None => Vec::new(),
+        };
+        self.write_current_doc(&doc, headers)?;
         *self.last_renewal.lock().expect("poisoned") = Some(Instant::now());
 
         tracing::trace!("cloud storage lease renewed");
@@ -253,7 +489,7 @@ impl PrimaryLease for CloudStorageLease {
             return Ok(()); // Idempotent
         }
 
-        self.remove_lease_file()?;
+        self.delete_current_doc()?;
         self.acquired.store(false, Ordering::Release);
 
         tracing::info!(
@@ -342,6 +578,42 @@ fn parse_lease_document(content: &str) -> Option<LeaseDocument> {
         acquired_at: acquired_at?,
         expires_at: expires_at?,
     })
+}
+
+fn is_remote_not_found(error: &str) -> bool {
+    let lowered = error.to_ascii_lowercase();
+    lowered.contains("not found")
+        || lowered.contains("notfound")
+        || lowered.contains("404")
+        || lowered.contains("nosuchkey")
+        || lowered.contains("blobnotfound")
+}
+
+fn is_remote_precondition_failed(error: &str) -> bool {
+    let lowered = error.to_ascii_lowercase();
+    lowered.contains("precondition")
+        || lowered.contains("412")
+        || lowered.contains("conditionnotmet")
+        || lowered.contains("condition not met")
+}
+
+fn delete_precondition_headers(metadata: &ObjectMetadata) -> Option<Vec<(String, String)>> {
+    if let Some(generation) = metadata
+        .generation
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        return Some(vec![(
+            "x-goog-if-generation-match".to_string(),
+            generation.clone(),
+        )]);
+    }
+
+    if !metadata.etag.is_empty() {
+        return Some(vec![("If-Match".to_string(), metadata.etag.clone())]);
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -491,6 +763,52 @@ mod tests {
         // Assert
         assert!(result.is_ok());
         assert!(!lease_file_exists(&cache_path));
+    }
+
+    #[test]
+    fn should_not_delete_provider_lease_owned_by_new_holder_on_stale_release() {
+        // Arrange
+        let cache_path = temp_cache_path();
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+        let lease = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            cache_path,
+            Arc::clone(&cloud),
+        ));
+        let _guard = Arc::clone(&lease).try_acquire().unwrap();
+
+        let now = chrono::Utc::now();
+        let new_holder_doc = LeaseDocument {
+            holder_id: "new-holder@host".to_string(),
+            acquired_at: now.to_rfc3339(),
+            expires_at: (now + chrono::Duration::seconds(60)).to_rfc3339(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_put(
+            LEASE_OBJECT_KEY.to_string(),
+            format_lease_document(&new_holder_doc).into_bytes(),
+            vec![],
+            tx,
+        );
+        let _ = rx.recv().unwrap();
+
+        // Act
+        lease.release().unwrap();
+
+        // Assert
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_get(LEASE_OBJECT_KEY.to_string(), tx);
+        let event = rx.recv().unwrap();
+        let bytes = match event {
+            CloudEvent::GetComplete {
+                result: CloudOutcome::Ok(bytes),
+                ..
+            } => bytes,
+            other => panic!("expected surviving lease doc, got {other:?}"),
+        };
+        let content = String::from_utf8(bytes).unwrap();
+        let doc = parse_lease_document(&content).unwrap();
+        assert_eq!(doc.holder_id, "new-holder@host");
     }
 
     #[test]

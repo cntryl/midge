@@ -133,46 +133,95 @@ impl CloudExecutor {
         }
 
         let client = self.client.clone();
-        let method = request.method.clone();
-        let url = request.url.clone();
-        let headers = request.headers.clone();
-        let body = request.body.clone();
 
         let cb = callback.clone();
 
         self.rt.spawn(async move {
-            let mut builder = client.request(method.clone(), &url);
-            for (k, v) in headers.iter() {
-                builder = builder.header(k, v);
-            }
-            if let Some(b) = body {
-                builder = builder.body(b);
-            }
-
-            let result = match builder.send().await {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    let headers = resp
-                        .headers()
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                        .collect::<Vec<_>>();
-
-                    match resp.bytes().await {
-                        Ok(bytes) => Ok(CloudResponse {
-                            status,
-                            headers,
-                            body: bytes.to_vec(),
-                        }),
-                        Err(err) => Err(MidgeError::Internal(format!("cloud body error: {err}"))),
-                    }
-                }
-                Err(err) => Err(MidgeError::Internal(format!("cloud request failed: {err}"))),
-            };
+            let result = Self::execute_request(client, request).await;
 
             let event = mapper(context.clone(), result);
             let _ = cb.send(event);
         });
+    }
+
+    pub fn spawn_request_loop<State, Make, Step, Finish>(
+        &self,
+        initial_state: State,
+        context: String,
+        callback: CloudCallback,
+        make_request: Make,
+        mut step: Step,
+        finish: Finish,
+    ) where
+        State: Send + 'static,
+        Make: Fn(&State) -> MidgeResult<CloudRequest> + Send + Sync + 'static,
+        Step: FnMut(&mut State, CloudResponse) -> MidgeResult<bool> + Send + 'static,
+        Finish: FnOnce(String, MidgeResult<State>) -> CloudEvent + Send + 'static,
+    {
+        let client = self.client.clone();
+        let signer = self.signer.clone();
+        let cb = callback.clone();
+
+        self.rt.spawn(async move {
+            let mut state = initial_state;
+            let result = loop {
+                let mut request = match make_request(&state) {
+                    Ok(request) => request,
+                    Err(error) => break Err(error),
+                };
+
+                if let Some(signer) = &signer {
+                    if let Err(error) = signer.sign(&mut request) {
+                        break Err(error);
+                    }
+                }
+
+                let response = match Self::execute_request(client.clone(), request).await {
+                    Ok(response) => response,
+                    Err(error) => break Err(error),
+                };
+
+                match step(&mut state, response) {
+                    Ok(true) => continue,
+                    Ok(false) => break Ok(state),
+                    Err(error) => break Err(error),
+                }
+            };
+
+            let event = finish(context, result);
+            let _ = cb.send(event);
+        });
+    }
+
+    async fn execute_request(client: Client, request: CloudRequest) -> MidgeResult<CloudResponse> {
+        let mut builder = client.request(request.method.clone(), &request.url);
+        for (k, v) in request.headers.iter() {
+            builder = builder.header(k, v);
+        }
+        if let Some(body) = request.body {
+            builder = builder.body(body);
+        }
+
+        match builder.send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let headers = resp
+                    .headers()
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                    .collect::<Vec<_>>();
+
+                match resp.bytes().await {
+                    Ok(bytes) => Ok(CloudResponse {
+                        status,
+                        headers,
+                        body: bytes.to_vec(),
+                    }),
+                    Err(err) => Err(MidgeError::Internal(format!("cloud body error: {err}"))),
+                }
+            }
+            Err(err) => Err(MidgeError::Internal(format!("cloud request failed: {err}"))),
+        }
     }
 }
 

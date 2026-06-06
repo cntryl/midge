@@ -27,6 +27,240 @@ use std::path::PathBuf;
 
 use crate::sst::compression::{CompressionAlgo, CompressionPolicy};
 
+/// Cloud provider credential source for S3-compatible providers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum S3CredentialSource {
+    /// Use an explicit access key / secret key pair.
+    Static {
+        access_key: String,
+        secret_key: String,
+        session_token: Option<String>,
+    },
+    /// Resolve static credentials from AWS-style environment variables.
+    Environment,
+    /// Resolve static credentials from AWS shared config/credentials files.
+    SharedProfile {
+        profile: Option<String>,
+        credentials_file: Option<PathBuf>,
+        config_file: Option<PathBuf>,
+    },
+    /// Use Midge's lightweight AWS default chain.
+    ///
+    /// Intended for AWS S3 only. S3-compatible providers should use `Static`,
+    /// `Environment`, or `SharedProfile` so they do not accidentally contact AWS
+    /// metadata/role endpoints.
+    AwsDefaultChain,
+}
+
+impl S3CredentialSource {
+    pub fn access_key(access_key: impl Into<String>, secret_key: impl Into<String>) -> Self {
+        Self::Static {
+            access_key: access_key.into(),
+            secret_key: secret_key.into(),
+            session_token: None,
+        }
+    }
+
+    pub fn session(
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+        session_token: impl Into<String>,
+    ) -> Self {
+        Self::Static {
+            access_key: access_key.into(),
+            secret_key: secret_key.into(),
+            session_token: Some(session_token.into()),
+        }
+    }
+
+    pub fn environment() -> Self {
+        Self::Environment
+    }
+
+    pub fn shared_profile(profile: impl Into<String>) -> Self {
+        Self::SharedProfile {
+            profile: Some(profile.into()),
+            credentials_file: None,
+            config_file: None,
+        }
+    }
+
+    pub fn aws_default_chain() -> Self {
+        Self::AwsDefaultChain
+    }
+}
+
+/// Azure Blob credential source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AzureCredentialSource {
+    SharedKey {
+        account_key: String,
+    },
+    SasToken {
+        token: String,
+    },
+    ConnectionString {
+        connection_string: String,
+    },
+    StorageEnvironment,
+    EnvironmentClientSecret,
+    WorkloadIdentity {
+        tenant_id: Option<String>,
+        client_id: Option<String>,
+        token_file: Option<PathBuf>,
+    },
+    ManagedIdentity {
+        client_id: Option<String>,
+    },
+    LightweightDefaultChain,
+}
+
+/// Google Cloud Storage credential source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GcsCredentialSource {
+    BearerToken { token: String },
+    HmacKey { access_id: String, secret: String },
+    ApplicationDefault,
+    ServiceAccountJsonFile { path: PathBuf },
+    AuthorizedUserJsonFile { path: PathBuf },
+    MetadataServer,
+}
+
+/// GCS HTTP API flavor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcsApiStyle {
+    /// Native JSON API (`/storage/v1`, `/upload/storage/v1`).
+    Json,
+    /// XML API with GOOG1 HMAC signing. This is the preferred Peas path.
+    Xml,
+}
+
+/// Public cloud provider configuration for real object-store backends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudProviderConfig {
+    AwsS3 {
+        bucket: String,
+        region: String,
+        credentials: S3CredentialSource,
+    },
+    S3Compatible {
+        bucket: String,
+        region: String,
+        endpoint: String,
+        path_style: bool,
+        credentials: S3CredentialSource,
+    },
+    Minio {
+        bucket: String,
+        endpoint: String,
+        credentials: S3CredentialSource,
+    },
+    Wasabi {
+        bucket: String,
+        region: String,
+        endpoint: Option<String>,
+        credentials: S3CredentialSource,
+    },
+    OciS3Compatible {
+        bucket: String,
+        namespace: String,
+        region: String,
+        endpoint: Option<String>,
+        path_style: bool,
+        credentials: S3CredentialSource,
+    },
+    AzureBlob {
+        account: String,
+        container: String,
+        endpoint: Option<String>,
+        credential: AzureCredentialSource,
+    },
+    Gcs {
+        bucket: String,
+        project_id: String,
+        endpoint: Option<String>,
+        api: GcsApiStyle,
+        credential: GcsCredentialSource,
+    },
+}
+
+impl CloudProviderConfig {
+    pub fn s3_compatible(
+        bucket: impl Into<String>,
+        region: impl Into<String>,
+        endpoint: impl Into<String>,
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+    ) -> Self {
+        Self::S3Compatible {
+            bucket: bucket.into(),
+            region: region.into(),
+            endpoint: endpoint.into(),
+            path_style: true,
+            credentials: S3CredentialSource::access_key(access_key, secret_key),
+        }
+    }
+
+    pub fn minio(
+        bucket: impl Into<String>,
+        endpoint: impl Into<String>,
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+    ) -> Self {
+        Self::Minio {
+            bucket: bucket.into(),
+            endpoint: endpoint.into(),
+            credentials: S3CredentialSource::access_key(access_key, secret_key),
+        }
+    }
+
+    pub fn peas_s3(bucket: impl Into<String>) -> Self {
+        Self::s3_compatible(
+            bucket,
+            "us-east-1",
+            "http://127.0.0.1:9000",
+            "admin",
+            "easy-peasy",
+        )
+    }
+
+    pub fn peas_azure(container: impl Into<String>) -> Self {
+        Self::AzureBlob {
+            account: "admin".to_string(),
+            container: container.into(),
+            endpoint: Some("http://127.0.0.1:9000".to_string()),
+            credential: AzureCredentialSource::SharedKey {
+                account_key: "easy-peasy".to_string(),
+            },
+        }
+    }
+
+    pub fn peas_gcs(bucket: impl Into<String>) -> Self {
+        Self::Gcs {
+            bucket: bucket.into(),
+            project_id: "peas".to_string(),
+            endpoint: Some("http://127.0.0.1:9000".to_string()),
+            api: GcsApiStyle::Xml,
+            credential: GcsCredentialSource::HmacKey {
+                access_id: "admin".to_string(),
+                secret: "easy-peasy".to_string(),
+            },
+        }
+    }
+
+    pub fn bucket_or_container(&self) -> &str {
+        match self {
+            Self::AwsS3 { bucket, .. }
+            | Self::S3Compatible { bucket, .. }
+            | Self::Minio { bucket, .. }
+            | Self::Wasabi { bucket, .. }
+            | Self::OciS3Compatible { bucket, .. }
+            | Self::Gcs { bucket, .. } => bucket,
+            Self::AzureBlob { container, .. } => container,
+        }
+    }
+}
+
 /// Storage backend specification - MUST be explicit
 ///
 /// This enum enforces unambiguous storage selection. There are NO defaults,
@@ -50,30 +284,31 @@ pub enum Storage {
         path: PathBuf,
     },
 
-    /// Cloud object storage (provider-agnostic)
+    /// Real cloud object storage.
     ///
-    /// Data persists to cloud object storage. Supports:
-    /// - AWS S3
-    /// - Azure Blob Storage  
-    /// - Google Cloud Storage
-    /// - Cloudflare R2
-    /// - MinIO and other S3-compatible services
-    /// - Any object storage with appropriate credentials
-    ///
-    /// Uses a hybrid model with local cache for performance.
-    ///
-    /// Use for: cloud-native deployments, serverless, distributed systems
+    /// Uses a hybrid model with a local cache/staging directory plus a
+    /// provider-backed object store.
     Cloud {
+        /// Local cache/staging path for performance
+        local_cache_path: PathBuf,
+        /// Provider and credential configuration.
+        provider: CloudProviderConfig,
+        /// Object key prefix (e.g., "databases/myapp/")
+        prefix: String,
+    },
+
+    /// Filesystem-backed cloud simulation.
+    ///
+    /// This is intentionally separate from real cloud mode so tests can keep a
+    /// deterministic in-process object-store stand-in without implying that a
+    /// provider endpoint is being used.
+    CloudSimulated {
         /// Local cache/staging path for performance
         local_cache_path: PathBuf,
         /// Bucket/container name (provider-specific terminology)
         bucket: String,
         /// Object key prefix (e.g., "databases/myapp/")
         prefix: String,
-        /// Optional endpoint override (for custom cloud providers or regional endpoints)
-        endpoint: Option<String>,
-        /// Optional region/location override
-        region: Option<String>,
     },
 }
 
@@ -178,7 +413,8 @@ pub enum RecoveryPolicy {
 /// Storage backend MUST be explicitly specified via constructors:
 /// - OpenOptions::in_memory()
 /// - OpenOptions::local(path)
-/// - OpenOptions::cloud(cache_path, bucket, prefix)
+/// - OpenOptions::cloud(cache_path, provider, prefix)
+/// - OpenOptions::cloud_simulated(cache_path, bucket, prefix)
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
     /// Storage backend (REQUIRED - no default)
@@ -276,28 +512,58 @@ impl OpenOptions {
         }
     }
 
-    /// Create cloud-backed database instance
+    /// Create cloud-backed database instance using a real object-store provider.
     ///
-    /// Data persists to cloud object storage (S3, Azure, GCS, R2, etc.).
+    /// Data persists to cloud object storage (S3, Azure, GCS, OCI, etc.).
     /// Uses hybrid model with local cache for performance.
     /// Ideal for: cloud-native deployments, serverless, distributed systems
     ///
     /// # Arguments
     /// * `local_cache_path` - Local directory for caching/staging
-    /// * `bucket` - Cloud bucket/container name
+    /// * `provider` - Cloud provider, bucket/container, credentials, and endpoint
     /// * `prefix` - Object key prefix
     pub fn cloud<P: Into<PathBuf>, S: Into<String>>(
         local_cache_path: P,
-        bucket: S,
+        provider: CloudProviderConfig,
         prefix: S,
     ) -> Self {
         Self {
             storage: Storage::Cloud {
                 local_cache_path: local_cache_path.into(),
+                provider,
+                prefix: prefix.into(),
+            },
+            goal: Goal::default(),
+            memory_budget: MemoryBudget::default(),
+            workload: WorkloadProfile::default(),
+            recovery_policy: RecoveryPolicy::default(),
+            derived_memory_budget: 0,
+            // Initial derived values until build() recomputes them
+            block_size: 16 * 1024,
+            memtable_size_limit: 64 * 1024 * 1024,
+            target_sst_size: 256 * 1024 * 1024,
+            block_cache_size: 128 * 1024 * 1024,
+            wal_buffer_size: 256 * 1024,
+            l0_compaction_trigger: 4,
+            compression_policy: CompressionPolicy::default(),
+            wal_batch_config: None,
+        }
+    }
+
+    /// Create a filesystem-backed cloud simulation.
+    ///
+    /// This keeps deterministic CloudAsync tests available without pretending to
+    /// connect to a real provider.
+    pub fn cloud_simulated<P: Into<PathBuf>, S: Into<String>>(
+        local_cache_path: P,
+        bucket: S,
+        prefix: S,
+    ) -> Self {
+        Self {
+            storage: Storage::CloudSimulated {
+                local_cache_path: local_cache_path.into(),
                 bucket: bucket.into(),
                 prefix: prefix.into(),
-                endpoint: None,
-                region: None,
             },
             goal: Goal::default(),
             memory_budget: MemoryBudget::default(),

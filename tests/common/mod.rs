@@ -51,25 +51,22 @@ impl MidgeOptions {
             StorageMode::LocalDisk { db_path } => Storage::Local {
                 path: db_path.clone(),
             },
-            StorageMode::CloudBacked { local_cache_path } => Storage::Cloud {
+            StorageMode::CloudBacked { local_cache_path } => Storage::CloudSimulated {
                 local_cache_path: local_cache_path.clone(),
                 bucket: "test-bucket".to_string(),
                 prefix: "test-prefix/".to_string(),
-                endpoint: None,
-                region: None,
             },
         };
 
         let mut open_opts = match storage {
             Storage::InMemory => OpenOptions::in_memory(),
             Storage::Local { path } => OpenOptions::local(path),
-            Storage::Cloud {
+            Storage::CloudSimulated {
                 local_cache_path,
                 bucket,
                 prefix,
-                endpoint: _,
-                region: _,
-            } => OpenOptions::cloud(local_cache_path, bucket, prefix),
+            } => OpenOptions::cloud_simulated(local_cache_path, bucket, prefix),
+            Storage::Cloud { .. } => unreachable!("tests/common uses simulated cloud storage"),
         };
 
         open_opts = open_opts

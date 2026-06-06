@@ -83,9 +83,11 @@ futures = { version = "0.3", optional = true }
 hmac = { version = "0.13", optional = true }
 md5 = { version = "0.8", optional = true }
 native-tls = { version = "0.2.18", optional = true }
+openssl = { version = "0.10", optional = true }
 percent-encoding = { version = "2.3", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "blocking"], optional = true }
 sha2 = { version = "0.11", optional = true }
+sha1 = { version = "0.11", optional = true }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros"], optional = true }
 ureq = { version = "3", features = ["rustls", "json"], optional = true }
 url = { version = "2.5", optional = true }
@@ -122,12 +124,14 @@ uring = ["dep:io-uring"]
 cloud-common = [
     "dep:ureq",
     "dep:hmac",
+    "dep:sha1",
     "dep:sha2",
     "dep:base64",
     "dep:url",
     "dep:tokio",
     "dep:reqwest",
     "dep:native-tls",
+    "dep:openssl",
     "dep:percent-encoding",
     "dep:urlencoding",
 ]

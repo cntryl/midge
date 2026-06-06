@@ -1,522 +1,401 @@
 # Cloud Storage Setup
 
-Guide to Midge's cloud storage architecture and implementation status.
+Guide to Midge's real cloud storage mode, local Peas qualification, and the lightweight credential support model.
 
 > **STATUS: Pre-1.0**
 >
-> Midge supports cloud storage as a pre-1.0 durability target with local caching. Cloud storage integration exists for AWS S3, Azure Blob, and Google Cloud Storage, but compatibility and operational guarantees are still being tightened before 1.0. Review the stability policy and validate recovery behavior for your workload before depending on cloud mode in production.
+> `OpenOptions::cloud(...)` now builds a real provider-backed object-store path. Midge intentionally does not depend on the AWS, Azure, or Google SDK crates; provider access is implemented through lean REST clients, signing, endpoint handling, credential resolution, and callback-based storage adapters.
+>
+> Keep using `OpenOptions::cloud_simulated(...)` for deterministic engine tests that need the old filesystem-backed cloud simulation.
 
 ## Table of Contents
 
 - [Cloud Storage Features](#cloud-storage-features)
-- [Hybrid Storage Architecture](#hybrid-storage-architecture)
-- [Getting Started](#getting-started)
-- [Provider Configuration](#provider-configuration)
-  - [AWS S3 Provider](#aws-s3-provider)
-  - [Azure Blob Provider](#azure-blob-provider)
-  - [GCS Provider](#gcs-provider)
-  - [S3-Compatible Providers](#s3-compatible-providers)
-- [Credential Management](#credential-management)
+- [Public API](#public-api)
+- [Peas Emulator](#peas-emulator)
+- [Credential Matrix](#credential-matrix)
+- [Provider Notes](#provider-notes)
+- [Engine Safety](#engine-safety)
 - [Testing Cloud Storage](#testing-cloud-storage)
+- [Operational Guidance](#operational-guidance)
 
 ## Cloud Storage Features
 
-Midge provides cloud storage integration with the following capabilities:
+Midge has two separate cloud surfaces:
 
-✅ **Hybrid storage architecture** - Local cache + cloud backend for optimal performance  
-✅ **Multiple cloud providers** - AWS S3, Azure Blob, Google Cloud Storage, Cloudflare R2, MinIO  
-✅ **Cloud-backed async durability** - Local visibility plus asynchronous cloud WAL upload  
-✅ **Automatic credential management** - Environment-based credential discovery  
-✅ **Consistent API** - Same operations across all storage modes  
-✅ **Performance optimization** - Smart caching, prefetching, and batching
+- **Real cloud mode**: `OpenOptions::cloud(local_cache_path, CloudProviderConfig, prefix)` uses the selected object-store provider through `CloudStorage` and `HybridStorage`.
+- **Filesystem simulation**: `OpenOptions::cloud_simulated(local_cache_path, bucket, prefix)` keeps the deterministic local simulation for tests and failure injection.
+- **Provider coverage**: AWS S3, S3-compatible endpoints, MinIO, Wasabi, OCI S3-compatible, Azure Blob, and GCS.
+- **Local emulator**: Peas is the canonical local qualification target because it exposes S3, Azure Blob, GCS, and OCI-compatible front doors.
+- **No heavy SDKs**: credential loading and request signing are implemented directly by Midge.
 
-### Quick Start
+### Hybrid Storage Architecture
 
-Open an engine with cloud storage:
+Real cloud mode uses a local cache/staging directory plus a remote object store.
+
+```text
+Application
+    |
+    v
+Engine / Runtime
+    |
+    v
+HybridStorage
+    |-------------------|
+    v                   v
+Local cache          CloudStorage
+FileSystem           CloudBackend provider
+```
+
+`CloudStorage` wraps the selected provider as a `StorageBackend`, preserves the configured prefix/namespace, and translates callback results into the same storage events used by the rest of the engine.
+
+## Public API
+
+### Real Cloud Mode
 
 ```rust
-use cntryl_midge::{Engine, OpenOptions};
+use cntryl_midge::{CloudProviderConfig, Engine, OpenOptions};
 
-let opts = OpenOptions::cloud("/tmp/cache", "my-bucket", "prefix/")
-    .build();
-
-let engine = Engine::open(opts)?;
-```
-
-Midge will:
-- Use the local directory `/tmp/cache` as a fast read cache
-- Store all durable data in the cloud bucket `my-bucket` under `prefix/`
-- Automatically handle WAL uploads and SST persistence
-- Manage credentials from your environment (AWS credentials, Azure connection strings, etc.)
-
-## Hybrid Storage Architecture
-
-The core hybrid storage model is **fully implemented** and tested. This architecture is used regardless of whether the backend is filesystem simulation or real cloud.
-
-```
-┌─────────────────┐
-│  Application    │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Engine/Runtime │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ HybridStorage   │  ← Orchestrates local + cloud
-└────────┬────────┘
-         │
-    ┌────┴────────────┐
-    ▼                 ▼
-┌────────────┐  ┌──────────────┐
-│  Local     │  │   Cloud      │
-│  Cache     │  │   Backend    │
-│ (FileSystem)│  │ (Simulated or Real)
-└────────────┘  └──────────────┘
-```
-
-### Key Components
-
-**`HybridStorage`** ([src/storage/hybrid/](../src/storage/hybrid/))
-
-- Dual-backend orchestration (local + cloud)
-- WAL upload pipeline with CloudAck/CloudFail events
-- SST read/write routing (local first, cloud fallback)
-- Backpressure and budget management
-
-**`CloudExecutor`** ([src/storage/cloud/executor.rs](../src/storage/cloud/executor.rs))
-
-- Embedded tokio runtime for async cloud I/O
-- Callback-based event delivery (no futures exposed to engine)
-- Request/response abstraction over HTTP
-
-**Cloud Providers** ([src/storage/providers/](../src/storage/providers/))
-
-- Individual implementations: AWS S3, Azure Blob, GCS, MinIO, Wasabi, OCI
-- REST API clients with native authentication
-- All use `CloudBackend` trait for uniformity
-
-### Cloud-Backed Async Durability
-
-When `Storage::Cloud` is used, the engine automatically uses cloud-backed async WAL durability:
-
-1. Write to local WAL segment
-2. Apply the write to the memtable after the local append barrier
-3. Enqueue the WAL segment for cloud upload
-4. Cloud upload completes → advance the cloud durability frontier
-5. `cloud_strict()` callers wait for that frontier before returning
-
-**Correctness guarantee:** Ordinary cloud-backed commits become visible after the local WAL append barrier, but they are not cloud-durable until upload completes. Use `cloud_strict()` when the caller must wait for cloud durability explicitly.
-
-This is the same durability model used by modern cloud-native databases (Neon, PlanetScale, CockroachDB).
-
-## Getting Started
-
-### Basic Cloud Configuration
-
-```rust
-use cntryl_midge::{Engine, OpenOptions};
-
-// Cloud mode connects to your configured cloud provider
 let opts = OpenOptions::cloud(
-    "/tmp/cache",        // Local cache for fast reads
-    "my-bucket",         // Cloud bucket name
-    "db-prefix/"         // Object key prefix
-).build();
-
-let engine = Engine::open(opts)?;
-
-// All operations work identically to local mode
-let cf = engine.default_cf();
-let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-tx.put(b"key".to_vec(), b"value".to_vec(), None)?;
-engine.commit(tx, WriteOptions::buffered())?;
-```
-
-**What happens:**
-
-- Local cache path stores hot data for fast reads
-- WAL segments uploaded to cloud storage bucket
-- SSTs uploaded as they're flushed and compacted
-- Cloud provider credentials auto-discovered from environment
-
-### Recovery from Cloud Storage
-
-```rust
-// First engine instance
-let opts1 = OpenOptions::cloud("/tmp/cache", "bucket", "prefix/").build();
-let engine1 = Engine::open(opts1)?;
-// ... write data ...
-drop(engine1);
-
-// Second engine instance recovers from cloud
-let opts2 = OpenOptions::cloud("/tmp/cache", "bucket", "prefix/").build();
-let engine2 = Engine::open(opts2)?;  // ← Replays WAL from cloud storage
-```
-
-This enables seamless recovery across ephemeral compute instances.
-
-## Provider Configuration
-
-Midge supports multiple cloud providers with automatic credential discovery.
-
-### AWS S3 Provider
-
-**Location:** [src/storage/providers/aws.rs](../src/storage/providers/aws.rs)
-
-**Features:**
-
-- Full AWS SigV4 request signing
-- Regional endpoints
-- IAM role support via environment variables
-- Access key + secret key authentication
-- Automatic credential discovery from AWS environment
-
-**Credentials:**
-
-Midge automatically discovers credentials from:
-- Environment variables: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`
-- IAM roles (when running on EC2/ECS/Lambda)
-- AWS configuration files (if available)
-
-**Configuration:**
-
-```rust
-use cntryl_midge::{Engine, OpenOptions};
-
-// Credentials auto-discovered from environment
-let opts = OpenOptions::cloud(
-    "/var/cache/midge",
-    "my-s3-bucket",
-    "production/db1/"
+    "./target/midge-cache",
+    CloudProviderConfig::peas_s3("midge-dev"),
+    "databases/example/",
 )
-.region("us-west-2")  // Optional: defaults to us-east-1
 .build();
 
 let engine = Engine::open(opts)?;
+# Ok::<(), cntryl_midge::MidgeError>(())
 ```
 
-**Supported operations:**
-- PUT/GET/DELETE/LIST/HEAD with full S3 semantics
-- Multipart uploads for large objects
-- Proper error handling and automatic retries
-- Range reads for efficient SST access
+### Filesystem Simulation
 
-### Azure Blob Provider
-
-**Location:** [src/storage/providers/azure.rs](../src/storage/providers/azure.rs)
-
-**Features:**
-
-- Native Azure Blob REST API (no S3 compatibility layer)
-- Shared Key authentication (HMAC-SHA256)
-- SAS token authentication
-- Connection string support
-- Zero Azure SDK dependencies
-
-**Credentials:**
-
-Midge discovers Azure credentials from (in priority order):
-1. **Connection String**: `AZURE_STORAGE_CONNECTION_STRING`
-2. **Shared Key**: `AZURE_STORAGE_KEY`
-3. **SAS Token**: `AZURE_STORAGE_SAS_TOKEN`
-4. **Managed Identity**: `AZURE_CLIENT_ID` (or system-assigned if not set)
-
-**Configuration:**
+Use this for deterministic engine tests, failpoints, and local recovery scenarios that should not depend on HTTP or credentials.
 
 ```rust
 use cntryl_midge::{Engine, OpenOptions};
 
-// Option 1: Using connection string
-std::env::set_var(
-    "AZURE_STORAGE_CONNECTION_STRING",
-    "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=..."
+let opts = OpenOptions::cloud_simulated(
+    "./target/midge-sim-cache",
+    "test-bucket",
+    "test-prefix/",
+)
+.build();
+
+let engine = Engine::open(opts)?;
+# Ok::<(), cntryl_midge::MidgeError>(())
+```
+
+### AWS S3
+
+```rust
+use cntryl_midge::{
+    CloudProviderConfig, Engine, OpenOptions, S3CredentialSource,
+};
+
+let provider = CloudProviderConfig::AwsS3 {
+    bucket: "midge-prod".to_string(),
+    region: "us-east-1".to_string(),
+    credentials: S3CredentialSource::AwsDefaultChain,
+};
+
+let engine = Engine::open(
+    OpenOptions::cloud("./cache", provider, "app-a/").build()
+)?;
+# Ok::<(), cntryl_midge::MidgeError>(())
+```
+
+### S3-Compatible / MinIO / Wasabi / OCI
+
+```rust
+use cntryl_midge::{
+    CloudProviderConfig, Engine, OpenOptions, S3CredentialSource,
+};
+
+let provider = CloudProviderConfig::S3Compatible {
+    bucket: "midge-dev".to_string(),
+    region: "us-east-1".to_string(),
+    endpoint: "http://127.0.0.1:9000".to_string(),
+    path_style: true,
+    credentials: S3CredentialSource::Environment,
+};
+
+let engine = Engine::open(
+    OpenOptions::cloud("./cache", provider, "dev/").build()
+)?;
+# Ok::<(), cntryl_midge::MidgeError>(())
+```
+
+For local MinIO with explicit credentials:
+
+```rust
+let provider = CloudProviderConfig::minio(
+    "midge-dev",
+    "http://127.0.0.1:9000",
+    "minioadmin",
+    "minioadmin",
 );
-
-// Option 2: Using Managed Identity (recommended for Azure VMs/ACA)
-std::env::set_var("AZURE_CLIENT_ID", "<user-assigned-identity-client-id>");
-// Or rely on system-assigned identity (no AZURE_CLIENT_ID needed)
-
-let opts = OpenOptions::cloud(
-    "/var/cache/midge",
-    "my-container",
-    "production/db1/"
-).build();
-
-let engine = Engine::open(opts)?;
 ```
 
-**API Details:**
-
-- Base URL: `https://{account}.blob.core.windows.net/{container}`
-- Full BlockBlob support (PUT/GET/DELETE/LIST)
-- Range reads with `x-ms-range` header
-- Efficient prefix listing with `comp=list`
-
-**Managed Identity Support:**
-
-Midge fully supports Azure Managed Identity for passwordless authentication:
+### Azure Blob
 
 ```rust
-use cntryl_midge::storage::providers::AzureProvider;
+use cntryl_midge::{
+    AzureCredentialSource, CloudProviderConfig, Engine, OpenOptions,
+};
 
-// System-assigned Managed Identity
-let provider = AzureProvider::with_managed_identity(
-    "mystorageaccount".into(),
-    "mycontainer".into(),
-    None  // No client_id = system-assigned
+let provider = CloudProviderConfig::AzureBlob {
+    account: "mystorageaccount".to_string(),
+    container: "midge".to_string(),
+    endpoint: None,
+    credential: AzureCredentialSource::LightweightDefaultChain,
+};
+
+let engine = Engine::open(
+    OpenOptions::cloud("./cache", provider, "prod/").build()
 )?;
+# Ok::<(), cntryl_midge::MidgeError>(())
+```
 
-// User-assigned Managed Identity
-let provider = AzureProvider::with_managed_identity(
-    "mystorageaccount".into(),
-    "mycontainer".into(),
-    Some("00000000-0000-0000-0000-000000000000".into())
+### GCS
+
+```rust
+use cntryl_midge::{
+    CloudProviderConfig, Engine, GcsApiStyle, GcsCredentialSource, OpenOptions,
+};
+
+let provider = CloudProviderConfig::Gcs {
+    bucket: "midge-prod".to_string(),
+    project_id: "my-project".to_string(),
+    endpoint: None,
+    api: GcsApiStyle::Json,
+    credential: GcsCredentialSource::ApplicationDefault,
+};
+
+let engine = Engine::open(
+    OpenOptions::cloud("./cache", provider, "prod/").build()
 )?;
-
-// Or use automatic discovery from environment
-std::env::set_var("AZURE_CLIENT_ID", "00000000-0000-0000-0000-000000000000");
-let provider = AzureProvider::from_env(
-    "mystorageaccount".into(),
-    "mycontainer".into()
-)?;
+# Ok::<(), cntryl_midge::MidgeError>(())
 ```
 
-**Works on:**
-- Azure Virtual Machines (with managed identity enabled)
-- Azure Container Apps
-- Azure App Service
-- Azure Kubernetes Service (AKS)
-- Azure Container Instances
-- Any Azure service supporting managed identities
+## Peas Emulator
 
-**Token management:**
-- Automatic token fetch from Azure Instance Metadata Service (IMDS)
-- Token caching with automatic refresh before expiry
-- Transparent OAuth bearer token authentication
-- No manual credential management required
-- DELETE → Standard blob deletion
+Peas is the canonical local emulator for cross-vendor cloud qualification.
 
-### GCS Provider
+Start it from the repository compose file:
 
-**Location:** [src/storage/providers/gcs.rs](../src/storage/providers/gcs.rs)
+```bash
+docker compose up -d peas
+```
 
-**Features:**
-
-- S3-compatible API via GCS interoperability mode
-- HMAC key authentication
-- Zero Google SDK dependencies
-- Full API parity with S3
-
-**Credentials:**
-
-Midge uses GCS HMAC keys (S3-compatible credentials):
-- Environment variables: `GCS_ACCESS_KEY_ID`, `GCS_SECRET_ACCESS_KEY`
-- Created via `gsutil hmac create` command
-
-**Configuration:**
+The built-in helpers use explicit emulator credentials only:
 
 ```rust
-use cntryl_midge::{Engine, OpenOptions};
+use cntryl_midge::CloudProviderConfig;
 
-// Set credentials from GCS HMAC keys
-std::env::set_var("GCS_ACCESS_KEY_ID", "GOOG...");
-std::env::set_var("GCS_SECRET_ACCESS_KEY", "...");
-
-let opts = OpenOptions::cloud(
-    "/var/cache/midge",
-    "my-gcs-bucket",
-    "production/db1/"
-).provider("gcs").build();
-
-let engine = Engine::open(opts)?;
+let s3 = CloudProviderConfig::peas_s3("midge-peas-s3");
+let azure = CloudProviderConfig::peas_azure("midge-peas-azure");
+let gcs = CloudProviderConfig::peas_gcs("midge-peas-gcs");
 ```
 
-**Setup (GCS HMAC keys):**
+Peas helper defaults:
 
-```bash
-# Create HMAC key for service account
-gsutil hmac create service-account@project.iam.gserviceaccount.com
+| Helper | Endpoint | Credentials | Notes |
+|---|---|---|---|
+| `peas_s3` | `http://127.0.0.1:9000` | `admin` / `easy-peasy` | S3-compatible, path-style |
+| `peas_azure` | `http://127.0.0.1:9000` | shared key `easy-peasy` | Azure emulator path-style URL |
+| `peas_gcs` | `http://127.0.0.1:9000` | HMAC `admin` / `easy-peasy` | GCS XML API with `GOOG1` signing |
 
-# Returns AWS-compatible access key and secret
-# Use these as GCS_ACCESS_KEY_ID and GCS_SECRET_ACCESS_KEY
-```
+Known Peas emulator quirks observed during qualification:
 
-### S3-Compatible Providers
+- Namespace/container initialization can return `500` when the namespace already exists; Midge treats this as emulator-specific setup noise, not a provider contract.
+- Azure SharedKey canonicalization for Peas path-style URLs differs from production Azure endpoint paths; Midge uses emulator-compatible canonicalization only when an explicit emulator endpoint is configured.
+- Some S3 conditional behavior is normalized client-side for Peas qualification, but production safety still relies on provider-side object preconditions.
 
-**Supported:**
+## Credential Matrix
 
-- **Cloudflare R2** - S3-compatible edge storage
-- **MinIO** - Self-hosted S3-compatible storage
-- **Wasabi** - Hot cloud storage with S3 API
-- **Oracle Cloud (OCI)** - Oracle Cloud Infrastructure Object Storage
-- **Digital Ocean Spaces** - S3-compatible object storage
-- **Backblaze B2** (via S3-compatible API)
+Midge follows the official provider credential families where practical, but it implements a lightweight subset. It does not attempt SDK `DefaultCredential` parity, and it never shells out to CLIs or `credential_process`.
 
-**Configuration (Cloudflare R2):**
+Official references:
 
-```rust
-use cntryl_midge::{Engine, OpenOptions};
+- [AWS SDK for Rust credential provider chain](https://docs.aws.amazon.com/sdk-for-rust/latest/dg/credproviders.html)
+- [Azure credential chains](https://learn.microsoft.com/en-us/dotnet/azure/sdk/authentication/credential-chains)
+- [Google Application Default Credentials](https://docs.cloud.google.com/docs/authentication/application-default-credentials)
+- [GCS HMAC keys](https://docs.cloud.google.com/storage/docs/authentication/hmackeys)
 
-std::env::set_var("R2_ACCESS_KEY_ID", "...");
-std::env::set_var("R2_SECRET_ACCESS_KEY", "...");
-std::env::set_var("R2_ENDPOINT", "https://<account-id>.r2.cloudflarestorage.com");
+### AWS / S3-Compatible
 
-let opts = OpenOptions::cloud(
-    "/var/cache/midge",
-    "my-r2-bucket",
-    "production/"
-)
-.provider("r2")
-.build();
+| Credential source | Midge enum | AWS S3 | S3-compatible | Peas behavior |
+|---|---|---:|---:|---|
+| Explicit access key | `S3CredentialSource::Static` | Supported | Supported | Supported |
+| Environment variables | `S3CredentialSource::Environment` | Supported | Supported | Supported if env is set |
+| Shared profile files | `S3CredentialSource::SharedProfile` | Supported | Supported | Supported if profile has static keys |
+| Lightweight AWS default chain | `S3CredentialSource::AwsDefaultChain` | Supported | Not allowed | Not used |
+| AWS IAM Identity Center / SSO | Profile metadata | Unsupported | Unsupported | Not used |
+| `credential_process` | Profile metadata | Unsupported | Unsupported | Not used |
 
-let engine = Engine::open(opts)?;
-```
+Midge's AWS default chain resolves:
 
-**Configuration (MinIO):**
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`
+- `~/.aws/credentials` and `~/.aws/config`, with `AWS_PROFILE`
+- web identity environment variables
+- ECS/EKS container credentials
+- EC2 IMDSv2
 
-```rust
-use cntryl_midge::{Engine, OpenOptions};
+For S3-compatible providers, prefer `Static`, `Environment`, or `SharedProfile`. `AwsDefaultChain` is restricted to `CloudProviderConfig::AwsS3` so custom endpoints do not accidentally contact AWS role or metadata endpoints.
 
-std::env::set_var("MINIO_ENDPOINT", "http://localhost:9000");
-std::env::set_var("MINIO_ACCESS_KEY", "minioadmin");
-std::env::set_var("MINIO_SECRET_KEY", "minioadmin");
+### Azure Blob
 
-let opts = OpenOptions::cloud(
-    "/tmp/cache",
-    "my-bucket",
-    "test/"
-)
-.provider("minio")
-.build();
+| Credential source | Midge enum | Supported | Peas behavior |
+|---|---|---:|---|
+| Shared key | `AzureCredentialSource::SharedKey` | Supported | Supported |
+| SAS token | `AzureCredentialSource::SasToken` | Supported | Supported if emulator accepts SAS |
+| Connection string | `AzureCredentialSource::ConnectionString` | Supported | Supported with emulator endpoint |
+| Storage account env | `AzureCredentialSource::StorageEnvironment` | Supported | Supported if env is set |
+| Client secret env | `AzureCredentialSource::EnvironmentClientSecret` | Supported | Not used |
+| Workload identity | `AzureCredentialSource::WorkloadIdentity` | Supported | Not used |
+| Managed identity | `AzureCredentialSource::ManagedIdentity` | Supported | Not used |
+| Lightweight chain | `AzureCredentialSource::LightweightDefaultChain` | Supported | Uses env/config sources only |
+| Azure CLI / PowerShell / Developer CLI | SDK developer credentials | Unsupported | Not used |
+| Visual Studio / VS Code / broker / browser | SDK developer credentials | Unsupported | Not used |
 
-let engine = Engine::open(opts)?;
-```
+Midge's Azure lightweight chain tries storage credentials first, then client-secret environment credentials, workload identity, and managed identity. It intentionally skips developer-tool credentials because those require SDK helpers or process execution.
 
-## Credential Management
+### GCS
 
-### Environment-Based Discovery
+| Credential source | Midge enum | API style | Supported | Peas behavior |
+|---|---|---|---:|---|
+| Bearer token | `GcsCredentialSource::BearerToken` | JSON | Supported | Not used |
+| HMAC key | `GcsCredentialSource::HmacKey` | XML | Supported | Supported |
+| Application Default Credentials | `GcsCredentialSource::ApplicationDefault` | JSON | Supported subset | Not used |
+| Service account JSON file | `GcsCredentialSource::ServiceAccountJsonFile` | JSON | Supported | Not used |
+| Authorized user JSON file | `GcsCredentialSource::AuthorizedUserJsonFile` | JSON | Supported | Not used |
+| Metadata server | `GcsCredentialSource::MetadataServer` | JSON | Supported | Not used |
+| Executable external-account ADC | ADC JSON | JSON | Unsupported | Not used |
 
-Midge automatically discovers credentials from environment variables:
+Midge's ADC subset resolves:
 
-**AWS S3:**
-```bash
-export AWS_ACCESS_KEY_ID="AKIA..."
-export AWS_SECRET_ACCESS_KEY="..."
-export AWS_SESSION_TOKEN="..."  # Optional for temporary credentials
-export AWS_REGION="us-west-2"   # Optional, defaults to us-east-1
-```
+- `GOOGLE_APPLICATION_CREDENTIALS`
+- local ADC file at the standard gcloud ADC location
+- service-account JWT bearer exchange
+- authorized-user refresh token exchange
+- metadata server tokens
 
-**Azure Blob:**
-```bash
-export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;..."
-# OR
-export AZURE_STORAGE_ACCOUNT="myaccount"
-export AZURE_STORAGE_KEY="..."
-```
+ADC, service-account, authorized-user, and metadata-server access tokens are cached and refreshed before expiry. Explicit bearer tokens are treated as static.
 
-**Google Cloud Storage:**
-```bash
-export GCS_ACCESS_KEY_ID="GOOG..."
-export GCS_SECRET_ACCESS_KEY="..."
-```
+GCS HMAC keys are XML API credentials. Midge enforces that by requiring `GcsApiStyle::Xml` for `GcsCredentialSource::HmacKey`.
 
-### IAM Roles and Instance Profiles
+## Provider Notes
 
-When running on cloud compute instances, Midge automatically uses instance credentials:
+### S3 / MinIO / Wasabi / OCI
 
-- **AWS EC2/ECS/Lambda:** Uses IAM role credentials via instance metadata service
-- **Azure VM:** Uses managed identity (if configured)
-- **GCP Compute Engine:** Uses service account from instance metadata
+- Uses SigV4 signing with the correct credential scope.
+- Supports path-style endpoints for emulators and S3-compatible providers.
+- Sends conditional object headers for create/update safety.
+- Supports range reads and prefix listing.
+- OCI support is through OCI's S3-compatible front door, not native OCI auth.
 
-No explicit credential configuration needed - just assign the appropriate IAM role/managed identity to your compute instance.
+### Azure Blob
+
+- Supports shared key, SAS token, and bearer-token authorization.
+- Supports emulator path-style URLs such as `http://127.0.0.1:9000/{account}/{container}`.
+- Uses Azure SharedKey canonicalization for production endpoints and Peas-compatible canonicalization for explicit emulator endpoints.
+
+### GCS
+
+- Supports JSON API bearer-token auth for ADC-style credentials.
+- Supports XML API `GOOG1` HMAC signing for Peas and HMAC deployments.
+- HMAC is XML-only, matching Google Cloud Storage restrictions.
+
+## Engine Safety
+
+Real cloud mode now uses provider-backed engine startup and lease behavior:
+
+- Builds `HybridStorage` from the selected provider backend.
+- Acquires a provider-backed primary lease using conditional object create/update and releases it only with holder verification plus provider preconditions.
+- Lists and downloads remote `wal/` objects through `CloudBackend` for WAL replay.
+- Stages manifest and intent-referenced `sst/` objects before intent replay, then validates the final manifest SST cache.
+- Hydrates metadata files under remote `metadata/` before recovery and mirrors metadata back only after startup recovery succeeds.
+- Fails `RecoveryPolicy::Strict` startup if reachability, metadata hydration, lease acquisition, WAL replay, or SST restore cannot complete.
+
+Important limitations:
+
+- Azure native blob leases are not used yet; the current lease path uses the portable conditional-object lease.
+- Peas is an emulator. Conditional writes are normalized by Midge for qualification, but production providers must still enforce object preconditions atomically.
+- Midge's lightweight default chains are intentionally narrower than the provider SDK chains.
 
 ## Testing Cloud Storage
 
-### Unit Tests
+### Deterministic Engine Tests
 
-Provider implementations have comprehensive unit tests:
+Use the filesystem simulation:
+
+```bash
+cargo test --test engine_cloud
+cargo test --test cloud_persistence_hardening
+```
+
+### Provider Unit Tests
 
 ```bash
 cargo test --lib storage::providers
 ```
 
-### Integration Tests
+### Peas Qualification Tests
 
-Cloud mode integration tests use filesystem simulation:
+Peas qualification is part of the default `cargo test` path. Start Peas first:
 
 ```bash
-cargo test --test engine_cloud
+docker compose up -d peas
 ```
 
-### Manual Testing with Real Providers
+Then run the full suite:
 
-To test against a real cloud provider, you can instantiate providers directly:
-
-```rust
-// Example: Testing Azure provider
-use cntryl_midge::storage::providers::AzureProvider;
-use cntryl_midge::storage::cloud::{CloudBackend, CloudCallback};
-
-let provider = AzureProvider::with_shared_key(
-    "teststorage".to_string(),
-    "testcontainer".to_string(),
-    std::env::var("AZURE_STORAGE_KEY")?,
-);
-
-let backend = provider.backend();
-
-// Test PUT
-let (tx, rx) = std::sync::mpsc::channel();
-backend.submit_put(
-    "test-key".to_string(),
-    b"test-value".to_vec(),
-    tx,
-);
-
-match rx.recv()? {
-    CloudEvent::PutComplete { result, .. } => {
-        println!("PUT result: {:?}", result);
-    }
-    _ => panic!("unexpected event"),
-}
+```bash
+cargo test
 ```
+
+Or narrow to just the provider qualification module:
+
+```bash
+cargo test storage::providers::qualification -- --test-threads=1
+```
+
+If Peas is not running, these tests are expected to fail instead of being skipped.
+
+The provider contract covers:
+
+- `PUT`
+- `GET`
+- `HEAD`
+- `LIST`
+- range read
+- `DELETE`
+- missing object behavior
+- overwrite behavior
+- conditional create
+- conditional update
+
+Use one bucket/container per vendor family and a UUID prefix per test for isolation.
 
 ### Mock Cloud Backend
 
-For deterministic testing without network I/O:
+Keep `MockCloudBackend` tests for deterministic failure injection, retries, timeouts, and edge cases that are difficult or impossible to trigger reliably against Peas or a real provider.
 
-```rust
-use cntryl_midge::storage::cloud::MockCloudBackend;
+## Operational Guidance
 
-let mock = MockCloudBackend::new();
+Use real cloud mode when you want to qualify object-store behavior, Peas compatibility, or cloud-backed recovery paths. Use local mode for the most conservative production-style evaluation while the 0.x cloud API is still moving.
 
-// Simulate successful PUT
-mock.expect_put("key", Ok(()));
+Recommended rollout order:
 
-// Use mock in HybridStorage tests
-let hybrid = HybridStorage::new(local_backend, Arc::new(mock));
-```
+1. Run provider qualification against Peas.
+2. Run provider qualification against the target vendor with a disposable bucket/container.
+3. Run engine-level recovery tests with an isolated prefix.
+4. Enable `RecoveryPolicy::Strict` for production-style validation.
+5. Monitor primary lease health through `Engine::is_primary_lease_healthy()`.
 
-## Next Steps
+Related docs:
 
-**For the most conservative deployments today:**
-
-- Use `Storage::Local` with persistent disk
-- Standard filesystem-based durability
-- Most mature deployment path in the current 0.1 release line
-
-**For cloud storage development:**
-
-- Contribute to provider integration (see `src/engine/mod.rs::open()`)
-- Add credential management
-- Performance testing infra
-
-**Documentation:**
-
-- [Architecture](../development/architecture.md) - System design and layer structure
-- [Durability](../user-guides/durability.md) - Durability guarantees and WAL replay
-- [Stability Policy](../development/stability-policy.md) - Pre-1.0 compatibility and upgrade expectations
-- [API Guide](../user-guides/api-guide.md) - Public API surface and usage patterns
+- [Architecture](../development/architecture.md)
+- [Durability](../user-guides/durability.md)
+- [Stability Policy](../development/stability-policy.md)
+- [API Guide](../user-guides/api-guide.md)

@@ -299,7 +299,7 @@ fn cloud_db_path(opts: &MidgeOptions) -> PathBuf {
 }
 
 fn cloud_open_options(db_path: &Path, recovery_policy: RecoveryPolicy) -> OpenOptions {
-    OpenOptions::cloud(
+    OpenOptions::cloud_simulated(
         db_path.to_path_buf(),
         "test-bucket".to_string(),
         "test-prefix/".to_string(),
