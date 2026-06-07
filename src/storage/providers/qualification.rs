@@ -6,9 +6,7 @@
 //! `cargo test storage::providers::qualification -- --test-threads=1`
 
 use super::build_cloud_storage;
-use crate::engine::api::{
-    CloudProviderConfig, GcsApiStyle, GcsCredentialSource, S3CredentialSource,
-};
+use crate::engine::api::{CloudProviderConfig, GcsApiStyle, GcsCredentialSource};
 use crate::engine::{Engine, MemoryBudget, OpenOptions, TransactionMode, WriteOptions};
 use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::path::PathBuf;
@@ -26,35 +24,41 @@ fn s3_compatible_contract_against_peas() {
 
 #[test]
 fn minio_contract_against_peas() {
-    let provider = CloudProviderConfig::Minio {
-        bucket: "midge-peas-minio".to_string(),
-        endpoint: PEAS_ENDPOINT.to_string(),
-        credentials: S3CredentialSource::access_key(PEAS_ACCESS_KEY, PEAS_SECRET_KEY),
-    };
+    let provider = CloudProviderConfig::minio_static(
+        "midge-peas-minio",
+        PEAS_ENDPOINT,
+        PEAS_ACCESS_KEY,
+        PEAS_SECRET_KEY,
+    );
     run_provider_contract("minio", provider);
 }
 
 #[test]
 fn wasabi_contract_against_peas() {
-    let provider = CloudProviderConfig::Wasabi {
-        bucket: "midge-peas-wasabi".to_string(),
-        region: "us-east-1".to_string(),
-        endpoint: Some(PEAS_ENDPOINT.to_string()),
-        credentials: S3CredentialSource::access_key(PEAS_ACCESS_KEY, PEAS_SECRET_KEY),
-    };
+    let provider = CloudProviderConfig::wasabi_static(
+        "midge-peas-wasabi",
+        "us-east-1",
+        PEAS_ACCESS_KEY,
+        PEAS_SECRET_KEY,
+    )
+    .with_endpoint(PEAS_ENDPOINT)
+    .expect("Peas Wasabi endpoint override should be supported");
     run_provider_contract("wasabi", provider);
 }
 
 #[test]
 fn oci_s3_compatible_contract_against_peas() {
-    let provider = CloudProviderConfig::OciS3Compatible {
-        bucket: "midge-peas-oci".to_string(),
-        namespace: "peas".to_string(),
-        region: "us-east-1".to_string(),
-        endpoint: Some(PEAS_ENDPOINT.to_string()),
-        path_style: true,
-        credentials: S3CredentialSource::access_key(PEAS_ACCESS_KEY, PEAS_SECRET_KEY),
-    };
+    let provider = CloudProviderConfig::oci_s3_compatible_static(
+        "peas",
+        "midge-peas-oci",
+        "us-east-1",
+        PEAS_ACCESS_KEY,
+        PEAS_SECRET_KEY,
+    )
+    .with_endpoint(PEAS_ENDPOINT)
+    .expect("Peas OCI endpoint override should be supported")
+    .with_path_style(true)
+    .expect("Peas OCI path-style override should be supported");
     run_provider_contract("oci", provider);
 }
 

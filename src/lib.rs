@@ -87,9 +87,9 @@ pub use engine::{
 
 // Configuration
 pub use engine::{
-    AzureCredentialSource, CloudProviderConfig, GcsApiStyle, GcsCredentialSource, Goal,
-    MemoryBudget, OpenOptions, RecoveryPolicy, S3CredentialSource, Storage, WorkloadProfile,
-    WriteOptions,
+    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, GcsApiStyle,
+    GcsCredentialSource, Goal, MemoryBudget, OpenOptions, RecoveryPolicy, S3CredentialSource,
+    Storage, WorkloadProfile, WriteOptions,
 };
 
 // Key/value types

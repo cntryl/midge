@@ -312,15 +312,170 @@ fn token_from_adc_file(path: &std::path::Path) -> MidgeResult<CachedGcsToken> {
     match json.get("type").and_then(|value| value.as_str()) {
         Some("authorized_user") => refresh_authorized_user_token(&json),
         Some("service_account") => fetch_service_account_token(&json),
-        Some("external_account") => Err(MidgeError::InvalidArgument(
-            "GCS executable/external account ADC is not supported without process execution"
-                .to_string(),
-        )),
+        Some("external_account") => fetch_external_account_token(&json),
         other => Err(MidgeError::InvalidArgument(format!(
             "unsupported GCS ADC credential type {:?}",
             other
         ))),
     }
+}
+
+fn fetch_external_account_token(json: &serde_json::Value) -> MidgeResult<CachedGcsToken> {
+    let audience = required_json_str(json, "audience")?;
+    let subject_token_type = required_json_str(json, "subject_token_type")?;
+    let token_url = required_json_str(json, "token_url")?;
+    let subject_token = external_account_subject_token(json)?;
+    let token = post_form_for_access_token(
+        token_url,
+        &[
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+            ),
+            ("audience", audience.to_string()),
+            (
+                "scope",
+                "https://www.googleapis.com/auth/devstorage.full_control".to_string(),
+            ),
+            (
+                "requested_token_type",
+                "urn:ietf:params:oauth:token-type:access_token".to_string(),
+            ),
+            ("subject_token_type", subject_token_type.to_string()),
+            ("subject_token", subject_token),
+        ],
+    )?;
+
+    if let Some(url) = json
+        .get("service_account_impersonation_url")
+        .and_then(|value| value.as_str())
+    {
+        impersonate_gcs_service_account(url, &token.access_token)
+    } else {
+        Ok(token)
+    }
+}
+
+fn external_account_subject_token(json: &serde_json::Value) -> MidgeResult<String> {
+    let source = json.get("credential_source").ok_or_else(|| {
+        MidgeError::InvalidArgument("GCS external_account ADC missing credential_source".into())
+    })?;
+    if source.get("executable").is_some()
+        || source.get("command").is_some()
+        || json.get("executable").is_some()
+    {
+        return Err(MidgeError::InvalidArgument(
+            "GCS executable external_account ADC is not supported without process execution"
+                .to_string(),
+        ));
+    }
+
+    let file = source
+        .get("file")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            MidgeError::InvalidArgument(
+                "GCS external_account ADC currently supports file credential_source only"
+                    .to_string(),
+            )
+        })?;
+    let content = std::fs::read_to_string(file).map_err(|error| {
+        MidgeError::Internal(format!(
+            "failed to read GCS external_account subject token file '{}': {}",
+            file, error
+        ))
+    })?;
+
+    match source
+        .get("format")
+        .and_then(|format| format.get("type"))
+        .and_then(|value| value.as_str())
+    {
+        Some("json") => {
+            let field = source
+                .get("format")
+                .and_then(|format| format.get("subject_token_field_name"))
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    MidgeError::InvalidArgument(
+                        "GCS external_account JSON credential_source missing subject_token_field_name"
+                            .to_string(),
+                    )
+                })?;
+            let token_json: serde_json::Value =
+                serde_json::from_str(&content).map_err(|error| {
+                    MidgeError::InvalidArgument(format!(
+                        "failed to parse GCS external_account subject token JSON '{}': {}",
+                        file, error
+                    ))
+                })?;
+            token_json
+                .get(field)
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    MidgeError::InvalidArgument(format!(
+                        "GCS external_account subject token JSON missing string field {}",
+                        field
+                    ))
+                })
+        }
+        Some("text") | None => {
+            let token = content.trim();
+            if token.is_empty() {
+                Err(MidgeError::InvalidArgument(
+                    "GCS external_account subject token file is empty".to_string(),
+                ))
+            } else {
+                Ok(token.to_string())
+            }
+        }
+        Some(format) => Err(MidgeError::InvalidArgument(format!(
+            "unsupported GCS external_account subject token format {}",
+            format
+        ))),
+    }
+}
+
+fn impersonate_gcs_service_account(
+    url: &str,
+    source_access_token: &str,
+) -> MidgeResult<CachedGcsToken> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|error| {
+            MidgeError::Internal(format!(
+                "GCS service account impersonation client init: {}",
+                error
+            ))
+        })?;
+    let response = client
+        .post(url)
+        .bearer_auth(source_access_token)
+        .json(&json!({
+            "scope": ["https://www.googleapis.com/auth/devstorage.full_control"],
+            "lifetime": "3600s",
+        }))
+        .send()
+        .map_err(|error| {
+            MidgeError::Internal(format!(
+                "GCS service account impersonation request: {}",
+                error
+            ))
+        })?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        return Err(MidgeError::Internal(format!(
+            "GCS service account impersonation failed with status {}: {}",
+            status, body
+        )));
+    }
+    let body = response.text().map_err(|error| {
+        MidgeError::Internal(format!("GCS service account impersonation body: {}", error))
+    })?;
+    parse_impersonated_access_token_json(&body)
 }
 
 fn refresh_authorized_user_token(json: &serde_json::Value) -> MidgeResult<CachedGcsToken> {
@@ -475,6 +630,31 @@ fn parse_access_token_json(body: &str) -> MidgeResult<CachedGcsToken> {
         .get("expires_in")
         .and_then(|value| value.as_u64())
         .map(|ttl| current_unix_secs().saturating_add(ttl))
+        .unwrap_or_else(|| current_unix_secs().saturating_add(3600));
+    Ok(CachedGcsToken::expiring(access_token, expires_at))
+}
+
+fn parse_impersonated_access_token_json(body: &str) -> MidgeResult<CachedGcsToken> {
+    let json: serde_json::Value = serde_json::from_str(body).map_err(|error| {
+        MidgeError::Internal(format!(
+            "GCS service account impersonation JSON parse: {}",
+            error
+        ))
+    })?;
+    let access_token = json
+        .get("accessToken")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            MidgeError::Internal(
+                "GCS service account impersonation response missing accessToken".into(),
+            )
+        })?;
+    let expires_at = json
+        .get("expireTime")
+        .and_then(|value| value.as_str())
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|datetime| datetime.timestamp().max(0) as u64)
         .unwrap_or_else(|| current_unix_secs().saturating_add(3600));
     Ok(CachedGcsToken::expiring(access_token, expires_at))
 }
@@ -1428,6 +1608,119 @@ mod tests {
         assert_eq!(second_auth, Some("Bearer token-two"));
         server.join().unwrap();
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn should_read_external_account_file_subject_token() {
+        let token_path = std::env::temp_dir().join(format!(
+            "midge_gcs_subject_token_{}_{}.txt",
+            std::process::id(),
+            current_unix_secs()
+        ));
+        std::fs::write(&token_path, "subject-token\n").unwrap();
+        let json = json!({
+            "type": "external_account",
+            "audience": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/provider",
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+            "token_url": "https://sts.googleapis.com/v1/token",
+            "credential_source": {
+                "file": token_path,
+                "format": {"type": "text"}
+            }
+        });
+
+        let token = external_account_subject_token(&json).expect("subject token");
+
+        assert_eq!(token, "subject-token");
+        let file = json
+            .get("credential_source")
+            .and_then(|source| source.get("file"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn should_exchange_external_account_subject_token_with_sts() {
+        let token_path = std::env::temp_dir().join(format!(
+            "midge_gcs_sts_subject_token_{}_{}.txt",
+            std::process::id(),
+            current_unix_secs()
+        ));
+        std::fs::write(&token_path, "subject-token").unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let token_url = format!("http://{}/token", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 4096];
+            let n = std::io::Read::read(&mut stream, &mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]);
+            assert!(request.starts_with("POST /token HTTP/1.1"));
+            assert!(request
+                .contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange"));
+            assert!(request.contains("subject_token=subject-token"));
+            assert!(request
+                .contains("subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt"));
+            let body = r#"{"access_token":"sts-access-token","expires_in":60}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            std::io::Write::write_all(&mut stream, response.as_bytes()).unwrap();
+        });
+
+        let json = json!({
+            "type": "external_account",
+            "audience": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/provider",
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+            "token_url": token_url,
+            "credential_source": {
+                "file": token_path,
+                "format": {"type": "text"}
+            }
+        });
+
+        let token = fetch_external_account_token(&json).expect("STS token exchange");
+
+        assert_eq!(token.access_token, "sts-access-token");
+        assert!(token.expires_at.unwrap_or_default() > current_unix_secs());
+        let file = json
+            .get("credential_source")
+            .and_then(|source| source.get("file"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let _ = std::fs::remove_file(file);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn should_reject_executable_external_account_credentials() {
+        let json = json!({
+            "type": "external_account",
+            "audience": "audience",
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+            "token_url": "https://sts.googleapis.com/v1/token",
+            "credential_source": {
+                "executable": {"command": "gcloud auth print-access-token"}
+            }
+        });
+
+        let error = external_account_subject_token(&json).expect_err("should reject executable");
+
+        assert!(error.to_string().contains("process execution"));
+    }
+
+    #[test]
+    fn should_parse_impersonated_access_token() {
+        let token = parse_impersonated_access_token_json(
+            r#"{"accessToken":"impersonated","expireTime":"2099-01-01T00:00:00Z"}"#,
+        )
+        .expect("parse impersonation token");
+
+        assert_eq!(token.access_token, "impersonated");
+        assert!(token.expires_at.unwrap_or_default() > current_unix_secs());
     }
 
     // =========== JSON Value Extraction Tests ===========

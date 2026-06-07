@@ -65,6 +65,40 @@ pub struct AzureProvider {
     credential: AzureCredential,
 }
 
+#[derive(Debug, Clone)]
+enum AzureEndpoint {
+    /// Path-style emulator front door: `{endpoint}/{account}/{container}/{blob}`.
+    PathStyleBase(String),
+    /// Account-scoped Blob endpoint: `{endpoint}/{container}/{blob}`.
+    AccountBase {
+        endpoint: String,
+        emulator_compat: bool,
+    },
+}
+
+impl AzureEndpoint {
+    fn path_style(endpoint: String) -> Self {
+        Self::PathStyleBase(endpoint)
+    }
+
+    fn account_base(endpoint: String, account_name: &str) -> Self {
+        let emulator_compat = account_endpoint_looks_emulated(&endpoint, account_name);
+        Self::AccountBase {
+            endpoint,
+            emulator_compat,
+        }
+    }
+
+    fn emulator_compat(&self) -> bool {
+        match self {
+            Self::PathStyleBase(_) => true,
+            Self::AccountBase {
+                emulator_compat, ..
+            } => *emulator_compat,
+        }
+    }
+}
+
 impl AzureProvider {
     /// Create provider with Shared Key authentication.
     pub fn with_shared_key(
@@ -85,13 +119,30 @@ impl AzureProvider {
         account_key: String,
         endpoint: Option<String>,
     ) -> MidgeResult<Self> {
+        Self::with_shared_key_and_azure_endpoint(
+            account_name,
+            container,
+            account_key,
+            endpoint.map(AzureEndpoint::path_style),
+        )
+    }
+
+    fn with_shared_key_and_azure_endpoint(
+        account_name: String,
+        container: String,
+        account_key: String,
+        endpoint: Option<AzureEndpoint>,
+    ) -> MidgeResult<Self> {
         let credential = AzureCredential::SharedKey {
             account_key: account_key.clone(),
         };
         let signer = SharedKeySigner::new_with_emulator_compat(
             account_name.clone(),
             account_key,
-            endpoint.is_some(),
+            endpoint
+                .as_ref()
+                .map(AzureEndpoint::emulator_compat)
+                .unwrap_or(false),
         )?;
         let executor = CloudExecutor::new(Some(Arc::new(signer)))?;
         let backend = Arc::new(AzureBackend::new(
@@ -124,6 +175,20 @@ impl AzureProvider {
         container: String,
         sas_token: String,
         endpoint: Option<String>,
+    ) -> MidgeResult<Self> {
+        Self::with_sas_token_and_azure_endpoint(
+            account_name,
+            container,
+            sas_token,
+            endpoint.map(AzureEndpoint::path_style),
+        )
+    }
+
+    fn with_sas_token_and_azure_endpoint(
+        account_name: String,
+        container: String,
+        sas_token: String,
+        endpoint: Option<AzureEndpoint>,
     ) -> MidgeResult<Self> {
         // Normalise: strip leading '?' if present.
         let token = sas_token
@@ -263,32 +328,35 @@ impl AzureProvider {
         container: String,
         endpoint: Option<String>,
     ) -> MidgeResult<Self> {
-        let mut account_name: Option<String> = None;
-        let mut account_key: Option<String> = None;
-        let mut sas_token: Option<String> = None;
+        let parts = AzureConnectionString::parse(&conn_str);
 
-        for part in conn_str.split(';') {
-            let kv: Vec<&str> = part.splitn(2, '=').collect();
-            if kv.len() == 2 {
-                match kv[0] {
-                    "AccountName" => account_name = Some(kv[1].to_string()),
-                    "AccountKey" => account_key = Some(kv[1].to_string()),
-                    "SharedAccessSignature" => sas_token = Some(kv[1].to_string()),
-                    _ => {}
-                }
-            }
+        let account = parts
+            .account_name
+            .as_deref()
+            .ok_or_else(|| {
+                MidgeError::InvalidArgument("Missing AccountName in connection string".into())
+            })?
+            .to_string();
+        let resolved_endpoint = endpoint
+            .map(AzureEndpoint::path_style)
+            .or_else(|| parts.blob_endpoint(account.as_str()));
+
+        if let Some(key) = parts.account_key {
+            return Self::with_shared_key_and_azure_endpoint(
+                account,
+                container,
+                key,
+                resolved_endpoint,
+            );
         }
 
-        let account = account_name.ok_or_else(|| {
-            MidgeError::InvalidArgument("Missing AccountName in connection string".into())
-        })?;
-
-        if let Some(key) = account_key {
-            return Self::with_shared_key_and_endpoint(account, container, key, endpoint);
-        }
-
-        if let Some(sas) = sas_token {
-            return Self::with_sas_token_and_endpoint(account, container, sas, endpoint);
+        if let Some(sas) = parts.sas_token {
+            return Self::with_sas_token_and_azure_endpoint(
+                account,
+                container,
+                sas,
+                resolved_endpoint,
+            );
         }
 
         Err(MidgeError::InvalidArgument(
@@ -321,15 +389,6 @@ impl AzureProvider {
                 "workload-identity".to_string(),
             ),
             crate::engine::api::AzureCredentialSource::LightweightDefaultChain => {
-                if let Ok(conn_str) = std::env::var("AZURE_STORAGE_CONNECTION_STRING") {
-                    return Self::from_connection_string_and_endpoint(conn_str, container, None);
-                }
-                if let Ok(key) = std::env::var("AZURE_STORAGE_KEY") {
-                    return Self::with_shared_key(account_name, container, key);
-                }
-                if let Ok(sas) = std::env::var("AZURE_STORAGE_SAS_TOKEN") {
-                    return Self::with_sas_token(account_name, container, sas);
-                }
                 if AzureOAuthProvider::has_environment_client_secret() {
                     return Self::with_oauth_provider(
                         account_name,
@@ -407,6 +466,105 @@ impl AzureProvider {
     }
 }
 
+#[derive(Debug, Default)]
+struct AzureConnectionString {
+    account_name: Option<String>,
+    account_key: Option<String>,
+    sas_token: Option<String>,
+    blob_endpoint: Option<String>,
+    default_endpoints_protocol: Option<String>,
+    endpoint_suffix: Option<String>,
+    use_development_storage: bool,
+}
+
+impl AzureConnectionString {
+    fn parse(connection_string: &str) -> Self {
+        let mut parsed = Self::default();
+        for part in connection_string.split(';') {
+            let mut kv = part.splitn(2, '=');
+            let key = kv.next().unwrap_or_default().trim().to_ascii_lowercase();
+            let value = kv.next().unwrap_or_default().trim();
+            if value.is_empty() {
+                continue;
+            }
+            match key.as_str() {
+                "accountname" => parsed.account_name = Some(value.to_string()),
+                "accountkey" => parsed.account_key = Some(value.to_string()),
+                "sharedaccesssignature" => parsed.sas_token = Some(value.to_string()),
+                "blobendpoint" => {
+                    parsed.blob_endpoint = Some(value.trim_end_matches('/').to_string())
+                }
+                "defaultendpointsprotocol" => {
+                    parsed.default_endpoints_protocol = Some(value.to_string())
+                }
+                "endpointsuffix" => parsed.endpoint_suffix = Some(value.to_string()),
+                "usedevelopmentstorage" if value.eq_ignore_ascii_case("true") => {
+                    parsed.use_development_storage = true;
+                }
+                _ => {}
+            }
+        }
+
+        if parsed.use_development_storage {
+            parsed
+                .account_name
+                .get_or_insert_with(|| "devstoreaccount1".to_string());
+            parsed
+                .account_key
+                .get_or_insert_with(default_azurite_account_key);
+            parsed
+                .blob_endpoint
+                .get_or_insert_with(|| "http://127.0.0.1:10000/devstoreaccount1".to_string());
+        }
+
+        parsed
+    }
+
+    fn blob_endpoint(&self, account_name: &str) -> Option<AzureEndpoint> {
+        if let Some(endpoint) = self.blob_endpoint.as_deref() {
+            return Some(AzureEndpoint::account_base(
+                endpoint.trim_end_matches('/').to_string(),
+                account_name,
+            ));
+        }
+
+        let suffix = self.endpoint_suffix.as_deref()?;
+        let protocol = self
+            .default_endpoints_protocol
+            .as_deref()
+            .unwrap_or("https");
+        Some(AzureEndpoint::account_base(
+            format!(
+                "{}://{}.blob.{}",
+                protocol,
+                account_name,
+                suffix.trim_start_matches('.')
+            ),
+            account_name,
+        ))
+    }
+}
+
+fn default_azurite_account_key() -> String {
+    "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+        .to_string()
+}
+
+fn account_endpoint_looks_emulated(endpoint: &str, account_name: &str) -> bool {
+    let Ok(url) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    let host_is_local = matches!(
+        url.host_str(),
+        Some("127.0.0.1") | Some("localhost") | Some("::1")
+    );
+    let first_path_segment = url
+        .path_segments()
+        .and_then(|mut segments| segments.next())
+        .unwrap_or_default();
+    host_is_local || first_path_segment.eq_ignore_ascii_case(account_name)
+}
+
 impl Drop for AzureProvider {
     fn drop(&mut self) {
         tracing::trace!("AzureProvider dropping, cleanup will propagate to CloudExecutor");
@@ -420,7 +578,7 @@ impl Drop for AzureProvider {
 struct AzureBackend {
     account_name: String,
     container: String,
-    endpoint: Option<String>,
+    endpoint: Option<AzureEndpoint>,
     /// If present, appended as `?{sas_token}` to every URL.
     sas_token: Option<String>,
     executor: CloudExecutor,
@@ -430,7 +588,7 @@ impl AzureBackend {
     fn new(
         account_name: String,
         container: String,
-        endpoint: Option<String>,
+        endpoint: Option<AzureEndpoint>,
         sas_token: Option<String>,
         executor: CloudExecutor,
     ) -> Self {
@@ -446,12 +604,15 @@ impl AzureBackend {
     /// Base URL: `https://{account}.blob.core.windows.net/{container}`
     fn base_url(&self) -> String {
         match &self.endpoint {
-            Some(endpoint) => format!(
+            Some(AzureEndpoint::PathStyleBase(endpoint)) => format!(
                 "{}/{}/{}",
                 endpoint.trim_end_matches('/'),
                 self.account_name,
                 self.container
             ),
+            Some(AzureEndpoint::AccountBase { endpoint, .. }) => {
+                format!("{}/{}", endpoint.trim_end_matches('/'), self.container)
+            }
             None => format!(
                 "https://{}.blob.core.windows.net/{}",
                 self.account_name, self.container
@@ -1662,6 +1823,88 @@ mod tests {
 
         // Assert
         assert_eq!(url, "https://myaccount.blob.core.windows.net/mycontainer");
+    }
+
+    #[test]
+    fn should_build_account_endpoint_base_url() {
+        let backend = AzureBackend::new(
+            "myaccount".into(),
+            "mycontainer".into(),
+            Some(AzureEndpoint::account_base(
+                "https://myaccount.blob.core.usgovcloudapi.net".to_string(),
+                "myaccount",
+            )),
+            None,
+            make_noop_executor(),
+        );
+
+        assert_eq!(
+            backend.base_url(),
+            "https://myaccount.blob.core.usgovcloudapi.net/mycontainer"
+        );
+    }
+
+    #[test]
+    fn should_build_path_style_endpoint_base_url() {
+        let backend = AzureBackend::new(
+            "admin".into(),
+            "container".into(),
+            Some(AzureEndpoint::path_style(
+                "http://127.0.0.1:9000".to_string(),
+            )),
+            None,
+            make_noop_executor(),
+        );
+
+        assert_eq!(backend.base_url(), "http://127.0.0.1:9000/admin/container");
+    }
+
+    #[test]
+    fn should_parse_blob_endpoint_connection_string() {
+        let provider = AzureProvider::from_connection_string_and_endpoint(
+            "AccountName=myaccount;AccountKey=dGVzdA==;BlobEndpoint=https://myaccount.blob.core.usgovcloudapi.net"
+                .to_string(),
+            "container".to_string(),
+            None,
+        )
+        .expect("connection string");
+
+        let backend = provider.backend();
+        assert_eq!(provider.account_name(), "myaccount");
+        assert_eq!(provider.container(), "container");
+        assert!(Arc::strong_count(&backend) >= 1);
+    }
+
+    #[test]
+    fn should_parse_endpoint_suffix_connection_string() {
+        let parts = AzureConnectionString::parse(
+            "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=dGVzdA==;EndpointSuffix=core.usgovcloudapi.net",
+        );
+        let endpoint = parts
+            .blob_endpoint("myaccount")
+            .expect("endpoint suffix should produce endpoint");
+
+        match endpoint {
+            AzureEndpoint::AccountBase { endpoint, .. } => {
+                assert_eq!(endpoint, "https://myaccount.blob.core.usgovcloudapi.net");
+            }
+            AzureEndpoint::PathStyleBase(_) => panic!("expected account endpoint"),
+        }
+    }
+
+    #[test]
+    fn should_parse_development_storage_connection_string() {
+        let parts = AzureConnectionString::parse("UseDevelopmentStorage=true");
+
+        assert_eq!(parts.account_name.as_deref(), Some("devstoreaccount1"));
+        assert!(parts.account_key.is_some());
+        assert!(matches!(
+            parts.blob_endpoint("devstoreaccount1"),
+            Some(AzureEndpoint::AccountBase {
+                emulator_compat: true,
+                ..
+            })
+        ));
     }
 
     #[test]

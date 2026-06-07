@@ -58,7 +58,7 @@ use cntryl_midge::{CloudProviderConfig, Engine, OpenOptions};
 
 let opts = OpenOptions::cloud(
     "./target/midge-cache",
-    CloudProviderConfig::peas_s3("midge-dev"),
+    CloudProviderConfig::aws_s3("midge-prod", "us-east-1"),
     "databases/example/",
 )
 .build();
@@ -66,6 +66,8 @@ let opts = OpenOptions::cloud(
 let engine = Engine::open(opts)?;
 # Ok::<(), cntryl_midge::MidgeError>(())
 ```
+
+The first argument is the local cache/staging directory, the second is the provider, and the third is the object prefix inside the bucket/container.
 
 ### Filesystem Simulation
 
@@ -88,15 +90,9 @@ let engine = Engine::open(opts)?;
 ### AWS S3
 
 ```rust
-use cntryl_midge::{
-    CloudProviderConfig, Engine, OpenOptions, S3CredentialSource,
-};
+use cntryl_midge::{CloudProviderConfig, Engine, OpenOptions};
 
-let provider = CloudProviderConfig::AwsS3 {
-    bucket: "midge-prod".to_string(),
-    region: "us-east-1".to_string(),
-    credentials: S3CredentialSource::AwsDefaultChain,
-};
+let provider = CloudProviderConfig::aws_s3("midge-prod", "us-east-1");
 
 let engine = Engine::open(
     OpenOptions::cloud("./cache", provider, "app-a/").build()
@@ -104,20 +100,29 @@ let engine = Engine::open(
 # Ok::<(), cntryl_midge::MidgeError>(())
 ```
 
+For explicit access keys:
+
+```rust
+let access_key = std::env::var("AWS_ACCESS_KEY_ID")?;
+let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")?;
+
+let provider = CloudProviderConfig::aws_s3_static(
+    "midge-prod",
+    "us-east-1",
+    access_key,
+    secret_key,
+);
+```
+
 ### S3-Compatible / MinIO / Wasabi / OCI
 
 ```rust
-use cntryl_midge::{
-    CloudProviderConfig, Engine, OpenOptions, S3CredentialSource,
-};
+use cntryl_midge::{CloudProviderConfig, Engine, OpenOptions};
 
-let provider = CloudProviderConfig::S3Compatible {
-    bucket: "midge-dev".to_string(),
-    region: "us-east-1".to_string(),
-    endpoint: "http://127.0.0.1:9000".to_string(),
-    path_style: true,
-    credentials: S3CredentialSource::Environment,
-};
+let provider = CloudProviderConfig::s3_compatible_env(
+    "midge-dev",
+    "http://127.0.0.1:9000",
+);
 
 let engine = Engine::open(
     OpenOptions::cloud("./cache", provider, "dev/").build()
@@ -125,57 +130,99 @@ let engine = Engine::open(
 # Ok::<(), cntryl_midge::MidgeError>(())
 ```
 
-For local MinIO with explicit credentials:
+For explicit access keys and vendor helpers:
 
 ```rust
-let provider = CloudProviderConfig::minio(
+let minio = CloudProviderConfig::minio_static(
     "midge-dev",
     "http://127.0.0.1:9000",
     "minioadmin",
     "minioadmin",
+);
+let wasabi = CloudProviderConfig::wasabi("midge-prod", "us-east-1");
+let oci = CloudProviderConfig::oci_s3_compatible(
+    "oci-namespace",
+    "midge-prod",
+    "us-phoenix-1",
 );
 ```
 
 ### Azure Blob
 
 ```rust
-use cntryl_midge::{
-    AzureCredentialSource, CloudProviderConfig, Engine, OpenOptions,
-};
+use cntryl_midge::{CloudProviderConfig, Engine, OpenOptions};
 
-let provider = CloudProviderConfig::AzureBlob {
-    account: "mystorageaccount".to_string(),
-    container: "midge".to_string(),
-    endpoint: None,
-    credential: AzureCredentialSource::LightweightDefaultChain,
-};
+let provider = CloudProviderConfig::azure_blob("mystorageaccount", "midge");
 
 let engine = Engine::open(
     OpenOptions::cloud("./cache", provider, "prod/").build()
 )?;
 # Ok::<(), cntryl_midge::MidgeError>(())
+```
+
+For storage credentials:
+
+```rust
+let shared_key = CloudProviderConfig::azure_blob_shared_key(
+    "mystorageaccount",
+    "midge",
+    "base64-account-key",
+);
+let sas = CloudProviderConfig::azure_blob_sas(
+    "mystorageaccount",
+    "midge",
+    "?sv=...",
+);
+let conn = CloudProviderConfig::azure_blob_connection_string(
+    "midge",
+    "DefaultEndpointsProtocol=https;AccountName=mystorageaccount;AccountKey=...",
+);
 ```
 
 ### GCS
 
 ```rust
-use cntryl_midge::{
-    CloudProviderConfig, Engine, GcsApiStyle, GcsCredentialSource, OpenOptions,
-};
+use cntryl_midge::{CloudProviderConfig, Engine, OpenOptions};
 
-let provider = CloudProviderConfig::Gcs {
-    bucket: "midge-prod".to_string(),
-    project_id: "my-project".to_string(),
-    endpoint: None,
-    api: GcsApiStyle::Json,
-    credential: GcsCredentialSource::ApplicationDefault,
-};
+let provider = CloudProviderConfig::gcs("midge-prod");
 
 let engine = Engine::open(
     OpenOptions::cloud("./cache", provider, "prod/").build()
 )?;
 # Ok::<(), cntryl_midge::MidgeError>(())
 ```
+
+For explicit GCS credentials:
+
+```rust
+let service_account = CloudProviderConfig::gcs_service_account_file(
+    "midge-prod",
+    "/var/run/secrets/gcp/service-account.json",
+);
+let hmac = CloudProviderConfig::gcs_hmac(
+    "midge-prod",
+    "GOOG_ACCESS_ID",
+    "GOOG_HMAC_SECRET",
+);
+```
+
+### Advanced Configuration
+
+Use fluent modifiers when you need endpoint, path-style, region, or credential overrides:
+
+```rust
+use cntryl_midge::{CloudProviderConfig, S3CredentialSource};
+
+let provider = CloudProviderConfig::s3_compatible_env("bucket", "http://old-endpoint")
+    .with_endpoint("http://new-endpoint")?
+    .with_s3_region("eu-west-1")?
+    .with_path_style(true)?
+    .with_s3_credentials(S3CredentialSource::access_key("key", "secret"))?;
+```
+
+The raw `CloudProviderConfig` enum variants remain public for advanced/manual configuration, but the constructors above are the recommended path.
+
+Endpoint, path-style, region, project-ID, and credential overrides are fallible on purpose. Midge rejects unsupported combinations instead of silently ignoring them. For example, use `s3_compatible_*` or `peas_s3(...)` for custom S3 endpoints; `aws_s3(...)` always targets AWS S3.
 
 ## Peas Emulator
 
@@ -213,25 +260,28 @@ Known Peas emulator quirks observed during qualification:
 
 ## Credential Matrix
 
-Midge follows the official provider credential families where practical, but it implements a lightweight subset. It does not attempt SDK `DefaultCredential` parity, and it never shells out to CLIs or `credential_process`.
+Midge follows official provider credential families where practical, but it implements a lean subset without SDK crates and without shelling out to CLIs or process helpers. “SDK-equivalent supported” means Midge matches the provider’s names, search order, token caching, and refresh behavior for that source.
 
 Official references:
 
-- [AWS SDK for Rust credential provider chain](https://docs.aws.amazon.com/sdk-for-rust/latest/dg/credproviders.html)
+- [AWS standardized credential providers](https://docs.aws.amazon.com/sdkref/latest/guide/standardized-credentials.html)
 - [Azure credential chains](https://learn.microsoft.com/en-us/dotnet/azure/sdk/authentication/credential-chains)
 - [Google Application Default Credentials](https://docs.cloud.google.com/docs/authentication/application-default-credentials)
 - [GCS HMAC keys](https://docs.cloud.google.com/storage/docs/authentication/hmackeys)
 
 ### AWS / S3-Compatible
 
-| Credential source | Midge enum | AWS S3 | S3-compatible | Peas behavior |
+| Credential source | Constructor/source | AWS S3 | S3-compatible | Peas |
 |---|---|---:|---:|---|
-| Explicit access key | `S3CredentialSource::Static` | Supported | Supported | Supported |
-| Environment variables | `S3CredentialSource::Environment` | Supported | Supported | Supported if env is set |
-| Shared profile files | `S3CredentialSource::SharedProfile` | Supported | Supported | Supported if profile has static keys |
-| Lightweight AWS default chain | `S3CredentialSource::AwsDefaultChain` | Supported | Not allowed | Not used |
-| AWS IAM Identity Center / SSO | Profile metadata | Unsupported | Unsupported | Not used |
-| `credential_process` | Profile metadata | Unsupported | Unsupported | Not used |
+| Default AWS chain | `aws_s3(...)` / `AwsDefaultChain` | SDK-equivalent supported | Not allowed | Not used |
+| Explicit access keys | `aws_s3_static(...)`, `s3_compatible_static(...)` | Supported | Supported | Supported |
+| Environment access keys | `S3CredentialSource::Environment` | Supported | Supported | Supported if env is set |
+| Shared static/session profile | `S3CredentialSource::SharedProfile` | Supported | Supported | Supported if profile has static keys |
+| Web identity / IRSA | Default chain | Supported | Not allowed | Not used |
+| ECS/EKS container credentials | Default chain | Supported | Not allowed | Not used |
+| EC2 IMDSv2 | Default chain | Supported | Not allowed | Not used |
+| AWS SSO / IAM Identity Center | Profile metadata | Lean unsupported: SDK/process-backed | Unsupported | Not used |
+| `credential_process` | Profile metadata | Lean unsupported: process execution | Unsupported | Not used |
 
 Midge's AWS default chain resolves:
 
@@ -241,36 +291,37 @@ Midge's AWS default chain resolves:
 - ECS/EKS container credentials
 - EC2 IMDSv2
 
-For S3-compatible providers, prefer `Static`, `Environment`, or `SharedProfile`. `AwsDefaultChain` is restricted to `CloudProviderConfig::AwsS3` so custom endpoints do not accidentally contact AWS role or metadata endpoints.
+For S3-compatible providers, use explicit keys, environment keys, or shared profiles. `AwsDefaultChain` is restricted to AWS S3 so custom endpoints do not accidentally contact AWS role or metadata endpoints.
 
 ### Azure Blob
 
-| Credential source | Midge enum | Supported | Peas behavior |
+| Credential source | Constructor/source | Support status | Peas |
 |---|---|---:|---|
-| Shared key | `AzureCredentialSource::SharedKey` | Supported | Supported |
-| SAS token | `AzureCredentialSource::SasToken` | Supported | Supported if emulator accepts SAS |
-| Connection string | `AzureCredentialSource::ConnectionString` | Supported | Supported with emulator endpoint |
-| Storage account env | `AzureCredentialSource::StorageEnvironment` | Supported | Supported if env is set |
-| Client secret env | `AzureCredentialSource::EnvironmentClientSecret` | Supported | Not used |
-| Workload identity | `AzureCredentialSource::WorkloadIdentity` | Supported | Not used |
-| Managed identity | `AzureCredentialSource::ManagedIdentity` | Supported | Not used |
-| Lightweight chain | `AzureCredentialSource::LightweightDefaultChain` | Supported | Uses env/config sources only |
-| Azure CLI / PowerShell / Developer CLI | SDK developer credentials | Unsupported | Not used |
-| Visual Studio / VS Code / broker / browser | SDK developer credentials | Unsupported | Not used |
+| Lean Azure identity chain | `azure_blob(...)` / `LightweightDefaultChain` | SDK-equivalent for supported identity sources | Not used |
+| Shared key | `azure_blob_shared_key(...)` | Supported | Supported |
+| SAS token | `azure_blob_sas(...)` | Supported | Supported if emulator accepts SAS |
+| Connection string | `azure_blob_connection_string(...)` | Supported | Supported with emulator endpoint |
+| Storage env key/SAS/connection string | `AzureCredentialSource::StorageEnvironment` | Supported as explicit storage credential source | Supported if env is set |
+| Client secret env | `EnvironmentClientSecret` | Supported | Not used |
+| Workload identity | `WorkloadIdentity` | Supported | Not used |
+| Managed identity | `ManagedIdentity` | Supported | Not used |
+| Azure CLI / PowerShell / Developer CLI | SDK developer credentials | Lean unsupported: process execution | Not used |
+| Visual Studio / VS Code / broker / browser | SDK developer credentials | Lean unsupported: dev-tool/broker integration | Not used |
 
-Midge's Azure lightweight chain tries storage credentials first, then client-secret environment credentials, workload identity, and managed identity. It intentionally skips developer-tool credentials because those require SDK helpers or process execution.
+Midge's Azure identity chain tries client-secret environment credentials, workload identity, then managed identity. It intentionally skips developer-tool credentials because those require SDK helpers, broker integration, or process execution. Shared key, SAS, connection strings, and storage environment credentials are explicit storage-credential paths, not part of the identity default chain.
 
 ### GCS
 
-| Credential source | Midge enum | API style | Supported | Peas behavior |
+| Credential source | Constructor/source | API style | Support status | Peas |
 |---|---|---|---:|---|
-| Bearer token | `GcsCredentialSource::BearerToken` | JSON | Supported | Not used |
-| HMAC key | `GcsCredentialSource::HmacKey` | XML | Supported | Supported |
-| Application Default Credentials | `GcsCredentialSource::ApplicationDefault` | JSON | Supported subset | Not used |
-| Service account JSON file | `GcsCredentialSource::ServiceAccountJsonFile` | JSON | Supported | Not used |
-| Authorized user JSON file | `GcsCredentialSource::AuthorizedUserJsonFile` | JSON | Supported | Not used |
+| Application Default Credentials | `gcs(...)` / `ApplicationDefault` | JSON | SDK-equivalent for supported ADC files | Not used |
+| Service account JSON file | `gcs_service_account_file(...)` | JSON | Supported | Not used |
+| Authorized user JSON file | `gcs_authorized_user_file(...)` | JSON | Supported | Not used |
 | Metadata server | `GcsCredentialSource::MetadataServer` | JSON | Supported | Not used |
-| Executable external-account ADC | ADC JSON | JSON | Unsupported | Not used |
+| Non-executable external-account file ADC | ADC JSON | JSON | Supported for file-sourced subject tokens | Not used |
+| Bearer token | `gcs_bearer_token(...)` | JSON | Supported, non-refreshable | Not used |
+| HMAC key | `gcs_hmac(...)` | XML | Supported | Supported |
+| Executable external-account ADC | ADC JSON | JSON | Lean unsupported: process execution | Not used |
 
 Midge's ADC subset resolves:
 
@@ -278,11 +329,12 @@ Midge's ADC subset resolves:
 - local ADC file at the standard gcloud ADC location
 - service-account JWT bearer exchange
 - authorized-user refresh token exchange
+- non-executable file-sourced external-account STS exchange
 - metadata server tokens
 
-ADC, service-account, authorized-user, and metadata-server access tokens are cached and refreshed before expiry. Explicit bearer tokens are treated as static.
+ADC, service-account, authorized-user, external-account, and metadata-server access tokens are cached and refreshed before expiry. Explicit bearer tokens are treated as static.
 
-GCS HMAC keys are XML API credentials. Midge enforces that by requiring `GcsApiStyle::Xml` for `GcsCredentialSource::HmacKey`.
+GCS HMAC keys are XML API credentials. `gcs_hmac(...)` selects XML automatically; ADC and bearer constructors select JSON automatically.
 
 ## Provider Notes
 
@@ -297,14 +349,15 @@ GCS HMAC keys are XML API credentials. Midge enforces that by requiring `GcsApiS
 ### Azure Blob
 
 - Supports shared key, SAS token, and bearer-token authorization.
+- `azure_blob(...)` uses identity credentials only; storage keys, SAS, and connection strings are explicit constructors.
 - Supports emulator path-style URLs such as `http://127.0.0.1:9000/{account}/{container}`.
 - Uses Azure SharedKey canonicalization for production endpoints and Peas-compatible canonicalization for explicit emulator endpoints.
 
 ### GCS
 
-- Supports JSON API bearer-token auth for ADC-style credentials.
+- Supports JSON API bearer-token auth for ADC-style credentials, including service-account, authorized-user, metadata-server, and non-executable file-sourced external-account ADC.
 - Supports XML API `GOOG1` HMAC signing for Peas and HMAC deployments.
-- HMAC is XML-only, matching Google Cloud Storage restrictions.
+- HMAC is XML-only, matching Google Cloud Storage restrictions, and `gcs_hmac(...)` selects XML automatically.
 
 ## Engine Safety
 
