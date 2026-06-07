@@ -12,7 +12,7 @@ on:
       - "tests/**"
       - "*.toml"
       - ".cargo/**"
-      - ".github/workflows/ci.yml"
+      - ".github/workflows/**"
   pull_request:
     branches: [main]
     paths:
@@ -21,7 +21,7 @@ on:
       - "tests/**"
       - "*.toml"
       - ".cargo/**"
-      - ".github/workflows/ci.yml"
+      - ".github/workflows/**"
 
 jobs:
   matrix:
