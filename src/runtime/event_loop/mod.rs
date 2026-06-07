@@ -54,6 +54,7 @@ pub struct EventLoop {
     pub(super) hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub(super) hybrid_storage_events:
         Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
+    pub(super) cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
     pub(super) trace_enabled: bool,
     pub(super) loop_debug: bool,
     pub(super) loop_debug_wakes: u64,
@@ -158,6 +159,7 @@ impl EventLoop {
             eviction_actor: None,
             hybrid_storage: None,
             hybrid_storage_events: config.hybrid_storage_events.clone(),
+            cloud_metadata_storage: config.cloud_metadata_storage.clone(),
             trace_enabled,
             loop_debug: std::env::var_os("MIDGE_LOOP_DEBUG").is_some(),
             loop_debug_wakes: 0,
@@ -289,6 +291,61 @@ impl EventLoop {
         Ok(())
     }
 
+    fn mirror_metadata_to_authoritative_cloud(&self) -> crate::common::MidgeResult<()> {
+        let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
+            return Ok(());
+        };
+
+        for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+            let local_path = self.state.db_path.join(file_name);
+            if !local_path.exists() {
+                continue;
+            }
+
+            let data = std::fs::read(&local_path)?;
+            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let (tx, rx) = std::sync::mpsc::channel();
+            cloud.submit_put(key.clone(), data, vec![], tx);
+
+            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(crate::storage::cloud::CloudEvent::PutComplete { result, .. }) => {
+                    if let crate::storage::cloud::CloudOutcome::Err(error) = result {
+                        return Err(crate::common::MidgeError::Internal(format!(
+                            "cloud metadata mirror failed for '{key}': {error}"
+                        )));
+                    }
+                }
+                Ok(other) => {
+                    return Err(crate::common::MidgeError::Internal(format!(
+                        "unexpected cloud metadata mirror response for '{key}': {other:?}"
+                    )));
+                }
+                Err(error) => {
+                    return Err(crate::common::MidgeError::Internal(format!(
+                        "cloud metadata mirror timed out for '{key}': {error}"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn mirror_metadata_after_local_commit(
+        &mut self,
+        context: &str,
+    ) -> crate::common::MidgeResult<()> {
+        match self.mirror_metadata_to_authoritative_cloud() {
+            Ok(()) => Ok(()),
+            Err(error) if self.state.recovery_policy == crate::engine::RecoveryPolicy::Salvage => {
+                self.state.mark_persistence_anomaly();
+                tracing::warn!(%error, context, "cloud metadata mirror failed during salvage-capable operation");
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn publish_flushed_sst(
         &mut self,
         cf_id: crate::engine::ColumnFamilyId,
@@ -315,6 +372,8 @@ impl EventLoop {
             if let Err(error) = self.manifest_actor.persist(&self.state) {
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(%error, sst_name, "manifest checkpoint after flush failed; journal remains authoritative");
+            } else {
+                self.mirror_metadata_after_local_commit("flush manifest publish")?;
             }
             self.state.clear_flush_publication_intent(sst_name)?;
         }
@@ -1432,6 +1491,30 @@ impl EventLoop {
                                 },
                             );
                         } else {
+                            if let Err(e) = self
+                                .mirror_metadata_after_local_commit("compaction manifest publish")
+                            {
+                                if let Some(t) = crate::telemetry::Telemetry::global() {
+                                    t.metrics().record_compaction_failure();
+                                }
+                                self.state.mark_persistence_anomaly();
+                                tracing::error!(
+                                    error = ?e,
+                                    "failed to mirror manifest after compaction"
+                                );
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::Error {
+                                        request_id,
+                                        error: crate::common::MidgeError::Internal(format!(
+                                            "failed to mirror manifest after compaction: {}",
+                                            e
+                                        )),
+                                    },
+                                );
+                                return HandleOutcome::Continue;
+                            }
+
                             // 🔑 CRITICAL Slice 6: Manifest is now durable.
                             // Safe to delete input SSTs (they are now orphaned from manifest).
                             fail::fail_point!("slice6::after_manifest_persist_before_sst_gc");
@@ -1894,7 +1977,10 @@ impl EventLoop {
                 request_id,
                 file_meta,
             } => {
-                let result = self.manifest_actor.add_sst(&mut self.state, file_meta);
+                let result = self
+                    .manifest_actor
+                    .add_sst(&mut self.state, file_meta)
+                    .and_then(|_| self.mirror_metadata_after_local_commit("manifest add sst"));
                 let resp = result
                     .map(|_| RuntimeResponse::Ok { request_id })
                     .unwrap_or_else(|e| RuntimeResponse::Error {
@@ -1909,9 +1995,12 @@ impl EventLoop {
                 removed,
                 added,
             } => {
-                let result =
-                    self.manifest_actor
-                        .compaction_complete(&mut self.state, removed, added);
+                let result = self
+                    .manifest_actor
+                    .compaction_complete(&mut self.state, removed, added)
+                    .and_then(|_| {
+                        self.mirror_metadata_after_local_commit("manifest compaction complete")
+                    });
                 let resp = result
                     .map(|_| RuntimeResponse::Ok { request_id })
                     .unwrap_or_else(|e| RuntimeResponse::Error {
@@ -1922,7 +2011,10 @@ impl EventLoop {
             }
 
             RuntimeMsg::ManifestPersist { request_id } => {
-                let result = self.manifest_actor.persist(&self.state);
+                let result = self
+                    .manifest_actor
+                    .persist(&self.state)
+                    .and_then(|_| self.mirror_metadata_after_local_commit("manifest persist"));
                 let resp = result
                     .map(|_| RuntimeResponse::Ok { request_id })
                     .unwrap_or_else(|e| RuntimeResponse::Error {
@@ -1957,7 +2049,11 @@ impl EventLoop {
 
                 let result = self
                     .manifest_actor
-                    .create_column_family(&mut self.state, name.clone());
+                    .create_column_family(&mut self.state, name.clone())
+                    .and_then(|cf_id| {
+                        self.mirror_metadata_after_local_commit("create column family")
+                            .map(|_| cf_id)
+                    });
                 let resp = result
                     .map(|cf_id| RuntimeResponse::ColumnFamilyCreated { request_id, cf_id })
                     .unwrap_or_else(|e| RuntimeResponse::Error {
@@ -1993,7 +2089,8 @@ impl EventLoop {
 
                 let result = self
                     .manifest_actor
-                    .drop_column_family(&mut self.state, cf_id);
+                    .drop_column_family(&mut self.state, cf_id)
+                    .and_then(|_| self.mirror_metadata_after_local_commit("drop column family"));
                 let resp = result
                     .map(|_| RuntimeResponse::Ok { request_id })
                     .unwrap_or_else(|e| RuntimeResponse::Error {

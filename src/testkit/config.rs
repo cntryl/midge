@@ -68,12 +68,10 @@ impl MidgeOptions {
             StorageMode::LocalDisk { db_path } => crate::Storage::Local {
                 path: db_path.clone(),
             },
-            StorageMode::CloudBacked { local_cache_path } => crate::Storage::Cloud {
+            StorageMode::CloudBacked { local_cache_path } => crate::Storage::CloudSimulated {
                 local_cache_path: local_cache_path.clone(),
                 bucket: "test-bucket".to_string(),
                 prefix: "test-prefix/".to_string(),
-                endpoint: None,
-                region: None,
             },
         };
 
@@ -81,13 +79,12 @@ impl MidgeOptions {
         let mut open_opts = match storage {
             crate::Storage::InMemory => crate::OpenOptions::in_memory(),
             crate::Storage::Local { path } => crate::OpenOptions::local(path),
-            crate::Storage::Cloud {
+            crate::Storage::CloudSimulated {
                 local_cache_path,
                 bucket,
                 prefix,
-                endpoint: _,
-                region: _,
-            } => crate::OpenOptions::cloud(local_cache_path, bucket, prefix),
+            } => crate::OpenOptions::cloud_simulated(local_cache_path, bucket, prefix),
+            crate::Storage::Cloud { .. } => unreachable!("testkit uses simulated cloud storage"),
         };
 
         // Apply user-specified high-level knobs

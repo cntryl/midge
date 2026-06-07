@@ -41,6 +41,7 @@ pub struct RuntimeConfig {
     pub wal_batch_config: BatchConfig,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
+    pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
     pub compression_policy: crate::sst::compression::CompressionPolicy,
     /// Fencing epoch from leader election.  Stamped on every WAL record.
     pub writer_epoch: u64,
@@ -60,6 +61,7 @@ impl Default for RuntimeConfig {
             wal_batch_config: BatchConfig::default(),
             hybrid_storage: None,
             hybrid_storage_events: None,
+            cloud_metadata_storage: None,
             compression_policy: crate::sst::compression::CompressionPolicy::default(),
             writer_epoch: 0,
             lease_healthy: None,

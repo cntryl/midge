@@ -10,7 +10,27 @@ use crossbeam_channel::{bounded, Sender};
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
+
+#[cfg(test)]
+const TEST_BLOCKING_VALUE: &[u8] = b"__cache_shard_drop_block__";
+
+#[cfg(test)]
+static TEST_WORKER_BLOCKED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+static TEST_WORKER_RELEASE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+static TEST_WORKER_FINISHED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+static TEST_SELF_JOIN_SKIPPED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+static TEST_SHARD_HOOK_LOCK: Mutex<()> = Mutex::new(());
 
 /// Message sent to admission worker
 struct AdmissionRequest {
@@ -214,6 +234,15 @@ impl CacheShard {
 
     /// Handle one admission request on the background worker.
     fn handle_admission_request(&self, request: AdmissionRequest) {
+        #[cfg(test)]
+        if request.value == Bytes::from_static(TEST_BLOCKING_VALUE) {
+            TEST_WORKER_BLOCKED.store(true, Ordering::SeqCst);
+            while !TEST_WORKER_RELEASE.load(Ordering::SeqCst) {
+                thread::yield_now();
+            }
+            TEST_WORKER_FINISHED.store(true, Ordering::SeqCst);
+        }
+
         // Check type-aware admission policy
         if !self.should_admit(&request.key) {
             return;
@@ -392,18 +421,32 @@ impl Drop for CacheShard {
         // Close sender first so worker receive loop exits promptly.
         let _ = self.admission_tx.take();
 
-        // Wait for worker thread to complete if it exists
-        // Use Option::take() to move the handle out of self
+        // Wait for worker thread to complete if it exists.
+        // Use Option::take() to move the handle out of self.
         if let Some(handle) = self.worker_handle.take() {
-            match handle.join() {
-                Ok(()) => {
-                    tracing::trace!("cache admission worker exited cleanly");
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = ?e,
-                        "cache admission worker thread panicked during shutdown"
-                    );
+            let current_id = thread::current().id();
+            let worker_id = handle.thread().id();
+
+            if current_id == worker_id {
+                // If the cache shard is being dropped from the worker thread itself,
+                // joining would deadlock / fail with EDEADLK. In that case, just
+                // allow the thread to exit naturally and drop the handle.
+                #[cfg(test)]
+                TEST_SELF_JOIN_SKIPPED.store(true, Ordering::SeqCst);
+                tracing::trace!(
+                    "cache admission worker drop running on worker thread; skipping self-join"
+                );
+            } else {
+                match handle.join() {
+                    Ok(()) => {
+                        tracing::trace!("cache admission worker exited cleanly");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = ?e,
+                            "cache admission worker thread panicked during shutdown"
+                        );
+                    }
                 }
             }
         }
@@ -704,6 +747,89 @@ mod tests {
         // Assert
         assert_eq!(metrics.miss_count(), 1);
         assert_eq!(metrics.hit_count(), 2);
+    }
+
+    #[test]
+    fn should_skip_self_join_when_dropping_on_worker_thread() {
+        // Arrange
+        let _guard = TEST_SHARD_HOOK_LOCK.lock().unwrap();
+        TEST_SELF_JOIN_SKIPPED.store(false, Ordering::SeqCst);
+        TEST_WORKER_BLOCKED.store(false, Ordering::SeqCst);
+        TEST_WORKER_RELEASE.store(false, Ordering::SeqCst);
+        TEST_WORKER_FINISHED.store(false, Ordering::SeqCst);
+
+        let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
+        let key = CacheKey::for_data(42, 0);
+
+        // Act
+        shard.put(key, Bytes::from_static(TEST_BLOCKING_VALUE));
+
+        let mut attempts = 0;
+        while !TEST_WORKER_BLOCKED.load(Ordering::SeqCst) && attempts < 1000 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            attempts += 1;
+        }
+
+        assert!(TEST_WORKER_BLOCKED.load(Ordering::SeqCst));
+
+        drop(shard);
+        TEST_WORKER_RELEASE.store(true, Ordering::SeqCst);
+
+        attempts = 0;
+        while !TEST_WORKER_FINISHED.load(Ordering::SeqCst) && attempts < 1000 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            attempts += 1;
+        }
+
+        // Assert
+        assert!(TEST_WORKER_FINISHED.load(Ordering::SeqCst));
+
+        attempts = 0;
+        while !TEST_SELF_JOIN_SKIPPED.load(Ordering::SeqCst) && attempts < 1000 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            attempts += 1;
+        }
+
+        assert!(TEST_SELF_JOIN_SKIPPED.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn should_join_worker_thread_when_dropping_on_main_thread() {
+        // Arrange
+        let _guard = TEST_SHARD_HOOK_LOCK.lock().unwrap();
+        TEST_SELF_JOIN_SKIPPED.store(false, Ordering::SeqCst);
+        TEST_WORKER_BLOCKED.store(false, Ordering::SeqCst);
+        TEST_WORKER_RELEASE.store(false, Ordering::SeqCst);
+        TEST_WORKER_FINISHED.store(false, Ordering::SeqCst);
+
+        let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
+        let key = CacheKey::for_data(43, 0);
+
+        // Act
+        shard.put(key, Bytes::from_static(TEST_BLOCKING_VALUE));
+
+        let mut attempts = 0;
+        while !TEST_WORKER_BLOCKED.load(Ordering::SeqCst) && attempts < 1000 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            attempts += 1;
+        }
+
+        assert!(TEST_WORKER_BLOCKED.load(Ordering::SeqCst));
+
+        TEST_WORKER_RELEASE.store(true, Ordering::SeqCst);
+
+        let mut attempts = 0;
+        while !TEST_WORKER_FINISHED.load(Ordering::SeqCst) && attempts < 1000 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            attempts += 1;
+        }
+
+        // Assert
+        assert!(TEST_WORKER_FINISHED.load(Ordering::SeqCst));
+
+        drop(shard);
+
+        assert!(!TEST_SELF_JOIN_SKIPPED.load(Ordering::SeqCst));
     }
 
     #[test]

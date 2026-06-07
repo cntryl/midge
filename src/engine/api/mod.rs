@@ -16,7 +16,11 @@ pub mod query;
 
 pub use iterator::{Direction, Iterator as ScanIterator};
 pub use kv::{Key, Value};
-pub use options::{Goal, MemoryBudget, OpenOptions, RecoveryPolicy, Storage, WorkloadProfile};
+pub use options::{
+    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, GcsApiStyle,
+    GcsCredentialSource, Goal, MemoryBudget, OpenOptions, RecoveryPolicy, S3CredentialSource,
+    Storage, WorkloadProfile,
+};
 pub use query::Query;
 pub(crate) use transaction::TransactionInit;
 pub use transaction::{IsolationLevel, Transaction, TransactionMode};

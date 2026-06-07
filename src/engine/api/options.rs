@@ -25,7 +25,849 @@
 
 use std::path::PathBuf;
 
+use crate::common::{MidgeError, MidgeResult};
 use crate::sst::compression::{CompressionAlgo, CompressionPolicy};
+
+/// Cloud provider credential source for S3-compatible providers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum S3CredentialSource {
+    /// Use an explicit access key / secret key pair.
+    Static {
+        access_key: String,
+        secret_key: String,
+        session_token: Option<String>,
+    },
+    /// Resolve static credentials from AWS-style environment variables.
+    Environment,
+    /// Resolve static credentials from AWS shared config/credentials files.
+    SharedProfile {
+        profile: Option<String>,
+        credentials_file: Option<PathBuf>,
+        config_file: Option<PathBuf>,
+    },
+    /// Use Midge's lightweight AWS default chain.
+    ///
+    /// Intended for AWS S3 only. S3-compatible providers should use `Static`,
+    /// `Environment`, or `SharedProfile` so they do not accidentally contact AWS
+    /// metadata/role endpoints.
+    AwsDefaultChain,
+}
+
+impl S3CredentialSource {
+    /// Use an explicit access key / secret key pair.
+    pub fn access_key(access_key: impl Into<String>, secret_key: impl Into<String>) -> Self {
+        Self::Static {
+            access_key: access_key.into(),
+            secret_key: secret_key.into(),
+            session_token: None,
+        }
+    }
+
+    /// Use explicit temporary/session credentials.
+    pub fn session(
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+        session_token: impl Into<String>,
+    ) -> Self {
+        Self::Static {
+            access_key: access_key.into(),
+            secret_key: secret_key.into(),
+            session_token: Some(session_token.into()),
+        }
+    }
+
+    /// Resolve static credentials from AWS-style environment variables.
+    pub fn environment() -> Self {
+        Self::Environment
+    }
+
+    /// Resolve static credentials from the named AWS shared profile.
+    pub fn shared_profile(profile: impl Into<String>) -> Self {
+        Self::SharedProfile {
+            profile: Some(profile.into()),
+            credentials_file: None,
+            config_file: None,
+        }
+    }
+
+    /// Use Midge's lean AWS default credential chain.
+    pub fn aws_default_chain() -> Self {
+        Self::AwsDefaultChain
+    }
+}
+
+/// Azure Blob credential source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AzureCredentialSource {
+    SharedKey {
+        account_key: String,
+    },
+    SasToken {
+        token: String,
+    },
+    ConnectionString {
+        connection_string: String,
+    },
+    StorageEnvironment,
+    EnvironmentClientSecret,
+    WorkloadIdentity {
+        tenant_id: Option<String>,
+        client_id: Option<String>,
+        token_file: Option<PathBuf>,
+    },
+    ManagedIdentity {
+        client_id: Option<String>,
+    },
+    LightweightDefaultChain,
+}
+
+impl AzureCredentialSource {
+    /// Use Azure Storage shared-key authentication.
+    pub fn shared_key(account_key: impl Into<String>) -> Self {
+        Self::SharedKey {
+            account_key: account_key.into(),
+        }
+    }
+
+    /// Use an Azure Storage SAS token.
+    pub fn sas_token(token: impl Into<String>) -> Self {
+        Self::SasToken {
+            token: token.into(),
+        }
+    }
+
+    /// Use an Azure Storage connection string.
+    pub fn connection_string(connection_string: impl Into<String>) -> Self {
+        Self::ConnectionString {
+            connection_string: connection_string.into(),
+        }
+    }
+
+    /// Resolve Azure Storage key/SAS/connection-string environment credentials.
+    pub fn storage_environment() -> Self {
+        Self::StorageEnvironment
+    }
+
+    /// Resolve Microsoft Entra client-secret credentials from environment variables.
+    pub fn environment_client_secret() -> Self {
+        Self::EnvironmentClientSecret
+    }
+
+    /// Resolve Azure workload identity credentials.
+    pub fn workload_identity() -> Self {
+        Self::WorkloadIdentity {
+            tenant_id: None,
+            client_id: None,
+            token_file: None,
+        }
+    }
+
+    /// Resolve Azure workload identity credentials with explicit fields.
+    pub fn workload_identity_with(
+        tenant_id: Option<String>,
+        client_id: Option<String>,
+        token_file: Option<PathBuf>,
+    ) -> Self {
+        Self::WorkloadIdentity {
+            tenant_id,
+            client_id,
+            token_file,
+        }
+    }
+
+    /// Resolve Azure workload identity credentials for an explicit client ID.
+    pub fn workload_identity_for_client(client_id: impl Into<String>) -> Self {
+        Self::WorkloadIdentity {
+            tenant_id: None,
+            client_id: Some(client_id.into()),
+            token_file: None,
+        }
+    }
+
+    /// Resolve Azure workload identity credentials from an explicit token file.
+    pub fn workload_identity_from_file(token_file: impl Into<PathBuf>) -> Self {
+        Self::WorkloadIdentity {
+            tenant_id: None,
+            client_id: None,
+            token_file: Some(token_file.into()),
+        }
+    }
+
+    /// Resolve an Azure managed identity token.
+    pub fn managed_identity() -> Self {
+        Self::ManagedIdentity { client_id: None }
+    }
+
+    /// Resolve a user-assigned Azure managed identity token.
+    pub fn user_assigned_managed_identity(client_id: impl Into<String>) -> Self {
+        Self::ManagedIdentity {
+            client_id: Some(client_id.into()),
+        }
+    }
+
+    /// Use Midge's lean Azure identity chain.
+    pub fn default_chain() -> Self {
+        Self::LightweightDefaultChain
+    }
+}
+
+/// Google Cloud Storage credential source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GcsCredentialSource {
+    BearerToken { token: String },
+    HmacKey { access_id: String, secret: String },
+    ApplicationDefault,
+    ServiceAccountJsonFile { path: PathBuf },
+    AuthorizedUserJsonFile { path: PathBuf },
+    MetadataServer,
+}
+
+impl GcsCredentialSource {
+    /// Use a static OAuth2 bearer token.
+    pub fn bearer_token(token: impl Into<String>) -> Self {
+        Self::BearerToken {
+            token: token.into(),
+        }
+    }
+
+    /// Use a GCS HMAC access ID / secret pair through the XML API.
+    pub fn hmac_key(access_id: impl Into<String>, secret: impl Into<String>) -> Self {
+        Self::HmacKey {
+            access_id: access_id.into(),
+            secret: secret.into(),
+        }
+    }
+
+    /// Use Google Application Default Credentials.
+    pub fn application_default() -> Self {
+        Self::ApplicationDefault
+    }
+
+    /// Use a service-account JSON key file.
+    pub fn service_account_json_file(path: impl Into<PathBuf>) -> Self {
+        Self::ServiceAccountJsonFile { path: path.into() }
+    }
+
+    /// Use an authorized-user ADC JSON file.
+    pub fn authorized_user_json_file(path: impl Into<PathBuf>) -> Self {
+        Self::AuthorizedUserJsonFile { path: path.into() }
+    }
+
+    /// Use the Google metadata server.
+    pub fn metadata_server() -> Self {
+        Self::MetadataServer
+    }
+}
+
+/// GCS HTTP API flavor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcsApiStyle {
+    /// Native JSON API (`/storage/v1`, `/upload/storage/v1`).
+    Json,
+    /// XML API with GOOG1 HMAC signing. This is the preferred Peas path.
+    Xml,
+}
+
+/// Public cloud provider configuration for real object-store backends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudProviderConfig {
+    AwsS3 {
+        bucket: String,
+        region: String,
+        credentials: S3CredentialSource,
+    },
+    S3Compatible {
+        bucket: String,
+        region: String,
+        endpoint: String,
+        path_style: bool,
+        credentials: S3CredentialSource,
+    },
+    Minio {
+        bucket: String,
+        endpoint: String,
+        credentials: S3CredentialSource,
+    },
+    Wasabi {
+        bucket: String,
+        region: String,
+        endpoint: Option<String>,
+        credentials: S3CredentialSource,
+    },
+    OciS3Compatible {
+        bucket: String,
+        namespace: String,
+        region: String,
+        endpoint: Option<String>,
+        path_style: bool,
+        credentials: S3CredentialSource,
+    },
+    AzureBlob {
+        account: String,
+        container: String,
+        endpoint: Option<String>,
+        credential: AzureCredentialSource,
+    },
+    Gcs {
+        bucket: String,
+        project_id: String,
+        endpoint: Option<String>,
+        api: GcsApiStyle,
+        credential: GcsCredentialSource,
+    },
+}
+
+/// Provider-neutral credential wrapper for fluent cloud configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudCredentialSource {
+    S3(S3CredentialSource),
+    Azure(AzureCredentialSource),
+    Gcs(GcsCredentialSource),
+}
+
+impl From<S3CredentialSource> for CloudCredentialSource {
+    fn from(source: S3CredentialSource) -> Self {
+        Self::S3(source)
+    }
+}
+
+impl From<AzureCredentialSource> for CloudCredentialSource {
+    fn from(source: AzureCredentialSource) -> Self {
+        Self::Azure(source)
+    }
+}
+
+impl From<GcsCredentialSource> for CloudCredentialSource {
+    fn from(source: GcsCredentialSource) -> Self {
+        Self::Gcs(source)
+    }
+}
+
+impl CloudProviderConfig {
+    /// Create AWS S3 config using Midge's lean AWS default credential chain.
+    pub fn aws_s3(bucket: impl Into<String>, region: impl Into<String>) -> Self {
+        Self::AwsS3 {
+            bucket: bucket.into(),
+            region: region.into(),
+            credentials: S3CredentialSource::aws_default_chain(),
+        }
+    }
+
+    /// Create AWS S3 config with explicit access keys.
+    pub fn aws_s3_static(
+        bucket: impl Into<String>,
+        region: impl Into<String>,
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+    ) -> Self {
+        Self::AwsS3 {
+            bucket: bucket.into(),
+            region: region.into(),
+            credentials: S3CredentialSource::access_key(access_key, secret_key),
+        }
+    }
+
+    /// Create S3-compatible config using AWS-style environment credentials.
+    pub fn s3_compatible_env(bucket: impl Into<String>, endpoint: impl Into<String>) -> Self {
+        Self::S3Compatible {
+            bucket: bucket.into(),
+            region: "us-east-1".to_string(),
+            endpoint: endpoint.into(),
+            path_style: true,
+            credentials: S3CredentialSource::environment(),
+        }
+    }
+
+    /// Create S3-compatible config with explicit access keys.
+    pub fn s3_compatible_static(
+        bucket: impl Into<String>,
+        endpoint: impl Into<String>,
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+    ) -> Self {
+        Self::S3Compatible {
+            bucket: bucket.into(),
+            region: "us-east-1".to_string(),
+            endpoint: endpoint.into(),
+            path_style: true,
+            credentials: S3CredentialSource::access_key(access_key, secret_key),
+        }
+    }
+
+    /// Backward-compatible S3-compatible constructor with explicit region and keys.
+    pub fn s3_compatible(
+        bucket: impl Into<String>,
+        region: impl Into<String>,
+        endpoint: impl Into<String>,
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+    ) -> Self {
+        Self::S3Compatible {
+            bucket: bucket.into(),
+            region: region.into(),
+            endpoint: endpoint.into(),
+            path_style: true,
+            credentials: S3CredentialSource::access_key(access_key, secret_key),
+        }
+    }
+
+    /// Create MinIO config with explicit access keys.
+    pub fn minio_static(
+        bucket: impl Into<String>,
+        endpoint: impl Into<String>,
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+    ) -> Self {
+        Self::Minio {
+            bucket: bucket.into(),
+            endpoint: endpoint.into(),
+            credentials: S3CredentialSource::access_key(access_key, secret_key),
+        }
+    }
+
+    /// Backward-compatible MinIO constructor with explicit access keys.
+    pub fn minio(
+        bucket: impl Into<String>,
+        endpoint: impl Into<String>,
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+    ) -> Self {
+        Self::minio_static(bucket, endpoint, access_key, secret_key)
+    }
+
+    /// Create Wasabi config using AWS-style environment credentials.
+    pub fn wasabi(bucket: impl Into<String>, region: impl Into<String>) -> Self {
+        Self::Wasabi {
+            bucket: bucket.into(),
+            region: region.into(),
+            endpoint: None,
+            credentials: S3CredentialSource::environment(),
+        }
+    }
+
+    /// Create Wasabi config with explicit access keys.
+    pub fn wasabi_static(
+        bucket: impl Into<String>,
+        region: impl Into<String>,
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+    ) -> Self {
+        Self::Wasabi {
+            bucket: bucket.into(),
+            region: region.into(),
+            endpoint: None,
+            credentials: S3CredentialSource::access_key(access_key, secret_key),
+        }
+    }
+
+    /// Create OCI Object Storage config through OCI's S3-compatible front door.
+    pub fn oci_s3_compatible(
+        namespace: impl Into<String>,
+        bucket: impl Into<String>,
+        region: impl Into<String>,
+    ) -> Self {
+        Self::OciS3Compatible {
+            bucket: bucket.into(),
+            namespace: namespace.into(),
+            region: region.into(),
+            endpoint: None,
+            path_style: false,
+            credentials: S3CredentialSource::environment(),
+        }
+    }
+
+    /// Create OCI Object Storage S3-compatible config with explicit access keys.
+    pub fn oci_s3_compatible_static(
+        namespace: impl Into<String>,
+        bucket: impl Into<String>,
+        region: impl Into<String>,
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+    ) -> Self {
+        Self::OciS3Compatible {
+            bucket: bucket.into(),
+            namespace: namespace.into(),
+            region: region.into(),
+            endpoint: None,
+            path_style: false,
+            credentials: S3CredentialSource::access_key(access_key, secret_key),
+        }
+    }
+
+    /// Create Azure Blob config using Midge's lean Azure identity chain.
+    pub fn azure_blob(account: impl Into<String>, container: impl Into<String>) -> Self {
+        Self::AzureBlob {
+            account: account.into(),
+            container: container.into(),
+            endpoint: None,
+            credential: AzureCredentialSource::default_chain(),
+        }
+    }
+
+    /// Create Azure Blob config with shared-key authentication.
+    pub fn azure_blob_shared_key(
+        account: impl Into<String>,
+        container: impl Into<String>,
+        account_key: impl Into<String>,
+    ) -> Self {
+        Self::AzureBlob {
+            account: account.into(),
+            container: container.into(),
+            endpoint: None,
+            credential: AzureCredentialSource::shared_key(account_key),
+        }
+    }
+
+    /// Create Azure Blob config with SAS-token authentication.
+    pub fn azure_blob_sas(
+        account: impl Into<String>,
+        container: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Self {
+        Self::AzureBlob {
+            account: account.into(),
+            container: container.into(),
+            endpoint: None,
+            credential: AzureCredentialSource::sas_token(token),
+        }
+    }
+
+    /// Create Azure Blob config from a connection string.
+    pub fn azure_blob_connection_string(
+        container: impl Into<String>,
+        connection_string: impl Into<String>,
+    ) -> Self {
+        let connection_string = connection_string.into();
+        Self::AzureBlob {
+            account: azure_connection_string_account(&connection_string).unwrap_or_default(),
+            container: container.into(),
+            endpoint: None,
+            credential: AzureCredentialSource::connection_string(connection_string),
+        }
+    }
+
+    /// Create GCS config using Application Default Credentials and the JSON API.
+    pub fn gcs(bucket: impl Into<String>) -> Self {
+        Self::Gcs {
+            bucket: bucket.into(),
+            project_id: String::new(),
+            endpoint: None,
+            api: GcsApiStyle::Json,
+            credential: GcsCredentialSource::application_default(),
+        }
+    }
+
+    /// Create GCS config using XML API HMAC credentials.
+    pub fn gcs_hmac(
+        bucket: impl Into<String>,
+        access_id: impl Into<String>,
+        secret: impl Into<String>,
+    ) -> Self {
+        Self::Gcs {
+            bucket: bucket.into(),
+            project_id: String::new(),
+            endpoint: None,
+            api: GcsApiStyle::Xml,
+            credential: GcsCredentialSource::hmac_key(access_id, secret),
+        }
+    }
+
+    /// Create GCS config using a service-account JSON file.
+    pub fn gcs_service_account_file(bucket: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        Self::Gcs {
+            bucket: bucket.into(),
+            project_id: String::new(),
+            endpoint: None,
+            api: GcsApiStyle::Json,
+            credential: GcsCredentialSource::service_account_json_file(path),
+        }
+    }
+
+    /// Create GCS config using an authorized-user ADC JSON file.
+    pub fn gcs_authorized_user_file(bucket: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        Self::Gcs {
+            bucket: bucket.into(),
+            project_id: String::new(),
+            endpoint: None,
+            api: GcsApiStyle::Json,
+            credential: GcsCredentialSource::authorized_user_json_file(path),
+        }
+    }
+
+    /// Create GCS config using a static OAuth2 bearer token.
+    pub fn gcs_bearer_token(bucket: impl Into<String>, token: impl Into<String>) -> Self {
+        Self::Gcs {
+            bucket: bucket.into(),
+            project_id: String::new(),
+            endpoint: None,
+            api: GcsApiStyle::Json,
+            credential: GcsCredentialSource::bearer_token(token),
+        }
+    }
+
+    pub fn peas_s3(bucket: impl Into<String>) -> Self {
+        Self::s3_compatible_static(bucket, "http://127.0.0.1:9000", "admin", "easy-peasy")
+    }
+
+    pub fn peas_azure(container: impl Into<String>) -> Self {
+        Self::AzureBlob {
+            account: "admin".to_string(),
+            container: container.into(),
+            endpoint: Some("http://127.0.0.1:9000".to_string()),
+            credential: AzureCredentialSource::shared_key("easy-peasy"),
+        }
+    }
+
+    pub fn peas_gcs(bucket: impl Into<String>) -> Self {
+        Self::Gcs {
+            bucket: bucket.into(),
+            project_id: "peas".to_string(),
+            endpoint: Some("http://127.0.0.1:9000".to_string()),
+            api: GcsApiStyle::Xml,
+            credential: GcsCredentialSource::hmac_key("admin", "easy-peasy"),
+        }
+    }
+
+    /// Override a provider endpoint when that provider supports endpoint overrides.
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> MidgeResult<Self> {
+        let endpoint = endpoint.into();
+        match &mut self {
+            Self::S3Compatible {
+                endpoint: target, ..
+            }
+            | Self::Minio {
+                endpoint: target, ..
+            } => *target = endpoint,
+            Self::Wasabi {
+                endpoint: target, ..
+            }
+            | Self::OciS3Compatible {
+                endpoint: target, ..
+            }
+            | Self::AzureBlob {
+                endpoint: target, ..
+            }
+            | Self::Gcs {
+                endpoint: target, ..
+            } => *target = Some(endpoint),
+            Self::AwsS3 { .. } => {
+                return Err(MidgeError::InvalidArgument(
+                    "AWS S3 does not support endpoint overrides; use s3_compatible_* for custom endpoints"
+                        .to_string(),
+                ));
+            }
+        }
+        Ok(self)
+    }
+
+    /// Override path-style addressing for S3-compatible providers that expose it.
+    pub fn with_path_style(mut self, path_style: bool) -> MidgeResult<Self> {
+        match &mut self {
+            Self::S3Compatible {
+                path_style: target, ..
+            }
+            | Self::OciS3Compatible {
+                path_style: target, ..
+            } => *target = path_style,
+            Self::AwsS3 { .. }
+            | Self::Minio { .. }
+            | Self::Wasabi { .. }
+            | Self::AzureBlob { .. }
+            | Self::Gcs { .. } => {
+                return Err(MidgeError::InvalidArgument(format!(
+                    "{} provider does not support path-style overrides",
+                    self.kind()
+                )));
+            }
+        }
+        Ok(self)
+    }
+
+    /// Override the signing region for S3-family providers that carry a region.
+    pub fn with_s3_region(mut self, region: impl Into<String>) -> MidgeResult<Self> {
+        let region = region.into();
+        match &mut self {
+            Self::AwsS3 { region: target, .. }
+            | Self::S3Compatible { region: target, .. }
+            | Self::Wasabi { region: target, .. }
+            | Self::OciS3Compatible { region: target, .. } => *target = region,
+            Self::Minio { .. } | Self::AzureBlob { .. } | Self::Gcs { .. } => {
+                return Err(MidgeError::InvalidArgument(format!(
+                    "{} provider does not support S3 region overrides",
+                    self.kind()
+                )));
+            }
+        }
+        Ok(self)
+    }
+
+    /// Override GCS project ID metadata for callers that need to preserve it.
+    pub fn with_gcs_project_id(mut self, project_id: impl Into<String>) -> MidgeResult<Self> {
+        if let Self::Gcs {
+            project_id: target, ..
+        } = &mut self
+        {
+            *target = project_id.into();
+            Ok(self)
+        } else {
+            Err(MidgeError::InvalidArgument(format!(
+                "{} provider does not support GCS project IDs",
+                self.kind()
+            )))
+        }
+    }
+
+    /// Override credentials when the credential kind matches the provider.
+    pub fn with_credentials<C: Into<CloudCredentialSource>>(
+        self,
+        credentials: C,
+    ) -> MidgeResult<Self> {
+        self.try_with_credentials(credentials)
+    }
+
+    /// Override credentials for an S3-family provider.
+    pub fn with_s3_credentials(self, credentials: S3CredentialSource) -> MidgeResult<Self> {
+        self.try_with_credentials(credentials)
+    }
+
+    /// Override credentials for an Azure provider.
+    pub fn with_azure_credentials(self, credentials: AzureCredentialSource) -> MidgeResult<Self> {
+        self.try_with_credentials(credentials)
+    }
+
+    /// Override credentials for a GCS provider, updating the API style as needed.
+    pub fn with_gcs_credentials(self, credentials: GcsCredentialSource) -> MidgeResult<Self> {
+        self.try_with_credentials(credentials)
+    }
+
+    /// Fallible credential override for dynamic provider/credential configuration.
+    pub fn try_with_credentials<C: Into<CloudCredentialSource>>(
+        mut self,
+        credentials: C,
+    ) -> MidgeResult<Self> {
+        match (&mut self, credentials.into()) {
+            (
+                Self::AwsS3 {
+                    credentials: target,
+                    ..
+                }
+                | Self::S3Compatible {
+                    credentials: target,
+                    ..
+                }
+                | Self::Minio {
+                    credentials: target,
+                    ..
+                }
+                | Self::Wasabi {
+                    credentials: target,
+                    ..
+                }
+                | Self::OciS3Compatible {
+                    credentials: target,
+                    ..
+                },
+                CloudCredentialSource::S3(credentials),
+            ) => *target = credentials,
+            (
+                Self::AzureBlob {
+                    account,
+                    credential,
+                    ..
+                },
+                CloudCredentialSource::Azure(credentials),
+            ) => {
+                if account.is_empty()
+                    && !matches!(&credentials, AzureCredentialSource::ConnectionString { .. })
+                {
+                    return Err(MidgeError::InvalidArgument(
+                        "cannot replace Azure connection-string credentials without an account name; use azure_blob_* with an explicit account"
+                            .to_string(),
+                    ));
+                }
+                *credential = credentials
+            }
+            (
+                Self::Gcs {
+                    api, credential, ..
+                },
+                CloudCredentialSource::Gcs(credentials),
+            ) => {
+                *api = match &credentials {
+                    GcsCredentialSource::HmacKey { .. } => GcsApiStyle::Xml,
+                    GcsCredentialSource::BearerToken { .. }
+                    | GcsCredentialSource::ApplicationDefault
+                    | GcsCredentialSource::ServiceAccountJsonFile { .. }
+                    | GcsCredentialSource::AuthorizedUserJsonFile { .. }
+                    | GcsCredentialSource::MetadataServer => GcsApiStyle::Json,
+                };
+                *credential = credentials;
+            }
+            (provider, credentials) => {
+                return Err(MidgeError::InvalidArgument(format!(
+                    "cannot apply {} credentials to {} provider",
+                    credentials.kind(),
+                    provider.kind()
+                )));
+            }
+        }
+        Ok(self)
+    }
+
+    pub fn bucket_or_container(&self) -> &str {
+        match self {
+            Self::AwsS3 { bucket, .. }
+            | Self::S3Compatible { bucket, .. }
+            | Self::Minio { bucket, .. }
+            | Self::Wasabi { bucket, .. }
+            | Self::OciS3Compatible { bucket, .. }
+            | Self::Gcs { bucket, .. } => bucket,
+            Self::AzureBlob { container, .. } => container,
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::AwsS3 { .. }
+            | Self::S3Compatible { .. }
+            | Self::Minio { .. }
+            | Self::Wasabi { .. }
+            | Self::OciS3Compatible { .. } => "S3-family",
+            Self::AzureBlob { .. } => "Azure",
+            Self::Gcs { .. } => "GCS",
+        }
+    }
+}
+
+impl CloudCredentialSource {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::S3(_) => "S3-family",
+            Self::Azure(_) => "Azure",
+            Self::Gcs(_) => "GCS",
+        }
+    }
+}
+
+fn azure_connection_string_account(connection_string: &str) -> Option<String> {
+    let mut use_development_storage = false;
+    let mut account = None;
+
+    for part in connection_string.split(';') {
+        let mut kv = part.splitn(2, '=');
+        let key = kv.next()?.trim().to_ascii_lowercase();
+        let value = kv.next().unwrap_or_default().trim();
+        match key.as_str() {
+            "accountname" if !value.is_empty() => account = Some(value.to_string()),
+            "usedevelopmentstorage" if value.eq_ignore_ascii_case("true") => {
+                use_development_storage = true;
+            }
+            _ => {}
+        }
+    }
+
+    account.or_else(|| use_development_storage.then(|| "devstoreaccount1".to_string()))
+}
 
 /// Storage backend specification - MUST be explicit
 ///
@@ -50,30 +892,31 @@ pub enum Storage {
         path: PathBuf,
     },
 
-    /// Cloud object storage (provider-agnostic)
+    /// Real cloud object storage.
     ///
-    /// Data persists to cloud object storage. Supports:
-    /// - AWS S3
-    /// - Azure Blob Storage  
-    /// - Google Cloud Storage
-    /// - Cloudflare R2
-    /// - MinIO and other S3-compatible services
-    /// - Any object storage with appropriate credentials
-    ///
-    /// Uses a hybrid model with local cache for performance.
-    ///
-    /// Use for: cloud-native deployments, serverless, distributed systems
+    /// Uses a hybrid model with a local cache/staging directory plus a
+    /// provider-backed object store.
     Cloud {
+        /// Local cache/staging path for performance
+        local_cache_path: PathBuf,
+        /// Provider and credential configuration.
+        provider: CloudProviderConfig,
+        /// Object key prefix (e.g., "databases/myapp/")
+        prefix: String,
+    },
+
+    /// Filesystem-backed cloud simulation.
+    ///
+    /// This is intentionally separate from real cloud mode so tests can keep a
+    /// deterministic in-process object-store stand-in without implying that a
+    /// provider endpoint is being used.
+    CloudSimulated {
         /// Local cache/staging path for performance
         local_cache_path: PathBuf,
         /// Bucket/container name (provider-specific terminology)
         bucket: String,
         /// Object key prefix (e.g., "databases/myapp/")
         prefix: String,
-        /// Optional endpoint override (for custom cloud providers or regional endpoints)
-        endpoint: Option<String>,
-        /// Optional region/location override
-        region: Option<String>,
     },
 }
 
@@ -178,7 +1021,8 @@ pub enum RecoveryPolicy {
 /// Storage backend MUST be explicitly specified via constructors:
 /// - OpenOptions::in_memory()
 /// - OpenOptions::local(path)
-/// - OpenOptions::cloud(cache_path, bucket, prefix)
+/// - OpenOptions::cloud(cache_path, provider, prefix)
+/// - OpenOptions::cloud_simulated(cache_path, bucket, prefix)
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
     /// Storage backend (REQUIRED - no default)
@@ -276,28 +1120,58 @@ impl OpenOptions {
         }
     }
 
-    /// Create cloud-backed database instance
+    /// Create cloud-backed database instance using a real object-store provider.
     ///
-    /// Data persists to cloud object storage (S3, Azure, GCS, R2, etc.).
+    /// Data persists to cloud object storage (S3, Azure, GCS, OCI, etc.).
     /// Uses hybrid model with local cache for performance.
     /// Ideal for: cloud-native deployments, serverless, distributed systems
     ///
     /// # Arguments
     /// * `local_cache_path` - Local directory for caching/staging
-    /// * `bucket` - Cloud bucket/container name
+    /// * `provider` - Cloud provider, bucket/container, credentials, and endpoint
     /// * `prefix` - Object key prefix
     pub fn cloud<P: Into<PathBuf>, S: Into<String>>(
         local_cache_path: P,
-        bucket: S,
+        provider: CloudProviderConfig,
         prefix: S,
     ) -> Self {
         Self {
             storage: Storage::Cloud {
                 local_cache_path: local_cache_path.into(),
+                provider,
+                prefix: prefix.into(),
+            },
+            goal: Goal::default(),
+            memory_budget: MemoryBudget::default(),
+            workload: WorkloadProfile::default(),
+            recovery_policy: RecoveryPolicy::default(),
+            derived_memory_budget: 0,
+            // Initial derived values until build() recomputes them
+            block_size: 16 * 1024,
+            memtable_size_limit: 64 * 1024 * 1024,
+            target_sst_size: 256 * 1024 * 1024,
+            block_cache_size: 128 * 1024 * 1024,
+            wal_buffer_size: 256 * 1024,
+            l0_compaction_trigger: 4,
+            compression_policy: CompressionPolicy::default(),
+            wal_batch_config: None,
+        }
+    }
+
+    /// Create a filesystem-backed cloud simulation.
+    ///
+    /// This keeps deterministic CloudAsync tests available without pretending to
+    /// connect to a real provider.
+    pub fn cloud_simulated<P: Into<PathBuf>, S: Into<String>>(
+        local_cache_path: P,
+        bucket: S,
+        prefix: S,
+    ) -> Self {
+        Self {
+            storage: Storage::CloudSimulated {
+                local_cache_path: local_cache_path.into(),
                 bucket: bucket.into(),
                 prefix: prefix.into(),
-                endpoint: None,
-                region: None,
             },
             goal: Goal::default(),
             memory_budget: MemoryBudget::default(),
@@ -645,6 +1519,263 @@ mod tests {
         assert_ne!(WorkloadProfile::WriteHeavy, WorkloadProfile::ReadMostly);
         assert_ne!(WorkloadProfile::ReadMostly, WorkloadProfile::RangeScan);
         assert_ne!(WorkloadProfile::RangeScan, WorkloadProfile::TtlHeavy);
+    }
+
+    // ========== Cloud Provider Constructor Tests ==========
+
+    #[test]
+    fn should_create_aws_s3_with_default_chain() {
+        let provider = CloudProviderConfig::aws_s3("bucket", "us-east-1");
+
+        assert_eq!(
+            provider,
+            CloudProviderConfig::AwsS3 {
+                bucket: "bucket".to_string(),
+                region: "us-east-1".to_string(),
+                credentials: S3CredentialSource::AwsDefaultChain,
+            }
+        );
+    }
+
+    #[test]
+    fn should_create_s3_compatible_env_with_safe_defaults() {
+        let provider = CloudProviderConfig::s3_compatible_env("bucket", "http://localhost:9000");
+
+        assert_eq!(
+            provider,
+            CloudProviderConfig::S3Compatible {
+                bucket: "bucket".to_string(),
+                region: "us-east-1".to_string(),
+                endpoint: "http://localhost:9000".to_string(),
+                path_style: true,
+                credentials: S3CredentialSource::Environment,
+            }
+        );
+    }
+
+    #[test]
+    fn should_create_s3_family_static_configs() {
+        let minio =
+            CloudProviderConfig::minio_static("bucket", "http://minio:9000", "key", "secret");
+        let wasabi = CloudProviderConfig::wasabi_static("bucket", "us-east-2", "key", "secret");
+        let oci = CloudProviderConfig::oci_s3_compatible_static(
+            "namespace",
+            "bucket",
+            "us-phoenix-1",
+            "key",
+            "secret",
+        );
+
+        assert!(matches!(minio, CloudProviderConfig::Minio { .. }));
+        assert!(matches!(
+            wasabi,
+            CloudProviderConfig::Wasabi {
+                credentials: S3CredentialSource::Static { .. },
+                endpoint: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            oci,
+            CloudProviderConfig::OciS3Compatible {
+                path_style: false,
+                credentials: S3CredentialSource::Static { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn should_create_azure_configs_for_identity_and_storage_credentials() {
+        let identity = CloudProviderConfig::azure_blob("account", "container");
+        let shared_key =
+            CloudProviderConfig::azure_blob_shared_key("account", "container", "account-key");
+        let sas = CloudProviderConfig::azure_blob_sas("account", "container", "?sig=token");
+        let conn = CloudProviderConfig::azure_blob_connection_string(
+            "container",
+            "AccountName=account;AccountKey=key",
+        );
+
+        assert!(matches!(
+            identity,
+            CloudProviderConfig::AzureBlob {
+                credential: AzureCredentialSource::LightweightDefaultChain,
+                ..
+            }
+        ));
+        assert!(matches!(
+            shared_key,
+            CloudProviderConfig::AzureBlob {
+                credential: AzureCredentialSource::SharedKey { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            sas,
+            CloudProviderConfig::AzureBlob {
+                credential: AzureCredentialSource::SasToken { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            conn,
+            CloudProviderConfig::AzureBlob {
+                account,
+                credential: AzureCredentialSource::ConnectionString { .. },
+                ..
+            } if account == "account"
+        ));
+    }
+
+    #[test]
+    fn should_create_gcs_configs_with_matching_api_styles() {
+        let adc = CloudProviderConfig::gcs("bucket");
+        let hmac = CloudProviderConfig::gcs_hmac("bucket", "access", "secret");
+        let bearer = CloudProviderConfig::gcs_bearer_token("bucket", "token");
+
+        assert!(matches!(
+            adc,
+            CloudProviderConfig::Gcs {
+                api: GcsApiStyle::Json,
+                credential: GcsCredentialSource::ApplicationDefault,
+                ..
+            }
+        ));
+        assert!(matches!(
+            hmac,
+            CloudProviderConfig::Gcs {
+                api: GcsApiStyle::Xml,
+                credential: GcsCredentialSource::HmacKey { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            bearer,
+            CloudProviderConfig::Gcs {
+                api: GcsApiStyle::Json,
+                credential: GcsCredentialSource::BearerToken { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn should_apply_fluent_cloud_modifiers() {
+        let s3 = CloudProviderConfig::s3_compatible_env("bucket", "http://old")
+            .with_endpoint("http://new")
+            .expect("endpoint override")
+            .with_s3_region("eu-west-1")
+            .expect("region override")
+            .with_path_style(false)
+            .expect("path-style override")
+            .with_s3_credentials(S3CredentialSource::access_key("key", "secret"))
+            .expect("s3 credentials");
+        let gcs = CloudProviderConfig::gcs_hmac("bucket", "access", "secret")
+            .with_gcs_credentials(GcsCredentialSource::application_default())
+            .expect("gcs credentials");
+
+        assert_eq!(
+            s3,
+            CloudProviderConfig::S3Compatible {
+                bucket: "bucket".to_string(),
+                region: "eu-west-1".to_string(),
+                endpoint: "http://new".to_string(),
+                path_style: false,
+                credentials: S3CredentialSource::access_key("key", "secret"),
+            }
+        );
+        assert!(matches!(
+            gcs,
+            CloudProviderConfig::Gcs {
+                api: GcsApiStyle::Json,
+                credential: GcsCredentialSource::ApplicationDefault,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn should_reject_mismatched_cloud_credentials() {
+        let result = CloudProviderConfig::gcs("bucket")
+            .try_with_credentials(S3CredentialSource::access_key("key", "secret"));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_reject_unsupported_cloud_modifiers() {
+        assert!(CloudProviderConfig::aws_s3("bucket", "us-east-1")
+            .with_endpoint("http://localhost:9000")
+            .is_err());
+        assert!(CloudProviderConfig::gcs("bucket")
+            .with_path_style(true)
+            .is_err());
+        assert!(
+            CloudProviderConfig::minio_static("bucket", "http://minio:9000", "key", "secret")
+                .with_s3_region("us-west-2")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn should_parse_azure_account_from_connection_string_config() {
+        let provider = CloudProviderConfig::azure_blob_connection_string(
+            "container",
+            "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=key",
+        );
+
+        assert!(matches!(
+            provider,
+            CloudProviderConfig::AzureBlob { account, .. } if account == "myaccount"
+        ));
+    }
+
+    #[test]
+    fn should_reject_connection_string_credential_override_without_account() {
+        let provider = CloudProviderConfig::AzureBlob {
+            account: String::new(),
+            container: "container".to_string(),
+            endpoint: None,
+            credential: AzureCredentialSource::connection_string("AccountKey=key"),
+        };
+
+        let result = provider.with_azure_credentials(AzureCredentialSource::shared_key("key"));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_create_workload_identity_credentials_without_none_annotations() {
+        let client = AzureCredentialSource::workload_identity_for_client("client-id");
+        let file = AzureCredentialSource::workload_identity_from_file("/var/run/token");
+        let full = AzureCredentialSource::workload_identity_with(
+            Some("tenant-id".to_string()),
+            None,
+            Some(PathBuf::from("/var/run/token")),
+        );
+
+        assert!(matches!(
+            client,
+            AzureCredentialSource::WorkloadIdentity {
+                client_id: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            file,
+            AzureCredentialSource::WorkloadIdentity {
+                token_file: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            full,
+            AzureCredentialSource::WorkloadIdentity {
+                tenant_id: Some(_),
+                client_id: None,
+                token_file: Some(_),
+            }
+        ));
     }
 
     #[test]

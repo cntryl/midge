@@ -29,8 +29,10 @@ pub(crate) mod api;
 mod ingest;
 
 pub use api::{
-    Direction, Goal, IsolationLevel, Key, MemoryBudget, OpenOptions, Query, RecoveryPolicy,
-    ScanIterator, Storage, Transaction, TransactionMode, Value, WorkloadProfile, WriteOptions,
+    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, Direction, GcsApiStyle,
+    GcsCredentialSource, Goal, IsolationLevel, Key, MemoryBudget, OpenOptions, Query,
+    RecoveryPolicy, S3CredentialSource, ScanIterator, Storage, Transaction, TransactionMode, Value,
+    WorkloadProfile, WriteOptions,
 };
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<ColumnFamilyId, ColumnFamilyHandle>;
@@ -490,6 +492,467 @@ impl Engine {
         Ok(())
     }
 
+    fn blocking_cloud_list(
+        cloud: &crate::storage::cloud::CloudStorage,
+        prefix: &str,
+    ) -> MidgeResult<Vec<String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_list(prefix.to_string(), tx);
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(crate::storage::cloud::CloudEvent::ListComplete { result, .. }) => match result {
+                crate::storage::cloud::CloudOutcome::Ok(keys) => Ok(keys),
+                crate::storage::cloud::CloudOutcome::Err(error) => Err(MidgeError::Internal(
+                    format!("cloud list '{}': {}", prefix, error),
+                )),
+            },
+            Ok(other) => Err(MidgeError::Internal(format!(
+                "unexpected cloud list response for '{}': {:?}",
+                prefix, other
+            ))),
+            Err(error) => Err(MidgeError::Internal(format!(
+                "cloud list '{}' timed out or failed: {}",
+                prefix, error
+            ))),
+        }
+    }
+
+    fn blocking_cloud_get(
+        cloud: &crate::storage::cloud::CloudStorage,
+        key: &str,
+    ) -> MidgeResult<Vec<u8>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_get(key.to_string(), tx);
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(crate::storage::cloud::CloudEvent::GetComplete { result, .. }) => match result {
+                crate::storage::cloud::CloudOutcome::Ok(data) => Ok(data),
+                crate::storage::cloud::CloudOutcome::Err(error) => Err(MidgeError::Internal(
+                    format!("cloud get '{}': {}", key, error),
+                )),
+            },
+            Ok(other) => Err(MidgeError::Internal(format!(
+                "unexpected cloud get response for '{}': {:?}",
+                key, other
+            ))),
+            Err(error) => Err(MidgeError::Internal(format!(
+                "cloud get '{}' timed out or failed: {}",
+                key, error
+            ))),
+        }
+    }
+
+    fn blocking_cloud_put(
+        cloud: &crate::storage::cloud::CloudStorage,
+        key: &str,
+        data: Vec<u8>,
+    ) -> MidgeResult<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_put(key.to_string(), data, vec![], tx);
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(crate::storage::cloud::CloudEvent::PutComplete { result, .. }) => match result {
+                crate::storage::cloud::CloudOutcome::Ok(()) => Ok(()),
+                crate::storage::cloud::CloudOutcome::Err(error) => Err(MidgeError::Internal(
+                    format!("cloud put '{}': {}", key, error),
+                )),
+            },
+            Ok(other) => Err(MidgeError::Internal(format!(
+                "unexpected cloud put response for '{}': {:?}",
+                key, other
+            ))),
+            Err(error) => Err(MidgeError::Internal(format!(
+                "cloud put '{}' timed out or failed: {}",
+                key, error
+            ))),
+        }
+    }
+
+    fn hydrate_cloud_metadata(
+        cloud: &crate::storage::cloud::CloudStorage,
+        db_path: &Path,
+        recovery_policy: RecoveryPolicy,
+    ) -> MidgeResult<()> {
+        let keys = match Self::blocking_cloud_list(cloud, "metadata/") {
+            Ok(keys) => keys,
+            Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
+                tracing::warn!(%error, "could not list cloud metadata during salvage open");
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(MidgeError::RecoveryFailed(format!(
+                    "failed to list cloud metadata objects: {}",
+                    error
+                )))
+            }
+        };
+
+        let available: std::collections::HashSet<String> = keys
+            .iter()
+            .map(|key| cloud.strip_namespace(key).to_string())
+            .collect();
+
+        for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            if !available.contains(&key) {
+                continue;
+            }
+
+            let data = match Self::blocking_cloud_get(cloud, &key) {
+                Ok(data) => data,
+                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
+                    tracing::warn!(%error, key = %key, "skipping cloud metadata object during salvage open");
+                    continue;
+                }
+                Err(error) => {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "failed to download cloud metadata '{}': {}",
+                        key, error
+                    )))
+                }
+            };
+
+            let local_path = db_path.join(file_name);
+            std::fs::write(&local_path, data).map_err(|error| {
+                MidgeError::RecoveryFailed(format!(
+                    "failed to stage cloud metadata '{}': {}",
+                    local_path.display(),
+                    error
+                ))
+            })?;
+        }
+
+        Ok(())
+    }
+
+    fn mirror_cloud_metadata(
+        cloud: &crate::storage::cloud::CloudStorage,
+        db_path: &Path,
+        recovery_policy: RecoveryPolicy,
+    ) -> MidgeResult<()> {
+        for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+            let local_path = db_path.join(file_name);
+            if !local_path.exists() {
+                continue;
+            }
+
+            let data = match std::fs::read(&local_path) {
+                Ok(data) => data,
+                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
+                    tracing::warn!(%error, file = %local_path.display(), "skipping metadata mirror during salvage open");
+                    continue;
+                }
+                Err(error) => {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "failed to read local metadata '{}': {}",
+                        local_path.display(),
+                        error
+                    )))
+                }
+            };
+
+            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            if let Err(error) = Self::blocking_cloud_put(cloud, &key, data) {
+                if recovery_policy == RecoveryPolicy::Salvage {
+                    tracing::warn!(%error, key = %key, "skipping metadata mirror during salvage open");
+                    continue;
+                }
+                return Err(MidgeError::RecoveryFailed(format!(
+                    "failed to mirror cloud metadata '{}': {}",
+                    key, error
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn materialize_cloud_wal_recovery_dir(
+        cloud: &crate::storage::cloud::CloudStorage,
+        db_path: &Path,
+        recovery_policy: RecoveryPolicy,
+    ) -> MidgeResult<PathBuf> {
+        let recovery_wal_dir = db_path.join("cloud_recovery").join("wal");
+        if recovery_wal_dir.exists() {
+            std::fs::remove_dir_all(&recovery_wal_dir).map_err(|error| {
+                MidgeError::RecoveryFailed(format!(
+                    "failed to clear cloud WAL recovery directory '{}': {}",
+                    recovery_wal_dir.display(),
+                    error
+                ))
+            })?;
+        }
+        std::fs::create_dir_all(&recovery_wal_dir).map_err(|error| {
+            MidgeError::RecoveryFailed(format!(
+                "failed to create cloud WAL recovery directory '{}': {}",
+                recovery_wal_dir.display(),
+                error
+            ))
+        })?;
+
+        let keys = match Self::blocking_cloud_list(cloud, "wal/") {
+            Ok(keys) => keys,
+            Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
+                tracing::warn!(%error, "could not list cloud WAL objects during salvage open");
+                return Ok(recovery_wal_dir);
+            }
+            Err(error) => {
+                return Err(MidgeError::RecoveryFailed(format!(
+                    "failed to list cloud WAL objects: {}",
+                    error
+                )))
+            }
+        };
+
+        for key in keys {
+            let logical_key = cloud.strip_namespace(&key);
+            let Some(file_name) = logical_key.strip_prefix("wal/") else {
+                continue;
+            };
+            if file_name.is_empty() || file_name.contains('/') {
+                continue;
+            }
+
+            let data = match Self::blocking_cloud_get(cloud, logical_key) {
+                Ok(data) => data,
+                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
+                    tracing::warn!(%error, key = %logical_key, "skipping cloud WAL object during salvage open");
+                    continue;
+                }
+                Err(error) => {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "failed to download cloud WAL '{}': {}",
+                        logical_key, error
+                    )))
+                }
+            };
+
+            std::fs::write(recovery_wal_dir.join(file_name), data).map_err(|error| {
+                MidgeError::RecoveryFailed(format!(
+                    "failed to stage cloud WAL '{}': {}",
+                    logical_key, error
+                ))
+            })?;
+        }
+
+        Ok(recovery_wal_dir)
+    }
+
+    fn ensure_local_sst_cache_from_cloud_storage(
+        state: &mut RuntimeState,
+        cloud: &crate::storage::cloud::CloudStorage,
+    ) -> MidgeResult<()> {
+        let keys = Self::blocking_cloud_list(cloud, "sst/")?;
+        let available: std::collections::HashSet<String> = keys
+            .iter()
+            .map(|key| cloud.strip_namespace(key).to_string())
+            .collect();
+        let mut retained_files = Vec::with_capacity(state.manifest.files.len());
+        let mut manifest_changed = false;
+
+        for file in state.manifest.files.clone() {
+            let cloud_key = format!("sst/{}", file.name);
+            if !available.contains(&cloud_key) {
+                if state.recovery_policy == RecoveryPolicy::Strict {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "authoritative cloud SST '{}' is missing",
+                        file.name
+                    )));
+                }
+                state.opened_in_salvage_mode = true;
+                state.persistence_anomaly_detected = true;
+                manifest_changed = true;
+                continue;
+            }
+
+            let local_path = state.sst_dir.join(&file.name);
+            let local_valid = local_path.exists()
+                && crate::sst::fs::SstFileIo::open_with_real_fs(&local_path).is_ok();
+            if !local_valid {
+                let data = match Self::blocking_cloud_get(cloud, &cloud_key) {
+                    Ok(data) => data,
+                    Err(error) if state.recovery_policy == RecoveryPolicy::Salvage => {
+                        tracing::warn!(%error, sst_name = %file.name, "dropping manifest SST during salvage restore");
+                        state.opened_in_salvage_mode = true;
+                        state.persistence_anomaly_detected = true;
+                        manifest_changed = true;
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "failed to restore cloud SST '{}': {}",
+                            file.name, error
+                        )))
+                    }
+                };
+
+                if let Some(parent) = local_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|error| {
+                        MidgeError::RecoveryFailed(format!(
+                            "failed to create SST cache directory '{}': {}",
+                            parent.display(),
+                            error
+                        ))
+                    })?;
+                }
+                std::fs::write(&local_path, data).map_err(|error| {
+                    MidgeError::RecoveryFailed(format!(
+                        "failed to write restored SST '{}': {}",
+                        file.name, error
+                    ))
+                })?;
+
+                if let Err(error) = crate::sst::fs::SstFileIo::open_with_real_fs(&local_path) {
+                    if state.recovery_policy == RecoveryPolicy::Strict {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "restored cloud SST '{}' is invalid: {}",
+                            file.name, error
+                        )));
+                    }
+                    state.opened_in_salvage_mode = true;
+                    state.persistence_anomaly_detected = true;
+                    manifest_changed = true;
+                    let _ = std::fs::remove_file(&local_path);
+                    continue;
+                }
+            }
+
+            retained_files.push(file);
+        }
+
+        if manifest_changed {
+            state.manifest.files = retained_files;
+            crate::metadata::ManifestPersistence::save(&state.db_path, &state.manifest)
+                .map_err(MidgeError::Internal)?;
+            state.restore_sequence_floor_from_manifest();
+        }
+
+        Ok(())
+    }
+
+    fn ensure_named_sst_cache_from_cloud_storage(
+        state: &mut RuntimeState,
+        cloud: &crate::storage::cloud::CloudStorage,
+        sst_names: impl IntoIterator<Item = String>,
+    ) -> MidgeResult<()> {
+        let keys = match Self::blocking_cloud_list(cloud, "sst/") {
+            Ok(keys) => keys,
+            Err(error) if state.recovery_policy == RecoveryPolicy::Salvage => {
+                state.opened_in_salvage_mode = true;
+                state.persistence_anomaly_detected = true;
+                tracing::warn!(%error, "could not list cloud SST objects during salvage staging");
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(MidgeError::RecoveryFailed(format!(
+                    "failed to list cloud SST objects: {}",
+                    error
+                )))
+            }
+        };
+        let available: std::collections::HashSet<String> = keys
+            .iter()
+            .map(|key| cloud.strip_namespace(key).to_string())
+            .collect();
+
+        for sst_name in sst_names {
+            let cloud_key = format!("sst/{}", sst_name);
+            if !available.contains(&cloud_key) {
+                if state.recovery_policy == RecoveryPolicy::Strict {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "authoritative cloud SST '{}' is missing",
+                        sst_name
+                    )));
+                }
+                state.opened_in_salvage_mode = true;
+                state.persistence_anomaly_detected = true;
+                tracing::warn!(
+                    sst_name = %sst_name,
+                    "skipping cloud SST staging because authoritative object is missing"
+                );
+                continue;
+            }
+
+            let local_path = state.sst_dir.join(&sst_name);
+            let local_valid = local_path.exists()
+                && crate::sst::fs::SstFileIo::open_with_real_fs(&local_path).is_ok();
+            if local_valid {
+                continue;
+            }
+
+            let data = match Self::blocking_cloud_get(cloud, &cloud_key) {
+                Ok(data) => data,
+                Err(error) if state.recovery_policy == RecoveryPolicy::Salvage => {
+                    state.opened_in_salvage_mode = true;
+                    state.persistence_anomaly_detected = true;
+                    tracing::warn!(%error, sst_name = %sst_name, "skipping cloud SST staging during salvage");
+                    continue;
+                }
+                Err(error) => {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "failed to restore cloud SST '{}': {}",
+                        sst_name, error
+                    )))
+                }
+            };
+
+            if let Some(parent) = local_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    MidgeError::RecoveryFailed(format!(
+                        "failed to create SST cache directory '{}': {}",
+                        parent.display(),
+                        error
+                    ))
+                })?;
+            }
+            std::fs::write(&local_path, data).map_err(|error| {
+                MidgeError::RecoveryFailed(format!(
+                    "failed to write restored SST '{}': {}",
+                    sst_name, error
+                ))
+            })?;
+
+            if let Err(error) = crate::sst::fs::SstFileIo::open_with_real_fs(&local_path) {
+                if state.recovery_policy == RecoveryPolicy::Strict {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "restored cloud SST '{}' is invalid: {}",
+                        sst_name, error
+                    )));
+                }
+                state.opened_in_salvage_mode = true;
+                state.persistence_anomaly_detected = true;
+                let _ = std::fs::remove_file(&local_path);
+                tracing::warn!(
+                    sst_name = %sst_name,
+                    error = %error,
+                    "discarding invalid cloud SST during salvage staging"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cloud_recovery_sst_names_for_intent_replay(state: &RuntimeState) -> Vec<String> {
+        let mut names = std::collections::BTreeSet::new();
+        for file in &state.manifest.files {
+            names.insert(file.name.clone());
+        }
+        for intent in &state.intent_log {
+            match intent {
+                crate::runtime::IntentLogEntry::FlushPublish { file_meta, .. }
+                | crate::runtime::IntentLogEntry::SstAdded { file_meta } => {
+                    names.insert(file_meta.name.clone());
+                }
+                crate::runtime::IntentLogEntry::CompactionPublish { added, .. }
+                | crate::runtime::IntentLogEntry::CompactionApplied { added, .. } => {
+                    for file_meta in added {
+                        names.insert(file_meta.name.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        names.into_iter().collect()
+    }
+
     /// Open a database with explicit environment selection.
     ///
     /// The storage backend is specified by `OpenOptions.storage`. There is no
@@ -515,6 +978,9 @@ impl Engine {
             ),
             Storage::Local { path } => (path.clone(), false),
             Storage::Cloud {
+                local_cache_path, ..
+            }
+            | Storage::CloudSimulated {
                 local_cache_path, ..
             } => (local_cache_path.clone(), false),
         };
@@ -576,8 +1042,9 @@ impl Engine {
         let lease_healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
         let mut cloud_root = None;
+        let mut cloud_storage_for_restore: Option<Arc<crate::storage::cloud::CloudStorage>> = None;
         let (mut state, runtime_config) = match &opts.storage {
-            Storage::Cloud { .. } => {
+            Storage::CloudSimulated { .. } => {
                 let cloud = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
                     &db_path,
                 )?;
@@ -603,6 +1070,53 @@ impl Engine {
 
                 (state, config)
             }
+            Storage::Cloud {
+                provider, prefix, ..
+            } => {
+                let cloud_storage =
+                    crate::storage::providers::build_cloud_storage(provider, prefix)?;
+                Self::hydrate_cloud_metadata(&cloud_storage, &db_path, opts.recovery_policy)?;
+                let recovery_wal_dir = Self::materialize_cloud_wal_recovery_dir(
+                    &cloud_storage,
+                    &db_path,
+                    opts.recovery_policy,
+                )?;
+
+                let local_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
+                    db_path.join("hybrid_local"),
+                )?);
+                let cloud_backend: Arc<dyn crate::storage::StorageBackend> = cloud_storage.clone();
+
+                let (tx, rx) = crossbeam::channel::unbounded::<crate::storage::StorageEvent>();
+                let hybrid_storage =
+                    Arc::new(crate::storage::HybridStorage::new_with_event_sender(
+                        local_backend,
+                        cloud_backend,
+                        tx,
+                    ));
+
+                let state = RuntimeState::try_new_with_recovery_dir(
+                    db_path.clone(),
+                    memory_mode,
+                    Some(recovery_wal_dir),
+                    opts.recovery_policy,
+                )?;
+
+                let config = crate::runtime::RuntimeConfig {
+                    wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+                    hybrid_storage: Some(hybrid_storage),
+                    hybrid_storage_events: Some(rx),
+                    cloud_metadata_storage: Some(cloud_storage.clone()),
+                    compression_policy: opts.compression_policy.clone(),
+                    writer_epoch,
+                    lease_healthy: Some(Arc::clone(&lease_healthy)),
+                    leader_store: leader_store.clone(),
+                    ..Default::default()
+                };
+
+                cloud_storage_for_restore = Some(cloud_storage);
+                (state, config)
+            }
             _ => {
                 // Local or Memory mode: use Batched durability with optional batch config from OpenOptions
                 let batch_config = opts.wal_batch_config.unwrap_or_default();
@@ -624,11 +1138,21 @@ impl Engine {
             }
         };
 
-        // 🔑 CRITICAL: Replay intent log to recover any interrupted mutations
-        // Must happen BEFORE runtime starts processing messages
+        if let Some(cloud_storage) = cloud_storage_for_restore.as_deref() {
+            let sst_names = Self::cloud_recovery_sst_names_for_intent_replay(&state);
+            Self::ensure_named_sst_cache_from_cloud_storage(&mut state, cloud_storage, sst_names)?;
+        }
+
+        // 🔑 CRITICAL: Replay intent log to recover any interrupted mutations.
+        // For real cloud mode, SSTs referenced by publish intents have already
+        // been staged locally so replay validation can stay local and strict.
         state.replay_intent_log()?;
         if let Some(root) = cloud_root.as_deref() {
             Self::ensure_local_sst_cache_from_cloud(&mut state, root)?;
+        }
+        if let Some(cloud_storage) = cloud_storage_for_restore.as_deref() {
+            Self::ensure_local_sst_cache_from_cloud_storage(&mut state, cloud_storage)?;
+            Self::mirror_cloud_metadata(cloud_storage, &db_path, opts.recovery_policy)?;
         }
         state.cleanup_storage_residue();
         let recovered_sequence = state.sequence;
@@ -729,7 +1253,10 @@ impl Engine {
             runtime_handle,
             db_path,
             memory_mode,
-            cloud_mode: matches!(&opts.storage, Storage::Cloud { .. }),
+            cloud_mode: matches!(
+                &opts.storage,
+                Storage::Cloud { .. } | Storage::CloudSimulated { .. }
+            ),
             recovery_policy: opts.recovery_policy,
             sequence: Arc::new(std::sync::atomic::AtomicU64::new(recovered_sequence)),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),

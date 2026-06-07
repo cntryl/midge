@@ -72,17 +72,34 @@ pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseErr
         }
         Storage::Cloud {
             local_cache_path,
-            bucket,
+            provider,
             prefix,
-            endpoint,
-            region,
         } => {
             // Cloud storage: use cloud lease with TTL-based coordination
             let config = CloudLeaseConfig {
+                bucket: provider.bucket_or_container().to_string(),
+                prefix: prefix.clone(),
+                endpoint: None,
+                region: None,
+            };
+            let cloud = crate::storage::providers::build_cloud_storage(provider, prefix)
+                .map_err(|error| LeaseError::IoError(format!("cloud lease backend: {}", error)))?;
+            Ok(Arc::new(CloudStorageLease::new_provider_backed(
+                config,
+                local_cache_path.clone(),
+                cloud,
+            )))
+        }
+        Storage::CloudSimulated {
+            local_cache_path,
+            bucket,
+            prefix,
+        } => {
+            let config = CloudLeaseConfig {
                 bucket: bucket.clone(),
                 prefix: prefix.clone(),
-                endpoint: endpoint.clone(),
-                region: region.clone(),
+                endpoint: None,
+                region: None,
             };
             Ok(Arc::new(CloudStorageLease::new(
                 config,

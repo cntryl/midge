@@ -7,20 +7,25 @@ on:
   push:
     branches: [main]
     paths:
+      - "compose.yml"
       - "src/**"
       - "tests/**"
       - "*.toml"
       - ".cargo/**"
+      - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
     paths:
+      - "compose.yml"
       - "src/**"
       - "tests/**"
       - "*.toml"
       - ".cargo/**"
+      - ".github/workflows/ci.yml"
 
 jobs:
-  ci:
+  matrix:
+    name: Matrix (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     env:
       CARGO_INCREMENTAL: 0
@@ -59,7 +64,34 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Build
-        run: cargo build
+        run: cargo build --all-targets
 
-      - name: Test
-        run: cargo test
+  cloud-integration:
+    name: Cloud integration (Peas)
+    runs-on: ubuntu-latest
+    needs: matrix
+    env:
+      CARGO_INCREMENTAL: 0
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Update Rust toolchain
+        run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-cloud-integration"
+
+      - name: Start Peas emulator
+        run: docker compose up -d peas
+
+      - name: Test against Peas emulator
+        run: cargo test --all-targets
+
+      - name: Stop Peas emulator
+        if: always()
+        run: docker compose down -v

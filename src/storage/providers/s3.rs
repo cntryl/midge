@@ -117,6 +117,13 @@ impl DefaultAwsCredentialProvider {
             });
         }
 
+        if let Some(creds) = self.resolve_profile_credentials()? {
+            return Ok(CachedAwsCredentials {
+                creds,
+                expires_at: None,
+            });
+        }
+
         if let Ok(web_identity) = self.resolve_web_identity() {
             return Ok(web_identity);
         }
@@ -130,7 +137,7 @@ impl DefaultAwsCredentialProvider {
         }
 
         Err(MidgeError::InvalidArgument(
-            "no AWS credentials found (checked env, IRSA web identity, ECS task role, and EC2 IMDS)"
+            "no AWS credentials found (checked env, shared profile, IRSA web identity, ECS task role, and EC2 IMDS)"
                 .into(),
         ))
     }
@@ -152,6 +159,34 @@ impl DefaultAwsCredentialProvider {
             region: self.region.clone(),
             session_token,
         })
+    }
+
+    fn resolve_profile_credentials(&self) -> MidgeResult<Option<AwsCredentials>> {
+        let profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".to_string());
+        let credentials_file = std::env::var("AWS_SHARED_CREDENTIALS_FILE")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .or_else(|| default_home_file(".aws/credentials"));
+        let config_file = std::env::var("AWS_CONFIG_FILE")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .or_else(|| default_home_file(".aws/config"));
+
+        if let Some(path) = credentials_file {
+            if let Some(creds) = read_aws_profile_credentials(&path, &profile, &self.region, false)?
+            {
+                return Ok(Some(creds));
+            }
+        }
+
+        if let Some(path) = config_file {
+            if let Some(creds) = read_aws_profile_credentials(&path, &profile, &self.region, true)?
+            {
+                return Ok(Some(creds));
+            }
+        }
+
+        Ok(None)
     }
 
     fn resolve_web_identity(&self) -> MidgeResult<CachedAwsCredentials> {
@@ -390,6 +425,170 @@ fn extract_xml_tag(xml: &str, tag: &str) -> MidgeResult<String> {
     )))
 }
 
+pub(crate) fn resolve_static_env_credentials(region: &str) -> Option<AwsCredentials> {
+    let access_key = std::env::var("AWS_ACCESS_KEY_ID")
+        .or_else(|_| std::env::var("AWS_ACCESS_KEY"))
+        .ok()?;
+    let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
+        .or_else(|_| std::env::var("AWS_SECRET_KEY"))
+        .ok()?;
+    let session_token = std::env::var("AWS_SESSION_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("AWS_SECURITY_TOKEN").ok());
+
+    Some(AwsCredentials {
+        access_key,
+        secret_key,
+        region: region.to_string(),
+        session_token,
+    })
+}
+
+pub(crate) fn resolve_static_profile_credentials(
+    region: &str,
+    profile: Option<&str>,
+    credentials_file: Option<&std::path::Path>,
+    config_file: Option<&std::path::Path>,
+) -> MidgeResult<Option<AwsCredentials>> {
+    let profile = profile
+        .map(str::to_string)
+        .or_else(|| std::env::var("AWS_PROFILE").ok())
+        .unwrap_or_else(|| "default".to_string());
+    let credentials_file = credentials_file
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("AWS_SHARED_CREDENTIALS_FILE")
+                .ok()
+                .map(std::path::PathBuf::from)
+        })
+        .or_else(|| default_home_file(".aws/credentials"));
+    let config_file = config_file
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("AWS_CONFIG_FILE")
+                .ok()
+                .map(std::path::PathBuf::from)
+        })
+        .or_else(|| default_home_file(".aws/config"));
+
+    if let Some(path) = credentials_file {
+        if let Some(creds) = read_aws_profile_credentials(&path, &profile, region, false)? {
+            return Ok(Some(creds));
+        }
+    }
+
+    if let Some(path) = config_file {
+        if let Some(creds) = read_aws_profile_credentials(&path, &profile, region, true)? {
+            return Ok(Some(creds));
+        }
+    }
+
+    Ok(None)
+}
+
+fn default_home_file(relative: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(relative))
+}
+
+fn read_aws_profile_credentials(
+    path: &std::path::Path,
+    profile: &str,
+    region: &str,
+    is_config_file: bool,
+) -> MidgeResult<Option<AwsCredentials>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(MidgeError::Internal(format!(
+                "failed to read AWS profile file '{}': {}",
+                path.display(),
+                error
+            )))
+        }
+    };
+
+    let section = profile_section_name(profile, is_config_file);
+    let Some(values) = parse_ini_section(&content, &section) else {
+        return Ok(None);
+    };
+
+    if values.contains_key("credential_process")
+        || values.contains_key("sso_start_url")
+        || values.contains_key("sso_session")
+    {
+        return Err(MidgeError::InvalidArgument(format!(
+            "AWS profile '{}' uses credential_process or SSO, which Midge does not execute without SDK/CLI support",
+            profile
+        )));
+    }
+
+    let access_key = values
+        .get("aws_access_key_id")
+        .cloned()
+        .or_else(|| values.get("access_key_id").cloned());
+    let secret_key = values
+        .get("aws_secret_access_key")
+        .cloned()
+        .or_else(|| values.get("secret_access_key").cloned());
+
+    let (Some(access_key), Some(secret_key)) = (access_key, secret_key) else {
+        return Ok(None);
+    };
+
+    Ok(Some(AwsCredentials {
+        access_key,
+        secret_key,
+        region: region.to_string(),
+        session_token: values
+            .get("aws_session_token")
+            .cloned()
+            .or_else(|| values.get("aws_security_token").cloned()),
+    }))
+}
+
+fn profile_section_name(profile: &str, is_config_file: bool) -> String {
+    if !is_config_file || profile == "default" {
+        profile.to_string()
+    } else {
+        format!("profile {}", profile)
+    }
+}
+
+fn parse_ini_section(
+    content: &str,
+    section: &str,
+) -> Option<std::collections::HashMap<String, String>> {
+    let mut current = None::<String>;
+    let mut values = std::collections::HashMap::new();
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+
+        if line.starts_with('[') && line.ends_with(']') {
+            current = Some(line[1..line.len() - 1].trim().to_string());
+            continue;
+        }
+
+        if current.as_deref() != Some(section) {
+            continue;
+        }
+
+        if let Some((key, value)) = line.split_once('=') {
+            values.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
 fn parse_rfc3339_epoch(value: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
@@ -554,6 +753,13 @@ impl S3Provider {
         Self::with_config(config, Some(creds))
     }
 
+    pub(crate) fn custom_with_credentials(
+        config: S3Config,
+        creds: AwsCredentials,
+    ) -> MidgeResult<Self> {
+        Self::with_config(config, Some(creds))
+    }
+
     /// Create provider with full config and optional credentials
     fn with_config(config: S3Config, creds: Option<AwsCredentials>) -> MidgeResult<Self> {
         let signer = creds.map(|c| Arc::new(SigV4Signer::new(c)) as Arc<dyn CloudSigner>);
@@ -632,8 +838,35 @@ impl S3Backend {
         format!("{}/{}", self.base_url(), self.canonical_key(key))
     }
 
-    fn list_url(&self, prefix: &str) -> String {
-        format!("{}?list-type=2&prefix={}", self.base_url(), encode(prefix))
+    fn list_url(&self, prefix: &str, continuation_token: Option<&str>) -> String {
+        let mut url = format!("{}?list-type=2&prefix={}", self.base_url(), encode(prefix));
+        if let Some(token) = continuation_token {
+            url.push_str("&continuation-token=");
+            url.push_str(&encode(token));
+        }
+        url
+    }
+}
+
+struct S3ListState {
+    prefix: String,
+    base_url: String,
+    continuation_token: Option<String>,
+    items: Vec<String>,
+}
+
+impl S3ListState {
+    fn url(&self) -> String {
+        let mut url = format!(
+            "{}?list-type=2&prefix={}",
+            self.base_url,
+            encode(&self.prefix)
+        );
+        if let Some(token) = self.continuation_token.as_deref() {
+            url.push_str("&continuation-token=");
+            url.push_str(&encode(token));
+        }
+        url
     }
 }
 
@@ -723,9 +956,12 @@ impl CloudBackend for S3Backend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    fn submit_delete(&self, key: String, callback: CloudCallback) {
+    fn submit_delete(&self, key: String, headers: Vec<(String, String)>, callback: CloudCallback) {
         let url = self.object_url(&key);
-        let request = CloudRequest::new(Method::DELETE, url);
+        let mut request = CloudRequest::new(Method::DELETE, url);
+        for (name, value) in headers.into_iter() {
+            request = request.with_header(name, value);
+        }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status < 400 => CloudEvent::DeleteComplete {
                 key: ctx,
@@ -744,35 +980,49 @@ impl CloudBackend for S3Backend {
     }
 
     fn submit_list(&self, prefix: String, callback: CloudCallback) {
-        let url = self.list_url(&prefix);
-        let request = CloudRequest::new(Method::GET, url);
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => {
-                let body = String::from_utf8_lossy(&resp.body);
-                let mut items = Vec::new();
-                for line in body.lines() {
-                    if let Some(start) = line.find("<Key>") {
-                        if let Some(end) = line.find("</Key>") {
-                            items.push(line[start + 5..end].to_string());
-                        }
-                    }
-                }
-                CloudEvent::ListComplete {
-                    prefix: ctx,
-                    result: CloudOutcome::Ok(items),
-                }
-            }
-            Ok(resp) => CloudEvent::ListComplete {
-                prefix: ctx,
-                result: CloudOutcome::Err(format!("status {}", resp.status)),
-            },
-            Err(err) => CloudEvent::ListComplete {
-                prefix: ctx,
-                result: CloudOutcome::Err(format!("{:?}", err)),
-            },
+        let base_url = self.base_url();
+        let state = S3ListState {
+            prefix: prefix.clone(),
+            base_url,
+            continuation_token: None,
+            items: Vec::new(),
         };
-        self.executor
-            .spawn_request(request, prefix.clone(), callback, mapper);
+        self.executor.spawn_request_loop(
+            state,
+            prefix.clone(),
+            callback,
+            |state| Ok(CloudRequest::new(Method::GET, state.url())),
+            |state, resp| {
+                if resp.status != 200 {
+                    return Err(MidgeError::Internal(format!("status {}", resp.status)));
+                }
+                let body = String::from_utf8_lossy(&resp.body);
+                state.items.extend(extract_xml_tag_values(&body, "Key"));
+                let truncated = extract_xml_tag_values(&body, "IsTruncated")
+                    .first()
+                    .map(|value| value.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                state.continuation_token = extract_xml_tag_values(&body, "NextContinuationToken")
+                    .into_iter()
+                    .next();
+                if truncated && state.continuation_token.is_none() {
+                    return Err(MidgeError::Internal(
+                        "S3 list response was truncated without NextContinuationToken".to_string(),
+                    ));
+                }
+                Ok(truncated)
+            },
+            |ctx, result| match result {
+                Ok(state) => CloudEvent::ListComplete {
+                    prefix: ctx,
+                    result: CloudOutcome::Ok(state.items),
+                },
+                Err(err) => CloudEvent::ListComplete {
+                    prefix: ctx,
+                    result: CloudOutcome::Err(format!("{:?}", err)),
+                },
+            },
+        );
     }
 
     fn submit_head(&self, key: String, callback: CloudCallback) {
@@ -816,9 +1066,13 @@ impl CloudSigner for SigV4Signer {
         let creds = self.resolve_credentials()?;
         let url = Url::parse(&request.url)
             .map_err(|err| MidgeError::InvalidArgument(format!("url parse: {}", err)))?;
-        let host = url
+        let host_name = url
             .host_str()
             .ok_or_else(|| MidgeError::InvalidArgument("missing host".to_string()))?;
+        let host = match url.port() {
+            Some(port) => format!("{}:{}", host_name, port),
+            None => host_name.to_string(),
+        };
         request.headers.retain(|(name, _)| {
             !name.eq_ignore_ascii_case("host")
                 && !name.eq_ignore_ascii_case("x-amz-date")
@@ -826,16 +1080,28 @@ impl CloudSigner for SigV4Signer {
                 && !name.eq_ignore_ascii_case("x-amz-security-token")
                 && !name.eq_ignore_ascii_case("authorization")
         });
-        request.headers.push(("Host".into(), host.to_string()));
+        request.headers.push(("Host".into(), host));
         let now = Utc::now();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
         let date = now.format("%Y%m%d").to_string();
+        let payload_hash = match request.body.as_ref() {
+            Some(body) => {
+                let mut hasher = Sha256::new();
+                hasher.update(body);
+                hex::encode(hasher.finalize())
+            }
+            None => {
+                let mut hasher = Sha256::new();
+                hasher.update([]);
+                hex::encode(hasher.finalize())
+            }
+        };
         request
             .headers
             .push(("X-Amz-Date".into(), amz_date.clone()));
         request
             .headers
-            .push(("X-Amz-Content-Sha256".into(), "UNSIGNED-PAYLOAD".into()));
+            .push(("X-Amz-Content-Sha256".into(), payload_hash.clone()));
         if let Some(token) = creds.session_token.as_ref() {
             request
                 .headers
@@ -870,25 +1136,23 @@ impl CloudSigner for SigV4Signer {
         };
 
         let canonical_request = format!(
-            "{}\n{}\n{}\n{}\n{}\nUNSIGNED-PAYLOAD",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             request.method.as_str(),
             percent_encode_path(path),
             canonical_query,
             canonical_headers,
-            signed_headers
+            signed_headers,
+            payload_hash
         );
 
         let mut hasher = Sha256::new();
         hasher.update(canonical_request.as_bytes());
         let canonical_hash = hex::encode(hasher.finalize());
 
-        let credential_scope = format!("{}/s3/aws4_request", date);
+        let credential_scope = format!("{}/{}/s3/aws4_request", date, self.region());
         let string_to_sign = format!(
-            "AWS4-HMAC-SHA256\n{}\n{}/{}\n{}",
-            amz_date,
-            date,
-            self.region(),
-            canonical_hash
+            "AWS4-HMAC-SHA256\n{}\n{}\n{}",
+            amz_date, credential_scope, canonical_hash
         );
 
         let signing_key = self.signing_key(&creds.secret_key, &date)?;
@@ -970,6 +1234,31 @@ fn canonicalize_query(query: &str) -> String {
     pairs.join("&")
 }
 
+fn extract_xml_tag_values(body: &str, tag: &str) -> Vec<String> {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let mut values = Vec::new();
+    let mut rest = body;
+    while let Some(start) = rest.find(&open) {
+        let after_open = &rest[start + open.len()..];
+        let Some(end) = after_open.find(&close) else {
+            break;
+        };
+        values.push(decode_xml_entities(&after_open[..end]));
+        rest = &after_open[end + close.len()..];
+    }
+    values
+}
+
+fn decode_xml_entities(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1034,5 +1323,31 @@ mod tests {
         assert!(request.headers.iter().any(|(name, value)| name
             .eq_ignore_ascii_case("x-amz-security-token")
             && value == "test-env-token"));
+    }
+
+    #[test]
+    fn should_extract_all_s3_list_keys_from_compact_xml() {
+        let body = "<ListBucketResult><Contents><Key>a</Key></Contents><Contents><Key>b&amp;c</Key></Contents></ListBucketResult>";
+
+        let keys = extract_xml_tag_values(body, "Key");
+
+        assert_eq!(keys, vec!["a".to_string(), "b&c".to_string()]);
+    }
+
+    #[test]
+    fn should_build_s3_list_url_with_continuation_token() {
+        let config = S3Config::custom(
+            "bucket".into(),
+            "us-east-1".into(),
+            "http://localhost:9000".into(),
+            true,
+        );
+        let backend = S3Backend::new(config, CloudExecutor::new(None).unwrap());
+
+        let url = backend.list_url("sst/", Some("token/with spaces"));
+
+        assert!(url.contains("list-type=2"));
+        assert!(url.contains("prefix=sst%2F"));
+        assert!(url.contains("continuation-token=token%2Fwith%20spaces"));
     }
 }
