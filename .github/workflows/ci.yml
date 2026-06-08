@@ -90,7 +90,7 @@ jobs:
         run: docker compose up -d peas
 
       - name: Test against Peas emulator
-        run: cargo test --all-targets
+        run: cargo test 
 
       - name: Stop Peas emulator
         if: always()
