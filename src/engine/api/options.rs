@@ -11,6 +11,8 @@
 //!
 //! All other parameters (block sizes, buffer sizes, compaction triggers, cache allocation, etc.)
 //! are **derived automatically** from these three inputs plus optional workload hints.
+//! Advanced callers can also override runtime memtable sizing explicitly while
+//! leaving `MemoryBudget` semantics unchanged.
 //!
 //! # Example
 //!
@@ -1040,6 +1042,12 @@ pub struct OpenOptions {
     /// Recovery policy used during engine open.
     pub recovery_policy: RecoveryPolicy,
 
+    /// Explicit override for memtable size limit in bytes.
+    explicit_memtable_size_limit: Option<usize>,
+
+    /// Explicit override for memtable flush threshold in bytes.
+    explicit_memtable_flush_threshold: Option<usize>,
+
     /// Derived memory budget in bytes (from build())
     pub(crate) derived_memory_budget: usize,
 
@@ -1049,6 +1057,9 @@ pub struct OpenOptions {
 
     /// Memtable size limit (derived)
     pub(crate) memtable_size_limit: usize,
+
+    /// Memtable flush threshold (derived)
+    pub(crate) memtable_flush_threshold: usize,
 
     /// Target SST file size (derived)
     pub(crate) target_sst_size: usize,
@@ -1075,6 +1086,9 @@ impl OpenOptions {
     /// Data is NOT persisted and will be lost when engine is dropped.
     /// Ideal for: testing, caching, ephemeral workloads
     ///
+    /// Memtable sizing is derived automatically by default. Advanced callers can
+    /// override the runtime memtable size limit and flush threshold explicitly.
+    ///
     pub fn in_memory() -> Self {
         Self {
             storage: Storage::InMemory,
@@ -1082,10 +1096,13 @@ impl OpenOptions {
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
             recovery_policy: RecoveryPolicy::default(),
+            explicit_memtable_size_limit: None,
+            explicit_memtable_flush_threshold: None,
             derived_memory_budget: 0,
             // Initial derived values until build() recomputes them
             block_size: 16 * 1024,
             memtable_size_limit: 64 * 1024 * 1024,
+            memtable_flush_threshold: 64 * 1024 * 1024,
             target_sst_size: 256 * 1024 * 1024,
             block_cache_size: 128 * 1024 * 1024,
             wal_buffer_size: 256 * 1024,
@@ -1107,10 +1124,13 @@ impl OpenOptions {
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
             recovery_policy: RecoveryPolicy::default(),
+            explicit_memtable_size_limit: None,
+            explicit_memtable_flush_threshold: None,
             derived_memory_budget: 0,
             // Initial derived values until build() recomputes them
             block_size: 16 * 1024,
             memtable_size_limit: 64 * 1024 * 1024,
+            memtable_flush_threshold: 64 * 1024 * 1024,
             target_sst_size: 256 * 1024 * 1024,
             block_cache_size: 128 * 1024 * 1024,
             wal_buffer_size: 256 * 1024,
@@ -1145,10 +1165,13 @@ impl OpenOptions {
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
             recovery_policy: RecoveryPolicy::default(),
+            explicit_memtable_size_limit: None,
+            explicit_memtable_flush_threshold: None,
             derived_memory_budget: 0,
             // Initial derived values until build() recomputes them
             block_size: 16 * 1024,
             memtable_size_limit: 64 * 1024 * 1024,
+            memtable_flush_threshold: 64 * 1024 * 1024,
             target_sst_size: 256 * 1024 * 1024,
             block_cache_size: 128 * 1024 * 1024,
             wal_buffer_size: 256 * 1024,
@@ -1177,10 +1200,13 @@ impl OpenOptions {
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
             recovery_policy: RecoveryPolicy::default(),
+            explicit_memtable_size_limit: None,
+            explicit_memtable_flush_threshold: None,
             derived_memory_budget: 0,
             // Initial derived values until build() recomputes them
             block_size: 16 * 1024,
             memtable_size_limit: 64 * 1024 * 1024,
+            memtable_flush_threshold: 64 * 1024 * 1024,
             target_sst_size: 256 * 1024 * 1024,
             block_cache_size: 128 * 1024 * 1024,
             wal_buffer_size: 256 * 1024,
@@ -1202,6 +1228,26 @@ impl OpenOptions {
         self
     }
 
+    /// Override the derived memtable size limit in bytes.
+    ///
+    /// By default, Midge derives memtable sizing from the goal, workload, and
+    /// memory budget. This override applies the exact requested runtime size
+    /// limit without changing `MemoryBudget`.
+    pub fn with_memtable_size_limit(mut self, bytes: usize) -> Self {
+        self.explicit_memtable_size_limit = Some(Self::sanitize_memtable_bytes(bytes));
+        self
+    }
+
+    /// Override the runtime memtable flush threshold in bytes.
+    ///
+    /// By default, the flush threshold follows the derived memtable sizing. If
+    /// only `with_memtable_size_limit` is set, the flush threshold uses that
+    /// same value unless this override is also provided.
+    pub fn with_memtable_flush_threshold(mut self, bytes: usize) -> Self {
+        self.explicit_memtable_flush_threshold = Some(Self::sanitize_memtable_bytes(bytes));
+        self
+    }
+
     /// Set workload profile hint.
     pub fn workload(mut self, profile: WorkloadProfile) -> Self {
         self.workload = profile;
@@ -1217,7 +1263,8 @@ impl OpenOptions {
     /// Build options with derived parameters.
     ///
     /// This automatically computes all low-level parameters based on the
-    /// high-level knobs (goal, durability, memory, workload).
+    /// high-level knobs (goal, memory, workload) plus optional explicit
+    /// memtable overrides for advanced callers.
     pub fn build(mut self) -> Self {
         // Derive memory budget
         let total_memory = match self.memory_budget {
@@ -1252,6 +1299,22 @@ impl OpenOptions {
         let max_memtable = total_memory / 2;
         let max_allowed = max_memtable.max(min_memtable.min(total_memory));
         self.memtable_size_limit = self.memtable_size_limit.min(max_allowed).max(1);
+
+        if let Some(explicit_memtable_size_limit) = self.explicit_memtable_size_limit {
+            self.memtable_size_limit = Self::sanitize_memtable_bytes(explicit_memtable_size_limit);
+        }
+
+        self.memtable_flush_threshold = if let Some(explicit_memtable_flush_threshold) =
+            self.explicit_memtable_flush_threshold
+        {
+            Self::sanitize_memtable_bytes(explicit_memtable_flush_threshold)
+        } else if self.explicit_memtable_size_limit.is_some() {
+            self.memtable_size_limit
+        } else if let MemoryBudget::Bytes(n) = self.memory_budget {
+            Self::sanitize_memtable_bytes(n / 2)
+        } else {
+            self.memtable_size_limit
+        };
 
         // Derive target SST size
         self.target_sst_size = match self.goal {
@@ -1344,6 +1407,24 @@ impl OpenOptions {
     /// Get derived compression policy
     pub fn compression_policy(&self) -> &CompressionPolicy {
         &self.compression_policy
+    }
+
+    pub(crate) fn runtime_memtable_size_limit(&self) -> usize {
+        if self.explicit_memtable_size_limit.is_some() {
+            self.memtable_size_limit
+        } else if let MemoryBudget::Bytes(n) = self.memory_budget {
+            Self::sanitize_memtable_bytes(n / 2)
+        } else {
+            self.memtable_size_limit
+        }
+    }
+
+    pub(crate) fn runtime_memtable_flush_threshold(&self) -> usize {
+        self.memtable_flush_threshold
+    }
+
+    fn sanitize_memtable_bytes(bytes: usize) -> usize {
+        bytes.max(1)
     }
 }
 
@@ -1793,6 +1874,54 @@ mod tests {
         assert_eq!(opts.derived_memory_budget, budget);
         assert!(opts.memtable_size_limit() <= budget / 2);
         assert!(opts.block_cache_size() <= budget);
+    }
+
+    #[test]
+    fn should_use_explicit_memtable_size_for_flush_threshold_when_only_size_override_is_set() {
+        // Arrange
+        let size_limit = 128 * 1024;
+
+        // Act
+        let opts = OpenOptions::in_memory()
+            .with_memtable_size_limit(size_limit)
+            .build();
+
+        // Assert
+        assert_eq!(opts.memtable_size_limit(), size_limit);
+        assert_eq!(opts.memtable_flush_threshold, size_limit);
+    }
+
+    #[test]
+    fn should_preserve_explicit_memtable_size_and_flush_threshold_when_both_are_set() {
+        // Arrange
+        let size_limit = 256 * 1024;
+        let flush_threshold = 128 * 1024;
+
+        // Act
+        let opts = OpenOptions::in_memory()
+            .with_memtable_size_limit(size_limit)
+            .with_memtable_flush_threshold(flush_threshold)
+            .build();
+
+        // Assert
+        assert_eq!(opts.memtable_size_limit(), size_limit);
+        assert_eq!(opts.memtable_flush_threshold, flush_threshold);
+    }
+
+    #[test]
+    fn should_clamp_zero_memtable_overrides_to_one() {
+        // Arrange
+        // (no setup required)
+
+        // Act
+        let opts = OpenOptions::in_memory()
+            .with_memtable_size_limit(0)
+            .with_memtable_flush_threshold(0)
+            .build();
+
+        // Assert
+        assert_eq!(opts.memtable_size_limit(), 1);
+        assert_eq!(opts.memtable_flush_threshold, 1);
     }
 
     // ========== OpenOptions Builder Tests ==========

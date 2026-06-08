@@ -117,6 +117,31 @@ fn should_use_auto_memory_given_no_explicit_budget_when_default() {
     );
 }
 
+#[test]
+fn should_preserve_default_memtable_size_given_no_override_when_building() {
+    // Arrange
+
+    // Act
+    let opts = OpenOptions::in_memory().build();
+
+    // Assert
+    assert_eq!(opts.memtable_size_limit(), 64 * 1024 * 1024);
+}
+
+#[test]
+fn should_override_memtable_size_given_explicit_builder_when_building() {
+    // Arrange
+    let memtable_size = 128 * 1024;
+
+    // Act
+    let opts = OpenOptions::in_memory()
+        .with_memtable_size_limit(memtable_size)
+        .build();
+
+    // Assert
+    assert_eq!(opts.memtable_size_limit(), memtable_size);
+}
+
 // ============================================================================
 // WORKLOAD PROFILE OPTIMIZATION TESTS
 // ============================================================================

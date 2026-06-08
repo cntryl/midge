@@ -1184,19 +1184,11 @@ impl Engine {
         let (runtime_inst, _) = Runtime::new()?;
         let (runtime, runtime_handle) = runtime_inst.start_with_config(state, runtime_config)?;
 
-        // Apply derived OpenOptions to runtime: memtable limits and compaction
-        let mut memtable_size_limit = opts.memtable_size_limit;
-        let mut memtable_flush_threshold = opts.memtable_size_limit;
-
-        // If user specified an explicit memory budget, derive thresholds from it
-        if let crate::MemoryBudget::Bytes(n) = opts.memory_budget {
-            // Use half of the memory budget as flush threshold so that
-            // `state.should_stall_writes` (which checks `total_memtable_bytes >= flush_threshold * 2`)
-            // will stall when total memtable bytes approaches the configured budget.
-            let flush = n / 2;
-            memtable_flush_threshold = flush.max(1);
-            memtable_size_limit = memtable_flush_threshold;
-        }
+        // Apply derived OpenOptions to runtime: preserve the legacy
+        // `MemoryBudget::Bytes(n) -> n / 2` runtime memtable sizing unless the
+        // caller explicitly overrode memtable sizing via OpenOptions.
+        let memtable_size_limit = opts.runtime_memtable_size_limit();
+        let memtable_flush_threshold = opts.runtime_memtable_flush_threshold();
 
         let request_id = crate::runtime::next_request_id()?;
         let resp = runtime_handle.send_and_wait(crate::runtime::RuntimeMsg::SetRuntimeConfig {

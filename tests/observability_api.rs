@@ -97,6 +97,48 @@ fn should_reject_storage_verification_in_memory_mode() {
 }
 
 #[test]
+fn should_install_explicit_memtable_size_in_runtime_metrics() {
+    // Arrange
+    let memtable_size = 128 * 1024;
+
+    let engine = Engine::open(
+        OpenOptions::in_memory()
+            .with_memtable_size_limit(memtable_size)
+            .build(),
+    )
+    .expect("open in-memory engine");
+
+    // Act
+    let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+
+    // Assert
+    assert_eq!(metrics.memtable_size_limit, memtable_size);
+    assert_eq!(metrics.memtable_flush_threshold, memtable_size);
+}
+
+#[test]
+fn should_install_distinct_explicit_memtable_size_and_flush_threshold_in_runtime_metrics() {
+    // Arrange
+    let memtable_size = 256 * 1024;
+    let flush_threshold = 128 * 1024;
+
+    let engine = Engine::open(
+        OpenOptions::in_memory()
+            .with_memtable_size_limit(memtable_size)
+            .with_memtable_flush_threshold(flush_threshold)
+            .build(),
+    )
+    .expect("open in-memory engine");
+
+    // Act
+    let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+
+    // Assert
+    assert_eq!(metrics.memtable_size_limit, memtable_size);
+    assert_eq!(metrics.memtable_flush_threshold, flush_threshold);
+}
+
+#[test]
 fn should_report_degraded_health_given_obsolete_sst_files_and_json_verification() {
     // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
