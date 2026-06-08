@@ -156,7 +156,8 @@ pub fn replay_wal_with_policy(
     tracing::info!(dir = %wal_dir, "starting wal replay");
 
     // Collect replay files: rotated segments first, then wal.log.
-    let mut segment_files: Vec<(u64, StoragePath)> = Vec::new();
+    let mut segment_files: std::collections::BTreeMap<u64, (String, StoragePath)> =
+        std::collections::BTreeMap::new();
     let mut wal_log_path: Option<StoragePath> = None;
 
     let entries = match storage.list_dir(wal_dir) {
@@ -175,17 +176,23 @@ pub fn replay_wal_with_policy(
             continue;
         }
 
-        // Match `{segment_id}.wal`
-        if let Some(segment_str) = file_name.strip_suffix(".wal") {
-            if let Ok(segment_id) = segment_str.parse::<u64>() {
-                segment_files.push((segment_id, join(wal_dir, &file_name)));
+        if let Some(segment_id) = crate::wal::parse_segment_id(&file_name) {
+            let prefer_candidate = segment_files
+                .get(&segment_id)
+                .map(|(existing_name, _)| {
+                    existing_name != &crate::wal::cloud_segment_file_name(segment_id)
+                        && file_name == crate::wal::cloud_segment_file_name(segment_id)
+                })
+                .unwrap_or(true);
+
+            if prefer_candidate {
+                segment_files.insert(segment_id, (file_name.clone(), join(wal_dir, &file_name)));
             }
         }
     }
 
-    segment_files.sort_by_key(|(id, _)| *id);
-
-    let mut replay_paths: Vec<StoragePath> = segment_files.into_iter().map(|(_, p)| p).collect();
+    let mut replay_paths: Vec<StoragePath> =
+        segment_files.into_iter().map(|(_, (_, p))| p).collect();
     if let Some(wal_log) = wal_log_path {
         replay_paths.push(wal_log);
     }

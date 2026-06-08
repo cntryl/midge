@@ -701,6 +701,9 @@ impl Engine {
             }
         };
 
+        let mut segment_keys: std::collections::BTreeMap<u64, String> =
+            std::collections::BTreeMap::new();
+
         for key in keys {
             let logical_key = cloud.strip_namespace(&key);
             let Some(file_name) = logical_key.strip_prefix("wal/") else {
@@ -710,7 +713,25 @@ impl Engine {
                 continue;
             }
 
-            let data = match Self::blocking_cloud_get(cloud, logical_key) {
+            let Some(segment_id) = crate::wal::parse_segment_id(logical_key) else {
+                continue;
+            };
+
+            let prefer_candidate = segment_keys
+                .get(&segment_id)
+                .map(|existing_key| {
+                    existing_key != &crate::wal::cloud_segment_object_key(segment_id)
+                        && logical_key == crate::wal::cloud_segment_object_key(segment_id)
+                })
+                .unwrap_or(true);
+
+            if prefer_candidate {
+                segment_keys.insert(segment_id, logical_key.to_string());
+            }
+        }
+
+        for (segment_id, logical_key) in segment_keys {
+            let data = match Self::blocking_cloud_get(cloud, &logical_key) {
                 Ok(data) => data,
                 Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
                     tracing::warn!(%error, key = %logical_key, "skipping cloud WAL object during salvage open");
@@ -724,7 +745,8 @@ impl Engine {
                 }
             };
 
-            std::fs::write(recovery_wal_dir.join(file_name), data).map_err(|error| {
+            let staged_file_name = crate::wal::cloud_segment_file_name(segment_id);
+            std::fs::write(recovery_wal_dir.join(&staged_file_name), data).map_err(|error| {
                 MidgeError::RecoveryFailed(format!(
                     "failed to stage cloud WAL '{}': {}",
                     logical_key, error
@@ -2180,5 +2202,60 @@ mod tests {
         assert_eq!(handles.len(), 2);
         assert_eq!(handles[0].name(), "default");
         assert_eq!(handles[1].name(), "secondary");
+    }
+
+    #[test]
+    fn should_stage_cloud_wal_segments_with_canonical_padded_names() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+
+        Engine::blocking_cloud_put(&cloud, "wal/1.wal", b"legacy".to_vec())
+            .expect("upload legacy wal object");
+        Engine::blocking_cloud_put(
+            &cloud,
+            &crate::wal::cloud_segment_object_key(1),
+            b"canonical".to_vec(),
+        )
+        .expect("upload canonical wal object");
+        Engine::blocking_cloud_put(&cloud, "wal/wal_000002.log", b"second".to_vec())
+            .expect("upload legacy log-style wal object");
+
+        let staged_dir = Engine::materialize_cloud_wal_recovery_dir(
+            &cloud,
+            temp_dir.path(),
+            RecoveryPolicy::Strict,
+        )
+        .expect("materialize cloud wal recovery dir");
+
+        let mut staged_files: Vec<String> = std::fs::read_dir(&staged_dir)
+            .expect("read staged wal dir")
+            .map(|entry| {
+                entry
+                    .expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        staged_files.sort();
+
+        assert_eq!(
+            staged_files,
+            vec![
+                crate::wal::cloud_segment_file_name(1),
+                crate::wal::cloud_segment_file_name(2),
+            ]
+        );
+        assert_eq!(
+            std::fs::read(staged_dir.join(crate::wal::cloud_segment_file_name(1)))
+                .expect("read staged wal 1"),
+            b"canonical"
+        );
+        assert_eq!(
+            std::fs::read(staged_dir.join(crate::wal::cloud_segment_file_name(2)))
+                .expect("read staged wal 2"),
+            b"second"
+        );
     }
 }

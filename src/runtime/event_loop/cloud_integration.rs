@@ -39,7 +39,7 @@ impl EventLoop {
         let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
         storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
 
-        let resource = format!("wal/{segment_id}.wal");
+        let resource = crate::wal::cloud_segment_object_key(segment_id);
         if !self
             .state
             .cloud
@@ -105,7 +105,7 @@ impl EventLoop {
                 max_sequence,
             ) {
                 Ok(()) => {
-                    let resource = format!("wal/{segment_id}.wal");
+                    let resource = crate::wal::cloud_segment_object_key(segment_id);
                     self.state
                         .cloud
                         .pending_uploads
@@ -135,7 +135,7 @@ impl EventLoop {
                 }
             },
             crate::storage::StorageEvent::CloudFail { segment_id, error } => {
-                let resource = format!("wal/{segment_id}.wal");
+                let resource = crate::wal::cloud_segment_object_key(segment_id);
                 self.state
                     .cloud
                     .pending_uploads

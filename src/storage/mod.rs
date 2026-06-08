@@ -25,7 +25,8 @@
 // 4. S3 PROVIDER RULES
 //    - S3Provider MUST support AWS, Wasabi, MinIO, and generic S3-compatible vendors.
 //    - AWS uses full SigV4 signing. Others use access key + secret only.
-//    - All object keys MUST be normalized to "sst/<name>" or "wal/<segment_id>.wal".
+//    - All object keys MUST be normalized to "sst/<name>" or a zero-padded
+//      "wal/<segment_id>.wal" key.
 //    - LIST operations MUST use prefix semantics.
 //
 // 5. FILESYSTEM BACKEND RULES

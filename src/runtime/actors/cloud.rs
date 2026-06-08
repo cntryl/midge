@@ -71,7 +71,7 @@ impl CloudActor {
 
     /// Upload a WAL segment to cloud storage
     pub fn upload_wal(&mut self, state: &mut RuntimeState, segment_id: u64) -> MidgeResult<()> {
-        let wal_name = format!("wal_{:06}.log", segment_id);
+        let wal_name = format!("{segment_id}.wal");
         let wal_path = state.wal_dir.join(&wal_name);
 
         // Validate WAL exists before upload
@@ -90,10 +90,10 @@ impl CloudActor {
         };
 
         // Create cloud key
-        let cloud_key = format!("wal/{}", wal_name);
+        let cloud_key = crate::wal::cloud_segment_object_key(segment_id);
 
         // Track pending upload
-        state.cloud.pending_uploads.push(wal_name.clone());
+        state.cloud.pending_uploads.push(cloud_key.clone());
         self.uploads_in_progress += 1;
 
         // Update cloud checkpoint
@@ -119,26 +119,18 @@ impl CloudActor {
         tracing::info!(resource, "Cloud upload completed");
 
         // Update checkpoint if this was a WAL segment
-        if resource.starts_with("wal_") {
-            // Extract sequence from name: wal_XXXXXX.log
-            if let Some(seq_str) = resource
-                .strip_prefix("wal_")
-                .and_then(|s| s.strip_suffix(".log"))
-            {
-                if let Ok(seq) = seq_str.parse::<u64>() {
-                    state.cloud.last_cloud_checkpoint_seq = seq;
-                    // Record cloud checkpoint in manifest journal
-                    let cp = crate::metadata::CloudCheckpoint {
-                        checkpoint_sequence: seq,
-                        covering_ssts: vec![],
-                    };
-                    let edit = crate::metadata::ManifestEdit::SetCloudCheckpoint(cp);
-                    if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
-                        tracing::warn!(error = ?e, "failed to append SetCloudCheckpoint to journal");
-                    }
-                    tracing::debug!(segment_id = seq, "Updated cloud WAL checkpoint");
-                }
+        if let Some(seq) = crate::wal::parse_segment_id(resource) {
+            state.cloud.last_cloud_checkpoint_seq = seq;
+            // Record cloud checkpoint in manifest journal
+            let cp = crate::metadata::CloudCheckpoint {
+                checkpoint_sequence: seq,
+                covering_ssts: vec![],
+            };
+            let edit = crate::metadata::ManifestEdit::SetCloudCheckpoint(cp);
+            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
+                tracing::warn!(error = ?e, "failed to append SetCloudCheckpoint to journal");
             }
+            tracing::debug!(segment_id = seq, "Updated cloud WAL checkpoint");
         }
     }
 

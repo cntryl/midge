@@ -195,7 +195,7 @@ impl HybridStorage {
                         }
 
                         let (tx, rx) = std::sync::mpsc::channel();
-                        let cloud_key = format!("wal/{}.wal", upload.segment_id);
+                        let cloud_key = crate::wal::cloud_segment_object_key(upload.segment_id);
                         cloud.submit_write(cloud_key, data, tx);
 
                         match rx.recv() {
@@ -529,7 +529,7 @@ impl HybridStorage {
 
         // Submit to cloud backend
         let (tx, rx) = std::sync::mpsc::channel();
-        let cloud_key = format!("wal/{}.wal", upload.segment_id);
+        let cloud_key = crate::wal::cloud_segment_object_key(upload.segment_id);
         self.cloud.submit_write(cloud_key, data, tx);
 
         // Wait for completion

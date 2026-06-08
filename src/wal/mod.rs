@@ -20,6 +20,37 @@ pub mod recovery;
 pub mod traits;
 pub mod types;
 
+/// Pad cloud WAL object names to the full `u64` width so bucket listings sort
+/// in the same order as segment ids.
+pub const CLOUD_WAL_SEGMENT_ID_WIDTH: usize = 20;
+
+/// Format a canonical cloud WAL object filename for the given segment id.
+pub fn cloud_segment_file_name(segment_id: u64) -> String {
+    format!(
+        "{segment_id:0width$}.wal",
+        width = CLOUD_WAL_SEGMENT_ID_WIDTH
+    )
+}
+
+/// Format the full cloud object key for a WAL segment.
+pub fn cloud_segment_object_key(segment_id: u64) -> String {
+    format!("wal/{}", cloud_segment_file_name(segment_id))
+}
+
+/// Parse a WAL segment id from a cloud key, staged filename, or legacy name.
+pub fn parse_segment_id(name: &str) -> Option<u64> {
+    let file_name = name.strip_prefix("wal/").unwrap_or(name);
+
+    if let Some(segment_str) = file_name.strip_suffix(".wal") {
+        return segment_str.parse::<u64>().ok();
+    }
+
+    file_name
+        .strip_prefix("wal_")
+        .and_then(|segment_str| segment_str.strip_suffix(".log"))
+        .and_then(|segment_str| segment_str.parse::<u64>().ok())
+}
+
 // Re-export main WAL types
 pub use types::{WalOpKind, WalRecord};
 
@@ -35,3 +66,21 @@ pub use fs::FsWalFactoryIo;
 
 // Re-export policy types
 pub use policy::DurabilityPolicy;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_format_cloud_wal_object_keys_with_zero_padding() {
+        assert_eq!(cloud_segment_object_key(42), "wal/00000000000000000042.wal");
+    }
+
+    #[test]
+    fn should_parse_segment_ids_from_supported_wal_names() {
+        assert_eq!(parse_segment_id("1.wal"), Some(1));
+        assert_eq!(parse_segment_id("00000000000000000042.wal"), Some(42));
+        assert_eq!(parse_segment_id("wal/00000000000000000099.wal"), Some(99));
+        assert_eq!(parse_segment_id("wal_000123.log"), Some(123));
+    }
+}
