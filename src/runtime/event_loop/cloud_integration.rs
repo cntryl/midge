@@ -28,6 +28,12 @@ impl EventLoop {
         let bytes_buffered = self.wal_actor.bytes_since_sync() as u64;
         let seal_start = Instant::now();
         self.wal_actor.flush_for_cloud_upload(&mut self.state)?;
+        fail::fail_point!(
+            "midge::cloud::inject_fail_after_wal_flush_before_rotate",
+            |_| Err(crate::common::MidgeError::Internal(
+                "failpoint: cloud seal failed after WAL flush before rotate".to_string(),
+            ))
+        );
         if let Err(error) = self.wal_actor.rotate(&mut self.state) {
             tracing::error!(error = %error, "CloudAsync: WAL rotate failed");
             return Err(error);
@@ -38,6 +44,7 @@ impl EventLoop {
         let max_sequence = self.state.wal.local_durable_seq;
         let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
         storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
+        self.wal_actor.complete_cloud_upload_seal(&mut self.state);
 
         let resource = crate::wal::cloud_segment_object_key(segment_id);
         if !self
@@ -129,6 +136,7 @@ impl EventLoop {
                         let waiters = self.durability.complete_waiters_at(seg_id);
                         self.complete_durability_waiters(waiters, CompletionSource::CloudAck);
                     }
+                    self.drain_auto_flush_memtables();
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "failed to apply cloud ack");
@@ -206,6 +214,7 @@ impl EventLoop {
                     self.state.write_stalled = false;
                 }
                 self.wake_write_stall_waiters();
+                self.drain_auto_flush_memtables();
             }
             _ => {}
         }
@@ -228,12 +237,12 @@ impl EventLoop {
             return;
         }
 
-        let cloud_pending = self.wal_actor.pending_cloud_writes_len();
+        let pending_writes = self.state.wal.pending_writes;
         let bytes_buffered = self.wal_actor.bytes_since_sync();
 
         if !self
             .durability
-            .should_flush_cloud_async(cloud_pending, bytes_buffered)
+            .should_flush_cloud_async(pending_writes, bytes_buffered)
         {
             return;
         }
@@ -255,15 +264,37 @@ impl EventLoop {
                 );
             }
         }
+
+        self.drain_auto_flush_memtables();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::create_test_event_loop;
+    use super::super::tests::{create_test_cloud_event_loop, create_test_event_loop};
     use super::super::EventLoop;
-    use crate::runtime::{state::RuntimeState, ResponseRouter};
-    use std::sync::Arc;
+    use crate::runtime::{state::RuntimeState, ResponseRouter, RuntimeMsg, RuntimeResponse};
+    use crate::sst::Memtable;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn failpoint_test_lock() -> &'static Mutex<()> {
+        FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn seal_segment_for_test(el: &mut EventLoop) -> crate::common::MidgeResult<(u64, u64)> {
+        let seg_id = el.state.wal.current_segment_id;
+        el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
+        el.wal_actor.rotate(&mut el.state)?;
+        el.durability.rotate_to(el.state.wal.current_segment_id);
+        let max_sequence = el.state.wal.local_durable_seq;
+        el.wal_actor.complete_cloud_upload_seal(&mut el.state);
+        el.durability
+            .record_cloud_segment_inflight(seg_id, max_sequence);
+        el.durability.record_cloud_flush();
+        Ok((seg_id, max_sequence))
+    }
 
     #[test]
     fn should_start_with_no_hybrid_storage() {
@@ -315,6 +346,39 @@ mod tests {
     }
 
     #[test]
+    fn should_retry_auto_flush_when_backpressure_releases() -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        el.state.write_stalled = true;
+        el.state.memtable_flush_threshold = 1024;
+        el.state.memtable_size_limit = 1024 * 1024;
+        el.state.sequence = 1;
+        {
+            let cf = el.state.get_cf(0).expect("default cf");
+            cf.memtable
+                .put_with_seq(b"retry-key".to_vec(), vec![0xA5; 2048], 1, None)
+                .expect("seed memtable");
+        }
+        el.state.total_memtable_bytes = el
+            .state
+            .get_cf(0)
+            .expect("default cf")
+            .memtable
+            .size_bytes();
+
+        el.handle_storage_event(crate::storage::StorageEvent::BackpressureOff);
+
+        assert!(!el.state.write_stalled);
+        assert!(
+            el.state.manifest.files.iter().any(|file| file.cf_id == 0),
+            "backpressure release should retry the pending auto-flush"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn should_cloud_async_ack_confirm_idempotent_request() -> crate::common::MidgeResult<()> {
         // Arrange: create state and event loop with CloudAsync policy
         let tmp = tempfile::tempdir().expect("create tmpdir");
@@ -357,16 +421,7 @@ mod tests {
             });
 
         // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
-        let seg_id = el.state.wal.current_segment_id;
-        // Flush and rotate to create a sealed segment
-        el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
-        el.wal_actor.rotate(&mut el.state)?;
-        // Move waiters into inflight bucket and record timing as EventLoop does
-        el.durability.rotate_to(el.state.wal.current_segment_id);
-        let max_sequence = el.state.wal.local_durable_seq;
-        el.durability
-            .record_cloud_segment_inflight(seg_id, max_sequence);
-        el.durability.record_cloud_flush();
+        let (seg_id, max_sequence) = seal_segment_for_test(&mut el)?;
 
         // Now simulate the storage CloudAck for that segment
         el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
@@ -432,16 +487,7 @@ mod tests {
             });
 
         // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
-        let seg_id = el.state.wal.current_segment_id;
-        // Flush and rotate to create a sealed segment
-        el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
-        el.wal_actor.rotate(&mut el.state)?;
-        // Move waiters into inflight bucket and record timing as EventLoop does
-        el.durability.rotate_to(el.state.wal.current_segment_id);
-        let max_sequence = el.state.wal.local_durable_seq;
-        el.durability
-            .record_cloud_segment_inflight(seg_id, max_sequence);
-        el.durability.record_cloud_flush();
+        let (seg_id, max_sequence) = seal_segment_for_test(&mut el)?;
 
         // Now simulate the storage CloudAck for that segment
         el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
@@ -528,16 +574,7 @@ mod tests {
             });
 
         // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
-        let seg_id = el.state.wal.current_segment_id;
-        // Flush and rotate to create a sealed segment
-        el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
-        el.wal_actor.rotate(&mut el.state)?;
-        // Move waiters into inflight bucket and record timing as EventLoop does
-        el.durability.rotate_to(el.state.wal.current_segment_id);
-        let max_sequence = el.state.wal.local_durable_seq;
-        el.durability
-            .record_cloud_segment_inflight(seg_id, max_sequence);
-        el.durability.record_cloud_flush();
+        let (seg_id, _max_sequence) = seal_segment_for_test(&mut el)?;
 
         // Now simulate the storage CloudFail for that segment
         el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
@@ -568,6 +605,223 @@ mod tests {
             "retry should be deferred when retried after fail (CloudAsync)"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
+    ) -> crate::common::MidgeResult<()> {
+        let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+        let scenario = fail::FailScenario::setup();
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+
+        let ops = vec![crate::runtime::TransactionOp::Put {
+            cf_id: 0,
+            key: bytes::Bytes::from_static(b"buffered-seal-key"),
+            value: bytes::Bytes::from_static(b"buffered-seal-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }];
+        let (last_sequence, _op_count, deferred) = el.wal_actor.append_transaction(
+            &mut el.state,
+            301,
+            ops,
+            Some(crate::wal::DurabilityPolicy::CloudAsync),
+            None,
+            crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+        )?;
+        assert!(
+            deferred,
+            "buffered transaction should defer cloud durability"
+        );
+
+        let failed_segment = el.state.wal.current_segment_id;
+        fail::cfg(
+            "midge::cloud::inject_fail_after_wal_flush_before_rotate",
+            "return",
+        )
+        .expect("configure cloud seal failpoint");
+
+        let first_error = el
+            .seal_current_cloud_segment()
+            .expect_err("first seal should fail before rotate");
+        match first_error {
+            crate::common::MidgeError::Internal(message) => {
+                assert!(
+                    message.contains("cloud seal failed after WAL flush before rotate"),
+                    "unexpected failpoint error: {message}"
+                );
+            }
+            other => panic!("unexpected seal failure: {other:?}"),
+        }
+        assert_eq!(
+            el.state.wal.current_segment_id, failed_segment,
+            "failed seal must not advance the current WAL segment"
+        );
+        assert!(
+            el.state.wal.pending_writes > 0,
+            "failed seal must preserve buffered WAL accounting for retry"
+        );
+        assert!(
+            el.wal_actor.bytes_since_sync() > 0,
+            "failed seal must preserve buffered byte accounting for retry"
+        );
+        assert!(
+            el.has_actionable_work(),
+            "failed seal should leave the runtime actionable for retry"
+        );
+
+        fail::remove("midge::cloud::inject_fail_after_wal_flush_before_rotate");
+
+        let sealed = el
+            .seal_current_cloud_segment()?
+            .expect("retry should seal and enqueue the same WAL segment");
+        assert_eq!(
+            sealed.0, failed_segment,
+            "retry should seal the same WAL segment after the failpoint clears"
+        );
+        assert_eq!(
+            sealed.1, last_sequence,
+            "retry should preserve the original max sequence for the segment"
+        );
+        assert_eq!(
+            el.state.wal.current_segment_id,
+            failed_segment + 1,
+            "successful retry should advance to the next WAL segment"
+        );
+        assert_eq!(
+            el.state.wal.pending_writes, 0,
+            "successful retry should clear buffered WAL accounting"
+        );
+        assert_eq!(
+            el.wal_actor.bytes_since_sync(),
+            0,
+            "successful retry should clear buffered byte accounting"
+        );
+        assert!(
+            el.hybrid_storage
+                .as_ref()
+                .expect("hybrid storage")
+                .pending_upload_count()
+                > 0,
+            "successful retry should enqueue the sealed segment for upload"
+        );
+
+        scenario.teardown();
+        Ok(())
+    }
+
+    #[test]
+    fn should_retry_seal_wal_for_cloud_after_failpoint_before_rotate(
+    ) -> crate::common::MidgeResult<()> {
+        let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+        let scenario = fail::FailScenario::setup();
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+
+        let ops = vec![crate::runtime::TransactionOp::Put {
+            cf_id: 0,
+            key: bytes::Bytes::from_static(b"strict-seal-key"),
+            value: bytes::Bytes::from_static(b"strict-seal-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }];
+        let (last_sequence, _op_count, deferred) = el.wal_actor.append_transaction(
+            &mut el.state,
+            302,
+            ops,
+            Some(crate::wal::DurabilityPolicy::CloudAsync),
+            None,
+            crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+        )?;
+        assert!(
+            deferred,
+            "cloud-backed transaction should defer cloud durability"
+        );
+
+        let fail_request_id = 401u64;
+        let fail_rx = el.router.register(fail_request_id);
+        fail::cfg(
+            "midge::cloud::inject_fail_after_wal_flush_before_rotate",
+            "return",
+        )
+        .expect("configure cloud seal failpoint");
+
+        let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
+        let outcome = el.handle_runtime_msg(
+            RuntimeMsg::SealWalForCloud {
+                request_id: fail_request_id,
+                sequence: last_sequence,
+                wait_for_ack: true,
+            },
+            &msg_rx,
+        );
+        assert_eq!(outcome, super::super::HandleOutcome::Continue);
+        match fail_rx.recv().expect("failed strict response") {
+            RuntimeResponse::Error { error, .. } => match error {
+                crate::common::MidgeError::Internal(message) => {
+                    assert!(
+                        message.contains("cloud seal failed after WAL flush before rotate"),
+                        "unexpected strict failure: {message}"
+                    );
+                }
+                other => panic!("unexpected strict failure: {other:?}"),
+            },
+            other => panic!("unexpected strict failure response: {other:?}"),
+        }
+        assert!(
+            el.state.wal.pending_writes > 0,
+            "failed strict seal must preserve buffered WAL accounting for retry"
+        );
+        assert!(
+            el.durability
+                .inflight_segment_for_sequence(last_sequence)
+                .is_none(),
+            "failed strict seal must not invent an inflight segment before rotate succeeds"
+        );
+
+        fail::remove("midge::cloud::inject_fail_after_wal_flush_before_rotate");
+
+        let retry_request_id = 402u64;
+        let retry_rx = el.router.register(retry_request_id);
+        let outcome = el.handle_runtime_msg(
+            RuntimeMsg::SealWalForCloud {
+                request_id: retry_request_id,
+                sequence: last_sequence,
+                wait_for_ack: true,
+            },
+            &msg_rx,
+        );
+        assert_eq!(outcome, super::super::HandleOutcome::Continue);
+        assert!(
+            el.durability
+                .inflight_segment_for_sequence(last_sequence)
+                .is_some(),
+            "successful retry should install an inflight segment instead of falling through to a missing-cover error"
+        );
+
+        let seg_id = el
+            .durability
+            .inflight_segment_for_sequence(last_sequence)
+            .expect("inflight segment for strict retry");
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id: seg_id,
+            max_sequence: last_sequence,
+        });
+
+        match retry_rx.recv().expect("strict retry response") {
+            RuntimeResponse::Ok { request_id } => assert_eq!(request_id, retry_request_id),
+            other => panic!("unexpected strict retry response: {other:?}"),
+        }
+        assert_eq!(
+            el.state.wal.pending_writes, 0,
+            "successful strict retry should clear buffered WAL accounting"
+        );
+
+        scenario.teardown();
         Ok(())
     }
 }

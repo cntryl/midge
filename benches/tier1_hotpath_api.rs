@@ -55,6 +55,7 @@ fn setup_db(name: &str) -> MidgeEngine {
         // (based on available RAM) can be too small for thousands of iterations
         // with compaction disabled.
         memory_budget: Some(4 * 1024 * 1024 * 1024), // 4 GiB
+        cloud_runtime_policy_overrides: None,
     };
 
     MidgeEngine::open_with_options(opts).unwrap()

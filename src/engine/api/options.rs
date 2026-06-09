@@ -1078,6 +1078,7 @@ pub struct OpenOptions {
 
     /// Optional WAL batch configuration (from testkit for batched durability mode)
     pub(crate) wal_batch_config: Option<crate::wal::policy::BatchConfig>,
+    pub(crate) cloud_runtime_policy: Option<crate::runtime::CloudRuntimePolicy>,
 }
 
 impl OpenOptions {
@@ -1109,6 +1110,7 @@ impl OpenOptions {
             l0_compaction_trigger: 4,
             compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
+            cloud_runtime_policy: None,
         }
     }
 
@@ -1137,6 +1139,7 @@ impl OpenOptions {
             l0_compaction_trigger: 4,
             compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
+            cloud_runtime_policy: None,
         }
     }
 
@@ -1178,6 +1181,7 @@ impl OpenOptions {
             l0_compaction_trigger: 4,
             compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
+            cloud_runtime_policy: None,
         }
     }
 
@@ -1213,6 +1217,7 @@ impl OpenOptions {
             l0_compaction_trigger: 4,
             compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
+            cloud_runtime_policy: None,
         }
     }
 

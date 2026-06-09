@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 /// Storage mode configuration for the engine.
 #[derive(Clone)]
@@ -18,6 +19,14 @@ pub enum StorageMode {
 }
 
 /// Configuration options for opening a `MidgeEngine` in tests.
+#[derive(Debug, Clone, Default)]
+pub struct CloudRuntimePolicyOverrides {
+    pub eventual_flush_segment_gap: Option<u64>,
+    pub wal_seal_min_segment_bytes: Option<usize>,
+    pub wal_seal_max_flush_delay: Option<Duration>,
+    pub wal_seal_max_pending_writes: Option<usize>,
+}
+
 #[derive(Clone)]
 pub struct MidgeOptions {
     /// Storage mode.
@@ -35,6 +44,8 @@ pub struct MidgeOptions {
     pub enable_compaction: bool,
     /// Memory budget for spilling (in bytes).
     pub memory_budget: Option<usize>,
+    /// Internal cloud runtime tuning used only by tests.
+    pub cloud_runtime_policy_overrides: Option<CloudRuntimePolicyOverrides>,
 }
 
 impl Default for MidgeOptions {
@@ -47,6 +58,7 @@ impl Default for MidgeOptions {
             compression: false,
             enable_compaction: true,
             memory_budget: None,
+            cloud_runtime_policy_overrides: None,
         }
     }
 }
@@ -58,6 +70,14 @@ impl MidgeOptions {
     /// Set to `None` for unlimited memory.
     pub fn memory_budget(mut self, bytes: usize) -> Self {
         self.memory_budget = Some(bytes);
+        self
+    }
+
+    pub fn with_cloud_runtime_policy_overrides(
+        mut self,
+        overrides: CloudRuntimePolicyOverrides,
+    ) -> Self {
+        self.cloud_runtime_policy_overrides = Some(overrides);
         self
     }
 
@@ -99,6 +119,22 @@ impl MidgeOptions {
 
         // Pass through WAL batch configuration if specified by testkit
         open_opts.wal_batch_config = self.wal_batch_config;
+        if let Some(overrides) = &self.cloud_runtime_policy_overrides {
+            let mut policy = crate::runtime::CloudRuntimePolicy::default();
+            if let Some(gap) = overrides.eventual_flush_segment_gap {
+                policy.eventual_flush_segment_gap = gap;
+            }
+            if let Some(bytes) = overrides.wal_seal_min_segment_bytes {
+                policy.wal_seal.min_segment_bytes = bytes;
+            }
+            if let Some(delay) = overrides.wal_seal_max_flush_delay {
+                policy.wal_seal.max_flush_delay = delay;
+            }
+            if let Some(max_pending_writes) = overrides.wal_seal_max_pending_writes {
+                policy.wal_seal.max_pending_writes = max_pending_writes;
+            }
+            open_opts.cloud_runtime_policy = Some(policy);
+        }
 
         open_opts
     }
@@ -169,6 +205,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             compression: false,
             enable_compaction: false,
             memory_budget: None,
+            cloud_runtime_policy_overrides: None,
         },
         "local" => {
             let timestamp = std::time::SystemTime::now()
@@ -190,6 +227,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 compression: false,
                 enable_compaction: false,
                 memory_budget: None,
+                cloud_runtime_policy_overrides: None,
             }
         }
         "cloud" => {
@@ -218,6 +256,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 compression: false,
                 enable_compaction: false,
                 memory_budget: None,
+                cloud_runtime_policy_overrides: None,
             }
         }
         _ => panic!("unknown storage mode: {}", mode),
@@ -264,6 +303,7 @@ pub fn compaction_test_opts() -> MidgeOptions {
         compression: false,
         enable_compaction: true,
         memory_budget: None,
+        cloud_runtime_policy_overrides: None,
     }
 }
 
@@ -279,6 +319,7 @@ pub fn manual_compaction_test_opts() -> MidgeOptions {
         compression: false,
         enable_compaction: false,
         memory_budget: None,
+        cloud_runtime_policy_overrides: None,
     }
 }
 
@@ -294,5 +335,6 @@ pub fn durability_opts() -> MidgeOptions {
         compression: false,
         enable_compaction: false,
         memory_budget: None,
+        cloud_runtime_policy_overrides: None,
     }
 }

@@ -96,7 +96,7 @@ enum HandleOutcome {
 
 impl EventLoop {
     pub(crate) fn new(
-        state: RuntimeState,
+        mut state: RuntimeState,
         trace_enabled: bool,
         router: Arc<ResponseRouter>,
         config: super::RuntimeConfig,
@@ -148,6 +148,9 @@ impl EventLoop {
             wal_actor.current_flush_generation()
         };
 
+        state.cloud_eventual_flush_segment_gap =
+            config.cloud_runtime_policy.eventual_flush_segment_gap;
+
         let mut event_loop = Self {
             state,
             flush_actor,
@@ -164,7 +167,11 @@ impl EventLoop {
             loop_debug: std::env::var_os("MIDGE_LOOP_DEBUG").is_some(),
             loop_debug_wakes: 0,
             loop_debug_batch_total: 0,
-            durability: DurabilityCoordinator::new(initial_durability_key, is_cloud_async),
+            durability: DurabilityCoordinator::new(
+                initial_durability_key,
+                is_cloud_async,
+                config.cloud_runtime_policy.clone(),
+            ),
             router,
             pending_msg: None,
             worker_msg_tx,
@@ -384,6 +391,80 @@ impl EventLoop {
         Ok(())
     }
 
+    fn drain_auto_flush_memtables(&mut self) -> usize {
+        if self.state.memory_mode {
+            return 0;
+        }
+
+        let mut flushed = 0usize;
+
+        loop {
+            let Some(candidate) = self
+                .state
+                .next_flush_candidate(self.wal_actor.is_cloud_async())
+            else {
+                return flushed;
+            };
+
+            let wal_segment_gap = self.state.active_memtable_wal_segment_gap(candidate.cf_id);
+            match self.flush_actor.handle_flush(
+                &mut self.state,
+                candidate.cf_id,
+                self.hybrid_storage.as_ref(),
+            ) {
+                Ok(flush_output) => {
+                    if flush_output.file_meta.is_none() {
+                        tracing::trace!(
+                            cf_id = candidate.cf_id,
+                            reason = ?candidate.reason,
+                            wal_segment_gap,
+                            "auto-flush made no durable progress"
+                        );
+                        return flushed;
+                    }
+
+                    let sequence = self.state.sequence;
+                    if let Err(error) = self.publish_flushed_sst(
+                        candidate.cf_id,
+                        &flush_output.sst_name,
+                        sequence,
+                        flush_output.file_meta,
+                    ) {
+                        tracing::error!(
+                            %error,
+                            cf_id = candidate.cf_id,
+                            sst_name = %flush_output.sst_name,
+                            reason = ?candidate.reason,
+                            wal_segment_gap,
+                            "auto-flush publication failed"
+                        );
+                        return flushed;
+                    }
+
+                    self.wake_write_stall_waiters();
+                    tracing::debug!(
+                        cf_id = candidate.cf_id,
+                        sst_name = %flush_output.sst_name,
+                        reason = ?candidate.reason,
+                        wal_segment_gap,
+                        "Auto-flushed memtable"
+                    );
+                    flushed += 1;
+                }
+                Err(error) => {
+                    tracing::trace!(
+                        cf_id = candidate.cf_id,
+                        reason = ?candidate.reason,
+                        wal_segment_gap,
+                        error = %error,
+                        "Auto-flush skipped"
+                    );
+                    return flushed;
+                }
+            }
+        }
+    }
+
     /// Helper: deliver a RuntimeResponse to the requester via the router.
     #[inline]
     pub(super) fn respond(&self, request_id: u64, resp: RuntimeResponse) {
@@ -408,10 +489,6 @@ impl EventLoop {
         }
 
         if self.durability.has_pending_waiters() {
-            return true;
-        }
-
-        if self.state.needs_flush().is_some() {
             return true;
         }
 
@@ -576,16 +653,20 @@ impl EventLoop {
                 // CRITICAL: Flush and wait for pending CloudAsync segments before shutdown.
                 // This ensures all writes are cloud-durable for recovery.
                 if self.wal_actor.is_cloud_async() && self.state.wal.pending_writes > 0 {
-                    if let Err(e) = self.wal_actor.flush_for_cloud_upload(&mut self.state) {
-                        tracing::error!(error = %e, "Failed to flush CloudAsync segments during shutdown");
-                    } else if let Err(e) = self.wal_actor.rotate(&mut self.state) {
-                        tracing::error!(error = %e, "Failed to rotate WAL during shutdown");
-                    } else if let Some(storage) = &self.hybrid_storage {
-                        let segment_id = self.state.wal.current_segment_id.saturating_sub(1);
-                        let max_sequence = self.state.wal.local_durable_seq;
-                        let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
-                        storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
-                        tracing::info!(segment_id, "Enqueued final CloudAsync segment on shutdown");
+                    match self.seal_current_cloud_segment() {
+                        Ok(Some((segment_id, _max_sequence))) => {
+                            tracing::info!(
+                                segment_id,
+                                "Enqueued final CloudAsync segment on shutdown"
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "Failed to seal CloudAsync segment during shutdown"
+                            );
+                        }
                     }
                 }
 
@@ -667,6 +748,8 @@ impl EventLoop {
                         .or_default()
                         .push_back(request_id);
                 }
+
+                self.drain_auto_flush_memtables();
             }
 
             RuntimeMsg::CancelWaitForWriteStallClear { wait_request_id } => {
@@ -1099,40 +1182,8 @@ impl EventLoop {
                     self.sync_batched_wal_if_needed(msg_rx);
                 }
 
-                // Check if any memtable needs flushing (backpressure mechanism)
-                // Flushing is critical to accumulating immutable memtables and triggering backpressure
-                if let Some(cf_id_to_flush) = self.state.needs_flush() {
-                    match self.flush_actor.handle_flush(
-                        &mut self.state,
-                        cf_id_to_flush,
-                        self.hybrid_storage.as_ref(),
-                    ) {
-                        Ok(flush_output) => {
-                            // Complete the flush by updating bookkeeping
-                            let sequence = self.state.sequence;
-                            if let Err(error) = self.publish_flushed_sst(
-                                cf_id_to_flush,
-                                &flush_output.sst_name,
-                                sequence,
-                                flush_output.file_meta,
-                            ) {
-                                tracing::error!(
-                                    %error,
-                                    cf_id = cf_id_to_flush,
-                                    sst_name = %flush_output.sst_name,
-                                    "auto-flush publication failed"
-                                );
-                            }
-                            self.wake_write_stall_waiters();
-                            tracing::debug!(cf_id = cf_id_to_flush, sst_name = %flush_output.sst_name, "Auto-flushed memtable to enable backpressure");
-                        }
-                        Err(e) => {
-                            tracing::trace!(cf_id = cf_id_to_flush, error = %e, "Flush failed (backpressure or internal error)");
-                        }
-                    }
-                }
-
                 self.maybe_flush_cloud_async_wal();
+                self.drain_auto_flush_memtables();
             }
 
             // =============================================================
@@ -1618,6 +1669,8 @@ impl EventLoop {
                         );
                     }
                 }
+
+                self.drain_auto_flush_memtables();
             }
 
             // WAL
@@ -1711,6 +1764,7 @@ impl EventLoop {
                 self.sync_batched_wal_if_needed(msg_rx);
 
                 self.maybe_flush_cloud_async_wal();
+                self.drain_auto_flush_memtables();
             }
 
             RuntimeMsg::WalAppendDeleteRange {
@@ -1795,6 +1849,7 @@ impl EventLoop {
 
                 self.sync_batched_wal_if_needed(msg_rx);
                 self.maybe_flush_cloud_async_wal();
+                self.drain_auto_flush_memtables();
             }
 
             RuntimeMsg::WalSync { request_id } => {
@@ -1879,8 +1934,10 @@ impl EventLoop {
                 }
 
                 if !wait_for_ack || self.state.wal.cloud_durable_seq >= sequence {
+                    self.drain_auto_flush_memtables();
                     self.respond(request_id, RuntimeResponse::Ok { request_id });
                 } else if let Some(segment_id) = inflight_segment {
+                    self.drain_auto_flush_memtables();
                     self.durability.queue_waiter_for_key(
                         segment_id,
                         DurabilityWaiter::CloudDurability { request_id },
@@ -2140,6 +2197,7 @@ impl EventLoop {
 pub(super) mod tests {
     use super::*;
     use crate::runtime::{state::RuntimeState, ResponseRouter};
+    use crate::sst::Memtable;
     use std::sync::Arc;
 
     // Helper to create a minimal runtime state for testing
@@ -2161,6 +2219,67 @@ pub(super) mod tests {
         )
     }
 
+    pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
+        storage_policy: crate::storage::hybrid::policy::StorageBudgetPolicy,
+    ) -> crate::common::MidgeResult<EventLoop> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let db_path = std::env::temp_dir().join(format!(
+            "midge_event_loop_cloud_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&db_path).expect("create temp cloud event loop dir");
+
+        let state = RuntimeState::new(db_path.clone(), false);
+        let router = Arc::new(ResponseRouter::new());
+        let local = Arc::new(
+            crate::storage::filesystem::FileSystem::new(db_path.join("hybrid_local"))
+                .expect("create local backend"),
+        );
+        let cloud = Arc::new(
+            crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
+                .expect("create cloud backend"),
+        );
+        let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
+            local,
+            cloud,
+            storage_policy,
+        ));
+        let config = crate::runtime::RuntimeConfig {
+            wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+            hybrid_storage: Some(Arc::clone(&hybrid_storage)),
+            ..crate::runtime::RuntimeConfig::default()
+        };
+        EventLoop::new(state, false, router, config, None)
+    }
+
+    pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
+    ) -> crate::common::MidgeResult<EventLoop> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let db_path = std::env::temp_dir().join(format!(
+            "midge_event_loop_local_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&db_path).expect("create temp local event loop dir");
+
+        let state = RuntimeState::new(db_path, false);
+        let router = Arc::new(ResponseRouter::new());
+        EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            None,
+        )
+    }
+
     // =========== EventLoop Creation Tests ===========
 
     #[test]
@@ -2171,6 +2290,209 @@ pub(super) mod tests {
 
         // Assert
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_not_treat_blocked_auto_flush_candidate_as_standalone_actionable_work() {
+        let mut event_loop = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::new(1_000_000),
+        )
+        .expect("create cloud event loop");
+        event_loop
+            .hybrid_storage
+            .as_ref()
+            .expect("hybrid storage")
+            .flush_completed(960_000);
+
+        event_loop.state.memtable_flush_threshold = 1024;
+        event_loop.state.memtable_size_limit = 1024 * 1024;
+        event_loop.state.sequence = 1;
+        {
+            let cf = event_loop.state.get_cf(0).expect("default cf");
+            cf.memtable
+                .put_with_seq(b"key".to_vec(), vec![0xA5; 2048], 1, None)
+                .expect("seed memtable");
+        }
+        event_loop.state.total_memtable_bytes = event_loop
+            .state
+            .get_cf(0)
+            .expect("default cf")
+            .memtable
+            .size_bytes();
+
+        assert_eq!(event_loop.drain_auto_flush_memtables(), 0);
+
+        assert!(
+            !event_loop.has_actionable_work(),
+            "blocked auto-flush candidates should wait for a real state change before retrying"
+        );
+    }
+
+    #[test]
+    fn should_not_spin_auto_flush_drain_in_memory_mode() {
+        let mut event_loop = create_test_event_loop().expect("create memory event loop");
+        event_loop.state.memtable_flush_threshold = 1024;
+        event_loop.state.memtable_size_limit = 1024 * 1024;
+
+        {
+            let cf = event_loop.state.get_cf(0).expect("default cf");
+            cf.memtable
+                .put_with_seq(b"memory-key".to_vec(), vec![0xA5; 2048], 1, None)
+                .expect("seed memory memtable");
+        }
+        let expected_size = event_loop
+            .state
+            .get_cf(0)
+            .expect("default cf")
+            .memtable
+            .size_bytes();
+        event_loop.state.total_memtable_bytes = expected_size;
+
+        let flushed = event_loop.drain_auto_flush_memtables();
+
+        assert_eq!(flushed, 0, "memory mode should not loop on no-op flushes");
+        assert_eq!(event_loop.state.manifest.files.len(), 0);
+        assert_eq!(
+            event_loop
+                .state
+                .get_cf(0)
+                .expect("default cf")
+                .memtable
+                .size_bytes(),
+            expected_size,
+            "memory mode should retain the active memtable contents"
+        );
+    }
+
+    #[test]
+    fn should_drain_all_current_flush_candidates_in_single_auto_flush_pass() {
+        let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+        event_loop.state.memtable_flush_threshold = 1024;
+        event_loop.state.memtable_size_limit = 1024 * 1024;
+
+        let second_cf_id = event_loop
+            .state
+            .create_cf("second".to_string())
+            .expect("create second cf");
+
+        {
+            let cf = event_loop.state.get_cf(0).expect("default cf");
+            cf.memtable
+                .put_with_seq(b"default-key".to_vec(), vec![0xA5; 2048], 1, None)
+                .expect("seed default cf");
+        }
+        {
+            let cf = event_loop.state.get_cf(second_cf_id).expect("second cf");
+            cf.memtable
+                .put_with_seq(b"second-key".to_vec(), vec![0x5A; 2048], 2, None)
+                .expect("seed second cf");
+        }
+        event_loop.state.total_memtable_bytes = event_loop
+            .state
+            .column_families
+            .values()
+            .map(|cf| cf.memtable.size_bytes())
+            .sum();
+
+        let flushed = event_loop.drain_auto_flush_memtables();
+
+        assert_eq!(
+            flushed, 2,
+            "one successful auto-flush trigger should drain every currently eligible CF"
+        );
+        assert_eq!(
+            event_loop.state.manifest.files.len(),
+            2,
+            "both flushable CFs should publish SSTs without waiting for another event"
+        );
+        assert!(event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .any(|file| file.cf_id == 0));
+        assert!(event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .any(|file| file.cf_id == second_cf_id));
+    }
+
+    #[test]
+    fn should_publish_all_flushable_cfs_given_local_write_burst_without_further_writes() {
+        let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+        event_loop.state.memtable_flush_threshold = 2048;
+        event_loop.state.memtable_size_limit = 1024 * 1024;
+        let second_cf_id = event_loop
+            .state
+            .create_cf("burst-second".to_string())
+            .expect("create second cf");
+
+        let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+        let payload = vec![0xA5; 1536];
+        let burst = vec![
+            RuntimeMsg::WalAppend {
+                request_id: 1,
+                cf_id: 0,
+                key: b"default-1".to_vec(),
+                value: Some(payload.clone()),
+                ttl_seconds: None,
+                insert_only: false,
+            },
+            RuntimeMsg::WalAppend {
+                request_id: 2,
+                cf_id: second_cf_id,
+                key: b"second-1".to_vec(),
+                value: Some(payload.clone()),
+                ttl_seconds: None,
+                insert_only: false,
+            },
+            RuntimeMsg::WalAppend {
+                request_id: 3,
+                cf_id: 0,
+                key: b"default-2".to_vec(),
+                value: Some(payload.clone()),
+                ttl_seconds: None,
+                insert_only: false,
+            },
+            RuntimeMsg::WalAppend {
+                request_id: 4,
+                cf_id: second_cf_id,
+                key: b"second-2".to_vec(),
+                value: Some(payload),
+                ttl_seconds: None,
+                insert_only: false,
+            },
+        ];
+
+        let mut burst_iter = burst.into_iter();
+        let first = burst_iter.next().expect("first burst write");
+        for msg in burst_iter {
+            msg_tx.send(msg).expect("enqueue burst write");
+        }
+
+        let outcome = event_loop.process_wake_msg(first, &msg_rx, 16);
+        drop(msg_tx);
+
+        assert_eq!(outcome, HandleOutcome::Continue);
+        assert_eq!(
+            event_loop.state.manifest.files.len(),
+            2,
+            "local write burst should publish SSTs for every CF that became flushable without requiring another write"
+        );
+        assert!(event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .any(|file| file.cf_id == 0));
+        assert!(event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .any(|file| file.cf_id == second_cf_id));
     }
 
     #[test]

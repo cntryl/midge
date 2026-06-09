@@ -1347,7 +1347,8 @@ impl WalActor {
         value: Option<Bytes>,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
-        if let Some(cf_state) = state.column_families.get(&cf_id) {
+        let current_segment_id = state.wal.current_segment_id;
+        if let Some(cf_state) = state.column_families.get_mut(&cf_id) {
             let prev = cf_state.memtable.size_bytes();
             if let Some(val) = value {
                 cf_state
@@ -1361,6 +1362,9 @@ impl WalActor {
                     .delete_bytes_with_seq(key, sequence)?;
             }
             let new = cf_state.memtable.size_bytes();
+            if prev == 0 && new > 0 {
+                cf_state.active_memtable_started_in_segment = current_segment_id;
+            }
             let delta = new.saturating_sub(prev);
             state.total_memtable_bytes = state.total_memtable_bytes.saturating_add(delta);
         }
@@ -1376,13 +1380,17 @@ impl WalActor {
         start_key: &[u8],
         end_key: &[u8],
     ) -> MidgeResult<()> {
-        if let Some(cf_state) = state.column_families.get(&cf_id) {
+        let current_segment_id = state.wal.current_segment_id;
+        if let Some(cf_state) = state.column_families.get_mut(&cf_id) {
             let memtable = Arc::clone(&cf_state.memtable);
             let prev = memtable.size_bytes();
             memtable
                 .as_ref()
                 .delete_range_with_seq(start_key, end_key, sequence)?;
             let new = memtable.size_bytes();
+            if prev == 0 && new > 0 {
+                cf_state.active_memtable_started_in_segment = current_segment_id;
+            }
             let delta = new.saturating_sub(prev);
             state.total_memtable_bytes = state.total_memtable_bytes.saturating_add(delta);
         }
@@ -1522,9 +1530,6 @@ impl WalActor {
         // Treat everything appended so far as ready-to-ship.
         state.wal.last_synced_seq = state.sequence;
         state.wal.local_durable_seq = state.sequence;
-        state.wal.pending_writes = 0;
-        self.pending_sync_count = 0;
-        self.bytes_since_sync = 0;
 
         tracing::debug!(
             pending_writes = pending,
@@ -1533,6 +1538,15 @@ impl WalActor {
         );
 
         Ok(())
+    }
+
+    /// Clear buffered WAL accounting after a CloudAsync segment is successfully
+    /// sealed, rotated, and enqueued for upload.
+    pub fn complete_cloud_upload_seal(&mut self, state: &mut RuntimeState) {
+        state.wal.pending_writes = 0;
+        self.pending_sync_count = 0;
+        self.bytes_since_sync = 0;
+        self.last_sync_instant = Instant::now();
     }
 
     /// Check if batched sync should trigger

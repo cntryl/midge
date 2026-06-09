@@ -117,6 +117,7 @@ pub struct RuntimeMetricsSnapshot {
     pub total_memtable_bytes: usize,
     pub memtable_size_limit: usize,
     pub memtable_flush_threshold: usize,
+    pub max_memtable_wal_segment_gap: u64,
     pub write_stalled: bool,
     pub wal_current_segment_id: u64,
     pub wal_pending_writes: usize,
@@ -1065,6 +1066,7 @@ impl Engine {
 
         let mut cloud_root = None;
         let mut cloud_storage_for_restore: Option<Arc<crate::storage::cloud::CloudStorage>> = None;
+        let cloud_runtime_policy = opts.cloud_runtime_policy.clone().unwrap_or_default();
         let (mut state, runtime_config) = match &opts.storage {
             Storage::CloudSimulated { .. } => {
                 let cloud = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
@@ -1081,6 +1083,7 @@ impl Engine {
 
                 let config = crate::runtime::RuntimeConfig {
                     wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+                    cloud_runtime_policy: cloud_runtime_policy.clone(),
                     hybrid_storage: Some(cloud.hybrid_storage),
                     hybrid_storage_events: Some(cloud.events),
                     compression_policy: opts.compression_policy.clone(),
@@ -1126,6 +1129,7 @@ impl Engine {
 
                 let config = crate::runtime::RuntimeConfig {
                     wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+                    cloud_runtime_policy: cloud_runtime_policy.clone(),
                     hybrid_storage: Some(hybrid_storage),
                     hybrid_storage_events: Some(rx),
                     cloud_metadata_storage: Some(cloud_storage.clone()),
@@ -1146,6 +1150,7 @@ impl Engine {
                 let config = crate::runtime::RuntimeConfig {
                     wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
                     wal_batch_config: batch_config,
+                    cloud_runtime_policy: cloud_runtime_policy.clone(),
                     compression_policy: opts.compression_policy.clone(),
                     writer_epoch,
                     lease_healthy: Some(Arc::clone(&lease_healthy)),

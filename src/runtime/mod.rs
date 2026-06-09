@@ -33,12 +33,46 @@ use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+#[derive(Debug, Clone)]
+pub(crate) struct CloudWalSealPolicy {
+    pub min_segment_bytes: usize,
+    pub max_flush_delay: Duration,
+    pub max_pending_writes: usize,
+}
+
+impl Default for CloudWalSealPolicy {
+    fn default() -> Self {
+        Self {
+            min_segment_bytes: 16 * 1024 * 1024,
+            max_flush_delay: Duration::from_millis(500),
+            max_pending_writes: 10_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CloudRuntimePolicy {
+    pub eventual_flush_segment_gap: u64,
+    pub wal_seal: CloudWalSealPolicy,
+}
+
+impl Default for CloudRuntimePolicy {
+    fn default() -> Self {
+        Self {
+            eventual_flush_segment_gap: 128,
+            wal_seal: CloudWalSealPolicy::default(),
+        }
+    }
+}
 
 /// Runtime configuration for wiring durability/storage behavior.
 #[derive(Clone)]
 pub struct RuntimeConfig {
     pub wal_durability_policy: DurabilityPolicy,
     pub wal_batch_config: BatchConfig,
+    pub cloud_runtime_policy: CloudRuntimePolicy,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
@@ -59,6 +93,7 @@ impl Default for RuntimeConfig {
         Self {
             wal_durability_policy: DurabilityPolicy::Batched,
             wal_batch_config: BatchConfig::default(),
+            cloud_runtime_policy: CloudRuntimePolicy::default(),
             hybrid_storage: None,
             hybrid_storage_events: None,
             cloud_metadata_storage: None,

@@ -18,7 +18,6 @@ use crate::io::traits::Fs;
 /// Maximum size of idempotency cache to prevent unbounded growth under cloud stall
 const MAX_IDEMPOTENCY_CACHE_SIZE: usize = 100_000;
 const MAX_RECENT_DELETE_RANGES: usize = 4096;
-
 #[derive(Debug, Clone)]
 pub struct RecentDeleteRange {
     pub cf_id: crate::engine::ColumnFamilyId,
@@ -34,6 +33,8 @@ pub struct ColumnFamilyState {
     pub memtable: Arc<SkipListMemtable>,
     /// Immutable memtables waiting to be flushed
     pub immutable_memtables: Vec<Arc<SkipListMemtable>>,
+    /// WAL segment ID when the active memtable first became non-empty.
+    pub active_memtable_started_in_segment: u64,
 }
 
 impl ColumnFamilyState {
@@ -43,6 +44,7 @@ impl ColumnFamilyState {
             name,
             memtable: Arc::new(SkipListMemtable::new()),
             immutable_memtables: Vec::new(),
+            active_memtable_started_in_segment: 1,
         }
     }
 }
@@ -103,6 +105,18 @@ pub struct SnapshotState {
     pub max_snapshot_lifetime: std::time::Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlushReason {
+    SizeThreshold,
+    CloudSegmentGap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FlushCandidate {
+    pub cf_id: crate::engine::ColumnFamilyId,
+    pub reason: FlushReason,
+}
+
 impl RuntimeState {
     pub fn memtable_flush_trigger_bytes(&self) -> usize {
         self.memtable_size_limit
@@ -153,6 +167,87 @@ impl RuntimeState {
             return cf_state.memtable.size_bytes() >= self.memtable_flush_trigger_bytes();
         }
         false
+    }
+
+    pub(crate) fn active_memtable_wal_segment_gap(
+        &self,
+        cf_id: crate::engine::ColumnFamilyId,
+    ) -> u64 {
+        self.column_families
+            .get(&cf_id)
+            .map(|cf_state| {
+                if cf_state.memtable.size_bytes() == 0 {
+                    0
+                } else {
+                    self.wal
+                        .current_segment_id
+                        .saturating_sub(cf_state.active_memtable_started_in_segment)
+                }
+            })
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn max_memtable_wal_segment_gap(&self) -> u64 {
+        self.column_families
+            .keys()
+            .map(|cf_id| self.active_memtable_wal_segment_gap(*cf_id))
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn next_flush_candidate(
+        &self,
+        cloud_segment_gap_enabled: bool,
+    ) -> Option<FlushCandidate> {
+        let flush_threshold = self.memtable_flush_trigger_bytes();
+
+        let size_candidate = self
+            .column_families
+            .iter()
+            .filter_map(|(cf_id, cf_state)| {
+                let size = cf_state.memtable.size_bytes();
+                (size >= flush_threshold).then_some((*cf_id, size))
+            })
+            .max_by_key(|(cf_id, size)| (*size, std::cmp::Reverse(*cf_id)));
+
+        if let Some((cf_id, _)) = size_candidate {
+            return Some(FlushCandidate {
+                cf_id,
+                reason: FlushReason::SizeThreshold,
+            });
+        }
+
+        if !cloud_segment_gap_enabled {
+            return None;
+        }
+
+        self.column_families
+            .iter()
+            .filter_map(|(cf_id, cf_state)| {
+                if cf_state.memtable.size_bytes() == 0 {
+                    return None;
+                }
+
+                let gap = self
+                    .wal
+                    .current_segment_id
+                    .saturating_sub(cf_state.active_memtable_started_in_segment);
+                (gap >= self.cloud_eventual_flush_segment_gap).then_some((*cf_id, gap))
+            })
+            .max_by_key(|(cf_id, gap)| (*gap, std::cmp::Reverse(*cf_id)))
+            .map(|(cf_id, _)| FlushCandidate {
+                cf_id,
+                reason: FlushReason::CloudSegmentGap,
+            })
+    }
+
+    pub(crate) fn reinitialize_active_memtable_segment_tracking(&mut self) {
+        let current_segment_id = self.wal.current_segment_id;
+        for cf_state in self.column_families.values_mut() {
+            if cf_state.memtable.size_bytes() > 0 {
+                cf_state.active_memtable_started_in_segment = current_segment_id;
+            }
+        }
     }
 }
 
@@ -222,6 +317,8 @@ pub struct RuntimeState {
     pub intent_log: Vec<IntentLogEntry>,
     /// Maximum size of any memtable before write stall
     pub memtable_flush_threshold: usize,
+    /// Cloud-only runtime heuristic: flush active memtables after enough WAL segment churn.
+    pub cloud_eventual_flush_segment_gap: u64,
     /// Write stall active flag
     pub write_stalled: bool,
     /// Total size of all memtables (in-memory)
@@ -550,7 +647,7 @@ impl RuntimeState {
             1
         };
 
-        Ok(Self {
+        let mut state = Self {
             db_path,
             wal_dir,
             sst_dir,
@@ -583,7 +680,9 @@ impl RuntimeState {
             persistence_anomaly_detected: false,
             intent_log,
             memtable_flush_threshold: 64 * 1024 * 1024, // 64MB
-            max_immutable_memtables: 10,                // Hard limit on immutable memtable queue
+            cloud_eventual_flush_segment_gap: crate::runtime::CloudRuntimePolicy::default()
+                .eventual_flush_segment_gap,
+            max_immutable_memtables: 10, // Hard limit on immutable memtable queue
             write_stalled: false,
             total_memtable_bytes: 0,
             enable_compaction: !memory_mode,
@@ -600,7 +699,9 @@ impl RuntimeState {
             )),
             ingest_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_compaction_waits: parking_lot::Mutex::new(std::collections::HashMap::new()),
-        })
+        };
+        state.reinitialize_active_memtable_segment_tracking();
+        Ok(state)
     }
 
     pub fn health(&self) -> crate::engine::EngineHealth {
@@ -648,6 +749,7 @@ impl RuntimeState {
             total_memtable_bytes: self.total_memtable_bytes,
             memtable_size_limit: self.memtable_size_limit,
             memtable_flush_threshold: self.memtable_flush_threshold,
+            max_memtable_wal_segment_gap: self.max_memtable_wal_segment_gap(),
             write_stalled: self.has_any_hard_write_stall(),
             wal_current_segment_id: self.wal.current_segment_id,
             wal_pending_writes: self.wal.pending_writes,
@@ -1728,14 +1830,8 @@ impl RuntimeState {
     }
 
     pub fn needs_flush(&self) -> Option<u32> {
-        for (cf_id, cf) in &self.column_families {
-            // Use the Memtable trait method
-            let size = crate::sst::Memtable::size_bytes(cf.memtable.as_ref());
-            if size >= self.memtable_flush_trigger_bytes() {
-                return Some(*cf_id);
-            }
-        }
-        None
+        self.next_flush_candidate(false)
+            .map(|candidate| candidate.cf_id)
     }
 }
 
@@ -1804,6 +1900,121 @@ mod tests {
 
         // Assert
         assert_eq!(cf.immutable_memtables.len(), 2);
+    }
+
+    #[test]
+    fn should_select_size_threshold_flush_candidate_before_cloud_gap_candidate() {
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        state.memtable_flush_threshold = 4 * 1024;
+        state.memtable_size_limit = 1024 * 1024;
+        state.wal.current_segment_id = state.cloud_eventual_flush_segment_gap + 50;
+
+        grow_active_memtable(&mut state, 0, 5 * 1024);
+
+        let other_cf_id = state
+            .create_cf("other".to_string())
+            .expect("create other cf");
+        {
+            let cf_state = state.get_cf(other_cf_id).expect("other cf");
+            cf_state
+                .memtable
+                .put_with_seq(b"other".to_vec(), b"value".to_vec(), 1, None)
+                .expect("seed other cf");
+        }
+        state
+            .get_cf_mut(other_cf_id)
+            .expect("other cf")
+            .active_memtable_started_in_segment = 1;
+
+        let candidate = state
+            .next_flush_candidate(true)
+            .expect("flush candidate should exist");
+        assert_eq!(candidate.cf_id, 0);
+        assert_eq!(candidate.reason, FlushReason::SizeThreshold);
+    }
+
+    #[test]
+    fn should_select_cloud_gap_flush_candidate_when_cloud_mode_and_gap_exceeded() {
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        state.memtable_flush_threshold = 1024 * 1024;
+        state.memtable_size_limit = 1024 * 1024;
+        state.wal.current_segment_id = state.cloud_eventual_flush_segment_gap + 1;
+
+        {
+            let cf_state = state.get_cf(0).expect("default cf");
+            cf_state
+                .memtable
+                .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)
+                .expect("seed default cf");
+        }
+        state
+            .get_cf_mut(0)
+            .expect("default cf")
+            .active_memtable_started_in_segment = 1;
+
+        let candidate = state
+            .next_flush_candidate(true)
+            .expect("cloud gap flush candidate should exist");
+        assert_eq!(candidate.cf_id, 0);
+        assert_eq!(candidate.reason, FlushReason::CloudSegmentGap);
+    }
+
+    #[test]
+    fn should_not_select_cloud_gap_flush_candidate_when_gap_mode_disabled() {
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        state.memtable_flush_threshold = 1024 * 1024;
+        state.memtable_size_limit = 1024 * 1024;
+        state.wal.current_segment_id = state.cloud_eventual_flush_segment_gap + 10;
+
+        {
+            let cf_state = state.get_cf(0).expect("default cf");
+            cf_state
+                .memtable
+                .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)
+                .expect("seed default cf");
+        }
+        state
+            .get_cf_mut(0)
+            .expect("default cf")
+            .active_memtable_started_in_segment = 1;
+
+        assert!(state.next_flush_candidate(false).is_none());
+    }
+
+    #[test]
+    fn should_report_max_memtable_wal_segment_gap_for_non_empty_memtables() {
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        state.wal.current_segment_id = state.cloud_eventual_flush_segment_gap + 20;
+
+        {
+            let cf_state = state.get_cf(0).expect("default cf");
+            cf_state
+                .memtable
+                .put_with_seq(b"default".to_vec(), b"value".to_vec(), 1, None)
+                .expect("seed default cf");
+        }
+        state
+            .get_cf_mut(0)
+            .expect("default cf")
+            .active_memtable_started_in_segment = 10;
+
+        let cf_id = state.create_cf("secondary".to_string()).expect("create cf");
+        {
+            let cf_state = state.get_cf(cf_id).expect("secondary cf");
+            cf_state
+                .memtable
+                .put_with_seq(b"secondary".to_vec(), b"value".to_vec(), 2, None)
+                .expect("seed secondary cf");
+        }
+        state
+            .get_cf_mut(cf_id)
+            .expect("secondary cf")
+            .active_memtable_started_in_segment = 1;
+
+        assert_eq!(
+            state.max_memtable_wal_segment_gap(),
+            state.wal.current_segment_id.saturating_sub(1)
+        );
     }
 
     #[test]

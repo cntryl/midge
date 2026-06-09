@@ -138,6 +138,8 @@ impl FlushActor {
             )));
         }
 
+        let current_segment_id = state.wal.current_segment_id;
+
         // Get the column family (after stall check to avoid borrow issues)
         let cf = state
             .get_cf_mut(cf_id)
@@ -155,6 +157,7 @@ impl FlushActor {
             &mut cf.memtable,
             std::sync::Arc::new(crate::sst::SkipListMemtable::new()),
         );
+        cf.active_memtable_started_in_segment = current_segment_id;
 
         // Add to immutable list
         cf.immutable_memtables.push(frozen.clone());

@@ -198,49 +198,8 @@ impl EventLoop {
             tracing::trace!(drained, "drained pending writes");
         }
 
-        // Check if any memtable needs flushing after processing writes.
-        // Active memtable pressure should rotate to SST before it becomes hard
-        // backpressure from immutable queue or total memory limits.
         if drained > 0 {
-            if let Some(cf_id_to_flush) = self.state.needs_flush() {
-                match self.flush_actor.handle_flush(
-                    &mut self.state,
-                    cf_id_to_flush,
-                    self.hybrid_storage.as_ref(),
-                ) {
-                    Ok(flush_output) => {
-                        // Complete the flush by updating bookkeeping.
-                        // Use current sequence as approximation for the flushed memtable's max seq.
-                        let sequence = self.state.sequence;
-                        if let Err(error) = self.publish_flushed_sst(
-                            cf_id_to_flush,
-                            &flush_output.sst_name,
-                            sequence,
-                            flush_output.file_meta,
-                        ) {
-                            tracing::error!(
-                                %error,
-                                cf_id = cf_id_to_flush,
-                                sst_name = %flush_output.sst_name,
-                                "flush publication failed after batch write"
-                            );
-                        }
-                        self.wake_write_stall_waiters();
-                        tracing::debug!(
-                            cf_id = cf_id_to_flush,
-                            sst_name = %flush_output.sst_name,
-                            "Auto-flushed memtable after batch write"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::trace!(
-                            cf_id = cf_id_to_flush,
-                            error = %e,
-                            "Flush failed after batch write"
-                        );
-                    }
-                }
-            }
+            self.drain_auto_flush_memtables();
         }
 
         drained

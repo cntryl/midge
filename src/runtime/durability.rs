@@ -79,16 +79,23 @@ pub struct DurabilityCoordinator {
 
     /// Is CloudAsync enabled? (read from wal_actor.is_cloud_async())
     is_cloud_async: bool,
+
+    cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
 }
 
 impl DurabilityCoordinator {
     /// Create a new coordinator with initial durability key.
-    pub fn new(initial_durability_key: u64, is_cloud_async: bool) -> Self {
+    pub fn new(
+        initial_durability_key: u64,
+        is_cloud_async: bool,
+        cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
+    ) -> Self {
         Self {
             waiters: Some(KeyedGroupCommit::new(initial_durability_key)),
             inflight: HashMap::new(),
             last_cloud_flush: Instant::now(),
             is_cloud_async,
+            cloud_runtime_policy,
         }
     }
 
@@ -228,30 +235,25 @@ impl DurabilityCoordinator {
     /// commits never block on upload completion unless explicit CloudStrict policy is used.
     ///
     /// Flush triggers (ALL must be satisfied):
-    /// - `cloud_pending > 0` (some data exists to flush)
+    /// - `pending_writes > 0` (some local WAL data exists to seal)
     /// - At least ONE of:
     ///   * `bytes_buffered >= CLOUD_ASYNC_MIN_SEGMENT_BYTES`
-    ///   * `cloud_pending >= CLOUD_ASYNC_MAX_PENDING_WRITES`
+    ///   * `pending_writes >= CLOUD_ASYNC_MAX_PENDING_WRITES`
     ///   * `elapsed >= CLOUD_ASYNC_MAX_FLUSH_DELAY_BACKLOG`
-    pub fn should_flush_cloud_async(&self, cloud_pending: usize, bytes_buffered: usize) -> bool {
+    pub fn should_flush_cloud_async(&self, pending_writes: usize, bytes_buffered: usize) -> bool {
         if !self.is_cloud_async {
             return false;
         }
-
-        // CloudAsync rotate/upload policy thresholds
-        const CLOUD_ASYNC_MIN_SEGMENT_BYTES: usize = 16 * 1024 * 1024; // 16MB (was 8MB)
-        const CLOUD_ASYNC_MAX_FLUSH_DELAY_BACKLOG: std::time::Duration =
-            std::time::Duration::from_millis(500); // 500ms (was 25ms)
-        const CLOUD_ASYNC_MAX_PENDING_WRITES: usize = 10_000; // 10k (was 2048)
 
         // FORBIDDEN: Never flush based on pending writer count alone.
         // Pending writers may be used for metrics/backpressure, but MUST NOT trigger flushes.
         // Only threshold-based conditions below are allowed to trigger uploads.
 
-        cloud_pending > 0
-            && (bytes_buffered >= CLOUD_ASYNC_MIN_SEGMENT_BYTES
-                || cloud_pending >= CLOUD_ASYNC_MAX_PENDING_WRITES
-                || self.last_cloud_flush.elapsed() >= CLOUD_ASYNC_MAX_FLUSH_DELAY_BACKLOG)
+        pending_writes > 0
+            && (bytes_buffered >= self.cloud_runtime_policy.wal_seal.min_segment_bytes
+                || pending_writes >= self.cloud_runtime_policy.wal_seal.max_pending_writes
+                || self.last_cloud_flush.elapsed()
+                    >= self.cloud_runtime_policy.wal_seal.max_flush_delay)
     }
 
     /// Update last flush timestamp (call after CloudAsync segment is enqueued).

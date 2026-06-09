@@ -43,6 +43,10 @@ fn should_expose_local_engine_observability_surfaces() {
         metrics.manifest_last_persisted_sequence >= metrics.current_sequence,
         "flush should advance manifest durability frontier"
     );
+    assert_eq!(
+        metrics.max_memtable_wal_segment_gap, 0,
+        "local explicit flush should leave no outstanding WAL segment gap"
+    );
     assert!(
         metrics.wal_append_count >= metrics.wal_fsync_count,
         "WAL append counter should never be below fsync counter"
@@ -114,6 +118,7 @@ fn should_install_explicit_memtable_size_in_runtime_metrics() {
     // Assert
     assert_eq!(metrics.memtable_size_limit, memtable_size);
     assert_eq!(metrics.memtable_flush_threshold, memtable_size);
+    assert_eq!(metrics.max_memtable_wal_segment_gap, 0);
 }
 
 #[test]
@@ -136,6 +141,7 @@ fn should_install_distinct_explicit_memtable_size_and_flush_threshold_in_runtime
     // Assert
     assert_eq!(metrics.memtable_size_limit, memtable_size);
     assert_eq!(metrics.memtable_flush_threshold, flush_threshold);
+    assert_eq!(metrics.max_memtable_wal_segment_gap, 0);
 }
 
 #[test]
