@@ -199,8 +199,8 @@ impl EventLoop {
         }
 
         // Check if any memtable needs flushing after processing writes.
-        // This is critical for backpressure: without flushing, memtables grow unbounded
-        // and should_stall_writes() never returns true.
+        // Active memtable pressure should rotate to SST before it becomes hard
+        // backpressure from immutable queue or total memory limits.
         if drained > 0 {
             if let Some(cf_id_to_flush) = self.state.needs_flush() {
                 match self.flush_actor.handle_flush(

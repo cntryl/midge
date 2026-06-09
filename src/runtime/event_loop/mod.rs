@@ -744,6 +744,8 @@ impl EventLoop {
                     self.state.enable_compaction = ec;
                 }
 
+                self.wake_write_stall_waiters();
+
                 // Apply WAL changes to the wal actor if requested
                 if wal_durability_policy.is_some() || wal_batch_config.is_some() {
                     let policy =

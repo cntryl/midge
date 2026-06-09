@@ -104,24 +104,53 @@ pub struct SnapshotState {
 }
 
 impl RuntimeState {
-    /// Check if writes should be stalled for a given column family.
+    pub fn memtable_flush_trigger_bytes(&self) -> usize {
+        self.memtable_size_limit
+            .min(self.memtable_flush_threshold)
+            .max(1)
+    }
+
+    pub fn is_immutable_memtable_queue_full(&self, cf_id: crate::engine::ColumnFamilyId) -> bool {
+        self.column_families.get(&cf_id).is_some_and(|cf_state| {
+            cf_state.immutable_memtables.len() >= self.max_immutable_memtables
+        })
+    }
+
+    pub fn is_total_memtable_hard_limit_exceeded(&self) -> bool {
+        self.total_memtable_bytes >= self.memtable_flush_threshold.saturating_mul(2)
+    }
+
+    /// Check whether writes must be rejected until runtime pressure clears.
     ///
-    /// Returns true if:
-    /// - Immutable memtables queue is at capacity
-    /// - Total memtable memory exceeds threshold
-    pub fn should_stall_writes(&self, cf_id: crate::engine::ColumnFamilyId) -> bool {
-        if let Some(cf_state) = self.column_families.get(&cf_id) {
-            if cf_state.immutable_memtables.len() >= self.max_immutable_memtables {
-                return true;
-            }
-            // Per-CF memtable pressure: if active memtable exceeds threshold, stall writes
-            if cf_state.memtable.size_bytes() > self.memtable_flush_threshold {
-                return true;
-            }
-        }
-        // Additional stall condition: total memory across CFs
-        if self.total_memtable_bytes >= self.memtable_flush_threshold * 2 {
+    /// This intentionally excludes active memtable size: active memtable pressure
+    /// should trigger flush, not block the flush that would relieve it.
+    pub fn should_hard_stall_writes(&self, cf_id: crate::engine::ColumnFamilyId) -> bool {
+        if self.write_stalled {
             return true;
+        }
+        if self.is_immutable_memtable_queue_full(cf_id) {
+            return true;
+        }
+        self.is_total_memtable_hard_limit_exceeded()
+    }
+
+    pub fn has_any_hard_write_stall(&self) -> bool {
+        if self.write_stalled || self.is_total_memtable_hard_limit_exceeded() {
+            return true;
+        }
+        self.column_families
+            .keys()
+            .any(|cf_id| self.is_immutable_memtable_queue_full(*cf_id))
+    }
+
+    /// Compatibility wrapper for write-admission callsites.
+    pub fn should_stall_writes(&self, cf_id: crate::engine::ColumnFamilyId) -> bool {
+        self.should_hard_stall_writes(cf_id)
+    }
+
+    pub fn memtable_needs_flush(&self, cf_id: crate::engine::ColumnFamilyId) -> bool {
+        if let Some(cf_state) = self.column_families.get(&cf_id) {
+            return cf_state.memtable.size_bytes() >= self.memtable_flush_trigger_bytes();
         }
         false
     }
@@ -578,7 +607,7 @@ impl RuntimeState {
         let residue = self.storage_residue_assessment();
         crate::storage::residue::classify_engine_health(crate::storage::residue::HealthInputs {
             opened_in_salvage_mode: self.opened_in_salvage_mode,
-            write_stalled: self.write_stalled,
+            write_stalled: self.has_any_hard_write_stall(),
             persistence_anomaly_detected: self.persistence_anomaly_detected,
             pending_intents: self.intent_log.len(),
             orphan_ssts: residue.orphan_ssts.len(),
@@ -619,7 +648,7 @@ impl RuntimeState {
             total_memtable_bytes: self.total_memtable_bytes,
             memtable_size_limit: self.memtable_size_limit,
             memtable_flush_threshold: self.memtable_flush_threshold,
-            write_stalled: self.write_stalled,
+            write_stalled: self.has_any_hard_write_stall(),
             wal_current_segment_id: self.wal.current_segment_id,
             wal_pending_writes: self.wal.pending_writes,
             wal_last_synced_seq: self.wal.last_synced_seq,
@@ -1702,7 +1731,7 @@ impl RuntimeState {
         for (cf_id, cf) in &self.column_families {
             // Use the Memtable trait method
             let size = crate::sst::Memtable::size_bytes(cf.memtable.as_ref());
-            if size >= self.memtable_size_limit {
+            if size >= self.memtable_flush_trigger_bytes() {
                 return Some(*cf_id);
             }
         }
@@ -1713,6 +1742,38 @@ impl RuntimeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn grow_active_memtable(
+        state: &mut RuntimeState,
+        cf_id: crate::engine::ColumnFamilyId,
+        target_bytes: usize,
+    ) {
+        let mut seq = 1_u64;
+        while state
+            .get_cf(cf_id)
+            .expect("column family")
+            .memtable
+            .size_bytes()
+            < target_bytes
+        {
+            let cf = state.get_cf(cf_id).expect("column family");
+            cf.memtable
+                .put_with_seq(
+                    format!("key_{seq:06}").into_bytes(),
+                    vec![0xA5; 128],
+                    seq,
+                    None,
+                )
+                .expect("seed memtable");
+            seq += 1;
+        }
+
+        state.total_memtable_bytes = state
+            .get_cf(cf_id)
+            .expect("column family")
+            .memtable
+            .size_bytes();
+    }
 
     // =========== ColumnFamilyState Tests ===========
 
@@ -1743,6 +1804,57 @@ mod tests {
 
         // Assert
         assert_eq!(cf.immutable_memtables.len(), 2);
+    }
+
+    #[test]
+    fn should_flush_but_not_hard_stall_when_active_memtable_exceeds_flush_threshold() {
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        state.memtable_size_limit = 1024 * 1024;
+        state.memtable_flush_threshold = 4 * 1024;
+        state.total_memtable_bytes = 0;
+
+        grow_active_memtable(&mut state, 0, 5 * 1024);
+
+        assert_eq!(state.needs_flush(), Some(0));
+        assert!(!state.should_hard_stall_writes(0));
+        assert!(!state.should_stall_writes(0));
+        assert!(!state.has_any_hard_write_stall());
+    }
+
+    #[test]
+    fn should_hard_stall_when_immutable_memtable_queue_is_full() {
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        state.max_immutable_memtables = 1;
+        state
+            .get_cf_mut(0)
+            .expect("default cf")
+            .immutable_memtables
+            .push(Arc::new(SkipListMemtable::new()));
+
+        assert!(state.is_immutable_memtable_queue_full(0));
+        assert!(state.should_hard_stall_writes(0));
+        assert!(state.has_any_hard_write_stall());
+    }
+
+    #[test]
+    fn should_hard_stall_when_total_memtable_memory_exceeds_limit() {
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        state.memtable_flush_threshold = 1024;
+        state.total_memtable_bytes = 2 * 1024;
+
+        assert!(state.is_total_memtable_hard_limit_exceeded());
+        assert!(state.should_hard_stall_writes(0));
+        assert!(state.has_any_hard_write_stall());
+    }
+
+    #[test]
+    fn should_hard_stall_when_external_backpressure_sets_write_stalled() {
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        state.write_stalled = true;
+
+        assert!(state.should_hard_stall_writes(0));
+        assert!(state.has_any_hard_write_stall());
+        assert!(state.runtime_metrics_snapshot().write_stalled);
     }
 
     // =========== WalState Tests ===========

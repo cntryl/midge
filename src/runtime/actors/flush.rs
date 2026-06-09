@@ -113,10 +113,10 @@ impl FlushActor {
             }
         }
 
-        // === Phase 1.1: Check write stall condition BEFORE adding to immutable queue ===
+        // === Phase 1.1: Check immutable queue capacity BEFORE adding to it ===
         // If immutable queue is at capacity, reject flush request with WriteStall error.
         // This provides backpressure to clients: they must retry after backoff.
-        if state.should_stall_writes(cf_id) {
+        if state.is_immutable_memtable_queue_full(cf_id) {
             let max_immutable = state.max_immutable_memtables;
             let immutable_count = state
                 .get_cf(cf_id)

@@ -205,6 +205,7 @@ impl EventLoop {
                 if self.state.write_stalled {
                     self.state.write_stalled = false;
                 }
+                self.wake_write_stall_waiters();
             }
             _ => {}
         }

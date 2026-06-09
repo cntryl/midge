@@ -8,10 +8,102 @@
 //! - engine setup from high-level knobs (via `OpenOptions`)
 
 use crate::testkit::{MidgeOptions, StorageMode};
-use crate::{Engine, Goal, MemoryBudget, WorkloadProfile};
+use crate::{Engine, Goal, MemoryBudget, RuntimeMetricsSnapshot, WorkloadProfile};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+pub const DEFAULT_MEMTABLE_SWEEP_SIZE_BYTES: [usize; 5] = [
+    128 * 1024,
+    512 * 1024,
+    2 * 1024 * 1024,
+    8 * 1024 * 1024,
+    32 * 1024 * 1024,
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemtableSweepSize {
+    pub label: String,
+    pub bytes: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeCounterSnapshot {
+    pub write_stalls_total: u64,
+    pub write_stalls_memory_total: u64,
+    pub compactions_run: u64,
+    pub compaction_bytes_rewritten: u64,
+    pub compaction_failures: u64,
+    pub wal_append_count: u64,
+    pub wal_flush_count: u64,
+    pub wal_fsync_count: u64,
+}
+
+impl RuntimeCounterSnapshot {
+    pub fn from_runtime_metrics(metrics: &RuntimeMetricsSnapshot) -> Self {
+        Self {
+            write_stalls_total: metrics.write_stalls_total,
+            write_stalls_memory_total: metrics.write_stalls_memory_total,
+            compactions_run: metrics.compactions_run,
+            compaction_bytes_rewritten: metrics.compaction_bytes_rewritten,
+            compaction_failures: metrics.compaction_failures,
+            wal_append_count: metrics.wal_append_count,
+            wal_flush_count: metrics.wal_flush_count,
+            wal_fsync_count: metrics.wal_fsync_count,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeCounterDeltas {
+    pub write_stalls_total: u64,
+    pub write_stalls_memory_total: u64,
+    pub compactions_run: u64,
+    pub compaction_bytes_rewritten: u64,
+    pub compaction_failures: u64,
+    pub wal_append_count: u64,
+    pub wal_flush_count: u64,
+    pub wal_fsync_count: u64,
+}
+
+impl RuntimeCounterDeltas {
+    pub fn between(start: RuntimeCounterSnapshot, end: RuntimeCounterSnapshot) -> Self {
+        Self {
+            write_stalls_total: end
+                .write_stalls_total
+                .saturating_sub(start.write_stalls_total),
+            write_stalls_memory_total: end
+                .write_stalls_memory_total
+                .saturating_sub(start.write_stalls_memory_total),
+            compactions_run: end.compactions_run.saturating_sub(start.compactions_run),
+            compaction_bytes_rewritten: end
+                .compaction_bytes_rewritten
+                .saturating_sub(start.compaction_bytes_rewritten),
+            compaction_failures: end
+                .compaction_failures
+                .saturating_sub(start.compaction_failures),
+            wal_append_count: end.wal_append_count.saturating_sub(start.wal_append_count),
+            wal_flush_count: end.wal_flush_count.saturating_sub(start.wal_flush_count),
+            wal_fsync_count: end.wal_fsync_count.saturating_sub(start.wal_fsync_count),
+        }
+    }
+}
+
+impl MemtableSweepSize {
+    pub fn default_derived() -> Self {
+        Self {
+            label: "default".to_string(),
+            bytes: None,
+        }
+    }
+
+    pub fn explicit(bytes: usize) -> Self {
+        Self {
+            label: format_memtable_size_label(bytes),
+            bytes: Some(bytes),
+        }
+    }
+}
 
 /// Global counter for unique benchmark directory names.
 static BENCH_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -27,6 +119,81 @@ pub fn unique_bench_path(prefix: &str) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     base_dir.join(format!("midge_bench_{}_{}_{}", prefix, pid, counter))
+}
+
+pub fn default_memtable_sweep_sizes() -> Vec<MemtableSweepSize> {
+    DEFAULT_MEMTABLE_SWEEP_SIZE_BYTES
+        .into_iter()
+        .map(MemtableSweepSize::explicit)
+        .chain(std::iter::once(MemtableSweepSize::default_derived()))
+        .collect()
+}
+
+pub fn parse_memtable_sweep_sizes(input: Option<&str>) -> Result<Vec<MemtableSweepSize>, String> {
+    let Some(input) = input.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(default_memtable_sweep_sizes());
+    };
+
+    let mut sizes = Vec::new();
+    for raw_part in input.split(',') {
+        let part = raw_part.trim();
+        if part.is_empty() {
+            return Err("memtable sweep sizes must not contain empty entries".to_string());
+        }
+
+        if part.eq_ignore_ascii_case("default") {
+            sizes.push(MemtableSweepSize::default_derived());
+            continue;
+        }
+
+        let bytes = part
+            .parse::<usize>()
+            .map_err(|_| format!("invalid memtable sweep size `{part}`; use bytes or `default`"))?;
+        if bytes == 0 {
+            return Err("memtable sweep size must be greater than zero".to_string());
+        }
+        sizes.push(MemtableSweepSize::explicit(bytes));
+    }
+
+    Ok(sizes)
+}
+
+pub fn format_memtable_size_label(bytes: usize) -> String {
+    if bytes.is_multiple_of(1024 * 1024) {
+        format!("{}MiB", bytes / (1024 * 1024))
+    } else if bytes.is_multiple_of(1024) {
+        format!("{}KiB", bytes / 1024)
+    } else {
+        format!("{bytes}B")
+    }
+}
+
+pub fn set_runtime_compaction_enabled(engine: &Engine, enabled: bool) -> crate::MidgeResult<()> {
+    engine.set_runtime_compaction_enabled(enabled)
+}
+
+pub fn kick_runtime_compaction_once(engine: &Engine) -> crate::MidgeResult<()> {
+    engine.kick_runtime_compaction_once()
+}
+
+pub fn init_benchmark_telemetry() -> crate::MidgeResult<()> {
+    let mut config = crate::telemetry::TelemetryConfig::new()
+        .with_enabled(true)
+        .with_service_name("midge-bench".to_string());
+    config.enable_logging = false;
+    config.enable_tracing = false;
+    config.enable_metrics = true;
+
+    match crate::telemetry::Telemetry::init(config) {
+        Ok(()) => Ok(()),
+        Err(crate::common::MidgeError::Internal(message))
+            if message == "Telemetry already initialized"
+                && crate::telemetry::Telemetry::global().is_some() =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Storage mode variant for benchmark parameterization.
@@ -422,8 +589,10 @@ pub fn consume_n_from_iterator(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_seed_dir, run_single_shot_from_seed, run_single_shot_with_restore,
-        setup_engine_at_path, unique_bench_path, BenchEngineConfig,
+        create_seed_dir, default_memtable_sweep_sizes, parse_memtable_sweep_sizes,
+        run_single_shot_from_seed, run_single_shot_with_restore, setup_engine_at_path,
+        unique_bench_path, BenchEngineConfig, MemtableSweepSize, RuntimeCounterDeltas,
+        RuntimeCounterSnapshot,
     };
 
     #[test]
@@ -479,5 +648,99 @@ mod tests {
         let captured = seq.lock().unwrap().clone();
         assert_eq!(captured, vec!["restore", "timed"]);
         assert!(_d.as_nanos() > 0);
+    }
+
+    #[test]
+    fn should_use_default_memtable_sweep_sizes_when_env_is_empty() {
+        let parsed = parse_memtable_sweep_sizes(Some("  ")).expect("parse default sizes");
+
+        assert_eq!(parsed, default_memtable_sweep_sizes());
+    }
+
+    #[test]
+    fn should_parse_comma_separated_memtable_sweep_byte_values() {
+        let parsed =
+            parse_memtable_sweep_sizes(Some("131072, 524288, default")).expect("parse sizes");
+
+        assert_eq!(
+            parsed,
+            vec![
+                MemtableSweepSize::explicit(128 * 1024),
+                MemtableSweepSize::explicit(512 * 1024),
+                MemtableSweepSize::default_derived()
+            ]
+        );
+    }
+
+    #[test]
+    fn should_reject_invalid_memtable_sweep_size() {
+        let result = parse_memtable_sweep_sizes(Some("131072, nope"));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_reject_zero_memtable_sweep_size() {
+        let result = parse_memtable_sweep_sizes(Some("0"));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_calculate_runtime_counter_deltas() {
+        let start = RuntimeCounterSnapshot {
+            write_stalls_total: 10,
+            write_stalls_memory_total: 4,
+            compactions_run: 3,
+            compaction_bytes_rewritten: 1_000,
+            compaction_failures: 1,
+            wal_append_count: 20,
+            wal_flush_count: 5,
+            wal_fsync_count: 2,
+        };
+        let end = RuntimeCounterSnapshot {
+            write_stalls_total: 12,
+            write_stalls_memory_total: 7,
+            compactions_run: 8,
+            compaction_bytes_rewritten: 2_500,
+            compaction_failures: 1,
+            wal_append_count: 25,
+            wal_flush_count: 8,
+            wal_fsync_count: 3,
+        };
+
+        assert_eq!(
+            RuntimeCounterDeltas::between(start, end),
+            RuntimeCounterDeltas {
+                write_stalls_total: 2,
+                write_stalls_memory_total: 3,
+                compactions_run: 5,
+                compaction_bytes_rewritten: 1_500,
+                compaction_failures: 0,
+                wal_append_count: 5,
+                wal_flush_count: 3,
+                wal_fsync_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn should_saturate_runtime_counter_deltas_when_snapshot_regresses() {
+        let start = RuntimeCounterSnapshot {
+            write_stalls_total: 10,
+            write_stalls_memory_total: 10,
+            compactions_run: 10,
+            compaction_bytes_rewritten: 10,
+            compaction_failures: 10,
+            wal_append_count: 10,
+            wal_flush_count: 10,
+            wal_fsync_count: 10,
+        };
+        let end = RuntimeCounterSnapshot::default();
+
+        assert_eq!(
+            RuntimeCounterDeltas::between(start, end),
+            RuntimeCounterDeltas::default()
+        );
     }
 }

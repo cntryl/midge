@@ -1357,6 +1357,43 @@ impl Engine {
         }
     }
 
+    pub(crate) fn set_runtime_compaction_enabled(&self, enabled: bool) -> MidgeResult<()> {
+        let request_id = crate::runtime::next_request_id()?;
+        let resp =
+            self.runtime_handle
+                .send_and_wait(crate::runtime::RuntimeMsg::SetRuntimeConfig {
+                    request_id,
+                    memtable_size_limit: None,
+                    memtable_flush_threshold: None,
+                    enable_compaction: Some(enabled),
+                    wal_durability_policy: None,
+                    wal_batch_config: None,
+                })?;
+
+        match resp {
+            crate::runtime::RuntimeResponse::Ok { .. } => Ok(()),
+            crate::runtime::RuntimeResponse::Error { error, .. } => Err(error),
+            _ => Err(crate::common::MidgeError::Internal(
+                "unexpected response to SetRuntimeConfig".to_string(),
+            )),
+        }
+    }
+
+    pub(crate) fn kick_runtime_compaction_once(&self) -> MidgeResult<()> {
+        let request_id = crate::runtime::next_request_id()?;
+        let resp = self
+            .runtime_handle
+            .send_and_wait(crate::runtime::RuntimeMsg::CheckCompaction { request_id })?;
+
+        match resp {
+            crate::runtime::RuntimeResponse::Ok { .. } => Ok(()),
+            crate::runtime::RuntimeResponse::Error { error, .. } => Err(error),
+            _ => Err(crate::common::MidgeError::Internal(
+                "unexpected response to CheckCompaction".to_string(),
+            )),
+        }
+    }
+
     /// Check if ingest batching should be used based on durability policy.
     ///
     /// Return whether an ingest barrier is currently active.

@@ -377,6 +377,11 @@ harness = false
 # path = "benches/tier4_system_compaction_throughput.rs"
 # harness = false
 
+[[bench]]
+name = "tier4_memtable_sizing_sweep"
+path = "benches/tier4_memtable_sizing_sweep.rs"
+harness = false
+
 # tier4_system_durability_cloud (basic): Base happy-path cloud test (moved to extended).
 # Extended versions with failure scenarios are new.
 # [[bench]]

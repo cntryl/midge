@@ -6,7 +6,6 @@
 
 use crate::common::MidgeResult;
 use crate::runtime::{IntentLogEntry, RuntimeResponse, RuntimeState};
-use crate::sst::Memtable;
 
 /// SeqnoAllocActor - allocates monotonic sequence numbers
 pub struct SeqnoAllocActor;
@@ -29,31 +28,13 @@ impl SeqnoAllocActor {
         state: &mut RuntimeState,
         cf_id: crate::engine::ColumnFamilyId,
     ) -> MidgeResult<(u64, RuntimeResponse)> {
-        // Check if write is stalled due to explicit flag
-        if state.write_stalled {
+        if state.should_hard_stall_writes(cf_id) {
             if let Some(t) = crate::telemetry::Telemetry::global() {
                 t.metrics().record_write_stall_memory();
             }
             return Err(crate::common::MidgeError::WriteStall(
-                "write stalled: memtable full or compaction lagging".to_string(),
+                "write stalled: memtable pressure or external backpressure".to_string(),
             ));
-        }
-
-        // Check memtable size pressure for this column family
-        if let Some(cf_state) = state.get_cf(cf_id) {
-            let memtable_size = cf_state.memtable.size_bytes();
-            if memtable_size > state.memtable_flush_threshold {
-                // Memtable is too large - signal write stall
-                state.write_stalled = true;
-                if let Some(t) = crate::telemetry::Telemetry::global() {
-                    t.metrics().record_write_stall_memory();
-                }
-                return Err(crate::common::MidgeError::WriteStall(format!(
-                    "memtable full: {}MB > threshold {}MB",
-                    memtable_size / (1024 * 1024),
-                    state.memtable_flush_threshold / (1024 * 1024)
-                )));
-            }
         }
 
         // Allocate new seqno
