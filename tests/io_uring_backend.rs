@@ -9,7 +9,8 @@ use cntryl_midge::io::{Durability, Fs, FsPath, OpenMode, OpenOptions, UringFs};
 use cntryl_midge::sst::fs::FsSstFactoryIo;
 use cntryl_midge::sst::traits::{DynSstWriter, SstStateReader};
 use cntryl_midge::wal::fs::{FsWalReaderIo, FsWalWriterIo};
-use cntryl_midge::wal::{WalOpKind, WalReader, WalRecord};
+use cntryl_midge::wal::traits::WalReader;
+use cntryl_midge::wal::{WalOpKind, WalRecord};
 use tempfile::TempDir;
 
 #[test]

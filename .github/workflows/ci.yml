@@ -63,8 +63,16 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Linux io_uring clippy
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --all-targets --features uring -- -D warnings
+
       - name: Build
         run: cargo build --all-targets
+
+      - name: Linux io_uring build check
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo check --tests --features uring
 
       - name: Linux io_uring backend tests
         if: matrix.os == 'ubuntu-latest'
