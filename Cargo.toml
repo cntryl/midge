@@ -96,6 +96,9 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { version = "0.7", optional = true }
+
 [dev-dependencies]
 criterion = "0.8"
 proptest = "1.11"
@@ -109,6 +112,7 @@ cntryl-stress = "0.2.3"
 default = ["cloud-common"]
 telemetry = ["cloud-common", "dep:tracing-opentelemetry", "dep:opentelemetry_sdk"]
 telemetry-otlp = ["telemetry", "dep:opentelemetry-otlp"]
+uring = ["dep:io-uring"]
 
 # Cloud storage backend support enabled by default for current deployment profiles.
 cloud-common = [

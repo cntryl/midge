@@ -66,6 +66,14 @@ jobs:
       - name: Build
         run: cargo build --all-targets
 
+      - name: Linux io_uring backend tests
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --test io_uring_backend --features uring
+
+      - name: Linux io_uring library tests
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --lib --features uring
+
   cloud-integration:
     name: Cloud integration (Peas)
     runs-on: ubuntu-latest

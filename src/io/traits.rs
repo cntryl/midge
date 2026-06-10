@@ -12,6 +12,7 @@
 
 use bytes::Bytes;
 use std::io::{IoSlice, IoSliceMut};
+use std::ops::{BitOr, BitOrAssign};
 use thiserror::Error;
 
 /// Filesystem errors
@@ -91,6 +92,20 @@ impl FileCaps {
 
     pub const fn contains(self, other: Self) -> bool {
         (self.0 & other.0) != 0
+    }
+}
+
+impl BitOr for FileCaps {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        FileCaps(self.0 | rhs.0)
+    }
+}
+
+impl BitOrAssign for FileCaps {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
     }
 }
 

@@ -30,7 +30,12 @@ pub mod mock;
 pub mod real;
 pub mod staging;
 pub mod traits;
+#[cfg(feature = "uring")]
+pub mod uring;
 
 pub use mock::MockFs;
 pub use real::RealFs;
 pub use traits::{Durability, File, Fs, FsPath, FsResult, OpenMode, OpenOptions};
+#[cfg(feature = "uring")]
+#[allow(unused_imports)]
+pub use uring::UringFs;
