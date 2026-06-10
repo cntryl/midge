@@ -101,9 +101,9 @@ Evidence:
   - `cloud_persistence_hardening.rs`
   - `hybrid_storage.rs`
   - cloud-oriented `tier3` and `tier4` benches
-- The current docs are explicit that cloud-backed production is still pre-`1.0`:
+- The current docs are explicit that cloud-backed production is still pre-`1.0`, even while the 0.x support posture is now cloud-first:
   - `one-dot-zero-contract.md` keeps cloud-backed production outside the `1.0` in-scope list
-  - `support-matrix.md` marks cloud-backed mode as experimental/evaluation
+  - `support-matrix.md` now treats cloud-backed mode as the primary supported `0.x` path
   - `cloud-setup.md` says compatibility and operational guarantees are still being tightened before `1.0`
 - This is not a statement that cloud mode is weak. It is a statement that the project has not yet promoted it into the promised production contract.
 

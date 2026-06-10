@@ -395,7 +395,7 @@ cargo test --lib storage::providers
 
 ### Peas Qualification Tests
 
-Peas qualification is part of the default `cargo test` path. Start Peas first:
+Peas qualification is part of the default `cargo test` path, and the CI workflow runs it as an explicit gate. Start Peas first:
 
 ```bash
 docker compose up -d peas
@@ -410,7 +410,7 @@ cargo test
 Or narrow to just the provider qualification module:
 
 ```bash
-cargo test storage::providers::qualification -- --test-threads=1
+cargo test --lib storage::providers::qualification -- --test-threads=1
 ```
 
 If Peas is not running, these tests are expected to fail instead of being skipped.

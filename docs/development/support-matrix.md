@@ -7,11 +7,11 @@ This matrix defines what Midge supports today and what must be true before a cap
 | Capability | Current status | Production target |
 |---|---|---|
 | Local single-process embedded mode | Evaluation-ready | Production-ready first |
-| Cloud-backed mode | Experimental/evaluation | Promote only after parity, lease, upload, and qualification gates pass |
+| Cloud-backed mode | Supported 0.x path | Promote only after parity, lease, upload, and qualification gates pass |
 | `WriteOptions::sync()` | Supported | Freeze semantics at 1.0 |
 | `WriteOptions::buffered()` | Supported | Freeze semantics at 1.0 |
 | `WriteOptions::best_effort()` | Supported with explicit caveats | Supported only for documented reloadable-data workflows |
-| `WriteOptions::cloud_strict()` | Supported for evaluation | Production-ready only if cloud-backed mode is promoted |
+| `WriteOptions::cloud_strict()` | Supported as part of the cloud-backed path | Production-ready only if cloud-backed mode is promoted |
 | `RecoveryPolicy::Strict` | Supported | Production recovery default |
 | `RecoveryPolicy::Salvage` | Diagnostic/degraded path | Keep out of production contract unless explicitly promoted |
 | Verification APIs | Present | Stabilize schemas and operator guidance before 1.0 |
