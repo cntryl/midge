@@ -327,7 +327,7 @@ mod linux_impl {
                 return Ok(bytes::Bytes::new());
             }
 
-            if let Some(_) = &self.ring {
+            if self.ring.is_some() {
                 let mut buf = vec![0u8; len];
                 let entry =
                     opcode::Read::new(types::Fd(self.file.as_raw_fd()), buf.as_mut_ptr(), len as _)
@@ -355,7 +355,7 @@ mod linux_impl {
                 return Ok(());
             }
 
-            if let Some(_) = &self.ring {
+            if self.ring.is_some() {
                 let entry = opcode::Write::new(
                     types::Fd(self.file.as_raw_fd()),
                     data.as_ptr(),
@@ -404,7 +404,7 @@ mod linux_impl {
             match dur {
                 Durability::Unsafe => Ok(()),
                 Durability::Durable => {
-                    if let Some(_) = &self.ring {
+                    if self.ring.is_some() {
                         let entry = opcode::Fsync::new(types::Fd(self.file.as_raw_fd())).build();
                         let result = self.submit_and_wait_one(entry)?;
                         if result < 0 {
@@ -428,7 +428,7 @@ mod linux_impl {
                 return Ok(0);
             }
 
-            if let Some(_) = &self.ring {
+            if self.ring.is_some() {
                 let iovecs = build_iovecs_mut(bufs);
                 let entry = opcode::Readv::new(
                     types::Fd(self.file.as_raw_fd()),
@@ -465,7 +465,7 @@ mod linux_impl {
                 return Ok(0);
             }
 
-            if let Some(_) = &self.ring {
+            if self.ring.is_some() {
                 let iovecs = build_iovecs(bufs);
                 let entry = opcode::Writev::new(
                     types::Fd(self.file.as_raw_fd()),
@@ -581,10 +581,8 @@ mod linux_impl {
             file.sync(Durability::Durable)?;
 
             let mut out = [0u8; 11];
-            let mut slices = [
-                IoSliceMut::new(&mut out[..5]),
-                IoSliceMut::new(&mut out[5..]),
-            ];
+            let (left, right) = out.split_at_mut(5);
+            let mut slices = [IoSliceMut::new(left), IoSliceMut::new(right)];
             let read = file.readv_at(0, &mut slices)?;
             assert_eq!(read, 11);
             assert_eq!(&out, b"hello world");
