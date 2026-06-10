@@ -60,7 +60,7 @@ pub mod azure;
 pub mod gcs;
 pub mod minio;
 pub mod oci;
-#[cfg(test)]
+#[cfg(all(test, feature = "peas-tests"))]
 pub mod qualification;
 pub mod s3;
 pub mod wasabi;

@@ -130,7 +130,7 @@ jobs:
         run: docker compose up -d peas
 
       - name: Peas qualification
-        run: cargo test --lib storage::providers::qualification -- --test-threads=1
+        run: cargo test --lib --features peas-tests storage::providers::qualification -- --test-threads=1
 
       - name: Full test suite against Peas emulator
         run: cargo test

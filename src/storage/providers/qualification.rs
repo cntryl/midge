@@ -2,8 +2,8 @@
 //!
 //! These tests intentionally assume Peas is already running. Start it with:
 //! `docker compose up -d peas`
-//! then run `cargo test` or narrow to this module with:
-//! `cargo test --lib storage::providers::qualification -- --test-threads=1`
+//! then run with the feature enabled, for example:
+//! `cargo test --lib --features peas-tests storage::providers::qualification -- --test-threads=1`
 
 use super::build_cloud_storage;
 use crate::engine::api::{CloudProviderConfig, GcsApiStyle, GcsCredentialSource};

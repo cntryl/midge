@@ -139,6 +139,7 @@ cloud-aws = ["cloud-common", "dep:md5"]
 # Feature gate to expose `testkit` types from crate root when enabled.
 # Default is *not* to expose test-only helper types to downstream consumers.
 testkit = []
+peas-tests = []
 cloud-azure = ["cloud-common"]
 cloud-gcp = ["cloud-common"]
 cloud-oci = ["cloud-common"]
