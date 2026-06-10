@@ -15,7 +15,7 @@
 use super::traits::{
     format_leader_record, parse_leader_record, LeaderRecord, LeaderStore, LeaseError,
 };
-use crate::io::{Durability, Fs, FsPath, OpenMode, OpenOptions};
+use crate::io::{staging, Durability, Fs, FsPath, OpenMode, OpenOptions};
 use std::sync::Arc;
 
 /// Well-known filename for the leader record.
@@ -167,19 +167,14 @@ impl FsLeaderStore {
         let temp = Self::temp_path();
         let target = FsPath::new(LEADER_RECORD_FILE);
 
-        {
-            let opts = OpenOptions {
-                mode: OpenMode::ReadWrite,
-                create: true,
-                create_new: false,
-                truncate: true,
-            };
-            let mut file = self.fs.open(&temp, opts)?;
-            file.write_at(0, bytes::Bytes::from(content))?;
-            file.sync(Durability::Durable)?;
-        }
+        staging::stage_bytes(
+            &self.fs,
+            &temp,
+            &target,
+            content.as_bytes(),
+            LeaseError::IoError,
+        )?;
 
-        self.fs.rename_atomic(&temp, &target)?;
         let _ = self.fs.sync_dir(&FsPath::new("."), Durability::Durable);
 
         Ok(())
@@ -193,19 +188,14 @@ impl FsLeaderStore {
         let temp = Self::temp_path();
         let target = FsPath::new(LEADER_RECORD_FILE);
 
-        {
-            let opts = OpenOptions {
-                mode: OpenMode::ReadWrite,
-                create: true,
-                create_new: false,
-                truncate: true,
-            };
-            let mut file = self.fs.open(&temp, opts)?;
-            file.write_at(0, bytes::Bytes::from(content.to_string()))?;
-            file.sync(Durability::Durable)?;
-        }
+        staging::stage_bytes(
+            &self.fs,
+            &temp,
+            &target,
+            content.as_bytes(),
+            LeaseError::IoError,
+        )?;
 
-        self.fs.rename_atomic(&temp, &target)?;
         let _ = self.fs.sync_dir(&FsPath::new("."), Durability::Durable);
 
         Ok(())
@@ -232,28 +222,18 @@ impl FsLeaderStore {
         let temp = Self::temp_path();
         let target = FsPath::new(LEADER_RECORD_FILE);
 
-        // 2. Write to temp file
-        {
-            let opts = OpenOptions {
-                mode: OpenMode::ReadWrite,
-                create: true,
-                create_new: false,
-                truncate: true,
-            };
-            let mut file = self.fs.open(&temp, opts)?;
-            file.write_at(0, bytes::Bytes::from(content))?;
+        staging::stage_bytes(
+            &self.fs,
+            &temp,
+            &target,
+            content.as_bytes(),
+            LeaseError::IoError,
+        )?;
 
-            // 3. Fsync the temp file
-            file.sync(Durability::Durable)?;
-        }
-
-        // 4. Atomic rename temp → leader record
-        self.fs.rename_atomic(&temp, &target)?;
-
-        // 5. Fsync parent directory
+        // Fsync parent directory
         let _ = self.fs.sync_dir(&FsPath::new("."), Durability::Durable);
 
-        // 6. Re-read to confirm we won
+        // Re-read to confirm we won
         match self.read_current()? {
             Some(rec) if rec.holder_id == holder_id && rec.epoch == new_epoch => {
                 tracing::info!(

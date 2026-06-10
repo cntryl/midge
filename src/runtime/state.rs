@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::io::traits::Fs;
+use crate::io::traits::{Fs, FsError, FsPath};
 
 /// Maximum size of idempotency cache to prevent unbounded growth under cloud stall
 const MAX_IDEMPOTENCY_CACHE_SIZE: usize = 100_000;
@@ -883,16 +883,16 @@ impl RuntimeState {
 
         let residue = self.storage_residue_assessment();
 
-        for temp_name in residue.temp_files {
-            let path = self.sst_dir.join(&temp_name);
-            match std::fs::remove_file(&path) {
+        for temp_name in residue.sst_temp_files {
+            let path = FsPath::new(format!("sst/{temp_name}"));
+            match self.fs.remove_file(&path) {
                 Ok(()) => {
-                    tracing::info!(path = %path.display(), "deleted non-authoritative SST temp residue");
+                    tracing::info!(path = %path.0.as_str(), "deleted non-authoritative SST temp residue");
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(FsError::NotFound(_)) => {}
                 Err(error) => {
                     tracing::warn!(
-                        path = %path.display(),
+                        path = %path.0.as_str(),
                         error = %error,
                         "failed to delete non-authoritative SST temp residue"
                     );
@@ -901,7 +901,7 @@ impl RuntimeState {
         }
 
         for orphan_name in residue.orphan_ssts {
-            let path = self.sst_dir.join(&orphan_name);
+            let path = FsPath::new(format!("sst/{orphan_name}"));
             let injected_delete_failure =
                 fail::eval("midge::recovery::inject_orphan_sst_delete_failure", |_| {
                     true
@@ -910,22 +910,85 @@ impl RuntimeState {
             if injected_delete_failure {
                 self.persistence_anomaly_detected = true;
                 tracing::warn!(
-                    path = %path.display(),
+                    path = %path.0.as_str(),
                     "failed to delete orphan SST residue during startup cleanup"
                 );
                 continue;
             }
-            match std::fs::remove_file(&path) {
+            match self.fs.remove_file(&path) {
                 Ok(()) => {
-                    tracing::info!(path = %path.display(), "deleted orphan SST residue during startup cleanup");
+                    tracing::info!(path = %path.0.as_str(), "deleted orphan SST residue during startup cleanup");
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(FsError::NotFound(_)) => {}
                 Err(error) => {
                     self.persistence_anomaly_detected = true;
                     tracing::warn!(
-                        path = %path.display(),
+                        path = %path.0.as_str(),
                         error = %error,
                         "failed to delete orphan SST residue during startup cleanup"
+                    );
+                }
+            }
+        }
+
+        self.cleanup_root_staging_residue();
+    }
+
+    fn cleanup_root_staging_residue(&mut self) {
+        let root = FsPath::new("");
+        let mut temp_files = Vec::new();
+        let mut staging_dirs = Vec::new();
+
+        match self.fs.list_dir(&root) {
+            Ok(entries) => {
+                for entry in entries {
+                    if entry.is_dir {
+                        if entry.name == "cloud_recovery" {
+                            staging_dirs.push(entry.name);
+                        }
+                    } else if entry.name.ends_with(".tmp") {
+                        temp_files.push(entry.name);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, "skipping root residue cleanup because root listing failed");
+                return;
+            }
+        }
+
+        temp_files.sort();
+        staging_dirs.sort();
+
+        for temp_name in temp_files {
+            let path = FsPath::new(temp_name);
+            match self.fs.remove_file(&path) {
+                Ok(()) => {
+                    tracing::info!(path = %path.0.as_str(), "deleted root staging temp residue");
+                }
+                Err(FsError::NotFound(_)) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.0.as_str(),
+                        error = %error,
+                        "failed to delete root staging temp residue"
+                    );
+                }
+            }
+        }
+
+        for dir_name in staging_dirs {
+            let path = FsPath::new(dir_name);
+            match self.fs.remove_dir_all(&path) {
+                Ok(()) => {
+                    tracing::info!(path = %path.0.as_str(), "deleted stale staging directory");
+                }
+                Err(FsError::NotFound(_)) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.0.as_str(),
+                        error = %error,
+                        "failed to delete stale staging directory"
                     );
                 }
             }

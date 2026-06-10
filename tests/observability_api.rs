@@ -392,6 +392,18 @@ fn should_ignore_stale_metadata_temp_files_on_reopen() {
         layout.levels.iter().all(|level| level.file_count == 0),
         "stale metadata temp files must not publish SST state on reopen"
     );
+    assert!(
+        !db_path.join("manifest.json.tmp").exists(),
+        "manifest staging residue should be cleaned up on reopen"
+    );
+    assert!(
+        !db_path.join("manifest.snapshot.json.tmp").exists(),
+        "snapshot staging residue should be cleaned up on reopen"
+    );
+    assert!(
+        !db_path.join("intent_log.json.tmp").exists(),
+        "intent staging residue should be cleaned up on reopen"
+    );
 }
 
 fn failpoint_test_lock() -> &'static Mutex<()> {

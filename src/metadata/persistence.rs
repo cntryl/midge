@@ -143,39 +143,30 @@ impl ManifestPersistence {
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
     ) -> Result<(), String> {
-        use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
+        use crate::io::staging;
+        use crate::io::traits::FsPath;
 
         // Serialize to pretty JSON for machine parsing with human-debuggability.
         let json = serde_json::to_vec_pretty(manifest)
             .map_err(|e| format!("failed to serialize manifest to JSON: {}", e))?;
 
-        // Write temp manifest file
         let temp_path = FsPath::new(Self::MANIFEST_FILE_TEMP);
-        let mut f = fs
-            .open(
-                &temp_path,
-                OpenOptions {
-                    mode: OpenMode::ReadWrite,
-                    create: true,
-                    create_new: false,
-                    truncate: true,
-                },
-            )
-            .map_err(|e| format!("failed to open temp manifest file: {:?}", e))?;
-        f.write_at(0, bytes::Bytes::from(json.clone()))
-            .map_err(|e| format!("failed to write temp manifest: {:?}", e))?;
-        f.sync(Durability::Durable)
-            .map_err(|e| format!("failed to sync temp manifest: {:?}", e))?;
-
-        fail::fail_point!(
-            "midge::manifest::inject_no_space_on_checkpoint_save",
-            |_| Err("failpoint: no space while saving manifest checkpoint".to_string())
-        );
-        fail::fail_point!("midge::manifest::after_temp_sync_before_rename");
-
-        // Atomic rename
-        fs.rename_atomic(&temp_path, &FsPath::new(Self::MANIFEST_FILE))
-            .map_err(|e| format!("failed to rename manifest file atomically: {:?}", e))?;
+        let target_path = FsPath::new(Self::MANIFEST_FILE);
+        staging::stage_bytes_with_hook(
+            fs,
+            &temp_path,
+            &target_path,
+            &json,
+            || {
+                fail::fail_point!(
+                    "midge::manifest::inject_no_space_on_checkpoint_save",
+                    |_| Err("failpoint: no space while saving manifest checkpoint".to_string())
+                );
+                fail::fail_point!("midge::manifest::after_temp_sync_before_rename");
+                Ok(())
+            },
+            |msg| msg,
+        )?;
 
         tracing::debug!(
             path = ?Self::MANIFEST_FILE,
@@ -192,7 +183,8 @@ impl ManifestPersistence {
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
     ) -> Result<(), String> {
-        use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
+        use crate::io::staging;
+        use crate::io::traits::FsPath;
 
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
         let temp = FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP);
@@ -200,26 +192,7 @@ impl ManifestPersistence {
         let json = serde_json::to_vec_pretty(manifest)
             .map_err(|e| format!("failed to serialize manifest to JSON: {}", e))?;
 
-        // Write temp snapshot
-        let mut f = fs
-            .open(
-                &temp,
-                OpenOptions {
-                    mode: OpenMode::ReadWrite,
-                    create: true,
-                    create_new: false,
-                    truncate: true,
-                },
-            )
-            .map_err(|e| format!("failed to open temp snapshot: {:?}", e))?;
-        f.write_at(0, bytes::Bytes::from(json.clone()))
-            .map_err(|e| format!("failed to write temp snapshot: {:?}", e))?;
-        f.sync(Durability::Durable)
-            .map_err(|e| format!("failed to sync temp snapshot: {:?}", e))?;
-
-        // Atomic rename
-        fs.rename_atomic(&temp, &snap_path)
-            .map_err(|e| format!("failed to rename snapshot into place: {:?}", e))?;
+        staging::stage_bytes(fs, &temp, &snap_path, &json, |msg| msg)?;
 
         // truncate journal
         crate::metadata::journal::truncate_journal_with_fs(fs)
@@ -497,6 +470,19 @@ mod tests {
         ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &snapshot_only)
             .expect("save snapshot");
 
+        assert!(
+            !test_dir
+                .join(ManifestPersistence::MANIFEST_FILE_TEMP)
+                .exists(),
+            "manifest staging temp file should be cleaned up after save"
+        );
+        assert!(
+            !test_dir
+                .join(ManifestPersistence::MANIFEST_SNAPSHOT_TEMP)
+                .exists(),
+            "snapshot staging temp file should be cleaned up after save"
+        );
+
         // Act
         let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
 
@@ -599,6 +585,12 @@ mod tests {
 
         // Act
         ManifestPersistence::save(&test_dir, &manifest).expect("save should succeed");
+        assert!(
+            !test_dir
+                .join(ManifestPersistence::MANIFEST_FILE_TEMP)
+                .exists(),
+            "manifest staging temp file should not remain after save"
+        );
         let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
 
         // Assert

@@ -6,7 +6,8 @@ use std::path::Path;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct StorageResidueAssessment {
     pub orphan_ssts: Vec<String>,
-    pub temp_files: Vec<String>,
+    /// Temporary residue inside `sst/` that is never authoritative.
+    pub sst_temp_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -27,7 +28,7 @@ impl StorageResidueAssessment {
             .map(|file| file.name.as_str())
             .collect();
         let mut orphan_ssts = Vec::new();
-        let mut temp_files = Vec::new();
+        let mut sst_temp_files = Vec::new();
 
         if let Ok(entries) = std::fs::read_dir(sst_dir) {
             for entry in entries.flatten() {
@@ -37,7 +38,7 @@ impl StorageResidueAssessment {
                 };
 
                 if name.ends_with(".sst.tmp") || name.ends_with(".tmp") {
-                    temp_files.push(name.to_string());
+                    sst_temp_files.push(name.to_string());
                     continue;
                 }
 
@@ -50,11 +51,11 @@ impl StorageResidueAssessment {
         }
 
         orphan_ssts.sort();
-        temp_files.sort();
+        sst_temp_files.sort();
 
         Self {
             orphan_ssts,
-            temp_files,
+            sst_temp_files,
         }
     }
 }

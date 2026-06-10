@@ -19,6 +19,7 @@
 //! - **`real`**: `RealFs` - production filesystem via std::fs
 //! - **`mock`**: `MockFs` - in-memory deterministic backend
 //! - **`chaos`**: `ChaosFs` - failure injection wrapper
+//! - **`staging`**: atomic temp-write + rename helpers for bootstrap files
 //!
 //! ## Usage Pattern
 //!
@@ -27,6 +28,7 @@
 pub mod chaos;
 pub mod mock;
 pub mod real;
+pub mod staging;
 pub mod traits;
 
 pub use mock::MockFs;

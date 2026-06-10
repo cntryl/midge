@@ -566,6 +566,16 @@ impl Engine {
         }
     }
 
+    fn recovery_staging_fs(db_path: &Path) -> MidgeResult<Arc<dyn crate::io::traits::Fs>> {
+        let real = crate::io::real::RealFs::new(db_path).map_err(|error| {
+            MidgeError::RecoveryFailed(format!(
+                "failed to initialize recovery staging filesystem: {}",
+                error
+            ))
+        })?;
+        Ok(Arc::new(real))
+    }
+
     fn hydrate_cloud_metadata(
         cloud: &crate::storage::cloud::CloudStorage,
         db_path: &Path,
@@ -589,6 +599,7 @@ impl Engine {
             .iter()
             .map(|key| cloud.strip_namespace(key).to_string())
             .collect();
+        let staging_fs = Self::recovery_staging_fs(db_path)?;
 
         for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
             let key = crate::storage::cloud::cloud_metadata_key(file_name);
@@ -610,14 +621,15 @@ impl Engine {
                 }
             };
 
-            let local_path = db_path.join(file_name);
-            std::fs::write(&local_path, data).map_err(|error| {
-                MidgeError::RecoveryFailed(format!(
-                    "failed to stage cloud metadata '{}': {}",
-                    local_path.display(),
-                    error
-                ))
-            })?;
+            let temp_path = crate::io::traits::FsPath::new(format!("{file_name}.tmp"));
+            let target_path = crate::io::traits::FsPath::new(*file_name);
+            crate::io::staging::stage_bytes(
+                &staging_fs,
+                &temp_path,
+                &target_path,
+                &data,
+                MidgeError::RecoveryFailed,
+            )?;
         }
 
         Ok(())
@@ -704,6 +716,7 @@ impl Engine {
 
         let mut segment_keys: std::collections::BTreeMap<u64, String> =
             std::collections::BTreeMap::new();
+        let staging_fs = Self::recovery_staging_fs(db_path)?;
 
         for key in keys {
             let logical_key = cloud.strip_namespace(&key);
@@ -747,12 +760,18 @@ impl Engine {
             };
 
             let staged_file_name = crate::wal::cloud_segment_file_name(segment_id);
-            std::fs::write(recovery_wal_dir.join(&staged_file_name), data).map_err(|error| {
-                MidgeError::RecoveryFailed(format!(
-                    "failed to stage cloud WAL '{}': {}",
-                    logical_key, error
-                ))
-            })?;
+            let temp_path = crate::io::traits::FsPath::new(format!(
+                "cloud_recovery/wal/{staged_file_name}.tmp"
+            ));
+            let target_path =
+                crate::io::traits::FsPath::new(format!("cloud_recovery/wal/{staged_file_name}"));
+            crate::io::staging::stage_bytes(
+                &staging_fs,
+                &temp_path,
+                &target_path,
+                &data,
+                MidgeError::RecoveryFailed,
+            )?;
         }
 
         Ok(recovery_wal_dir)
@@ -762,6 +781,7 @@ impl Engine {
         state: &mut RuntimeState,
         cloud: &crate::storage::cloud::CloudStorage,
     ) -> MidgeResult<()> {
+        let staging_fs = state.fs.clone();
         let keys = Self::blocking_cloud_list(cloud, "sst/")?;
         let available: std::collections::HashSet<String> = keys
             .iter()
@@ -802,25 +822,19 @@ impl Engine {
                         return Err(MidgeError::RecoveryFailed(format!(
                             "failed to restore cloud SST '{}': {}",
                             file.name, error
-                        )))
+                        )));
                     }
                 };
 
-                if let Some(parent) = local_path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|error| {
-                        MidgeError::RecoveryFailed(format!(
-                            "failed to create SST cache directory '{}': {}",
-                            parent.display(),
-                            error
-                        ))
-                    })?;
-                }
-                std::fs::write(&local_path, data).map_err(|error| {
-                    MidgeError::RecoveryFailed(format!(
-                        "failed to write restored SST '{}': {}",
-                        file.name, error
-                    ))
-                })?;
+                let temp_path = crate::io::traits::FsPath::new(format!("sst/{}.tmp", file.name));
+                let target_path = crate::io::traits::FsPath::new(format!("sst/{}", file.name));
+                crate::io::staging::stage_bytes(
+                    &staging_fs,
+                    &temp_path,
+                    &target_path,
+                    &data,
+                    MidgeError::RecoveryFailed,
+                )?;
 
                 if let Err(error) = crate::sst::fs::SstFileIo::open_with_real_fs(&local_path) {
                     if state.recovery_policy == RecoveryPolicy::Strict {
@@ -855,6 +869,7 @@ impl Engine {
         cloud: &crate::storage::cloud::CloudStorage,
         sst_names: impl IntoIterator<Item = String>,
     ) -> MidgeResult<()> {
+        let staging_fs = state.fs.clone();
         let keys = match Self::blocking_cloud_list(cloud, "sst/") {
             Ok(keys) => keys,
             Err(error) if state.recovery_policy == RecoveryPolicy::Salvage => {
@@ -916,21 +931,15 @@ impl Engine {
                 }
             };
 
-            if let Some(parent) = local_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|error| {
-                    MidgeError::RecoveryFailed(format!(
-                        "failed to create SST cache directory '{}': {}",
-                        parent.display(),
-                        error
-                    ))
-                })?;
-            }
-            std::fs::write(&local_path, data).map_err(|error| {
-                MidgeError::RecoveryFailed(format!(
-                    "failed to write restored SST '{}': {}",
-                    sst_name, error
-                ))
-            })?;
+            let temp_path = crate::io::traits::FsPath::new(format!("sst/{}.tmp", sst_name));
+            let target_path = crate::io::traits::FsPath::new(format!("sst/{}", sst_name));
+            crate::io::staging::stage_bytes(
+                &staging_fs,
+                &temp_path,
+                &target_path,
+                &data,
+                MidgeError::RecoveryFailed,
+            )?;
 
             if let Err(error) = crate::sst::fs::SstFileIo::open_with_real_fs(&local_path) {
                 if state.recovery_policy == RecoveryPolicy::Strict {

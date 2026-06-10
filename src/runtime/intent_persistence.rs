@@ -89,33 +89,27 @@ impl IntentPersistence {
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         intents: &[IntentLogEntry],
     ) -> Result<(), String> {
-        use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
+        use crate::io::staging;
+        use crate::io::traits::FsPath;
 
         let json = serde_json::to_vec_pretty(intents)
             .map_err(|e| format!("failed to serialize intent log to JSON: {}", e))?;
 
         let temp = FsPath::new(Self::INTENT_FILE_TEMP);
-        fail::fail_point!("midge::intent::inject_no_space_on_save", |_| Err(
-            "failpoint: no space while saving intent log".to_string()
-        ));
-        let mut f = fs
-            .open(
-                &temp,
-                OpenOptions {
-                    mode: OpenMode::ReadWrite,
-                    create: true,
-                    create_new: false,
-                    truncate: true,
-                },
-            )
-            .map_err(|e| format!("failed to open temp intent file: {:?}", e))?;
-        f.write_at(0, bytes::Bytes::from(json.clone()))
-            .map_err(|e| format!("failed to write temp intent: {:?}", e))?;
-        f.sync(Durability::Durable)
-            .map_err(|e| format!("failed to sync temp intent: {:?}", e))?;
-
-        fs.rename_atomic(&temp, &FsPath::new(Self::INTENT_FILE))
-            .map_err(|e| format!("failed to rename intent file atomically: {:?}", e))?;
+        let target = FsPath::new(Self::INTENT_FILE);
+        staging::stage_bytes_with_hook(
+            fs,
+            &temp,
+            &target,
+            &json,
+            || {
+                fail::fail_point!("midge::intent::inject_no_space_on_save", |_| Err(
+                    "failpoint: no space while saving intent log".to_string()
+                ));
+                Ok(())
+            },
+            |msg| msg,
+        )?;
 
         tracing::debug!(path = ?Self::INTENT_FILE, entries = intents.len(), "intent log persisted");
         Ok(())
@@ -243,6 +237,10 @@ mod tests {
 
         // Act
         IntentPersistence::save(&test_dir, &intents).expect("save should succeed");
+        assert!(
+            !test_dir.join(IntentPersistence::INTENT_FILE_TEMP).exists(),
+            "intent staging temp file should not remain after save"
+        );
         let loaded = IntentPersistence::load(&test_dir).expect("load should succeed");
 
         // Assert

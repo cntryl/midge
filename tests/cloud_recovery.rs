@@ -23,6 +23,10 @@ use std::time::Duration;
 #[test]
 fn should_preserve_flushed_values_when_reopening_after_short_upload_window() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        let cloud_cache_path = match &opts.storage_mode {
+            StorageMode::CloudBacked { local_cache_path } => Some(local_cache_path.clone()),
+            _ => None,
+        };
         // Arrange
         // Act (Phase 1)
         {
@@ -49,7 +53,7 @@ fn should_preserve_flushed_values_when_reopening_after_short_upload_window() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -65,6 +69,13 @@ fn should_preserve_flushed_values_when_reopening_after_short_upload_window() {
                     key
                 );
             }
+        }
+
+        if let Some(local_cache_path) = cloud_cache_path {
+            assert!(
+                !local_cache_path.join("cloud_recovery").exists(),
+                "cloud reopen should not leave recovery staging directories behind"
+            );
         }
     });
 }
