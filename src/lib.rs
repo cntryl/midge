@@ -111,10 +111,6 @@ pub use io::{
     Durability as FsDurability, Fs, FsPath, OpenMode as FsOpenMode, OpenOptions as FsOpenOptions,
 };
 
-// Linux io_uring filesystem backend (available when feature-enabled).
-#[cfg(feature = "uring")]
-pub use io::UringFs;
-
 /// Test support types re-exported for benches/tests and compatibility helpers.
 pub use testkit::{MidgeOptions, StorageMode};
 
