@@ -232,12 +232,12 @@ mod linux_impl {
             usize::try_from(len).map_err(|_| FsError::Io(format!("len too large: {len}")))
         }
 
-    fn current_file_len(&self) -> FsResult<u64> {
-        Ok(self
-            .file
-            .metadata()
-            .map_err(|e| FsError::Io(format!("metadata(len) {}: {e}", self.path.display())))?
-            .len())
+        fn current_file_len(&self) -> FsResult<u64> {
+            Ok(self
+                .file
+                .metadata()
+                .map_err(|e| FsError::Io(format!("metadata(len) {}: {e}", self.path.display())))?
+                .len())
         }
 
         fn io_uring_error(&self, op: &str, result: i32) -> FsError {
@@ -558,7 +558,7 @@ mod linux_impl {
         FsError::Io(format!("{op} {}: {e}", path.display()))
     }
 
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, target_os = "linux", feature = "uring"))]
     mod tests {
         use super::*;
         use std::io::{IoSlice, IoSliceMut};
@@ -625,5 +625,4 @@ mod linux_impl {
 pub use linux_impl::UringFs;
 
 #[cfg(not(target_os = "linux"))]
-#[allow(unused)]
-pub type UringFs = super::real::RealFs;
+pub use super::real::RealFs as UringFs;

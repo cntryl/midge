@@ -106,6 +106,10 @@ pub use engine::Key as Bytes;
 // Re-export BytesMut directly from the `bytes` crate.
 pub use bytes::BytesMut;
 
+// Linux io_uring filesystem backend (available when feature-enabled).
+#[cfg(feature = "uring")]
+pub use io::UringFs;
+
 /// Test support types re-exported for benches/tests and compatibility helpers.
 pub use testkit::{MidgeOptions, StorageMode};
 
