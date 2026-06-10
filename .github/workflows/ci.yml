@@ -27,12 +27,15 @@ jobs:
   matrix:
     name: Matrix (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    
     env:
       CARGO_INCREMENTAL: 0
+
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-      fail-fast: false
+      fail-fast: true
+
     timeout-minutes: 20
 
     steps:
@@ -63,31 +66,52 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Linux io_uring clippy
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy --all-targets --features uring -- -D warnings
-
       - name: Build
         run: cargo build --all-targets
 
-      - name: Linux io_uring build check
-        if: matrix.os == 'ubuntu-latest'
+      - name: Test (without Peas emulator qualification)
+        run: cargo test -- --skip storage::providers::qualification
+
+  io-uring:
+    name: Linux io_uring
+    runs-on: ubuntu-latest
+
+    env:
+      CARGO_INCREMENTAL: 0
+
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Update Rust toolchain
+        run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-io-uring"
+
+      - name: io_uring clippy
+        run: cargo clippy --all-targets --features uring -- -D warnings
+
+      - name: io_uring build check
         run: cargo check --tests --features uring
 
-      - name: Linux io_uring backend tests
-        if: matrix.os == 'ubuntu-latest'
+      - name: io_uring backend tests
         run: cargo test --test io_uring_backend --features uring
 
-      - name: Linux io_uring library tests
-        if: matrix.os == 'ubuntu-latest'
+      - name: io_uring library tests
         run: cargo test --lib --features uring
 
   cloud-integration:
     name: Cloud integration (Peas)
     runs-on: ubuntu-latest
-    needs: matrix
+
     env:
       CARGO_INCREMENTAL: 0
+
     timeout-minutes: 20
 
     steps:
