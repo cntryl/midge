@@ -15,6 +15,12 @@ use std::time::Duration;
 const PEAS_ENDPOINT: &str = "http://127.0.0.1:9000";
 const PEAS_ACCESS_KEY: &str = "admin";
 const PEAS_SECRET_KEY: &str = "easy-peasy";
+const REAL_S3_BUCKET_ENV: &str = "MIDGE_REAL_S3_BUCKET";
+const REAL_S3_ENDPOINT_ENV: &str = "MIDGE_REAL_S3_ENDPOINT";
+const REAL_S3_REGION_ENV: &str = "MIDGE_REAL_S3_REGION";
+const REAL_S3_ACCESS_KEY_ENV: &str = "MIDGE_REAL_S3_ACCESS_KEY";
+const REAL_S3_SECRET_KEY_ENV: &str = "MIDGE_REAL_S3_SECRET_KEY";
+const REAL_S3_PATH_STYLE_ENV: &str = "MIDGE_REAL_S3_PATH_STYLE";
 
 #[test]
 fn s3_compatible_contract_against_peas() {
@@ -100,57 +106,41 @@ fn gcs_json_bearer_config_rejects_peas_hmac_contract() {
 }
 
 #[test]
+fn s3_compatible_contract_against_real_provider_if_configured() {
+    let Some(provider) = configured_real_s3_provider() else {
+        return;
+    };
+
+    run_provider_contract_without_namespace_setup("real-s3", provider);
+}
+
+#[test]
 fn engine_recovers_from_peas_s3_after_local_cache_loss() {
     let provider = CloudProviderConfig::peas_s3("midge-peas-engine-s3");
-    ensure_peas_namespace(&provider).expect("prepare Peas S3 bucket");
+    engine_recovers_from_provider_after_local_cache_loss("peas-engine", provider, true);
+}
 
-    let prefix = format!("engine/{}/", uuid::Uuid::new_v4());
-    let cache_path =
-        std::env::temp_dir().join(format!("midge-peas-engine-{}", uuid::Uuid::new_v4()));
-    let _ = std::fs::remove_dir_all(&cache_path);
+#[test]
+fn engine_recovers_from_real_s3_after_local_cache_loss_if_configured() {
+    let Some(provider) = configured_real_s3_provider() else {
+        return;
+    };
 
-    let opts = real_cloud_engine_options(cache_path.clone(), provider.clone(), prefix.clone());
-    let engine = Engine::open(opts).expect("open Peas-backed engine");
-    let default_handle = default_cf(&engine);
-
-    let mut tx = engine
-        .begin_tx(default_handle.id(), TransactionMode::ReadWrite)
-        .expect("begin write tx");
-    tx.put(
-        b"engine-peas-key".to_vec(),
-        b"engine-peas-value".to_vec(),
-        None,
-    )
-    .expect("put value");
-    tx.commit(WriteOptions::cloud_strict())
-        .expect("cloud-strict commit");
-
-    engine.flush_cf(&default_handle).expect("force SST upload");
-    drop(engine);
-
-    std::fs::remove_dir_all(&cache_path).expect("delete local cache");
-
-    let reopened = Engine::open(real_cloud_engine_options(
-        cache_path.clone(),
-        provider,
-        prefix,
-    ))
-    .expect("reopen from Peas");
-    let reopened_cf = default_cf(&reopened);
-    let read_tx = reopened
-        .begin_tx(reopened_cf.id(), TransactionMode::ReadOnly)
-        .expect("begin read tx");
-    let value = read_tx.get(b"engine-peas-key").expect("read value");
-    assert_eq!(value, Some(bytes::Bytes::from_static(b"engine-peas-value")));
-
-    drop(reopened);
-    let _ = std::fs::remove_dir_all(&cache_path);
+    engine_recovers_from_provider_after_local_cache_loss("real-s3-engine", provider, false);
 }
 
 fn run_provider_contract(label: &str, provider: CloudProviderConfig) {
     ensure_peas_namespace(&provider).unwrap_or_else(|error| {
         panic!("{label}: failed to prepare Peas namespace: {error}");
     });
+    run_provider_contract_body(label, provider);
+}
+
+fn run_provider_contract_without_namespace_setup(label: &str, provider: CloudProviderConfig) {
+    run_provider_contract_body(label, provider);
+}
+
+fn run_provider_contract_body(label: &str, provider: CloudProviderConfig) {
     let backend = build_cloud_storage(&provider, "").unwrap_or_else(|error| {
         panic!("{label}: failed to build provider backend: {error}");
     });
@@ -232,6 +222,83 @@ fn real_cloud_engine_options(
     OpenOptions::cloud(cache_path, provider, prefix)
         .memory_budget(MemoryBudget::Bytes(8 * 1024 * 1024))
         .build()
+}
+
+fn engine_recovers_from_provider_after_local_cache_loss(
+    label: &str,
+    provider: CloudProviderConfig,
+    prepare_namespace: bool,
+) {
+    if prepare_namespace {
+        ensure_peas_namespace(&provider).unwrap_or_else(|error| {
+            panic!("{label}: failed to prepare provider namespace: {error}")
+        });
+    }
+
+    let prefix = format!("engine/{label}/{}/", uuid::Uuid::new_v4());
+    let cache_path =
+        std::env::temp_dir().join(format!("midge-provider-engine-{}", uuid::Uuid::new_v4()));
+    let _ = std::fs::remove_dir_all(&cache_path);
+
+    let opts = real_cloud_engine_options(cache_path.clone(), provider.clone(), prefix.clone());
+    let engine = Engine::open(opts).expect("open provider-backed engine");
+    let default_handle = default_cf(&engine);
+
+    let mut tx = engine
+        .begin_tx(default_handle.id(), TransactionMode::ReadWrite)
+        .expect("begin write tx");
+    tx.put(
+        b"engine-provider-key".to_vec(),
+        b"engine-provider-value".to_vec(),
+        None,
+    )
+    .expect("put value");
+    tx.commit(WriteOptions::cloud_strict())
+        .expect("cloud-strict commit");
+
+    engine.flush_cf(&default_handle).expect("force SST upload");
+    drop(engine);
+
+    std::fs::remove_dir_all(&cache_path).expect("delete local cache");
+
+    let reopened = Engine::open(real_cloud_engine_options(
+        cache_path.clone(),
+        provider,
+        prefix,
+    ))
+    .expect("reopen from provider");
+    let reopened_cf = default_cf(&reopened);
+    let read_tx = reopened
+        .begin_tx(reopened_cf.id(), TransactionMode::ReadOnly)
+        .expect("begin read tx");
+    let value = read_tx.get(b"engine-provider-key").expect("read value");
+    assert_eq!(
+        value,
+        Some(bytes::Bytes::from_static(b"engine-provider-value"))
+    );
+
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&cache_path);
+}
+
+fn configured_real_s3_provider() -> Option<CloudProviderConfig> {
+    let bucket = std::env::var(REAL_S3_BUCKET_ENV).ok()?;
+    let endpoint = std::env::var(REAL_S3_ENDPOINT_ENV).ok()?;
+    let access_key = std::env::var(REAL_S3_ACCESS_KEY_ENV).ok()?;
+    let secret_key = std::env::var(REAL_S3_SECRET_KEY_ENV).ok()?;
+    let region = std::env::var(REAL_S3_REGION_ENV).unwrap_or_else(|_| "us-east-1".to_string());
+    let path_style = std::env::var(REAL_S3_PATH_STYLE_ENV)
+        .ok()
+        .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "off"))
+        .unwrap_or(true);
+
+    let provider =
+        CloudProviderConfig::s3_compatible(bucket, region, endpoint, access_key, secret_key);
+    Some(
+        provider
+            .with_path_style(path_style)
+            .expect("real S3 path-style override"),
+    )
 }
 
 fn default_cf(engine: &Engine) -> crate::engine::ColumnFamilyHandle {

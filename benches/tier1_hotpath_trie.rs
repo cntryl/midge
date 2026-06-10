@@ -16,6 +16,8 @@ use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throug
 use criterion_config::criterion_config_for_tier1;
 use std::hint::black_box;
 
+const TRIE_PREFIX_BATCH_SIZE: usize = 256;
+
 /// Benchmark trie exact key lookup (hot path for point reads)
 fn bench_trie_find_block(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_trie_find_block");
@@ -65,7 +67,7 @@ fn bench_trie_find_block(c: &mut Criterion) {
 fn bench_trie_prefix_range(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_trie_prefix_range");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
+    group.throughput(Throughput::Elements(TRIE_PREFIX_BATCH_SIZE as u64));
 
     // Build trie with hierarchical keys (use zero-padded IDs for lexicographic order)
     let mut builder = TrieBuilder::new();
@@ -86,22 +88,34 @@ fn bench_trie_prefix_range(c: &mut Criterion) {
 
     group.bench_function("prefix_single_user", |b| {
         b.iter(|| {
-            let blocks = reader.find_prefix_range(black_box(prefix_single_user));
-            black_box(blocks);
+            let mut total = 0usize;
+            for _ in 0..TRIE_PREFIX_BATCH_SIZE {
+                let blocks = reader.find_prefix_range(black_box(prefix_single_user));
+                total = total.wrapping_add(blocks.len());
+            }
+            black_box(total);
         })
     });
 
     group.bench_function("prefix_all_users", |b| {
         b.iter(|| {
-            let blocks = reader.find_prefix_range(black_box(prefix_all_users));
-            black_box(blocks);
+            let mut total = 0usize;
+            for _ in 0..TRIE_PREFIX_BATCH_SIZE {
+                let blocks = reader.find_prefix_range(black_box(prefix_all_users));
+                total = total.wrapping_add(blocks.len());
+            }
+            black_box(total);
         })
     });
 
     group.bench_function("prefix_no_match", |b| {
         b.iter(|| {
-            let blocks = reader.find_prefix_range(black_box(prefix_no_match));
-            black_box(blocks);
+            let mut misses = 0usize;
+            for _ in 0..TRIE_PREFIX_BATCH_SIZE {
+                let blocks = reader.find_prefix_range(black_box(prefix_no_match));
+                misses += usize::from(blocks.is_empty());
+            }
+            black_box(misses);
         })
     });
 

@@ -20,6 +20,8 @@ use criterion::{
 use criterion_config::criterion_config_for_tier1;
 use std::hint::black_box;
 
+const INSERT_BATCH_ROUNDS: usize = 4;
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Pre-create a cache key with SST file 1.
@@ -86,28 +88,30 @@ fn bench_get_hot_single(c: &mut Criterion) {
 /// Benchmark single-block insert into warm cache.
 fn bench_insert_single(c: &mut Criterion) {
     let mut group = c.benchmark_group("block_cache/insert_single");
-    group.measurement_time(std::time::Duration::from_millis(200));
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(1));
 
-    // Large cache to avoid triggering eviction
     let cache = create_cache(100 * 1024 * 1024); // 100MB cache
 
-    // Pre-populate to simulate realistic warm cache state
+    // Pre-populate to simulate realistic warm cache state.
     for i in 0..100 {
         let key = make_cache_key(i * 4096);
         let block = make_block_data(4096);
         cache.put(key, block);
     }
 
-    // Pre-create block data outside hot loop
+    // Rotate through a bounded keyset so the benchmark stays below cache
+    // capacity and does not drift into eviction-heavy behavior mid-run.
+    let insert_keys: Vec<CacheKey> = (0..4096)
+        .map(|i| make_cache_key((1000 + i as u64) * 4096))
+        .collect();
     let block_data = make_block_data(4096);
-    let mut offset_counter = 1000u64;
+    let mut key_index = 0usize;
 
     group.bench_function("4k_block", |b| {
         b.iter(|| {
-            let key = make_cache_key(offset_counter * 4096);
-            offset_counter = offset_counter.wrapping_add(1);
+            let key = insert_keys[key_index % insert_keys.len()];
+            key_index = key_index.wrapping_add(1);
             cache.put(black_box(key), black_box(block_data.clone()));
         })
     });
@@ -200,7 +204,9 @@ fn bench_insert_batch(c: &mut Criterion) {
 
     let num_blocks = 100;
     let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
-    group.throughput(Throughput::Elements(num_blocks as u64));
+    group.throughput(Throughput::Elements(
+        (num_blocks * INSERT_BATCH_ROUNDS) as u64,
+    ));
 
     group.bench_with_input(
         BenchmarkId::from_parameter(num_blocks),
@@ -209,8 +215,11 @@ fn bench_insert_batch(c: &mut Criterion) {
             b.iter_batched(
                 || create_cache(cache_size),
                 |cache| {
-                    for i in 0..n {
-                        cache.put(keys[i], blocks[i].clone());
+                    for round in 0..INSERT_BATCH_ROUNDS {
+                        for i in 0..n {
+                            let idx = (i + round) % n;
+                            cache.put(keys[idx], blocks[idx].clone());
+                        }
                     }
                     black_box(());
                 },

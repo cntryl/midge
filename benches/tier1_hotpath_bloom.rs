@@ -17,12 +17,13 @@ use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throug
 use criterion_config::criterion_config_for_tier1;
 use std::hint::black_box;
 
+const PROBE_BATCH_SIZE: usize = 256;
+
 /// Benchmark bloom filter containment check (hit vs miss)
 fn bench_bloom_maybe_contains(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_bloom_maybe_contains");
-    group.measurement_time(std::time::Duration::from_millis(200));
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
+    group.throughput(Throughput::Elements(PROBE_BATCH_SIZE as u64));
 
     // Build filter once outside benchmark loop
     let mut builder = BloomWriter::with_defaults(100);
@@ -34,21 +35,29 @@ fn bench_bloom_maybe_contains(c: &mut Criterion) {
     }
     let filter = builder.finish();
 
-    // Precompute keys (avoid allocation in hot path)
-    let hit_key = &keys[42];
+    // Batch probes so timer noise does not dominate these sub-10ns operations.
+    let hit_key = keys[42].as_ref();
     let miss_key = b"key_00001000";
 
     group.bench_function("maybe_contains_hit", |b| {
         b.iter(|| {
-            let result = filter.contains(black_box(hit_key));
-            black_box(result.might_be_present())
+            let mut matches = 0usize;
+            for _ in 0..PROBE_BATCH_SIZE {
+                let result = filter.contains(black_box(hit_key));
+                matches += usize::from(result.might_be_present());
+            }
+            black_box(matches)
         })
     });
 
     group.bench_function("maybe_contains_miss", |b| {
         b.iter(|| {
-            let result = filter.contains(black_box(miss_key));
-            black_box(result.definitely_not_present())
+            let mut misses = 0usize;
+            for _ in 0..PROBE_BATCH_SIZE {
+                let result = filter.contains(black_box(miss_key));
+                misses += usize::from(result.definitely_not_present());
+            }
+            black_box(misses)
         })
     });
 

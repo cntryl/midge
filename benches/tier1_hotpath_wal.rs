@@ -21,6 +21,12 @@ use cntryl_midge::wal::encoding::{decode, encode};
 use cntryl_midge::wal::{WalOpKind, WalRecord};
 use std::hint::black_box;
 
+const WAL_ENCODE_BATCH_SIZE_DEFAULT: usize = 128;
+const WAL_ENCODE_BATCH_SIZE_SMALL: usize = 512;
+const WAL_DECODE_BATCH_SIZE_DEFAULT: usize = 256;
+const WAL_DECODE_BATCH_SIZE_DELETE: usize = 512;
+const WAL_DECODE_BATCH_SIZE_MEDIUM: usize = 512;
+
 // ============================================================================
 // Encoding Benchmarks
 // ============================================================================
@@ -63,11 +69,22 @@ fn bench_wal_encode_record(c: &mut Criterion) {
         ),
     ];
 
-    group.throughput(Throughput::Elements(1));
-
     for (name, record) in test_cases {
+        let encode_batch_size = if name == "small_put" {
+            WAL_ENCODE_BATCH_SIZE_SMALL
+        } else {
+            WAL_ENCODE_BATCH_SIZE_DEFAULT
+        };
+        group.throughput(Throughput::Elements(encode_batch_size as u64));
         group.bench_function(name, |b| {
-            b.iter(|| black_box(encode(&record).unwrap()));
+            b.iter(|| {
+                let mut encoded = 0usize;
+                for _ in 0..encode_batch_size {
+                    let out = encode(&record).unwrap();
+                    encoded = encoded.wrapping_add(out.len());
+                }
+                black_box(encoded)
+            });
         });
     }
 
@@ -77,6 +94,7 @@ fn bench_wal_encode_record(c: &mut Criterion) {
 /// Benchmark WAL record decoding (TLV format).
 fn bench_wal_decode_record(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_wal_decode");
+    group.sampling_mode(SamplingMode::Flat);
 
     let small_key = Bytes::from_static(b"key");
     let small_value = Bytes::from_static(b"value");
@@ -120,11 +138,25 @@ fn bench_wal_decode_record(c: &mut Criterion) {
         ),
     ];
 
-    group.throughput(Throughput::Elements(1));
-
     for (name, encoded) in test_cases {
+        let decode_batch_size = if name == "medium_put" {
+            WAL_DECODE_BATCH_SIZE_MEDIUM
+        } else if name == "delete" {
+            WAL_DECODE_BATCH_SIZE_DELETE
+        } else {
+            WAL_DECODE_BATCH_SIZE_DEFAULT
+        };
+        group.throughput(Throughput::Elements(decode_batch_size as u64));
         group.bench_function(name, |b| {
-            b.iter(|| black_box(decode(encoded.clone()).unwrap()));
+            b.iter(|| {
+                let mut decoded = 0usize;
+                for _ in 0..decode_batch_size {
+                    let record = decode(encoded.clone()).unwrap();
+                    // Keep decode work observable while averaging multiple probes.
+                    decoded += usize::from(record.seq >= 1);
+                }
+                black_box(decoded)
+            });
         });
     }
 

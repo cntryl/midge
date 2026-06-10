@@ -15,6 +15,8 @@ use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingM
 use criterion_config::criterion_config_for_tier1;
 use std::hint::black_box;
 
+const LOOKUP_BATCH_SIZE: usize = 1024;
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Pre-compute a key (deterministic, no allocation in hot path)
@@ -151,8 +153,7 @@ fn bench_put_batch(c: &mut Criterion) {
 fn bench_get_point(c: &mut Criterion) {
     let mut group = c.benchmark_group("memtable/get_point");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
-    group.measurement_time(std::time::Duration::from_millis(200));
+    group.throughput(Throughput::Elements(LOOKUP_BATCH_SIZE as u64));
 
     // Pre-compute all keys outside benchmark
     let keys: Vec<Vec<u8>> = (0..1000).map(make_key).collect();
@@ -163,20 +164,30 @@ fn bench_get_point(c: &mut Criterion) {
         let _ = memtable.put(keys[i].clone(), values[i].clone());
     }
 
-    let hit_key = keys[500].clone();
+    let hit_key = keys[500].as_slice();
     let miss_key = make_key(2000);
 
     group.bench_function("hit", |b| {
         b.iter(|| {
-            let result = memtable.get(black_box(&hit_key));
-            black_box(result)
+            let mut hits = 0usize;
+            for _ in 0..LOOKUP_BATCH_SIZE {
+                if memtable.get(black_box(hit_key)).unwrap().is_some() {
+                    hits += 1;
+                }
+            }
+            black_box(hits)
         })
     });
 
     group.bench_function("miss", |b| {
         b.iter(|| {
-            let result = memtable.get(black_box(&miss_key));
-            black_box(result)
+            let mut misses = 0usize;
+            for _ in 0..LOOKUP_BATCH_SIZE {
+                if memtable.get(black_box(&miss_key)).unwrap().is_none() {
+                    misses += 1;
+                }
+            }
+            black_box(misses)
         })
     });
 

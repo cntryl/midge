@@ -18,10 +18,13 @@ use cntryl_midge::{
     MidgeEngine,
 };
 use criterion::{
-    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+    criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use criterion_config::criterion_config_for_tier1;
 use std::hint::black_box;
+
+const SINGLE_GET_BATCH_SIZE: usize = 256;
+const SINGLE_PUT_BATCH_SIZE: usize = 32;
 
 fn make_fixed_kv(size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
     let mut keys = Vec::with_capacity(size);
@@ -69,7 +72,7 @@ fn bench_batch_put(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_batch_put");
     group.sampling_mode(SamplingMode::Flat);
 
-    // Setup database once, reuse across iterations
+    // Setup database once, reuse across iterations.
     let engine = setup_db("batch_put");
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
@@ -114,7 +117,7 @@ fn bench_batch_put(c: &mut Criterion) {
 fn bench_single_get(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_single_get");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
+    group.throughput(Throughput::Elements(SINGLE_GET_BATCH_SIZE as u64));
 
     let engine = setup_db("single_get");
     let cf = engine.create_column_family("cf1").unwrap();
@@ -138,13 +141,18 @@ fn bench_single_get(c: &mut Criterion) {
     let cf_id = cf.id();
     group.bench_function("single_get_hit_memtable", |b| {
         b.iter(|| {
-            let idx = counter % num_keys;
-            counter += 1;
-            let tx = engine
-                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                .expect("begin");
-            let result = tx.get(black_box(&keys[idx]));
-            black_box(result)
+            let mut hits = 0usize;
+            for _ in 0..SINGLE_GET_BATCH_SIZE {
+                let idx = counter % num_keys;
+                counter += 1;
+                let tx = engine
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                    .expect("begin");
+                if tx.get(black_box(&keys[idx])).unwrap().is_some() {
+                    hits += 1;
+                }
+            }
+            black_box(hits)
         })
     });
 
@@ -161,13 +169,18 @@ fn bench_single_get(c: &mut Criterion) {
     let mut miss_counter = 0;
     group.bench_function("single_get_miss", |b| {
         b.iter(|| {
-            let idx = miss_counter % num_keys;
-            miss_counter += 1;
-            let tx = engine
-                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                .expect("begin");
-            let result = tx.get(black_box(&miss_keys[idx]));
-            black_box(result)
+            let mut misses = 0usize;
+            for _ in 0..SINGLE_GET_BATCH_SIZE {
+                let idx = miss_counter % num_keys;
+                miss_counter += 1;
+                let tx = engine
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                    .expect("begin");
+                if tx.get(black_box(&miss_keys[idx])).unwrap().is_none() {
+                    misses += 1;
+                }
+            }
+            black_box(misses)
         })
     });
 
@@ -181,35 +194,37 @@ fn bench_single_get(c: &mut Criterion) {
 fn bench_single_put(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_single_put");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
+    group.throughput(Throughput::Elements(SINGLE_PUT_BATCH_SIZE as u64));
 
-    let engine = setup_db("single_put");
-    let cf = engine.create_column_family("cf1").unwrap();
-
-    // Precompute keys and values
+    // The write workload itself is what we want to measure, not the slowdown
+    // from version chains growing across the entire Criterion run.
     let num_ops = 10_000;
     let (keys, vals) = make_fixed_kv(num_ops);
     let mut counter = 0;
-    let cf_id = cf.id();
 
     group.bench_function("single_put", |b| {
-        b.iter(|| {
-            let idx = counter % num_ops;
-            counter += 1;
-            let mut tx = engine
-                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                .expect("begin");
-            tx.put(keys[idx].to_vec(), vals[idx].to_vec(), None)
-                .unwrap();
-            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
-            black_box(());
-        })
+        b.iter_batched(
+            || {
+                let engine = setup_db("single_put");
+                let cf = engine.create_column_family("cf1").unwrap();
+                (engine, cf.id())
+            },
+            |(engine, cf_id)| {
+                for _ in 0..SINGLE_PUT_BATCH_SIZE {
+                    let idx = counter % num_ops;
+                    counter += 1;
+                    let mut tx = engine
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                        .expect("begin");
+                    tx.put(keys[idx].to_vec(), vals[idx].to_vec(), None)
+                        .unwrap();
+                    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+                }
+                black_box(counter);
+            },
+            BatchSize::SmallInput,
+        )
     });
-
-    // CRITICAL: Flush memtable to prevent unbounded version-chain growth
-    // across subsequent benchmarks. This clears all in-memory data without
-    // triggering compaction (which is disabled).
-    let _ = engine.flush_cf(&cf);
 
     group.finish();
 }

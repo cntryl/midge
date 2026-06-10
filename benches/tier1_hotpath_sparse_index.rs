@@ -17,6 +17,9 @@ use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throug
 use criterion_config::criterion_config_for_tier1;
 use std::hint::black_box;
 
+const SPARSE_INDEX_LOOKUP_BATCH_SIZE_DEFAULT: usize = 256;
+const SPARSE_INDEX_LOOKUP_BATCH_SIZE_LARGE: usize = 1024;
+
 /// Benchmark sparse index binary search for exact key match
 fn bench_sparse_index_find_block(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_sparse_index_find_block");
@@ -75,9 +78,14 @@ fn bench_sparse_index_find_block(c: &mut Criterion) {
 fn bench_sparse_index_sizes(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_sparse_index_sizes");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
-
+    group.measurement_time(std::time::Duration::from_millis(600));
     for &size in &[10, 100, 1000] {
+        let lookup_batch_size = if size >= 1000 {
+            SPARSE_INDEX_LOOKUP_BATCH_SIZE_LARGE
+        } else {
+            SPARSE_INDEX_LOOKUP_BATCH_SIZE_DEFAULT
+        };
+        group.throughput(Throughput::Elements(lookup_batch_size as u64));
         let entries: Vec<IndexEntry> = (0..size)
             .map(|i| {
                 let key = format!("key_{:010}", i * 100);
@@ -91,8 +99,12 @@ fn bench_sparse_index_sizes(c: &mut Criterion) {
 
         group.bench_function(format!("{}_entries", size), |b| {
             b.iter(|| {
-                let range = reader.find_block_range(black_box(lookup_key.as_bytes()));
-                black_box(range);
+                let mut found = 0usize;
+                for _ in 0..lookup_batch_size {
+                    let range = reader.find_block_range(black_box(lookup_key.as_bytes()));
+                    found = found.wrapping_add(range.start_block);
+                }
+                black_box(found);
             })
         });
     }

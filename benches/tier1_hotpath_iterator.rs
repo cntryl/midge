@@ -20,6 +20,8 @@ use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throug
 use criterion_config::criterion_config_for_tier1;
 use std::hint::black_box;
 
+const ITER_SINGLE_STEP_BATCH_SIZE: usize = 256;
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Pre-compute a key (deterministic, no allocation in hot path)
@@ -116,22 +118,26 @@ fn bench_range_bounded(c: &mut Criterion) {
 fn bench_iter_single_step(c: &mut Criterion) {
     let mut group = c.benchmark_group("iterator/single_step");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
+    group.throughput(Throughput::Elements(ITER_SINGLE_STEP_BATCH_SIZE as u64));
 
     let sl = create_populated_skiplist(100);
 
-    // Precompute start key
+    // Precompute keys so no allocation happens inside the measured loop.
     let start_key = make_key(50);
+    let end_key = make_key(51);
 
     // Benchmark cost of getting next single entry after seek
     group.bench_function("next_after_seek", |b| {
         b.iter(|| {
-            // Seek to position, then get one entry
-            let entries = sl.range(
-                Some(black_box(start_key.as_ref())),
-                Some(black_box(&make_key(51))),
-            );
-            black_box(entries.first());
+            let mut seen = 0usize;
+            for _ in 0..ITER_SINGLE_STEP_BATCH_SIZE {
+                let entries = sl.range(
+                    Some(black_box(start_key.as_ref())),
+                    Some(black_box(end_key.as_ref())),
+                );
+                seen += usize::from(!entries.is_empty());
+            }
+            black_box(seen);
         })
     });
 

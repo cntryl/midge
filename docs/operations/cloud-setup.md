@@ -415,6 +415,12 @@ cargo test storage::providers::qualification -- --test-threads=1
 
 If Peas is not running, these tests are expected to fail instead of being skipped.
 
+For an opt-in real S3-compatible smoke run, set `MIDGE_REAL_S3_BUCKET`,
+`MIDGE_REAL_S3_ENDPOINT`, `MIDGE_REAL_S3_ACCESS_KEY`, and
+`MIDGE_REAL_S3_SECRET_KEY` before running the same qualification module.
+`MIDGE_REAL_S3_REGION` defaults to `us-east-1`, and `MIDGE_REAL_S3_PATH_STYLE`
+defaults to `true`.
+
 The provider contract covers:
 
 - `PUT`

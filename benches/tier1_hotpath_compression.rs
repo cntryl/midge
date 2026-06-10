@@ -20,6 +20,8 @@ use cntryl_midge::sst::compression::{
     decompress_block_with_trailer, decompress_wal_value, CompressionAlgo, CompressionPolicy,
 };
 
+const TRAILER_COMPRESS_BATCH_SIZE: usize = 128;
+
 // ============================================================================
 // Raw Compress Benchmarks
 // ============================================================================
@@ -98,7 +100,7 @@ fn bench_decompress_raw(c: &mut Criterion) {
 fn bench_compress_trailer(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_compress_trailer");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Bytes(16 * 1024));
+    group.throughput(Throughput::Bytes((16 * 1024 * TRAILER_COMPRESS_BATCH_SIZE) as u64));
 
     let data: Vec<u8> = (0..16 * 1024).map(|i| (i % 64) as u8).collect();
     let policy_lz4 = CompressionPolicy::Fixed(CompressionAlgo::Lz4);
@@ -106,15 +108,23 @@ fn bench_compress_trailer(c: &mut Criterion) {
 
     group.bench_function("lz4", |b| {
         b.iter(|| {
-            let out = compress_block_with_trailer(black_box(&data), &policy_lz4).unwrap();
-            black_box(out)
+            let mut bytes = 0usize;
+            for _ in 0..TRAILER_COMPRESS_BATCH_SIZE {
+                let out = compress_block_with_trailer(black_box(&data), &policy_lz4).unwrap();
+                bytes = bytes.wrapping_add(out.len());
+            }
+            black_box(bytes)
         })
     });
 
     group.bench_function("zstd3", |b| {
         b.iter(|| {
-            let out = compress_block_with_trailer(black_box(&data), &policy_zstd3).unwrap();
-            black_box(out)
+            let mut bytes = 0usize;
+            for _ in 0..TRAILER_COMPRESS_BATCH_SIZE {
+                let out = compress_block_with_trailer(black_box(&data), &policy_zstd3).unwrap();
+                bytes = bytes.wrapping_add(out.len());
+            }
+            black_box(bytes)
         })
     });
 
