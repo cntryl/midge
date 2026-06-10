@@ -25,6 +25,7 @@ struct ChaosCounters {
 }
 
 impl ChaosFs {
+    #[allow(dead_code)]
     /// Create a new chaos wrapper
     ///
     /// # Arguments

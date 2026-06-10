@@ -625,4 +625,5 @@ mod linux_impl {
 pub use linux_impl::UringFs;
 
 #[cfg(not(target_os = "linux"))]
+#[allow(unused)]
 pub type UringFs = super::real::RealFs;

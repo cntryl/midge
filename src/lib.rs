@@ -32,7 +32,9 @@ pub mod common;
 #[allow(dead_code)]
 mod compaction;
 pub mod handler;
-#[allow(dead_code)]
+#[cfg(test)]
+pub mod io;
+#[cfg(not(test))]
 mod io;
 pub mod iterators;
 #[allow(dead_code)]

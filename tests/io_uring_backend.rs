@@ -15,7 +15,8 @@ use tempfile::TempDir;
 
 #[test]
 fn should_roundtrip_wal_through_io_uring_fs() -> MidgeResult<()> {
-    let temp = TempDir::new().map_err(|e| cntryl_midge::common::MidgeError::Io(e.to_string()))?;
+    let temp =
+        TempDir::new().map_err(cntryl_midge::common::MidgeError::Io)?;
     let fs: Arc<dyn Fs> = Arc::new(UringFs::new(temp.path())?);
 
     let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs))?;
@@ -63,7 +64,8 @@ fn should_roundtrip_wal_through_io_uring_fs() -> MidgeResult<()> {
 
 #[test]
 fn should_roundtrip_sst_through_io_uring_fs() -> MidgeResult<()> {
-    let temp = TempDir::new().map_err(|e| cntryl_midge::common::MidgeError::Io(e.to_string()))?;
+    let temp =
+        TempDir::new().map_err(cntryl_midge::common::MidgeError::Io)?;
     let fs: Arc<dyn Fs> = Arc::new(UringFs::new(temp.path())?);
     let factory = FsSstFactoryIo::new(Arc::clone(&fs), 4096);
 
