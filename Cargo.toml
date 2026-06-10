@@ -62,6 +62,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # OpenTelemetry (Observability)
+opentelemetry = { version = "0.32", optional = true }
 opentelemetry-otlp = { version = "0.32", optional = true, features = ["grpc-tonic"] }
 opentelemetry_sdk = { version = "0.32", optional = true, features = ["rt-tokio"] }
 tracing-opentelemetry = { version = "0.33", optional = true }
@@ -110,7 +111,12 @@ cntryl-stress = "0.2.3"
 
 [features]
 default = ["cloud-common"]
-telemetry = ["cloud-common", "dep:tracing-opentelemetry", "dep:opentelemetry_sdk"]
+telemetry = [
+    "cloud-common",
+    "dep:opentelemetry",
+    "dep:tracing-opentelemetry",
+    "dep:opentelemetry_sdk",
+]
 telemetry-otlp = ["telemetry", "dep:opentelemetry-otlp"]
 uring = ["dep:io-uring"]
 

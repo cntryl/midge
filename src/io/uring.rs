@@ -232,12 +232,12 @@ mod linux_impl {
             usize::try_from(len).map_err(|_| FsError::Io(format!("len too large: {len}")))
         }
 
-        fn current_file_len(&self) -> FsResult<u64> {
-            self.file
-                .metadata()
-                .map_err(|e| FsError::Io(format!("metadata(len) {}: {e}", self.path.display())))?
-                .len()
-                .into()
+    fn current_file_len(&self) -> FsResult<u64> {
+        Ok(self
+            .file
+            .metadata()
+            .map_err(|e| FsError::Io(format!("metadata(len) {}: {e}", self.path.display())))?
+            .len())
         }
 
         fn io_uring_error(&self, op: &str, result: i32) -> FsError {
@@ -327,7 +327,7 @@ mod linux_impl {
                 return Ok(bytes::Bytes::new());
             }
 
-            if let Some(ring) = &self.ring {
+            if let Some(_) = &self.ring {
                 let mut buf = vec![0u8; len];
                 let entry =
                     opcode::Read::new(types::Fd(self.file.as_raw_fd()), buf.as_mut_ptr(), len as _)

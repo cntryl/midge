@@ -67,6 +67,8 @@ impl Telemetry {
     #[cfg(feature = "telemetry")]
     #[allow(dead_code)]
     fn setup_tracing(config: &TelemetryConfig) -> crate::common::MidgeResult<()> {
+        use opentelemetry::global;
+        use opentelemetry::trace::TracerProvider as _;
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
         use tracing_subscriber::Layer;
@@ -84,20 +86,22 @@ impl Telemetry {
         if let Some(otel_config) = &config.otlp_config {
             use opentelemetry_otlp::WithExportConfig;
 
-            let tracer = opentelemetry_otlp::new_pipeline()
-                .tracing()
-                .with_exporter(
-                    opentelemetry_otlp::new_exporter()
-                        .tonic()
-                        .with_endpoint(&otel_config.endpoint),
-                )
-                .install_batch(opentelemetry_sdk::runtime::Tokio)
+            let exporter = opentelemetry_otlp::SpanExporter::builder()
+                .with_tonic()
+                .with_endpoint(&otel_config.endpoint)
+                .build()
                 .map_err(|e| {
                     crate::common::MidgeError::Internal(format!(
-                        "Failed to initialize OTLP tracer: {}",
+                        "Failed to initialize OTLP exporter: {}",
                         e
                     ))
                 })?;
+
+            let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                .with_batch_exporter(exporter)
+                .build();
+            let tracer = tracer_provider.tracer("midge");
+            global::set_tracer_provider(tracer_provider);
 
             registry
                 .with(tracing_opentelemetry::layer().with_tracer(tracer))
