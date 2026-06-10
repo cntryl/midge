@@ -49,6 +49,7 @@ fn bench_bloom_build_100k_keys(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("subsystem_bloom_build_100k_keys");
     group.sampling_mode(SamplingMode::Flat);
+    group.measurement_time(std::time::Duration::from_secs(6));
     group.throughput(Throughput::Elements(100_000));
 
     group.bench_function("build_100k_keys", |b| {
@@ -70,6 +71,7 @@ fn bench_bloom_build_1m_keys(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("subsystem_bloom_build_1m_keys");
     group.sampling_mode(SamplingMode::Flat);
+    group.measurement_time(std::time::Duration::from_secs(6));
     group.throughput(Throughput::Elements(1_000_000));
 
     group.bench_function("build_1m_keys", |b| {

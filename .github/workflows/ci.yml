@@ -89,8 +89,11 @@ jobs:
       - name: Start Peas emulator
         run: docker compose up -d peas
 
-      - name: Test against Peas emulator
-        run: cargo test 
+      - name: Peas qualification
+        run: cargo test --lib storage::providers::qualification -- --test-threads=1
+
+      - name: Full test suite against Peas emulator
+        run: cargo test
 
       - name: Stop Peas emulator
         if: always()

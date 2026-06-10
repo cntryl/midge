@@ -43,7 +43,7 @@ impl RangeScan {
     }
 
     /// Execute scan with cache, returning (blocks_read, cache_hits)
-    fn execute(&self, cache: &BlockCache, sst_id: u64) -> (u32, u32) {
+    fn execute(&self, cache: &BlockCache, sst_id: u64, miss_block_data: &Bytes) -> (u32, u32) {
         let mut blocks_read = 0u32;
         let mut cache_hits = 0u32;
 
@@ -55,8 +55,7 @@ impl RangeScan {
             } else {
                 // Simulate block read + cache insert
                 blocks_read += 1;
-                let block_data = Bytes::from_static(&[0xAB; 4096]);
-                cache.put(key, block_data);
+                cache.put(key, miss_block_data.clone());
             }
         }
 
@@ -82,7 +81,7 @@ fn populate_cache(cache: &BlockCache, sst_id: u64, start_block: usize, num_block
 
 /// Benchmark range scan with warm cache (all blocks cached)
 fn bench_range_scan_warm_cache(c: &mut Criterion) {
-    let _block_data = precompute_block_data();
+    let miss_block_data = precompute_block_data();
 
     for &num_blocks in &[10, 100, 1000] {
         let mut group = c.benchmark_group(format!("range_scan_warm_cache_{}_blocks", num_blocks));
@@ -97,7 +96,8 @@ fn bench_range_scan_warm_cache(c: &mut Criterion) {
             let scan = RangeScan::new(0, num_blocks);
 
             b.iter(|| {
-                let (blocks_read, cache_hits) = scan.execute(&cache, SST_ID);
+                let (blocks_read, cache_hits) = scan.execute(&cache, SST_ID, &miss_block_data);
+
                 black_box((blocks_read, cache_hits))
             })
         });
@@ -110,6 +110,8 @@ fn bench_range_scan_warm_cache(c: &mut Criterion) {
 
 /// Benchmark range scan with cold cache (no blocks cached, must read all)
 fn bench_range_scan_cold_cache(c: &mut Criterion) {
+    let miss_block_data = precompute_block_data();
+
     for &num_blocks in &[10, 100, 1000] {
         let mut group = c.benchmark_group(format!("range_scan_cold_cache_{}_blocks", num_blocks));
         group.sampling_mode(SamplingMode::Flat);
@@ -123,7 +125,8 @@ fn bench_range_scan_cold_cache(c: &mut Criterion) {
                     (cache, RangeScan::new(0, num_blocks))
                 },
                 |(cache, scan)| {
-                    let (blocks_read, cache_hits) = scan.execute(&cache, SST_ID);
+                    let (blocks_read, cache_hits) = scan.execute(&cache, SST_ID, &miss_block_data);
+
                     black_box((blocks_read, cache_hits))
                 },
                 criterion::BatchSize::SmallInput,

@@ -180,6 +180,7 @@ fn bench_point_read_bloom_disabled(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("sst_point_read_bloom_disabled");
     group.sampling_mode(SamplingMode::Flat);
+    group.measurement_time(std::time::Duration::from_secs(6));
     group.throughput(Throughput::Elements(10_000));
 
     group.bench_function("10k_queries_10pct_hit", |b| {
@@ -226,9 +227,11 @@ fn bench_point_read_bloom_disabled(c: &mut Criterion) {
 fn bench_point_read_bloom_comparison(c: &mut Criterion) {
     let sst = build_mock_sst(3);
     let (hits, misses) = precompute_query_keys(42);
+    let query_keys: Vec<Bytes> = hits.iter().chain(misses.iter()).cloned().collect();
 
     let mut group = c.benchmark_group("sst_point_read_comparison");
     group.sampling_mode(SamplingMode::Flat);
+    group.measurement_time(std::time::Duration::from_secs(6));
     group.throughput(Throughput::Elements(10_000));
 
     for &mode in &["with_bloom", "without_bloom"] {
@@ -238,7 +241,7 @@ fn bench_point_read_bloom_comparison(c: &mut Criterion) {
                     let mut bloom_rejects = 0u32;
                     let mut blocks_read = 0u32;
 
-                    for key in hits.iter().chain(misses.iter()) {
+                    for key in &query_keys {
                         if sst.bloom.contains(key).might_be_present() {
                             let range = sst.sparse_index.find_block_range(key);
                             for block_idx in
@@ -260,7 +263,7 @@ fn bench_point_read_bloom_comparison(c: &mut Criterion) {
                 b.iter(|| {
                     let mut blocks_read = 0u32;
 
-                    for key in hits.iter().chain(misses.iter()) {
+                    for key in &query_keys {
                         let range = sst.sparse_index.find_block_range(key);
                         for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1)
                         {

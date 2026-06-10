@@ -23,6 +23,35 @@ use std::hint::black_box;
 // ─── Configuration ──────────────────────────────────────────────────────
 
 const KEYS_PER_BLOCK: usize = 100;
+const LOOKUPS_PER_ITER: usize = 1000;
+const MIXED_GETS_PER_ITER: usize = 700;
+const MIXED_SCANS_PER_ITER: usize = 30;
+const SCAN_WIDTH: usize = 10;
+
+#[inline]
+fn key_from_index(idx: usize) -> Bytes {
+    Bytes::from(format!("key:{:010}", idx))
+}
+
+fn precompute_zipf_keys(count: usize, max_key: usize, alpha: f64) -> Vec<Bytes> {
+    let mut zipf = ZipfianDistribution::new(max_key, alpha);
+    (0..count).map(|_| key_from_index(zipf.next())).collect()
+}
+
+fn precompute_uniform_keys(count: usize, max_key: usize) -> Vec<Bytes> {
+    let mut seed = 0xDEADBEEFCAFEBABEu64;
+    (0..count)
+        .map(|_| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            key_from_index((seed as usize) % max_key)
+        })
+        .collect()
+}
+
+fn precompute_zipf_starts(count: usize, max_key: usize, alpha: f64) -> Vec<usize> {
+    let mut zipf = ZipfianDistribution::new(max_key, alpha);
+    (0..count).map(|_| zipf.next()).collect()
+}
 
 /// Simulated SST with bloom filter and block data
 struct SstSimulator {
@@ -245,22 +274,21 @@ impl ZipfianDistribution {
 fn bench_read_amp_point_lookups_zipfian(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_amplification_point_lookups_zipfian");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1000));
+    group.throughput(Throughput::Elements(LOOKUPS_PER_ITER as u64));
+
+    let lookup_keys = precompute_zipf_keys(LOOKUPS_PER_ITER, 40_000, 1.5);
 
     group.bench_function("1000_gets_80_20_dist", |b| {
         b.iter(|| {
             let mut lsm = LsmSimulator::new_zipfian();
-            let mut zipf = ZipfianDistribution::new(40_000, 1.5);
 
             let mut total_blocks_read = 0u32;
             let mut total_cache_hits = 0u32;
             let mut total_found = 0u32;
 
             // Perform 1000 lookups
-            for _ in 0..1000 {
-                let key_idx = zipf.next();
-                let key = Bytes::from(format!("key:{:010}", key_idx));
-                let (br, ch, found) = lsm.get(&key);
+            for key in &lookup_keys {
+                let (br, ch, found) = lsm.get(key);
                 total_blocks_read += br;
                 total_cache_hits += ch;
                 if found {
@@ -279,22 +307,24 @@ fn bench_read_amp_point_lookups_zipfian(c: &mut Criterion) {
 fn bench_read_amp_mixed_get_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_amplification_mixed_get_scan");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1000)); // 1000 operations (gets + scan chunks)
+    group.throughput(Throughput::Elements(
+        (MIXED_GETS_PER_ITER + (MIXED_SCANS_PER_ITER * SCAN_WIDTH)) as u64,
+    )); // 1000 operations (gets + scan chunks)
+
+    let get_keys = precompute_zipf_keys(MIXED_GETS_PER_ITER, 40_000, 1.5);
+    let scan_starts = precompute_zipf_starts(MIXED_SCANS_PER_ITER, 40_000, 1.5);
 
     group.bench_function("700_gets_300_scan", |b| {
         b.iter(|| {
             let mut lsm = LsmSimulator::new_zipfian();
-            let mut zipf = ZipfianDistribution::new(40_000, 1.5);
 
             let mut total_blocks_read = 0u32;
             let mut total_cache_hits = 0u32;
             let mut total_found = 0u32;
 
             // 700 point lookups
-            for _ in 0..700 {
-                let key_idx = zipf.next();
-                let key = Bytes::from(format!("key:{:010}", key_idx));
-                let (br, ch, found) = lsm.get(&key);
+            for key in &get_keys {
+                let (br, ch, found) = lsm.get(key);
                 total_blocks_read += br;
                 total_cache_hits += ch;
                 if found {
@@ -303,9 +333,8 @@ fn bench_read_amp_mixed_get_scan(c: &mut Criterion) {
             }
 
             // 300 scans (30 scans of 10 keys each)
-            for _ in 0..30 {
-                let start_key = zipf.next();
-                let (br, ch, found) = lsm.scan(start_key, 10);
+            for &start_key in &scan_starts {
+                let (br, ch, found) = lsm.scan(start_key, SCAN_WIDTH);
                 total_blocks_read += br;
                 total_cache_hits += ch;
                 total_found += found;
@@ -322,23 +351,21 @@ fn bench_read_amp_mixed_get_scan(c: &mut Criterion) {
 fn bench_read_amp_uniform_distribution(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_amplification_uniform_distribution");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1000));
+    group.throughput(Throughput::Elements(LOOKUPS_PER_ITER as u64));
+
+    let lookup_keys = precompute_uniform_keys(LOOKUPS_PER_ITER, 40_000);
 
     group.bench_function("1000_uniform_gets", |b| {
         b.iter(|| {
             let mut lsm = LsmSimulator::new_zipfian();
-            let mut seed = 0xDEADBEEFCAFEBABEu64;
 
             let mut total_blocks_read = 0u32;
             let mut total_cache_hits = 0u32;
             let mut total_found = 0u32;
 
             // Perform 1000 lookups with uniform distribution
-            for _ in 0..1000 {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                let key_idx = (seed as usize) % 40_000;
-                let key = Bytes::from(format!("key:{:010}", key_idx));
-                let (br, ch, found) = lsm.get(&key);
+            for key in &lookup_keys {
+                let (br, ch, found) = lsm.get(key);
                 total_blocks_read += br;
                 total_cache_hits += ch;
                 if found {

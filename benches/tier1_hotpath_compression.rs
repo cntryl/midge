@@ -100,7 +100,9 @@ fn bench_decompress_raw(c: &mut Criterion) {
 fn bench_compress_trailer(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_compress_trailer");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Bytes((16 * 1024 * TRAILER_COMPRESS_BATCH_SIZE) as u64));
+    group.throughput(Throughput::Bytes(
+        (16 * 1024 * TRAILER_COMPRESS_BATCH_SIZE) as u64,
+    ));
 
     let data: Vec<u8> = (0..16 * 1024).map(|i| (i % 64) as u8).collect();
     let policy_lz4 = CompressionPolicy::Fixed(CompressionAlgo::Lz4);

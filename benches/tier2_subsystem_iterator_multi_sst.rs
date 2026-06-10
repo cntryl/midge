@@ -191,6 +191,7 @@ fn bench_iterator_overlapping_ssts(c: &mut Criterion) {
         let mut group =
             c.benchmark_group(format!("iterator_multi_sst_overlapping_{}_ssts", num_ssts));
         group.sampling_mode(SamplingMode::Flat);
+        group.measurement_time(std::time::Duration::from_secs(6));
         group.throughput(Throughput::Elements((num_ssts * KEYS_PER_SST) as u64));
 
         group.bench_function("sequential_merge", |b| {
@@ -229,6 +230,7 @@ fn bench_iterator_partial_overlap_ssts(c: &mut Criterion) {
     for &num_ssts in &[2, 3, 5] {
         let mut group = c.benchmark_group(format!("iterator_multi_sst_partial_{}_ssts", num_ssts));
         group.sampling_mode(SamplingMode::Flat);
+        group.measurement_time(std::time::Duration::from_secs(6));
         group.throughput(Throughput::Elements((num_ssts * KEYS_PER_SST) as u64));
 
         group.bench_function("50pct_overlap", |b| {
@@ -269,6 +271,8 @@ fn bench_iterator_partial_overlap_ssts(c: &mut Criterion) {
 fn bench_iterator_multi_sst_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("iterator_multi_sst_comparison");
     group.sampling_mode(SamplingMode::Flat);
+    group.measurement_time(std::time::Duration::from_secs(6));
+    group.sample_size(30);
 
     for &(pattern, num_ssts) in &[
         ("disjoint_2ssts", 2),
