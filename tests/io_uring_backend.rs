@@ -6,7 +6,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use cntryl_midge::common::MidgeResult;
 use cntryl_midge::sst::fs::FsSstFactoryIo;
-use cntryl_midge::sst::traits::{DynSstWriter, SstFactory};
+use cntryl_midge::sst::traits::SstFactory;
 use cntryl_midge::wal::fs::{FsWalReaderIo, FsWalWriterIo};
 use cntryl_midge::wal::traits::{WalReader, WalWriter};
 use cntryl_midge::wal::{WalOpKind, WalRecord};
