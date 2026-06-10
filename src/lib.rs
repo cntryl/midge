@@ -106,6 +106,11 @@ pub use engine::Key as Bytes;
 // Re-export BytesMut directly from the `bytes` crate.
 pub use bytes::BytesMut;
 
+// Low-level filesystem abstraction exports for advanced/testing use.
+pub use io::{
+    Durability as FsDurability, Fs, FsPath, OpenMode as FsOpenMode, OpenOptions as FsOpenOptions,
+};
+
 // Linux io_uring filesystem backend (available when feature-enabled).
 #[cfg(feature = "uring")]
 pub use io::UringFs;

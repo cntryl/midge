@@ -1,0 +1,20 @@
+FROM rust:trixie
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		build-essential \
+		pkg-config \
+		libssl-dev \
+		ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add clippy
+
+WORKDIR /workspace
+
+# Copy the full repository and run the same quality gates we expect in CI.
+COPY . .
+
+RUN cargo bench --all-features
+
+CMD ["bash"]

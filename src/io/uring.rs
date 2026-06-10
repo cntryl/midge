@@ -3,7 +3,7 @@
 //! This backend keeps the same `Fs` / `File` contract as `RealFs`, but routes
 //! the hot file operations through `io_uring` when the feature is enabled.
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "uring"))]
 mod linux_impl {
 
     use crate::io::traits::*;
@@ -621,7 +621,7 @@ mod linux_impl {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "uring"))]
 pub use linux_impl::UringFs;
 
 #[cfg(not(target_os = "linux"))]

@@ -5,18 +5,17 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cntryl_midge::common::MidgeResult;
-use cntryl_midge::io::{Durability, Fs, FsPath, OpenMode, OpenOptions, UringFs};
 use cntryl_midge::sst::fs::FsSstFactoryIo;
-use cntryl_midge::sst::traits::{DynSstWriter, SstStateReader};
+use cntryl_midge::sst::traits::{DynSstWriter, SstFactory};
 use cntryl_midge::wal::fs::{FsWalReaderIo, FsWalWriterIo};
-use cntryl_midge::wal::traits::WalReader;
+use cntryl_midge::wal::traits::{WalReader, WalWriter};
 use cntryl_midge::wal::{WalOpKind, WalRecord};
+use cntryl_midge::{Fs, FsDurability, FsOpenMode, FsOpenOptions, FsPath, UringFs};
 use tempfile::TempDir;
 
 #[test]
 fn should_roundtrip_wal_through_io_uring_fs() -> MidgeResult<()> {
-    let temp =
-        TempDir::new().map_err(cntryl_midge::common::MidgeError::Io)?;
+    let temp = TempDir::new().map_err(cntryl_midge::common::MidgeError::Io)?;
     let fs: Arc<dyn Fs> = Arc::new(UringFs::new(temp.path())?);
 
     let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs))?;
@@ -64,8 +63,7 @@ fn should_roundtrip_wal_through_io_uring_fs() -> MidgeResult<()> {
 
 #[test]
 fn should_roundtrip_sst_through_io_uring_fs() -> MidgeResult<()> {
-    let temp =
-        TempDir::new().map_err(cntryl_midge::common::MidgeError::Io)?;
+    let temp = TempDir::new().map_err(cntryl_midge::common::MidgeError::Io)?;
     let fs: Arc<dyn Fs> = Arc::new(UringFs::new(temp.path())?);
     let factory = FsSstFactoryIo::new(Arc::clone(&fs), 4096);
 
@@ -80,19 +78,19 @@ fn should_roundtrip_sst_through_io_uring_fs() -> MidgeResult<()> {
 
     let mut tmp = fs.open(
         &tmp_path,
-        OpenOptions {
-            mode: OpenMode::ReadWrite,
+        FsOpenOptions {
+            mode: FsOpenMode::ReadWrite,
             create: true,
             create_new: false,
             truncate: true,
         },
     )?;
     tmp.write_at(0, Bytes::from(bytes.clone()))?;
-    tmp.sync(Durability::Durable)?;
+    tmp.sync(FsDurability::Durable)?;
     drop(tmp);
 
     fs.rename_atomic(&tmp_path, &final_path)?;
-    fs.sync_dir(&FsPath::new(""), Durability::Durable)?;
+    fs.sync_dir(&FsPath::new(""), FsDurability::Durable)?;
 
     let reader = factory.open(Path::new("table.sst"))?;
     let states = reader.scan_range_state(None, None)?;
