@@ -1,4 +1,4 @@
-//! Tier 4 - Memtable sizing sweep
+//! Tier 5 - Memtable sizing sweep
 //!
 //! Exploratory local-storage sweep for explicit `OpenOptions` memtable sizes.
 //! Writes one JSON object per scenario/size row to stdout and to JSONL.
@@ -102,7 +102,7 @@ struct SweepResult {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("tier4_memtable_sizing_sweep failed: {error:#}");
+        eprintln!("tier5_memtable_sizing_sweep failed: {error:#}");
         std::process::exit(1);
     }
 }

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 resolver = "2"
 rust-version = "1.93"
+autobenches = false
 description = "A high-performance embedded key-value database with LSM-tree storage"
 license = "Apache-2.0"
 repository = "https://github.com/cntryl/midge"
@@ -148,9 +149,12 @@ cloud_integration = ["cloud-all"]
 
 
 # =============================================================================
-# Benchmarks — Tier 1: Hot Path (<1s)
+# Benchmarks — Active Targets
 # =============================================================================
+# Keep this manifest to active, harness-free benches. Experimental or disabled
+# bench files stay under `benches/` until we want them in the supported set.
 
+# Tier 1
 [[bench]]
 name = "tier1_hotpath_api"
 path = "benches/tier1_hotpath_api.rs"
@@ -216,15 +220,7 @@ name = "tier1_hotpath_event_loop"
 path = "benches/tier1_hotpath_event_loop.rs"
 harness = false
 
-[[bench]]
-name = "tier2_subsystem_event_loop"
-path = "benches/tier2_subsystem_event_loop.rs"
-harness = false
-
-# =============================================================================
-# Benchmarks — Tier 2: Subsystem (<8s)
-# =============================================================================
-
+# Tier 2
 [[bench]]
 name = "tier2_subsystem_block_cache"
 path = "benches/tier2_subsystem_block_cache.rs"
@@ -260,18 +256,12 @@ name = "tier2_subsystem_read_amplification"
 path = "benches/tier2_subsystem_read_amplification.rs"
 harness = false
 
-# =========== MOVED TO EXTENDED LANE ===========
-# tier2_subsystem_compression: Adaptive compression tuning is not correctness-critical.
-# Run only on explicit compression subsystem changes.
-# [[bench]]
-# name = "tier2_subsystem_compression"
-# path = "benches/tier2_subsystem_compression.rs"
-# harness = false
+[[bench]]
+name = "tier2_subsystem_event_loop"
+path = "benches/tier2_subsystem_event_loop.rs"
+harness = false
 
-# =============================================================================
-# Benchmarks — Tier 3: System (<30s) — ALL IN FAST LANE
-# =============================================================================
-
+# Tier 3
 [[bench]]
 name = "tier3_system_compaction"
 path = "benches/tier3_system_compaction.rs"
@@ -307,15 +297,7 @@ name = "tier3_system_sst"
 path = "benches/tier3_system_sst.rs"
 harness = false
 
-# =============================================================================
-# Benchmarks — Tier 4: Streaming & YCSB (>30s)
-# =============================================================================
-
-# ─────────────────────────────────────────────────────────────────────────
-# TIER 4: FAST LANE (every push to main)
-# Core signal tests representing canonical production workloads.
-# ─────────────────────────────────────────────────────────────────────────
-
+# Tier 4
 [[bench]]
 name = "tier4_ycsb_workload_b"
 path = "benches/tier4_ycsb_workload_b.rs"
@@ -346,71 +328,18 @@ name = "tier4_system_recovery_throughput"
 path = "benches/tier4_system_recovery_throughput.rs"
 harness = false
 
-# ─────────────────────────────────────────────────────────────────────────
-# TIER 4: EXTENDED LANE (nightly / on conditional triggers)
-# Exploratory and optional workloads; run opportunistically, not per-push.
-# ─────────────────────────────────────────────────────────────────────────
-
-# tier4_ycsb_workload_a: 50/50 hybrid workload. Not canonical production.
-# Moved to extended; productivity modeled via B + streaming.
-# [[bench]]
-# name = "tier4_ycsb_workload_a"
-# path = "benches/tier4_ycsb_workload_a.rs"
-# harness = false
-
-# tier4_ycsb_workload_c: 100% read cache-only. Covered by tier3_system_scan + B.
-# [[bench]]
-# name = "tier4_ycsb_workload_c"
-# path = "benches/tier4_ycsb_workload_c.rs"
-# harness = false
-
-# tier4_streaming_workload: Streaming insert pattern. Run on WAL/memtable changes.
-# [[bench]]
-# name = "tier4_streaming_workload"
-# path = "benches/tier4_streaming_workload.rs"
-# harness = false
-
-# tier4_system_compaction_throughput: Extended validation of compaction at scale.
-# Keep in extended; tier3_system_compaction covers correctness.
-# [[bench]]
-# name = "tier4_system_compaction_throughput"
-# path = "benches/tier4_system_compaction_throughput.rs"
-# harness = false
-
-[[bench]]
-name = "tier4_memtable_sizing_sweep"
-path = "benches/tier4_memtable_sizing_sweep.rs"
-harness = false
-
-# tier4_system_durability_cloud (basic): Base happy-path cloud test (moved to extended).
-# Extended versions with failure scenarios are new.
-# [[bench]]
-# name = "tier4_system_durability_cloud"
-# path = "benches/tier4_system_durability_cloud.rs"
-# harness = false
-
-# =============================================================================
-# Benchmarks — Tier 4: NEW HIGH-PRIORITY TESTS (Extended Lane)
-# =============================================================================
-# These are NEW tests addressing critical coverage gaps identified in the audit.
-# They will be enabled in extended lane once they stabilize.
-
-# tier4_durability_cloud_failure_scenarios: Cloud durability under realistic failures
-# - Transient network errors with retry
-# - Partial uploads + metadata failures
-# - Crash during in-flight commits
-# - Idempotent replay validation
 [[bench]]
 name = "tier4_durability_cloud_failure_scenarios"
 path = "benches/tier4_durability_cloud_failure_scenarios.rs"
 harness = false
 
-# tier4_mvcc_snapshot_isolation_under_concurrency: MVCC isolation validation under load
-# - Multi-threaded snapshot readers + concurrent writers
-# - Compaction happening in background
-# - Validates no dirty reads, no lost updates
-# - Measures writer fairness under long-running snapshots
 [[bench]]
 name = "tier4_mvcc_snapshot_isolation_under_concurrency"
 path = "benches/tier4_mvcc_snapshot_isolation_under_concurrency.rs"
+harness = false
+
+# Tier 5: Exploratory / Multi-Minute Sweeps
+[[bench]]
+name = "tier5_memtable_sizing_sweep"
+path = "benches/tier5_memtable_sizing_sweep.rs"
 harness = false

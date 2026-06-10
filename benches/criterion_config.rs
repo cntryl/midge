@@ -29,8 +29,8 @@ pub fn criterion_config_for_tier1() -> Criterion {
     // - Looser noise threshold (accept Windows jitter)
     // ---------------------------------------------------------------
     Criterion::default()
-        .warm_up_time(Duration::from_secs(1))
-        .measurement_time(Duration::from_secs(3))
+        .warm_up_time(Duration::from_millis(100))
+        .measurement_time(Duration::from_millis(300))
         .sample_size(20)
         .without_plots()
 }
