@@ -40,6 +40,48 @@ fn should_recover_cloud_strict_write_from_authoritative_remote_wal_after_local_c
 }
 
 #[test]
+fn should_remove_local_wal_segment_after_cloud_durable_upload() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let opts = opts_for_mode("cloud");
+    let db_path = cloud_db_path(&opts);
+    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+
+    // Act
+    put_default(
+        &engine,
+        b"cloud-pruned-local-wal",
+        b"remote-wal-value",
+        WriteOptions::cloud_strict(),
+    );
+    let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    let local_segments = list_files_with_extension(&db_path.join("wal"), "wal");
+    let remote_segments =
+        list_files_with_extension(&db_path.join("cloud_store").join("wal"), "wal");
+    drop(engine);
+    reset_dir(&db_path.join("wal"));
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
+
+    // Assert
+    assert!(
+        metrics.wal_cloud_durable_seq >= metrics.current_sequence,
+        "cloud-strict write should advance the cloud durability frontier"
+    );
+    assert!(
+        local_segments.is_empty(),
+        "cloud-durable local WAL segments should be removed, found: {local_segments:?}"
+    );
+    assert!(
+        !remote_segments.is_empty(),
+        "authoritative remote WAL segment should remain available"
+    );
+    assert_eq!(
+        get_default(&reopened, b"cloud-pruned-local-wal"),
+        Some(Bytes::from_static(b"remote-wal-value"))
+    );
+}
+
+#[test]
 fn should_keep_sync_write_local_only_when_cloud_wal_upload_fails() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");

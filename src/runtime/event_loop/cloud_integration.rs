@@ -117,6 +117,7 @@ impl EventLoop {
                         .cloud
                         .pending_uploads
                         .retain(|item| item != &resource);
+                    self.remove_cloud_durable_local_wal_segment(segment_id);
 
                     // If cloud_durable_seq advanced past multiple segments,
                     // complete all inflight segments whose max_sequence is now durable.
@@ -266,6 +267,31 @@ impl EventLoop {
         }
 
         self.drain_auto_flush_memtables();
+    }
+
+    fn remove_cloud_durable_local_wal_segment(&mut self, segment_id: u64) {
+        if self.state.memory_mode {
+            return;
+        }
+
+        let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
+        match std::fs::remove_file(&local_path) {
+            Ok(()) => tracing::debug!(
+                segment_id,
+                path = %local_path.display(),
+                "Removed cloud-durable local WAL segment"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                self.state.mark_persistence_anomaly();
+                tracing::warn!(
+                    segment_id,
+                    path = %local_path.display(),
+                    error = %error,
+                    "Failed to remove cloud-durable local WAL segment"
+                );
+            }
+        }
     }
 }
 
