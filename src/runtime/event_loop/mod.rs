@@ -23,7 +23,7 @@ mod read_path;
 mod write_batch;
 
 use crossbeam::channel::{Receiver, TryRecvError};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,6 +59,8 @@ pub struct EventLoop {
     pub(super) loop_debug: bool,
     pub(super) loop_debug_wakes: u64,
     pub(super) loop_debug_batch_total: u64,
+    pub(super) cloud_acked_wal_segments: BTreeMap<u64, u64>,
+    pub(super) cloud_wal_prune_inflight: HashSet<u64>,
 
     // Durability coordination (extracted to reduce EventLoop cognitive load)
     pub(super) durability: DurabilityCoordinator,
@@ -167,6 +169,8 @@ impl EventLoop {
             loop_debug: std::env::var_os("MIDGE_LOOP_DEBUG").is_some(),
             loop_debug_wakes: 0,
             loop_debug_batch_total: 0,
+            cloud_acked_wal_segments: BTreeMap::new(),
+            cloud_wal_prune_inflight: HashSet::new(),
             durability: DurabilityCoordinator::new(
                 initial_durability_key,
                 is_cloud_async,
@@ -367,6 +371,7 @@ impl EventLoop {
             return Ok(());
         };
 
+        let mut cloud_manifest_published = false;
         if !self.state.memory_mode {
             self.manifest_actor.add_sst(&mut self.state, file_meta)?;
             self.state.transition_flush_publication_intent(
@@ -381,12 +386,16 @@ impl EventLoop {
                 tracing::warn!(%error, sst_name, "manifest checkpoint after flush failed; journal remains authoritative");
             } else {
                 self.mirror_metadata_after_local_commit("flush manifest publish")?;
+                cloud_manifest_published = true;
             }
             self.state.clear_flush_publication_intent(sst_name)?;
         }
 
         self.flush_actor
             .handle_flush_complete(&mut self.state, cf_id, sst_name, sequence);
+        if cloud_manifest_published {
+            self.prune_cloud_wal_segments_covered_by_manifest();
+        }
         self.publish_snapshot();
         Ok(())
     }

@@ -117,6 +117,8 @@ impl EventLoop {
                         .cloud
                         .pending_uploads
                         .retain(|item| item != &resource);
+                    self.cloud_acked_wal_segments
+                        .insert(segment_id, max_sequence);
                     self.remove_cloud_durable_local_wal_segment(segment_id);
 
                     // If cloud_durable_seq advanced past multiple segments,
@@ -137,6 +139,7 @@ impl EventLoop {
                         let waiters = self.durability.complete_waiters_at(seg_id);
                         self.complete_durability_waiters(waiters, CompletionSource::CloudAck);
                     }
+                    self.prune_cloud_wal_segments_covered_by_manifest();
                     self.drain_auto_flush_memtables();
                 }
                 Err(e) => {
@@ -205,6 +208,22 @@ impl EventLoop {
                 // Clear any remaining inflight segments
                 self.durability.clear_inflight();
             }
+            crate::storage::StorageEvent::CloudWalPruneComplete { segment_id, result } => {
+                self.cloud_wal_prune_inflight.remove(&segment_id);
+                match result {
+                    crate::storage::StorageOutcome::Ok(()) => {
+                        self.cloud_acked_wal_segments.remove(&segment_id);
+                        tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
+                    }
+                    crate::storage::StorageOutcome::Err(error) => {
+                        tracing::warn!(
+                            segment_id,
+                            error = %error,
+                            "Failed to prune cloud-covered remote WAL segment; will retry after a future checkpoint"
+                        );
+                    }
+                }
+            }
             crate::storage::StorageEvent::BackpressureOn => {
                 tracing::warn!("storage backpressure activated — pausing flushes");
                 self.state.write_stalled = true;
@@ -267,6 +286,44 @@ impl EventLoop {
         }
 
         self.drain_auto_flush_memtables();
+    }
+
+    pub(super) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
+        if !self.wal_actor.is_cloud_async() || self.state.memory_mode {
+            return;
+        }
+
+        let Some(storage) = self.hybrid_storage.clone() else {
+            return;
+        };
+        let Some(recovery_floor_segment) = self.state.cloud_wal_recovery_floor_segment() else {
+            return;
+        };
+        let persisted_sequence = self.state.manifest.last_persisted_sequence;
+
+        let eligible_segments: Vec<u64> = self
+            .cloud_acked_wal_segments
+            .iter()
+            .filter_map(|(segment_id, max_sequence)| {
+                (*segment_id < recovery_floor_segment
+                    && *max_sequence <= persisted_sequence
+                    && !self.cloud_wal_prune_inflight.contains(segment_id))
+                .then_some(*segment_id)
+            })
+            .collect();
+
+        for segment_id in eligible_segments {
+            self.cloud_wal_prune_inflight.insert(segment_id);
+            if let Err(error) = storage.prune_cloud_wal_segment(segment_id) {
+                self.cloud_wal_prune_inflight.remove(&segment_id);
+                self.state.mark_persistence_anomaly();
+                tracing::warn!(
+                    segment_id,
+                    error = %error,
+                    "Failed to schedule cloud-covered remote WAL prune"
+                );
+            }
+        }
     }
 
     fn remove_cloud_durable_local_wal_segment(&mut self, segment_id: u64) {

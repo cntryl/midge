@@ -195,6 +195,25 @@ impl RuntimeState {
             .unwrap_or(0)
     }
 
+    pub(crate) fn cloud_wal_recovery_floor_segment(&self) -> Option<u64> {
+        if self
+            .column_families
+            .values()
+            .any(|cf_state| !cf_state.immutable_memtables.is_empty())
+        {
+            return None;
+        }
+
+        let oldest_active_segment = self
+            .column_families
+            .values()
+            .filter(|cf_state| cf_state.memtable.size_bytes() > 0)
+            .map(|cf_state| cf_state.active_memtable_started_in_segment)
+            .min();
+
+        Some(oldest_active_segment.unwrap_or(self.wal.current_segment_id))
+    }
+
     pub(crate) fn next_flush_candidate(
         &self,
         cloud_segment_gap_enabled: bool,

@@ -253,6 +253,12 @@ pub enum StorageEvent {
     /// Cloud upload failed - segment NOT durable
     /// Runtime should retry or handle failure
     CloudFail { segment_id: u64, error: String },
+    /// Remote WAL pruning completed after the segment became covered by
+    /// cloud-published SST and metadata state.
+    CloudWalPruneComplete {
+        segment_id: u64,
+        result: StorageOutcome<()>,
+    },
     /// Backpressure activated - disk watermark exceeded
     /// Runtime should pause flushes until BackpressureOff
     BackpressureOn,

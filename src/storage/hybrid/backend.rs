@@ -637,6 +637,43 @@ impl HybridStorage {
         self.upload_queue.lock().len()
     }
 
+    pub fn prune_cloud_wal_segment(&self, segment_id: u64) -> Result<(), String> {
+        let cloud = Arc::clone(&self.cloud);
+        let event_queue = Arc::clone(&self.event_queue);
+        let external_event_tx = self.external_event_tx.clone();
+
+        thread::Builder::new()
+            .name(format!("midge-wal-pruner-{segment_id}"))
+            .spawn(move || {
+                let key = crate::wal::cloud_segment_object_key(segment_id);
+                let (tx, rx) = std::sync::mpsc::channel();
+                cloud.submit_delete(key.clone(), tx);
+
+                let result = match rx.recv_timeout(Duration::from_secs(30)) {
+                    Ok(StorageEvent::DeleteComplete { result, .. }) => result,
+                    Ok(other) => StorageOutcome::Err(format!(
+                        "unexpected cloud WAL prune response for '{key}': {other:?}"
+                    )),
+                    Err(error) => StorageOutcome::Err(format!(
+                        "cloud WAL prune timed out for '{key}': {error}"
+                    )),
+                };
+
+                let event = StorageEvent::CloudWalPruneComplete { segment_id, result };
+
+                {
+                    let mut events = event_queue.lock();
+                    events.push_back(event.clone());
+                }
+
+                if let Some(tx) = external_event_tx {
+                    let _ = tx.send(event);
+                }
+            })
+            .map(|_| ())
+            .map_err(|error| format!("failed to spawn cloud WAL prune worker: {error}"))
+    }
+
     pub fn write_sst_object(
         &self,
         sst_name: &str,
