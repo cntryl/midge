@@ -78,6 +78,8 @@ pub struct FileMeta {
     pub name: String,
     pub level: u32,
     pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_crc32c: Option<u32>,
     #[serde(default)]
     pub cf_id: u32,
     #[serde(default)]

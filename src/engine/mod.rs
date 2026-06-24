@@ -316,6 +316,49 @@ impl Drop for Engine {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CloudSstRecoveryProof {
+    name: String,
+    expected_size_bytes: Option<u64>,
+    expected_crc32c: Option<u32>,
+}
+
+impl CloudSstRecoveryProof {
+    #[cfg(test)]
+    fn name_only(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            expected_size_bytes: None,
+            expected_crc32c: None,
+        }
+    }
+
+    fn from_manifest(file: &crate::metadata::FileMeta) -> Self {
+        Self {
+            name: file.name.clone(),
+            expected_size_bytes: Some(file.size_bytes),
+            expected_crc32c: file.content_crc32c,
+        }
+    }
+
+    fn from_runtime(file: &crate::runtime::FileMeta) -> Self {
+        Self {
+            name: file.name.clone(),
+            expected_size_bytes: Some(file.size_bytes),
+            expected_crc32c: file.content_crc32c,
+        }
+    }
+
+    fn merge_from(&mut self, other: Self) {
+        if self.expected_size_bytes.is_none() {
+            self.expected_size_bytes = other.expected_size_bytes;
+        }
+        if self.expected_crc32c.is_none() {
+            self.expected_crc32c = other.expected_crc32c;
+        }
+    }
+}
+
 impl Engine {
     fn verify_storage_path_internal(
         db_path: &Path,
@@ -398,13 +441,12 @@ impl Engine {
 
         for file in state.manifest.files.clone() {
             let remote_path = remote_sst_dir.join(&file.name);
-            let remote_valid = remote_path.exists()
-                && crate::sst::fs::SstFileIo::open_with_real_fs(&remote_path).is_ok();
+            let remote_valid = Self::local_sst_file_matches_manifest(&remote_path, &file);
 
             if !remote_valid {
                 if state.recovery_policy == RecoveryPolicy::Strict {
                     return Err(MidgeError::RecoveryFailed(format!(
-                        "authoritative cloud SST '{}' is missing or corrupt",
+                        "authoritative cloud SST '{}' is missing, corrupt, or size-mismatched",
                         file.name
                     )));
                 }
@@ -422,8 +464,7 @@ impl Engine {
             }
 
             let local_path = state.sst_dir.join(&file.name);
-            let local_valid = local_path.exists()
-                && crate::sst::fs::SstFileIo::open_with_real_fs(&local_path).is_ok();
+            let local_valid = Self::local_sst_file_matches_manifest(&local_path, &file);
 
             if !local_valid {
                 if let Some(parent) = local_path.parent() {
@@ -491,6 +532,81 @@ impl Engine {
         }
 
         Ok(())
+    }
+
+    fn validate_sst_bytes_against_proof(
+        sst_name: &str,
+        data: &[u8],
+        expected_size_bytes: Option<u64>,
+        expected_crc32c: Option<u32>,
+    ) -> MidgeResult<()> {
+        if let Some(expected_size_bytes) = expected_size_bytes {
+            if data.len() as u64 != expected_size_bytes {
+                return Err(MidgeError::RecoveryFailed(format!(
+                    "SST '{}' size {} does not match manifest {}",
+                    sst_name,
+                    data.len(),
+                    expected_size_bytes
+                )));
+            }
+        }
+
+        if let Some(expected_crc32c) = expected_crc32c {
+            let actual_crc32c = crc32c::crc32c(data);
+            if actual_crc32c != expected_crc32c {
+                return Err(MidgeError::RecoveryFailed(format!(
+                    "SST '{}' content crc32c {:08x} does not match manifest {:08x}",
+                    sst_name, actual_crc32c, expected_crc32c
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn local_sst_file_matches_proof(
+        path: &Path,
+        sst_name: &str,
+        expected_size_bytes: Option<u64>,
+        expected_crc32c: Option<u32>,
+    ) -> bool {
+        if !path.exists() {
+            return false;
+        }
+
+        if let Some(expected_size_bytes) = expected_size_bytes {
+            match std::fs::metadata(path) {
+                Ok(metadata) if metadata.len() == expected_size_bytes => {}
+                _ => return false,
+            }
+        }
+
+        if expected_crc32c.is_some() {
+            let Ok(data) = std::fs::read(path) else {
+                return false;
+            };
+            if Self::validate_sst_bytes_against_proof(
+                sst_name,
+                &data,
+                expected_size_bytes,
+                expected_crc32c,
+            )
+            .is_err()
+            {
+                return false;
+            }
+        }
+
+        crate::sst::fs::SstFileIo::open_with_real_fs(path).is_ok()
+    }
+
+    fn local_sst_file_matches_manifest(path: &Path, file: &crate::metadata::FileMeta) -> bool {
+        Self::local_sst_file_matches_proof(
+            path,
+            &file.name,
+            Some(file.size_bytes),
+            file.content_crc32c,
+        )
     }
 
     fn blocking_cloud_list(
@@ -739,34 +855,17 @@ impl Engine {
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<()> {
-        let keys = match Self::blocking_cloud_list(cloud, "metadata/") {
-            Ok(keys) => keys,
-            Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                tracing::warn!(%error, "could not list cloud metadata during salvage open");
-                return Ok(());
-            }
-            Err(error) => {
-                return Err(MidgeError::RecoveryFailed(format!(
-                    "failed to list cloud metadata objects: {}",
-                    error
-                )))
-            }
-        };
-
-        let available: std::collections::HashSet<String> = keys
-            .iter()
-            .map(|key| cloud.strip_namespace(key).to_string())
-            .collect();
         let staging_fs = Self::recovery_staging_fs(db_path)?;
+        let mut metadata_objects = Vec::new();
+        let mut snapshot_sequence = None;
+        let mut manifest_sequence = None;
+        let mut has_manifest_journal = false;
 
         for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
             let key = crate::storage::cloud::cloud_metadata_key(file_name);
-            if !available.contains(&key) {
-                continue;
-            }
-
-            let data = match Self::blocking_cloud_get(cloud, &key) {
-                Ok(data) => data,
+            let data = match Self::blocking_cloud_get_optional(cloud, &key) {
+                Ok(Some(data)) => data,
+                Ok(None) => continue,
                 Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
                     tracing::warn!(%error, key = %key, "skipping cloud metadata object during salvage open");
                     continue;
@@ -779,8 +878,52 @@ impl Engine {
                 }
             };
 
+            if file_name == &"manifest.journal" {
+                has_manifest_journal = true;
+            }
+            if let Some(sequence) = Self::remote_manifest_sequence_from_metadata(file_name, &data)?
+            {
+                match *file_name {
+                    "manifest.snapshot.json" => snapshot_sequence = Some(sequence),
+                    "manifest.json" => manifest_sequence = Some(sequence),
+                    _ => {}
+                }
+            }
+
+            metadata_objects.push((*file_name, data));
+        }
+
+        let mut metadata_to_skip = None;
+        if !has_manifest_journal {
+            if let (Some(snapshot), Some(manifest)) = (snapshot_sequence, manifest_sequence) {
+                if snapshot != manifest {
+                    if recovery_policy == RecoveryPolicy::Strict {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "mixed cloud manifest metadata without journal: manifest.snapshot.json sequence {snapshot}, manifest.json sequence {manifest}"
+                        )));
+                    }
+                    let skip_metadata = if manifest >= snapshot {
+                        "manifest.snapshot.json"
+                    } else {
+                        "manifest.json"
+                    };
+                    metadata_to_skip = Some(skip_metadata);
+                    tracing::warn!(
+                        snapshot_sequence = snapshot,
+                        manifest_sequence = manifest,
+                        skip = skip_metadata,
+                        "skipping mixed cloud manifest metadata during salvage open"
+                    );
+                }
+            }
+        }
+
+        for (file_name, data) in metadata_objects {
+            if metadata_to_skip == Some(file_name) {
+                continue;
+            }
             let temp_path = crate::io::traits::FsPath::new(format!("{file_name}.tmp"));
-            let target_path = crate::io::traits::FsPath::new(*file_name);
+            let target_path = crate::io::traits::FsPath::new(file_name);
             crate::io::staging::stage_bytes(
                 &staging_fs,
                 &temp_path,
@@ -967,11 +1110,66 @@ impl Engine {
         for file in state.manifest.files.clone() {
             let cloud_key = crate::sst::object_key(&file.name);
             let local_path = state.sst_dir.join(&file.name);
-            let local_valid = local_path.exists()
-                && crate::sst::fs::SstFileIo::open_with_real_fs(&local_path).is_ok();
+            let local_valid = Self::local_sst_file_matches_manifest(&local_path, &file);
             if local_valid {
                 match Self::blocking_cloud_head_optional(cloud, &cloud_key) {
-                    Ok(Some(_)) => {}
+                    Ok(Some(metadata)) if metadata.size == file.size_bytes => {
+                        if file.content_crc32c.is_some() {
+                            match Self::blocking_cloud_get_optional(cloud, &cloud_key) {
+                                Ok(Some(data)) => {
+                                    if let Err(error) = Self::validate_sst_bytes_against_proof(
+                                        &file.name,
+                                        &data,
+                                        Some(file.size_bytes),
+                                        file.content_crc32c,
+                                    ) {
+                                        if state.recovery_policy == RecoveryPolicy::Strict {
+                                            return Err(error);
+                                        }
+                                        tracing::warn!(%error, sst_name = %file.name, "retaining locally valid manifest SST during salvage despite invalid cloud object");
+                                        state.opened_in_salvage_mode = true;
+                                        state.persistence_anomaly_detected = true;
+                                    }
+                                }
+                                Ok(None) => {
+                                    if state.recovery_policy == RecoveryPolicy::Strict {
+                                        return Err(MidgeError::RecoveryFailed(format!(
+                                            "authoritative cloud SST '{}' is missing",
+                                            file.name
+                                        )));
+                                    }
+                                    tracing::warn!(
+                                        sst_name = %file.name,
+                                        "retaining locally valid manifest SST during salvage despite missing cloud object"
+                                    );
+                                    state.opened_in_salvage_mode = true;
+                                    state.persistence_anomaly_detected = true;
+                                }
+                                Err(error) if state.recovery_policy == RecoveryPolicy::Salvage => {
+                                    tracing::warn!(%error, sst_name = %file.name, "retaining locally valid manifest SST during salvage despite remote content validation failure");
+                                    state.opened_in_salvage_mode = true;
+                                    state.persistence_anomaly_detected = true;
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
+                    Ok(Some(metadata)) => {
+                        if state.recovery_policy == RecoveryPolicy::Strict {
+                            return Err(MidgeError::RecoveryFailed(format!(
+                                "authoritative cloud SST '{}' size {} does not match manifest {}",
+                                file.name, metadata.size, file.size_bytes
+                            )));
+                        }
+                        state.opened_in_salvage_mode = true;
+                        state.persistence_anomaly_detected = true;
+                        tracing::warn!(
+                            sst_name = %file.name,
+                            cloud_size = metadata.size,
+                            manifest_size = file.size_bytes,
+                            "retaining locally valid manifest SST during salvage despite cloud size mismatch"
+                        );
+                    }
                     Ok(None) => {
                         if state.recovery_policy == RecoveryPolicy::Strict {
                             return Err(MidgeError::RecoveryFailed(format!(
@@ -981,15 +1179,15 @@ impl Engine {
                         }
                         state.opened_in_salvage_mode = true;
                         state.persistence_anomaly_detected = true;
-                        manifest_changed = true;
-                        continue;
+                        tracing::warn!(
+                            sst_name = %file.name,
+                            "retaining locally valid manifest SST during salvage despite missing cloud object"
+                        );
                     }
                     Err(error) if state.recovery_policy == RecoveryPolicy::Salvage => {
-                        tracing::warn!(%error, sst_name = %file.name, "dropping manifest SST during salvage remote validation");
+                        tracing::warn!(%error, sst_name = %file.name, "retaining locally valid manifest SST during salvage despite remote validation failure");
                         state.opened_in_salvage_mode = true;
                         state.persistence_anomaly_detected = true;
-                        manifest_changed = true;
-                        continue;
                     }
                     Err(error) => {
                         return Err(MidgeError::RecoveryFailed(format!(
@@ -1027,6 +1225,21 @@ impl Engine {
                         )));
                     }
                 };
+
+                if let Err(error) = Self::validate_sst_bytes_against_proof(
+                    &file.name,
+                    &data,
+                    Some(file.size_bytes),
+                    file.content_crc32c,
+                ) {
+                    if state.recovery_policy == RecoveryPolicy::Strict {
+                        return Err(error);
+                    }
+                    state.opened_in_salvage_mode = true;
+                    state.persistence_anomaly_detected = true;
+                    manifest_changed = true;
+                    continue;
+                }
 
                 let temp_path =
                     crate::io::traits::FsPath::new(crate::sst::temp_object_key(&file.name));
@@ -1071,18 +1284,79 @@ impl Engine {
     fn ensure_named_sst_cache_from_cloud_storage(
         state: &mut RuntimeState,
         cloud: &crate::storage::cloud::CloudStorage,
-        sst_names: impl IntoIterator<Item = String>,
+        sst_proofs: impl IntoIterator<Item = CloudSstRecoveryProof>,
     ) -> MidgeResult<()> {
         let staging_fs = state.fs.clone();
 
-        for sst_name in sst_names {
+        for proof in sst_proofs {
+            let sst_name = proof.name;
             let cloud_key = crate::sst::object_key(&sst_name);
             let local_path = state.sst_dir.join(&sst_name);
-            let local_valid = local_path.exists()
-                && crate::sst::fs::SstFileIo::open_with_real_fs(&local_path).is_ok();
+            let local_valid = Self::local_sst_file_matches_proof(
+                &local_path,
+                &sst_name,
+                proof.expected_size_bytes,
+                proof.expected_crc32c,
+            );
             if local_valid {
                 match Self::blocking_cloud_head_optional(cloud, &cloud_key) {
-                    Ok(Some(_)) => {}
+                    Ok(Some(metadata))
+                        if proof
+                            .expected_size_bytes
+                            .is_none_or(|expected| metadata.size == expected) =>
+                    {
+                        if proof.expected_crc32c.is_some() {
+                            match Self::blocking_cloud_get_optional(cloud, &cloud_key) {
+                                Ok(Some(data)) => {
+                                    if let Err(error) = Self::validate_sst_bytes_against_proof(
+                                        &sst_name,
+                                        &data,
+                                        proof.expected_size_bytes,
+                                        proof.expected_crc32c,
+                                    ) {
+                                        if state.recovery_policy == RecoveryPolicy::Strict {
+                                            return Err(error);
+                                        }
+                                        state.opened_in_salvage_mode = true;
+                                        state.persistence_anomaly_detected = true;
+                                        tracing::warn!(%error, sst_name = %sst_name, "skipping cloud SST staging during salvage content validation");
+                                    }
+                                }
+                                Ok(None) => {
+                                    if state.recovery_policy == RecoveryPolicy::Strict {
+                                        return Err(MidgeError::RecoveryFailed(format!(
+                                            "authoritative cloud SST '{}' is missing",
+                                            sst_name
+                                        )));
+                                    }
+                                    state.opened_in_salvage_mode = true;
+                                    state.persistence_anomaly_detected = true;
+                                    tracing::warn!(
+                                        sst_name = %sst_name,
+                                        "skipping cloud SST staging because authoritative object is missing"
+                                    );
+                                }
+                                Err(error) if state.recovery_policy == RecoveryPolicy::Salvage => {
+                                    state.opened_in_salvage_mode = true;
+                                    state.persistence_anomaly_detected = true;
+                                    tracing::warn!(%error, sst_name = %sst_name, "skipping cloud SST staging during salvage content validation");
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
+                    Ok(Some(metadata)) => {
+                        let error = MidgeError::RecoveryFailed(format!(
+                            "authoritative cloud SST '{}' size {} does not match expected {:?}",
+                            sst_name, metadata.size, proof.expected_size_bytes
+                        ));
+                        if state.recovery_policy == RecoveryPolicy::Strict {
+                            return Err(error);
+                        }
+                        state.opened_in_salvage_mode = true;
+                        state.persistence_anomaly_detected = true;
+                        tracing::warn!(%error, sst_name = %sst_name, "skipping cloud SST staging during salvage size validation");
+                    }
                     Ok(None) => {
                         if state.recovery_policy == RecoveryPolicy::Strict {
                             return Err(MidgeError::RecoveryFailed(format!(
@@ -1143,6 +1417,21 @@ impl Engine {
                 }
             };
 
+            if let Err(error) = Self::validate_sst_bytes_against_proof(
+                &sst_name,
+                &data,
+                proof.expected_size_bytes,
+                proof.expected_crc32c,
+            ) {
+                if state.recovery_policy == RecoveryPolicy::Strict {
+                    return Err(error);
+                }
+                state.opened_in_salvage_mode = true;
+                state.persistence_anomaly_detected = true;
+                tracing::warn!(%error, sst_name = %sst_name, "skipping cloud SST staging during salvage proof validation");
+                continue;
+            }
+
             let temp_path = crate::io::traits::FsPath::new(crate::sst::temp_object_key(&sst_name));
             let target_path = crate::io::traits::FsPath::new(crate::sst::object_key(&sst_name));
             crate::io::staging::stage_bytes(
@@ -1174,27 +1463,42 @@ impl Engine {
         Ok(())
     }
 
-    fn cloud_recovery_sst_names_for_intent_replay(state: &RuntimeState) -> Vec<String> {
-        let mut names = std::collections::BTreeSet::new();
+    fn cloud_recovery_sst_proofs_for_intent_replay(
+        state: &RuntimeState,
+    ) -> Vec<CloudSstRecoveryProof> {
+        let mut proofs = std::collections::BTreeMap::<String, CloudSstRecoveryProof>::new();
         for file in &state.manifest.files {
-            names.insert(file.name.clone());
+            proofs
+                .entry(file.name.clone())
+                .and_modify(|proof| proof.merge_from(CloudSstRecoveryProof::from_manifest(file)))
+                .or_insert_with(|| CloudSstRecoveryProof::from_manifest(file));
         }
         for intent in &state.intent_log {
             match intent {
                 crate::runtime::IntentLogEntry::FlushPublish { file_meta, .. }
                 | crate::runtime::IntentLogEntry::SstAdded { file_meta } => {
-                    names.insert(file_meta.name.clone());
+                    proofs
+                        .entry(file_meta.name.clone())
+                        .and_modify(|proof| {
+                            proof.merge_from(CloudSstRecoveryProof::from_runtime(file_meta))
+                        })
+                        .or_insert_with(|| CloudSstRecoveryProof::from_runtime(file_meta));
                 }
                 crate::runtime::IntentLogEntry::CompactionPublish { added, .. }
                 | crate::runtime::IntentLogEntry::CompactionApplied { added, .. } => {
                     for file_meta in added {
-                        names.insert(file_meta.name.clone());
+                        proofs
+                            .entry(file_meta.name.clone())
+                            .and_modify(|proof| {
+                                proof.merge_from(CloudSstRecoveryProof::from_runtime(file_meta))
+                            })
+                            .or_insert_with(|| CloudSstRecoveryProof::from_runtime(file_meta));
                     }
                 }
                 _ => {}
             }
         }
-        names.into_iter().collect()
+        proofs.into_values().collect()
     }
 
     /// Open a database with explicit environment selection.
@@ -1387,8 +1691,8 @@ impl Engine {
         };
 
         if let Some(cloud_storage) = cloud_storage_for_restore.as_deref() {
-            let sst_names = Self::cloud_recovery_sst_names_for_intent_replay(&state);
-            Self::ensure_named_sst_cache_from_cloud_storage(&mut state, cloud_storage, sst_names)?;
+            let sst_proofs = Self::cloud_recovery_sst_proofs_for_intent_replay(&state);
+            Self::ensure_named_sst_cache_from_cloud_storage(&mut state, cloud_storage, sst_proofs)?;
         }
 
         // 🔑 CRITICAL: Replay intent log to recover any interrupted mutations.
@@ -2556,6 +2860,111 @@ mod tests {
         );
     }
 
+    #[test]
+    fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let inner = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let backend = Arc::new(ListOmittingCloudBackend::new(
+            Arc::clone(&inner),
+            "metadata/",
+        ));
+        let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+        let remote_manifest = crate::metadata::Manifest {
+            last_persisted_sequence: 42,
+            ..Default::default()
+        };
+        Engine::blocking_cloud_put(
+            &cloud,
+            "metadata/manifest.json",
+            serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
+        )
+        .expect("upload readable remote manifest metadata");
+
+        Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
+            .expect("stale metadata list must not hide directly readable metadata");
+
+        let hydrated = crate::metadata::ManifestPersistence::load(temp_dir.path())
+            .expect("load hydrated manifest");
+        assert_eq!(
+            hydrated.last_persisted_sequence, 42,
+            "metadata hydration must probe known metadata keys directly"
+        );
+    }
+
+    #[test]
+    fn should_reject_mixed_cloud_manifest_metadata_without_journal() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+        let snapshot_manifest = crate::metadata::Manifest {
+            last_persisted_sequence: 10,
+            ..Default::default()
+        };
+        let current_manifest = crate::metadata::Manifest {
+            last_persisted_sequence: 11,
+            ..Default::default()
+        };
+        Engine::blocking_cloud_put(
+            &cloud,
+            "metadata/manifest.snapshot.json",
+            serde_json::to_vec_pretty(&snapshot_manifest).expect("serialize snapshot manifest"),
+        )
+        .expect("upload stale snapshot");
+        Engine::blocking_cloud_put(
+            &cloud,
+            "metadata/manifest.json",
+            serde_json::to_vec_pretty(&current_manifest).expect("serialize current manifest"),
+        )
+        .expect("upload newer manifest");
+
+        let error = Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
+            .expect_err("strict hydration must reject mixed manifest metadata without journal");
+
+        assert!(
+            error.to_string().contains("mixed")
+                || error.to_string().contains("inconsistent")
+                || error.to_string().contains("sequence"),
+            "unexpected mixed metadata error: {error}"
+        );
+    }
+
+    #[test]
+    fn should_salvage_mixed_cloud_manifest_metadata_by_retaining_highest_sequence() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+        let snapshot_manifest = crate::metadata::Manifest {
+            last_persisted_sequence: 10,
+            ..Default::default()
+        };
+        let current_manifest = crate::metadata::Manifest {
+            last_persisted_sequence: 11,
+            ..Default::default()
+        };
+        Engine::blocking_cloud_put(
+            &cloud,
+            "metadata/manifest.snapshot.json",
+            serde_json::to_vec_pretty(&snapshot_manifest).expect("serialize snapshot manifest"),
+        )
+        .expect("upload stale snapshot");
+        Engine::blocking_cloud_put(
+            &cloud,
+            "metadata/manifest.json",
+            serde_json::to_vec_pretty(&current_manifest).expect("serialize current manifest"),
+        )
+        .expect("upload newer manifest");
+
+        Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Salvage)
+            .expect("salvage hydration should retain the highest sequence manifest metadata");
+
+        let hydrated = crate::metadata::ManifestPersistence::load(temp_dir.path())
+            .expect("load salvaged manifest metadata");
+        assert_eq!(
+            hydrated.last_persisted_sequence, 11,
+            "salvage hydration must not let a stale snapshot hide a newer manifest"
+        );
+    }
+
     struct ListOmittingCloudBackend {
         inner: Arc<crate::storage::cloud::MockCloudBackend>,
         omitted_prefix: String,
@@ -2623,15 +3032,40 @@ mod tests {
         }
     }
 
-    fn test_sst_bytes() -> Vec<u8> {
+    fn test_sst_bytes_with_key_value(key: &[u8], value: &[u8]) -> Vec<u8> {
         use crate::sst::traits::SstFactory;
 
         let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
         let mut writer = factory.create().expect("create test sst writer");
         writer
-            .add_with_meta(b"cloud-list-key", Some(b"cloud-list-value"), 1, 0, None)
+            .add_with_meta(key, Some(value), 1, 0, None)
             .expect("write test sst entry");
         writer.finish_bytes().expect("finish test sst bytes")
+    }
+
+    fn test_sst_bytes_with_value(value: &[u8]) -> Vec<u8> {
+        test_sst_bytes_with_key_value(b"cloud-list-key", value)
+    }
+
+    fn test_sst_bytes() -> Vec<u8> {
+        test_sst_bytes_with_value(b"cloud-list-value")
+    }
+
+    fn same_size_sst_with_different_crc(bytes: &[u8]) -> Vec<u8> {
+        assert!(bytes.len() > 32, "test SST must include an extended footer");
+        let mut changed = bytes.to_vec();
+        let footer_block_bloom_byte = changed.len() - 16;
+        changed[footer_block_bloom_byte] ^= 0x01;
+        assert_eq!(changed.len(), bytes.len());
+        assert_ne!(crc32c::crc32c(&changed), crc32c::crc32c(bytes));
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let path = temp_dir.path().join("changed.sst");
+        std::fs::write(&path, &changed).expect("write changed SST");
+        crate::sst::fs::SstFileIo::open_with_real_fs(&path)
+            .expect("changed same-size SST should remain structurally readable");
+
+        changed
     }
 
     fn cloud_with_stale_sst_listing() -> crate::storage::cloud::CloudStorage {
@@ -2677,6 +3111,245 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let mut state = crate::runtime::RuntimeState::try_new(
+            temp_dir.path().to_path_buf(),
+            false,
+            RecoveryPolicy::Strict,
+        )
+        .expect("create runtime state");
+        let sst_name = crate::sst::file_name(0, 0, 3);
+        let committed_sst_bytes = test_sst_bytes_with_value(b"manifest-sized-value");
+        let wrong_sst_bytes = test_sst_bytes_with_value(b"different-cloud-object-bytes");
+        assert_ne!(
+            committed_sst_bytes.len(),
+            wrong_sst_bytes.len(),
+            "test must use a valid cloud SST with different size than the committed manifest"
+        );
+        state.manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: committed_sst_bytes.len() as u64,
+            cf_id: 0,
+            sst_seq: 3,
+            smallest_key: Some(b"cloud-list-key".to_vec()),
+            largest_key: Some(b"cloud-list-key".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            ..Default::default()
+        });
+        let cloud = cloud_with_stale_sst_listing();
+        Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), wrong_sst_bytes)
+            .expect("upload wrong-sized but structurally valid test sst");
+
+        let error = Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+            .expect_err("strict recovery must reject wrong-sized authoritative cloud SST");
+
+        assert!(
+            error.to_string().contains("size"),
+            "unexpected wrong-sized cloud SST recovery error: {error}"
+        );
+        assert!(
+            !state.sst_dir.join(&sst_name).exists(),
+            "wrong-sized cloud SST must not be installed into the local cache"
+        );
+    }
+
+    #[test]
+    fn should_reject_manifest_sst_when_same_size_cloud_object_crc_differs() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let mut state = crate::runtime::RuntimeState::try_new(
+            temp_dir.path().to_path_buf(),
+            false,
+            RecoveryPolicy::Strict,
+        )
+        .expect("create runtime state");
+        let sst_name = crate::sst::file_name(0, 0, 4);
+        let wrong_sst_bytes = test_sst_bytes();
+        let expected_crc = crc32c::crc32c(&wrong_sst_bytes) ^ 0xffff_ffff;
+        state.manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: wrong_sst_bytes.len() as u64,
+            content_crc32c: Some(expected_crc),
+            cf_id: 0,
+            sst_seq: 4,
+            smallest_key: Some(b"cloud-list-key".to_vec()),
+            largest_key: Some(b"cloud-list-key".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            ..Default::default()
+        });
+        let cloud = cloud_with_stale_sst_listing();
+        Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), wrong_sst_bytes)
+            .expect("upload same-sized but wrong-content test sst");
+
+        let error = Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+            .expect_err("strict recovery must reject wrong-content authoritative cloud SST");
+
+        assert!(
+            error.to_string().contains("crc") || error.to_string().contains("content"),
+            "unexpected wrong-content cloud SST recovery error: {error}"
+        );
+        assert!(
+            !state.sst_dir.join(&sst_name).exists(),
+            "wrong-content cloud SST must not be installed into the local cache"
+        );
+    }
+
+    #[test]
+    fn should_replace_wrong_sized_local_sst_cache_from_authoritative_cloud_object() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let mut state = crate::runtime::RuntimeState::try_new(
+            temp_dir.path().to_path_buf(),
+            false,
+            RecoveryPolicy::Strict,
+        )
+        .expect("create runtime state");
+        let sst_name = crate::sst::file_name(0, 0, 5);
+        let committed_sst_bytes = test_sst_bytes_with_value(b"manifest-sized-value");
+        let stale_local_sst_bytes = test_sst_bytes_with_value(b"different-local-cache-bytes");
+        assert_ne!(
+            committed_sst_bytes.len(),
+            stale_local_sst_bytes.len(),
+            "test must use a stale local SST with different size than the committed manifest"
+        );
+        state.manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: committed_sst_bytes.len() as u64,
+            cf_id: 0,
+            sst_seq: 4,
+            smallest_key: Some(b"cloud-list-key".to_vec()),
+            largest_key: Some(b"cloud-list-key".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            ..Default::default()
+        });
+        std::fs::write(state.sst_dir.join(&sst_name), stale_local_sst_bytes)
+            .expect("write stale local SST cache");
+        let cloud = cloud_with_stale_sst_listing();
+        Engine::blocking_cloud_put(
+            &cloud,
+            &crate::sst::object_key(&sst_name),
+            committed_sst_bytes.clone(),
+        )
+        .expect("upload authoritative manifest-sized test sst");
+
+        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+            .expect("wrong-sized local cache should be restored from authoritative cloud SST");
+
+        assert_eq!(
+            std::fs::read(state.sst_dir.join(&sst_name)).expect("read restored local SST"),
+            committed_sst_bytes,
+            "local SST cache must be replaced with the manifest-sized cloud object"
+        );
+    }
+
+    #[test]
+    fn should_replace_same_size_wrong_crc_local_sst_cache_from_authoritative_cloud_object() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let mut state = crate::runtime::RuntimeState::try_new(
+            temp_dir.path().to_path_buf(),
+            false,
+            RecoveryPolicy::Strict,
+        )
+        .expect("create runtime state");
+        let sst_name = crate::sst::file_name(0, 0, 6);
+        let committed_sst_bytes = test_sst_bytes();
+        let stale_local_sst_bytes = same_size_sst_with_different_crc(&committed_sst_bytes);
+        state.manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: committed_sst_bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&committed_sst_bytes)),
+            cf_id: 0,
+            sst_seq: 6,
+            smallest_key: Some(b"cloud-list-key".to_vec()),
+            largest_key: Some(b"cloud-list-key".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            ..Default::default()
+        });
+        std::fs::write(state.sst_dir.join(&sst_name), stale_local_sst_bytes)
+            .expect("write stale same-size local SST cache");
+        let cloud = cloud_with_stale_sst_listing();
+        Engine::blocking_cloud_put(
+            &cloud,
+            &crate::sst::object_key(&sst_name),
+            committed_sst_bytes.clone(),
+        )
+        .expect("upload authoritative manifest-crc test sst");
+
+        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+            .expect("same-size wrong local cache should be restored from authoritative cloud SST");
+
+        assert_eq!(
+            std::fs::read(state.sst_dir.join(&sst_name)).expect("read restored local SST"),
+            committed_sst_bytes,
+            "local SST cache must be replaced with the manifest-crc cloud object"
+        );
+    }
+
+    #[test]
+    fn should_salvage_retain_manifest_sst_when_local_cache_is_valid_but_cloud_crc_differs() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let mut state = crate::runtime::RuntimeState::try_new(
+            temp_dir.path().to_path_buf(),
+            false,
+            RecoveryPolicy::Salvage,
+        )
+        .expect("create runtime state");
+        let sst_name = crate::sst::file_name(0, 0, 7);
+        let committed_sst_bytes = test_sst_bytes();
+        let wrong_cloud_sst_bytes = same_size_sst_with_different_crc(&committed_sst_bytes);
+        state.manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: committed_sst_bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&committed_sst_bytes)),
+            cf_id: 0,
+            sst_seq: 7,
+            smallest_key: Some(b"cloud-list-key".to_vec()),
+            largest_key: Some(b"cloud-list-key".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            ..Default::default()
+        });
+        std::fs::write(state.sst_dir.join(&sst_name), &committed_sst_bytes)
+            .expect("write valid local SST cache");
+        let cloud = cloud_with_stale_sst_listing();
+        Engine::blocking_cloud_put(
+            &cloud,
+            &crate::sst::object_key(&sst_name),
+            wrong_cloud_sst_bytes,
+        )
+        .expect("upload wrong-content cloud SST");
+
+        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+            .expect("salvage should keep a manifest SST when the local cache is valid");
+
+        assert!(
+            state
+                .manifest
+                .files
+                .iter()
+                .any(|file| file.name == sst_name),
+            "salvage must not drop a manifest SST that still has a valid local recoverable copy"
+        );
+        assert_eq!(
+            std::fs::read(state.sst_dir.join(&sst_name)).expect("read retained local SST"),
+            committed_sst_bytes,
+            "valid local SST cache must remain intact"
+        );
+        assert!(
+            state.persistence_anomaly_detected,
+            "salvage should still surface the invalid cloud copy as a persistence anomaly"
+        );
+    }
+
+    #[test]
     fn should_stage_intent_replay_sst_when_cloud_listing_is_stale_but_object_is_readable() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let mut state = crate::runtime::RuntimeState::try_new(
@@ -2694,13 +3367,58 @@ mod tests {
         Engine::ensure_named_sst_cache_from_cloud_storage(
             &mut state,
             &cloud,
-            vec![sst_name.clone()],
+            vec![CloudSstRecoveryProof::name_only(sst_name.clone())],
         )
         .expect("stale list should not make readable intent SST unstaged");
 
         assert!(
             state.sst_dir.join(&sst_name).exists(),
             "readable cloud SST should be staged despite stale LIST"
+        );
+    }
+
+    #[test]
+    fn should_reject_intent_replay_sst_when_cloud_object_crc_differs_from_intent() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let mut state = crate::runtime::RuntimeState::try_new(
+            temp_dir.path().to_path_buf(),
+            false,
+            RecoveryPolicy::Strict,
+        )
+        .expect("create runtime state");
+        let sst_name = crate::sst::file_name(0, 0, 7);
+        let sst_bytes = test_sst_bytes();
+        let expected_crc = crc32c::crc32c(&sst_bytes) ^ 0xffff_ffff;
+        state
+            .intent_log
+            .push(crate::runtime::IntentLogEntry::SstAdded {
+                file_meta: crate::runtime::FileMeta {
+                    name: sst_name.clone(),
+                    level: 0,
+                    size_bytes: sst_bytes.len() as u64,
+                    content_crc32c: Some(expected_crc),
+                    cf_id: 0,
+                    smallest_key: Some(b"cloud-list-key".to_vec()),
+                    largest_key: Some(b"cloud-list-key".to_vec()),
+                    smallest_seq: Some(1),
+                    largest_seq: Some(1),
+                },
+            });
+        let cloud = cloud_with_stale_sst_listing();
+        Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), sst_bytes)
+            .expect("upload intent SST with mismatched content proof");
+
+        let proofs = Engine::cloud_recovery_sst_proofs_for_intent_replay(&state);
+        let error = Engine::ensure_named_sst_cache_from_cloud_storage(&mut state, &cloud, proofs)
+            .expect_err("strict recovery must reject intent SST with mismatched content proof");
+
+        assert!(
+            error.to_string().contains("crc") || error.to_string().contains("content"),
+            "unexpected intent SST proof error: {error}"
+        );
+        assert!(
+            !state.sst_dir.join(&sst_name).exists(),
+            "intent SST with mismatched proof must not be staged"
         );
     }
 }

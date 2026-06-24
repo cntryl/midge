@@ -286,6 +286,7 @@ impl EventLoop {
             name: sst_name.to_string(),
             level,
             size_bytes: summary.size_bytes,
+            content_crc32c: Some(crc32c::crc32c(&std::fs::read(&path)?)),
             cf_id,
             smallest_key: Some(summary.smallest_key),
             largest_key: Some(summary.largest_key),

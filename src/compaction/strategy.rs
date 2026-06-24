@@ -282,6 +282,7 @@ mod tests {
             cf_id,
             level,
             size_bytes,
+            content_crc32c: None,
             sst_seq: 0,
             smallest_key,
             largest_key,

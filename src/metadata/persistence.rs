@@ -565,6 +565,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn should_preserve_file_metadata_when_persisting() {
         // Arrange
         let test_dir = create_test_dir();
@@ -574,6 +575,7 @@ mod tests {
             name: sst_name.clone(),
             level: 0,
             size_bytes: 4096,
+            content_crc32c: Some(0x1234_abcd),
             cf_id: 0,
             sst_seq: 1,
             smallest_key: Some(vec![1, 2, 3]),
@@ -599,6 +601,7 @@ mod tests {
         assert_eq!(loaded.files[0].name, sst_name);
         assert_eq!(loaded.files[0].level, 0);
         assert_eq!(loaded.files[0].size_bytes, 4096);
+        assert_eq!(loaded.files[0].content_crc32c, Some(0x1234_abcd));
         assert_eq!(loaded.files[0].smallest_key, Some(vec![1, 2, 3]));
         assert_eq!(loaded.files[0].largest_key, Some(vec![7, 8, 9]));
     }

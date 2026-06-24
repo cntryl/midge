@@ -278,11 +278,13 @@ impl FlushActor {
 
         tracing::info!(path = ?path, added = added_count, add_ms = (add_ns as f64) / 1_000_000.0, finish_ms = (finish_ns as f64) / 1_000_000.0, "memtable -> sst flush breakdown");
 
-        let size_bytes = std::fs::metadata(path)?.len();
+        let sst_bytes = std::fs::read(path)?;
+        let size_bytes = sst_bytes.len() as u64;
         Ok(crate::runtime::FileMeta {
             name: sst_name.to_string(),
             level: 0,
             size_bytes,
+            content_crc32c: Some(crc32c::crc32c(&sst_bytes)),
             cf_id,
             smallest_key: Some(smallest_key),
             largest_key: Some(largest_key),
