@@ -335,8 +335,51 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// Submit a write operation. Returns immediately.
     fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback);
 
+    /// Submit a conditional write operation. Backends that cannot enforce the
+    /// supplied preconditions must fail closed rather than writing.
+    fn submit_write_with_headers(
+        &self,
+        key: String,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        if headers.is_empty() {
+            self.submit_write(key, data, callback);
+            return;
+        }
+
+        let _ = callback.send(StorageEvent::WriteComplete {
+            key,
+            result: StorageOutcome::Err(
+                "conditional write is not supported by this storage backend".to_string(),
+            ),
+        });
+    }
+
     /// Submit a delete operation. Returns immediately.
     fn submit_delete(&self, key: String, callback: StorageCallback);
+
+    /// Submit a conditional delete operation. Backends that cannot enforce the
+    /// supplied preconditions must fail closed rather than deleting.
+    fn submit_delete_with_headers(
+        &self,
+        key: String,
+        headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        if headers.is_empty() {
+            self.submit_delete(key, callback);
+            return;
+        }
+
+        let _ = callback.send(StorageEvent::DeleteComplete {
+            key,
+            result: StorageOutcome::Err(
+                "conditional delete is not supported by this storage backend".to_string(),
+            ),
+        });
+    }
 
     /// Submit a prefix list operation. Returns immediately.
     fn submit_list(&self, prefix: String, callback: StorageCallback);

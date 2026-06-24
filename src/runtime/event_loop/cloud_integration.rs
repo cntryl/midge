@@ -120,27 +120,48 @@ impl EventLoop {
                     return;
                 }
 
+                let resource = crate::wal::cloud_segment_object_key(segment_id);
+                self.state
+                    .cloud
+                    .pending_uploads
+                    .retain(|item| item != &resource);
+                self.cloud_acked_wal_segments
+                    .insert(segment_id, max_sequence);
+
+                let ready_segments = match self
+                    .durability
+                    .take_contiguous_acked_cloud_segments(&self.cloud_acked_wal_segments)
+                {
+                    Ok(ready_segments) => ready_segments,
+                    Err(error) => {
+                        self.cloud_acked_wal_segments.remove(&segment_id);
+                        self.handle_cloud_upload_failure(segment_id, error);
+                        return;
+                    }
+                };
+
+                let Some((durable_segment_id, durable_max_sequence)) =
+                    ready_segments.last().copied()
+                else {
+                    tracing::debug!(
+                        segment_id,
+                        max_sequence,
+                        "CloudAck buffered behind an earlier unacked WAL segment"
+                    );
+                    return;
+                };
+
                 match self.wal_actor.handle_cloud_upload_complete(
                     &mut self.state,
-                    segment_id,
-                    max_sequence,
+                    durable_segment_id,
+                    durable_max_sequence,
                 ) {
                     Ok(()) => {
-                        let resource = crate::wal::cloud_segment_object_key(segment_id);
-                        self.state
-                            .cloud
-                            .pending_uploads
-                            .retain(|item| item != &resource);
-                        self.cloud_acked_wal_segments
-                            .insert(segment_id, max_sequence);
-                        self.remove_cloud_durable_local_wal_segment(segment_id);
+                        for (ready_segment_id, _) in &ready_segments {
+                            self.remove_cloud_durable_local_wal_segment(*ready_segment_id);
+                        }
 
-                        // If cloud_durable_seq advanced past multiple segments,
-                        // complete all inflight segments whose max_sequence is now durable.
-                        let durable = self.state.wal.cloud_durable_seq;
-                        let ready = self.durability.get_ready_cloud_segments(durable);
-
-                        for seg_id in ready {
+                        for (seg_id, _) in ready_segments {
                             if let Some(enqueued_at) =
                                 self.durability.take_cloud_segment_timing(seg_id)
                             {
@@ -215,6 +236,7 @@ impl EventLoop {
             .pending_uploads
             .retain(|item| item != &resource);
         self.state.mark_persistence_anomaly();
+        self.cloud_acked_wal_segments.split_off(&segment_id);
 
         // Attempt to recover the failed segment's max_sequence so we can
         // invalidate idempotency allocations that were part of it.
@@ -328,6 +350,7 @@ impl EventLoop {
             .iter()
             .filter_map(|(segment_id, max_sequence)| {
                 (*segment_id < recovery_floor_segment
+                    && *max_sequence <= self.state.wal.cloud_durable_seq
                     && *max_sequence <= persisted_sequence
                     && !self.cloud_wal_prune_inflight.contains(segment_id))
                 .then_some(*segment_id)
@@ -599,10 +622,22 @@ mod tests {
         el.state.wal.current_segment_id = segment_id + 1;
         el.state.manifest.last_persisted_sequence = max_sequence;
         el.cloud_acked_wal_segments.insert(segment_id, max_sequence);
-        write_test_file(
-            remote_wal_path_for_test(el, segment_id),
-            b"remote wal marker",
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            Bytes::from_static(b"prune-candidate"),
+            Some(Bytes::from_static(b"value")),
+            max_sequence,
+            0,
         );
+        let payload = crate::wal::encoding::encode(&record).expect("encode test WAL record");
+        let mut bytes = Vec::new();
+        crate::wal::frame::append_frame(&mut bytes, &payload).expect("append test WAL frame");
+        write_test_file(remote_wal_path_for_test(el, segment_id), &bytes);
+        if let Some(storage) = el.hybrid_storage.as_ref() {
+            storage
+                .verify_remote_wal_segment(segment_id, max_sequence)
+                .expect("verify remote WAL prune candidate");
+        }
     }
 
     fn add_manifest_sst_for_test(el: &mut EventLoop, sst_name: &str, max_sequence: u64) {
@@ -851,6 +886,104 @@ mod tests {
     }
 
     #[test]
+    fn should_not_prune_remote_wal_when_segment_is_not_cloud_durable(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence - 1;
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL must be retained until the cloud durable frontier covers its max sequence"
+        );
+        assert!(
+            el.cloud_acked_wal_segments.contains_key(&segment_id),
+            "retained WAL should remain eligible for a future conservative retry"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_prune_remote_wal_when_segment_max_sequence_exceeds_manifest_coverage(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence;
+        el.state.manifest.last_persisted_sequence = max_sequence - 1;
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL must be retained when its max sequence exceeds manifest coverage"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_prune_remote_wal_when_segment_max_sequence_equals_manifest_coverage(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence;
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            !remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL may be pruned when cloud durability and manifest coverage both include its max sequence"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_ignore_listing_only_ssts_when_deciding_remote_wal_cleanup(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence;
+        el.state.manifest.last_persisted_sequence = 0;
+        write_test_file(
+            remote_sst_path_for_test(&el, "uploaded-but-uncommitted.sst"),
+            b"listing-only object",
+        );
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "uploaded but uncommitted SST objects must not establish WAL cleanup coverage"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn should_keep_local_wal_when_remote_wal_readback_fails_after_cloud_ack(
     ) -> crate::common::MidgeResult<()> {
         let mut el = create_test_cloud_event_loop(
@@ -919,6 +1052,177 @@ mod tests {
         assert!(
             local_wal.exists(),
             "local WAL must be retained when CloudAck has no prior remote readback proof"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_advance_cloud_durability_across_unacked_segment_gap(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+
+        let first_request = 601u64;
+        let (first_seq, first_deferred) = el.wal_actor.append(
+            &mut el.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: first_request,
+                cf_id: 0,
+                key: Bytes::from_static(b"gap-first"),
+                value: Some(Bytes::from_static(b"value-1")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        assert!(first_deferred, "CloudAsync first append should defer");
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id: first_request,
+                sequence: first_seq,
+            });
+        let (first_segment, first_max_sequence) = seal_segment_for_test(&mut el)?;
+
+        let second_request = 602u64;
+        let (second_seq, second_deferred) = el.wal_actor.append(
+            &mut el.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: second_request,
+                cf_id: 0,
+                key: Bytes::from_static(b"gap-second"),
+                value: Some(Bytes::from_static(b"value-2")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        assert!(second_deferred, "CloudAsync second append should defer");
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id: second_request,
+                sequence: second_seq,
+            });
+        let (second_segment, second_max_sequence) = seal_segment_for_test(&mut el)?;
+        assert!(second_segment > first_segment);
+        let second_local_wal = el
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(second_segment));
+
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id: second_segment,
+            max_sequence: second_max_sequence,
+        });
+
+        assert_eq!(
+            el.state.wal.cloud_durable_seq, 0,
+            "cloud durable frontier must not jump across an unacked segment"
+        );
+        assert_eq!(
+            el.wal_actor.pending_cloud_writes_len(),
+            2,
+            "pending CloudAsync writes must not become visible until the gap is closed"
+        );
+        assert!(
+            second_local_wal.exists(),
+            "local WAL for an out-of-order ack must remain until earlier segments are durable"
+        );
+
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id: first_segment,
+            max_sequence: first_max_sequence,
+        });
+
+        assert_eq!(
+            el.state.wal.cloud_durable_seq, second_max_sequence,
+            "frontier should advance through the contiguous acked segment range once the gap closes"
+        );
+        assert_eq!(
+            el.wal_actor.pending_cloud_writes_len(),
+            0,
+            "pending CloudAsync writes should drain after contiguous durability is proven"
+        );
+        assert!(
+            !second_local_wal.exists(),
+            "local WAL can be removed after the contiguous cloud durable frontier covers it"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common::MidgeResult<()>
+    {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+
+        let first_request = 611u64;
+        let (first_seq, first_deferred) = el.wal_actor.append(
+            &mut el.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: first_request,
+                cf_id: 0,
+                key: Bytes::from_static(b"fail-gap-first"),
+                value: Some(Bytes::from_static(b"value-1")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        assert!(first_deferred, "CloudAsync first append should defer");
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id: first_request,
+                sequence: first_seq,
+            });
+        let (first_segment, _) = seal_segment_for_test(&mut el)?;
+
+        let second_request = 612u64;
+        let (second_seq, second_deferred) = el.wal_actor.append(
+            &mut el.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: second_request,
+                cf_id: 0,
+                key: Bytes::from_static(b"fail-gap-second"),
+                value: Some(Bytes::from_static(b"value-2")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        assert!(second_deferred, "CloudAsync second append should defer");
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id: second_request,
+                sequence: second_seq,
+            });
+        let (second_segment, second_max_sequence) = seal_segment_for_test(&mut el)?;
+
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id: second_segment,
+            max_sequence: second_max_sequence,
+        });
+        assert!(
+            el.cloud_acked_wal_segments.contains_key(&second_segment),
+            "later ack should be buffered while an earlier segment is unacked"
+        );
+
+        el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+            segment_id: first_segment,
+            error: "injected upload failure".to_string(),
+        });
+
+        assert_eq!(
+            el.state.wal.cloud_durable_seq, 0,
+            "failure of the earlier segment must not let a buffered later ack advance durability"
+        );
+        assert!(
+            !el.cloud_acked_wal_segments.contains_key(&second_segment),
+            "later buffered ack bookkeeping must be discarded after an earlier gap fails"
+        );
+        assert_eq!(
+            el.wal_actor.pending_cloud_writes_len(),
+            0,
+            "pending CloudAsync writes should be cleared after cloud upload failure"
         );
 
         Ok(())

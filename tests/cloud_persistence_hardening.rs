@@ -180,6 +180,59 @@ fn should_keep_remote_wal_segment_when_unflushed_column_family_still_needs_it() 
 }
 
 #[test]
+fn should_recover_after_partial_remote_wal_cleanup_and_local_cache_loss() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let opts = opts_for_mode("cloud");
+    let db_path = cloud_db_path(&opts);
+    let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let default_cf = default_cf(&engine);
+
+    put_default(
+        &engine,
+        b"covered-before-partial-cleanup",
+        b"covered-value",
+        WriteOptions::cloud_strict(),
+    );
+    assert!(
+        !wait_for_remote_wal_count_at_least(&remote_wal_dir, 1).is_empty(),
+        "first strict write should create remote WAL before flush"
+    );
+    engine.flush_cf(&default_cf).expect("flush covered value");
+    wait_for_remote_wal_count(&remote_wal_dir, 0);
+
+    // Act: a later strict write remains WAL-backed after the earlier segment was pruned.
+    put_default(
+        &engine,
+        b"retained-after-partial-cleanup",
+        b"retained-value",
+        WriteOptions::cloud_strict(),
+    );
+    let retained_segments = wait_for_remote_wal_count_at_least(&remote_wal_dir, 1);
+    drop(engine);
+    reset_dir(&db_path.join("wal"));
+    reset_dir(&db_path.join("sst"));
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
+
+    // Assert
+    assert_eq!(
+        get_default(&reopened, b"covered-before-partial-cleanup"),
+        Some(Bytes::from_static(b"covered-value")),
+        "covered data should recover from cloud SST after its remote WAL was pruned"
+    );
+    assert_eq!(
+        get_default(&reopened, b"retained-after-partial-cleanup"),
+        Some(Bytes::from_static(b"retained-value")),
+        "later unflushed data should recover from the retained remote WAL"
+    );
+    assert!(
+        !retained_segments.is_empty(),
+        "test must prove at least one later remote WAL segment survived partial cleanup"
+    );
+}
+
+#[test]
 fn should_keep_sync_write_local_only_when_cloud_wal_upload_fails() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");

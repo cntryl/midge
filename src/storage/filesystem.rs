@@ -12,7 +12,9 @@
 //! the main engine thread.
 
 use crate::common::MidgeResult;
-use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
+use crate::storage::{
+    StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome,
+};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -47,6 +49,19 @@ impl FileSystem {
             }
         }
         out
+    }
+}
+
+fn write_file_with_parents(full_path: &Path, data: Vec<u8>) -> StorageOutcome<()> {
+    if let Some(parent) = full_path.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            return StorageOutcome::Err(format!("mkdir {:?}: {}", parent, e));
+        }
+    }
+
+    match fs::write(full_path, data) {
+        Ok(_) => StorageOutcome::Ok(()),
+        Err(e) => StorageOutcome::Err(format!("write {:?}: {}", full_path, e)),
     }
 }
 
@@ -93,12 +108,111 @@ impl StorageBackend for FileSystem {
         });
     }
 
+    fn submit_write_with_headers(
+        &self,
+        key: String,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        if headers.is_empty() {
+            self.submit_write(key, data, callback);
+            return;
+        }
+
+        let full_path = self.full_path(&key);
+        let if_none_match = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("if-none-match"))
+            .map(|(_, value)| value.trim().to_string());
+        let if_match = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("if-match"))
+            .map(|(_, value)| value.trim().trim_matches('"').to_string());
+
+        let outcome = if if_none_match.as_deref() == Some("*") && full_path.exists() {
+            StorageOutcome::Err("precondition failed: object already exists".to_string())
+        } else if let Some(expected) = if_match {
+            match fs::read(&full_path) {
+                Ok(existing) => {
+                    let current =
+                        StorageObjectMetadata::content_crc(existing.len() as u64, &existing).etag;
+                    if current == expected {
+                        write_file_with_parents(&full_path, data)
+                    } else {
+                        StorageOutcome::Err("precondition failed: etag mismatch".to_string())
+                    }
+                }
+                Err(error) => StorageOutcome::Err(format!(
+                    "precondition failed: read {:?}: {}",
+                    full_path, error
+                )),
+            }
+        } else if if_none_match.as_deref() == Some("*") {
+            write_file_with_parents(&full_path, data)
+        } else {
+            StorageOutcome::Err("conditional write requires a supported precondition".to_string())
+        };
+
+        let _ = callback.send(StorageEvent::WriteComplete {
+            key,
+            result: outcome,
+        });
+    }
+
     fn submit_delete(&self, key: String, callback: StorageCallback) {
         let full_path = self.full_path(&key);
 
         let outcome = match fs::remove_file(&full_path) {
             Ok(_) => StorageOutcome::Ok(()),
             Err(e) => StorageOutcome::Err(format!("delete {:?}: {}", full_path, e)),
+        };
+
+        let _ = callback.send(StorageEvent::DeleteComplete {
+            key,
+            result: outcome,
+        });
+    }
+
+    fn submit_delete_with_headers(
+        &self,
+        key: String,
+        headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        if headers.is_empty() {
+            self.submit_delete(key, callback);
+            return;
+        }
+
+        let full_path = self.full_path(&key);
+        let outcome = if let Some((_, expected)) = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("if-match"))
+        {
+            match fs::read(&full_path) {
+                Ok(data) => {
+                    let current = StorageObjectMetadata::content_crc(data.len() as u64, &data).etag;
+                    if current == expected.trim_matches('"') {
+                        match fs::remove_file(&full_path) {
+                            Ok(_) => StorageOutcome::Ok(()),
+                            Err(error) => {
+                                StorageOutcome::Err(format!("delete {:?}: {}", full_path, error))
+                            }
+                        }
+                    } else {
+                        StorageOutcome::Err("precondition failed: etag mismatch".to_string())
+                    }
+                }
+                Err(error) => StorageOutcome::Err(format!(
+                    "precondition failed: read {:?}: {}",
+                    full_path, error
+                )),
+            }
+        } else {
+            StorageOutcome::Err(
+                "conditional delete requires a supported If-Match precondition".to_string(),
+            )
         };
 
         let _ = callback.send(StorageEvent::DeleteComplete {
@@ -277,6 +391,61 @@ mod tests {
                 assert!(result.is_ok());
                 let content = std::fs::read(temp_dir.path().join("binary.bin")).unwrap();
                 assert_eq!(content, binary_data);
+            }
+            _ => panic!("Expected WriteComplete"),
+        }
+    }
+
+    #[test]
+    fn should_create_file_when_if_none_match_star_and_missing() {
+        // Arrange
+        let temp_dir = TempDir::new().unwrap();
+        let fs = FileSystem::new(temp_dir.path()).unwrap();
+        let path = temp_dir.path().join("conditional-create.txt");
+        let (tx, rx) = mpsc::channel();
+
+        // Act
+        fs.submit_write_with_headers(
+            "conditional-create.txt".into(),
+            b"new".to_vec(),
+            vec![("If-None-Match".into(), "*".into())],
+            tx,
+        );
+        let event = rx.recv().unwrap();
+
+        // Assert
+        match event {
+            StorageEvent::WriteComplete { result, .. } => {
+                assert!(result.is_ok());
+                assert_eq!(std::fs::read(&path).unwrap(), b"new");
+            }
+            _ => panic!("Expected WriteComplete"),
+        }
+    }
+
+    #[test]
+    fn should_reject_create_when_if_none_match_star_and_existing() {
+        // Arrange
+        let temp_dir = TempDir::new().unwrap();
+        let fs = FileSystem::new(temp_dir.path()).unwrap();
+        let path = temp_dir.path().join("conditional-existing.txt");
+        std::fs::write(&path, b"old").unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        // Act
+        fs.submit_write_with_headers(
+            "conditional-existing.txt".into(),
+            b"new".to_vec(),
+            vec![("If-None-Match".into(), "*".into())],
+            tx,
+        );
+        let event = rx.recv().unwrap();
+
+        // Assert
+        match event {
+            StorageEvent::WriteComplete { result, .. } => {
+                assert!(result.is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), b"old");
             }
             _ => panic!("Expected WriteComplete"),
         }
@@ -462,6 +631,62 @@ mod tests {
             StorageEvent::DeleteComplete { result, .. } => {
                 assert!(result.is_ok());
                 assert!(!path.exists());
+            }
+            _ => panic!("Expected DeleteComplete"),
+        }
+    }
+
+    #[test]
+    fn should_delete_file_when_if_match_header_matches_content() {
+        // Arrange
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("conditional.txt");
+        let data = b"data".to_vec();
+        std::fs::write(&path, &data).unwrap();
+        let etag = StorageObjectMetadata::content_crc(data.len() as u64, &data).etag;
+        let fs = FileSystem::new(temp_dir.path()).unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        // Act
+        fs.submit_delete_with_headers(
+            "conditional.txt".into(),
+            vec![("If-Match".into(), etag)],
+            tx,
+        );
+        let event = rx.recv().unwrap();
+
+        // Assert
+        match event {
+            StorageEvent::DeleteComplete { result, .. } => {
+                assert!(result.is_ok());
+                assert!(!path.exists());
+            }
+            _ => panic!("Expected DeleteComplete"),
+        }
+    }
+
+    #[test]
+    fn should_reject_conditional_delete_when_if_match_header_mismatches() {
+        // Arrange
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("conditional-stale.txt");
+        std::fs::write(&path, b"data").unwrap();
+        let fs = FileSystem::new(temp_dir.path()).unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        // Act
+        fs.submit_delete_with_headers(
+            "conditional-stale.txt".into(),
+            vec![("If-Match".into(), "crc32c:00000000".into())],
+            tx,
+        );
+        let event = rx.recv().unwrap();
+
+        // Assert
+        match event {
+            StorageEvent::DeleteComplete { result, .. } => {
+                assert!(result.is_err());
+                assert!(path.exists());
             }
             _ => panic!("Expected DeleteComplete"),
         }

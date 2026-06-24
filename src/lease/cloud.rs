@@ -622,6 +622,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    static TEMP_PATH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn test_config() -> CloudLeaseConfig {
         CloudLeaseConfig {
             bucket: "test-bucket".to_string(),
@@ -632,9 +634,11 @@ mod tests {
     }
 
     fn temp_cache_path() -> PathBuf {
+        let counter = TEMP_PATH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "midge_cloud_lease_test_{}_{}",
+            "midge_cloud_lease_test_{}_{}_{}",
             std::process::id(),
+            counter,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
