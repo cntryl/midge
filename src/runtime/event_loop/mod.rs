@@ -36,6 +36,13 @@ use super::snapshot_cache::{CfSnapshotData, PublishedSnapshot, SnapshotCache};
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MetadataCleanupProof {
+    len: u64,
+    crc32c: u32,
+    remote: crate::storage::StorageObjectMetadata,
+}
+
 /// Main synchronous event loop for the runtime.
 ///
 /// Owns all actors and is responsible for routing inbound messages.
@@ -61,6 +68,7 @@ pub struct EventLoop {
     pub(super) loop_debug_batch_total: u64,
     pub(super) cloud_acked_wal_segments: BTreeMap<u64, u64>,
     pub(super) cloud_wal_prune_inflight: HashSet<u64>,
+    pub(super) cloud_metadata_cleanup_proofs: HashMap<String, MetadataCleanupProof>,
 
     // Durability coordination (extracted to reduce EventLoop cognitive load)
     pub(super) durability: DurabilityCoordinator,
@@ -171,6 +179,7 @@ impl EventLoop {
             loop_debug_batch_total: 0,
             cloud_acked_wal_segments: BTreeMap::new(),
             cloud_wal_prune_inflight: HashSet::new(),
+            cloud_metadata_cleanup_proofs: HashMap::new(),
             durability: DurabilityCoordinator::new(
                 initial_durability_key,
                 is_cloud_async,
@@ -2207,7 +2216,24 @@ pub(super) mod tests {
     use super::*;
     use crate::runtime::{state::RuntimeState, ResponseRouter};
     use crate::sst::Memtable;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+
+    static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_test_db_path(prefix: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "{prefix}_{}_{}_{}",
+            std::process::id(),
+            unique,
+            counter
+        ))
+    }
 
     // Helper to create a minimal runtime state for testing
     pub(in crate::runtime::event_loop) fn create_test_state() -> RuntimeState {
@@ -2231,15 +2257,7 @@ pub(super) mod tests {
     pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
         storage_policy: crate::storage::hybrid::policy::StorageBudgetPolicy,
     ) -> crate::common::MidgeResult<EventLoop> {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let db_path = std::env::temp_dir().join(format!(
-            "midge_event_loop_cloud_{}_{}",
-            std::process::id(),
-            unique
-        ));
+        let db_path = unique_test_db_path("midge_event_loop_cloud");
         std::fs::create_dir_all(&db_path).expect("create temp cloud event loop dir");
 
         let state = RuntimeState::new(db_path.clone(), false);
@@ -2267,15 +2285,7 @@ pub(super) mod tests {
 
     pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
     ) -> crate::common::MidgeResult<EventLoop> {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let db_path = std::env::temp_dir().join(format!(
-            "midge_event_loop_local_{}_{}",
-            std::process::id(),
-            unique
-        ));
+        let db_path = unique_test_db_path("midge_event_loop_local");
         std::fs::create_dir_all(&db_path).expect("create temp local event loop dir");
 
         let state = RuntimeState::new(db_path, false);

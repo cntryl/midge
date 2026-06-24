@@ -25,7 +25,7 @@
 
 pub mod executor;
 
-use super::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
+use super::{StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome};
 use crate::common::MidgeError;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -603,6 +603,36 @@ impl StorageBackend for CloudStorage {
             };
             let _ = callback.send(event);
         }
+    }
+
+    fn submit_head(&self, key: String, callback: StorageCallback) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        CloudStorage::submit_head(self, key.clone(), tx);
+        let event = match rx.recv() {
+            Ok(CloudEvent::HeadComplete { key, result }) => {
+                let outcome = match result {
+                    CloudOutcome::Ok(metadata) => StorageOutcome::Ok(StorageObjectMetadata {
+                        size: metadata.size,
+                        etag: metadata.etag,
+                        generation: metadata.generation,
+                    }),
+                    CloudOutcome::Err(err) => StorageOutcome::Err(err),
+                };
+                StorageEvent::HeadComplete {
+                    key,
+                    result: outcome,
+                }
+            }
+            Ok(other) => StorageEvent::HeadComplete {
+                key,
+                result: StorageOutcome::Err(format!("unexpected cloud HEAD response: {other:?}")),
+            },
+            Err(error) => StorageEvent::HeadComplete {
+                key,
+                result: StorageOutcome::Err(format!("cloud HEAD channel closed: {error}")),
+            },
+        };
+        let _ = callback.send(event);
     }
 }
 

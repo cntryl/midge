@@ -221,6 +221,24 @@ pub use hybrid::backend::HybridStorage;
 // Implementations MUST NOT modify memtables directly, only send StorageEvent.
 // Implement only coordination logic here; WAL ordering logic stays in WalActor.
 
+/// Basic object metadata used to revalidate cached cloud object proofs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageObjectMetadata {
+    pub size: u64,
+    pub etag: String,
+    pub generation: Option<String>,
+}
+
+impl StorageObjectMetadata {
+    pub fn content_crc(size: u64, data: &[u8]) -> Self {
+        Self {
+            size,
+            etag: format!("crc32c:{:08x}", crc32c::crc32c(data)),
+            generation: None,
+        }
+    }
+}
+
 /// Storage events sent back to the runtime after async I/O.
 ///
 /// These events are sent via StorageCallback channels when operations complete.
@@ -246,6 +264,11 @@ pub enum StorageEvent {
     ListComplete {
         prefix: String,
         result: StorageOutcome<Vec<String>>,
+    },
+    /// Metadata lookup completed
+    HeadComplete {
+        key: String,
+        result: StorageOutcome<StorageObjectMetadata>,
     },
     /// Cloud upload acknowledged - segment is now durable
     /// WAL Actor MUST apply pending writes to memtable on receipt
@@ -317,4 +340,29 @@ pub trait StorageBackend: Send + Sync + 'static {
 
     /// Submit a prefix list operation. Returns immediately.
     fn submit_list(&self, prefix: String, callback: StorageCallback);
+
+    /// Submit an object metadata lookup. Implementations with native HEAD
+    /// support should override this. The fallback reads the object and returns
+    /// a content fingerprint, which is conservative but may be more expensive.
+    fn submit_head(&self, key: String, callback: StorageCallback) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.submit_read(key.clone(), tx);
+        let result = match rx.recv() {
+            Ok(StorageEvent::ReadComplete {
+                result: StorageOutcome::Ok(data),
+                ..
+            }) => StorageOutcome::Ok(StorageObjectMetadata::content_crc(data.len() as u64, &data)),
+            Ok(StorageEvent::ReadComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            }) => StorageOutcome::Err(error),
+            Ok(other) => StorageOutcome::Err(format!(
+                "unexpected storage HEAD fallback response for '{key}': {other:?}"
+            )),
+            Err(error) => StorageOutcome::Err(format!(
+                "storage HEAD fallback channel closed for '{key}': {error}"
+            )),
+        };
+        let _ = callback.send(StorageEvent::HeadComplete { key, result });
+    }
 }

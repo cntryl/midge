@@ -26,10 +26,13 @@
 use super::actor;
 use super::policy;
 use super::state;
-use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
+use crate::storage::{
+    StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome,
+};
 use crossbeam::channel as cb;
 use parking_lot::Mutex;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -54,6 +57,17 @@ pub struct UploadState {
     pub max_sequence: u64,
 }
 
+#[derive(Debug, Clone)]
+struct VerifiedWalSegment {
+    max_sequence: u64,
+    metadata: StorageObjectMetadata,
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedCloudObject {
+    metadata: StorageObjectMetadata,
+}
+
 /// Hybrid storage combining local filesystem and cloud backends
 ///
 /// Managed by a Storage Budget Actor to enforce disk constraints, watermarks,
@@ -74,6 +88,12 @@ pub struct HybridStorage {
     upload_queue: Arc<Mutex<VecDeque<UploadState>>>,
     /// Completed events ready for polling
     event_queue: Arc<Mutex<VecDeque<StorageEvent>>>,
+
+    /// WAL segments whose remote object was read back and decoded successfully.
+    verified_wal_segments: Arc<Mutex<HashMap<u64, VerifiedWalSegment>>>,
+
+    /// Immutable SST objects whose remote object was read back and opened successfully.
+    verified_sst_objects: Arc<Mutex<HashMap<String, VerifiedCloudObject>>>,
 
     /// Optional external event sink for CloudAck/CloudFail.
     /// When set, upload completions are pushed directly to the runtime event loop
@@ -128,6 +148,10 @@ impl HybridStorage {
 
         let upload_queue: Arc<Mutex<VecDeque<UploadState>>> = Arc::new(Mutex::new(VecDeque::new()));
         let event_queue: Arc<Mutex<VecDeque<StorageEvent>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let verified_wal_segments: Arc<Mutex<HashMap<u64, VerifiedWalSegment>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let verified_sst_objects: Arc<Mutex<HashMap<String, VerifiedCloudObject>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         // Single background worker for WAL uploads.
         // This avoids spawning one OS thread per segment, which is extremely
@@ -138,6 +162,7 @@ impl HybridStorage {
             let cloud = Arc::clone(&cloud);
             let event_queue = Arc::clone(&event_queue);
             let external_event_tx = external_event_tx.clone();
+            let verified_wal_segments = Arc::clone(&verified_wal_segments);
 
             let spawn_result = thread::Builder::new()
                 .name("midge-wal-uploader".to_string())
@@ -200,6 +225,29 @@ impl HybridStorage {
 
                         match rx.recv() {
                             Ok(StorageEvent::WriteComplete { result, .. }) if result.is_ok() => {
+                                if let Err(error) = Self::verify_remote_wal_segment_with_backend(
+                                    &cloud,
+                                    &verified_wal_segments,
+                                    upload.segment_id,
+                                    upload.max_sequence,
+                                ) {
+                                    if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                                        telemetry.metrics().record_cloud_async_wal_upload_failed();
+                                    }
+                                    let fail = StorageEvent::CloudFail {
+                                        segment_id: upload.segment_id,
+                                        error: format!(
+                                            "remote WAL readback validation failed: {error}"
+                                        ),
+                                    };
+                                    let mut events = event_queue.lock();
+                                    events.push_back(fail.clone());
+                                    if let Some(tx) = &external_event_tx {
+                                        let _ = tx.send(fail);
+                                    }
+                                    continue;
+                                }
+
                                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                                     telemetry
                                         .metrics()
@@ -277,6 +325,8 @@ impl HybridStorage {
             budget_actor: Arc::new(Mutex::new(budget_actor)),
             upload_queue,
             event_queue,
+            verified_wal_segments,
+            verified_sst_objects,
             external_event_tx,
             wal_upload_tx: Some(wal_upload_tx),
             upload_worker_failed,
@@ -535,6 +585,24 @@ impl HybridStorage {
         // Wait for completion
         match rx.recv() {
             Ok(StorageEvent::WriteComplete { result, .. }) if result.is_ok() => {
+                if let Err(error) =
+                    self.verify_remote_wal_segment(upload.segment_id, upload.max_sequence)
+                {
+                    if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                        telemetry.metrics().record_cloud_async_wal_upload_failed();
+                    }
+                    let fail = StorageEvent::CloudFail {
+                        segment_id: upload.segment_id,
+                        error: format!("remote WAL readback validation failed: {error}"),
+                    };
+                    let mut events = self.event_queue.lock();
+                    events.push_back(fail.clone());
+                    if let Some(tx) = &self.external_event_tx {
+                        let _ = tx.send(fail);
+                    }
+                    return;
+                }
+
                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                     telemetry.metrics().record_cloud_async_wal_upload_completed(
                         upload_start.elapsed().as_micros() as u64,
@@ -637,6 +705,301 @@ impl HybridStorage {
         self.upload_queue.lock().len()
     }
 
+    fn read_cloud_object_from_backend_blocking(
+        cloud: &Arc<dyn StorageBackend>,
+        key: &str,
+    ) -> Result<Vec<u8>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_read(key.to_string(), tx);
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(StorageEvent::ReadComplete {
+                result: StorageOutcome::Ok(data),
+                ..
+            }) => Ok(data),
+            Ok(StorageEvent::ReadComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            }) => Err(error),
+            Ok(other) => Err(format!(
+                "unexpected cloud read response for '{key}': {other:?}"
+            )),
+            Err(error) => Err(format!("cloud read timed out for '{key}': {error}")),
+        }
+    }
+
+    fn read_cloud_object_blocking(&self, key: &str) -> Result<Vec<u8>, String> {
+        Self::read_cloud_object_from_backend_blocking(&self.cloud, key)
+    }
+
+    fn head_cloud_object_from_backend_blocking(
+        cloud: &Arc<dyn StorageBackend>,
+        key: &str,
+    ) -> Result<StorageObjectMetadata, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_head(key.to_string(), tx);
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(StorageEvent::HeadComplete {
+                result: StorageOutcome::Ok(metadata),
+                ..
+            }) => Ok(metadata),
+            Ok(StorageEvent::HeadComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            }) => Err(format!(
+                "cloud object '{key}' unreadable during cached proof revalidation: {error}"
+            )),
+            Ok(other) => Err(format!(
+                "unexpected cloud HEAD response for '{key}': {other:?}"
+            )),
+            Err(error) => Err(format!("cloud HEAD timed out for '{key}': {error}")),
+        }
+    }
+
+    fn head_cloud_object_blocking(&self, key: &str) -> Result<StorageObjectMetadata, String> {
+        Self::head_cloud_object_from_backend_blocking(&self.cloud, key)
+    }
+
+    fn verify_cloud_object_proof(
+        cloud: &Arc<dyn StorageBackend>,
+        key: &str,
+        expected: &StorageObjectMetadata,
+    ) -> Result<(), String> {
+        let actual = Self::head_cloud_object_from_backend_blocking(cloud, key)?;
+        if &actual == expected {
+            return Ok(());
+        }
+
+        Err(format!(
+            "cloud object '{key}' changed since validation: expected {expected:?}, actual {actual:?}"
+        ))
+    }
+
+    fn validate_wal_segment_bytes(
+        key: &str,
+        data: &[u8],
+        expected_max_sequence: u64,
+    ) -> Result<u64, String> {
+        if data.is_empty() {
+            return Err(format!("cloud WAL segment '{key}' is empty"));
+        }
+
+        let mut pos = 0usize;
+        let mut records = 0usize;
+        let mut observed_max_sequence = 0u64;
+        while pos < data.len() {
+            let header_end = pos
+                .checked_add(crate::wal::frame::WAL_FRAME_HEADER_LEN)
+                .ok_or_else(|| format!("cloud WAL segment '{key}' frame offset overflow"))?;
+            if header_end > data.len() {
+                return Err(format!(
+                    "cloud WAL segment '{key}' has incomplete frame header at offset {pos}"
+                ));
+            }
+
+            let (payload_len, expected_crc) =
+                crate::wal::frame::decode_frame_header(&data[pos..header_end])
+                    .map_err(|error| format!("cloud WAL segment '{key}' frame header: {error}"))?;
+            let payload_end = header_end
+                .checked_add(payload_len)
+                .ok_or_else(|| format!("cloud WAL segment '{key}' payload offset overflow"))?;
+            if payload_end > data.len() {
+                return Err(format!(
+                    "cloud WAL segment '{key}' has incomplete record at offset {pos}"
+                ));
+            }
+
+            let payload = &data[header_end..payload_end];
+            crate::wal::frame::verify_frame_crc(payload, expected_crc)
+                .map_err(|error| format!("cloud WAL segment '{key}' frame CRC: {error}"))?;
+            let record = crate::wal::encoding::decode(payload)
+                .map_err(|error| format!("cloud WAL segment '{key}' record decode: {error}"))?;
+            observed_max_sequence = observed_max_sequence.max(record.seq);
+            records += 1;
+            pos = payload_end;
+        }
+
+        if records == 0 {
+            return Err(format!("cloud WAL segment '{key}' contains no records"));
+        }
+        if observed_max_sequence < expected_max_sequence {
+            return Err(format!(
+                "cloud WAL segment '{key}' max sequence {observed_max_sequence} is below expected {expected_max_sequence}"
+            ));
+        }
+        if observed_max_sequence > expected_max_sequence {
+            return Err(format!(
+                "cloud WAL segment '{key}' max sequence {observed_max_sequence} exceeds expected {expected_max_sequence}"
+            ));
+        }
+
+        Ok(observed_max_sequence)
+    }
+
+    fn is_verified_wal_segment(
+        verified_wal_segments: &Arc<Mutex<HashMap<u64, VerifiedWalSegment>>>,
+        segment_id: u64,
+        expected_max_sequence: u64,
+    ) -> bool {
+        verified_wal_segments
+            .lock()
+            .get(&segment_id)
+            .is_some_and(|proof| proof.max_sequence == expected_max_sequence)
+    }
+
+    pub fn is_remote_wal_segment_verified(
+        &self,
+        segment_id: u64,
+        expected_max_sequence: u64,
+    ) -> bool {
+        Self::is_verified_wal_segment(
+            &self.verified_wal_segments,
+            segment_id,
+            expected_max_sequence,
+        )
+    }
+
+    pub fn verify_cached_remote_wal_segment(
+        &self,
+        segment_id: u64,
+        expected_max_sequence: u64,
+    ) -> Result<(), String> {
+        let key = crate::wal::cloud_segment_object_key(segment_id);
+        let Some(proof) = self.verified_wal_segments.lock().get(&segment_id).cloned() else {
+            return Err(format!(
+                "cloud WAL segment {segment_id} has no prior readback proof for max sequence {expected_max_sequence}"
+            ));
+        };
+        if proof.max_sequence != expected_max_sequence {
+            return Err(format!(
+                "cached cloud WAL segment '{key}' max sequence {} does not match expected {expected_max_sequence}",
+                proof.max_sequence
+            ));
+        }
+        Self::verify_cloud_object_proof(&self.cloud, &key, &proof.metadata)
+    }
+
+    fn verify_remote_wal_segment_with_backend(
+        cloud: &Arc<dyn StorageBackend>,
+        verified_wal_segments: &Arc<Mutex<HashMap<u64, VerifiedWalSegment>>>,
+        segment_id: u64,
+        expected_max_sequence: u64,
+    ) -> Result<(), String> {
+        let key = crate::wal::cloud_segment_object_key(segment_id);
+        if let Some(proof) = verified_wal_segments.lock().get(&segment_id).cloned() {
+            if proof.max_sequence != expected_max_sequence {
+                return Err(format!(
+                    "cached cloud WAL segment '{key}' max sequence {} does not match expected {expected_max_sequence}",
+                    proof.max_sequence
+                ));
+            }
+            return Self::verify_cloud_object_proof(cloud, &key, &proof.metadata);
+        }
+
+        let data = Self::read_cloud_object_from_backend_blocking(cloud, &key)?;
+        let observed_max_sequence =
+            Self::validate_wal_segment_bytes(&key, &data, expected_max_sequence)?;
+        let metadata = Self::head_cloud_object_from_backend_blocking(cloud, &key)?;
+        if metadata.size != data.len() as u64 {
+            return Err(format!(
+                "cloud WAL segment '{key}' size changed during validation: read={}, head={}",
+                data.len(),
+                metadata.size
+            ));
+        }
+        verified_wal_segments.lock().insert(
+            segment_id,
+            VerifiedWalSegment {
+                max_sequence: observed_max_sequence,
+                metadata,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn verify_remote_wal_segment(
+        &self,
+        segment_id: u64,
+        expected_max_sequence: u64,
+    ) -> Result<(), String> {
+        Self::verify_remote_wal_segment_with_backend(
+            &self.cloud,
+            &self.verified_wal_segments,
+            segment_id,
+            expected_max_sequence,
+        )
+    }
+
+    fn validate_sst_object_bytes(
+        sst_name: &str,
+        expected_size_bytes: u64,
+        data: &[u8],
+    ) -> Result<(), String> {
+        if expected_size_bytes > 0 && data.len() as u64 != expected_size_bytes {
+            return Err(format!(
+                "cloud SST '{sst_name}' size mismatch: manifest={expected_size_bytes}, object={}",
+                data.len()
+            ));
+        }
+
+        let mut temp = tempfile::Builder::new()
+            .prefix("midge-cloud-sst-verify-")
+            .suffix(".sst")
+            .tempfile()
+            .map_err(|error| format!("create temp SST verifier for '{sst_name}': {error}"))?;
+        temp.write_all(data)
+            .map_err(|error| format!("write temp SST verifier for '{sst_name}': {error}"))?;
+        temp.flush()
+            .map_err(|error| format!("flush temp SST verifier for '{sst_name}': {error}"))?;
+
+        crate::sst::fs::SstFileIo::open_with_real_fs(temp.path())
+            .map(|_| ())
+            .map_err(|error| format!("cloud SST '{sst_name}' failed validation: {error}"))
+    }
+
+    pub fn verify_manifest_cloud_objects(
+        &self,
+        manifest: &crate::metadata::Manifest,
+    ) -> Result<(), String> {
+        for file in &manifest.files {
+            let key = format!("sst/{}", file.name);
+            self.verify_sst_cloud_object(&key, &file.name, file.size_bytes)?;
+        }
+
+        Ok(())
+    }
+
+    fn verify_sst_cloud_object(
+        &self,
+        key: &str,
+        sst_name: &str,
+        expected_size_bytes: u64,
+    ) -> Result<(), String> {
+        if let Some(proof) = self.verified_sst_objects.lock().get(key).cloned() {
+            if expected_size_bytes > 0 && proof.metadata.size != expected_size_bytes {
+                return Err(format!(
+                    "cached cloud SST '{sst_name}' size {} does not match manifest {expected_size_bytes}",
+                    proof.metadata.size
+                ));
+            }
+            return Self::verify_cloud_object_proof(&self.cloud, key, &proof.metadata);
+        }
+
+        let data = self.read_cloud_object_blocking(key)?;
+        Self::validate_sst_object_bytes(sst_name, expected_size_bytes, &data)?;
+        let metadata = self.head_cloud_object_blocking(key)?;
+        if metadata.size != data.len() as u64 {
+            return Err(format!(
+                "cloud SST '{sst_name}' size changed during validation: read={}, head={}",
+                data.len(),
+                metadata.size
+            ));
+        }
+        self.verified_sst_objects
+            .lock()
+            .insert(key.to_string(), VerifiedCloudObject { metadata });
+        Ok(())
+    }
+
     pub fn prune_cloud_wal_segment(&self, segment_id: u64) -> Result<(), String> {
         let cloud = Arc::clone(&self.cloud);
         let event_queue = Arc::clone(&self.event_queue);
@@ -719,7 +1082,8 @@ impl HybridStorage {
         }
 
         let (tx_cloud, rx_cloud) = std::sync::mpsc::channel();
-        self.cloud.submit_write(key, data, tx_cloud);
+        let expected_size_bytes = data.len() as u64;
+        self.cloud.submit_write(key.clone(), data, tx_cloud);
 
         let cloud_result = rx_cloud.recv().map_err(|_| {
             crate::common::MidgeError::Internal(
@@ -731,7 +1095,9 @@ impl HybridStorage {
             StorageEvent::WriteComplete {
                 result: StorageOutcome::Ok(()),
                 ..
-            } => Ok(()),
+            } => self
+                .verify_sst_cloud_object(&key, sst_name, expected_size_bytes)
+                .map_err(crate::common::MidgeError::Internal),
             StorageEvent::WriteComplete {
                 result: StorageOutcome::Err(error),
                 ..
@@ -907,6 +1273,337 @@ impl StorageBackend for HybridStorage {
             prefix,
             result: StorageOutcome::Ok(results),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sst::SstFactory;
+    use crate::storage::cloud::{CloudStorage, MockCloudBackend};
+    use bytes::Bytes;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, HybridStorage) {
+        let tmp = tempfile::tempdir().expect("create hybrid storage test dir");
+        let local = Arc::new(
+            crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+                .expect("create local backend"),
+        );
+        let mock_cloud = Arc::new(MockCloudBackend::new());
+        let cloud = Arc::new(CloudStorage::new(
+            mock_cloud.clone(),
+            "hybrid-test".to_string(),
+        ));
+        let storage = HybridStorage::with_policy(
+            local,
+            cloud,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        );
+        (mock_cloud, storage)
+    }
+
+    fn valid_sst_bytes(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create().expect("create SST writer");
+        writer
+            .add_with_meta(key, Some(value), seq, 0, None)
+            .expect("add SST entry");
+        writer.finish_bytes().expect("finish SST bytes")
+    }
+
+    fn valid_wal_bytes(seq: u64) -> Vec<u8> {
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            seq,
+            1,
+        );
+        let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+        let mut bytes = Vec::new();
+        crate::wal::frame::append_frame(&mut bytes, &payload).expect("append WAL frame");
+        bytes
+    }
+
+    fn write_cloud_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        storage.cloud.submit_write(key.to_string(), data, tx);
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(StorageEvent::WriteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            }) => {}
+            other => panic!("cloud write for '{key}' failed: {other:?}"),
+        }
+    }
+
+    fn delete_cloud_object(storage: &HybridStorage, key: &str) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        storage.cloud.submit_delete(key.to_string(), tx);
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(StorageEvent::DeleteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            }) => {}
+            other => panic!("cloud delete for '{key}' failed: {other:?}"),
+        }
+    }
+
+    fn manifest_for_ssts(files: &[(&str, u64)]) -> crate::metadata::Manifest {
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest.files = files
+            .iter()
+            .map(|(name, size_bytes)| crate::metadata::FileMeta {
+                name: (*name).to_string(),
+                level: 0,
+                size_bytes: *size_bytes,
+                cf_id: 0,
+                smallest_key: Some(b"a".to_vec()),
+                largest_key: Some(b"z".to_vec()),
+                smallest_seq: Some(1),
+                largest_seq: Some(1),
+                ..Default::default()
+            })
+            .collect();
+        manifest
+    }
+
+    #[test]
+    fn should_not_reread_verified_manifest_ssts_on_repeated_validation() {
+        let (mock_cloud, storage) = hybrid_with_mock_cloud();
+        let sst_name = "cached.sst";
+        let bytes = valid_sst_bytes(b"a", b"v1", 1);
+        write_cloud_object(&storage, &format!("sst/{sst_name}"), bytes.clone());
+        let manifest = manifest_for_ssts(&[(sst_name, bytes.len() as u64)]);
+
+        mock_cloud.clear_history();
+        storage
+            .verify_manifest_cloud_objects(&manifest)
+            .expect("first manifest validation");
+        let first_downloads = mock_cloud.get_downloads();
+        assert!(
+            first_downloads
+                .iter()
+                .any(|key| key.ends_with("sst/cached.sst")),
+            "first validation should read the cloud SST, got {first_downloads:?}"
+        );
+
+        storage
+            .verify_manifest_cloud_objects(&manifest)
+            .expect("second manifest validation");
+
+        assert_eq!(
+            mock_cloud.get_downloads(),
+            first_downloads,
+            "verified immutable SSTs should not be reread on unchanged manifest validation"
+        );
+    }
+
+    #[test]
+    fn should_only_validate_new_manifest_ssts_after_manifest_extends() {
+        let (mock_cloud, storage) = hybrid_with_mock_cloud();
+        let first_name = "first.sst";
+        let second_name = "second.sst";
+        let first_bytes = valid_sst_bytes(b"a", b"v1", 1);
+        let second_bytes = valid_sst_bytes(b"b", b"v2", 2);
+        write_cloud_object(&storage, &format!("sst/{first_name}"), first_bytes.clone());
+        write_cloud_object(
+            &storage,
+            &format!("sst/{second_name}"),
+            second_bytes.clone(),
+        );
+
+        let first_manifest = manifest_for_ssts(&[(first_name, first_bytes.len() as u64)]);
+        storage
+            .verify_manifest_cloud_objects(&first_manifest)
+            .expect("first manifest validation");
+
+        mock_cloud.clear_history();
+        let extended_manifest = manifest_for_ssts(&[
+            (first_name, first_bytes.len() as u64),
+            (second_name, second_bytes.len() as u64),
+        ]);
+        storage
+            .verify_manifest_cloud_objects(&extended_manifest)
+            .expect("extended manifest validation");
+        let downloads = mock_cloud.get_downloads();
+
+        assert!(
+            downloads.iter().any(|key| key.ends_with("sst/second.sst")),
+            "extended validation should read the new SST, got {downloads:?}"
+        );
+        assert!(
+            downloads.iter().all(|key| !key.ends_with("sst/first.sst")),
+            "extended validation should not reread already verified SSTs, got {downloads:?}"
+        );
+    }
+
+    #[test]
+    fn should_reject_cached_manifest_sst_proof_when_cloud_object_is_deleted() {
+        let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+        let sst_name = "deleted-after-proof.sst";
+        let bytes = valid_sst_bytes(b"a", b"v1", 1);
+        let key = format!("sst/{sst_name}");
+        write_cloud_object(&storage, &key, bytes.clone());
+        let manifest = manifest_for_ssts(&[(sst_name, bytes.len() as u64)]);
+
+        storage
+            .verify_manifest_cloud_objects(&manifest)
+            .expect("initial manifest validation");
+        delete_cloud_object(&storage, &key);
+
+        let error = storage
+            .verify_manifest_cloud_objects(&manifest)
+            .expect_err("deleted SST must invalidate cached proof");
+        assert!(
+            error.contains("changed since validation") || error.contains("unreadable"),
+            "unexpected stale SST proof error: {error}"
+        );
+    }
+
+    #[test]
+    fn should_reject_cached_manifest_sst_proof_when_cloud_object_is_overwritten() {
+        let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+        let sst_name = "overwritten-after-proof.sst";
+        let bytes = valid_sst_bytes(b"a", b"v1", 1);
+        let key = format!("sst/{sst_name}");
+        write_cloud_object(&storage, &key, bytes.clone());
+        let manifest = manifest_for_ssts(&[(sst_name, bytes.len() as u64)]);
+
+        storage
+            .verify_manifest_cloud_objects(&manifest)
+            .expect("initial manifest validation");
+        write_cloud_object(&storage, &key, b"not a valid sst".to_vec());
+
+        let error = storage
+            .verify_manifest_cloud_objects(&manifest)
+            .expect_err("overwritten SST must invalidate cached proof");
+        assert!(
+            error.contains("changed since validation") || error.contains("size mismatch"),
+            "unexpected stale SST proof error: {error}"
+        );
+    }
+
+    #[test]
+    fn should_cache_remote_wal_readback_validation() {
+        let (mock_cloud, storage) = hybrid_with_mock_cloud();
+        let segment_id = 7;
+        let max_sequence = 11;
+        write_cloud_object(
+            &storage,
+            &crate::wal::cloud_segment_object_key(segment_id),
+            valid_wal_bytes(max_sequence),
+        );
+
+        mock_cloud.clear_history();
+        storage
+            .verify_remote_wal_segment(segment_id, max_sequence)
+            .expect("first remote WAL validation");
+        let first_downloads = mock_cloud.get_downloads();
+        assert!(
+            first_downloads
+                .iter()
+                .any(|key| key.ends_with("wal/00000000000000000007.wal")),
+            "first validation should read the cloud WAL, got {first_downloads:?}"
+        );
+
+        storage
+            .verify_remote_wal_segment(segment_id, max_sequence)
+            .expect("second remote WAL validation");
+        assert_eq!(
+            mock_cloud.get_downloads(),
+            first_downloads,
+            "verified immutable WAL segments should not be reread"
+        );
+    }
+
+    #[test]
+    fn should_reject_cached_remote_wal_proof_when_cloud_object_is_deleted() {
+        let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+        let segment_id = 8;
+        let max_sequence = 12;
+        let key = crate::wal::cloud_segment_object_key(segment_id);
+        write_cloud_object(&storage, &key, valid_wal_bytes(max_sequence));
+
+        storage
+            .verify_remote_wal_segment(segment_id, max_sequence)
+            .expect("initial remote WAL validation");
+        delete_cloud_object(&storage, &key);
+
+        let error = storage
+            .verify_remote_wal_segment(segment_id, max_sequence)
+            .expect_err("deleted WAL must invalidate cached proof");
+        assert!(
+            error.contains("changed since validation") || error.contains("unreadable"),
+            "unexpected stale WAL proof error: {error}"
+        );
+    }
+
+    #[test]
+    fn should_reject_remote_wal_segment_with_sequence_beyond_expected_max() {
+        let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+        let segment_id = 10;
+        let expected_max_sequence = 20;
+        write_cloud_object(
+            &storage,
+            &crate::wal::cloud_segment_object_key(segment_id),
+            valid_wal_bytes(expected_max_sequence + 1),
+        );
+
+        let error = storage
+            .verify_remote_wal_segment(segment_id, expected_max_sequence)
+            .expect_err("WAL segment with records beyond expected max must be rejected");
+        assert!(
+            error.contains("exceeds expected"),
+            "unexpected WAL max-sequence error: {error}"
+        );
+    }
+
+    #[test]
+    fn should_readback_remote_wal_before_upload_worker_emits_ack() {
+        let (mock_cloud, storage) = hybrid_with_mock_cloud();
+        let tmp = tempfile::tempdir().expect("create WAL dir");
+        let segment_id = 9;
+        let max_sequence = 13;
+        let wal_path = tmp.path().join(format!("{segment_id}.wal"));
+        std::fs::write(&wal_path, valid_wal_bytes(max_sequence)).expect("write local WAL");
+
+        mock_cloud.clear_history();
+        storage.enqueue_wal_segment(segment_id, wal_path, max_sequence);
+        storage.process_uploads();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut events = Vec::new();
+        while Instant::now() < deadline {
+            events.extend(storage.process_uploads());
+            if events
+                .iter()
+                .any(|event| matches!(event, StorageEvent::CloudAck { .. }))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StorageEvent::CloudAck {
+                    segment_id: 9,
+                    max_sequence: 13
+                }
+            )),
+            "worker should emit CloudAck after upload and readback, got {events:?}"
+        );
+        assert!(
+            mock_cloud
+                .get_downloads()
+                .iter()
+                .any(|key| key.ends_with("wal/00000000000000000009.wal")),
+            "upload worker must read back the remote WAL before ack"
+        );
     }
 }
 
