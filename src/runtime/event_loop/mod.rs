@@ -321,10 +321,166 @@ impl EventLoop {
         Ok(())
     }
 
+    fn cloud_metadata_get_optional(
+        cloud: &crate::storage::cloud::CloudStorage,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_get(key.to_string(), tx);
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                result: crate::storage::cloud::CloudOutcome::Ok(data),
+                ..
+            }) => Ok(Some(data)),
+            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                result: crate::storage::cloud::CloudOutcome::Err(error),
+                ..
+            }) if crate::storage::cloud::is_not_found_error(&error) => Ok(None),
+            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                result: crate::storage::cloud::CloudOutcome::Err(error),
+                ..
+            }) => Err(format!("cloud metadata get '{key}' failed: {error}")),
+            Ok(other) => Err(format!(
+                "unexpected cloud metadata get response for '{key}': {other:?}"
+            )),
+            Err(error) => Err(format!("cloud metadata get '{key}' timed out: {error}")),
+        }
+    }
+
+    fn cloud_metadata_head_optional(
+        cloud: &crate::storage::cloud::CloudStorage,
+        key: &str,
+    ) -> Result<Option<crate::storage::cloud::ObjectMetadata>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_head(key.to_string(), tx);
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+                result: crate::storage::cloud::CloudOutcome::Ok(metadata),
+                ..
+            }) => Ok(Some(metadata)),
+            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+                result: crate::storage::cloud::CloudOutcome::Err(error),
+                ..
+            }) if crate::storage::cloud::is_not_found_error(&error) => Ok(None),
+            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+                result: crate::storage::cloud::CloudOutcome::Err(error),
+                ..
+            }) => Err(format!("cloud metadata head '{key}' failed: {error}")),
+            Ok(other) => Err(format!(
+                "unexpected cloud metadata head response for '{key}': {other:?}"
+            )),
+            Err(error) => Err(format!("cloud metadata head '{key}' timed out: {error}")),
+        }
+    }
+
+    fn remote_manifest_sequence_from_metadata(
+        file_name: &str,
+        data: &[u8],
+    ) -> Result<Option<u64>, String> {
+        match file_name {
+            "manifest.json" | "manifest.snapshot.json" => {
+                let manifest: crate::metadata::Manifest = serde_json::from_slice(data)
+                    .map_err(|error| format!("cloud metadata '{file_name}' is invalid: {error}"))?;
+                Ok(Some(manifest.last_persisted_sequence))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn ensure_remote_manifest_metadata_not_ahead(
+        &self,
+        cloud: &crate::storage::cloud::CloudStorage,
+    ) -> crate::common::MidgeResult<()> {
+        let local_sequence = self.state.manifest.last_persisted_sequence;
+        for file_name in ["manifest.snapshot.json", "manifest.json"] {
+            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let Some(data) = Self::cloud_metadata_get_optional(cloud, &key)
+                .map_err(crate::common::MidgeError::Internal)?
+            else {
+                continue;
+            };
+            let Some(remote_sequence) =
+                Self::remote_manifest_sequence_from_metadata(file_name, &data)
+                    .map_err(crate::common::MidgeError::Internal)?
+            else {
+                continue;
+            };
+            if remote_sequence > local_sequence {
+                return Err(crate::common::MidgeError::Internal(format!(
+                    "stale cloud metadata mirror rejected: remote {file_name} is ahead of local manifest ({remote_sequence} > {local_sequence})"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn submit_conditional_metadata_put(
+        cloud: &crate::storage::cloud::CloudStorage,
+        file_name: &str,
+        key: String,
+        data: Vec<u8>,
+        local_manifest_sequence: u64,
+    ) -> crate::common::MidgeResult<()> {
+        let headers = match Self::cloud_metadata_head_optional(cloud, &key)
+            .map_err(crate::common::MidgeError::Internal)?
+        {
+            Some(metadata) => {
+                let etag = metadata.etag.trim().to_string();
+                if etag.is_empty() {
+                    return Err(crate::common::MidgeError::Internal(format!(
+                        "cloud metadata '{key}' cannot be conditionally updated without an etag"
+                    )));
+                }
+                let current = Self::cloud_metadata_get_optional(cloud, &key)
+                    .map_err(crate::common::MidgeError::Internal)?
+                    .ok_or_else(|| {
+                        crate::common::MidgeError::Internal(format!(
+                            "cloud metadata '{key}' disappeared after HEAD precondition"
+                        ))
+                    })?;
+                if let Some(remote_sequence) =
+                    Self::remote_manifest_sequence_from_metadata(file_name, &current)
+                        .map_err(crate::common::MidgeError::Internal)?
+                {
+                    if remote_sequence > local_manifest_sequence {
+                        return Err(crate::common::MidgeError::Internal(format!(
+                            "stale cloud metadata mirror rejected: remote {file_name} is ahead of local manifest ({remote_sequence} > {local_manifest_sequence})"
+                        )));
+                    }
+                }
+                vec![("If-Match".to_string(), etag)]
+            }
+            None => vec![("If-None-Match".to_string(), "*".to_string())],
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_put(key.clone(), data, headers, tx);
+
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(crate::storage::cloud::CloudEvent::PutComplete { result, .. }) => match result {
+                crate::storage::cloud::CloudOutcome::Ok(()) => Ok(()),
+                crate::storage::cloud::CloudOutcome::Err(error) => {
+                    Err(crate::common::MidgeError::Internal(format!(
+                        "cloud metadata mirror failed for '{key}': {error}"
+                    )))
+                }
+            },
+            Ok(other) => Err(crate::common::MidgeError::Internal(format!(
+                "unexpected cloud metadata mirror response for '{key}': {other:?}"
+            ))),
+            Err(error) => Err(crate::common::MidgeError::Internal(format!(
+                "cloud metadata mirror timed out for '{key}': {error}"
+            ))),
+        }
+    }
+
     fn mirror_metadata_to_authoritative_cloud(&self) -> crate::common::MidgeResult<()> {
         let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
             return Ok(());
         };
+
+        self.ensure_remote_manifest_metadata_not_ahead(cloud)?;
+        let local_manifest_sequence = self.state.manifest.last_persisted_sequence;
 
         for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
             let local_path = self.state.db_path.join(file_name);
@@ -334,28 +490,13 @@ impl EventLoop {
 
             let data = std::fs::read(&local_path)?;
             let key = crate::storage::cloud::cloud_metadata_key(file_name);
-            let (tx, rx) = std::sync::mpsc::channel();
-            cloud.submit_put(key.clone(), data, vec![], tx);
-
-            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                Ok(crate::storage::cloud::CloudEvent::PutComplete { result, .. }) => {
-                    if let crate::storage::cloud::CloudOutcome::Err(error) = result {
-                        return Err(crate::common::MidgeError::Internal(format!(
-                            "cloud metadata mirror failed for '{key}': {error}"
-                        )));
-                    }
-                }
-                Ok(other) => {
-                    return Err(crate::common::MidgeError::Internal(format!(
-                        "unexpected cloud metadata mirror response for '{key}': {other:?}"
-                    )));
-                }
-                Err(error) => {
-                    return Err(crate::common::MidgeError::Internal(format!(
-                        "cloud metadata mirror timed out for '{key}': {error}"
-                    )));
-                }
-            }
+            Self::submit_conditional_metadata_put(
+                cloud,
+                file_name,
+                key,
+                data,
+                local_manifest_sequence,
+            )?;
         }
 
         Ok(())

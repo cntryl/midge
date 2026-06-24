@@ -542,7 +542,10 @@ mod tests {
     use crate::sst::Memtable;
     use bytes::Bytes;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    };
     use std::time::{Duration, Instant};
 
     static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -682,6 +685,22 @@ mod tests {
         }
     }
 
+    fn get_cloud_metadata_for_test(
+        cloud: &crate::storage::cloud::CloudStorage,
+        file_name: &str,
+    ) -> Vec<u8> {
+        let key = crate::storage::cloud::cloud_metadata_key(file_name);
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_get(key.clone(), tx);
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                result: crate::storage::cloud::CloudOutcome::Ok(data),
+                ..
+            }) => data,
+            other => panic!("metadata get for '{key}' failed: {other:?}"),
+        }
+    }
+
     fn put_all_cloud_metadata_for_test(
         cloud: &crate::storage::cloud::CloudStorage,
         db_path: &Path,
@@ -710,6 +729,179 @@ mod tests {
             }) => {}
             other => panic!("metadata delete for '{key}' failed: {other:?}"),
         }
+    }
+
+    struct AdvanceManifestBeforeHeadBackend {
+        inner: crate::storage::cloud::MockCloudBackend,
+        advanced_manifest: Vec<u8>,
+        advanced: AtomicBool,
+    }
+
+    impl AdvanceManifestBeforeHeadBackend {
+        fn new(advanced_manifest: Vec<u8>) -> Self {
+            Self {
+                inner: crate::storage::cloud::MockCloudBackend::new(),
+                advanced_manifest,
+                advanced: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl crate::storage::cloud::CloudBackend for AdvanceManifestBeforeHeadBackend {
+        fn submit_put(
+            &self,
+            key: String,
+            data: Vec<u8>,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            self.inner.submit_put(key, data, headers, callback);
+        }
+
+        fn submit_get(&self, key: String, callback: crate::storage::cloud::CloudCallback) {
+            self.inner.submit_get(key, callback);
+        }
+
+        fn submit_get_range(
+            &self,
+            key: String,
+            start: u64,
+            end: Option<u64>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            self.inner.submit_get_range(key, start, end, callback);
+        }
+
+        fn submit_delete(
+            &self,
+            key: String,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            self.inner.submit_delete(key, headers, callback);
+        }
+
+        fn submit_list(&self, prefix: String, callback: crate::storage::cloud::CloudCallback) {
+            self.inner.submit_list(prefix, callback);
+        }
+
+        fn submit_head(&self, key: String, callback: crate::storage::cloud::CloudCallback) {
+            if key.ends_with("metadata/manifest.json")
+                && !self.advanced.swap(true, Ordering::SeqCst)
+            {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.inner
+                    .submit_put(key.clone(), self.advanced_manifest.clone(), vec![], tx);
+                match rx.recv_timeout(Duration::from_secs(1)) {
+                    Ok(crate::storage::cloud::CloudEvent::PutComplete {
+                        result: crate::storage::cloud::CloudOutcome::Ok(()),
+                        ..
+                    }) => {}
+                    other => panic!("advance remote manifest before HEAD failed: {other:?}"),
+                }
+            }
+            self.inner.submit_head(key, callback);
+        }
+    }
+
+    #[test]
+    fn should_not_overwrite_newer_remote_manifest_metadata_when_mirroring(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        el.state.manifest.last_persisted_sequence = 10;
+        crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+
+        let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+            metadata_backend,
+            "metadata-test".to_string(),
+        ));
+        let remote_manifest = crate::metadata::Manifest {
+            last_persisted_sequence: 11,
+            ..Default::default()
+        };
+        put_cloud_metadata_for_test(
+            &metadata_storage,
+            "manifest.json",
+            serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
+        );
+        el.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+
+        let error = el
+            .mirror_metadata_to_authoritative_cloud()
+            .expect_err("newer remote manifest metadata must reject stale local mirror");
+
+        assert!(
+            error.to_string().contains("newer")
+                || error.to_string().contains("ahead")
+                || error.to_string().contains("stale"),
+            "unexpected stale metadata mirror error: {error}"
+        );
+        let retained: crate::metadata::Manifest = serde_json::from_slice(
+            &get_cloud_metadata_for_test(&metadata_storage, "manifest.json"),
+        )
+        .expect("parse retained remote manifest");
+        assert_eq!(
+            retained.last_persisted_sequence, 11,
+            "stale metadata mirror must not overwrite newer remote manifest"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        el.state.manifest.last_persisted_sequence = 30;
+        crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+
+        let advanced_manifest = crate::metadata::Manifest {
+            last_persisted_sequence: 31,
+            ..Default::default()
+        };
+        let metadata_backend = Arc::new(AdvanceManifestBeforeHeadBackend::new(
+            serde_json::to_vec_pretty(&advanced_manifest).expect("serialize advanced manifest"),
+        ));
+        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+            metadata_backend,
+            "metadata-race".to_string(),
+        ));
+        let initial_manifest = crate::metadata::Manifest {
+            last_persisted_sequence: 30,
+            ..Default::default()
+        };
+        put_cloud_metadata_for_test(
+            &metadata_storage,
+            "manifest.json",
+            serde_json::to_vec_pretty(&initial_manifest).expect("serialize initial manifest"),
+        );
+        el.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+
+        let error = el
+            .mirror_metadata_to_authoritative_cloud()
+            .expect_err("manifest advancing after preflight must reject stale metadata mirror");
+
+        assert!(
+            error.to_string().contains("ahead") || error.to_string().contains("stale"),
+            "unexpected metadata mirror race error: {error}"
+        );
+        let retained: crate::metadata::Manifest = serde_json::from_slice(
+            &get_cloud_metadata_for_test(&metadata_storage, "manifest.json"),
+        )
+        .expect("parse retained race manifest");
+        assert_eq!(
+            retained.last_persisted_sequence, 31,
+            "metadata mirror must not overwrite a manifest that advanced after preflight"
+        );
+
+        Ok(())
     }
 
     #[test]

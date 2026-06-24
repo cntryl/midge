@@ -541,13 +541,80 @@ impl Engine {
         }
     }
 
+    fn blocking_cloud_get_optional(
+        cloud: &crate::storage::cloud::CloudStorage,
+        key: &str,
+    ) -> MidgeResult<Option<Vec<u8>>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_get(key.to_string(), tx);
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(crate::storage::cloud::CloudEvent::GetComplete { result, .. }) => match result {
+                crate::storage::cloud::CloudOutcome::Ok(data) => Ok(Some(data)),
+                crate::storage::cloud::CloudOutcome::Err(error)
+                    if crate::storage::cloud::is_not_found_error(&error) =>
+                {
+                    Ok(None)
+                }
+                crate::storage::cloud::CloudOutcome::Err(error) => Err(MidgeError::Internal(
+                    format!("cloud get '{}': {}", key, error),
+                )),
+            },
+            Ok(other) => Err(MidgeError::Internal(format!(
+                "unexpected cloud get response for '{}': {:?}",
+                key, other
+            ))),
+            Err(error) => Err(MidgeError::Internal(format!(
+                "cloud get '{}' timed out or failed: {}",
+                key, error
+            ))),
+        }
+    }
+
+    fn blocking_cloud_head_optional(
+        cloud: &crate::storage::cloud::CloudStorage,
+        key: &str,
+    ) -> MidgeResult<Option<crate::storage::cloud::ObjectMetadata>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_head(key.to_string(), tx);
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(crate::storage::cloud::CloudEvent::HeadComplete { result, .. }) => match result {
+                crate::storage::cloud::CloudOutcome::Ok(metadata) => Ok(Some(metadata)),
+                crate::storage::cloud::CloudOutcome::Err(error)
+                    if crate::storage::cloud::is_not_found_error(&error) =>
+                {
+                    Ok(None)
+                }
+                crate::storage::cloud::CloudOutcome::Err(error) => Err(MidgeError::Internal(
+                    format!("cloud head '{}': {}", key, error),
+                )),
+            },
+            Ok(other) => Err(MidgeError::Internal(format!(
+                "unexpected cloud head response for '{}': {:?}",
+                key, other
+            ))),
+            Err(error) => Err(MidgeError::Internal(format!(
+                "cloud head '{}' timed out or failed: {}",
+                key, error
+            ))),
+        }
+    }
+
     fn blocking_cloud_put(
         cloud: &crate::storage::cloud::CloudStorage,
         key: &str,
         data: Vec<u8>,
     ) -> MidgeResult<()> {
+        Self::blocking_cloud_put_with_headers(cloud, key, data, vec![])
+    }
+
+    fn blocking_cloud_put_with_headers(
+        cloud: &crate::storage::cloud::CloudStorage,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+    ) -> MidgeResult<()> {
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_put(key.to_string(), data, vec![], tx);
+        cloud.submit_put(key.to_string(), data, headers, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(crate::storage::cloud::CloudEvent::PutComplete { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(()) => Ok(()),
@@ -564,6 +631,97 @@ impl Engine {
                 key, error
             ))),
         }
+    }
+
+    fn remote_manifest_sequence_from_metadata(
+        file_name: &str,
+        data: &[u8],
+    ) -> MidgeResult<Option<u64>> {
+        match file_name {
+            "manifest.json" | "manifest.snapshot.json" => {
+                let manifest: crate::metadata::Manifest =
+                    serde_json::from_slice(data).map_err(|error| {
+                        MidgeError::Internal(format!(
+                            "cloud metadata '{}' is invalid: {}",
+                            file_name, error
+                        ))
+                    })?;
+                Ok(Some(manifest.last_persisted_sequence))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn load_local_manifest_for_cloud_metadata_mirror(
+        db_path: &Path,
+        recovery_policy: RecoveryPolicy,
+    ) -> MidgeResult<crate::metadata::Manifest> {
+        let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(crate::io::RealFs::new(db_path)?);
+        crate::metadata::ManifestPersistence::load_with_fs_and_policy(&fs, recovery_policy)
+            .map_err(MidgeError::Internal)
+    }
+
+    fn ensure_remote_manifest_metadata_not_ahead(
+        cloud: &crate::storage::cloud::CloudStorage,
+        local_sequence: u64,
+    ) -> MidgeResult<()> {
+        for file_name in ["manifest.snapshot.json", "manifest.json"] {
+            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let Some(data) = Self::blocking_cloud_get_optional(cloud, &key)? else {
+                continue;
+            };
+            let Some(remote_sequence) =
+                Self::remote_manifest_sequence_from_metadata(file_name, &data)?
+            else {
+                continue;
+            };
+            if remote_sequence > local_sequence {
+                return Err(MidgeError::Internal(format!(
+                    "stale cloud metadata mirror rejected: remote {file_name} is ahead of local manifest ({remote_sequence} > {local_sequence})"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn blocking_conditional_cloud_metadata_put(
+        cloud: &crate::storage::cloud::CloudStorage,
+        file_name: &str,
+        key: &str,
+        data: Vec<u8>,
+        local_manifest_sequence: u64,
+    ) -> MidgeResult<()> {
+        let headers = match Self::blocking_cloud_head_optional(cloud, key)? {
+            Some(metadata) => {
+                let etag = metadata.etag.trim().to_string();
+                if etag.is_empty() {
+                    return Err(MidgeError::Internal(format!(
+                        "cloud metadata '{}' cannot be conditionally updated without an etag",
+                        key
+                    )));
+                }
+                let current = Self::blocking_cloud_get_optional(cloud, key)?.ok_or_else(|| {
+                    MidgeError::Internal(format!(
+                        "cloud metadata '{}' disappeared after HEAD precondition",
+                        key
+                    ))
+                })?;
+                if let Some(remote_sequence) =
+                    Self::remote_manifest_sequence_from_metadata(file_name, &current)?
+                {
+                    if remote_sequence > local_manifest_sequence {
+                        return Err(MidgeError::Internal(format!(
+                            "stale cloud metadata mirror rejected: remote {file_name} is ahead of local manifest ({remote_sequence} > {local_manifest_sequence})"
+                        )));
+                    }
+                }
+                vec![("If-Match".to_string(), etag)]
+            }
+            None => vec![("If-None-Match".to_string(), "*".to_string())],
+        };
+
+        Self::blocking_cloud_put_with_headers(cloud, key, data, headers)
     }
 
     fn recovery_staging_fs(db_path: &Path) -> MidgeResult<Arc<dyn crate::io::traits::Fs>> {
@@ -640,6 +798,21 @@ impl Engine {
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<()> {
+        let local_manifest = match Self::load_local_manifest_for_cloud_metadata_mirror(
+            db_path,
+            recovery_policy,
+        ) {
+            Ok(manifest) => manifest,
+            Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
+                tracing::warn!(%error, "skipping metadata mirror during salvage open because local manifest could not be loaded");
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        let local_manifest_sequence = local_manifest.last_persisted_sequence;
+
+        Self::ensure_remote_manifest_metadata_not_ahead(cloud, local_manifest_sequence)?;
+
         for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
             let local_path = db_path.join(file_name);
             if !local_path.exists() {
@@ -662,7 +835,13 @@ impl Engine {
             };
 
             let key = crate::storage::cloud::cloud_metadata_key(file_name);
-            if let Err(error) = Self::blocking_cloud_put(cloud, &key, data) {
+            if let Err(error) = Self::blocking_conditional_cloud_metadata_put(
+                cloud,
+                file_name,
+                &key,
+                data,
+                local_manifest_sequence,
+            ) {
                 if recovery_policy == RecoveryPolicy::Salvage {
                     tracing::warn!(%error, key = %key, "skipping metadata mirror during salvage open");
                     continue;
@@ -2301,6 +2480,48 @@ mod tests {
             std::fs::read(staged_dir.join(crate::wal::cloud_segment_file_name(2)))
                 .expect("read staged wal 2"),
             b"second"
+        );
+    }
+
+    #[test]
+    fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+        let local_manifest = crate::metadata::Manifest {
+            last_persisted_sequence: 20,
+            ..Default::default()
+        };
+        crate::metadata::ManifestPersistence::save(temp_dir.path(), &local_manifest)
+            .expect("save local manifest");
+        let remote_manifest = crate::metadata::Manifest {
+            last_persisted_sequence: 21,
+            ..Default::default()
+        };
+        Engine::blocking_cloud_put(
+            &cloud,
+            "metadata/manifest.json",
+            serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
+        )
+        .expect("upload newer remote manifest");
+
+        let error = Engine::mirror_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
+            .expect_err("newer remote manifest metadata must reject stale engine mirror");
+
+        assert!(
+            error.to_string().contains("newer")
+                || error.to_string().contains("ahead")
+                || error.to_string().contains("stale"),
+            "unexpected stale engine metadata mirror error: {error}"
+        );
+        let retained: crate::metadata::Manifest = serde_json::from_slice(
+            &Engine::blocking_cloud_get(&cloud, "metadata/manifest.json")
+                .expect("download retained remote manifest"),
+        )
+        .expect("parse retained remote manifest");
+        assert_eq!(
+            retained.last_persisted_sequence, 21,
+            "engine metadata mirror must not overwrite newer remote manifest"
         );
     }
 }

@@ -529,7 +529,7 @@ impl CloudStorage {
     }
 }
 
-fn is_not_found_error(error: &str) -> bool {
+pub(crate) fn is_not_found_error(error: &str) -> bool {
     let lowered = error.to_ascii_lowercase();
     lowered.contains("not found")
         || lowered.contains("notfound")
