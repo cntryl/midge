@@ -69,6 +69,43 @@ struct VerifiedCloudObject {
     metadata: StorageObjectMetadata,
 }
 
+#[derive(Clone)]
+pub(crate) struct CloudMetadataPruneGuard {
+    cloud: Arc<crate::storage::cloud::CloudStorage>,
+    objects: Vec<CloudMetadataPruneProof>,
+}
+
+impl CloudMetadataPruneGuard {
+    pub(crate) fn new(
+        cloud: Arc<crate::storage::cloud::CloudStorage>,
+        objects: Vec<CloudMetadataPruneProof>,
+    ) -> Self {
+        Self { cloud, objects }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CloudMetadataPruneProof {
+    pub(crate) key: String,
+    pub(crate) expected_bytes: Vec<u8>,
+    pub(crate) remote: StorageObjectMetadata,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct CloudWalPruneGuard {
+    manifest: crate::metadata::Manifest,
+    metadata: Option<CloudMetadataPruneGuard>,
+}
+
+impl CloudWalPruneGuard {
+    pub(crate) fn new(
+        manifest: crate::metadata::Manifest,
+        metadata: Option<CloudMetadataPruneGuard>,
+    ) -> Self {
+        Self { manifest, metadata }
+    }
+}
+
 /// Hybrid storage combining local filesystem and cloud backends
 ///
 /// Managed by a Storage Budget Actor to enforce disk constraints, watermarks,
@@ -1004,9 +1041,27 @@ impl HybridStorage {
         &self,
         manifest: &crate::metadata::Manifest,
     ) -> Result<(), String> {
+        Self::verify_manifest_cloud_objects_with_backend(
+            &self.cloud,
+            &self.verified_sst_objects,
+            manifest,
+        )
+    }
+
+    fn verify_manifest_cloud_objects_with_backend(
+        cloud: &Arc<dyn StorageBackend>,
+        verified_sst_objects: &Arc<Mutex<HashMap<String, VerifiedCloudObject>>>,
+        manifest: &crate::metadata::Manifest,
+    ) -> Result<(), String> {
         for file in &manifest.files {
             let key = crate::sst::object_key(&file.name);
-            self.verify_sst_cloud_object(&key, &file.name, file.size_bytes)?;
+            Self::verify_sst_cloud_object_with_backend(
+                cloud,
+                verified_sst_objects,
+                &key,
+                &file.name,
+                file.size_bytes,
+            )?;
         }
 
         for sst_name in &manifest.ssts {
@@ -1014,7 +1069,13 @@ impl HybridStorage {
                 continue;
             }
             let key = crate::sst::object_key(sst_name);
-            self.verify_sst_cloud_object(&key, sst_name, 0)?;
+            Self::verify_sst_cloud_object_with_backend(
+                cloud,
+                verified_sst_objects,
+                &key,
+                sst_name,
+                0,
+            )?;
         }
 
         Ok(())
@@ -1026,19 +1087,35 @@ impl HybridStorage {
         sst_name: &str,
         expected_size_bytes: u64,
     ) -> Result<(), String> {
-        if let Some(proof) = self.verified_sst_objects.lock().get(key).cloned() {
+        Self::verify_sst_cloud_object_with_backend(
+            &self.cloud,
+            &self.verified_sst_objects,
+            key,
+            sst_name,
+            expected_size_bytes,
+        )
+    }
+
+    fn verify_sst_cloud_object_with_backend(
+        cloud: &Arc<dyn StorageBackend>,
+        verified_sst_objects: &Arc<Mutex<HashMap<String, VerifiedCloudObject>>>,
+        key: &str,
+        sst_name: &str,
+        expected_size_bytes: u64,
+    ) -> Result<(), String> {
+        if let Some(proof) = verified_sst_objects.lock().get(key).cloned() {
             if expected_size_bytes > 0 && proof.metadata.size != expected_size_bytes {
                 return Err(format!(
                     "cached cloud SST '{sst_name}' size {} does not match manifest {expected_size_bytes}",
                     proof.metadata.size
                 ));
             }
-            return Self::verify_cloud_object_proof(&self.cloud, key, &proof.metadata);
+            return Self::verify_cloud_object_proof(cloud, key, &proof.metadata);
         }
 
-        let data = self.read_cloud_object_blocking(key)?;
+        let data = Self::read_cloud_object_from_backend_blocking(cloud, key)?;
         Self::validate_sst_object_bytes(sst_name, expected_size_bytes, &data)?;
-        let metadata = self.head_cloud_object_blocking(key)?;
+        let metadata = Self::head_cloud_object_from_backend_blocking(cloud, key)?;
         if metadata.size != data.len() as u64 {
             return Err(format!(
                 "cloud SST '{sst_name}' size changed during validation: read={}, head={}",
@@ -1046,13 +1123,17 @@ impl HybridStorage {
                 metadata.size
             ));
         }
-        self.verified_sst_objects
+        verified_sst_objects
             .lock()
             .insert(key.to_string(), VerifiedCloudObject { metadata });
         Ok(())
     }
 
-    pub fn prune_cloud_wal_segment(&self, segment_id: u64) -> Result<(), String> {
+    pub(crate) fn prune_cloud_wal_segment(
+        &self,
+        segment_id: u64,
+        guard: CloudWalPruneGuard,
+    ) -> Result<(), String> {
         let proof = self
             .verified_wal_segments
             .lock()
@@ -1073,22 +1154,41 @@ impl HybridStorage {
         let cloud = Arc::clone(&self.cloud);
         let event_queue = Arc::clone(&self.event_queue);
         let external_event_tx = self.external_event_tx.clone();
+        let verified_wal_segments = Arc::clone(&self.verified_wal_segments);
+        let verified_sst_objects = Arc::clone(&self.verified_sst_objects);
+        let expected_max_sequence = proof.max_sequence;
 
         thread::Builder::new()
             .name(format!("midge-wal-pruner-{segment_id}"))
             .spawn(move || {
                 let key = crate::wal::cloud_segment_object_key(segment_id);
-                let (tx, rx) = std::sync::mpsc::channel();
-                cloud.submit_delete_with_headers(key.clone(), vec![("If-Match".into(), etag)], tx);
+                let result = match Self::revalidate_cloud_wal_prune_guard(
+                    &cloud,
+                    &verified_wal_segments,
+                    &verified_sst_objects,
+                    segment_id,
+                    expected_max_sequence,
+                    &guard,
+                ) {
+                    Ok(()) => {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        cloud.submit_delete_with_headers(
+                            key.clone(),
+                            vec![("If-Match".into(), etag)],
+                            tx,
+                        );
 
-                let result = match rx.recv_timeout(Duration::from_secs(30)) {
-                    Ok(StorageEvent::DeleteComplete { result, .. }) => result,
-                    Ok(other) => StorageOutcome::Err(format!(
-                        "unexpected cloud WAL prune response for '{key}': {other:?}"
-                    )),
-                    Err(error) => StorageOutcome::Err(format!(
-                        "cloud WAL prune timed out for '{key}': {error}"
-                    )),
+                        match rx.recv_timeout(Duration::from_secs(30)) {
+                            Ok(StorageEvent::DeleteComplete { result, .. }) => result,
+                            Ok(other) => StorageOutcome::Err(format!(
+                                "unexpected cloud WAL prune response for '{key}': {other:?}"
+                            )),
+                            Err(error) => StorageOutcome::Err(format!(
+                                "cloud WAL prune timed out for '{key}': {error}"
+                            )),
+                        }
+                    }
+                    Err(error) => StorageOutcome::Err(error),
                 };
 
                 let event = StorageEvent::CloudWalPruneComplete { segment_id, result };
@@ -1104,6 +1204,118 @@ impl HybridStorage {
             })
             .map(|_| ())
             .map_err(|error| format!("failed to spawn cloud WAL prune worker: {error}"))
+    }
+
+    fn revalidate_cloud_wal_prune_guard(
+        cloud: &Arc<dyn StorageBackend>,
+        verified_wal_segments: &Arc<Mutex<HashMap<u64, VerifiedWalSegment>>>,
+        verified_sst_objects: &Arc<Mutex<HashMap<String, VerifiedCloudObject>>>,
+        segment_id: u64,
+        expected_max_sequence: u64,
+        guard: &CloudWalPruneGuard,
+    ) -> Result<(), String> {
+        Self::verify_remote_wal_segment_with_backend(
+            cloud,
+            verified_wal_segments,
+            segment_id,
+            expected_max_sequence,
+        )?;
+        Self::verify_manifest_cloud_objects_with_backend(
+            cloud,
+            verified_sst_objects,
+            &guard.manifest,
+        )?;
+        Self::verify_cloud_metadata_prune_guard(guard.metadata.as_ref())
+    }
+
+    fn verify_cloud_metadata_prune_guard(
+        guard: Option<&CloudMetadataPruneGuard>,
+    ) -> Result<(), String> {
+        let Some(guard) = guard else {
+            return Ok(());
+        };
+
+        for proof in &guard.objects {
+            let (tx, rx) = std::sync::mpsc::channel();
+            guard.cloud.submit_get(proof.key.clone(), tx);
+            match rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                    result: crate::storage::cloud::CloudOutcome::Ok(data),
+                    ..
+                }) => {
+                    if data != proof.expected_bytes {
+                        return Err(format!(
+                            "cloud metadata '{}' changed before WAL prune",
+                            proof.key
+                        ));
+                    }
+                    let (head_tx, head_rx) = std::sync::mpsc::channel();
+                    guard.cloud.submit_head(proof.key.clone(), head_tx);
+                    match head_rx.recv_timeout(Duration::from_secs(30)) {
+                        Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+                            result: crate::storage::cloud::CloudOutcome::Ok(actual),
+                            ..
+                        }) => {
+                            let actual = StorageObjectMetadata {
+                                size: actual.size,
+                                etag: actual.etag,
+                                generation: actual.generation,
+                            };
+                            if actual != proof.remote {
+                                return Err(format!(
+                                    "cloud metadata '{}' identity changed before WAL prune: expected {:?}, actual {:?}",
+                                    proof.key, proof.remote, actual
+                                ));
+                            }
+                        }
+                        Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+                            result: crate::storage::cloud::CloudOutcome::Err(error),
+                            ..
+                        }) => {
+                            return Err(format!(
+                                "cloud metadata '{}' is unreadable before WAL prune: {error}",
+                                proof.key
+                            ));
+                        }
+                        Ok(other) => {
+                            return Err(format!(
+                                "unexpected cloud metadata HEAD response for '{}': {other:?}",
+                                proof.key
+                            ));
+                        }
+                        Err(error) => {
+                            return Err(format!(
+                                "cloud metadata HEAD timed out for '{}': {error}",
+                                proof.key
+                            ));
+                        }
+                    }
+                }
+                Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                    result: crate::storage::cloud::CloudOutcome::Err(error),
+                    ..
+                }) => {
+                    return Err(format!(
+                        "cloud metadata '{}' is unreadable before WAL prune: {error}",
+                        proof.key
+                    ));
+                }
+                Ok(other) => {
+                    return Err(format!(
+                        "unexpected cloud metadata read response for '{}': {other:?}",
+                        proof.key
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "cloud metadata read timed out for '{}': {error}",
+                        proof.key
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn write_sst_object(
@@ -1599,6 +1811,34 @@ mod tests {
         }
     }
 
+    fn write_cloud_metadata_object(cloud: &CloudStorage, key: &str, data: Vec<u8>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_put(key.to_string(), data, vec![], tx);
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(crate::storage::cloud::CloudEvent::PutComplete {
+                result: crate::storage::cloud::CloudOutcome::Ok(()),
+                ..
+            }) => {}
+            other => panic!("cloud metadata write for '{key}' failed: {other:?}"),
+        }
+    }
+
+    fn head_cloud_metadata_object(cloud: &CloudStorage, key: &str) -> StorageObjectMetadata {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_head(key.to_string(), tx);
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+                result: crate::storage::cloud::CloudOutcome::Ok(metadata),
+                ..
+            }) => StorageObjectMetadata {
+                size: metadata.size,
+                etag: metadata.etag,
+                generation: metadata.generation,
+            },
+            other => panic!("cloud metadata head for '{key}' failed: {other:?}"),
+        }
+    }
+
     fn assert_cloud_object_exists(storage: &HybridStorage, key: &str) {
         let (tx, rx) = std::sync::mpsc::channel();
         storage.cloud.submit_head(key.to_string(), tx);
@@ -1920,7 +2160,7 @@ mod tests {
 
         write_cloud_object(&storage, &key, valid_wal_bytes(max_sequence));
         storage
-            .prune_cloud_wal_segment(segment_id)
+            .prune_cloud_wal_segment(segment_id, CloudWalPruneGuard::default())
             .expect("schedule prune");
 
         let result = wait_for_wal_prune_result(&storage, segment_id);
@@ -1929,6 +2169,134 @@ mod tests {
             "stale WAL proof must make remote prune fail conservatively"
         );
         assert_cloud_object_exists(&storage, &key);
+    }
+
+    #[test]
+    fn should_not_prune_remote_wal_when_manifest_sst_disappears_after_initial_validation() {
+        let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+        let segment_id = 13;
+        let max_sequence = 23;
+        let wal_key = crate::wal::cloud_segment_object_key(segment_id);
+        let sst_name = "missing-after-validation.sst";
+        let sst_key = crate::sst::object_key(sst_name);
+        let sst_bytes = valid_sst_bytes(b"a", b"v1", 1);
+        let manifest = manifest_for_ssts(&[(sst_name, sst_bytes.len() as u64)]);
+
+        write_cloud_object(&storage, &wal_key, valid_wal_bytes(max_sequence));
+        write_cloud_object(&storage, &sst_key, sst_bytes);
+        storage
+            .verify_remote_wal_segment(segment_id, max_sequence)
+            .expect("initial remote WAL validation");
+        storage
+            .verify_manifest_cloud_objects(&manifest)
+            .expect("initial manifest SST validation");
+
+        delete_cloud_object(&storage, &sst_key);
+        storage
+            .prune_cloud_wal_segment(segment_id, CloudWalPruneGuard::new(manifest.clone(), None))
+            .expect("schedule prune");
+
+        let result = wait_for_wal_prune_result(&storage, segment_id);
+        assert!(
+            result.is_err(),
+            "worker-side manifest revalidation must fail conservatively"
+        );
+        assert_cloud_object_exists(&storage, &wal_key);
+    }
+
+    #[test]
+    fn should_not_prune_remote_wal_when_cloud_metadata_changes_after_initial_validation() {
+        let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+        let segment_id = 14;
+        let max_sequence = 24;
+        let wal_key = crate::wal::cloud_segment_object_key(segment_id);
+        let metadata_backend = Arc::new(MockCloudBackend::new());
+        let metadata_cloud = Arc::new(CloudStorage::new(
+            metadata_backend,
+            "metadata-test".to_string(),
+        ));
+        let metadata_key = crate::storage::cloud::cloud_metadata_key("manifest.json");
+        let metadata_bytes = br#"{"last_persisted_sequence":24}"#.to_vec();
+
+        write_cloud_object(&storage, &wal_key, valid_wal_bytes(max_sequence));
+        storage
+            .verify_remote_wal_segment(segment_id, max_sequence)
+            .expect("initial remote WAL validation");
+        write_cloud_metadata_object(&metadata_cloud, &metadata_key, metadata_bytes.clone());
+        let metadata_guard = CloudMetadataPruneGuard::new(
+            metadata_cloud.clone(),
+            vec![CloudMetadataPruneProof {
+                key: metadata_key.clone(),
+                expected_bytes: metadata_bytes,
+                remote: head_cloud_metadata_object(&metadata_cloud, &metadata_key),
+            }],
+        );
+
+        write_cloud_metadata_object(&metadata_cloud, &metadata_key, b"changed".to_vec());
+        storage
+            .prune_cloud_wal_segment(
+                segment_id,
+                CloudWalPruneGuard::new(crate::metadata::Manifest::default(), Some(metadata_guard)),
+            )
+            .expect("schedule prune");
+
+        let result = wait_for_wal_prune_result(&storage, segment_id);
+        assert!(
+            result.is_err(),
+            "worker-side metadata revalidation must fail conservatively"
+        );
+        assert_cloud_object_exists(&storage, &wal_key);
+    }
+
+    #[test]
+    fn should_prune_remote_wal_when_worker_side_guard_remains_valid() {
+        let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+        let segment_id = 15;
+        let max_sequence = 25;
+        let wal_key = crate::wal::cloud_segment_object_key(segment_id);
+        let sst_name = "guard-valid.sst";
+        let sst_key = crate::sst::object_key(sst_name);
+        let sst_bytes = valid_sst_bytes(b"a", b"v1", 1);
+        let manifest = manifest_for_ssts(&[(sst_name, sst_bytes.len() as u64)]);
+        let metadata_backend = Arc::new(MockCloudBackend::new());
+        let metadata_cloud = Arc::new(CloudStorage::new(
+            metadata_backend,
+            "metadata-test".to_string(),
+        ));
+        let metadata_key = crate::storage::cloud::cloud_metadata_key("manifest.json");
+        let metadata_bytes = br#"{"last_persisted_sequence":25}"#.to_vec();
+
+        write_cloud_object(&storage, &wal_key, valid_wal_bytes(max_sequence));
+        write_cloud_object(&storage, &sst_key, sst_bytes.clone());
+        storage
+            .verify_remote_wal_segment(segment_id, max_sequence)
+            .expect("initial remote WAL validation");
+        storage
+            .verify_manifest_cloud_objects(&manifest)
+            .expect("initial manifest SST validation");
+        write_cloud_metadata_object(&metadata_cloud, &metadata_key, metadata_bytes.clone());
+        let metadata_guard = CloudMetadataPruneGuard::new(
+            metadata_cloud.clone(),
+            vec![CloudMetadataPruneProof {
+                key: metadata_key.clone(),
+                expected_bytes: metadata_bytes,
+                remote: head_cloud_metadata_object(&metadata_cloud, &metadata_key),
+            }],
+        );
+
+        storage
+            .prune_cloud_wal_segment(
+                segment_id,
+                CloudWalPruneGuard::new(manifest, Some(metadata_guard)),
+            )
+            .expect("schedule prune");
+
+        let result = wait_for_wal_prune_result(&storage, segment_id);
+        assert!(
+            result.is_ok(),
+            "valid worker-side guard should allow conditional remote WAL deletion"
+        );
+        assert_cloud_object_missing(&storage, &wal_key);
     }
 
     #[test]

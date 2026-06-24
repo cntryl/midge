@@ -370,18 +370,26 @@ impl EventLoop {
             return;
         }
 
-        if let Err(error) = self.verify_cloud_metadata_for_wal_cleanup() {
-            self.state.mark_persistence_anomaly();
-            tracing::warn!(
-                error = %error,
-                "Skipping remote WAL prune because cloud metadata is not fully readable"
-            );
-            return;
-        }
+        let metadata_guard = match self.cloud_metadata_prune_guard_for_wal_cleanup() {
+            Ok(guard) => guard,
+            Err(error) => {
+                self.state.mark_persistence_anomaly();
+                tracing::warn!(
+                    error = %error,
+                    "Skipping remote WAL prune because cloud metadata is not fully readable"
+                );
+                return;
+            }
+        };
+
+        let prune_guard = crate::storage::hybrid::backend::CloudWalPruneGuard::new(
+            self.state.manifest.clone(),
+            metadata_guard,
+        );
 
         for segment_id in eligible_segments {
             self.cloud_wal_prune_inflight.insert(segment_id);
-            if let Err(error) = storage.prune_cloud_wal_segment(segment_id) {
+            if let Err(error) = storage.prune_cloud_wal_segment(segment_id, prune_guard.clone()) {
                 self.cloud_wal_prune_inflight.remove(&segment_id);
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(
@@ -424,9 +432,18 @@ impl EventLoop {
     }
 
     fn verify_cloud_metadata_for_wal_cleanup(&mut self) -> Result<(), String> {
+        self.cloud_metadata_prune_guard_for_wal_cleanup()
+            .map(|_| ())
+    }
+
+    fn cloud_metadata_prune_guard_for_wal_cleanup(
+        &mut self,
+    ) -> Result<Option<crate::storage::hybrid::backend::CloudMetadataPruneGuard>, String> {
         let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
-            return Ok(());
+            return Ok(None);
         };
+
+        let mut objects = Vec::new();
 
         for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
             let file_name = *file_name;
@@ -447,6 +464,11 @@ impl EventLoop {
                 if proof.len == local_len && proof.crc32c == local_crc32c {
                     let actual = Self::read_cloud_metadata_head_for_wal_cleanup(cloud, &key)?;
                     if actual == proof.remote {
+                        objects.push(crate::storage::hybrid::backend::CloudMetadataPruneProof {
+                            key,
+                            expected_bytes: local_data,
+                            remote: proof.remote.clone(),
+                        });
                         continue;
                     }
                     return Err(format!(
@@ -481,9 +503,14 @@ impl EventLoop {
                         super::MetadataCleanupProof {
                             len: local_len,
                             crc32c: local_crc32c,
-                            remote,
+                            remote: remote.clone(),
                         },
                     );
+                    objects.push(crate::storage::hybrid::backend::CloudMetadataPruneProof {
+                        key,
+                        expected_bytes: local_data,
+                        remote,
+                    });
                 }
                 Ok(crate::storage::cloud::CloudEvent::GetComplete {
                     result: crate::storage::cloud::CloudOutcome::Err(error),
@@ -502,7 +529,9 @@ impl EventLoop {
             }
         }
 
-        Ok(())
+        Ok(Some(
+            crate::storage::hybrid::backend::CloudMetadataPruneGuard::new(cloud.clone(), objects),
+        ))
     }
 
     fn remove_cloud_durable_local_wal_segment(&mut self, segment_id: u64) {
@@ -527,7 +556,7 @@ impl EventLoop {
                     segment_id,
                     path = %local_path.display(),
                     error = %error,
-                    "Failed to remove cloud-durable local WAL segment"
+                    "Failed to remove cloud-durable local WAL segment; recovery remains safe but storage may leak"
                 );
             }
         }
@@ -655,6 +684,38 @@ mod tests {
             largest_seq: Some(max_sequence),
             ..Default::default()
         });
+    }
+
+    fn valid_sst_bytes_for_test(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {
+        use crate::sst::SstFactory;
+
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create().expect("create test SST writer");
+        writer
+            .add_with_meta(key, Some(value), seq, 0, None)
+            .expect("add test SST entry");
+        writer.finish_bytes().expect("finish test SST bytes")
+    }
+
+    fn add_valid_manifest_sst_for_test(
+        el: &mut EventLoop,
+        sst_name: &str,
+        max_sequence: u64,
+    ) -> Vec<u8> {
+        let bytes = valid_sst_bytes_for_test(b"a", b"value", max_sequence);
+        el.state.manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            cf_id: 0,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"a".to_vec()),
+            smallest_seq: Some(max_sequence),
+            largest_seq: Some(max_sequence),
+            ..Default::default()
+        });
+        write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
+        bytes
     }
 
     fn drain_prune_completion_for_test(el: &mut EventLoop) {
@@ -1143,6 +1204,62 @@ mod tests {
         assert!(
             !remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL may be pruned when cloud durability and manifest coverage both include its max sequence"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_clear_prune_inflight_and_retry_after_worker_guard_failure(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        let sst_name = "guard-retry.sst";
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence;
+        let sst_bytes = add_valid_manifest_sst_for_test(&mut el, sst_name, max_sequence);
+        let storage = el.hybrid_storage.as_ref().expect("hybrid storage").clone();
+        storage
+            .verify_manifest_cloud_objects(&el.state.manifest)
+            .expect("initial manifest validation");
+
+        el.cloud_wal_prune_inflight.insert(segment_id);
+        std::fs::remove_file(remote_sst_path_for_test(&el, sst_name))
+            .expect("delete remote SST after initial validation");
+        storage
+            .prune_cloud_wal_segment(
+                segment_id,
+                crate::storage::hybrid::backend::CloudWalPruneGuard::new(
+                    el.state.manifest.clone(),
+                    None,
+                ),
+            )
+            .expect("schedule guarded prune");
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            el.cloud_wal_prune_inflight.is_empty(),
+            "worker-side guard failure must clear prune inflight state"
+        );
+        assert!(
+            el.cloud_acked_wal_segments.contains_key(&segment_id),
+            "failed guarded prune must keep the WAL eligible for retry"
+        );
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "failed guarded prune must retain the remote WAL"
+        );
+
+        write_test_file(remote_sst_path_for_test(&el, sst_name), &sst_bytes);
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            !remote_wal_path_for_test(&el, segment_id).exists(),
+            "restored manifest SST should allow a later guarded prune"
         );
 
         Ok(())
