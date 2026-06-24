@@ -48,6 +48,7 @@ impl ManifestActor {
                 name: file_meta.name.clone(),
                 level: file_meta.level,
                 size_bytes: file_meta.size_bytes,
+                content_crc32c: file_meta.content_crc32c,
                 cf_id: file_meta.cf_id,
                 smallest_key: file_meta.smallest_key.clone(),
                 largest_key: file_meta.largest_key.clone(),
@@ -69,6 +70,7 @@ impl ManifestActor {
             name: file_meta.name.clone(),
             level: file_meta.level,
             size_bytes: file_meta.size_bytes,
+            content_crc32c: file_meta.content_crc32c,
             cf_id: file_meta.cf_id,
             smallest_key: file_meta.smallest_key,
             largest_key: file_meta.largest_key,
@@ -108,6 +110,7 @@ impl ManifestActor {
                     name: f.name.clone(),
                     level: f.level,
                     size_bytes: f.size_bytes,
+                    content_crc32c: f.content_crc32c,
                     cf_id: f.cf_id,
                     smallest_key: f.smallest_key.clone(),
                     largest_key: f.largest_key.clone(),
@@ -137,6 +140,7 @@ impl ManifestActor {
                 name: file_meta.name.clone(),
                 level: file_meta.level,
                 size_bytes: file_meta.size_bytes,
+                content_crc32c: file_meta.content_crc32c,
                 cf_id: file_meta.cf_id,
                 smallest_key: file_meta.smallest_key.clone(),
                 largest_key: file_meta.largest_key.clone(),
@@ -345,7 +349,7 @@ mod tests {
     fn should_fail_to_add_sst_given_corrupted_file_when_validating() {
         // Arrange: create a temp dir and a corrupt SST file (partial content)
         let tmp = tempfile::tempdir().expect("create tmpdir");
-        let sst_name = "sst_000001_000001.sst".to_string();
+        let sst_name = crate::sst::file_name(0, 0, 1);
         let sst_path = tmp.path().join(&sst_name);
 
         // Write corrupted content (not a valid SST)
@@ -356,6 +360,7 @@ mod tests {
             name: sst_name.clone(),
             level: 0,
             size_bytes: 0,
+            content_crc32c: None,
             cf_id: 0,
             smallest_key: None,
             largest_key: None,
@@ -381,7 +386,7 @@ mod tests {
     fn should_fail_to_add_sst_given_missing_final_file_when_only_tmp_exists() {
         // Arrange: create a temp dir and a leftover .tmp file (simulate crash before rename)
         let tmp = tempfile::tempdir().expect("create tmpdir");
-        let sst_name = "sst_000002_000002.sst".to_string();
+        let sst_name = crate::sst::file_name(0, 0, 2);
         let tmp_name = format!("{}.tmp", sst_name);
         let tmp_path = tmp.path().join(&tmp_name);
 
@@ -392,6 +397,7 @@ mod tests {
             name: sst_name.clone(),
             level: 0,
             size_bytes: 0,
+            content_crc32c: None,
             cf_id: 0,
             smallest_key: None,
             largest_key: None,
@@ -416,7 +422,7 @@ mod tests {
     fn should_add_sst_successfully_given_valid_file_when_manifest_updated() -> MidgeResult<()> {
         // Arrange: create a valid on-disk SST via the Fs SstFactory
         let tmp = tempfile::tempdir().expect("create tmpdir");
-        let sst_name = "sst_000003_000003.sst".to_string();
+        let sst_name = crate::sst::file_name(0, 0, 3);
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
         assert!(state.sst_dir.exists(), "sst dir must exist");
         let sst_path = state.sst_dir.join(&sst_name);
@@ -439,6 +445,7 @@ mod tests {
             name: sst_name.clone(),
             level: 0,
             size_bytes: std::fs::metadata(&sst_path)?.len(),
+            content_crc32c: None,
             cf_id: 0,
             smallest_key: Some(b"a".to_vec()),
             largest_key: Some(b"a".to_vec()),

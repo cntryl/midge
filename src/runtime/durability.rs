@@ -5,7 +5,7 @@
 
 use crate::common::KeyedGroupCommit;
 use crate::engine::api::Durability;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 /// Single CloudAsync segment being uploaded
@@ -176,27 +176,37 @@ impl DurabilityCoordinator {
         );
     }
 
-    /// Get all CloudAsync segments ready for completion (whose max_sequence is now durable).
-    pub fn get_ready_cloud_segments(&mut self, durable_seq: u64) -> Vec<u64> {
-        let mut ready: Vec<u64> = self
+    /// Get the contiguous acked CloudAsync segments starting at the oldest
+    /// inflight segment. A later segment ack never makes earlier gaps durable.
+    pub fn take_contiguous_acked_cloud_segments(
+        &mut self,
+        acked_segments: &BTreeMap<u64, u64>,
+    ) -> Result<Vec<(u64, u64)>, String> {
+        let mut inflight: Vec<(u64, u64)> = self
             .inflight
             .iter()
-            .filter_map(|(seg, info)| {
-                if info.max_sequence <= durable_seq {
-                    Some(*seg)
-                } else {
-                    None
-                }
-            })
+            .map(|(segment_id, info)| (*segment_id, info.max_sequence))
             .collect();
-        ready.sort_unstable();
+        inflight.sort_unstable_by_key(|(segment_id, _)| *segment_id);
 
-        // Remove them from inflight
-        for seg_id in &ready {
-            self.inflight.remove(seg_id);
+        let mut ready = Vec::new();
+        for (segment_id, expected_max_sequence) in inflight {
+            let Some(acked_max_sequence) = acked_segments.get(&segment_id) else {
+                break;
+            };
+            if *acked_max_sequence != expected_max_sequence {
+                return Err(format!(
+                    "cloud WAL segment {segment_id} ack max sequence {acked_max_sequence} does not match inflight max sequence {expected_max_sequence}"
+                ));
+            }
+            ready.push((segment_id, expected_max_sequence));
         }
 
-        ready
+        for (segment_id, _) in &ready {
+            self.inflight.remove(segment_id);
+        }
+
+        Ok(ready)
     }
 
     /// Get timing info for a CloudAsync segment (for telemetry).

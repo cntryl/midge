@@ -42,7 +42,10 @@ impl EventLoop {
         self.durability.rotate_to(self.state.wal.current_segment_id);
 
         let max_sequence = self.state.wal.local_durable_seq;
-        let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
+        let local_path = self
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
         storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
         self.wal_actor.complete_cloud_upload_seal(&mut self.state);
 
@@ -106,103 +109,98 @@ impl EventLoop {
             crate::storage::StorageEvent::CloudAck {
                 segment_id,
                 max_sequence,
-            } => match self.wal_actor.handle_cloud_upload_complete(
-                &mut self.state,
-                segment_id,
-                max_sequence,
-            ) {
-                Ok(()) => {
-                    let resource = crate::wal::cloud_segment_object_key(segment_id);
-                    self.state
-                        .cloud
-                        .pending_uploads
-                        .retain(|item| item != &resource);
-
-                    // If cloud_durable_seq advanced past multiple segments,
-                    // complete all inflight segments whose max_sequence is now durable.
-                    let durable = self.state.wal.cloud_durable_seq;
-                    let ready = self.durability.get_ready_cloud_segments(durable);
-
-                    for seg_id in ready {
-                        if let Some(enqueued_at) = self.durability.take_cloud_segment_timing(seg_id)
-                        {
-                            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                                telemetry.metrics().record_cloud_async_wal_ack_latency_us(
-                                    enqueued_at.elapsed().as_micros() as u64,
-                                );
-                            }
-                        }
-
-                        let waiters = self.durability.complete_waiters_at(seg_id);
-                        self.complete_durability_waiters(waiters, CompletionSource::CloudAck);
-                    }
-                    self.drain_auto_flush_memtables();
+            } => {
+                if let Err(error) =
+                    self.verify_remote_wal_segment_before_ack(segment_id, max_sequence)
+                {
+                    self.handle_cloud_upload_failure(
+                        segment_id,
+                        format!("cloud WAL readback validation failed: {error}"),
+                    );
+                    return;
                 }
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to apply cloud ack");
-                }
-            },
-            crate::storage::StorageEvent::CloudFail { segment_id, error } => {
+
                 let resource = crate::wal::cloud_segment_object_key(segment_id);
                 self.state
                     .cloud
                     .pending_uploads
                     .retain(|item| item != &resource);
-                self.state.mark_persistence_anomaly();
+                self.cloud_acked_wal_segments
+                    .insert(segment_id, max_sequence);
 
-                // Attempt to recover the failed segment's max_sequence so we can
-                // invalidate idempotency allocations that were part of it.
-                let failed_max_seq = self.durability.take_cloud_segment_max_sequence(segment_id);
+                let ready_segments = match self
+                    .durability
+                    .take_contiguous_acked_cloud_segments(&self.cloud_acked_wal_segments)
+                {
+                    Ok(ready_segments) => ready_segments,
+                    Err(error) => {
+                        self.cloud_acked_wal_segments.remove(&segment_id);
+                        self.handle_cloud_upload_failure(segment_id, error);
+                        return;
+                    }
+                };
 
-                // Let WAL actor handle its internal failure handling and drop pending writes
-                self.wal_actor
-                    .handle_cloud_upload_failed(segment_id, &error);
-
-                // If we know the max_sequence for the failed segment, invalidate idempotency
-                // allocations up to that sequence so retries will allocate fresh sequences.
-                if let Some(max_seq) = failed_max_seq {
-                    self.state.invalidate_idempotency_allocations_up_to(max_seq);
-                }
-
-                let waiters = self.durability.drain_all_waiters();
-                for w in waiters {
-                    let request_id = match w {
-                        super::super::durability::DurabilityWaiter::WalAppend {
-                            request_id,
-                            ..
-                        }
-                        | super::super::durability::DurabilityWaiter::ConfirmWalAppend {
-                            request_id,
-                        }
-                        | super::super::durability::DurabilityWaiter::TransactionApply {
-                            request_id,
-                            ..
-                        }
-                        | super::super::durability::DurabilityWaiter::ConfirmTransactionApply {
-                            request_id,
-                        }
-                        | super::super::durability::DurabilityWaiter::CloudDurability {
-                            request_id,
-                        }
-                        | super::super::durability::DurabilityWaiter::Read { request_id, .. }
-                        | super::super::durability::DurabilityWaiter::RangeScan {
-                            request_id,
-                            ..
-                        } => request_id,
-                    };
-                    self.respond(
-                        request_id,
-                        super::super::RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::Internal(format!(
-                                "Cloud durability failed: {error}"
-                            )),
-                        },
+                let Some((durable_segment_id, durable_max_sequence)) =
+                    ready_segments.last().copied()
+                else {
+                    tracing::debug!(
+                        segment_id,
+                        max_sequence,
+                        "CloudAck buffered behind an earlier unacked WAL segment"
                     );
-                }
+                    return;
+                };
 
-                // Clear any remaining inflight segments
-                self.durability.clear_inflight();
+                match self.wal_actor.handle_cloud_upload_complete(
+                    &mut self.state,
+                    durable_segment_id,
+                    durable_max_sequence,
+                ) {
+                    Ok(()) => {
+                        for (ready_segment_id, _) in &ready_segments {
+                            self.remove_cloud_durable_local_wal_segment(*ready_segment_id);
+                        }
+
+                        for (seg_id, _) in ready_segments {
+                            if let Some(enqueued_at) =
+                                self.durability.take_cloud_segment_timing(seg_id)
+                            {
+                                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                                    telemetry.metrics().record_cloud_async_wal_ack_latency_us(
+                                        enqueued_at.elapsed().as_micros() as u64,
+                                    );
+                                }
+                            }
+
+                            let waiters = self.durability.complete_waiters_at(seg_id);
+                            self.complete_durability_waiters(waiters, CompletionSource::CloudAck);
+                        }
+                        self.prune_cloud_wal_segments_covered_by_manifest();
+                        self.drain_auto_flush_memtables();
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to apply cloud ack");
+                    }
+                }
+            }
+            crate::storage::StorageEvent::CloudFail { segment_id, error } => {
+                self.handle_cloud_upload_failure(segment_id, error);
+            }
+            crate::storage::StorageEvent::CloudWalPruneComplete { segment_id, result } => {
+                self.cloud_wal_prune_inflight.remove(&segment_id);
+                match result {
+                    crate::storage::StorageOutcome::Ok(()) => {
+                        self.cloud_acked_wal_segments.remove(&segment_id);
+                        tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
+                    }
+                    crate::storage::StorageOutcome::Err(error) => {
+                        tracing::warn!(
+                            segment_id,
+                            error = %error,
+                            "Failed to prune cloud-covered remote WAL segment; will retry after a future checkpoint"
+                        );
+                    }
+                }
             }
             crate::storage::StorageEvent::BackpressureOn => {
                 tracing::warn!("storage backpressure activated — pausing flushes");
@@ -218,6 +216,72 @@ impl EventLoop {
             }
             _ => {}
         }
+    }
+
+    fn verify_remote_wal_segment_before_ack(
+        &mut self,
+        segment_id: u64,
+        max_sequence: u64,
+    ) -> Result<(), String> {
+        let Some(storage) = self.hybrid_storage.as_ref() else {
+            return Err("CloudAck received without HybridStorage".to_string());
+        };
+        storage.verify_cached_remote_wal_segment(segment_id, max_sequence)
+    }
+
+    fn handle_cloud_upload_failure(&mut self, segment_id: u64, error: String) {
+        let resource = crate::wal::cloud_segment_object_key(segment_id);
+        self.state
+            .cloud
+            .pending_uploads
+            .retain(|item| item != &resource);
+        self.state.mark_persistence_anomaly();
+        self.cloud_acked_wal_segments.split_off(&segment_id);
+
+        // Attempt to recover the failed segment's max_sequence so we can
+        // invalidate idempotency allocations that were part of it.
+        let failed_max_seq = self.durability.take_cloud_segment_max_sequence(segment_id);
+
+        // Let WAL actor handle its internal failure handling and drop pending writes.
+        self.wal_actor
+            .handle_cloud_upload_failed(segment_id, &error);
+
+        // If we know the max_sequence for the failed segment, invalidate idempotency
+        // allocations up to that sequence so retries will allocate fresh sequences.
+        if let Some(max_seq) = failed_max_seq {
+            self.state.invalidate_idempotency_allocations_up_to(max_seq);
+        }
+
+        let waiters = self.durability.drain_all_waiters();
+        for w in waiters {
+            let request_id = match w {
+                super::super::durability::DurabilityWaiter::WalAppend { request_id, .. }
+                | super::super::durability::DurabilityWaiter::ConfirmWalAppend { request_id }
+                | super::super::durability::DurabilityWaiter::TransactionApply {
+                    request_id, ..
+                }
+                | super::super::durability::DurabilityWaiter::ConfirmTransactionApply {
+                    request_id,
+                }
+                | super::super::durability::DurabilityWaiter::CloudDurability { request_id }
+                | super::super::durability::DurabilityWaiter::Read { request_id, .. }
+                | super::super::durability::DurabilityWaiter::RangeScan { request_id, .. } => {
+                    request_id
+                }
+            };
+            self.respond(
+                request_id,
+                super::super::RuntimeResponse::Error {
+                    request_id,
+                    error: crate::common::MidgeError::Internal(format!(
+                        "Cloud durability failed: {error}"
+                    )),
+                },
+            );
+        }
+
+        // Clear any remaining inflight segments.
+        self.durability.clear_inflight();
     }
 
     pub(super) fn maybe_flush_cloud_async_wal(&mut self) {
@@ -267,6 +331,236 @@ impl EventLoop {
 
         self.drain_auto_flush_memtables();
     }
+
+    pub(super) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
+        if !self.wal_actor.is_cloud_async() || self.state.memory_mode {
+            return;
+        }
+
+        let Some(storage) = self.hybrid_storage.clone() else {
+            return;
+        };
+        let Some(recovery_floor_segment) = self.state.cloud_wal_recovery_floor_segment() else {
+            return;
+        };
+        let persisted_sequence = self.state.manifest.last_persisted_sequence;
+
+        let eligible_segments: Vec<u64> = self
+            .cloud_acked_wal_segments
+            .iter()
+            .filter_map(|(segment_id, max_sequence)| {
+                (*segment_id < recovery_floor_segment
+                    && *max_sequence <= self.state.wal.cloud_durable_seq
+                    && *max_sequence <= persisted_sequence
+                    && !self.cloud_wal_prune_inflight.contains(segment_id))
+                .then_some(*segment_id)
+            })
+            .collect();
+
+        if eligible_segments.is_empty() {
+            return;
+        }
+
+        if let Err(error) = storage.verify_manifest_cloud_objects(&self.state.manifest) {
+            self.state.mark_persistence_anomaly();
+            tracing::warn!(
+                error = %error,
+                "Skipping remote WAL prune because manifest-referenced cloud objects are not fully readable"
+            );
+            return;
+        }
+
+        let metadata_guard = match self.cloud_metadata_prune_guard_for_wal_cleanup() {
+            Ok(guard) => guard,
+            Err(error) => {
+                self.state.mark_persistence_anomaly();
+                tracing::warn!(
+                    error = %error,
+                    "Skipping remote WAL prune because cloud metadata is not fully readable"
+                );
+                return;
+            }
+        };
+
+        let prune_guard = crate::storage::hybrid::backend::CloudWalPruneGuard::new(
+            self.state.manifest.clone(),
+            metadata_guard,
+        );
+
+        for segment_id in eligible_segments {
+            self.cloud_wal_prune_inflight.insert(segment_id);
+            if let Err(error) = storage.prune_cloud_wal_segment(segment_id, prune_guard.clone()) {
+                self.cloud_wal_prune_inflight.remove(&segment_id);
+                self.state.mark_persistence_anomaly();
+                tracing::warn!(
+                    segment_id,
+                    error = %error,
+                    "Failed to schedule cloud-covered remote WAL prune"
+                );
+            }
+        }
+    }
+
+    fn read_cloud_metadata_head_for_wal_cleanup(
+        cloud: &crate::storage::cloud::CloudStorage,
+        key: &str,
+    ) -> Result<crate::storage::StorageObjectMetadata, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_head(key.to_string(), tx);
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+                result: crate::storage::cloud::CloudOutcome::Ok(metadata),
+                ..
+            }) => Ok(crate::storage::StorageObjectMetadata {
+                size: metadata.size,
+                etag: metadata.etag,
+                generation: metadata.generation,
+            }),
+            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+                result: crate::storage::cloud::CloudOutcome::Err(error),
+                ..
+            }) => Err(format!(
+                "cloud metadata '{key}' is unreadable during cached proof revalidation: {error}"
+            )),
+            Ok(other) => Err(format!(
+                "unexpected cloud metadata HEAD response for '{key}': {other:?}"
+            )),
+            Err(error) => Err(format!(
+                "cloud metadata HEAD timed out for '{key}': {error}"
+            )),
+        }
+    }
+
+    fn verify_cloud_metadata_for_wal_cleanup(&mut self) -> Result<(), String> {
+        self.cloud_metadata_prune_guard_for_wal_cleanup()
+            .map(|_| ())
+    }
+
+    fn cloud_metadata_prune_guard_for_wal_cleanup(
+        &mut self,
+    ) -> Result<Option<crate::storage::hybrid::backend::CloudMetadataPruneGuard>, String> {
+        let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
+            return Ok(None);
+        };
+
+        let mut objects = Vec::new();
+
+        for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+            let file_name = *file_name;
+            let local_path = self.state.db_path.join(file_name);
+            if !local_path.exists() {
+                continue;
+            }
+            let local_data = std::fs::read(&local_path).map_err(|error| {
+                format!(
+                    "local metadata '{}' is unreadable: {error}",
+                    local_path.display()
+                )
+            })?;
+            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let local_len = local_data.len() as u64;
+            let local_crc32c = crc32c::crc32c(&local_data);
+            if let Some(proof) = self.cloud_metadata_cleanup_proofs.get(file_name) {
+                if proof.len == local_len && proof.crc32c == local_crc32c {
+                    let actual = Self::read_cloud_metadata_head_for_wal_cleanup(cloud, &key)?;
+                    if actual == proof.remote {
+                        objects.push(crate::storage::hybrid::backend::CloudMetadataPruneProof {
+                            key,
+                            expected_bytes: local_data,
+                            remote: proof.remote.clone(),
+                        });
+                        continue;
+                    }
+                    return Err(format!(
+                        "cloud metadata '{key}' changed since validation: expected {:?}, actual {:?}",
+                        proof.remote, actual
+                    ));
+                }
+            }
+            self.cloud_metadata_cleanup_proofs.remove(file_name);
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            cloud.submit_get(key.clone(), tx);
+            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                    result: crate::storage::cloud::CloudOutcome::Ok(cloud_data),
+                    ..
+                }) => {
+                    if cloud_data != local_data {
+                        return Err(format!(
+                            "cloud metadata '{key}' does not match committed local metadata"
+                        ));
+                    }
+                    let remote = Self::read_cloud_metadata_head_for_wal_cleanup(cloud, &key)?;
+                    if remote.size != local_len {
+                        return Err(format!(
+                            "cloud metadata '{key}' size changed during validation: read={local_len}, head={}",
+                            remote.size
+                        ));
+                    }
+                    self.cloud_metadata_cleanup_proofs.insert(
+                        file_name.to_string(),
+                        super::MetadataCleanupProof {
+                            len: local_len,
+                            crc32c: local_crc32c,
+                            remote: remote.clone(),
+                        },
+                    );
+                    objects.push(crate::storage::hybrid::backend::CloudMetadataPruneProof {
+                        key,
+                        expected_bytes: local_data,
+                        remote,
+                    });
+                }
+                Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                    result: crate::storage::cloud::CloudOutcome::Err(error),
+                    ..
+                }) => return Err(format!("cloud metadata '{key}' is unreadable: {error}")),
+                Ok(other) => {
+                    return Err(format!(
+                        "unexpected cloud metadata read response for '{key}': {other:?}"
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "cloud metadata read timed out for '{key}': {error}"
+                    ));
+                }
+            }
+        }
+
+        Ok(Some(
+            crate::storage::hybrid::backend::CloudMetadataPruneGuard::new(cloud.clone(), objects),
+        ))
+    }
+
+    fn remove_cloud_durable_local_wal_segment(&mut self, segment_id: u64) {
+        if self.state.memory_mode {
+            return;
+        }
+
+        let local_path = self
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
+        match std::fs::remove_file(&local_path) {
+            Ok(()) => tracing::debug!(
+                segment_id,
+                path = %local_path.display(),
+                "Removed cloud-durable local WAL segment"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                self.state.mark_persistence_anomaly();
+                tracing::warn!(
+                    segment_id,
+                    path = %local_path.display(),
+                    error = %error,
+                    "Failed to remove cloud-durable local WAL segment; recovery remains safe but storage may leak"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -275,7 +569,13 @@ mod tests {
     use super::super::EventLoop;
     use crate::runtime::{state::RuntimeState, ResponseRouter, RuntimeMsg, RuntimeResponse};
     use crate::sst::Memtable;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use bytes::Bytes;
+    use std::path::{Path, PathBuf};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    };
+    use std::time::{Duration, Instant};
 
     static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -284,16 +584,385 @@ mod tests {
     }
 
     fn seal_segment_for_test(el: &mut EventLoop) -> crate::common::MidgeResult<(u64, u64)> {
+        let (seg_id, max_sequence) = seal_segment_without_remote_proof_for_test(el)?;
+        if let Some(storage) = el.hybrid_storage.as_ref() {
+            storage
+                .verify_remote_wal_segment(seg_id, max_sequence)
+                .expect("verify remote WAL for test CloudAck");
+        }
+        Ok((seg_id, max_sequence))
+    }
+
+    fn seal_segment_without_remote_proof_for_test(
+        el: &mut EventLoop,
+    ) -> crate::common::MidgeResult<(u64, u64)> {
         let seg_id = el.state.wal.current_segment_id;
         el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
         el.wal_actor.rotate(&mut el.state)?;
         el.durability.rotate_to(el.state.wal.current_segment_id);
         let max_sequence = el.state.wal.local_durable_seq;
+        copy_local_segment_to_remote_wal_for_test(el, seg_id);
         el.wal_actor.complete_cloud_upload_seal(&mut el.state);
         el.durability
             .record_cloud_segment_inflight(seg_id, max_sequence);
         el.durability.record_cloud_flush();
         Ok((seg_id, max_sequence))
+    }
+
+    fn remote_wal_path_for_test(el: &EventLoop, segment_id: u64) -> PathBuf {
+        el.state
+            .db_path
+            .join("cloud_store")
+            .join("wal")
+            .join(crate::wal::cloud_segment_file_name(segment_id))
+    }
+
+    fn remote_sst_path_for_test(el: &EventLoop, sst_name: &str) -> PathBuf {
+        el.state
+            .db_path
+            .join("cloud_store")
+            .join("sst")
+            .join(sst_name)
+    }
+
+    fn write_test_file(path: PathBuf, data: &[u8]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create test file parent");
+        }
+        std::fs::write(path, data).expect("write test file");
+    }
+
+    fn copy_local_segment_to_remote_wal_for_test(el: &EventLoop, segment_id: u64) {
+        let local_path = el
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
+        let remote_path = remote_wal_path_for_test(el, segment_id);
+        if let Some(parent) = remote_path.parent() {
+            std::fs::create_dir_all(parent).expect("create remote WAL parent");
+        }
+        std::fs::copy(&local_path, &remote_path).unwrap_or_else(|error| {
+            panic!(
+                "copy local WAL '{}' to remote WAL '{}': {error}",
+                local_path.display(),
+                remote_path.display()
+            )
+        });
+    }
+
+    fn seed_cloud_prune_candidate(el: &mut EventLoop, segment_id: u64, max_sequence: u64) {
+        el.state.wal.current_segment_id = segment_id + 1;
+        el.state.manifest.last_persisted_sequence = max_sequence;
+        el.cloud_acked_wal_segments.insert(segment_id, max_sequence);
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            Bytes::from_static(b"prune-candidate"),
+            Some(Bytes::from_static(b"value")),
+            max_sequence,
+            0,
+        );
+        let payload = crate::wal::encoding::encode(&record).expect("encode test WAL record");
+        let mut bytes = Vec::new();
+        crate::wal::frame::append_frame(&mut bytes, &payload).expect("append test WAL frame");
+        write_test_file(remote_wal_path_for_test(el, segment_id), &bytes);
+        if let Some(storage) = el.hybrid_storage.as_ref() {
+            storage
+                .verify_remote_wal_segment(segment_id, max_sequence)
+                .expect("verify remote WAL prune candidate");
+        }
+    }
+
+    fn add_manifest_sst_for_test(el: &mut EventLoop, sst_name: &str, max_sequence: u64) {
+        el.state.manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: 128,
+            cf_id: 0,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"z".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(max_sequence),
+            ..Default::default()
+        });
+    }
+
+    fn valid_sst_bytes_for_test(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {
+        use crate::sst::SstFactory;
+
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create().expect("create test SST writer");
+        writer
+            .add_with_meta(key, Some(value), seq, 0, None)
+            .expect("add test SST entry");
+        writer.finish_bytes().expect("finish test SST bytes")
+    }
+
+    fn add_valid_manifest_sst_for_test(
+        el: &mut EventLoop,
+        sst_name: &str,
+        max_sequence: u64,
+    ) -> Vec<u8> {
+        let bytes = valid_sst_bytes_for_test(b"a", b"value", max_sequence);
+        el.state.manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            cf_id: 0,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"a".to_vec()),
+            smallest_seq: Some(max_sequence),
+            largest_seq: Some(max_sequence),
+            ..Default::default()
+        });
+        write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
+        bytes
+    }
+
+    fn drain_prune_completion_for_test(el: &mut EventLoop) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            el.tick_hybrid_storage();
+            if el.cloud_wal_prune_inflight.is_empty() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn put_cloud_metadata_for_test(
+        cloud: &crate::storage::cloud::CloudStorage,
+        file_name: &str,
+        data: Vec<u8>,
+    ) {
+        let key = crate::storage::cloud::cloud_metadata_key(file_name);
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_put(key.clone(), data, vec![], tx);
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(crate::storage::cloud::CloudEvent::PutComplete {
+                result: crate::storage::cloud::CloudOutcome::Ok(()),
+                ..
+            }) => {}
+            other => panic!("metadata put for '{key}' failed: {other:?}"),
+        }
+    }
+
+    fn get_cloud_metadata_for_test(
+        cloud: &crate::storage::cloud::CloudStorage,
+        file_name: &str,
+    ) -> Vec<u8> {
+        let key = crate::storage::cloud::cloud_metadata_key(file_name);
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_get(key.clone(), tx);
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                result: crate::storage::cloud::CloudOutcome::Ok(data),
+                ..
+            }) => data,
+            other => panic!("metadata get for '{key}' failed: {other:?}"),
+        }
+    }
+
+    fn put_all_cloud_metadata_for_test(
+        cloud: &crate::storage::cloud::CloudStorage,
+        db_path: &Path,
+    ) {
+        for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+            let local_path = db_path.join(file_name);
+            if !local_path.exists() {
+                continue;
+            }
+            let data = std::fs::read(&local_path).expect("read local metadata");
+            put_cloud_metadata_for_test(cloud, file_name, data);
+        }
+    }
+
+    fn delete_cloud_metadata_for_test(
+        cloud: &crate::storage::cloud::CloudStorage,
+        file_name: &str,
+    ) {
+        let key = crate::storage::cloud::cloud_metadata_key(file_name);
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_delete(key.clone(), tx);
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(crate::storage::cloud::CloudEvent::DeleteComplete {
+                result: crate::storage::cloud::CloudOutcome::Ok(()),
+                ..
+            }) => {}
+            other => panic!("metadata delete for '{key}' failed: {other:?}"),
+        }
+    }
+
+    struct AdvanceManifestBeforeHeadBackend {
+        inner: crate::storage::cloud::MockCloudBackend,
+        advanced_manifest: Vec<u8>,
+        advanced: AtomicBool,
+    }
+
+    impl AdvanceManifestBeforeHeadBackend {
+        fn new(advanced_manifest: Vec<u8>) -> Self {
+            Self {
+                inner: crate::storage::cloud::MockCloudBackend::new(),
+                advanced_manifest,
+                advanced: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl crate::storage::cloud::CloudBackend for AdvanceManifestBeforeHeadBackend {
+        fn submit_put(
+            &self,
+            key: String,
+            data: Vec<u8>,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            self.inner.submit_put(key, data, headers, callback);
+        }
+
+        fn submit_get(&self, key: String, callback: crate::storage::cloud::CloudCallback) {
+            self.inner.submit_get(key, callback);
+        }
+
+        fn submit_get_range(
+            &self,
+            key: String,
+            start: u64,
+            end: Option<u64>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            self.inner.submit_get_range(key, start, end, callback);
+        }
+
+        fn submit_delete(
+            &self,
+            key: String,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            self.inner.submit_delete(key, headers, callback);
+        }
+
+        fn submit_list(&self, prefix: String, callback: crate::storage::cloud::CloudCallback) {
+            self.inner.submit_list(prefix, callback);
+        }
+
+        fn submit_head(&self, key: String, callback: crate::storage::cloud::CloudCallback) {
+            if key.ends_with("metadata/manifest.json")
+                && !self.advanced.swap(true, Ordering::SeqCst)
+            {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.inner
+                    .submit_put(key.clone(), self.advanced_manifest.clone(), vec![], tx);
+                match rx.recv_timeout(Duration::from_secs(1)) {
+                    Ok(crate::storage::cloud::CloudEvent::PutComplete {
+                        result: crate::storage::cloud::CloudOutcome::Ok(()),
+                        ..
+                    }) => {}
+                    other => panic!("advance remote manifest before HEAD failed: {other:?}"),
+                }
+            }
+            self.inner.submit_head(key, callback);
+        }
+    }
+
+    #[test]
+    fn should_not_overwrite_newer_remote_manifest_metadata_when_mirroring(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        el.state.manifest.last_persisted_sequence = 10;
+        crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+
+        let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+            metadata_backend,
+            "metadata-test".to_string(),
+        ));
+        let remote_manifest = crate::metadata::Manifest {
+            last_persisted_sequence: 11,
+            ..Default::default()
+        };
+        put_cloud_metadata_for_test(
+            &metadata_storage,
+            "manifest.json",
+            serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
+        );
+        el.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+
+        let error = el
+            .mirror_metadata_to_authoritative_cloud()
+            .expect_err("newer remote manifest metadata must reject stale local mirror");
+
+        assert!(
+            error.to_string().contains("newer")
+                || error.to_string().contains("ahead")
+                || error.to_string().contains("stale"),
+            "unexpected stale metadata mirror error: {error}"
+        );
+        let retained: crate::metadata::Manifest = serde_json::from_slice(
+            &get_cloud_metadata_for_test(&metadata_storage, "manifest.json"),
+        )
+        .expect("parse retained remote manifest");
+        assert_eq!(
+            retained.last_persisted_sequence, 11,
+            "stale metadata mirror must not overwrite newer remote manifest"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        el.state.manifest.last_persisted_sequence = 30;
+        crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+
+        let advanced_manifest = crate::metadata::Manifest {
+            last_persisted_sequence: 31,
+            ..Default::default()
+        };
+        let metadata_backend = Arc::new(AdvanceManifestBeforeHeadBackend::new(
+            serde_json::to_vec_pretty(&advanced_manifest).expect("serialize advanced manifest"),
+        ));
+        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+            metadata_backend,
+            "metadata-race".to_string(),
+        ));
+        let initial_manifest = crate::metadata::Manifest {
+            last_persisted_sequence: 30,
+            ..Default::default()
+        };
+        put_cloud_metadata_for_test(
+            &metadata_storage,
+            "manifest.json",
+            serde_json::to_vec_pretty(&initial_manifest).expect("serialize initial manifest"),
+        );
+        el.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+
+        let error = el
+            .mirror_metadata_to_authoritative_cloud()
+            .expect_err("manifest advancing after preflight must reject stale metadata mirror");
+
+        assert!(
+            error.to_string().contains("ahead") || error.to_string().contains("stale"),
+            "unexpected metadata mirror race error: {error}"
+        );
+        let retained: crate::metadata::Manifest = serde_json::from_slice(
+            &get_cloud_metadata_for_test(&metadata_storage, "manifest.json"),
+        )
+        .expect("parse retained race manifest");
+        assert_eq!(
+            retained.last_persisted_sequence, 31,
+            "metadata mirror must not overwrite a manifest that advanced after preflight"
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -346,6 +1015,650 @@ mod tests {
     }
 
     #[test]
+    fn should_not_prune_remote_wal_when_manifest_sst_is_missing_from_cloud(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        add_manifest_sst_for_test(&mut el, "missing.sst", max_sequence);
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL must be retained when a manifest-referenced cloud SST is missing"
+        );
+        assert!(
+            el.cloud_acked_wal_segments.contains_key(&segment_id),
+            "retained WAL should remain eligible for a future conservative retry"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_prune_remote_wal_when_manifest_sst_is_corrupt_in_cloud(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        let sst_name = "corrupt.sst";
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        add_manifest_sst_for_test(&mut el, sst_name, max_sequence);
+        write_test_file(remote_sst_path_for_test(&el, sst_name), b"not a valid sst");
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL must be retained when a manifest-referenced cloud SST is unreadable"
+        );
+        assert!(
+            el.cloud_acked_wal_segments.contains_key(&segment_id),
+            "retained WAL should remain eligible for a future conservative retry"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_prune_remote_wal_when_cloud_metadata_is_missing() -> crate::common::MidgeResult<()>
+    {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+        let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        el.cloud_metadata_storage = Some(Arc::new(crate::storage::cloud::CloudStorage::new(
+            metadata_backend,
+            "metadata-test".to_string(),
+        )));
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL must be retained when committed cloud metadata is missing"
+        );
+        assert!(
+            el.cloud_acked_wal_segments.contains_key(&segment_id),
+            "retained WAL should remain eligible for a future conservative retry"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_prune_remote_wal_when_cloud_metadata_is_stale() -> crate::common::MidgeResult<()>
+    {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+
+        let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+            metadata_backend,
+            "metadata-test".to_string(),
+        ));
+        let format_bytes =
+            std::fs::read(el.state.db_path.join("FORMAT")).expect("read local FORMAT");
+        put_cloud_metadata_for_test(&metadata_storage, "FORMAT", format_bytes);
+        put_cloud_metadata_for_test(&metadata_storage, "manifest.json", b"{}".to_vec());
+        el.cloud_metadata_storage = Some(metadata_storage);
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL must be retained when cloud metadata does not match the committed manifest"
+        );
+        assert!(
+            el.cloud_acked_wal_segments.contains_key(&segment_id),
+            "retained WAL should remain eligible for a future conservative retry"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_prune_remote_wal_when_segment_is_not_cloud_durable(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence - 1;
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL must be retained until the cloud durable frontier covers its max sequence"
+        );
+        assert!(
+            el.cloud_acked_wal_segments.contains_key(&segment_id),
+            "retained WAL should remain eligible for a future conservative retry"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_prune_remote_wal_when_segment_max_sequence_exceeds_manifest_coverage(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence;
+        el.state.manifest.last_persisted_sequence = max_sequence - 1;
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL must be retained when its max sequence exceeds manifest coverage"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_prune_remote_wal_when_segment_max_sequence_equals_manifest_coverage(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence;
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            !remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL may be pruned when cloud durability and manifest coverage both include its max sequence"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_clear_prune_inflight_and_retry_after_worker_guard_failure(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        let sst_name = "guard-retry.sst";
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence;
+        let sst_bytes = add_valid_manifest_sst_for_test(&mut el, sst_name, max_sequence);
+        let storage = el.hybrid_storage.as_ref().expect("hybrid storage").clone();
+        storage
+            .verify_manifest_cloud_objects(&el.state.manifest)
+            .expect("initial manifest validation");
+
+        el.cloud_wal_prune_inflight.insert(segment_id);
+        std::fs::remove_file(remote_sst_path_for_test(&el, sst_name))
+            .expect("delete remote SST after initial validation");
+        storage
+            .prune_cloud_wal_segment(
+                segment_id,
+                crate::storage::hybrid::backend::CloudWalPruneGuard::new(
+                    el.state.manifest.clone(),
+                    None,
+                ),
+            )
+            .expect("schedule guarded prune");
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            el.cloud_wal_prune_inflight.is_empty(),
+            "worker-side guard failure must clear prune inflight state"
+        );
+        assert!(
+            el.cloud_acked_wal_segments.contains_key(&segment_id),
+            "failed guarded prune must keep the WAL eligible for retry"
+        );
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "failed guarded prune must retain the remote WAL"
+        );
+
+        write_test_file(remote_sst_path_for_test(&el, sst_name), &sst_bytes);
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            !remote_wal_path_for_test(&el, segment_id).exists(),
+            "restored manifest SST should allow a later guarded prune"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_ignore_listing_only_ssts_when_deciding_remote_wal_cleanup(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence;
+        el.state.manifest.last_persisted_sequence = 0;
+        write_test_file(
+            remote_sst_path_for_test(&el, "uploaded-but-uncommitted.sst"),
+            b"listing-only object",
+        );
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "uploaded but uncommitted SST objects must not establish WAL cleanup coverage"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_keep_local_wal_when_remote_wal_readback_fails_after_cloud_ack(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let local_wal = el
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
+        write_test_file(local_wal.clone(), b"local wal still needed");
+
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id,
+            max_sequence: 1,
+        });
+
+        assert!(
+            local_wal.exists(),
+            "local WAL must be retained when the remote WAL cannot be read back after CloudAck"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_treat_unproven_cloud_ack_as_failure_without_local_wal_removal(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let request_id = 501u64;
+        let (seq, deferred) = el.wal_actor.append(
+            &mut el.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id,
+                cf_id: 0,
+                key: Bytes::from_static(b"unproven-ack"),
+                value: Some(Bytes::from_static(b"value")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        assert!(deferred, "CloudAsync append should wait for CloudAck");
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id,
+                sequence: seq,
+            });
+
+        let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+        let local_wal = el
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
+        assert!(
+            local_wal.exists(),
+            "sealed local WAL should exist before ack"
+        );
+
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id,
+            max_sequence,
+        });
+
+        assert!(
+            local_wal.exists(),
+            "local WAL must be retained when CloudAck has no prior remote readback proof"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_advance_cloud_durability_across_unacked_segment_gap(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+
+        let first_request = 601u64;
+        let (first_seq, first_deferred) = el.wal_actor.append(
+            &mut el.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: first_request,
+                cf_id: 0,
+                key: Bytes::from_static(b"gap-first"),
+                value: Some(Bytes::from_static(b"value-1")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        assert!(first_deferred, "CloudAsync first append should defer");
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id: first_request,
+                sequence: first_seq,
+            });
+        let (first_segment, first_max_sequence) = seal_segment_for_test(&mut el)?;
+
+        let second_request = 602u64;
+        let (second_seq, second_deferred) = el.wal_actor.append(
+            &mut el.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: second_request,
+                cf_id: 0,
+                key: Bytes::from_static(b"gap-second"),
+                value: Some(Bytes::from_static(b"value-2")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        assert!(second_deferred, "CloudAsync second append should defer");
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id: second_request,
+                sequence: second_seq,
+            });
+        let (second_segment, second_max_sequence) = seal_segment_for_test(&mut el)?;
+        assert!(second_segment > first_segment);
+        let second_local_wal = el
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(second_segment));
+
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id: second_segment,
+            max_sequence: second_max_sequence,
+        });
+
+        assert_eq!(
+            el.state.wal.cloud_durable_seq, 0,
+            "cloud durable frontier must not jump across an unacked segment"
+        );
+        assert_eq!(
+            el.wal_actor.pending_cloud_writes_len(),
+            2,
+            "pending CloudAsync writes must not become visible until the gap is closed"
+        );
+        assert!(
+            second_local_wal.exists(),
+            "local WAL for an out-of-order ack must remain until earlier segments are durable"
+        );
+
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id: first_segment,
+            max_sequence: first_max_sequence,
+        });
+
+        assert_eq!(
+            el.state.wal.cloud_durable_seq, second_max_sequence,
+            "frontier should advance through the contiguous acked segment range once the gap closes"
+        );
+        assert_eq!(
+            el.wal_actor.pending_cloud_writes_len(),
+            0,
+            "pending CloudAsync writes should drain after contiguous durability is proven"
+        );
+        assert!(
+            !second_local_wal.exists(),
+            "local WAL can be removed after the contiguous cloud durable frontier covers it"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common::MidgeResult<()>
+    {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+
+        let first_request = 611u64;
+        let (first_seq, first_deferred) = el.wal_actor.append(
+            &mut el.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: first_request,
+                cf_id: 0,
+                key: Bytes::from_static(b"fail-gap-first"),
+                value: Some(Bytes::from_static(b"value-1")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        assert!(first_deferred, "CloudAsync first append should defer");
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id: first_request,
+                sequence: first_seq,
+            });
+        let (first_segment, _) = seal_segment_for_test(&mut el)?;
+
+        let second_request = 612u64;
+        let (second_seq, second_deferred) = el.wal_actor.append(
+            &mut el.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: second_request,
+                cf_id: 0,
+                key: Bytes::from_static(b"fail-gap-second"),
+                value: Some(Bytes::from_static(b"value-2")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        assert!(second_deferred, "CloudAsync second append should defer");
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id: second_request,
+                sequence: second_seq,
+            });
+        let (second_segment, second_max_sequence) = seal_segment_for_test(&mut el)?;
+
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id: second_segment,
+            max_sequence: second_max_sequence,
+        });
+        assert!(
+            el.cloud_acked_wal_segments.contains_key(&second_segment),
+            "later ack should be buffered while an earlier segment is unacked"
+        );
+
+        el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+            segment_id: first_segment,
+            error: "injected upload failure".to_string(),
+        });
+
+        assert_eq!(
+            el.state.wal.cloud_durable_seq, 0,
+            "failure of the earlier segment must not let a buffered later ack advance durability"
+        );
+        assert!(
+            !el.cloud_acked_wal_segments.contains_key(&second_segment),
+            "later buffered ack bookkeeping must be discarded after an earlier gap fails"
+        );
+        assert_eq!(
+            el.wal_actor.pending_cloud_writes_len(),
+            0,
+            "pending CloudAsync writes should be cleared after cloud upload failure"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_keep_local_wal_when_cached_remote_wal_proof_becomes_stale_before_cloud_ack(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let request_id = 502u64;
+        let (seq, deferred) = el.wal_actor.append(
+            &mut el.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id,
+                cf_id: 0,
+                key: Bytes::from_static(b"stale-proof-ack"),
+                value: Some(Bytes::from_static(b"value")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        assert!(deferred, "CloudAsync append should wait for CloudAck");
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id,
+                sequence: seq,
+            });
+
+        let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+        let local_wal = el
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
+        el.hybrid_storage
+            .as_ref()
+            .expect("hybrid storage")
+            .verify_remote_wal_segment(segment_id, max_sequence)
+            .expect("establish remote WAL proof");
+        std::fs::remove_file(remote_wal_path_for_test(&el, segment_id))
+            .expect("delete remote WAL after proof");
+
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id,
+            max_sequence,
+        });
+
+        assert!(
+            local_wal.exists(),
+            "local WAL must be retained when cached remote proof becomes stale before CloudAck"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_reread_verified_cloud_metadata_on_repeated_wal_cleanup_check(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+
+        let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+            metadata_backend.clone(),
+            "metadata-test".to_string(),
+        ));
+        put_all_cloud_metadata_for_test(&metadata_storage, &el.state.db_path);
+        el.cloud_metadata_storage = Some(metadata_storage);
+
+        metadata_backend.clear_history();
+        el.verify_cloud_metadata_for_wal_cleanup()
+            .expect("first cloud metadata validation");
+        let first_downloads = metadata_backend.get_downloads();
+        assert!(
+            !first_downloads.is_empty(),
+            "first validation should read cloud metadata"
+        );
+
+        el.verify_cloud_metadata_for_wal_cleanup()
+            .expect("second cloud metadata validation");
+
+        assert_eq!(
+            metadata_backend.get_downloads(),
+            first_downloads,
+            "unchanged metadata proof should avoid repeated cloud metadata reads"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_cached_cloud_metadata_proof_when_remote_metadata_is_deleted(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+
+        let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+            metadata_backend,
+            "metadata-test".to_string(),
+        ));
+        put_all_cloud_metadata_for_test(&metadata_storage, &el.state.db_path);
+        el.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+
+        el.verify_cloud_metadata_for_wal_cleanup()
+            .expect("initial cloud metadata validation");
+        delete_cloud_metadata_for_test(&metadata_storage, "manifest.json");
+
+        let error = el
+            .verify_cloud_metadata_for_wal_cleanup()
+            .expect_err("deleted metadata must invalidate cached cleanup proof");
+        assert!(
+            error.contains("changed since validation") || error.contains("unreadable"),
+            "unexpected stale metadata proof error: {error}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn should_retry_auto_flush_when_backpressure_releases() -> crate::common::MidgeResult<()> {
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
@@ -380,15 +1693,9 @@ mod tests {
 
     #[test]
     fn should_cloud_async_ack_confirm_idempotent_request() -> crate::common::MidgeResult<()> {
-        // Arrange: create state and event loop with CloudAsync policy
-        let tmp = tempfile::tempdir().expect("create tmpdir");
-        let state = RuntimeState::new(tmp.path().to_path_buf(), false);
-        let router = Arc::new(ResponseRouter::new());
-        let config = crate::runtime::RuntimeConfig {
-            wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
-            ..Default::default()
-        };
-        let mut el = EventLoop::new(state, false, router, config, None)?;
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
 
         // Act
 
@@ -446,15 +1753,9 @@ mod tests {
     #[test]
     fn should_cloud_async_retry_after_ack_return_same_sequence_without_queueing(
     ) -> crate::common::MidgeResult<()> {
-        // Arrange: create state and event loop with CloudAsync policy
-        let tmp = tempfile::tempdir().expect("create tmpdir");
-        let state = RuntimeState::new(tmp.path().to_path_buf(), false);
-        let router = Arc::new(ResponseRouter::new());
-        let config = crate::runtime::RuntimeConfig {
-            wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
-            ..Default::default()
-        };
-        let mut el = EventLoop::new(state, false, router, config, None)?;
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
 
         // Act
 
@@ -807,6 +2108,12 @@ mod tests {
             .durability
             .inflight_segment_for_sequence(last_sequence)
             .expect("inflight segment for strict retry");
+        copy_local_segment_to_remote_wal_for_test(&el, seg_id);
+        el.hybrid_storage
+            .as_ref()
+            .expect("hybrid storage")
+            .verify_remote_wal_segment(seg_id, last_sequence)
+            .expect("verify retry remote WAL for test CloudAck");
         el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
             segment_id: seg_id,
             max_sequence: last_sequence,

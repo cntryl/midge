@@ -40,6 +40,199 @@ fn should_recover_cloud_strict_write_from_authoritative_remote_wal_after_local_c
 }
 
 #[test]
+fn should_remove_local_wal_segment_after_cloud_durable_upload() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let opts = opts_for_mode("cloud");
+    let db_path = cloud_db_path(&opts);
+    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+
+    // Act
+    put_default(
+        &engine,
+        b"cloud-pruned-local-wal",
+        b"remote-wal-value",
+        WriteOptions::cloud_strict(),
+    );
+    let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    let local_segments = list_files_with_extension(&db_path.join("wal"), "wal");
+    let remote_segments =
+        list_files_with_extension(&db_path.join("cloud_store").join("wal"), "wal");
+    drop(engine);
+    reset_dir(&db_path.join("wal"));
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
+
+    // Assert
+    assert!(
+        metrics.wal_cloud_durable_seq >= metrics.current_sequence,
+        "cloud-strict write should advance the cloud durability frontier"
+    );
+    assert!(
+        local_segments.is_empty(),
+        "cloud-durable local WAL segments should be removed, found: {local_segments:?}"
+    );
+    assert!(
+        !remote_segments.is_empty(),
+        "authoritative remote WAL segment should remain available"
+    );
+    assert_eq!(
+        get_default(&reopened, b"cloud-pruned-local-wal"),
+        Some(Bytes::from_static(b"remote-wal-value"))
+    );
+}
+
+#[test]
+fn should_prune_remote_wal_segment_after_cloud_sst_covers_it() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let opts = opts_for_mode("cloud");
+    let db_path = cloud_db_path(&opts);
+    let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+
+    put_default(
+        &engine,
+        b"remote-pruned-after-flush",
+        b"covered-by-sst",
+        WriteOptions::cloud_strict(),
+    );
+    assert!(
+        !list_files_with_extension(&remote_wal_dir, "wal").is_empty(),
+        "cloud-strict write should create an authoritative remote WAL segment"
+    );
+    let default_cf = default_cf(&engine);
+
+    // Act
+    engine.flush_cf(&default_cf).expect("flush default cf");
+    let remote_segments = wait_for_remote_wal_count(&remote_wal_dir, 0);
+    drop(engine);
+    reset_dir(&db_path.join("wal"));
+    reset_dir(&db_path.join("sst"));
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
+
+    // Assert
+    assert!(
+        remote_segments.is_empty(),
+        "remote WAL should be pruned after cloud SST coverage"
+    );
+    assert_eq!(
+        get_default(&reopened, b"remote-pruned-after-flush"),
+        Some(Bytes::from_static(b"covered-by-sst"))
+    );
+    assert!(
+        !list_files_with_extension(&db_path.join("sst"), "sst").is_empty(),
+        "reopen should restore the covered value from cloud SST state"
+    );
+}
+
+#[test]
+fn should_keep_remote_wal_segment_when_unflushed_column_family_still_needs_it() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let opts = opts_for_mode("cloud");
+    let db_path = cloud_db_path(&opts);
+    let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let default_cf = default_cf(&engine);
+    let other_cf = engine
+        .create_column_family("other")
+        .expect("create other cf");
+
+    put_cf(
+        &engine,
+        &default_cf,
+        b"default-buffered",
+        b"default-value",
+        WriteOptions::buffered(),
+    );
+    put_cf(
+        &engine,
+        &other_cf,
+        b"other-buffered",
+        b"other-value",
+        WriteOptions::buffered(),
+    );
+    put_cf(
+        &engine,
+        &default_cf,
+        b"default-strict",
+        b"default-strict-value",
+        WriteOptions::cloud_strict(),
+    );
+    assert!(
+        !wait_for_remote_wal_count_at_least(&remote_wal_dir, 1).is_empty(),
+        "shared remote WAL segment should exist before partial flush"
+    );
+
+    // Act
+    engine.flush_cf(&default_cf).expect("flush default cf");
+    wait_for_no_remote_wal_prune(&remote_wal_dir);
+    drop(engine);
+    reset_dir(&db_path.join("wal"));
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
+
+    // Assert
+    assert_eq!(
+        get_cf(&reopened, "other", b"other-buffered"),
+        Some(Bytes::from_static(b"other-value")),
+        "unflushed column family data should still recover from retained remote WAL"
+    );
+}
+
+#[test]
+fn should_recover_after_partial_remote_wal_cleanup_and_local_cache_loss() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let opts = opts_for_mode("cloud");
+    let db_path = cloud_db_path(&opts);
+    let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let default_cf = default_cf(&engine);
+
+    put_default(
+        &engine,
+        b"covered-before-partial-cleanup",
+        b"covered-value",
+        WriteOptions::cloud_strict(),
+    );
+    assert!(
+        !wait_for_remote_wal_count_at_least(&remote_wal_dir, 1).is_empty(),
+        "first strict write should create remote WAL before flush"
+    );
+    engine.flush_cf(&default_cf).expect("flush covered value");
+    wait_for_remote_wal_count(&remote_wal_dir, 0);
+
+    // Act: a later strict write remains WAL-backed after the earlier segment was pruned.
+    put_default(
+        &engine,
+        b"retained-after-partial-cleanup",
+        b"retained-value",
+        WriteOptions::cloud_strict(),
+    );
+    let retained_segments = wait_for_remote_wal_count_at_least(&remote_wal_dir, 1);
+    drop(engine);
+    reset_dir(&db_path.join("wal"));
+    reset_dir(&db_path.join("sst"));
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
+
+    // Assert
+    assert_eq!(
+        get_default(&reopened, b"covered-before-partial-cleanup"),
+        Some(Bytes::from_static(b"covered-value")),
+        "covered data should recover from cloud SST after its remote WAL was pruned"
+    );
+    assert_eq!(
+        get_default(&reopened, b"retained-after-partial-cleanup"),
+        Some(Bytes::from_static(b"retained-value")),
+        "later unflushed data should recover from the retained remote WAL"
+    );
+    assert!(
+        !retained_segments.is_empty(),
+        "test must prove at least one later remote WAL segment survived partial cleanup"
+    );
+}
+
+#[test]
 fn should_keep_sync_write_local_only_when_cloud_wal_upload_fails() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
@@ -316,20 +509,45 @@ fn default_cf(engine: &Engine) -> cntryl_midge::ColumnFamilyHandle {
 
 fn put_default(engine: &Engine, key: &[u8], value: &[u8], opts: WriteOptions) {
     let default_cf = default_cf(engine);
+    put_cf(engine, &default_cf, key, value, opts);
+}
+
+fn put_cf(
+    engine: &Engine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    key: &[u8],
+    value: &[u8],
+    opts: WriteOptions,
+) {
     let mut tx = engine
-        .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
         .expect("begin write tx");
     tx.put(key.to_vec(), value.to_vec(), None)
-        .expect("put default value");
-    tx.commit(opts).expect("commit default value");
+        .expect("put value");
+    tx.commit(opts).expect("commit value");
 }
 
 fn get_default(engine: &Engine, key: &[u8]) -> Option<Bytes> {
     let default_cf = default_cf(engine);
+    get_cf_by_handle(engine, &default_cf, key)
+}
+
+fn get_cf(engine: &Engine, name: &str, key: &[u8]) -> Option<Bytes> {
+    let cf = engine
+        .get_column_family(name)
+        .unwrap_or_else(|| panic!("missing column family: {name}"));
+    get_cf_by_handle(engine, &cf, key)
+}
+
+fn get_cf_by_handle(
+    engine: &Engine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    key: &[u8],
+) -> Option<Bytes> {
     let tx = engine
-        .begin_tx(default_cf.id(), TransactionMode::ReadOnly)
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
         .expect("begin read tx");
-    tx.get(key).expect("get default value")
+    tx.get(key).expect("get value")
 }
 
 fn wait_for_cloud_gap(engine: &Engine, min_sequence: u64) -> cntryl_midge::RuntimeMetricsSnapshot {
@@ -372,6 +590,48 @@ fn list_files(dir: &Path) -> Vec<PathBuf> {
         .unwrap_or_else(|error| panic!("read_dir({}): {error}", dir.display()))
         .map(|entry| entry.expect("dir entry").path())
         .collect()
+}
+
+fn wait_for_remote_wal_count(dir: &Path, expected: usize) -> Vec<PathBuf> {
+    wait_for_remote_wal_condition(dir, |files| files.len() == expected)
+}
+
+fn wait_for_remote_wal_count_at_least(dir: &Path, expected: usize) -> Vec<PathBuf> {
+    wait_for_remote_wal_condition(dir, |files| files.len() >= expected)
+}
+
+fn wait_for_no_remote_wal_prune(dir: &Path) {
+    let deadline = Instant::now() + Duration::from_millis(300);
+    loop {
+        let files = list_files_with_extension(dir, "wal");
+        assert!(
+            !files.is_empty(),
+            "remote WAL segment was pruned while another column family still needed it"
+        );
+        if Instant::now() >= deadline {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn wait_for_remote_wal_condition<F>(dir: &Path, predicate: F) -> Vec<PathBuf>
+where
+    F: Fn(&[PathBuf]) -> bool,
+{
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let files = list_files_with_extension(dir, "wal");
+        if predicate(&files) {
+            return files;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for remote WAL condition; found: {files:?}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn reset_dir(dir: &Path) {

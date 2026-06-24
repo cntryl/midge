@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 /// which performs the actual merge and write pipeline.
 ///
 /// **Important**: `output_dir` must be the CF-specific directory (e.g., `cf_00/`),
-/// not the DB root. Output filename is sequence-only: `{seq:08}.sst`.
+/// not the DB root. Output filenames use canonical SST names:
+/// `{cf_id:06}_{level:02}_{sequence:020}.sst`.
 pub fn execute_compaction(
     plan: &CompactionPlan,
     sst_factory: &dyn crate::sst::SstFactory,
@@ -68,15 +69,14 @@ pub fn execute_compaction(
 /// Construct the output filename for a completed compaction.
 /// This is stable and predictable for crash recovery and manifest logging.
 ///
-/// Follows LSM-tree industry standard: CF → directory, sequence → filename.
-/// The directory is assumed to already be CF-specific (e.g., `cf_00/`).
-fn output_filename(plan: &CompactionPlan, cf_dir: &Path) -> PathBuf {
-    // File naming rules (aligned with RocksDB, TiKV, Pebble):
-    // - filename encodes only ordering information (sequence)
-    // - zero-padded to maintain lexicographic sort
-    // - CF identity is encoded in the directory structure, not the filename
-    let name = format!("{:08}.sst", plan.output_seq);
-    cf_dir.join(name)
+/// File names encode CF, target level, and creation sequence with fixed-width
+/// numeric fields so plain directory/object-store listings sort predictably.
+fn output_filename(plan: &CompactionPlan, output_dir: &Path) -> PathBuf {
+    output_dir.join(crate::sst::file_name(
+        plan.cf_id,
+        plan.target_level,
+        plan.output_seq,
+    ))
 }
 
 #[cfg(test)]
@@ -98,8 +98,24 @@ mod tests {
         // Act
         let filename = output_filename(&plan, cf_dir);
 
-        // Assert: should be zero-padded to 8 digits
-        assert_eq!(filename, PathBuf::from("cf_00/00000042.sst"));
+        // Assert: should be fixed-width and lex-sortable
+        assert_eq!(
+            filename,
+            PathBuf::from("cf_00/000000_01_00000000000000000042.sst")
+        );
+    }
+
+    #[test]
+    fn should_format_compaction_output_with_canonical_lex_sortable_sst_name() {
+        let plan = CompactionPlan::new(7, 0, 2).with_output_seq(42);
+        let output_dir = Path::new("sst");
+
+        let filename = output_filename(&plan, output_dir);
+
+        assert_eq!(
+            filename,
+            PathBuf::from("sst/000007_02_00000000000000000042.sst")
+        );
     }
 
     #[test]
@@ -112,7 +128,10 @@ mod tests {
         let filename = output_filename(&plan, cf_dir);
 
         // Assert: directory structure preserved
-        assert_eq!(filename, PathBuf::from("data/cf_00/00000001.sst"));
+        assert_eq!(
+            filename,
+            PathBuf::from("data/cf_00/000000_01_00000000000000000001.sst")
+        );
     }
 
     #[test]
@@ -125,7 +144,10 @@ mod tests {
         let filename = output_filename(&plan, cf_dir);
 
         // Assert: large numbers formatted correctly
-        assert_eq!(filename, PathBuf::from("cf_01/999999999.sst"));
+        assert_eq!(
+            filename,
+            PathBuf::from("cf_01/000000_01_00000000000999999999.sst")
+        );
     }
 
     #[test]
@@ -161,7 +183,11 @@ mod tests {
         ];
         filenames.sort();
 
-        let expected = vec!["00000001.sst", "00000010.sst", "00000100.sst"];
+        let expected = vec![
+            "000000_01_00000000000000000001.sst",
+            "000000_01_00000000000000000010.sst",
+            "000000_01_00000000000000000100.sst",
+        ];
         assert_eq!(filenames, expected);
     }
 
@@ -188,7 +214,10 @@ mod tests {
         let filename = output_filename(&plan, cf_dir);
 
         // Assert
-        assert_eq!(filename, PathBuf::from("cf_00/00000000.sst"));
+        assert_eq!(
+            filename,
+            PathBuf::from("cf_00/000000_01_00000000000000000000.sst")
+        );
     }
 
     // ============================================================================
@@ -358,9 +387,10 @@ mod tests {
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
 
         // Assert
-        assert_eq!(output_names, vec!["00000042.sst".to_string()]);
+        let output_name = crate::sst::file_name(0, 1, 42);
+        assert_eq!(output_names, vec![output_name.clone()]);
 
-        let reader = factory.open(std::path::Path::new("00000042.sst"))?;
+        let reader = factory.open(std::path::Path::new(&output_name))?;
         let states = reader.scan_range_state(None, None)?;
         assert!(
             states.is_empty(),
@@ -396,9 +426,10 @@ mod tests {
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
 
         // Assert
-        assert_eq!(output_names, vec!["00000043.sst".to_string()]);
+        let output_name = crate::sst::file_name(0, 1, 43);
+        assert_eq!(output_names, vec![output_name.clone()]);
 
-        let reader = factory.open(std::path::Path::new("00000043.sst"))?;
+        let reader = factory.open(std::path::Path::new(&output_name))?;
         match reader.get_state(b"alpha")? {
             crate::sst::types::KeyState::Tombstone(seq) => assert_eq!(seq, 11),
             other => panic!("expected preserved tombstone, got {other:?}"),

@@ -23,14 +23,16 @@
 //! - Events are received asynchronously but callback processing is synchronous
 //! - No futures in the engine: all async work happens in `CloudExecutor` embedded tokio runtime
 
+#[cfg(feature = "cloud-common")]
 pub mod executor;
 
-use super::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
+use super::{StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome};
 use crate::common::MidgeError;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(feature = "cloud-common")]
 pub use executor::{CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 
 /// Cloud operation outcome – cloneable wrapper around Result
@@ -527,7 +529,7 @@ impl CloudStorage {
     }
 }
 
-fn is_not_found_error(error: &str) -> bool {
+pub(crate) fn is_not_found_error(error: &str) -> bool {
     let lowered = error.to_ascii_lowercase();
     lowered.contains("not found")
         || lowered.contains("notfound")
@@ -569,9 +571,52 @@ impl StorageBackend for CloudStorage {
         }
     }
 
+    fn submit_write_with_headers(
+        &self,
+        key: String,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.submit_put(key.clone(), data, headers, tx);
+        if let Ok(CloudEvent::PutComplete { key, result }) = rx.recv() {
+            let outcome = match result {
+                CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
+                CloudOutcome::Err(err) => StorageOutcome::Err(err),
+            };
+            let event = StorageEvent::WriteComplete {
+                key,
+                result: outcome,
+            };
+            let _ = callback.send(event);
+        }
+    }
+
     fn submit_delete(&self, key: String, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_delete(self, key.clone(), tx);
+        if let Ok(CloudEvent::DeleteComplete { key, result }) = rx.recv() {
+            let outcome = match result {
+                CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
+                CloudOutcome::Err(err) => StorageOutcome::Err(err),
+            };
+            let event = StorageEvent::DeleteComplete {
+                key,
+                result: outcome,
+            };
+            let _ = callback.send(event);
+        }
+    }
+
+    fn submit_delete_with_headers(
+        &self,
+        key: String,
+        headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        CloudStorage::submit_delete_with_headers(self, key.clone(), headers, tx);
         if let Ok(CloudEvent::DeleteComplete { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
@@ -603,6 +648,36 @@ impl StorageBackend for CloudStorage {
             };
             let _ = callback.send(event);
         }
+    }
+
+    fn submit_head(&self, key: String, callback: StorageCallback) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        CloudStorage::submit_head(self, key.clone(), tx);
+        let event = match rx.recv() {
+            Ok(CloudEvent::HeadComplete { key, result }) => {
+                let outcome = match result {
+                    CloudOutcome::Ok(metadata) => StorageOutcome::Ok(StorageObjectMetadata {
+                        size: metadata.size,
+                        etag: metadata.etag,
+                        generation: metadata.generation,
+                    }),
+                    CloudOutcome::Err(err) => StorageOutcome::Err(err),
+                };
+                StorageEvent::HeadComplete {
+                    key,
+                    result: outcome,
+                }
+            }
+            Ok(other) => StorageEvent::HeadComplete {
+                key,
+                result: StorageOutcome::Err(format!("unexpected cloud HEAD response: {other:?}")),
+            },
+            Err(error) => StorageEvent::HeadComplete {
+                key,
+                result: StorageOutcome::Err(format!("cloud HEAD channel closed: {error}")),
+            },
+        };
+        let _ = callback.send(event);
     }
 }
 

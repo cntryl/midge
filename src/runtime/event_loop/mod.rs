@@ -23,7 +23,7 @@ mod read_path;
 mod write_batch;
 
 use crossbeam::channel::{Receiver, TryRecvError};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,6 +35,13 @@ use super::read_snapshot::ReadSnapshot;
 use super::snapshot_cache::{CfSnapshotData, PublishedSnapshot, SnapshotCache};
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MetadataCleanupProof {
+    len: u64,
+    crc32c: u32,
+    remote: crate::storage::StorageObjectMetadata,
+}
 
 /// Main synchronous event loop for the runtime.
 ///
@@ -59,6 +66,9 @@ pub struct EventLoop {
     pub(super) loop_debug: bool,
     pub(super) loop_debug_wakes: u64,
     pub(super) loop_debug_batch_total: u64,
+    pub(super) cloud_acked_wal_segments: BTreeMap<u64, u64>,
+    pub(super) cloud_wal_prune_inflight: HashSet<u64>,
+    pub(super) cloud_metadata_cleanup_proofs: HashMap<String, MetadataCleanupProof>,
 
     // Durability coordination (extracted to reduce EventLoop cognitive load)
     pub(super) durability: DurabilityCoordinator,
@@ -167,6 +177,9 @@ impl EventLoop {
             loop_debug: std::env::var_os("MIDGE_LOOP_DEBUG").is_some(),
             loop_debug_wakes: 0,
             loop_debug_batch_total: 0,
+            cloud_acked_wal_segments: BTreeMap::new(),
+            cloud_wal_prune_inflight: HashSet::new(),
+            cloud_metadata_cleanup_proofs: HashMap::new(),
             durability: DurabilityCoordinator::new(
                 initial_durability_key,
                 is_cloud_async,
@@ -273,12 +286,23 @@ impl EventLoop {
             name: sst_name.to_string(),
             level,
             size_bytes: summary.size_bytes,
+            content_crc32c: Some(crc32c::crc32c(&std::fs::read(&path)?)),
             cf_id,
             smallest_key: Some(summary.smallest_key),
             largest_key: Some(summary.largest_key),
             smallest_seq: Some(summary.smallest_seq),
             largest_seq: Some(summary.largest_seq),
         })
+    }
+
+    fn assign_compaction_output_sequence(
+        &mut self,
+        mut plan: crate::compaction::CompactionPlan,
+    ) -> crate::compaction::CompactionPlan {
+        if plan.output_seq == 0 {
+            plan.output_seq = self.state.next_sequence();
+        }
+        plan
     }
 
     fn mirror_ssts_to_authoritative_cloud(
@@ -298,10 +322,166 @@ impl EventLoop {
         Ok(())
     }
 
+    fn cloud_metadata_get_optional(
+        cloud: &crate::storage::cloud::CloudStorage,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_get(key.to_string(), tx);
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                result: crate::storage::cloud::CloudOutcome::Ok(data),
+                ..
+            }) => Ok(Some(data)),
+            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                result: crate::storage::cloud::CloudOutcome::Err(error),
+                ..
+            }) if crate::storage::cloud::is_not_found_error(&error) => Ok(None),
+            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                result: crate::storage::cloud::CloudOutcome::Err(error),
+                ..
+            }) => Err(format!("cloud metadata get '{key}' failed: {error}")),
+            Ok(other) => Err(format!(
+                "unexpected cloud metadata get response for '{key}': {other:?}"
+            )),
+            Err(error) => Err(format!("cloud metadata get '{key}' timed out: {error}")),
+        }
+    }
+
+    fn cloud_metadata_head_optional(
+        cloud: &crate::storage::cloud::CloudStorage,
+        key: &str,
+    ) -> Result<Option<crate::storage::cloud::ObjectMetadata>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_head(key.to_string(), tx);
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+                result: crate::storage::cloud::CloudOutcome::Ok(metadata),
+                ..
+            }) => Ok(Some(metadata)),
+            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+                result: crate::storage::cloud::CloudOutcome::Err(error),
+                ..
+            }) if crate::storage::cloud::is_not_found_error(&error) => Ok(None),
+            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+                result: crate::storage::cloud::CloudOutcome::Err(error),
+                ..
+            }) => Err(format!("cloud metadata head '{key}' failed: {error}")),
+            Ok(other) => Err(format!(
+                "unexpected cloud metadata head response for '{key}': {other:?}"
+            )),
+            Err(error) => Err(format!("cloud metadata head '{key}' timed out: {error}")),
+        }
+    }
+
+    fn remote_manifest_sequence_from_metadata(
+        file_name: &str,
+        data: &[u8],
+    ) -> Result<Option<u64>, String> {
+        match file_name {
+            "manifest.json" | "manifest.snapshot.json" => {
+                let manifest: crate::metadata::Manifest = serde_json::from_slice(data)
+                    .map_err(|error| format!("cloud metadata '{file_name}' is invalid: {error}"))?;
+                Ok(Some(manifest.last_persisted_sequence))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn ensure_remote_manifest_metadata_not_ahead(
+        &self,
+        cloud: &crate::storage::cloud::CloudStorage,
+    ) -> crate::common::MidgeResult<()> {
+        let local_sequence = self.state.manifest.last_persisted_sequence;
+        for file_name in ["manifest.snapshot.json", "manifest.json"] {
+            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let Some(data) = Self::cloud_metadata_get_optional(cloud, &key)
+                .map_err(crate::common::MidgeError::Internal)?
+            else {
+                continue;
+            };
+            let Some(remote_sequence) =
+                Self::remote_manifest_sequence_from_metadata(file_name, &data)
+                    .map_err(crate::common::MidgeError::Internal)?
+            else {
+                continue;
+            };
+            if remote_sequence > local_sequence {
+                return Err(crate::common::MidgeError::Internal(format!(
+                    "stale cloud metadata mirror rejected: remote {file_name} is ahead of local manifest ({remote_sequence} > {local_sequence})"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn submit_conditional_metadata_put(
+        cloud: &crate::storage::cloud::CloudStorage,
+        file_name: &str,
+        key: String,
+        data: Vec<u8>,
+        local_manifest_sequence: u64,
+    ) -> crate::common::MidgeResult<()> {
+        let headers = match Self::cloud_metadata_head_optional(cloud, &key)
+            .map_err(crate::common::MidgeError::Internal)?
+        {
+            Some(metadata) => {
+                let etag = metadata.etag.trim().to_string();
+                if etag.is_empty() {
+                    return Err(crate::common::MidgeError::Internal(format!(
+                        "cloud metadata '{key}' cannot be conditionally updated without an etag"
+                    )));
+                }
+                let current = Self::cloud_metadata_get_optional(cloud, &key)
+                    .map_err(crate::common::MidgeError::Internal)?
+                    .ok_or_else(|| {
+                        crate::common::MidgeError::Internal(format!(
+                            "cloud metadata '{key}' disappeared after HEAD precondition"
+                        ))
+                    })?;
+                if let Some(remote_sequence) =
+                    Self::remote_manifest_sequence_from_metadata(file_name, &current)
+                        .map_err(crate::common::MidgeError::Internal)?
+                {
+                    if remote_sequence > local_manifest_sequence {
+                        return Err(crate::common::MidgeError::Internal(format!(
+                            "stale cloud metadata mirror rejected: remote {file_name} is ahead of local manifest ({remote_sequence} > {local_manifest_sequence})"
+                        )));
+                    }
+                }
+                vec![("If-Match".to_string(), etag)]
+            }
+            None => vec![("If-None-Match".to_string(), "*".to_string())],
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_put(key.clone(), data, headers, tx);
+
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(crate::storage::cloud::CloudEvent::PutComplete { result, .. }) => match result {
+                crate::storage::cloud::CloudOutcome::Ok(()) => Ok(()),
+                crate::storage::cloud::CloudOutcome::Err(error) => {
+                    Err(crate::common::MidgeError::Internal(format!(
+                        "cloud metadata mirror failed for '{key}': {error}"
+                    )))
+                }
+            },
+            Ok(other) => Err(crate::common::MidgeError::Internal(format!(
+                "unexpected cloud metadata mirror response for '{key}': {other:?}"
+            ))),
+            Err(error) => Err(crate::common::MidgeError::Internal(format!(
+                "cloud metadata mirror timed out for '{key}': {error}"
+            ))),
+        }
+    }
+
     fn mirror_metadata_to_authoritative_cloud(&self) -> crate::common::MidgeResult<()> {
         let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
             return Ok(());
         };
+
+        self.ensure_remote_manifest_metadata_not_ahead(cloud)?;
+        let local_manifest_sequence = self.state.manifest.last_persisted_sequence;
 
         for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
             let local_path = self.state.db_path.join(file_name);
@@ -311,28 +491,13 @@ impl EventLoop {
 
             let data = std::fs::read(&local_path)?;
             let key = crate::storage::cloud::cloud_metadata_key(file_name);
-            let (tx, rx) = std::sync::mpsc::channel();
-            cloud.submit_put(key.clone(), data, vec![], tx);
-
-            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                Ok(crate::storage::cloud::CloudEvent::PutComplete { result, .. }) => {
-                    if let crate::storage::cloud::CloudOutcome::Err(error) = result {
-                        return Err(crate::common::MidgeError::Internal(format!(
-                            "cloud metadata mirror failed for '{key}': {error}"
-                        )));
-                    }
-                }
-                Ok(other) => {
-                    return Err(crate::common::MidgeError::Internal(format!(
-                        "unexpected cloud metadata mirror response for '{key}': {other:?}"
-                    )));
-                }
-                Err(error) => {
-                    return Err(crate::common::MidgeError::Internal(format!(
-                        "cloud metadata mirror timed out for '{key}': {error}"
-                    )));
-                }
-            }
+            Self::submit_conditional_metadata_put(
+                cloud,
+                file_name,
+                key,
+                data,
+                local_manifest_sequence,
+            )?;
         }
 
         Ok(())
@@ -367,6 +532,7 @@ impl EventLoop {
             return Ok(());
         };
 
+        let mut cloud_manifest_published = false;
         if !self.state.memory_mode {
             self.manifest_actor.add_sst(&mut self.state, file_meta)?;
             self.state.transition_flush_publication_intent(
@@ -381,12 +547,16 @@ impl EventLoop {
                 tracing::warn!(%error, sst_name, "manifest checkpoint after flush failed; journal remains authoritative");
             } else {
                 self.mirror_metadata_after_local_commit("flush manifest publish")?;
+                cloud_manifest_published = true;
             }
             self.state.clear_flush_publication_intent(sst_name)?;
         }
 
         self.flush_actor
             .handle_flush_complete(&mut self.state, cf_id, sst_name, sequence);
+        if cloud_manifest_published {
+            self.prune_cloud_wal_segments_covered_by_manifest();
+        }
         self.publish_snapshot();
         Ok(())
     }
@@ -1283,6 +1453,7 @@ impl EventLoop {
                 }
 
                 if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
+                    let plan = self.assign_compaction_output_sequence(plan);
                     // Schedule compaction to run in background and respond immediately.
                     // The compaction worker will send a `CompactionComplete` message back
                     // when finished which will be handled below.
@@ -1399,6 +1570,7 @@ impl EventLoop {
                 let mut scheduled = 0usize;
                 loop {
                     if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
+                        let plan = self.assign_compaction_output_sequence(plan);
                         let schedule_res = self.compaction_actor.run_compaction(
                             &mut self.state,
                             plan,
@@ -2198,7 +2370,24 @@ pub(super) mod tests {
     use super::*;
     use crate::runtime::{state::RuntimeState, ResponseRouter};
     use crate::sst::Memtable;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+
+    static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_test_db_path(prefix: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "{prefix}_{}_{}_{}",
+            std::process::id(),
+            unique,
+            counter
+        ))
+    }
 
     // Helper to create a minimal runtime state for testing
     pub(in crate::runtime::event_loop) fn create_test_state() -> RuntimeState {
@@ -2222,15 +2411,7 @@ pub(super) mod tests {
     pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
         storage_policy: crate::storage::hybrid::policy::StorageBudgetPolicy,
     ) -> crate::common::MidgeResult<EventLoop> {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let db_path = std::env::temp_dir().join(format!(
-            "midge_event_loop_cloud_{}_{}",
-            std::process::id(),
-            unique
-        ));
+        let db_path = unique_test_db_path("midge_event_loop_cloud");
         std::fs::create_dir_all(&db_path).expect("create temp cloud event loop dir");
 
         let state = RuntimeState::new(db_path.clone(), false);
@@ -2258,15 +2439,7 @@ pub(super) mod tests {
 
     pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
     ) -> crate::common::MidgeResult<EventLoop> {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let db_path = std::env::temp_dir().join(format!(
-            "midge_event_loop_local_{}_{}",
-            std::process::id(),
-            unique
-        ));
+        let db_path = unique_test_db_path("midge_event_loop_local");
         std::fs::create_dir_all(&db_path).expect("create temp local event loop dir");
 
         let state = RuntimeState::new(db_path, false);
@@ -2493,6 +2666,36 @@ pub(super) mod tests {
             .files
             .iter()
             .any(|file| file.cf_id == second_cf_id));
+    }
+
+    #[test]
+    fn should_assign_compaction_output_sequence_when_plan_has_zero() {
+        let mut event_loop = create_test_event_loop().expect("create event loop");
+        event_loop.state.sequence = 41;
+        let plan = crate::compaction::CompactionPlan::new(3, 0, 1);
+
+        let assigned = event_loop.assign_compaction_output_sequence(plan);
+
+        assert_eq!(assigned.output_seq, 42);
+        assert_eq!(
+            event_loop.state.sequence, 42,
+            "assigning a compaction output sequence must consume one global sequence"
+        );
+    }
+
+    #[test]
+    fn should_preserve_existing_compaction_output_sequence() {
+        let mut event_loop = create_test_event_loop().expect("create event loop");
+        event_loop.state.sequence = 41;
+        let plan = crate::compaction::CompactionPlan::new(3, 0, 1).with_output_seq(99);
+
+        let assigned = event_loop.assign_compaction_output_sequence(plan);
+
+        assert_eq!(assigned.output_seq, 99);
+        assert_eq!(
+            event_loop.state.sequence, 41,
+            "preassigned compaction output sequences must not consume another sequence"
+        );
     }
 
     #[test]

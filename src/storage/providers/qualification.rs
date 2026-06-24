@@ -9,12 +9,15 @@ use super::build_cloud_storage;
 use crate::engine::api::{CloudProviderConfig, GcsApiStyle, GcsCredentialSource};
 use crate::engine::{Engine, MemoryBudget, OpenOptions, TransactionMode, WriteOptions};
 use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
 const PEAS_ENDPOINT: &str = "http://127.0.0.1:9000";
+const PEAS_SOCKET: &str = "127.0.0.1:9000";
 const PEAS_ACCESS_KEY: &str = "admin";
 const PEAS_SECRET_KEY: &str = "easy-peasy";
+const REQUIRE_PEAS_ENV: &str = "MIDGE_REQUIRE_PEAS";
 const REAL_S3_BUCKET_ENV: &str = "MIDGE_REAL_S3_BUCKET";
 const REAL_S3_ENDPOINT_ENV: &str = "MIDGE_REAL_S3_ENDPOINT";
 const REAL_S3_REGION_ENV: &str = "MIDGE_REAL_S3_REGION";
@@ -82,6 +85,10 @@ fn gcs_xml_contract_against_peas() {
 
 #[test]
 fn gcs_json_bearer_config_rejects_peas_hmac_contract() {
+    if !peas_available_or_skip("gcs-json-bearer") {
+        return;
+    }
+
     let provider = CloudProviderConfig::Gcs {
         bucket: "midge-peas-gcs".to_string(),
         project_id: "peas".to_string(),
@@ -130,6 +137,10 @@ fn engine_recovers_from_real_s3_after_local_cache_loss_if_configured() {
 }
 
 fn run_provider_contract(label: &str, provider: CloudProviderConfig) {
+    if !peas_available_or_skip(label) {
+        return;
+    }
+
     ensure_peas_namespace(&provider).unwrap_or_else(|error| {
         panic!("{label}: failed to prepare Peas namespace: {error}");
     });
@@ -229,6 +240,10 @@ fn engine_recovers_from_provider_after_local_cache_loss(
     provider: CloudProviderConfig,
     prepare_namespace: bool,
 ) {
+    if prepare_namespace && !peas_available_or_skip(label) {
+        return;
+    }
+
     if prepare_namespace {
         ensure_peas_namespace(&provider).unwrap_or_else(|error| {
             panic!("{label}: failed to prepare provider namespace: {error}")
@@ -305,6 +320,43 @@ fn default_cf(engine: &Engine) -> crate::engine::ColumnFamilyHandle {
     engine
         .get_column_family("default")
         .expect("default column family")
+}
+
+fn peas_available_or_skip(label: &str) -> bool {
+    if peas_is_available() {
+        return true;
+    }
+
+    if peas_required() {
+        panic!(
+            "{label}: Peas is required by {REQUIRE_PEAS_ENV}, but {PEAS_ENDPOINT} is unreachable"
+        );
+    }
+
+    eprintln!("{label}: skipping Peas qualification test because {PEAS_ENDPOINT} is unreachable");
+    false
+}
+
+fn peas_is_available() -> bool {
+    let Ok(addr) = PEAS_SOCKET.parse::<SocketAddr>() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+}
+
+fn peas_required() -> bool {
+    peas_required_from_value(std::env::var(REQUIRE_PEAS_ENV).ok().as_deref())
+}
+
+fn peas_required_from_value(value: Option<&str>) -> bool {
+    value
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn ensure_peas_namespace(provider: &CloudProviderConfig) -> Result<(), String> {
@@ -686,5 +738,26 @@ fn delete(backend: &CloudStorage, key: &str) -> Result<(), String> {
             CloudOutcome::Err(error) => Err(error),
         },
         other => Err(format!("unexpected DELETE event: {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::peas_required_from_value;
+
+    #[test]
+    fn should_not_require_peas_when_env_is_unset_or_false() {
+        assert!(!peas_required_from_value(None));
+        assert!(!peas_required_from_value(Some("0")));
+        assert!(!peas_required_from_value(Some("false")));
+        assert!(!peas_required_from_value(Some("off")));
+    }
+
+    #[test]
+    fn should_require_peas_for_truthy_env_values() {
+        assert!(peas_required_from_value(Some("1")));
+        assert!(peas_required_from_value(Some("true")));
+        assert!(peas_required_from_value(Some("YES")));
+        assert!(peas_required_from_value(Some("on")));
     }
 }

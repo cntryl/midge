@@ -249,6 +249,30 @@ pub use read_amp_metrics::ReadAmpMetrics;
 
 pub use traits::{SstFactory, SstReader, SstStateReader};
 
+/// Pad generated SST sequence names to the full `u64` width so filesystem and
+/// object-store listings sort in the same order as creation sequence.
+pub const SST_SEQUENCE_WIDTH: usize = 20;
+
+/// Format a canonical SST filename. Storage roots already encode the object
+/// type via the `sst/` directory or cloud prefix, so the file name only carries
+/// ordering identity.
+pub fn file_name(cf_id: u32, level: u32, sequence: u64) -> String {
+    format!(
+        "{cf_id:06}_{level:02}_{sequence:0width$}.sst",
+        width = SST_SEQUENCE_WIDTH
+    )
+}
+
+/// Format the cloud object key for an SST file.
+pub fn object_key(file_name: &str) -> String {
+    format!("sst/{file_name}")
+}
+
+/// Format the temporary staging path for an SST file inside the local SST root.
+pub fn temp_object_key(file_name: &str) -> String {
+    format!("sst/{file_name}.tmp")
+}
+
 type MemtableEntryWithMeta = (Vec<u8>, Option<Vec<u8>>, u64, Option<u64>, u8);
 
 /// Key-value pair
@@ -577,5 +601,37 @@ impl Memtable for SkipListMemtable {
 
     fn size_bytes(&self) -> usize {
         self.size_bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn should_format_sst_names_in_lexicographic_sequence_order() {
+        let names = [1, 2, 10, u64::MAX]
+            .into_iter()
+            .map(|seq| super::file_name(7, 2, seq))
+            .collect::<Vec<_>>();
+        let mut sorted = names.clone();
+        sorted.sort();
+
+        assert_eq!(names, sorted);
+        assert_eq!(names[0], "000007_02_00000000000000000001.sst");
+        assert_eq!(names[3], "000007_02_18446744073709551615.sst");
+    }
+
+    #[test]
+    fn should_format_sst_object_keys_without_repeating_sst_prefix_in_file_name() {
+        let file_name = super::file_name(0, 0, 1);
+
+        assert_eq!(file_name, "000000_00_00000000000000000001.sst");
+        assert_eq!(
+            super::object_key(&file_name),
+            "sst/000000_00_00000000000000000001.sst"
+        );
+        assert_eq!(
+            super::temp_object_key(&file_name),
+            "sst/000000_00_00000000000000000001.sst.tmp"
+        );
     }
 }

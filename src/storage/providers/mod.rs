@@ -55,25 +55,38 @@
 //!
 //! ## Example Usage
 
+#[cfg(feature = "cloud-common")]
 pub mod aws;
+#[cfg(feature = "cloud-common")]
 pub mod azure;
+#[cfg(feature = "cloud-common")]
 pub mod gcs;
+#[cfg(feature = "cloud-common")]
 pub mod minio;
+#[cfg(feature = "cloud-common")]
 pub mod oci;
-#[cfg(all(test, feature = "peas-tests"))]
+#[cfg(all(test, feature = "cloud-common", feature = "peas-tests"))]
 pub mod qualification;
+#[cfg(feature = "cloud-common")]
 pub mod s3;
+#[cfg(feature = "cloud-common")]
 pub mod wasabi;
 
 use std::sync::Arc;
 
 use crate::common::{MidgeError, MidgeResult};
+#[cfg(not(feature = "cloud-common"))]
+use crate::engine::api::CloudProviderConfig;
+#[cfg(feature = "cloud-common")]
 use crate::engine::api::{
     AzureCredentialSource, CloudProviderConfig, GcsApiStyle, GcsCredentialSource,
     S3CredentialSource,
 };
-use crate::storage::cloud::{CloudBackend, CloudStorage};
+#[cfg(feature = "cloud-common")]
+use crate::storage::cloud::CloudBackend;
+use crate::storage::cloud::CloudStorage;
 
+#[cfg(feature = "cloud-common")]
 pub(crate) fn build_cloud_backend(
     provider: &CloudProviderConfig,
 ) -> MidgeResult<Arc<dyn CloudBackend>> {
@@ -280,6 +293,7 @@ pub(crate) fn build_cloud_backend(
     }
 }
 
+#[cfg(feature = "cloud-common")]
 fn resolve_s3_credentials(
     source: &S3CredentialSource,
     region: &str,
@@ -328,6 +342,7 @@ fn resolve_s3_credentials(
     }
 }
 
+#[cfg(feature = "cloud-common")]
 pub(crate) fn build_cloud_storage(
     provider: &CloudProviderConfig,
     prefix: &str,
@@ -337,4 +352,14 @@ pub(crate) fn build_cloud_storage(
         backend,
         prefix.trim_matches('/').to_string(),
     )))
+}
+
+#[cfg(not(feature = "cloud-common"))]
+pub(crate) fn build_cloud_storage(
+    _provider: &CloudProviderConfig,
+    _prefix: &str,
+) -> MidgeResult<Arc<CloudStorage>> {
+    Err(MidgeError::InvalidArgument(
+        "real cloud storage requires the cloud-common feature".to_string(),
+    ))
 }

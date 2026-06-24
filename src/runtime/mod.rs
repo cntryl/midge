@@ -154,6 +154,8 @@ pub struct FileMeta {
     pub name: String,
     pub level: u32,
     pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_crc32c: Option<u32>,
     pub cf_id: crate::engine::ColumnFamilyId,
     pub smallest_key: Option<Vec<u8>>,
     pub largest_key: Option<Vec<u8>>,
@@ -1576,7 +1578,7 @@ mod tests {
 
         // Act
         let plan = CompactionPlan {
-            input_files: vec!["sst_001.sst".to_string()],
+            input_files: vec![crate::sst::file_name(0, 0, 1)],
             source_level: 0,
             target_level: 1,
             cf_id: 0,
@@ -1614,10 +1616,12 @@ mod tests {
         // (no setup)
 
         // Act
+        let sst_name = crate::sst::file_name(0, 0, 1);
         let meta = FileMeta {
-            name: "sst_001.sst".to_string(),
+            name: sst_name.clone(),
             level: 0,
             size_bytes: 1024,
+            content_crc32c: None,
             cf_id: 0,
             smallest_key: None,
             largest_key: None,
@@ -1626,7 +1630,7 @@ mod tests {
         };
 
         // Assert
-        assert_eq!(meta.name, "sst_001.sst");
+        assert_eq!(meta.name, sst_name);
         assert_eq!(meta.level, 0);
         assert_eq!(meta.size_bytes, 1024);
         assert_eq!(meta.cf_id, 0);
@@ -1639,6 +1643,7 @@ mod tests {
             name: "sst.sst".to_string(),
             level: 0,
             size_bytes: 100,
+            content_crc32c: None,
             cf_id: 0,
             smallest_key: Some(b"a".to_vec()),
             largest_key: Some(b"z".to_vec()),

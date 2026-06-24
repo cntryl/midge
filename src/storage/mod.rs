@@ -25,8 +25,8 @@
 // 4. S3 PROVIDER RULES
 //    - S3Provider MUST support AWS, Wasabi, MinIO, and generic S3-compatible vendors.
 //    - AWS uses full SigV4 signing. Others use access key + secret only.
-//    - All object keys MUST be normalized to "sst/<name>" or a zero-padded
-//      "wal/<segment_id>.wal" key.
+//    - All object keys MUST be normalized to "sst/<name>" or
+//      "wal/{segment_id:020}.wal".
 //    - LIST operations MUST use prefix semantics.
 //
 // 5. FILESYSTEM BACKEND RULES
@@ -221,6 +221,24 @@ pub use hybrid::backend::HybridStorage;
 // Implementations MUST NOT modify memtables directly, only send StorageEvent.
 // Implement only coordination logic here; WAL ordering logic stays in WalActor.
 
+/// Basic object metadata used to revalidate cached cloud object proofs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageObjectMetadata {
+    pub size: u64,
+    pub etag: String,
+    pub generation: Option<String>,
+}
+
+impl StorageObjectMetadata {
+    pub fn content_crc(size: u64, data: &[u8]) -> Self {
+        Self {
+            size,
+            etag: format!("crc32c:{:08x}", crc32c::crc32c(data)),
+            generation: None,
+        }
+    }
+}
+
 /// Storage events sent back to the runtime after async I/O.
 ///
 /// These events are sent via StorageCallback channels when operations complete.
@@ -247,12 +265,23 @@ pub enum StorageEvent {
         prefix: String,
         result: StorageOutcome<Vec<String>>,
     },
+    /// Metadata lookup completed
+    HeadComplete {
+        key: String,
+        result: StorageOutcome<StorageObjectMetadata>,
+    },
     /// Cloud upload acknowledged - segment is now durable
     /// WAL Actor MUST apply pending writes to memtable on receipt
     CloudAck { segment_id: u64, max_sequence: u64 },
     /// Cloud upload failed - segment NOT durable
     /// Runtime should retry or handle failure
     CloudFail { segment_id: u64, error: String },
+    /// Remote WAL pruning completed after the segment became covered by
+    /// cloud-published SST and metadata state.
+    CloudWalPruneComplete {
+        segment_id: u64,
+        result: StorageOutcome<()>,
+    },
     /// Backpressure activated - disk watermark exceeded
     /// Runtime should pause flushes until BackpressureOff
     BackpressureOn,
@@ -306,9 +335,77 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// Submit a write operation. Returns immediately.
     fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback);
 
+    /// Submit a conditional write operation. Backends that cannot enforce the
+    /// supplied preconditions must fail closed rather than writing.
+    fn submit_write_with_headers(
+        &self,
+        key: String,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        if headers.is_empty() {
+            self.submit_write(key, data, callback);
+            return;
+        }
+
+        let _ = callback.send(StorageEvent::WriteComplete {
+            key,
+            result: StorageOutcome::Err(
+                "conditional write is not supported by this storage backend".to_string(),
+            ),
+        });
+    }
+
     /// Submit a delete operation. Returns immediately.
     fn submit_delete(&self, key: String, callback: StorageCallback);
 
+    /// Submit a conditional delete operation. Backends that cannot enforce the
+    /// supplied preconditions must fail closed rather than deleting.
+    fn submit_delete_with_headers(
+        &self,
+        key: String,
+        headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        if headers.is_empty() {
+            self.submit_delete(key, callback);
+            return;
+        }
+
+        let _ = callback.send(StorageEvent::DeleteComplete {
+            key,
+            result: StorageOutcome::Err(
+                "conditional delete is not supported by this storage backend".to_string(),
+            ),
+        });
+    }
+
     /// Submit a prefix list operation. Returns immediately.
     fn submit_list(&self, prefix: String, callback: StorageCallback);
+
+    /// Submit an object metadata lookup. Implementations with native HEAD
+    /// support should override this. The fallback reads the object and returns
+    /// a content fingerprint, which is conservative but may be more expensive.
+    fn submit_head(&self, key: String, callback: StorageCallback) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.submit_read(key.clone(), tx);
+        let result = match rx.recv() {
+            Ok(StorageEvent::ReadComplete {
+                result: StorageOutcome::Ok(data),
+                ..
+            }) => StorageOutcome::Ok(StorageObjectMetadata::content_crc(data.len() as u64, &data)),
+            Ok(StorageEvent::ReadComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            }) => StorageOutcome::Err(error),
+            Ok(other) => StorageOutcome::Err(format!(
+                "unexpected storage HEAD fallback response for '{key}': {other:?}"
+            )),
+            Err(error) => StorageOutcome::Err(format!(
+                "storage HEAD fallback channel closed for '{key}': {error}"
+            )),
+        };
+        let _ = callback.send(StorageEvent::HeadComplete { key, result });
+    }
 }

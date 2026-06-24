@@ -171,8 +171,8 @@ pub fn replay_wal_with_policy(
             continue;
         }
         let file_name = entry.name;
-        if file_name == "wal.log" {
-            wal_log_path = Some(join(wal_dir, "wal.log"));
+        if file_name == crate::wal::ACTIVE_FILE_NAME {
+            wal_log_path = Some(join(wal_dir, crate::wal::ACTIVE_FILE_NAME));
             continue;
         }
 
