@@ -569,8 +569,9 @@ mod tests {
         // Arrange
         let test_dir = create_test_dir();
         let mut manifest = Manifest::default();
+        let sst_name = crate::sst::file_name(0, 0, 1);
         manifest.files.push(crate::metadata::FileMeta {
-            name: "sst_001.sst".to_string(),
+            name: sst_name.clone(),
             level: 0,
             size_bytes: 4096,
             cf_id: 0,
@@ -595,7 +596,7 @@ mod tests {
 
         // Assert
         assert_eq!(loaded.files.len(), 1);
-        assert_eq!(loaded.files[0].name, "sst_001.sst");
+        assert_eq!(loaded.files[0].name, sst_name);
         assert_eq!(loaded.files[0].level, 0);
         assert_eq!(loaded.files[0].size_bytes, 4096);
         assert_eq!(loaded.files[0].smallest_key, Some(vec![1, 2, 3]));

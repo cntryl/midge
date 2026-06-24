@@ -169,7 +169,7 @@ impl FlushActor {
             .get(&cf_id)
             .copied()
             .unwrap_or(1);
-        let sst_name = format!("sst_{:06}_{:06}.sst", cf_id, sst_seq);
+        let sst_name = crate::sst::file_name(cf_id, 0, sst_seq);
         let sst_path = state.sst_dir.join(&sst_name);
 
         // Ensure parent directory exists
@@ -412,5 +412,30 @@ mod tests {
 
         // Assert: increment and decrement pattern
         assert_eq!(actor.in_progress, 1);
+    }
+
+    #[test]
+    fn should_name_flushed_sst_with_canonical_lex_sortable_format() -> MidgeResult<()> {
+        let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+        let db_path = temp.path().to_path_buf();
+        let mut state = RuntimeState::new(db_path.clone(), false);
+        let mut actor = FlushActor::new(
+            &db_path.join("sst"),
+            false,
+            crate::sst::compression::CompressionPolicy::default(),
+        )?;
+        state.get_cf(0).expect("default cf").memtable.put_with_seq(
+            b"k".to_vec(),
+            b"v".to_vec(),
+            1,
+            None,
+        )?;
+
+        let output = actor.handle_flush(&mut state, 0, None)?;
+
+        assert_eq!(output.sst_name, "000000_00_00000000000000000001.sst");
+        assert!(state.sst_dir.join(&output.sst_name).exists());
+
+        Ok(())
     }
 }

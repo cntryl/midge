@@ -791,7 +791,7 @@ impl Engine {
         let mut manifest_changed = false;
 
         for file in state.manifest.files.clone() {
-            let cloud_key = format!("sst/{}", file.name);
+            let cloud_key = crate::sst::object_key(&file.name);
             if !available.contains(&cloud_key) {
                 if state.recovery_policy == RecoveryPolicy::Strict {
                     return Err(MidgeError::RecoveryFailed(format!(
@@ -826,8 +826,10 @@ impl Engine {
                     }
                 };
 
-                let temp_path = crate::io::traits::FsPath::new(format!("sst/{}.tmp", file.name));
-                let target_path = crate::io::traits::FsPath::new(format!("sst/{}", file.name));
+                let temp_path =
+                    crate::io::traits::FsPath::new(crate::sst::temp_object_key(&file.name));
+                let target_path =
+                    crate::io::traits::FsPath::new(crate::sst::object_key(&file.name));
                 crate::io::staging::stage_bytes(
                     &staging_fs,
                     &temp_path,
@@ -891,7 +893,7 @@ impl Engine {
             .collect();
 
         for sst_name in sst_names {
-            let cloud_key = format!("sst/{}", sst_name);
+            let cloud_key = crate::sst::object_key(&sst_name);
             if !available.contains(&cloud_key) {
                 if state.recovery_policy == RecoveryPolicy::Strict {
                     return Err(MidgeError::RecoveryFailed(format!(
@@ -931,8 +933,8 @@ impl Engine {
                 }
             };
 
-            let temp_path = crate::io::traits::FsPath::new(format!("sst/{}.tmp", sst_name));
-            let target_path = crate::io::traits::FsPath::new(format!("sst/{}", sst_name));
+            let temp_path = crate::io::traits::FsPath::new(crate::sst::temp_object_key(&sst_name));
+            let target_path = crate::io::traits::FsPath::new(crate::sst::object_key(&sst_name));
             crate::io::staging::stage_bytes(
                 &staging_fs,
                 &temp_path,

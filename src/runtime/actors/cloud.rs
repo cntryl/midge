@@ -48,7 +48,7 @@ impl CloudActor {
         };
 
         // Create cloud key (use namespace prefix for isolation)
-        let cloud_key = format!("sst/{}", sst_name);
+        let cloud_key = crate::sst::object_key(sst_name);
 
         // Submit SST to cloud storage via hybrid backend
         if let Some(s) = storage {
@@ -71,7 +71,7 @@ impl CloudActor {
 
     /// Upload a WAL segment to cloud storage
     pub fn upload_wal(&mut self, state: &mut RuntimeState, segment_id: u64) -> MidgeResult<()> {
-        let wal_name = format!("{segment_id}.wal");
+        let wal_name = crate::wal::segment_file_name(segment_id);
         let wal_path = state.wal_dir.join(&wal_name);
 
         // Validate WAL exists before upload

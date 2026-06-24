@@ -132,7 +132,7 @@ impl WalActor {
         } else {
             let fs: Arc<dyn Fs> = Arc::new(RealFs::new(&wal_dir)?);
             let factory = FsWalFactoryIo::new(Arc::clone(&fs));
-            let writer = Some(factory.create_writer("wal.log")?);
+            let writer = Some(factory.create_writer(crate::wal::ACTIVE_FILE_NAME)?);
             (Some(fs), writer)
         };
 
@@ -1579,16 +1579,16 @@ impl WalActor {
         let _ = self.writer.take();
 
         if let Some(fs) = &self.wal_fs {
-            // Rename wal.log to {old_segment}.wal
-            let old_path = FsPath::new("wal.log");
-            let new_path = FsPath::new(format!("{old_segment}.wal"));
+            // Rename the mutable active WAL to its immutable sealed segment name.
+            let old_path = FsPath::new(crate::wal::ACTIVE_FILE_NAME);
+            let new_path = FsPath::new(crate::wal::segment_file_name(old_segment));
 
             // Rename may fail if file doesn't exist (e.g., in memory mode)
             let _ = fs.rename_atomic(&old_path, &new_path);
 
             // Create new writer for the next segment
             let factory = FsWalFactoryIo::new(Arc::clone(fs));
-            self.writer = Some(factory.create_writer("wal.log")?);
+            self.writer = Some(factory.create_writer(crate::wal::ACTIVE_FILE_NAME)?);
         }
 
         state.wal.current_segment_id += 1;
@@ -1863,6 +1863,36 @@ mod tests {
             wal_actor.sync_calls(),
             0,
             "no syncs should have been performed yet"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_rotate_to_lex_sortable_wal_segment_name() -> MidgeResult<()> {
+        let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+        let db_path = temp.path().to_path_buf();
+        let wal_dir = db_path.join("wal");
+        let mut state = RuntimeState::new(db_path, false);
+        let mut wal_actor = WalActor::new(
+            wal_dir.clone(),
+            DurabilityPolicy::Strict,
+            BatchConfig::default(),
+            false,
+            1,
+        )?;
+
+        wal_actor.rotate(&mut state)?;
+
+        assert!(
+            wal_dir
+                .join(crate::wal::cloud_segment_file_name(1))
+                .exists(),
+            "rotated WAL segments should use the canonical lex-sortable segment name"
+        );
+        assert!(
+            !wal_dir.join("1.wal").exists(),
+            "newly rotated WAL segments should not use the legacy non-padded name"
         );
 
         Ok(())

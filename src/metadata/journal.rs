@@ -583,9 +583,10 @@ mod tests {
         // Arrange
         let td = tempdir().unwrap();
         let db = td.path();
+        let sst_name = crate::sst::file_name(0, 0, 1);
 
         let file = FileMeta {
-            name: "sst_001.sst".to_string(),
+            name: sst_name.clone(),
             level: 0,
             size_bytes: 1024,
             cf_id: 0,
@@ -605,7 +606,7 @@ mod tests {
         assert_eq!(edits.len(), 1);
         match &edits[0] {
             ManifestEdit::AddSst(m) => {
-                assert_eq!(m.name, "sst_001.sst");
+                assert_eq!(m.name, sst_name);
                 assert_eq!(m.size_bytes, 1024);
             }
             _ => panic!("unexpected edit variant"),

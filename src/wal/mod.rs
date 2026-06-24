@@ -20,21 +20,33 @@ pub mod recovery;
 pub mod traits;
 pub mod types;
 
-/// Pad cloud WAL object names to the full `u64` width so bucket listings sort
-/// in the same order as segment ids.
-pub const CLOUD_WAL_SEGMENT_ID_WIDTH: usize = 20;
+/// Active WAL filename. This file is mutable and is never uploaded as-is.
+pub const ACTIVE_FILE_NAME: &str = "wal.log";
 
-/// Format a canonical cloud WAL object filename for the given segment id.
-pub fn cloud_segment_file_name(segment_id: u64) -> String {
-    format!(
-        "{segment_id:0width$}.wal",
-        width = CLOUD_WAL_SEGMENT_ID_WIDTH
-    )
+/// Pad sealed WAL segment names to the full `u64` width so filesystem and
+/// object-store listings sort in the same order as segment ids.
+pub const WAL_SEGMENT_ID_WIDTH: usize = 20;
+
+/// Format a canonical sealed WAL segment filename for the given segment id.
+pub fn segment_file_name(segment_id: u64) -> String {
+    format!("{segment_id:0width$}.wal", width = WAL_SEGMENT_ID_WIDTH)
 }
 
-/// Format the full cloud object key for a WAL segment.
+/// Format the full cloud object key for a sealed WAL segment.
+pub fn segment_object_key(segment_id: u64) -> String {
+    format!("wal/{}", segment_file_name(segment_id))
+}
+
+/// Backward-compatible alias for callers that operate specifically on cloud WAL
+/// objects.
+pub fn cloud_segment_file_name(segment_id: u64) -> String {
+    segment_file_name(segment_id)
+}
+
+/// Backward-compatible alias for callers that operate specifically on cloud WAL
+/// objects.
 pub fn cloud_segment_object_key(segment_id: u64) -> String {
-    format!("wal/{}", cloud_segment_file_name(segment_id))
+    segment_object_key(segment_id)
 }
 
 /// Parse a WAL segment id from a cloud key, staged filename, or legacy name.
@@ -73,7 +85,22 @@ mod tests {
 
     #[test]
     fn should_format_cloud_wal_object_keys_with_zero_padding() {
-        assert_eq!(cloud_segment_object_key(42), "wal/00000000000000000042.wal");
+        assert_eq!(segment_object_key(42), "wal/00000000000000000042.wal");
+        assert_eq!(cloud_segment_object_key(42), segment_object_key(42));
+    }
+
+    #[test]
+    fn should_format_wal_segment_names_in_lexicographic_sequence_order() {
+        let names = [1, 2, 10, u64::MAX]
+            .into_iter()
+            .map(segment_file_name)
+            .collect::<Vec<_>>();
+        let mut sorted = names.clone();
+        sorted.sort();
+
+        assert_eq!(names, sorted);
+        assert_eq!(names[0], "00000000000000000001.wal");
+        assert_eq!(names[3], "18446744073709551615.wal");
     }
 
     #[test]

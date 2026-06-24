@@ -355,8 +355,9 @@ mod tests {
     fn should_add_file_to_manifest() {
         // Arrange
         let mut manifest = Manifest::default();
+        let sst_name = crate::sst::file_name(0, 0, 1);
         let file = FileMeta {
-            name: "sst_001.sst".to_string(),
+            name: sst_name.clone(),
             level: 0,
             size_bytes: 1024,
             cf_id: 0,
@@ -369,7 +370,7 @@ mod tests {
 
         // Assert
         assert_eq!(manifest.files.len(), 1);
-        assert_eq!(manifest.files[0].name, "sst_001.sst");
+        assert_eq!(manifest.files[0].name, sst_name);
     }
 
     #[test]
@@ -380,7 +381,7 @@ mod tests {
         // Act
         for i in 0..5 {
             let file = FileMeta {
-                name: format!("sst_{:03}.sst", i),
+                name: crate::sst::file_name(0, i as u32, i as u64),
                 level: i as u32,
                 size_bytes: 1000 + (i as u64 * 100),
                 ..Default::default()

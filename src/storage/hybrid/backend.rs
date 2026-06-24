@@ -55,6 +55,7 @@ pub struct UploadState {
     pub local_path: PathBuf,
     pub status: UploadStatus,
     pub max_sequence: u64,
+    pub retries: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -343,6 +344,7 @@ impl HybridStorage {
             local_path: local_path.clone(),
             status: UploadStatus::Pending,
             max_sequence,
+            retries: 0,
         };
 
         let mut queue = self.upload_queue.lock();
@@ -415,13 +417,10 @@ impl HybridStorage {
                 }
                 StorageEvent::CloudFail { segment_id, error } => {
                     if let Some(item) = queue.iter_mut().find(|u| &u.segment_id == segment_id) {
-                        let prev_retries = match item.status {
-                            UploadStatus::Failed { retries, .. } => retries,
-                            _ => 0,
-                        };
+                        item.retries = item.retries.saturating_add(1);
                         item.status = UploadStatus::Failed {
                             error: error.clone(),
-                            retries: prev_retries.saturating_add(1),
+                            retries: item.retries,
                         };
                     }
                 }
@@ -439,7 +438,7 @@ impl HybridStorage {
         for upload in queue.iter_mut() {
             let eligible = match upload.status {
                 UploadStatus::Pending => true,
-                UploadStatus::Failed { retries, .. } => retries < 3,
+                UploadStatus::Failed { .. } => upload.retries < 3,
                 UploadStatus::InFlight { .. } | UploadStatus::Completed => false,
             };
             if !eligible {
@@ -487,10 +486,10 @@ impl HybridStorage {
             }
         }
 
-        // 4) Garbage-collect finished items (Completed or Failed after 3 retries).
+        // 4) Garbage-collect finished items (Completed or Failed after 3 attempts).
         queue.retain(|u| match &u.status {
             UploadStatus::Completed => false,
-            UploadStatus::Failed { retries, .. } => *retries < 3,
+            UploadStatus::Failed { .. } => u.retries < 3,
             _ => true,
         });
 
@@ -719,7 +718,7 @@ impl HybridStorage {
             Ok(StorageEvent::ReadComplete {
                 result: StorageOutcome::Err(error),
                 ..
-            }) => Err(error),
+            }) => Err(format!("cloud object '{key}' unreadable: {error}")),
             Ok(other) => Err(format!(
                 "unexpected cloud read response for '{key}': {other:?}"
             )),
@@ -961,8 +960,16 @@ impl HybridStorage {
         manifest: &crate::metadata::Manifest,
     ) -> Result<(), String> {
         for file in &manifest.files {
-            let key = format!("sst/{}", file.name);
+            let key = crate::sst::object_key(&file.name);
             self.verify_sst_cloud_object(&key, &file.name, file.size_bytes)?;
+        }
+
+        for sst_name in &manifest.ssts {
+            if manifest.files.iter().any(|file| file.name == *sst_name) {
+                continue;
+            }
+            let key = crate::sst::object_key(sst_name);
+            self.verify_sst_cloud_object(&key, sst_name, 0)?;
         }
 
         Ok(())
@@ -1042,7 +1049,7 @@ impl HybridStorage {
         sst_name: &str,
         data: Vec<u8>,
     ) -> crate::common::MidgeResult<()> {
-        let key = format!("sst/{sst_name}");
+        let key = crate::sst::object_key(sst_name);
 
         let (tx_local, rx_local) = std::sync::mpsc::channel();
         self.local.submit_write(key.clone(), data.clone(), tx_local);
@@ -1282,7 +1289,10 @@ mod tests {
     use crate::sst::SstFactory;
     use crate::storage::cloud::{CloudStorage, MockCloudBackend};
     use bytes::Bytes;
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use std::time::{Duration, Instant};
 
     fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, HybridStorage) {
@@ -1325,6 +1335,54 @@ mod tests {
         let mut bytes = Vec::new();
         crate::wal::frame::append_frame(&mut bytes, &payload).expect("append WAL frame");
         bytes
+    }
+
+    struct AlwaysFailingWriteBackend {
+        write_attempts: Arc<AtomicUsize>,
+    }
+
+    impl AlwaysFailingWriteBackend {
+        fn new(write_attempts: Arc<AtomicUsize>) -> Self {
+            Self { write_attempts }
+        }
+    }
+
+    impl StorageBackend for AlwaysFailingWriteBackend {
+        fn submit_read(&self, key: String, callback: StorageCallback) {
+            let _ = callback.send(StorageEvent::ReadComplete {
+                key,
+                result: StorageOutcome::Err("read unavailable".to_string()),
+            });
+        }
+
+        fn submit_write(&self, key: String, _data: Vec<u8>, callback: StorageCallback) {
+            self.write_attempts.fetch_add(1, Ordering::SeqCst);
+            let _ = callback.send(StorageEvent::WriteComplete {
+                key,
+                result: StorageOutcome::Err("write unavailable".to_string()),
+            });
+        }
+
+        fn submit_delete(&self, key: String, callback: StorageCallback) {
+            let _ = callback.send(StorageEvent::DeleteComplete {
+                key,
+                result: StorageOutcome::Ok(()),
+            });
+        }
+
+        fn submit_list(&self, prefix: String, callback: StorageCallback) {
+            let _ = callback.send(StorageEvent::ListComplete {
+                prefix,
+                result: StorageOutcome::Ok(Vec::new()),
+            });
+        }
+
+        fn submit_head(&self, key: String, callback: StorageCallback) {
+            let _ = callback.send(StorageEvent::HeadComplete {
+                key,
+                result: StorageOutcome::Err("head unavailable".to_string()),
+            });
+        }
     }
 
     fn write_cloud_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
@@ -1375,7 +1433,7 @@ mod tests {
         let (mock_cloud, storage) = hybrid_with_mock_cloud();
         let sst_name = "cached.sst";
         let bytes = valid_sst_bytes(b"a", b"v1", 1);
-        write_cloud_object(&storage, &format!("sst/{sst_name}"), bytes.clone());
+        write_cloud_object(&storage, &crate::sst::object_key(sst_name), bytes.clone());
         let manifest = manifest_for_ssts(&[(sst_name, bytes.len() as u64)]);
 
         mock_cloud.clear_history();
@@ -1408,10 +1466,14 @@ mod tests {
         let second_name = "second.sst";
         let first_bytes = valid_sst_bytes(b"a", b"v1", 1);
         let second_bytes = valid_sst_bytes(b"b", b"v2", 2);
-        write_cloud_object(&storage, &format!("sst/{first_name}"), first_bytes.clone());
         write_cloud_object(
             &storage,
-            &format!("sst/{second_name}"),
+            &crate::sst::object_key(first_name),
+            first_bytes.clone(),
+        );
+        write_cloud_object(
+            &storage,
+            &crate::sst::object_key(second_name),
             second_bytes.clone(),
         );
 
@@ -1445,7 +1507,7 @@ mod tests {
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let sst_name = "deleted-after-proof.sst";
         let bytes = valid_sst_bytes(b"a", b"v1", 1);
-        let key = format!("sst/{sst_name}");
+        let key = crate::sst::object_key(sst_name);
         write_cloud_object(&storage, &key, bytes.clone());
         let manifest = manifest_for_ssts(&[(sst_name, bytes.len() as u64)]);
 
@@ -1464,11 +1526,26 @@ mod tests {
     }
 
     #[test]
+    fn should_validate_legacy_manifest_ssts_before_wal_cleanup() {
+        let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest.ssts.push("legacy-missing.sst".to_string());
+
+        let error = storage
+            .verify_manifest_cloud_objects(&manifest)
+            .expect_err("legacy manifest SST references must be validated");
+        assert!(
+            error.contains("legacy-missing.sst") || error.contains("sst/legacy-missing.sst"),
+            "unexpected legacy SST validation error: {error}"
+        );
+    }
+
+    #[test]
     fn should_reject_cached_manifest_sst_proof_when_cloud_object_is_overwritten() {
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let sst_name = "overwritten-after-proof.sst";
         let bytes = valid_sst_bytes(b"a", b"v1", 1);
-        let key = format!("sst/{sst_name}");
+        let key = crate::sst::object_key(sst_name);
         write_cloud_object(&storage, &key, bytes.clone());
         let manifest = manifest_for_ssts(&[(sst_name, bytes.len() as u64)]);
 
@@ -1567,7 +1644,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create WAL dir");
         let segment_id = 9;
         let max_sequence = 13;
-        let wal_path = tmp.path().join(format!("{segment_id}.wal"));
+        let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
         std::fs::write(&wal_path, valid_wal_bytes(max_sequence)).expect("write local WAL");
 
         mock_cloud.clear_history();
@@ -1603,6 +1680,57 @@ mod tests {
                 .iter()
                 .any(|key| key.ends_with("wal/00000000000000000009.wal")),
             "upload worker must read back the remote WAL before ack"
+        );
+    }
+
+    #[test]
+    fn should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted() {
+        let tmp = tempfile::tempdir().expect("create WAL retry test dir");
+        let local = Arc::new(
+            crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+                .expect("create local backend"),
+        );
+        let write_attempts = Arc::new(AtomicUsize::new(0));
+        let cloud = Arc::new(AlwaysFailingWriteBackend::new(Arc::clone(&write_attempts)));
+        let storage = HybridStorage::with_policy(
+            local,
+            cloud,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        );
+        let segment_id = 11;
+        let max_sequence = 21;
+        let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
+        std::fs::write(&wal_path, valid_wal_bytes(max_sequence)).expect("write local WAL");
+
+        storage.enqueue_wal_segment(segment_id, wal_path, max_sequence);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut observed_failures = 0usize;
+        while Instant::now() < deadline {
+            let events = storage.process_uploads();
+            observed_failures += events
+                .iter()
+                .filter(|event| matches!(event, StorageEvent::CloudFail { .. }))
+                .count();
+            if storage.pending_upload_count() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            write_attempts.load(Ordering::SeqCst),
+            3,
+            "permanently failing WAL uploads should stop after the retry budget"
+        );
+        assert_eq!(
+            observed_failures, 3,
+            "each failed WAL upload attempt should surface exactly one CloudFail"
+        );
+        assert_eq!(
+            storage.pending_upload_count(),
+            0,
+            "exhausted WAL uploads must leave the queue so cleanup and shutdown are bounded"
         );
     }
 }

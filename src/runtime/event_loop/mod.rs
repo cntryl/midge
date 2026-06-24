@@ -294,6 +294,16 @@ impl EventLoop {
         })
     }
 
+    fn assign_compaction_output_sequence(
+        &mut self,
+        mut plan: crate::compaction::CompactionPlan,
+    ) -> crate::compaction::CompactionPlan {
+        if plan.output_seq == 0 {
+            plan.output_seq = self.state.next_sequence();
+        }
+        plan
+    }
+
     fn mirror_ssts_to_authoritative_cloud(
         &self,
         sst_names: &[String],
@@ -1301,6 +1311,7 @@ impl EventLoop {
                 }
 
                 if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
+                    let plan = self.assign_compaction_output_sequence(plan);
                     // Schedule compaction to run in background and respond immediately.
                     // The compaction worker will send a `CompactionComplete` message back
                     // when finished which will be handled below.
@@ -1417,6 +1428,7 @@ impl EventLoop {
                 let mut scheduled = 0usize;
                 loop {
                     if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
+                        let plan = self.assign_compaction_output_sequence(plan);
                         let schedule_res = self.compaction_actor.run_compaction(
                             &mut self.state,
                             plan,
@@ -2512,6 +2524,36 @@ pub(super) mod tests {
             .files
             .iter()
             .any(|file| file.cf_id == second_cf_id));
+    }
+
+    #[test]
+    fn should_assign_compaction_output_sequence_when_plan_has_zero() {
+        let mut event_loop = create_test_event_loop().expect("create event loop");
+        event_loop.state.sequence = 41;
+        let plan = crate::compaction::CompactionPlan::new(3, 0, 1);
+
+        let assigned = event_loop.assign_compaction_output_sequence(plan);
+
+        assert_eq!(assigned.output_seq, 42);
+        assert_eq!(
+            event_loop.state.sequence, 42,
+            "assigning a compaction output sequence must consume one global sequence"
+        );
+    }
+
+    #[test]
+    fn should_preserve_existing_compaction_output_sequence() {
+        let mut event_loop = create_test_event_loop().expect("create event loop");
+        event_loop.state.sequence = 41;
+        let plan = crate::compaction::CompactionPlan::new(3, 0, 1).with_output_seq(99);
+
+        let assigned = event_loop.assign_compaction_output_sequence(plan);
+
+        assert_eq!(assigned.output_seq, 99);
+        assert_eq!(
+            event_loop.state.sequence, 41,
+            "preassigned compaction output sequences must not consume another sequence"
+        );
     }
 
     #[test]

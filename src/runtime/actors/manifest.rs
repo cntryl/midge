@@ -345,7 +345,7 @@ mod tests {
     fn should_fail_to_add_sst_given_corrupted_file_when_validating() {
         // Arrange: create a temp dir and a corrupt SST file (partial content)
         let tmp = tempfile::tempdir().expect("create tmpdir");
-        let sst_name = "sst_000001_000001.sst".to_string();
+        let sst_name = crate::sst::file_name(0, 0, 1);
         let sst_path = tmp.path().join(&sst_name);
 
         // Write corrupted content (not a valid SST)
@@ -381,7 +381,7 @@ mod tests {
     fn should_fail_to_add_sst_given_missing_final_file_when_only_tmp_exists() {
         // Arrange: create a temp dir and a leftover .tmp file (simulate crash before rename)
         let tmp = tempfile::tempdir().expect("create tmpdir");
-        let sst_name = "sst_000002_000002.sst".to_string();
+        let sst_name = crate::sst::file_name(0, 0, 2);
         let tmp_name = format!("{}.tmp", sst_name);
         let tmp_path = tmp.path().join(&tmp_name);
 
@@ -416,7 +416,7 @@ mod tests {
     fn should_add_sst_successfully_given_valid_file_when_manifest_updated() -> MidgeResult<()> {
         // Arrange: create a valid on-disk SST via the Fs SstFactory
         let tmp = tempfile::tempdir().expect("create tmpdir");
-        let sst_name = "sst_000003_000003.sst".to_string();
+        let sst_name = crate::sst::file_name(0, 0, 3);
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
         assert!(state.sst_dir.exists(), "sst dir must exist");
         let sst_path = state.sst_dir.join(&sst_name);

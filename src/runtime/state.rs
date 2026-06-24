@@ -903,7 +903,7 @@ impl RuntimeState {
         let residue = self.storage_residue_assessment();
 
         for temp_name in residue.sst_temp_files {
-            let path = FsPath::new(format!("sst/{temp_name}"));
+            let path = FsPath::new(crate::sst::object_key(&temp_name));
             match self.fs.remove_file(&path) {
                 Ok(()) => {
                     tracing::info!(path = %path.0.as_str(), "deleted non-authoritative SST temp residue");
@@ -920,7 +920,7 @@ impl RuntimeState {
         }
 
         for orphan_name in residue.orphan_ssts {
-            let path = FsPath::new(format!("sst/{orphan_name}"));
+            let path = FsPath::new(crate::sst::object_key(&orphan_name));
             let injected_delete_failure =
                 fail::eval("midge::recovery::inject_orphan_sst_delete_failure", |_| {
                     true
@@ -2223,8 +2223,12 @@ mod tests {
         let mut compaction = CompactionState::default();
 
         // Act
-        compaction.compacting_ssts.push("sst_001.sst".to_string());
-        compaction.compacting_ssts.push("sst_002.sst".to_string());
+        compaction
+            .compacting_ssts
+            .push(crate::sst::file_name(0, 0, 1));
+        compaction
+            .compacting_ssts
+            .push(crate::sst::file_name(0, 0, 2));
         compaction.pending_tasks = 2;
 
         // Assert
@@ -2253,7 +2257,7 @@ mod tests {
         let mut cloud = CloudState::default();
 
         // Act
-        cloud.pending_uploads.push("sst_001.sst".to_string());
+        cloud.pending_uploads.push(crate::sst::file_name(0, 0, 1));
         cloud.last_cloud_checkpoint_seq = 100;
 
         // Assert
@@ -2533,7 +2537,7 @@ mod tests {
         state
             .compaction
             .compacting_ssts
-            .push("sst_001.sst".to_string());
+            .push(crate::sst::file_name(0, 0, 1));
         state.compaction.pending_tasks = 3;
 
         // Assert
@@ -2550,7 +2554,7 @@ mod tests {
         state
             .cloud
             .pending_uploads
-            .push("sst_remote.sst".to_string());
+            .push(crate::sst::file_name(0, 0, 50));
         state.cloud.last_cloud_checkpoint_seq = 50;
 
         // Assert

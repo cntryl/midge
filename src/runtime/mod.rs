@@ -1576,7 +1576,7 @@ mod tests {
 
         // Act
         let plan = CompactionPlan {
-            input_files: vec!["sst_001.sst".to_string()],
+            input_files: vec![crate::sst::file_name(0, 0, 1)],
             source_level: 0,
             target_level: 1,
             cf_id: 0,
@@ -1614,8 +1614,9 @@ mod tests {
         // (no setup)
 
         // Act
+        let sst_name = crate::sst::file_name(0, 0, 1);
         let meta = FileMeta {
-            name: "sst_001.sst".to_string(),
+            name: sst_name.clone(),
             level: 0,
             size_bytes: 1024,
             cf_id: 0,
@@ -1626,7 +1627,7 @@ mod tests {
         };
 
         // Assert
-        assert_eq!(meta.name, "sst_001.sst");
+        assert_eq!(meta.name, sst_name);
         assert_eq!(meta.level, 0);
         assert_eq!(meta.size_bytes, 1024);
         assert_eq!(meta.cf_id, 0);

@@ -42,7 +42,10 @@ impl EventLoop {
         self.durability.rotate_to(self.state.wal.current_segment_id);
 
         let max_sequence = self.state.wal.local_durable_seq;
-        let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
+        let local_path = self
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
         storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
         self.wal_actor.complete_cloud_upload_seal(&mut self.state);
 
@@ -484,7 +487,10 @@ impl EventLoop {
             return;
         }
 
-        let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
+        let local_path = self
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
         match std::fs::remove_file(&local_path) {
             Ok(()) => tracing::debug!(
                 segment_id,
@@ -572,7 +578,10 @@ mod tests {
     }
 
     fn copy_local_segment_to_remote_wal_for_test(el: &EventLoop, segment_id: u64) {
-        let local_path = el.state.wal_dir.join(format!("{segment_id}.wal"));
+        let local_path = el
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
         let remote_path = remote_wal_path_for_test(el, segment_id);
         if let Some(parent) = remote_path.parent() {
             std::fs::create_dir_all(parent).expect("create remote WAL parent");
@@ -848,7 +857,10 @@ mod tests {
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
         let segment_id = 1;
-        let local_wal = el.state.wal_dir.join(format!("{segment_id}.wal"));
+        let local_wal = el
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
         write_test_file(local_wal.clone(), b"local wal still needed");
 
         el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
@@ -890,7 +902,10 @@ mod tests {
             });
 
         let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
-        let local_wal = el.state.wal_dir.join(format!("{segment_id}.wal"));
+        let local_wal = el
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
         assert!(
             local_wal.exists(),
             "sealed local WAL should exist before ack"
@@ -935,7 +950,10 @@ mod tests {
             });
 
         let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
-        let local_wal = el.state.wal_dir.join(format!("{segment_id}.wal"));
+        let local_wal = el
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
         el.hybrid_storage
             .as_ref()
             .expect("hybrid storage")
