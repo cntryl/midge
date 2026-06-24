@@ -349,11 +349,25 @@ impl EventLoop {
             .cloud_acked_wal_segments
             .iter()
             .filter_map(|(segment_id, max_sequence)| {
-                (*segment_id < recovery_floor_segment
+                if !(*segment_id < recovery_floor_segment
                     && *max_sequence <= self.state.wal.cloud_durable_seq
                     && *max_sequence <= persisted_sequence
                     && !self.cloud_wal_prune_inflight.contains(segment_id))
-                .then_some(*segment_id)
+                {
+                    return None;
+                }
+
+                let Ok(covered_by_manifest) = storage
+                    .cached_remote_wal_segment_covered_by_manifest(
+                        *segment_id,
+                        *max_sequence,
+                        &self.state.manifest,
+                    )
+                else {
+                    return None;
+                };
+
+                covered_by_manifest.then_some(*segment_id)
             })
             .collect();
 
@@ -672,6 +686,29 @@ mod tests {
         }
     }
 
+    fn seed_cloud_prune_candidate_with_records(
+        el: &mut EventLoop,
+        segment_id: u64,
+        max_sequence: u64,
+        records: Vec<crate::wal::WalRecord>,
+    ) {
+        el.state.wal.current_segment_id = segment_id + 1;
+        el.state.manifest.last_persisted_sequence = max_sequence;
+        el.cloud_acked_wal_segments.insert(segment_id, max_sequence);
+
+        let mut bytes = Vec::new();
+        for record in records {
+            let payload = crate::wal::encoding::encode(&record).expect("encode test WAL record");
+            crate::wal::frame::append_frame(&mut bytes, &payload).expect("append test WAL frame");
+        }
+        write_test_file(remote_wal_path_for_test(el, segment_id), &bytes);
+        if let Some(storage) = el.hybrid_storage.as_ref() {
+            storage
+                .verify_remote_wal_segment(segment_id, max_sequence)
+                .expect("verify remote WAL prune candidate");
+        }
+    }
+
     fn add_manifest_sst_for_test(el: &mut EventLoop, sst_name: &str, max_sequence: u64) {
         el.state.manifest.files.push(crate::metadata::FileMeta {
             name: sst_name.to_string(),
@@ -686,6 +723,30 @@ mod tests {
         });
     }
 
+    fn add_manifest_sst_meta_for_test(
+        el: &mut EventLoop,
+        sst_name: &str,
+        cf_id: u32,
+        key: &[u8],
+        smallest_seq: u64,
+        largest_seq: u64,
+    ) {
+        let bytes = valid_sst_bytes_for_test(key, b"value", largest_seq);
+        el.state.manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id,
+            smallest_key: Some(key.to_vec()),
+            largest_key: Some(key.to_vec()),
+            smallest_seq: Some(smallest_seq),
+            largest_seq: Some(largest_seq),
+            ..Default::default()
+        });
+        write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
+    }
+
     fn valid_sst_bytes_for_test(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {
         use crate::sst::SstFactory;
 
@@ -697,21 +758,59 @@ mod tests {
         writer.finish_bytes().expect("finish test SST bytes")
     }
 
+    fn valid_range_tombstone_sst_bytes_for_test(start: &[u8], end: &[u8], seq: u64) -> Vec<u8> {
+        use crate::sst::SstFactory;
+
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create().expect("create test SST writer");
+        writer
+            .add_range_tombstone(start, end, seq)
+            .expect("add test range tombstone");
+        writer
+            .finish_bytes()
+            .expect("finish range tombstone test SST bytes")
+    }
+
     fn add_valid_manifest_sst_for_test(
         el: &mut EventLoop,
         sst_name: &str,
         max_sequence: u64,
     ) -> Vec<u8> {
-        let bytes = valid_sst_bytes_for_test(b"a", b"value", max_sequence);
+        let bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", max_sequence);
         el.state.manifest.files.push(crate::metadata::FileMeta {
             name: sst_name.to_string(),
             level: 0,
             size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
             cf_id: 0,
-            smallest_key: Some(b"a".to_vec()),
-            largest_key: Some(b"a".to_vec()),
+            smallest_key: Some(b"prune-candidate".to_vec()),
+            largest_key: Some(b"prune-candidate".to_vec()),
             smallest_seq: Some(max_sequence),
             largest_seq: Some(max_sequence),
+            ..Default::default()
+        });
+        write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
+        bytes
+    }
+
+    fn add_valid_range_tombstone_manifest_sst_for_test(
+        el: &mut EventLoop,
+        sst_name: &str,
+        start: &[u8],
+        end: &[u8],
+        seq: u64,
+    ) -> Vec<u8> {
+        let bytes = valid_range_tombstone_sst_bytes_for_test(start, end, seq);
+        el.state.manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            smallest_key: Some(start.to_vec()),
+            largest_key: Some(end.to_vec()),
+            smallest_seq: Some(seq),
+            largest_seq: Some(seq),
             ..Default::default()
         });
         write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
@@ -1165,6 +1264,134 @@ mod tests {
     }
 
     #[test]
+    fn should_not_prune_remote_wal_when_manifest_sequence_advances_without_sst_coverage(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence;
+        assert!(
+            el.state.manifest.files.is_empty(),
+            "test requires no manifest SSTs to prove sequence-only metadata is insufficient"
+        );
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL must be retained when manifest sequence is advanced but no SST covers it"
+        );
+        assert!(
+            el.cloud_acked_wal_segments.contains_key(&segment_id),
+            "retained WAL should remain eligible for a future conservative retry"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_prune_remote_wal_when_high_sequence_sst_does_not_cover_wal_record_cf(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate_with_records(
+            &mut el,
+            segment_id,
+            max_sequence,
+            vec![
+                crate::wal::WalRecord::new_cf(
+                    0,
+                    crate::wal::WalOpKind::Put,
+                    Bytes::from_static(b"default-only-in-wal"),
+                    Some(Bytes::from_static(b"default-value")),
+                    5,
+                    0,
+                ),
+                crate::wal::WalRecord::new_cf(
+                    1,
+                    crate::wal::WalOpKind::Put,
+                    Bytes::from_static(b"other-covered"),
+                    Some(Bytes::from_static(b"other-value")),
+                    max_sequence,
+                    0,
+                ),
+            ],
+        );
+        el.state.wal.cloud_durable_seq = max_sequence;
+        add_manifest_sst_meta_for_test(
+            &mut el,
+            "other-high-seq.sst",
+            1,
+            b"other-covered",
+            max_sequence,
+            max_sequence,
+        );
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL must be retained when manifest SST coverage is only for a different CF"
+        );
+        assert!(
+            el.cloud_acked_wal_segments.contains_key(&segment_id),
+            "retained WAL should remain eligible for a future conservative retry"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_prune_remote_wal_when_manifest_sst_metadata_does_not_match_actual_sst(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        let sst_name = "lying-summary.sst";
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence;
+
+        let bytes = valid_sst_bytes_for_test(b"other-key", b"value", max_sequence);
+        el.state.manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            smallest_key: Some(b"prune-candidate".to_vec()),
+            largest_key: Some(b"prune-candidate".to_vec()),
+            smallest_seq: Some(max_sequence),
+            largest_seq: Some(max_sequence),
+            ..Default::default()
+        });
+        write_test_file(remote_sst_path_for_test(&el, sst_name), &bytes);
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL must be retained when manifest SST metadata does not match actual SST contents"
+        );
+        assert!(
+            el.cloud_acked_wal_segments.contains_key(&segment_id),
+            "retained WAL should remain eligible for a future conservative retry"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn should_not_prune_remote_wal_when_segment_max_sequence_exceeds_manifest_coverage(
     ) -> crate::common::MidgeResult<()> {
         let mut el = create_test_cloud_event_loop(
@@ -1197,6 +1424,7 @@ mod tests {
         let max_sequence = 10;
         seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
         el.state.wal.cloud_durable_seq = max_sequence;
+        add_valid_manifest_sst_for_test(&mut el, "coverage.sst", max_sequence);
 
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
@@ -1204,6 +1432,145 @@ mod tests {
         assert!(
             !remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL may be pruned when cloud durability and manifest coverage both include its max sequence"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_prune_remote_wal_when_delete_range_record_is_manifest_covered(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        let mut delete_range = crate::wal::WalRecord::new_cf(
+            0,
+            crate::wal::WalOpKind::DeleteRange,
+            Bytes::from_static(b"k10"),
+            None,
+            max_sequence,
+            0,
+        );
+        delete_range.range_end = Some(Bytes::from_static(b"k20"));
+        seed_cloud_prune_candidate_with_records(
+            &mut el,
+            segment_id,
+            max_sequence,
+            vec![delete_range],
+        );
+        el.state.wal.cloud_durable_seq = max_sequence;
+        add_valid_range_tombstone_manifest_sst_for_test(
+            &mut el,
+            "delete-range-covered.sst",
+            b"k10",
+            b"k20",
+            max_sequence,
+        );
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            !remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL may be pruned when a delete-range record is physically covered by a manifest SST"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_prune_remote_wal_when_delete_range_record_exceeds_manifest_range(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        let mut delete_range = crate::wal::WalRecord::new_cf(
+            0,
+            crate::wal::WalOpKind::DeleteRange,
+            Bytes::from_static(b"k10"),
+            None,
+            max_sequence,
+            0,
+        );
+        delete_range.range_end = Some(Bytes::from_static(b"k20"));
+        seed_cloud_prune_candidate_with_records(
+            &mut el,
+            segment_id,
+            max_sequence,
+            vec![delete_range],
+        );
+        el.state.wal.cloud_durable_seq = max_sequence;
+        add_valid_range_tombstone_manifest_sst_for_test(
+            &mut el,
+            "delete-range-partial.sst",
+            b"k10",
+            b"k19",
+            max_sequence,
+        );
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL must be retained when manifest range tombstone coverage is narrower than the WAL record"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_prune_remote_wal_when_only_transaction_marker_exceeds_data_coverage(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate_with_records(
+            &mut el,
+            segment_id,
+            max_sequence,
+            vec![
+                crate::wal::WalRecord::new_cf(
+                    0,
+                    crate::wal::WalOpKind::TxnBegin,
+                    Bytes::from_static(b"txn"),
+                    None,
+                    8,
+                    0,
+                ),
+                crate::wal::WalRecord::new_cf(
+                    0,
+                    crate::wal::WalOpKind::Put,
+                    Bytes::from_static(b"txn-data"),
+                    Some(Bytes::from_static(b"value")),
+                    9,
+                    0,
+                ),
+                crate::wal::WalRecord::new_cf(
+                    0,
+                    crate::wal::WalOpKind::TxnCommit,
+                    Bytes::from_static(b"txn"),
+                    None,
+                    max_sequence,
+                    0,
+                ),
+            ],
+        );
+        el.state.wal.cloud_durable_seq = max_sequence;
+        add_manifest_sst_meta_for_test(&mut el, "txn-data.sst", 0, b"txn-data", 9, 9);
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            !remote_wal_path_for_test(&el, segment_id).exists(),
+            "transaction marker records must not force retention when all data records are covered"
         );
 
         Ok(())

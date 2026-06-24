@@ -126,6 +126,67 @@ fn should_prune_remote_wal_segment_after_cloud_sst_covers_it() {
 }
 
 #[test]
+fn should_recover_delete_range_after_remote_wal_pruned_and_local_cache_lost() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let opts = opts_for_mode("cloud");
+    let db_path = cloud_db_path(&opts);
+    let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let default_cf = default_cf(&engine);
+
+    put_default(
+        &engine,
+        b"range-10",
+        b"covered-before-delete",
+        WriteOptions::cloud_strict(),
+    );
+    put_default(
+        &engine,
+        b"range-15",
+        b"covered-before-delete",
+        WriteOptions::cloud_strict(),
+    );
+    put_default(
+        &engine,
+        b"range-25",
+        b"outside-delete-range",
+        WriteOptions::cloud_strict(),
+    );
+    let mut tx = engine
+        .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
+        .expect("begin delete-range tx");
+    tx.delete_range(b"range-10".to_vec(), b"range-20".to_vec())
+        .expect("delete range");
+    tx.commit(WriteOptions::cloud_strict())
+        .expect("commit delete range");
+    assert!(
+        !wait_for_remote_wal_count_at_least(&remote_wal_dir, 1).is_empty(),
+        "cloud-strict writes should create remote WAL before flush"
+    );
+
+    // Act
+    engine.flush_cf(&default_cf).expect("flush range tombstone");
+    let remote_segments = wait_for_remote_wal_count(&remote_wal_dir, 0);
+    drop(engine);
+    reset_dir(&db_path.join("wal"));
+    reset_dir(&db_path.join("sst"));
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
+
+    // Assert
+    assert!(
+        remote_segments.is_empty(),
+        "remote WAL should be pruned after the range tombstone is covered by cloud SST"
+    );
+    assert_eq!(get_default(&reopened, b"range-10"), None);
+    assert_eq!(get_default(&reopened, b"range-15"), None);
+    assert_eq!(
+        get_default(&reopened, b"range-25"),
+        Some(Bytes::from_static(b"outside-delete-range"))
+    );
+}
+
+#[test]
 fn should_keep_remote_wal_segment_when_unflushed_column_family_still_needs_it() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");

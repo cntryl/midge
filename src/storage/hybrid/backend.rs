@@ -61,12 +61,35 @@ pub struct UploadState {
 #[derive(Debug, Clone)]
 struct VerifiedWalSegment {
     max_sequence: u64,
+    data_records: Vec<WalDataCoverageRecord>,
     metadata: StorageObjectMetadata,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WalSegmentValidation {
+    max_sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+struct WalSegmentReadback {
+    validation: WalSegmentValidation,
+    data_records: Vec<WalDataCoverageRecord>,
+}
+
+#[derive(Debug, Clone)]
+struct WalDataCoverageRecord {
+    cf_id: u32,
+    op: crate::wal::WalOpKind,
+    key: Vec<u8>,
+    range_end: Option<Vec<u8>>,
+    seq: u64,
 }
 
 #[derive(Debug, Clone)]
 struct VerifiedCloudObject {
     metadata: StorageObjectMetadata,
+    content_crc32c: Option<u32>,
+    summary: Option<crate::sst::fs::SstFileSummary>,
 }
 
 #[derive(Clone)]
@@ -859,7 +882,7 @@ impl HybridStorage {
         key: &str,
         data: &[u8],
         expected_max_sequence: u64,
-    ) -> Result<u64, String> {
+    ) -> Result<WalSegmentReadback, String> {
         if data.is_empty() {
             return Err(format!("cloud WAL segment '{key}' is empty"));
         }
@@ -867,6 +890,7 @@ impl HybridStorage {
         let mut pos = 0usize;
         let mut records = 0usize;
         let mut observed_max_sequence = 0u64;
+        let mut data_records = Vec::new();
         while pos < data.len() {
             let header_end = pos
                 .checked_add(crate::wal::frame::WAL_FRAME_HEADER_LEN)
@@ -895,6 +919,18 @@ impl HybridStorage {
             let record = crate::wal::encoding::decode(payload)
                 .map_err(|error| format!("cloud WAL segment '{key}' record decode: {error}"))?;
             observed_max_sequence = observed_max_sequence.max(record.seq);
+            if !matches!(
+                record.op,
+                crate::wal::WalOpKind::TxnBegin | crate::wal::WalOpKind::TxnCommit
+            ) {
+                data_records.push(WalDataCoverageRecord {
+                    cf_id: record.cf_id,
+                    op: record.op,
+                    key: record.key.to_vec(),
+                    range_end: record.range_end.map(|range_end| range_end.to_vec()),
+                    seq: record.seq,
+                });
+            }
             records += 1;
             pos = payload_end;
         }
@@ -913,7 +949,12 @@ impl HybridStorage {
             ));
         }
 
-        Ok(observed_max_sequence)
+        Ok(WalSegmentReadback {
+            validation: WalSegmentValidation {
+                max_sequence: observed_max_sequence,
+            },
+            data_records,
+        })
     }
 
     fn is_verified_wal_segment(
@@ -959,6 +1000,96 @@ impl HybridStorage {
         Self::verify_cloud_object_proof(&self.cloud, &key, &proof.metadata)
     }
 
+    pub(crate) fn cached_remote_wal_segment_covered_by_manifest(
+        &self,
+        segment_id: u64,
+        expected_max_sequence: u64,
+        manifest: &crate::metadata::Manifest,
+    ) -> Result<bool, String> {
+        let proof = self.cached_remote_wal_segment_proof(segment_id, expected_max_sequence)?;
+        Ok(Self::wal_data_records_covered_by_manifest(
+            &proof.data_records,
+            manifest,
+        ))
+    }
+
+    fn cached_remote_wal_segment_proof(
+        &self,
+        segment_id: u64,
+        expected_max_sequence: u64,
+    ) -> Result<VerifiedWalSegment, String> {
+        let key = crate::wal::cloud_segment_object_key(segment_id);
+        let Some(proof) = self.verified_wal_segments.lock().get(&segment_id).cloned() else {
+            return Err(format!(
+                "cloud WAL segment {segment_id} has no prior readback proof for max sequence {expected_max_sequence}"
+            ));
+        };
+        if proof.max_sequence != expected_max_sequence {
+            return Err(format!(
+                "cached cloud WAL segment '{key}' max sequence {} does not match expected {expected_max_sequence}",
+                proof.max_sequence
+            ));
+        }
+        Ok(proof)
+    }
+
+    fn wal_data_records_covered_by_manifest(
+        data_records: &[WalDataCoverageRecord],
+        manifest: &crate::metadata::Manifest,
+    ) -> bool {
+        data_records
+            .iter()
+            .all(|record| Self::manifest_covers_wal_data_record(manifest, record))
+    }
+
+    fn manifest_covers_wal_data_record(
+        manifest: &crate::metadata::Manifest,
+        record: &WalDataCoverageRecord,
+    ) -> bool {
+        manifest
+            .files
+            .iter()
+            .any(|file| Self::manifest_file_covers_wal_data_record(file, record))
+    }
+
+    fn manifest_file_covers_wal_data_record(
+        file: &crate::metadata::FileMeta,
+        record: &WalDataCoverageRecord,
+    ) -> bool {
+        if file.cf_id != record.cf_id {
+            return false;
+        }
+
+        let (Some(smallest_seq), Some(largest_seq)) = (file.smallest_seq, file.largest_seq) else {
+            return false;
+        };
+        if record.seq < smallest_seq || record.seq > largest_seq {
+            return false;
+        }
+
+        let (Some(smallest_key), Some(largest_key)) =
+            (file.smallest_key.as_ref(), file.largest_key.as_ref())
+        else {
+            return false;
+        };
+
+        match record.op {
+            crate::wal::WalOpKind::Put
+            | crate::wal::WalOpKind::Insert
+            | crate::wal::WalOpKind::Delete => {
+                smallest_key.as_slice() <= record.key.as_slice()
+                    && record.key.as_slice() <= largest_key.as_slice()
+            }
+            crate::wal::WalOpKind::DeleteRange => {
+                record.range_end.as_ref().is_some_and(|range_end| {
+                    smallest_key.as_slice() <= record.key.as_slice()
+                        && range_end.as_slice() <= largest_key.as_slice()
+                })
+            }
+            crate::wal::WalOpKind::TxnBegin | crate::wal::WalOpKind::TxnCommit => true,
+        }
+    }
+
     fn verify_remote_wal_segment_with_backend(
         cloud: &Arc<dyn StorageBackend>,
         verified_wal_segments: &Arc<Mutex<HashMap<u64, VerifiedWalSegment>>>,
@@ -977,8 +1108,7 @@ impl HybridStorage {
         }
 
         let data = Self::read_cloud_object_from_backend_blocking(cloud, &key)?;
-        let observed_max_sequence =
-            Self::validate_wal_segment_bytes(&key, &data, expected_max_sequence)?;
+        let readback = Self::validate_wal_segment_bytes(&key, &data, expected_max_sequence)?;
         let metadata = Self::head_cloud_object_from_backend_blocking(cloud, &key)?;
         if metadata.size != data.len() as u64 {
             return Err(format!(
@@ -990,7 +1120,8 @@ impl HybridStorage {
         verified_wal_segments.lock().insert(
             segment_id,
             VerifiedWalSegment {
-                max_sequence: observed_max_sequence,
+                max_sequence: readback.validation.max_sequence,
+                data_records: readback.data_records,
                 metadata,
             },
         );
@@ -1013,13 +1144,24 @@ impl HybridStorage {
     fn validate_sst_object_bytes(
         sst_name: &str,
         expected_size_bytes: u64,
+        expected_content_crc32c: Option<u32>,
+        expected_file: Option<&crate::metadata::FileMeta>,
         data: &[u8],
-    ) -> Result<(), String> {
+    ) -> Result<(u32, crate::sst::fs::SstFileSummary), String> {
         if expected_size_bytes > 0 && data.len() as u64 != expected_size_bytes {
             return Err(format!(
                 "cloud SST '{sst_name}' size mismatch: manifest={expected_size_bytes}, object={}",
                 data.len()
             ));
+        }
+
+        let actual_content_crc32c = crc32c::crc32c(data);
+        if let Some(expected_content_crc32c) = expected_content_crc32c {
+            if actual_content_crc32c != expected_content_crc32c {
+                return Err(format!(
+                    "cloud SST '{sst_name}' content crc32c {actual_content_crc32c:08x} does not match manifest {expected_content_crc32c:08x}"
+                ));
+            }
         }
 
         let mut temp = tempfile::Builder::new()
@@ -1032,9 +1174,60 @@ impl HybridStorage {
         temp.flush()
             .map_err(|error| format!("flush temp SST verifier for '{sst_name}': {error}"))?;
 
-        crate::sst::fs::SstFileIo::open_with_real_fs(temp.path())
-            .map(|_| ())
-            .map_err(|error| format!("cloud SST '{sst_name}' failed validation: {error}"))
+        let reader = crate::sst::fs::SstFileIo::open_with_real_fs(temp.path())
+            .map_err(|error| format!("cloud SST '{sst_name}' failed validation: {error}"))?;
+        let summary = reader
+            .summary()
+            .map_err(|error| format!("cloud SST '{sst_name}' summary validation: {error}"))?;
+        if let Some(expected_file) = expected_file {
+            Self::verify_sst_summary_matches_manifest(sst_name, &summary, expected_file)?;
+        }
+
+        Ok((actual_content_crc32c, summary))
+    }
+
+    fn verify_sst_summary_matches_manifest(
+        sst_name: &str,
+        summary: &crate::sst::fs::SstFileSummary,
+        file: &crate::metadata::FileMeta,
+    ) -> Result<(), String> {
+        if file.size_bytes > 0 && summary.size_bytes != file.size_bytes {
+            return Err(format!(
+                "cloud SST '{sst_name}' physical size {} does not match manifest {}",
+                summary.size_bytes, file.size_bytes
+            ));
+        }
+        if let Some(smallest_key) = file.smallest_key.as_ref() {
+            if summary.smallest_key.as_slice() != smallest_key.as_slice() {
+                return Err(format!(
+                    "cloud SST '{sst_name}' smallest key does not match manifest"
+                ));
+            }
+        }
+        if let Some(largest_key) = file.largest_key.as_ref() {
+            if summary.largest_key.as_slice() != largest_key.as_slice() {
+                return Err(format!(
+                    "cloud SST '{sst_name}' largest key does not match manifest"
+                ));
+            }
+        }
+        if let Some(smallest_seq) = file.smallest_seq {
+            if summary.smallest_seq != smallest_seq {
+                return Err(format!(
+                    "cloud SST '{sst_name}' smallest sequence {} does not match manifest {smallest_seq}",
+                    summary.smallest_seq
+                ));
+            }
+        }
+        if let Some(largest_seq) = file.largest_seq {
+            if summary.largest_seq != largest_seq {
+                return Err(format!(
+                    "cloud SST '{sst_name}' largest sequence {} does not match manifest {largest_seq}",
+                    summary.largest_seq
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn verify_manifest_cloud_objects(
@@ -1061,6 +1254,8 @@ impl HybridStorage {
                 &key,
                 &file.name,
                 file.size_bytes,
+                file.content_crc32c,
+                Some(file),
             )?;
         }
 
@@ -1075,6 +1270,8 @@ impl HybridStorage {
                 &key,
                 sst_name,
                 0,
+                None,
+                None,
             )?;
         }
 
@@ -1086,6 +1283,8 @@ impl HybridStorage {
         key: &str,
         sst_name: &str,
         expected_size_bytes: u64,
+        expected_content_crc32c: Option<u32>,
+        expected_file: Option<&crate::metadata::FileMeta>,
     ) -> Result<(), String> {
         Self::verify_sst_cloud_object_with_backend(
             &self.cloud,
@@ -1093,6 +1292,8 @@ impl HybridStorage {
             key,
             sst_name,
             expected_size_bytes,
+            expected_content_crc32c,
+            expected_file,
         )
     }
 
@@ -1102,6 +1303,8 @@ impl HybridStorage {
         key: &str,
         sst_name: &str,
         expected_size_bytes: u64,
+        expected_content_crc32c: Option<u32>,
+        expected_file: Option<&crate::metadata::FileMeta>,
     ) -> Result<(), String> {
         if let Some(proof) = verified_sst_objects.lock().get(key).cloned() {
             if expected_size_bytes > 0 && proof.metadata.size != expected_size_bytes {
@@ -1110,11 +1313,37 @@ impl HybridStorage {
                     proof.metadata.size
                 ));
             }
-            return Self::verify_cloud_object_proof(cloud, key, &proof.metadata);
+            Self::verify_cloud_object_proof(cloud, key, &proof.metadata)?;
+            if let Some(expected_content_crc32c) = expected_content_crc32c {
+                if proof.content_crc32c != Some(expected_content_crc32c) {
+                    let actual = proof
+                        .content_crc32c
+                        .map(|crc| format!("{crc:08x}"))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    return Err(format!(
+                        "cached cloud SST '{sst_name}' content crc32c {actual} does not match manifest {expected_content_crc32c:08x}"
+                    ));
+                }
+            }
+            if let Some(expected_file) = expected_file {
+                let Some(summary) = proof.summary.as_ref() else {
+                    return Err(format!(
+                        "cached cloud SST '{sst_name}' has no physical summary proof"
+                    ));
+                };
+                Self::verify_sst_summary_matches_manifest(sst_name, summary, expected_file)?;
+            }
+            return Ok(());
         }
 
         let data = Self::read_cloud_object_from_backend_blocking(cloud, key)?;
-        Self::validate_sst_object_bytes(sst_name, expected_size_bytes, &data)?;
+        let (content_crc32c, summary) = Self::validate_sst_object_bytes(
+            sst_name,
+            expected_size_bytes,
+            expected_content_crc32c,
+            expected_file,
+            &data,
+        )?;
         let metadata = Self::head_cloud_object_from_backend_blocking(cloud, key)?;
         if metadata.size != data.len() as u64 {
             return Err(format!(
@@ -1123,9 +1352,14 @@ impl HybridStorage {
                 metadata.size
             ));
         }
-        verified_sst_objects
-            .lock()
-            .insert(key.to_string(), VerifiedCloudObject { metadata });
+        verified_sst_objects.lock().insert(
+            key.to_string(),
+            VerifiedCloudObject {
+                metadata,
+                content_crc32c: Some(content_crc32c),
+                summary: Some(summary),
+            },
+        );
         Ok(())
     }
 
@@ -1220,6 +1454,18 @@ impl HybridStorage {
             segment_id,
             expected_max_sequence,
         )?;
+        let proof = verified_wal_segments
+            .lock()
+            .get(&segment_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!("cloud WAL segment {segment_id} has no readback proof after validation")
+            })?;
+        if !Self::wal_data_records_covered_by_manifest(&proof.data_records, &guard.manifest) {
+            return Err(format!(
+                "cloud WAL segment {segment_id} contains records not covered by the committed manifest"
+            ));
+        }
         Self::verify_manifest_cloud_objects_with_backend(
             cloud,
             verified_sst_objects,
@@ -1325,6 +1571,7 @@ impl HybridStorage {
     ) -> crate::common::MidgeResult<()> {
         let key = crate::sst::object_key(sst_name);
         let expected_size_bytes = data.len() as u64;
+        let expected_content_crc32c = Some(crc32c::crc32c(&data));
 
         if Self::object_exists_in_backend_blocking(&self.local, &key).map_err(|error| {
             crate::common::MidgeError::Internal(format!(
@@ -1363,7 +1610,13 @@ impl HybridStorage {
                 result: StorageOutcome::Ok(()),
                 ..
             } => self
-                .verify_sst_cloud_object(&key, sst_name, expected_size_bytes)
+                .verify_sst_cloud_object(
+                    &key,
+                    sst_name,
+                    expected_size_bytes,
+                    expected_content_crc32c,
+                    None,
+                )
                 .map_err(crate::common::MidgeError::Internal)?,
             StorageEvent::WriteComplete {
                 result: StorageOutcome::Err(error),
@@ -1883,20 +2136,31 @@ mod tests {
     }
 
     fn manifest_for_ssts(files: &[(&str, u64)]) -> crate::metadata::Manifest {
+        let files_with_crc: Vec<_> = files
+            .iter()
+            .map(|(name, size_bytes)| (*name, *size_bytes, None))
+            .collect();
+        manifest_for_ssts_with_crc(&files_with_crc)
+    }
+
+    fn manifest_for_ssts_with_crc(files: &[(&str, u64, Option<u32>)]) -> crate::metadata::Manifest {
         crate::metadata::Manifest {
             files: files
                 .iter()
-                .map(|(name, size_bytes)| crate::metadata::FileMeta {
-                    name: (*name).to_string(),
-                    level: 0,
-                    size_bytes: *size_bytes,
-                    cf_id: 0,
-                    smallest_key: Some(b"a".to_vec()),
-                    largest_key: Some(b"z".to_vec()),
-                    smallest_seq: Some(1),
-                    largest_seq: Some(1),
-                    ..Default::default()
-                })
+                .map(
+                    |(name, size_bytes, content_crc32c)| crate::metadata::FileMeta {
+                        name: (*name).to_string(),
+                        level: 0,
+                        size_bytes: *size_bytes,
+                        content_crc32c: *content_crc32c,
+                        cf_id: 0,
+                        smallest_key: Some(b"a".to_vec()),
+                        largest_key: Some(b"a".to_vec()),
+                        smallest_seq: Some(1),
+                        largest_seq: Some(1),
+                        ..Default::default()
+                    },
+                )
                 .collect(),
             ..Default::default()
         }
@@ -1957,10 +2221,33 @@ mod tests {
             .expect("first manifest validation");
 
         mock_cloud.clear_history();
-        let extended_manifest = manifest_for_ssts(&[
-            (first_name, first_bytes.len() as u64),
-            (second_name, second_bytes.len() as u64),
-        ]);
+        let extended_manifest = crate::metadata::Manifest {
+            files: vec![
+                crate::metadata::FileMeta {
+                    name: first_name.to_string(),
+                    level: 0,
+                    size_bytes: first_bytes.len() as u64,
+                    cf_id: 0,
+                    smallest_key: Some(b"a".to_vec()),
+                    largest_key: Some(b"a".to_vec()),
+                    smallest_seq: Some(1),
+                    largest_seq: Some(1),
+                    ..Default::default()
+                },
+                crate::metadata::FileMeta {
+                    name: second_name.to_string(),
+                    level: 0,
+                    size_bytes: second_bytes.len() as u64,
+                    cf_id: 0,
+                    smallest_key: Some(b"b".to_vec()),
+                    largest_key: Some(b"b".to_vec()),
+                    smallest_seq: Some(2),
+                    largest_seq: Some(2),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
         storage
             .verify_manifest_cloud_objects(&extended_manifest)
             .expect("extended manifest validation");
@@ -2034,6 +2321,52 @@ mod tests {
         assert!(
             error.contains("changed since validation") || error.contains("size mismatch"),
             "unexpected stale SST proof error: {error}"
+        );
+    }
+
+    #[test]
+    fn should_reject_manifest_sst_when_content_crc_differs() {
+        let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+        let sst_name = "wrong-crc.sst";
+        let bytes = valid_sst_bytes(b"a", b"v1", 1);
+        let key = crate::sst::object_key(sst_name);
+        let wrong_crc = crc32c::crc32c(&bytes) ^ 0xffff_ffff;
+        write_cloud_object(&storage, &key, bytes.clone());
+        let manifest =
+            manifest_for_ssts_with_crc(&[(sst_name, bytes.len() as u64, Some(wrong_crc))]);
+
+        let error = storage
+            .verify_manifest_cloud_objects(&manifest)
+            .expect_err("manifest SST with mismatched content CRC must not validate");
+
+        assert!(
+            error.contains("crc") || error.contains("content"),
+            "unexpected manifest SST CRC validation error: {error}"
+        );
+    }
+
+    #[test]
+    fn should_not_reuse_size_only_sst_proof_when_manifest_later_requires_crc() {
+        let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+        let sst_name = "crc-after-size-proof.sst";
+        let bytes = valid_sst_bytes(b"a", b"v1", 1);
+        let key = crate::sst::object_key(sst_name);
+        let wrong_crc = crc32c::crc32c(&bytes) ^ 0xffff_ffff;
+        write_cloud_object(&storage, &key, bytes.clone());
+        let size_only_manifest = manifest_for_ssts(&[(sst_name, bytes.len() as u64)]);
+        storage
+            .verify_manifest_cloud_objects(&size_only_manifest)
+            .expect("initial size-only manifest validation");
+        let crc_manifest =
+            manifest_for_ssts_with_crc(&[(sst_name, bytes.len() as u64, Some(wrong_crc))]);
+
+        let error = storage
+            .verify_manifest_cloud_objects(&crc_manifest)
+            .expect_err("cached size-only SST proof must not satisfy later CRC requirement");
+
+        assert!(
+            error.contains("crc") || error.contains("content"),
+            "unexpected cached SST CRC validation error: {error}"
         );
     }
 
@@ -2205,6 +2538,36 @@ mod tests {
     }
 
     #[test]
+    fn should_not_prune_remote_wal_when_manifest_sst_content_crc_differs() {
+        let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+        let segment_id = 16;
+        let max_sequence = 26;
+        let wal_key = crate::wal::cloud_segment_object_key(segment_id);
+        let sst_name = "wrong-crc-prune-guard.sst";
+        let sst_key = crate::sst::object_key(sst_name);
+        let sst_bytes = valid_sst_bytes(b"a", b"v1", 1);
+        let wrong_crc = crc32c::crc32c(&sst_bytes) ^ 0xffff_ffff;
+        let manifest =
+            manifest_for_ssts_with_crc(&[(sst_name, sst_bytes.len() as u64, Some(wrong_crc))]);
+
+        write_cloud_object(&storage, &wal_key, valid_wal_bytes(max_sequence));
+        write_cloud_object(&storage, &sst_key, sst_bytes);
+        storage
+            .verify_remote_wal_segment(segment_id, max_sequence)
+            .expect("initial remote WAL validation");
+        storage
+            .prune_cloud_wal_segment(segment_id, CloudWalPruneGuard::new(manifest, None))
+            .expect("schedule guarded prune");
+
+        let result = wait_for_wal_prune_result(&storage, segment_id);
+        assert!(
+            result.is_err(),
+            "worker-side manifest CRC revalidation must fail conservatively"
+        );
+        assert_cloud_object_exists(&storage, &wal_key);
+    }
+
+    #[test]
     fn should_not_prune_remote_wal_when_cloud_metadata_changes_after_initial_validation() {
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 14;
@@ -2256,8 +2619,22 @@ mod tests {
         let wal_key = crate::wal::cloud_segment_object_key(segment_id);
         let sst_name = "guard-valid.sst";
         let sst_key = crate::sst::object_key(sst_name);
-        let sst_bytes = valid_sst_bytes(b"a", b"v1", 1);
-        let manifest = manifest_for_ssts(&[(sst_name, sst_bytes.len() as u64)]);
+        let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
+        let manifest = crate::metadata::Manifest {
+            files: vec![crate::metadata::FileMeta {
+                name: sst_name.to_string(),
+                level: 0,
+                size_bytes: sst_bytes.len() as u64,
+                content_crc32c: Some(crc32c::crc32c(&sst_bytes)),
+                cf_id: 0,
+                smallest_key: Some(b"k".to_vec()),
+                largest_key: Some(b"k".to_vec()),
+                smallest_seq: Some(max_sequence),
+                largest_seq: Some(max_sequence),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
         let metadata_backend = Arc::new(MockCloudBackend::new());
         let metadata_cloud = Arc::new(CloudStorage::new(
             metadata_backend,
