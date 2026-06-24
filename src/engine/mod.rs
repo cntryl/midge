@@ -961,35 +961,58 @@ impl Engine {
         cloud: &crate::storage::cloud::CloudStorage,
     ) -> MidgeResult<()> {
         let staging_fs = state.fs.clone();
-        let keys = Self::blocking_cloud_list(cloud, "sst/")?;
-        let available: std::collections::HashSet<String> = keys
-            .iter()
-            .map(|key| cloud.strip_namespace(key).to_string())
-            .collect();
         let mut retained_files = Vec::with_capacity(state.manifest.files.len());
         let mut manifest_changed = false;
 
         for file in state.manifest.files.clone() {
             let cloud_key = crate::sst::object_key(&file.name);
-            if !available.contains(&cloud_key) {
-                if state.recovery_policy == RecoveryPolicy::Strict {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "authoritative cloud SST '{}' is missing",
-                        file.name
-                    )));
-                }
-                state.opened_in_salvage_mode = true;
-                state.persistence_anomaly_detected = true;
-                manifest_changed = true;
-                continue;
-            }
-
             let local_path = state.sst_dir.join(&file.name);
             let local_valid = local_path.exists()
                 && crate::sst::fs::SstFileIo::open_with_real_fs(&local_path).is_ok();
-            if !local_valid {
-                let data = match Self::blocking_cloud_get(cloud, &cloud_key) {
-                    Ok(data) => data,
+            if local_valid {
+                match Self::blocking_cloud_head_optional(cloud, &cloud_key) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        if state.recovery_policy == RecoveryPolicy::Strict {
+                            return Err(MidgeError::RecoveryFailed(format!(
+                                "authoritative cloud SST '{}' is missing",
+                                file.name
+                            )));
+                        }
+                        state.opened_in_salvage_mode = true;
+                        state.persistence_anomaly_detected = true;
+                        manifest_changed = true;
+                        continue;
+                    }
+                    Err(error) if state.recovery_policy == RecoveryPolicy::Salvage => {
+                        tracing::warn!(%error, sst_name = %file.name, "dropping manifest SST during salvage remote validation");
+                        state.opened_in_salvage_mode = true;
+                        state.persistence_anomaly_detected = true;
+                        manifest_changed = true;
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "failed to validate cloud SST '{}': {}",
+                            file.name, error
+                        )));
+                    }
+                }
+            } else {
+                let data = match Self::blocking_cloud_get_optional(cloud, &cloud_key) {
+                    Ok(Some(data)) => data,
+                    Ok(None) => {
+                        if state.recovery_policy == RecoveryPolicy::Strict {
+                            return Err(MidgeError::RecoveryFailed(format!(
+                                "authoritative cloud SST '{}' is missing",
+                                file.name
+                            )));
+                        }
+                        state.opened_in_salvage_mode = true;
+                        state.persistence_anomaly_detected = true;
+                        manifest_changed = true;
+                        continue;
+                    }
                     Err(error) if state.recovery_policy == RecoveryPolicy::Salvage => {
                         tracing::warn!(%error, sst_name = %file.name, "dropping manifest SST during salvage restore");
                         state.opened_in_salvage_mode = true;
@@ -1051,53 +1074,61 @@ impl Engine {
         sst_names: impl IntoIterator<Item = String>,
     ) -> MidgeResult<()> {
         let staging_fs = state.fs.clone();
-        let keys = match Self::blocking_cloud_list(cloud, "sst/") {
-            Ok(keys) => keys,
-            Err(error) if state.recovery_policy == RecoveryPolicy::Salvage => {
-                state.opened_in_salvage_mode = true;
-                state.persistence_anomaly_detected = true;
-                tracing::warn!(%error, "could not list cloud SST objects during salvage staging");
-                return Ok(());
-            }
-            Err(error) => {
-                return Err(MidgeError::RecoveryFailed(format!(
-                    "failed to list cloud SST objects: {}",
-                    error
-                )))
-            }
-        };
-        let available: std::collections::HashSet<String> = keys
-            .iter()
-            .map(|key| cloud.strip_namespace(key).to_string())
-            .collect();
 
         for sst_name in sst_names {
             let cloud_key = crate::sst::object_key(&sst_name);
-            if !available.contains(&cloud_key) {
-                if state.recovery_policy == RecoveryPolicy::Strict {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "authoritative cloud SST '{}' is missing",
-                        sst_name
-                    )));
-                }
-                state.opened_in_salvage_mode = true;
-                state.persistence_anomaly_detected = true;
-                tracing::warn!(
-                    sst_name = %sst_name,
-                    "skipping cloud SST staging because authoritative object is missing"
-                );
-                continue;
-            }
-
             let local_path = state.sst_dir.join(&sst_name);
             let local_valid = local_path.exists()
                 && crate::sst::fs::SstFileIo::open_with_real_fs(&local_path).is_ok();
             if local_valid {
+                match Self::blocking_cloud_head_optional(cloud, &cloud_key) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        if state.recovery_policy == RecoveryPolicy::Strict {
+                            return Err(MidgeError::RecoveryFailed(format!(
+                                "authoritative cloud SST '{}' is missing",
+                                sst_name
+                            )));
+                        }
+                        state.opened_in_salvage_mode = true;
+                        state.persistence_anomaly_detected = true;
+                        tracing::warn!(
+                            sst_name = %sst_name,
+                            "skipping cloud SST staging because authoritative object is missing"
+                        );
+                    }
+                    Err(error) if state.recovery_policy == RecoveryPolicy::Salvage => {
+                        state.opened_in_salvage_mode = true;
+                        state.persistence_anomaly_detected = true;
+                        tracing::warn!(%error, sst_name = %sst_name, "skipping cloud SST staging during salvage validation");
+                    }
+                    Err(error) => {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "failed to validate cloud SST '{}': {}",
+                            sst_name, error
+                        )))
+                    }
+                }
                 continue;
             }
 
-            let data = match Self::blocking_cloud_get(cloud, &cloud_key) {
-                Ok(data) => data,
+            let data = match Self::blocking_cloud_get_optional(cloud, &cloud_key) {
+                Ok(Some(data)) => data,
+                Ok(None) => {
+                    if state.recovery_policy == RecoveryPolicy::Strict {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "authoritative cloud SST '{}' is missing",
+                            sst_name
+                        )));
+                    }
+                    state.opened_in_salvage_mode = true;
+                    state.persistence_anomaly_detected = true;
+                    tracing::warn!(
+                        sst_name = %sst_name,
+                        "skipping cloud SST staging because authoritative object is missing"
+                    );
+                    continue;
+                }
                 Err(error) if state.recovery_policy == RecoveryPolicy::Salvage => {
                     state.opened_in_salvage_mode = true;
                     state.persistence_anomaly_detected = true;
@@ -2522,6 +2553,154 @@ mod tests {
         assert_eq!(
             retained.last_persisted_sequence, 21,
             "engine metadata mirror must not overwrite newer remote manifest"
+        );
+    }
+
+    struct ListOmittingCloudBackend {
+        inner: Arc<crate::storage::cloud::MockCloudBackend>,
+        omitted_prefix: String,
+    }
+
+    impl ListOmittingCloudBackend {
+        fn new(
+            inner: Arc<crate::storage::cloud::MockCloudBackend>,
+            omitted_prefix: impl Into<String>,
+        ) -> Self {
+            Self {
+                inner,
+                omitted_prefix: omitted_prefix.into(),
+            }
+        }
+    }
+
+    impl crate::storage::cloud::CloudBackend for ListOmittingCloudBackend {
+        fn submit_put(
+            &self,
+            key: String,
+            data: Vec<u8>,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            self.inner.submit_put(key, data, headers, callback);
+        }
+
+        fn submit_get(&self, key: String, callback: crate::storage::cloud::CloudCallback) {
+            self.inner.submit_get(key, callback);
+        }
+
+        fn submit_get_range(
+            &self,
+            key: String,
+            start: u64,
+            end: Option<u64>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            self.inner.submit_get_range(key, start, end, callback);
+        }
+
+        fn submit_delete(
+            &self,
+            key: String,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            self.inner.submit_delete(key, headers, callback);
+        }
+
+        fn submit_list(&self, prefix: String, callback: crate::storage::cloud::CloudCallback) {
+            if prefix.ends_with(&self.omitted_prefix) {
+                let _ = callback.send(crate::storage::cloud::CloudEvent::ListComplete {
+                    prefix,
+                    result: crate::storage::cloud::CloudOutcome::Ok(Vec::new()),
+                });
+                return;
+            }
+            self.inner.submit_list(prefix, callback);
+        }
+
+        fn submit_head(&self, key: String, callback: crate::storage::cloud::CloudCallback) {
+            self.inner.submit_head(key, callback);
+        }
+    }
+
+    fn test_sst_bytes() -> Vec<u8> {
+        use crate::sst::traits::SstFactory;
+
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create().expect("create test sst writer");
+        writer
+            .add_with_meta(b"cloud-list-key", Some(b"cloud-list-value"), 1, 0, None)
+            .expect("write test sst entry");
+        writer.finish_bytes().expect("finish test sst bytes")
+    }
+
+    fn cloud_with_stale_sst_listing() -> crate::storage::cloud::CloudStorage {
+        let inner = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let backend = Arc::new(ListOmittingCloudBackend::new(Arc::clone(&inner), "sst/"));
+        crate::storage::cloud::CloudStorage::new(backend, "midge".to_string())
+    }
+
+    #[test]
+    fn should_restore_manifest_sst_when_cloud_listing_is_stale_but_object_is_readable() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let mut state = crate::runtime::RuntimeState::try_new(
+            temp_dir.path().to_path_buf(),
+            false,
+            RecoveryPolicy::Strict,
+        )
+        .expect("create runtime state");
+        let sst_name = crate::sst::file_name(0, 0, 1);
+        let sst_bytes = test_sst_bytes();
+        state.manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: sst_bytes.len() as u64,
+            cf_id: 0,
+            sst_seq: 1,
+            smallest_key: Some(b"cloud-list-key".to_vec()),
+            largest_key: Some(b"cloud-list-key".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            ..Default::default()
+        });
+        let cloud = cloud_with_stale_sst_listing();
+        Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), sst_bytes)
+            .expect("upload test sst");
+
+        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+            .expect("stale list should not make readable manifest SST unrecoverable");
+
+        assert!(
+            state.sst_dir.join(&sst_name).exists(),
+            "readable cloud SST should be restored despite stale LIST"
+        );
+    }
+
+    #[test]
+    fn should_stage_intent_replay_sst_when_cloud_listing_is_stale_but_object_is_readable() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let mut state = crate::runtime::RuntimeState::try_new(
+            temp_dir.path().to_path_buf(),
+            false,
+            RecoveryPolicy::Strict,
+        )
+        .expect("create runtime state");
+        let sst_name = crate::sst::file_name(0, 0, 2);
+        let sst_bytes = test_sst_bytes();
+        let cloud = cloud_with_stale_sst_listing();
+        Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), sst_bytes)
+            .expect("upload intent replay sst");
+
+        Engine::ensure_named_sst_cache_from_cloud_storage(
+            &mut state,
+            &cloud,
+            vec![sst_name.clone()],
+        )
+        .expect("stale list should not make readable intent SST unstaged");
+
+        assert!(
+            state.sst_dir.join(&sst_name).exists(),
+            "readable cloud SST should be staged despite stale LIST"
         );
     }
 }
