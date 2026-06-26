@@ -889,6 +889,74 @@ impl HybridStorage {
         }
     }
 
+    fn spawn_best_effort_local_cache_delete(
+        local: Arc<dyn StorageBackend>,
+        key: String,
+        sst_name: String,
+    ) {
+        let log_key = key.clone();
+        let log_sst_name = sst_name.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("midge-sst-cache-gc".to_string())
+            .spawn(move || {
+                let (tx, rx) = std::sync::mpsc::channel();
+                local.submit_delete(key.clone(), tx);
+                match rx.recv_timeout(Duration::from_secs(30)) {
+                    Ok(StorageEvent::DeleteComplete {
+                        result: StorageOutcome::Ok(()),
+                        ..
+                    }) => {
+                        tracing::debug!(sst_name, key, "Deleted obsolete local hybrid SST cache");
+                    }
+                    Ok(StorageEvent::DeleteComplete {
+                        result: StorageOutcome::Err(error),
+                        ..
+                    }) if Self::storage_error_indicates_missing(&error) => {
+                        tracing::debug!(
+                            sst_name,
+                            key,
+                            "Obsolete local hybrid SST cache already missing"
+                        );
+                    }
+                    Ok(StorageEvent::DeleteComplete {
+                        result: StorageOutcome::Err(error),
+                        ..
+                    }) => {
+                        tracing::warn!(
+                            sst_name,
+                            key,
+                            error,
+                            "Failed to delete obsolete SST from local hybrid cache"
+                        );
+                    }
+                    Ok(other) => {
+                        tracing::warn!(
+                            sst_name,
+                            key,
+                            ?other,
+                            "Unexpected local hybrid SST cache delete response"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            sst_name,
+                            key,
+                            %error,
+                            "Timed out deleting obsolete SST from local hybrid cache"
+                        );
+                    }
+                }
+            })
+        {
+            tracing::warn!(
+                sst_name = %log_sst_name,
+                key = %log_key,
+                %error,
+                "Failed to schedule obsolete local hybrid SST cache delete"
+            );
+        }
+    }
+
     fn verify_cloud_object_proof(
         cloud: &Arc<dyn StorageBackend>,
         key: &str,
@@ -1713,15 +1781,11 @@ impl HybridStorage {
         }
 
         self.verified_sst_objects.lock().remove(&key);
-
-        if let Err(error) = Self::delete_object_from_backend_blocking(&self.local, &key) {
-            tracing::warn!(
-                sst_name,
-                key,
-                error,
-                "Failed to delete obsolete SST from local hybrid cache"
-            );
-        }
+        Self::spawn_best_effort_local_cache_delete(
+            Arc::clone(&self.local),
+            key,
+            sst_name.to_string(),
+        );
 
         Ok(())
     }
