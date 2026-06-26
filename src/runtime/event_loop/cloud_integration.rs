@@ -1425,6 +1425,70 @@ mod tests {
     }
 
     #[test]
+    fn should_mirror_cleared_compaction_intent_after_cloud_sst_publish(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        el.state.enable_compaction = false;
+
+        let input_sst = "compaction-input.sst";
+        add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
+
+        let output_sst = "compaction-output.sst";
+        let output_bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", 10);
+        write_test_file(el.state.sst_dir.join(output_sst), &output_bytes);
+
+        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            "metadata-test".to_string(),
+        ));
+        el.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+
+        el.state
+            .active_compactions
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let request_id = 4242;
+        let response_rx = el.router.register(request_id);
+        let (_tx, msg_rx) = crossbeam::channel::unbounded();
+
+        // Act
+        el.handle_runtime_msg(
+            RuntimeMsg::CompactionComplete {
+                request_id,
+                input_ssts: vec![input_sst.to_string()],
+                output_ssts: vec![output_sst.to_string()],
+                cf_id: 0,
+                target_level: 1,
+                succeeded: true,
+            },
+            &msg_rx,
+        );
+
+        // Assert
+        assert!(matches!(
+            response_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("compaction completion response"),
+            RuntimeResponse::Ok { .. }
+        ));
+        let local_intent =
+            std::fs::read(el.state.db_path.join("intent_log.json")).expect("read local intent log");
+        let remote_intent = get_cloud_metadata_for_test(&metadata_storage, "intent_log.json");
+        assert_eq!(
+            remote_intent, local_intent,
+            "cloud intent metadata must reflect the cleared compaction publication intent"
+        );
+        assert!(
+            el.state.intent_log.is_empty(),
+            "compaction publication intent should be cleared locally after completion"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn should_not_prune_remote_wal_when_segment_is_not_cloud_durable(
     ) -> crate::common::MidgeResult<()> {
         let mut el = create_test_cloud_event_loop(

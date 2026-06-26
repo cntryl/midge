@@ -1783,14 +1783,41 @@ impl EventLoop {
                                 );
                             }
 
-                            if let Err(error) =
-                                self.state.clear_compaction_publication_intent(&output_ssts)
-                            {
-                                self.state.mark_persistence_anomaly();
-                                tracing::warn!(
-                                    %error,
-                                    "failed to clear compaction publication intent after GC"
-                                );
+                            match self.state.clear_compaction_publication_intent(&output_ssts) {
+                                Ok(()) => {
+                                    if let Err(e) = self.mirror_metadata_after_local_commit(
+                                        "compaction publication intent clear",
+                                    ) {
+                                        if let Some(t) = crate::telemetry::Telemetry::global() {
+                                            t.metrics().record_compaction_failure();
+                                        }
+                                        self.state.mark_persistence_anomaly();
+                                        tracing::error!(
+                                            error = ?e,
+                                            "failed to mirror cleared compaction publication intent"
+                                        );
+                                        self.respond(
+                                            request_id,
+                                            RuntimeResponse::Error {
+                                                request_id,
+                                                error: crate::common::MidgeError::Internal(
+                                                    format!(
+                                                        "failed to mirror cleared compaction publication intent: {}",
+                                                        e
+                                                    ),
+                                                ),
+                                            },
+                                        );
+                                        return HandleOutcome::Continue;
+                                    }
+                                }
+                                Err(error) => {
+                                    self.state.mark_persistence_anomaly();
+                                    tracing::warn!(
+                                        %error,
+                                        "failed to clear compaction publication intent after GC"
+                                    );
+                                }
                             }
                             if let Some(t) = crate::telemetry::Telemetry::global() {
                                 let bytes_rewritten: u64 = self
