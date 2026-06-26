@@ -359,6 +359,10 @@ impl EventLoop {
     }
 
     fn schedule_compaction_after_flush_publication(&mut self, sst_name: &str) {
+        if !self.state.enable_compaction {
+            return;
+        }
+
         match self.schedule_one_background_compaction_if_needed("flush publication") {
             Ok(true) => tracing::debug!(
                 sst_name,
@@ -2391,7 +2395,7 @@ pub(super) mod tests {
     use crate::runtime::{state::RuntimeState, ResponseRouter};
     use crate::sst::Memtable;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -2638,6 +2642,80 @@ pub(super) mod tests {
         assert!(
             event_loop.state.compaction.compacting_ssts.is_empty(),
             "disabled compaction should not lock SSTs after flush publication"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_skip_post_flush_compaction_check_during_ingest_when_compaction_disabled(
+    ) -> crate::common::MidgeResult<()> {
+        #[derive(Clone)]
+        struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+        struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+            type Writer = CapturedLogWriter;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                CapturedLogWriter(Arc::clone(&self.0))
+            }
+        }
+
+        impl std::io::Write for CapturedLogWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("captured logs lock")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+        event_loop.state.enable_compaction = false;
+        event_loop
+            .state
+            .ingest_active
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        event_loop.state.manifest.files.extend(
+            (1..=4)
+                .map(|seq| test_manifest_l0_file_meta(&format!("ingest-disabled-{seq}.sst"), seq)),
+        );
+
+        let captured_logs = CapturedLogs(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(captured_logs.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            event_loop.schedule_compaction_after_flush_publication("ingest-disabled-4.sst");
+        });
+
+        let logs = String::from_utf8(captured_logs.0.lock().expect("captured logs lock").clone())
+            .expect("captured logs should be utf8");
+        assert!(
+            !logs.contains("no_compaction_during_ingest"),
+            "disabled post-flush scheduling should not enter the ingest invariant path: {logs}"
+        );
+        assert!(
+            !logs.contains("BUG: compaction scheduling attempted while ingest mode is active"),
+            "disabled post-flush scheduling should stay quiet during ingest teardown: {logs}"
+        );
+        assert_eq!(
+            event_loop
+                .state
+                .active_compactions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "disabled post-flush scheduling should not start compaction during ingest"
         );
 
         Ok(())
