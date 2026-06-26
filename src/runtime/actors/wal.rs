@@ -65,6 +65,8 @@ pub struct WalActor {
     cloud_write_queue: CloudWriteQueue,
     /// Bytes written since last sync (for batched mode)
     bytes_since_sync: usize,
+    /// Highest sequence actually appended to the current WAL segment.
+    segment_max_sequence: u64,
     /// Flush generation for batched/local durability group commit
     flush_generation: u64,
 
@@ -120,6 +122,10 @@ impl WalActor {
         }
     }
 
+    fn record_segment_sequence(&mut self, sequence: u64) {
+        self.segment_max_sequence = self.segment_max_sequence.max(sequence);
+    }
+
     pub fn new(
         wal_dir: PathBuf,
         durability_policy: DurabilityPolicy,
@@ -143,6 +149,7 @@ impl WalActor {
             durability_policy,
             cloud_write_queue: CloudWriteQueue::new(),
             bytes_since_sync: 0,
+            segment_max_sequence: 0,
             flush_generation: 0,
             sync_calls: 0,
             sync_total: Duration::from_secs(0),
@@ -336,6 +343,7 @@ impl WalActor {
                     record.estimated_size() as u64,
                     a_start.elapsed(),
                 );
+                self.record_segment_sequence(sequence);
             }
         }
 
@@ -554,6 +562,7 @@ impl WalActor {
                     record.estimated_size() as u64,
                     a_start.elapsed(),
                 );
+                self.record_segment_sequence(sequence);
             }
 
             // Update state tracking
@@ -818,6 +827,9 @@ impl WalActor {
                     return Err(error);
                 }
                 self.finish_append_instrumentation(total_wal_bytes as u64, a_start.elapsed());
+                if let Some(max_sequence) = wal_records.iter().map(|record| record.seq).max() {
+                    self.record_segment_sequence(max_sequence);
+                }
                 fail::fail_point!("midge::wal::after_append_batch_before_sync");
             }
 
@@ -850,6 +862,7 @@ impl WalActor {
                     commit_record.estimated_size() as u64,
                     a_start.elapsed(),
                 );
+                self.record_segment_sequence(commit_record.seq);
             }
 
             state.wal.pending_writes += 1;
@@ -1517,8 +1530,9 @@ impl WalActor {
     /// CloudAsync durability uses local WAL as a staging file for upload.
     /// We avoid fsync on every write, but do a flush+fsync only when sealing
     /// a segment right before upload so the uploader reads a complete file.
-    pub fn flush_for_cloud_upload(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
+    pub fn flush_for_cloud_upload(&mut self, state: &mut RuntimeState) -> MidgeResult<u64> {
         let pending = state.wal.pending_writes;
+        let segment_max_sequence = self.segment_max_sequence;
 
         if let Some(writer) = &mut self.writer {
             writer.flush()?;
@@ -1528,8 +1542,8 @@ impl WalActor {
         }
 
         // Treat everything appended so far as ready-to-ship.
-        state.wal.last_synced_seq = state.sequence;
-        state.wal.local_durable_seq = state.sequence;
+        state.wal.last_synced_seq = segment_max_sequence;
+        state.wal.local_durable_seq = segment_max_sequence;
 
         tracing::debug!(
             pending_writes = pending,
@@ -1537,7 +1551,7 @@ impl WalActor {
             "WAL flush (CloudAsync upload)"
         );
 
-        Ok(())
+        Ok(segment_max_sequence)
     }
 
     /// Clear buffered WAL accounting after a CloudAsync segment is successfully
@@ -1546,6 +1560,7 @@ impl WalActor {
         state.wal.pending_writes = 0;
         self.pending_sync_count = 0;
         self.bytes_since_sync = 0;
+        self.segment_max_sequence = 0;
         self.last_sync_instant = Instant::now();
     }
 
@@ -1592,6 +1607,7 @@ impl WalActor {
         }
 
         state.wal.current_segment_id += 1;
+        self.segment_max_sequence = 0;
 
         tracing::info!(
             old_segment,
