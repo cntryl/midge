@@ -542,14 +542,20 @@ impl EventLoop {
             if sequence > self.state.manifest.last_persisted_sequence {
                 self.state.manifest.last_persisted_sequence = sequence;
             }
-            if let Err(error) = self.manifest_actor.persist(&self.state) {
-                self.state.mark_persistence_anomaly();
-                tracing::warn!(%error, sst_name, "manifest checkpoint after flush failed; journal remains authoritative");
-            } else {
+            let manifest_persisted = match self.manifest_actor.persist(&self.state) {
+                Ok(()) => true,
+                Err(error) => {
+                    self.state.mark_persistence_anomaly();
+                    tracing::warn!(%error, sst_name, "manifest checkpoint after flush failed; journal remains authoritative");
+                    false
+                }
+            };
+
+            self.state.clear_flush_publication_intent(sst_name)?;
+            if manifest_persisted {
                 self.mirror_metadata_after_local_commit("flush manifest publish")?;
                 cloud_manifest_published = true;
             }
-            self.state.clear_flush_publication_intent(sst_name)?;
         }
 
         self.flush_actor

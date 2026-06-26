@@ -1238,6 +1238,87 @@ mod tests {
     }
 
     #[test]
+    fn should_prune_remote_wal_when_flush_intent_clear_is_mirrored(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        let sst_name = "flush-covered.sst";
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence;
+
+        let sst_bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", max_sequence);
+        write_test_file(el.state.sst_dir.join(sst_name), &sst_bytes);
+        write_test_file(remote_sst_path_for_test(&el, sst_name), &sst_bytes);
+        let file_meta = crate::runtime::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: sst_bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&sst_bytes)),
+            cf_id: 0,
+            smallest_key: Some(b"prune-candidate".to_vec()),
+            largest_key: Some(b"prune-candidate".to_vec()),
+            smallest_seq: Some(max_sequence),
+            largest_seq: Some(max_sequence),
+        };
+
+        let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+            metadata_backend.clone(),
+            "metadata-test".to_string(),
+        ));
+        el.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+
+        el.state
+            .append_intent(crate::runtime::IntentLogEntry::FlushPublish {
+                phase: crate::runtime::PublicationPhase::OutputDurable,
+                cf_id: 0,
+                sequence: max_sequence,
+                file_meta: file_meta.clone(),
+            })?;
+
+        // Act
+        el.publish_flushed_sst(0, sst_name, max_sequence, Some(file_meta))?;
+        drain_prune_completion_for_test(&mut el);
+
+        // Assert
+        let local_intent =
+            std::fs::read(el.state.db_path.join("intent_log.json")).expect("read local intent log");
+        let remote_intent = get_cloud_metadata_for_test(&metadata_storage, "intent_log.json");
+        assert_eq!(
+            remote_intent, local_intent,
+            "cloud intent metadata must reflect the committed local intent clear before WAL prune"
+        );
+        let metadata_uploads = metadata_backend.get_uploads();
+        let expected_metadata_uploads = crate::storage::cloud::CLOUD_METADATA_FILES
+            .iter()
+            .filter(|file_name| el.state.db_path.join(file_name).exists())
+            .count();
+        assert_eq!(
+            metadata_uploads.len(),
+            expected_metadata_uploads,
+            "flush publication should use the existing metadata mirror, not perform a second full mirror: {metadata_uploads:?}"
+        );
+        assert_eq!(
+            metadata_uploads
+                .iter()
+                .filter(|(key, _)| key.ends_with("metadata/intent_log.json"))
+                .count(),
+            1,
+            "intent metadata should be uploaded once as part of the existing mirror"
+        );
+        assert!(
+            !remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL should prune after flush coverage and current cloud metadata are both verified"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn should_not_prune_remote_wal_when_segment_is_not_cloud_durable(
     ) -> crate::common::MidgeResult<()> {
         let mut el = create_test_cloud_event_loop(
