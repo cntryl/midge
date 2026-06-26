@@ -863,6 +863,32 @@ impl HybridStorage {
         }
     }
 
+    fn delete_object_from_backend_blocking(
+        backend: &Arc<dyn StorageBackend>,
+        key: &str,
+    ) -> Result<bool, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        backend.submit_delete(key.to_string(), tx);
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(StorageEvent::DeleteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            }) => Ok(true),
+            Ok(StorageEvent::DeleteComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            }) if Self::storage_error_indicates_missing(&error) => Ok(false),
+            Ok(StorageEvent::DeleteComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            }) => Err(format!("object '{key}' delete failed: {error}")),
+            Ok(other) => Err(format!(
+                "unexpected storage delete response for '{key}': {other:?}"
+            )),
+            Err(error) => Err(format!("storage delete timed out for '{key}': {error}")),
+        }
+    }
+
     fn verify_cloud_object_proof(
         cloud: &Arc<dyn StorageBackend>,
         key: &str,
@@ -1666,6 +1692,37 @@ impl HybridStorage {
                 )));
             }
         }
+        Ok(())
+    }
+
+    pub fn delete_sst_object(&self, sst_name: &str) -> crate::common::MidgeResult<()> {
+        let key = crate::sst::object_key(sst_name);
+
+        match Self::delete_object_from_backend_blocking(&self.cloud, &key) {
+            Ok(true) => {
+                tracing::info!(sst_name, key, "Deleted obsolete cloud SST object");
+            }
+            Ok(false) => {
+                tracing::debug!(sst_name, key, "Obsolete cloud SST object already missing");
+            }
+            Err(error) => {
+                return Err(crate::common::MidgeError::Internal(format!(
+                    "cloud SST delete failed: {error}"
+                )));
+            }
+        }
+
+        self.verified_sst_objects.lock().remove(&key);
+
+        if let Err(error) = Self::delete_object_from_backend_blocking(&self.local, &key) {
+            tracing::warn!(
+                sst_name,
+                key,
+                error,
+                "Failed to delete obsolete SST from local hybrid cache"
+            );
+        }
+
         Ok(())
     }
 }

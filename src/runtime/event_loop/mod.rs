@@ -1769,8 +1769,12 @@ impl EventLoop {
                             fail::fail_point!("slice6::after_manifest_persist_before_sst_gc");
 
                             // Queue GC deletion of input SSTs
-                            if let Err(e) = self.gc_actor.delete_ssts(&mut self.state, &input_ssts)
-                            {
+                            let hybrid_storage = self.hybrid_storage.clone();
+                            if let Err(e) = self.gc_actor.delete_ssts(
+                                &mut self.state,
+                                &input_ssts,
+                                hybrid_storage.as_deref(),
+                            ) {
                                 self.state.mark_persistence_anomaly();
                                 tracing::warn!(
                                     error = ?e,
@@ -2254,7 +2258,12 @@ impl EventLoop {
                 request_id,
                 sst_names,
             } => {
-                let result = self.gc_actor.delete_ssts(&mut self.state, &sst_names);
+                let hybrid_storage = self.hybrid_storage.clone();
+                let result = self.gc_actor.delete_ssts(
+                    &mut self.state,
+                    &sst_names,
+                    hybrid_storage.as_deref(),
+                );
                 let resp = result
                     .map(|_| RuntimeResponse::Ok { request_id })
                     .unwrap_or_else(|e| RuntimeResponse::Error {

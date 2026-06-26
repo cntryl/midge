@@ -78,6 +78,7 @@ impl GcActor {
         &mut self,
         state: &mut RuntimeState,
         sst_names: &[String],
+        hybrid_storage: Option<&crate::storage::HybridStorage>,
     ) -> MidgeResult<()> {
         // Get set of SSTs pinned by active snapshots
         let pinned_ssts = state.get_pinned_sst_names();
@@ -108,6 +109,19 @@ impl GcActor {
                 tracing::warn!(sst_name, "Skipping delete of SST pinned by active snapshot");
                 skipped_count += 1;
                 continue;
+            }
+
+            if let Some(storage) = hybrid_storage {
+                if let Err(e) = storage.delete_sst_object(sst_name) {
+                    tracing::warn!(
+                        sst_name,
+                        error = %e,
+                        "Failed to delete obsolete SST from cloud storage"
+                    );
+                    skipped_count += 1;
+                    // Keep the local orphan so a later GC pass can retry provider cleanup.
+                    continue;
+                }
             }
 
             // Actually delete the file

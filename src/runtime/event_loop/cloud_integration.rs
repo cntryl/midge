@@ -1661,6 +1661,86 @@ mod tests {
     }
 
     #[test]
+    fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common::MidgeResult<()>
+    {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        el.state.enable_compaction = false;
+
+        let input_sst = "cloud-gc-input.sst";
+        let input_bytes = valid_sst_bytes_for_test(b"obsolete", b"value", 10);
+        el.state.manifest.files.push(crate::metadata::FileMeta {
+            name: input_sst.to_string(),
+            level: 0,
+            size_bytes: input_bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&input_bytes)),
+            cf_id: 0,
+            smallest_key: Some(b"obsolete".to_vec()),
+            largest_key: Some(b"obsolete".to_vec()),
+            smallest_seq: Some(10),
+            largest_seq: Some(10),
+            ..Default::default()
+        });
+        write_test_file(el.state.sst_dir.join(input_sst), &input_bytes);
+        el.hybrid_storage
+            .as_ref()
+            .expect("hybrid storage")
+            .write_sst_object(input_sst, input_bytes)?;
+        assert!(
+            remote_sst_path_for_test(&el, input_sst).exists(),
+            "test setup should create the obsolete provider SST object"
+        );
+
+        let output_sst = "cloud-gc-output.sst";
+        let output_bytes = valid_sst_bytes_for_test(b"obsolete", b"new-value", 11);
+        write_test_file(el.state.sst_dir.join(output_sst), &output_bytes);
+
+        el.state
+            .active_compactions
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let request_id = 4545;
+        let response_rx = el.router.register(request_id);
+        let (_tx, msg_rx) = crossbeam::channel::unbounded();
+
+        // Act
+        el.handle_runtime_msg(
+            RuntimeMsg::CompactionComplete {
+                request_id,
+                input_ssts: vec![input_sst.to_string()],
+                output_ssts: vec![output_sst.to_string()],
+                cf_id: 0,
+                target_level: 1,
+                succeeded: true,
+            },
+            &msg_rx,
+        );
+
+        // Assert
+        assert!(matches!(
+            response_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("compaction completion response"),
+            RuntimeResponse::Ok { .. }
+        ));
+        assert!(
+            !el.state.sst_dir.join(input_sst).exists(),
+            "obsolete input SST should be removed from the local runtime cache"
+        );
+        assert!(
+            !remote_sst_path_for_test(&el, input_sst).exists(),
+            "obsolete input SST should be removed from the cloud provider namespace"
+        );
+        assert!(
+            remote_sst_path_for_test(&el, output_sst).exists(),
+            "compaction output SST should remain in the cloud provider namespace"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn should_not_prune_remote_wal_when_segment_is_not_cloud_durable(
     ) -> crate::common::MidgeResult<()> {
         let mut el = create_test_cloud_event_loop(
