@@ -1783,29 +1783,66 @@ impl EventLoop {
                                 );
                             }
 
-                            if let Err(error) =
-                                self.state.clear_compaction_publication_intent(&output_ssts)
+                            let cleared_intent_mirror_error = match self
+                                .state
+                                .clear_compaction_publication_intent(&output_ssts)
                             {
-                                self.state.mark_persistence_anomaly();
-                                tracing::warn!(
-                                    %error,
-                                    "failed to clear compaction publication intent after GC"
+                                Ok(()) => {
+                                    match self.mirror_metadata_after_local_commit(
+                                        "compaction publication intent clear",
+                                    ) {
+                                        Ok(()) => None,
+                                        Err(e) => {
+                                            if let Some(t) = crate::telemetry::Telemetry::global() {
+                                                t.metrics().record_compaction_failure();
+                                            }
+                                            self.state.mark_persistence_anomaly();
+                                            tracing::error!(
+                                                error = ?e,
+                                                "failed to mirror cleared compaction publication intent"
+                                            );
+                                            Some(e)
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    self.state.mark_persistence_anomaly();
+                                    tracing::warn!(
+                                        %error,
+                                        "failed to clear compaction publication intent after GC"
+                                    );
+                                    None
+                                }
+                            };
+
+                            if let Some(error) = cleared_intent_mirror_error {
+                                self.publish_snapshot();
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::Error {
+                                        request_id,
+                                        error: crate::common::MidgeError::Internal(format!(
+                                            "failed to mirror cleared compaction publication intent: {}",
+                                            error
+                                        )),
+                                    },
                                 );
+                            } else {
+                                if let Some(t) = crate::telemetry::Telemetry::global() {
+                                    let bytes_rewritten: u64 = self
+                                        .state
+                                        .manifest
+                                        .files
+                                        .iter()
+                                        .filter(|file| output_ssts.contains(&file.name))
+                                        .map(|file| file.size_bytes)
+                                        .sum();
+                                    t.metrics().record_compaction(bytes_rewritten);
+                                }
+                                allow_emergent_followup = true;
+                                self.publish_snapshot();
+                                self.respond(request_id, RuntimeResponse::Ok { request_id });
                             }
-                            if let Some(t) = crate::telemetry::Telemetry::global() {
-                                let bytes_rewritten: u64 = self
-                                    .state
-                                    .manifest
-                                    .files
-                                    .iter()
-                                    .filter(|file| output_ssts.contains(&file.name))
-                                    .map(|file| file.size_bytes)
-                                    .sum();
-                                t.metrics().record_compaction(bytes_rewritten);
-                            }
-                            allow_emergent_followup = true;
-                            self.publish_snapshot();
-                            self.respond(request_id, RuntimeResponse::Ok { request_id });
                         }
                     }
                 }

@@ -617,7 +617,7 @@ mod tests {
     use bytes::Bytes;
     use std::path::{Path, PathBuf};
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, OnceLock,
     };
     use std::time::{Duration, Instant};
@@ -626,6 +626,92 @@ mod tests {
 
     fn failpoint_test_lock() -> &'static Mutex<()> {
         FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct FailSecondIntentPutBackend {
+        inner: Arc<crate::storage::cloud::MockCloudBackend>,
+        intent_puts: AtomicUsize,
+    }
+
+    impl FailSecondIntentPutBackend {
+        fn new(inner: Arc<crate::storage::cloud::MockCloudBackend>) -> Self {
+            Self {
+                inner,
+                intent_puts: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl crate::storage::cloud::CloudBackend for FailSecondIntentPutBackend {
+        fn submit_put(
+            &self,
+            key: String,
+            data: Vec<u8>,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            if key.ends_with("metadata/intent_log.json")
+                && self.intent_puts.fetch_add(1, Ordering::SeqCst) >= 1
+            {
+                let _ = callback.send(crate::storage::cloud::CloudEvent::PutComplete {
+                    key,
+                    result: crate::storage::cloud::CloudOutcome::Err(
+                        "injected intent metadata put failure".to_string(),
+                    ),
+                });
+                return;
+            }
+
+            crate::storage::cloud::CloudBackend::submit_put(
+                self.inner.as_ref(),
+                key,
+                data,
+                headers,
+                callback,
+            );
+        }
+
+        fn submit_get(&self, key: String, callback: crate::storage::cloud::CloudCallback) {
+            crate::storage::cloud::CloudBackend::submit_get(self.inner.as_ref(), key, callback);
+        }
+
+        fn submit_get_range(
+            &self,
+            key: String,
+            start: u64,
+            end: Option<u64>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            crate::storage::cloud::CloudBackend::submit_get_range(
+                self.inner.as_ref(),
+                key,
+                start,
+                end,
+                callback,
+            );
+        }
+
+        fn submit_delete(
+            &self,
+            key: String,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            crate::storage::cloud::CloudBackend::submit_delete(
+                self.inner.as_ref(),
+                key,
+                headers,
+                callback,
+            );
+        }
+
+        fn submit_list(&self, prefix: String, callback: crate::storage::cloud::CloudCallback) {
+            crate::storage::cloud::CloudBackend::submit_list(self.inner.as_ref(), prefix, callback);
+        }
+
+        fn submit_head(&self, key: String, callback: crate::storage::cloud::CloudCallback) {
+            crate::storage::cloud::CloudBackend::submit_head(self.inner.as_ref(), key, callback);
+        }
     }
 
     fn seal_segment_for_test(el: &mut EventLoop) -> crate::common::MidgeResult<(u64, u64)> {
@@ -1419,6 +1505,156 @@ mod tests {
         assert!(
             !remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL should prune after flush coverage and current cloud metadata are both verified"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_mirror_cleared_compaction_intent_after_cloud_sst_publish(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        el.state.enable_compaction = false;
+
+        let input_sst = "compaction-input.sst";
+        add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
+
+        let output_sst = "compaction-output.sst";
+        let output_bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", 10);
+        write_test_file(el.state.sst_dir.join(output_sst), &output_bytes);
+
+        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            "metadata-test".to_string(),
+        ));
+        el.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+
+        el.state
+            .active_compactions
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let request_id = 4242;
+        let response_rx = el.router.register(request_id);
+        let (_tx, msg_rx) = crossbeam::channel::unbounded();
+
+        // Act
+        el.handle_runtime_msg(
+            RuntimeMsg::CompactionComplete {
+                request_id,
+                input_ssts: vec![input_sst.to_string()],
+                output_ssts: vec![output_sst.to_string()],
+                cf_id: 0,
+                target_level: 1,
+                succeeded: true,
+            },
+            &msg_rx,
+        );
+
+        // Assert
+        assert!(matches!(
+            response_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("compaction completion response"),
+            RuntimeResponse::Ok { .. }
+        ));
+        let local_intent =
+            std::fs::read(el.state.db_path.join("intent_log.json")).expect("read local intent log");
+        let remote_intent = get_cloud_metadata_for_test(&metadata_storage, "intent_log.json");
+        assert_eq!(
+            remote_intent, local_intent,
+            "cloud intent metadata must reflect the cleared compaction publication intent"
+        );
+        assert!(
+            el.state.intent_log.is_empty(),
+            "compaction publication intent should be cleared locally after completion"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        el.state.enable_compaction = false;
+
+        let input_sst = "mirror-fail-input.sst";
+        add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
+
+        let output_sst = "mirror-fail-output.sst";
+        let output_bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", 10);
+        write_test_file(el.state.sst_dir.join(output_sst), &output_bytes);
+
+        let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let failing_backend = Arc::new(FailSecondIntentPutBackend::new(metadata_backend));
+        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+            failing_backend,
+            "metadata-test".to_string(),
+        ));
+        el.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+
+        el.state
+            .active_compactions
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let completion_request_id = 4343;
+        let completion_rx = el.router.register(completion_request_id);
+        let waiter_request_id = 4344;
+        let waiter_rx = el.router.register(waiter_request_id);
+        el.state
+            .pending_compaction_waits
+            .lock()
+            .insert(waiter_request_id, "CompactAll".to_string());
+        let (_tx, msg_rx) = crossbeam::channel::unbounded();
+
+        // Act
+        el.handle_runtime_msg(
+            RuntimeMsg::CompactionComplete {
+                request_id: completion_request_id,
+                input_ssts: vec![input_sst.to_string()],
+                output_ssts: vec![output_sst.to_string()],
+                cf_id: 0,
+                target_level: 1,
+                succeeded: true,
+            },
+            &msg_rx,
+        );
+
+        // Assert
+        match completion_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("compaction completion response")
+        {
+            RuntimeResponse::Error { error, .. } => {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("failed to mirror cleared compaction publication intent"),
+                    "unexpected compaction completion error: {error}"
+                );
+            }
+            other => panic!("expected mirror failure response, got {other:?}"),
+        }
+        assert!(matches!(
+            waiter_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("pending compaction waiter response"),
+            RuntimeResponse::Ok { .. }
+        ));
+        assert_eq!(
+            el.state
+                .active_compactions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "compaction completion should still drain active count after mirror failure"
+        );
+        assert!(
+            el.state.pending_compaction_waits.lock().is_empty(),
+            "mirror failure must not leave pending compaction waiters stuck"
         );
 
         Ok(())
