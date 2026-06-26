@@ -384,17 +384,18 @@ impl EventLoop {
             return;
         }
 
-        let metadata_guard = match self.cloud_metadata_prune_guard_for_wal_cleanup() {
-            Ok(guard) => guard,
-            Err(error) => {
-                self.state.mark_persistence_anomaly();
-                tracing::warn!(
-                    error = %error,
-                    "Skipping remote WAL prune because cloud metadata is not fully readable"
-                );
-                return;
-            }
-        };
+        let metadata_guard =
+            match self.cloud_metadata_prune_guard_for_wal_cleanup_with_convergence() {
+                Ok(guard) => guard,
+                Err(error) => {
+                    self.state.mark_persistence_anomaly();
+                    tracing::warn!(
+                        error = %error,
+                        "Skipping remote WAL prune because cloud metadata is not fully readable"
+                    );
+                    return;
+                }
+            };
 
         let prune_guard = crate::storage::hybrid::backend::CloudWalPruneGuard::new(
             self.state.manifest.clone(),
@@ -413,6 +414,37 @@ impl EventLoop {
                 );
             }
         }
+    }
+
+    fn cloud_metadata_prune_guard_for_wal_cleanup_with_convergence(
+        &mut self,
+    ) -> Result<Option<crate::storage::hybrid::backend::CloudMetadataPruneGuard>, String> {
+        match self.cloud_metadata_prune_guard_for_wal_cleanup() {
+            Ok(guard) => Ok(guard),
+            Err(error) if Self::is_convergeable_cloud_metadata_mismatch(&error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Cloud metadata mismatch blocked WAL prune; attempting metadata mirror before retry"
+                );
+                self.cloud_metadata_cleanup_proofs.clear();
+                self.mirror_metadata_after_local_commit("cloud WAL prune metadata convergence")
+                    .map_err(|mirror_error| {
+                        format!("{error}; metadata mirror before WAL prune failed: {mirror_error}")
+                    })?;
+                self.cloud_metadata_cleanup_proofs.clear();
+                self.cloud_metadata_prune_guard_for_wal_cleanup()
+                    .map_err(|retry_error| {
+                        format!(
+                            "{error}; metadata still not verifiable after mirror: {retry_error}"
+                        )
+                    })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn is_convergeable_cloud_metadata_mismatch(error: &str) -> bool {
+        error.contains("does not match committed local metadata")
     }
 
     fn read_cloud_metadata_head_for_wal_cleanup(
@@ -1200,14 +1232,84 @@ mod tests {
     }
 
     #[test]
-    fn should_not_prune_remote_wal_when_cloud_metadata_is_stale() -> crate::common::MidgeResult<()>
-    {
+    fn should_converge_stale_intent_metadata_before_remote_wal_prune(
+    ) -> crate::common::MidgeResult<()> {
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
         let segment_id = 1;
         let max_sequence = 10;
         seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence;
+        add_valid_manifest_sst_for_test(&mut el, "coverage.sst", max_sequence);
+        crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+
+        el.state
+            .append_intent(crate::runtime::IntentLogEntry::WalSynced {
+                segment_id: 1,
+                seqno: 1,
+            })?;
+
+        let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+            metadata_backend.clone(),
+            "metadata-test".to_string(),
+        ));
+        put_all_cloud_metadata_for_test(&metadata_storage, &el.state.db_path);
+        el.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+        el.verify_cloud_metadata_for_wal_cleanup()
+            .expect("initial cloud metadata validation should cache proofs");
+
+        el.state
+            .append_intent(crate::runtime::IntentLogEntry::WalSynced {
+                segment_id: 2,
+                seqno: max_sequence,
+            })?;
+        let local_intent =
+            std::fs::read(el.state.db_path.join("intent_log.json")).expect("read local intent log");
+        metadata_backend.clear_history();
+
+        el.prune_cloud_wal_segments_covered_by_manifest();
+        drain_prune_completion_for_test(&mut el);
+
+        assert!(
+            !remote_wal_path_for_test(&el, segment_id).exists(),
+            "remote WAL should prune after stale intent metadata is mirrored and revalidated"
+        );
+        assert_eq!(
+            get_cloud_metadata_for_test(&metadata_storage, "intent_log.json"),
+            local_intent,
+            "cloud intent metadata should converge to committed local metadata before WAL prune"
+        );
+        let proof = el
+            .cloud_metadata_cleanup_proofs
+            .get("intent_log.json")
+            .expect("retry validation should refresh the intent metadata proof");
+        assert_eq!(proof.len, local_intent.len() as u64);
+        assert_eq!(proof.crc32c, crc32c::crc32c(&local_intent));
+        assert!(
+            metadata_backend
+                .get_uploads()
+                .iter()
+                .any(|(key, _)| key.ends_with("metadata/intent_log.json")),
+            "stale intent metadata should be repaired by an authoritative metadata mirror"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_prune_remote_wal_when_cloud_manifest_metadata_is_ahead(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let segment_id = 1;
+        let max_sequence = 10;
+        seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+        el.state.wal.cloud_durable_seq = max_sequence;
+        add_valid_manifest_sst_for_test(&mut el, "coverage.sst", max_sequence);
         crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
             .map_err(crate::common::MidgeError::Internal)?;
 
@@ -1216,18 +1318,24 @@ mod tests {
             metadata_backend,
             "metadata-test".to_string(),
         ));
-        let format_bytes =
-            std::fs::read(el.state.db_path.join("FORMAT")).expect("read local FORMAT");
-        put_cloud_metadata_for_test(&metadata_storage, "FORMAT", format_bytes);
-        put_cloud_metadata_for_test(&metadata_storage, "manifest.json", b"{}".to_vec());
-        el.cloud_metadata_storage = Some(metadata_storage);
+        put_all_cloud_metadata_for_test(&metadata_storage, &el.state.db_path);
+        let remote_manifest = crate::metadata::Manifest {
+            last_persisted_sequence: max_sequence + 1,
+            ..Default::default()
+        };
+        put_cloud_metadata_for_test(
+            &metadata_storage,
+            "manifest.json",
+            serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
+        );
+        el.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
 
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
         assert!(
             remote_wal_path_for_test(&el, segment_id).exists(),
-            "remote WAL must be retained when cloud metadata does not match the committed manifest"
+            "remote WAL must be retained when cloud manifest metadata is ahead of local state"
         );
         assert!(
             el.cloud_acked_wal_segments.contains_key(&segment_id),
