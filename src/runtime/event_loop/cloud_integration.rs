@@ -714,6 +714,97 @@ mod tests {
         }
     }
 
+    struct BlockingDeleteStorageBackend {
+        inner: Arc<crate::storage::filesystem::FileSystem>,
+        block_key: String,
+        delete_started: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        release_delete: Arc<AtomicBool>,
+    }
+
+    impl BlockingDeleteStorageBackend {
+        fn new(
+            inner: Arc<crate::storage::filesystem::FileSystem>,
+            block_key: String,
+            delete_started: std::sync::mpsc::Sender<()>,
+            release_delete: Arc<AtomicBool>,
+        ) -> Self {
+            Self {
+                inner,
+                block_key,
+                delete_started: Mutex::new(Some(delete_started)),
+                release_delete,
+            }
+        }
+    }
+
+    impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
+        fn submit_read(&self, key: String, callback: crate::storage::StorageCallback) {
+            crate::storage::StorageBackend::submit_read(self.inner.as_ref(), key, callback);
+        }
+
+        fn submit_write(
+            &self,
+            key: String,
+            data: Vec<u8>,
+            callback: crate::storage::StorageCallback,
+        ) {
+            crate::storage::StorageBackend::submit_write(self.inner.as_ref(), key, data, callback);
+        }
+
+        fn submit_write_with_headers(
+            &self,
+            key: String,
+            data: Vec<u8>,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::StorageCallback,
+        ) {
+            crate::storage::StorageBackend::submit_write_with_headers(
+                self.inner.as_ref(),
+                key,
+                data,
+                headers,
+                callback,
+            );
+        }
+
+        fn submit_delete(&self, key: String, callback: crate::storage::StorageCallback) {
+            if key == self.block_key {
+                if let Ok(mut started) = self.delete_started.lock() {
+                    if let Some(tx) = started.take() {
+                        let _ = tx.send(());
+                    }
+                }
+                while !self.release_delete.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+
+            crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
+        }
+
+        fn submit_delete_with_headers(
+            &self,
+            key: String,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::StorageCallback,
+        ) {
+            crate::storage::StorageBackend::submit_delete_with_headers(
+                self.inner.as_ref(),
+                key,
+                headers,
+                callback,
+            );
+        }
+
+        fn submit_list(&self, prefix: String, callback: crate::storage::StorageCallback) {
+            crate::storage::StorageBackend::submit_list(self.inner.as_ref(), prefix, callback);
+        }
+
+        fn submit_head(&self, key: String, callback: crate::storage::StorageCallback) {
+            crate::storage::StorageBackend::submit_head(self.inner.as_ref(), key, callback);
+        }
+    }
+
     fn seal_segment_for_test(el: &mut EventLoop) -> crate::common::MidgeResult<(u64, u64)> {
         let (seg_id, max_sequence) = seal_segment_without_remote_proof_for_test(el)?;
         if let Some(storage) = el.hybrid_storage.as_ref() {
@@ -1655,6 +1746,186 @@ mod tests {
         assert!(
             el.state.pending_compaction_waits.lock().is_empty(),
             "mirror failure must not leave pending compaction waiters stuck"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common::MidgeResult<()>
+    {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        el.state.enable_compaction = false;
+
+        let input_sst = "cloud-gc-input.sst";
+        let input_bytes = valid_sst_bytes_for_test(b"obsolete", b"value", 10);
+        el.state.manifest.files.push(crate::metadata::FileMeta {
+            name: input_sst.to_string(),
+            level: 0,
+            size_bytes: input_bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&input_bytes)),
+            cf_id: 0,
+            smallest_key: Some(b"obsolete".to_vec()),
+            largest_key: Some(b"obsolete".to_vec()),
+            smallest_seq: Some(10),
+            largest_seq: Some(10),
+            ..Default::default()
+        });
+        write_test_file(el.state.sst_dir.join(input_sst), &input_bytes);
+        el.hybrid_storage
+            .as_ref()
+            .expect("hybrid storage")
+            .write_sst_object(input_sst, input_bytes)?;
+        assert!(
+            remote_sst_path_for_test(&el, input_sst).exists(),
+            "test setup should create the obsolete provider SST object"
+        );
+
+        let output_sst = "cloud-gc-output.sst";
+        let output_bytes = valid_sst_bytes_for_test(b"obsolete", b"new-value", 11);
+        write_test_file(el.state.sst_dir.join(output_sst), &output_bytes);
+
+        el.state
+            .active_compactions
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let request_id = 4545;
+        let response_rx = el.router.register(request_id);
+        let (_tx, msg_rx) = crossbeam::channel::unbounded();
+
+        // Act
+        el.handle_runtime_msg(
+            RuntimeMsg::CompactionComplete {
+                request_id,
+                input_ssts: vec![input_sst.to_string()],
+                output_ssts: vec![output_sst.to_string()],
+                cf_id: 0,
+                target_level: 1,
+                succeeded: true,
+            },
+            &msg_rx,
+        );
+
+        // Assert
+        assert!(matches!(
+            response_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("compaction completion response"),
+            RuntimeResponse::Ok { .. }
+        ));
+        for _ in 0..100 {
+            if !el.state.sst_dir.join(input_sst).exists()
+                && !remote_sst_path_for_test(&el, input_sst).exists()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !el.state.sst_dir.join(input_sst).exists(),
+            "obsolete input SST should be removed from the local runtime cache"
+        );
+        assert!(
+            !remote_sst_path_for_test(&el, input_sst).exists(),
+            "obsolete input SST should be removed from the cloud provider namespace"
+        );
+        assert!(
+            remote_sst_path_for_test(&el, output_sst).exists(),
+            "compaction output SST should remain in the cloud provider namespace"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::MidgeResult<()> {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let sst_name = "slow-cloud-gc.sst";
+        let sst_bytes = valid_sst_bytes_for_test(b"slow-delete", b"value", 12);
+        write_test_file(el.state.sst_dir.join(sst_name), &sst_bytes);
+
+        let local_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
+            crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local_slow"))
+                .expect("create slow local backend"),
+        );
+        let cloud_backend_inner = Arc::new(
+            crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+                .expect("create slow cloud backend"),
+        );
+        let (delete_started_tx, delete_started_rx) = std::sync::mpsc::channel();
+        let release_delete = Arc::new(AtomicBool::new(false));
+        let cloud_backend: Arc<dyn crate::storage::StorageBackend> =
+            Arc::new(BlockingDeleteStorageBackend::new(
+                cloud_backend_inner,
+                crate::sst::object_key(sst_name),
+                delete_started_tx,
+                Arc::clone(&release_delete),
+            ));
+        let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
+            local_backend,
+            cloud_backend,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        ));
+        el.set_hybrid_storage(Arc::clone(&hybrid_storage));
+        hybrid_storage.write_sst_object(sst_name, sst_bytes)?;
+
+        let request_id = 4546;
+        let response_rx = el.router.register(request_id);
+        let (_tx, msg_rx) = crossbeam::channel::unbounded();
+        let release_delete_for_thread = Arc::clone(&release_delete);
+        let release_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            release_delete_for_thread.store(true, Ordering::SeqCst);
+        });
+
+        // Act
+        let started_at = Instant::now();
+        el.handle_runtime_msg(
+            RuntimeMsg::DeleteObsoleteSsts {
+                request_id,
+                sst_names: vec![sst_name.to_string()],
+            },
+            &msg_rx,
+        );
+        let elapsed = started_at.elapsed();
+
+        // Assert
+        assert!(
+            elapsed < Duration::from_millis(150),
+            "runtime GC handler blocked on provider delete for {elapsed:?}"
+        );
+        assert!(matches!(
+            response_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("GC response"),
+            RuntimeResponse::Ok { .. }
+        ));
+        delete_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("background cloud delete should start");
+        release_thread
+            .join()
+            .expect("release blocked delete thread should finish");
+        for _ in 0..100 {
+            if !el.state.sst_dir.join(sst_name).exists()
+                && !remote_sst_path_for_test(&el, sst_name).exists()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !el.state.sst_dir.join(sst_name).exists(),
+            "runtime-local orphan should be deleted after provider cleanup completes"
+        );
+        assert!(
+            !remote_sst_path_for_test(&el, sst_name).exists(),
+            "provider object should be deleted after blocked cloud delete is released"
         );
 
         Ok(())
