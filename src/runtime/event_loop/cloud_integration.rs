@@ -27,7 +27,7 @@ impl EventLoop {
         let segment_id = self.state.wal.current_segment_id;
         let bytes_buffered = self.wal_actor.bytes_since_sync() as u64;
         let seal_start = Instant::now();
-        self.wal_actor.flush_for_cloud_upload(&mut self.state)?;
+        let max_sequence = self.wal_actor.flush_for_cloud_upload(&mut self.state)?;
         fail::fail_point!(
             "midge::cloud::inject_fail_after_wal_flush_before_rotate",
             |_| Err(crate::common::MidgeError::Internal(
@@ -41,7 +41,6 @@ impl EventLoop {
 
         self.durability.rotate_to(self.state.wal.current_segment_id);
 
-        let max_sequence = self.state.wal.local_durable_seq;
         let local_path = self
             .state
             .wal_dir
@@ -643,10 +642,9 @@ mod tests {
         el: &mut EventLoop,
     ) -> crate::common::MidgeResult<(u64, u64)> {
         let seg_id = el.state.wal.current_segment_id;
-        el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
+        let max_sequence = el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
         el.wal_actor.rotate(&mut el.state)?;
         el.durability.rotate_to(el.state.wal.current_segment_id);
-        let max_sequence = el.state.wal.local_durable_seq;
         copy_local_segment_to_remote_wal_for_test(el, seg_id);
         el.wal_actor.complete_cloud_upload_seal(&mut el.state);
         el.durability
@@ -2567,6 +2565,75 @@ mod tests {
         );
 
         scenario.teardown();
+        Ok(())
+    }
+
+    #[test]
+    fn should_seal_cloud_wal_with_segment_max_sequence_not_global_sequence(
+    ) -> crate::common::MidgeResult<()> {
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+
+        let ops = vec![crate::runtime::TransactionOp::Put {
+            cf_id: 0,
+            key: bytes::Bytes::from_static(b"segment-max-key"),
+            value: bytes::Bytes::from_static(b"segment-max-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }];
+        let (last_wal_sequence, _op_count, deferred) = el.wal_actor.append_transaction(
+            &mut el.state,
+            303,
+            ops,
+            Some(crate::wal::DurabilityPolicy::CloudAsync),
+            None,
+            crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+        )?;
+        assert!(
+            deferred,
+            "CloudAsync transaction should defer cloud durability"
+        );
+
+        let global_sequence_without_wal_records = last_wal_sequence + 551;
+        el.state.sequence = global_sequence_without_wal_records;
+
+        let (segment_id, sealed_max_sequence) = el
+            .seal_current_cloud_segment()?
+            .expect("pending CloudAsync WAL records should seal a segment");
+
+        assert_eq!(
+            sealed_max_sequence, last_wal_sequence,
+            "sealed WAL max sequence must come from records appended to the segment, not global runtime sequence"
+        );
+        assert_eq!(
+            el.state.wal.local_durable_seq, last_wal_sequence,
+            "local durable frontier for the sealed segment should not advance past WAL contents"
+        );
+
+        let storage = el.hybrid_storage.as_ref().expect("hybrid storage");
+        for _ in 0..100 {
+            if storage
+                .process_uploads()
+                .iter()
+                .any(|event| matches!(event, crate::storage::StorageEvent::CloudAck { segment_id: acked, max_sequence } if *acked == segment_id && *max_sequence == last_wal_sequence))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        storage
+            .verify_remote_wal_segment(segment_id, last_wal_sequence)
+            .expect("remote WAL readback should prove the actual segment max sequence");
+        let overproof = storage
+            .verify_remote_wal_segment(segment_id, global_sequence_without_wal_records)
+            .expect_err("remote WAL readback must reject a frontier above the segment contents");
+        assert!(
+            overproof.contains("does not match expected") || overproof.contains("below expected"),
+            "unexpected overproof validation error: {overproof}"
+        );
+
         Ok(())
     }
 
