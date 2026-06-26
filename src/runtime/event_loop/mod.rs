@@ -305,6 +305,78 @@ impl EventLoop {
         plan
     }
 
+    fn schedule_one_background_compaction_if_needed(
+        &mut self,
+        operation: &str,
+    ) -> crate::common::MidgeResult<bool> {
+        let evicted = self.state.evict_timed_out_snapshots();
+        if evicted > 0 {
+            tracing::warn!(
+                evicted,
+                operation,
+                "Evicted timed-out snapshots before compaction check"
+            );
+        }
+
+        if self
+            .state
+            .ingest_active
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            let epoch = self
+                .state
+                .ingest_epoch
+                .load(std::sync::atomic::Ordering::SeqCst);
+            tracing::error!(
+                component = "compaction",
+                invariant = "no_compaction_during_ingest",
+                ingest_epoch = epoch,
+                operation,
+                "BUG: compaction scheduling attempted while ingest mode is active. \
+                 Violated invariant: compaction must not be scheduled during ingest. \
+                 Correct ordering: complete all compactions BEFORE begin_ingest."
+            );
+            return Err(crate::common::MidgeError::Internal(
+                "BUG: compaction scheduling attempted during ingest mode — violated invariant"
+                    .to_string(),
+            ));
+        }
+
+        let Some(plan) = self.compaction_actor.check_compaction(&self.state) else {
+            return Ok(false);
+        };
+
+        let plan = self.assign_compaction_output_sequence(plan);
+        self.compaction_actor
+            .run_compaction(
+                &mut self.state,
+                plan,
+                self.hybrid_storage.as_ref(),
+                self.worker_msg_tx.clone(),
+            )
+            .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))?;
+        Ok(true)
+    }
+
+    fn schedule_compaction_after_flush_publication(&mut self, sst_name: &str) {
+        if !self.state.enable_compaction {
+            return;
+        }
+
+        match self.schedule_one_background_compaction_if_needed("flush publication") {
+            Ok(true) => tracing::debug!(
+                sst_name,
+                "Scheduled background compaction after flush publication"
+            ),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                sst_name,
+                "Skipping automatic compaction after flush publication"
+            ),
+        }
+    }
+
     fn mirror_ssts_to_authoritative_cloud(
         &self,
         sst_names: &[String],
@@ -564,6 +636,7 @@ impl EventLoop {
             self.prune_cloud_wal_segments_covered_by_manifest();
         }
         self.publish_snapshot();
+        self.schedule_compaction_after_flush_publication(sst_name);
         Ok(())
     }
 
@@ -990,6 +1063,7 @@ impl EventLoop {
                 memtable_size_limit,
                 memtable_flush_threshold,
                 enable_compaction,
+                l0_compaction_trigger,
                 wal_durability_policy,
                 wal_batch_config,
             } => {
@@ -1001,6 +1075,9 @@ impl EventLoop {
                 }
                 if let Some(ec) = enable_compaction {
                     self.state.enable_compaction = ec;
+                }
+                if let Some(trigger) = l0_compaction_trigger {
+                    self.compaction_actor.set_l0_file_count_threshold(trigger);
                 }
 
                 self.wake_write_stall_waiters();
@@ -1033,6 +1110,7 @@ impl EventLoop {
                         memtable_size_limit: self.state.memtable_size_limit,
                         memtable_flush_threshold: self.state.memtable_flush_threshold,
                         enable_compaction: self.state.enable_compaction,
+                        l0_compaction_trigger: self.compaction_actor.l0_file_count_threshold(),
                         wal_durability_policy: self.wal_actor.durability_policy(),
                         wal_batch_config: self.wal_actor.batch_config(),
                     },
@@ -1418,71 +1496,11 @@ impl EventLoop {
             // Compaction
             // =============================================================
             RuntimeMsg::CheckCompaction { request_id } => {
-                let evicted = self.state.evict_timed_out_snapshots();
-                if evicted > 0 {
-                    tracing::warn!(
-                        evicted,
-                        "Evicted timed-out snapshots before compaction check"
-                    );
-                }
-
-                // ─────────────────────────────────────────────────────────────────────
-                // HARD INVARIANT: No compaction scheduling while ingest is active.
-                // This is a programmer error — the caller should not have reached here.
-                // ─────────────────────────────────────────────────────────────────────
-                if self
-                    .state
-                    .ingest_active
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    let epoch = self
-                        .state
-                        .ingest_epoch
-                        .load(std::sync::atomic::Ordering::SeqCst);
-                    tracing::error!(
-                        component = "compaction",
-                        invariant = "no_compaction_during_ingest",
-                        ingest_epoch = epoch,
-                        "BUG: CheckCompaction called while ingest mode is active. \
-                         Violated invariant: compaction must not be scheduled during ingest. \
-                         Correct ordering: complete all compactions BEFORE begin_ingest."
-                    );
-                    // Return error (panic would kill the runtime; use error response for recoverability)
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::Internal("BUG: compaction scheduling attempted during ingest mode — violated invariant".to_string()),
-                        },
-                    );
-                    return HandleOutcome::Continue;
-                }
-
-                if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
-                    let plan = self.assign_compaction_output_sequence(plan);
-                    // Schedule compaction to run in background and respond immediately.
-                    // The compaction worker will send a `CompactionComplete` message back
-                    // when finished which will be handled below.
-                    let schedule_res = self.compaction_actor.run_compaction(
-                        &mut self.state,
-                        plan,
-                        self.hybrid_storage.as_ref(),
-                        self.worker_msg_tx.clone(),
-                    );
-
-                    // Return immediate response (ack)
-                    match schedule_res {
-                        Ok(_) => self.respond(request_id, RuntimeResponse::Ok { request_id }),
-                        Err(e) => self.respond(
-                            request_id,
-                            RuntimeResponse::Error {
-                                request_id,
-                                error: crate::common::MidgeError::Internal(e.to_string()),
-                            },
-                        ),
+                match self.schedule_one_background_compaction_if_needed("CheckCompaction") {
+                    Ok(_) => self.respond(request_id, RuntimeResponse::Ok { request_id }),
+                    Err(error) => {
+                        self.respond(request_id, RuntimeResponse::Error { request_id, error })
                     }
-                } else {
-                    self.respond(request_id, RuntimeResponse::Ok { request_id });
                 }
             }
 
@@ -2377,7 +2395,7 @@ pub(super) mod tests {
     use crate::runtime::{state::RuntimeState, ResponseRouter};
     use crate::sst::Memtable;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -2459,6 +2477,53 @@ pub(super) mod tests {
         )
     }
 
+    fn valid_sst_bytes_for_event_loop_test(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {
+        use crate::sst::SstFactory;
+
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create().expect("create test SST writer");
+        writer
+            .add_with_meta(key, Some(value), seq, 0, None)
+            .expect("add test SST entry");
+        writer.finish_bytes().expect("finish test SST bytes")
+    }
+
+    fn test_manifest_l0_file_meta(name: &str, largest_seq: u64) -> crate::metadata::FileMeta {
+        crate::metadata::FileMeta {
+            name: name.to_string(),
+            level: 0,
+            size_bytes: 128,
+            cf_id: 0,
+            smallest_key: Some(format!("key-{largest_seq:04}").into_bytes()),
+            largest_key: Some(format!("key-{largest_seq:04}").into_bytes()),
+            smallest_seq: Some(largest_seq),
+            largest_seq: Some(largest_seq),
+            ..Default::default()
+        }
+    }
+
+    fn write_runtime_l0_sst_for_test(
+        event_loop: &EventLoop,
+        name: &str,
+        largest_seq: u64,
+    ) -> crate::runtime::FileMeta {
+        let key = format!("key-{largest_seq:04}");
+        let bytes = valid_sst_bytes_for_event_loop_test(key.as_bytes(), b"value", largest_seq);
+        std::fs::create_dir_all(&event_loop.state.sst_dir).expect("create test sst dir");
+        std::fs::write(event_loop.state.sst_dir.join(name), &bytes).expect("write test SST");
+        crate::runtime::FileMeta {
+            name: name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            smallest_key: Some(key.clone().into_bytes()),
+            largest_key: Some(key.into_bytes()),
+            smallest_seq: Some(largest_seq),
+            largest_seq: Some(largest_seq),
+        }
+    }
+
     // =========== EventLoop Creation Tests ===========
 
     #[test]
@@ -2504,6 +2569,188 @@ pub(super) mod tests {
         assert!(
             !event_loop.has_actionable_work(),
             "blocked auto-flush candidates should wait for a real state change before retrying"
+        );
+    }
+
+    #[test]
+    fn should_schedule_compaction_after_l0_flush_when_threshold_reached(
+    ) -> crate::common::MidgeResult<()> {
+        let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+        let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
+        event_loop.worker_msg_tx = Some(worker_tx);
+        event_loop.state.enable_compaction = true;
+        event_loop
+            .state
+            .manifest
+            .files
+            .extend((1..=3).map(|seq| test_manifest_l0_file_meta(&format!("pre-{seq}.sst"), seq)));
+
+        let flushed = write_runtime_l0_sst_for_test(&event_loop, "threshold-crossing.sst", 4);
+        event_loop.publish_flushed_sst(0, "threshold-crossing.sst", 4, Some(flushed))?;
+
+        assert_eq!(
+            event_loop
+                .state
+                .active_compactions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "publishing the threshold-crossing L0 SST should schedule compaction"
+        );
+        assert_eq!(
+            event_loop.state.compaction.compacting_ssts.len(),
+            4,
+            "scheduled L0 compaction should lock all threshold input files"
+        );
+        assert!(
+            event_loop
+                .state
+                .compaction
+                .compacting_ssts
+                .iter()
+                .any(|name| name == "threshold-crossing.sst"),
+            "newly flushed SST should be part of the scheduled L0 compaction"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_schedule_auto_compaction_when_compaction_disabled(
+    ) -> crate::common::MidgeResult<()> {
+        let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+        let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
+        event_loop.worker_msg_tx = Some(worker_tx);
+        event_loop.state.enable_compaction = false;
+        event_loop
+            .state
+            .manifest
+            .files
+            .extend((1..=3).map(|seq| test_manifest_l0_file_meta(&format!("pre-{seq}.sst"), seq)));
+
+        let flushed =
+            write_runtime_l0_sst_for_test(&event_loop, "disabled-threshold-crossing.sst", 4);
+        event_loop.publish_flushed_sst(0, "disabled-threshold-crossing.sst", 4, Some(flushed))?;
+
+        assert_eq!(
+            event_loop
+                .state
+                .active_compactions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "post-flush compaction scheduling should respect enable_compaction=false"
+        );
+        assert!(
+            event_loop.state.compaction.compacting_ssts.is_empty(),
+            "disabled compaction should not lock SSTs after flush publication"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_skip_post_flush_compaction_check_during_ingest_when_compaction_disabled(
+    ) -> crate::common::MidgeResult<()> {
+        #[derive(Clone)]
+        struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+        struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+            type Writer = CapturedLogWriter;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                CapturedLogWriter(Arc::clone(&self.0))
+            }
+        }
+
+        impl std::io::Write for CapturedLogWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("captured logs lock")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+        event_loop.state.enable_compaction = false;
+        event_loop
+            .state
+            .ingest_active
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        event_loop.state.manifest.files.extend(
+            (1..=4)
+                .map(|seq| test_manifest_l0_file_meta(&format!("ingest-disabled-{seq}.sst"), seq)),
+        );
+
+        let captured_logs = CapturedLogs(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(captured_logs.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            event_loop.schedule_compaction_after_flush_publication("ingest-disabled-4.sst");
+        });
+
+        let logs = String::from_utf8(captured_logs.0.lock().expect("captured logs lock").clone())
+            .expect("captured logs should be utf8");
+        assert!(
+            !logs.contains("no_compaction_during_ingest"),
+            "disabled post-flush scheduling should not enter the ingest invariant path: {logs}"
+        );
+        assert!(
+            !logs.contains("BUG: compaction scheduling attempted while ingest mode is active"),
+            "disabled post-flush scheduling should stay quiet during ingest teardown: {logs}"
+        );
+        assert_eq!(
+            event_loop
+                .state
+                .active_compactions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "disabled post-flush scheduling should not start compaction during ingest"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_apply_l0_compaction_trigger_from_runtime_config() {
+        let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+        let request_id = 99;
+        let response_rx = event_loop.router.register(request_id);
+        let (_tx, msg_rx) = crossbeam::channel::unbounded();
+
+        event_loop.handle_runtime_msg(
+            RuntimeMsg::SetRuntimeConfig {
+                request_id,
+                memtable_size_limit: None,
+                memtable_flush_threshold: None,
+                enable_compaction: None,
+                l0_compaction_trigger: Some(2),
+                wal_durability_policy: None,
+                wal_batch_config: None,
+            },
+            &msg_rx,
+        );
+
+        assert!(matches!(
+            response_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("runtime config response"),
+            RuntimeResponse::Ok { .. }
+        ));
+        assert_eq!(
+            event_loop.compaction_actor.l0_file_count_threshold(),
+            2,
+            "runtime config should update the compaction actor L0 file-count trigger"
         );
     }
 

@@ -24,11 +24,26 @@ pub struct CompactionActor {
 
 impl CompactionActor {
     pub fn new(sst_factory: Arc<dyn SstFactory>) -> Self {
+        Self::new_with_config(sst_factory, LeveledCompactionConfig::default())
+    }
+
+    pub fn new_with_config(
+        sst_factory: Arc<dyn SstFactory>,
+        config: LeveledCompactionConfig,
+    ) -> Self {
         Self {
             compaction_running: false,
             sst_factory,
-            compactor: Compactor::with_config(LeveledCompactionConfig::default()),
+            compactor: Compactor::with_config(config),
         }
+    }
+
+    pub fn set_l0_file_count_threshold(&mut self, threshold: usize) {
+        self.compactor.config.l0_file_count_threshold = threshold.max(1);
+    }
+
+    pub fn l0_file_count_threshold(&self) -> usize {
+        self.compactor.config.l0_file_count_threshold
     }
 
     /// Open an SST reader using the actor's configured SstFactory
@@ -334,6 +349,14 @@ mod tests {
         CompactionActor::new(sst_factory)
     }
 
+    fn create_test_compaction_actor_with_config(
+        config: LeveledCompactionConfig,
+    ) -> CompactionActor {
+        let fs = Arc::new(crate::io::MockFs::new());
+        let sst_factory = Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
+        CompactionActor::new_with_config(sst_factory, config)
+    }
+
     #[test]
     fn should_initialize_compaction_actor_with_no_running_compaction() {
         // Arrange
@@ -410,6 +433,28 @@ mod tests {
 
         // Assert
         assert!(!actor.compaction_running);
+    }
+
+    #[test]
+    fn should_use_configured_l0_file_count_threshold_when_picking_compaction() {
+        let mut actor = create_test_compaction_actor_with_config(LeveledCompactionConfig {
+            l0_file_count_threshold: 2,
+            ..LeveledCompactionConfig::default()
+        });
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.enable_compaction = true;
+        state.manifest.files.extend([
+            make_l0_file("cf0_0001.sst", 0, b"a00", b"a99"),
+            make_l0_file("cf0_0002.sst", 0, b"b00", b"b99"),
+        ]);
+
+        let plan = actor
+            .check_compaction(&state)
+            .expect("expected compaction plan at configured file-count threshold");
+
+        assert_eq!(plan.source_level, 0);
+        assert_eq!(plan.target_level, 1);
+        assert_eq!(plan.input_files.len(), 2);
     }
 
     #[test]
