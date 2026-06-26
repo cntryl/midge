@@ -234,6 +234,7 @@ pub struct IngestModeSnapshot {
     pub memtable_size_limit: usize,
     pub memtable_flush_threshold: usize,
     pub enable_compaction: bool,
+    pub l0_compaction_trigger: usize,
     pub wal_durability_policy: crate::wal::DurabilityPolicy,
     pub wal_batch_config: crate::wal::policy::BatchConfig,
 }
@@ -1726,6 +1727,7 @@ impl Engine {
             memtable_size_limit: Some(memtable_size_limit),
             memtable_flush_threshold: Some(memtable_flush_threshold),
             enable_compaction: None,
+            l0_compaction_trigger: Some(opts.l0_compaction_trigger()),
             wal_durability_policy: None,
             wal_batch_config: None,
         })?;
@@ -1871,6 +1873,7 @@ impl Engine {
                 memtable_size_limit,
                 memtable_flush_threshold,
                 enable_compaction,
+                l0_compaction_trigger,
                 wal_durability_policy,
                 wal_batch_config,
                 ..
@@ -1878,6 +1881,7 @@ impl Engine {
                 memtable_size_limit,
                 memtable_flush_threshold,
                 enable_compaction,
+                l0_compaction_trigger,
                 wal_durability_policy,
                 wal_batch_config,
             }),
@@ -1896,6 +1900,7 @@ impl Engine {
                     memtable_size_limit: None,
                     memtable_flush_threshold: None,
                     enable_compaction: Some(enabled),
+                    l0_compaction_trigger: None,
                     wal_durability_policy: None,
                     wal_batch_config: None,
                 })?;
@@ -1961,6 +1966,7 @@ impl Engine {
                     memtable_size_limit: Some(target_mem),
                     memtable_flush_threshold: Some(target_mem),
                     enable_compaction: Some(false), // also set false here for a fast path
+                    l0_compaction_trigger: None,
                     wal_durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
                     wal_batch_config: Some(batch_cfg),
                 })?;
@@ -2004,6 +2010,7 @@ impl Engine {
                         memtable_size_limit: Some(prev.memtable_size_limit),
                         memtable_flush_threshold: Some(prev.memtable_flush_threshold),
                         enable_compaction: Some(prev.enable_compaction),
+                        l0_compaction_trigger: Some(prev.l0_compaction_trigger),
                         wal_durability_policy: Some(prev.wal_durability_policy),
                         wal_batch_config: Some(prev.wal_batch_config),
                     },
@@ -2534,6 +2541,26 @@ mod tests {
 
         // Assert: should be retrievable by id
         assert_eq!(map.get(&id), Some(&"value"));
+    }
+
+    #[test]
+    fn should_apply_open_options_l0_compaction_trigger_to_runtime() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let opts = OpenOptions::local(temp_dir.path())
+            .goal(Goal::Throughput)
+            .workload(WorkloadProfile::WriteHeavy)
+            .build();
+        let expected_trigger = opts.l0_compaction_trigger();
+
+        let engine = Engine::open(opts).expect("open engine");
+        let runtime_config = engine
+            .get_runtime_config()
+            .expect("read runtime configuration");
+
+        assert_eq!(
+            runtime_config.l0_compaction_trigger, expected_trigger,
+            "runtime compaction actor should use the OpenOptions-derived L0 trigger"
+        );
     }
 
     // ============================================================================

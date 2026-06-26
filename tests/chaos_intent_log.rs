@@ -96,6 +96,8 @@ fn child_create_data_flush_compact_and_crash() {
     let db_path = PathBuf::from(&db_path_str);
 
     let engine = Engine::open(OpenOptions::local(&db_path).build()).expect("open engine");
+    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, false)
+        .expect("disable automatic compaction during crash setup");
 
     let default_cf = engine.get_column_family("default").expect("default cf");
 
@@ -139,6 +141,8 @@ fn child_create_data_flush_compact_and_crash() {
     }
 
     // Trigger compaction (will panic at failpoint)
+    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, true)
+        .expect("enable manual compaction for crash point");
     engine.compact_all().expect("compact_all");
 
     // Should not reach here (panicked at failpoint)
