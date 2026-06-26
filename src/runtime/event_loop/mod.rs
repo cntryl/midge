@@ -1773,7 +1773,7 @@ impl EventLoop {
                             if let Err(e) = self.gc_actor.delete_ssts(
                                 &mut self.state,
                                 &input_ssts,
-                                hybrid_storage.as_deref(),
+                                hybrid_storage,
                             ) {
                                 self.state.mark_persistence_anomaly();
                                 tracing::warn!(
@@ -1783,7 +1783,7 @@ impl EventLoop {
                             } else {
                                 tracing::info!(
                                     removed_count = input_ssts.len(),
-                                    "Successfully deleted compaction input SSTs"
+                                    "Submitted compaction input SSTs for GC"
                                 );
                             }
 
@@ -2259,11 +2259,9 @@ impl EventLoop {
                 sst_names,
             } => {
                 let hybrid_storage = self.hybrid_storage.clone();
-                let result = self.gc_actor.delete_ssts(
-                    &mut self.state,
-                    &sst_names,
-                    hybrid_storage.as_deref(),
-                );
+                let result = self
+                    .gc_actor
+                    .delete_ssts(&mut self.state, &sst_names, hybrid_storage);
                 let resp = result
                     .map(|_| RuntimeResponse::Ok { request_id })
                     .unwrap_or_else(|e| RuntimeResponse::Error {

@@ -1695,7 +1695,7 @@ impl HybridStorage {
         Ok(())
     }
 
-    pub fn delete_sst_object(&self, sst_name: &str) -> crate::common::MidgeResult<()> {
+    pub fn delete_sst_object_blocking(&self, sst_name: &str) -> crate::common::MidgeResult<()> {
         let key = crate::sst::object_key(sst_name);
 
         match Self::delete_object_from_backend_blocking(&self.cloud, &key) {

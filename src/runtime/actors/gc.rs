@@ -8,6 +8,8 @@
 use super::super::state::RuntimeState;
 use crate::common::MidgeResult;
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Actor handling garbage collection
 pub struct GcActor {
@@ -78,13 +80,15 @@ impl GcActor {
         &mut self,
         state: &mut RuntimeState,
         sst_names: &[String],
-        hybrid_storage: Option<&crate::storage::HybridStorage>,
+        hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<()> {
         // Get set of SSTs pinned by active snapshots
         let pinned_ssts = state.get_pinned_sst_names();
 
         let mut deleted_count = 0;
+        let mut scheduled_count = 0;
         let mut skipped_count = 0;
+        let mut cloud_sst_deletes = Vec::new();
 
         for sst_name in sst_names {
             let sst_path = state.sst_dir.join(sst_name);
@@ -111,17 +115,9 @@ impl GcActor {
                 continue;
             }
 
-            if let Some(storage) = hybrid_storage {
-                if let Err(e) = storage.delete_sst_object(sst_name) {
-                    tracing::warn!(
-                        sst_name,
-                        error = %e,
-                        "Failed to delete obsolete SST from cloud storage"
-                    );
-                    skipped_count += 1;
-                    // Keep the local orphan so a later GC pass can retry provider cleanup.
-                    continue;
-                }
+            if hybrid_storage.is_some() {
+                cloud_sst_deletes.push((sst_name.clone(), sst_path));
+                continue;
             }
 
             // Actually delete the file
@@ -142,11 +138,30 @@ impl GcActor {
             }
         }
 
+        if let Some(storage) = hybrid_storage {
+            scheduled_count = cloud_sst_deletes.len();
+            if !cloud_sst_deletes.is_empty() {
+                match Self::spawn_cloud_sst_delete_worker(storage, cloud_sst_deletes) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            scheduled = scheduled_count,
+                            "Failed to schedule obsolete cloud SST deletion"
+                        );
+                        skipped_count += scheduled_count;
+                        scheduled_count = 0;
+                    }
+                }
+            }
+        }
+
         self.last_gc_run = Some(std::time::Instant::now());
 
-        if deleted_count > 0 || skipped_count > 0 {
+        if deleted_count > 0 || scheduled_count > 0 || skipped_count > 0 {
             tracing::info!(
                 deleted = deleted_count,
+                scheduled = scheduled_count,
                 skipped = skipped_count,
                 "GC deletion batch complete"
             );
@@ -158,6 +173,46 @@ impl GcActor {
     /// Get timestamp of last GC run
     pub fn last_gc_run(&self) -> Option<std::time::Instant> {
         self.last_gc_run
+    }
+
+    fn spawn_cloud_sst_delete_worker(
+        storage: Arc<crate::storage::HybridStorage>,
+        ssts: Vec<(String, PathBuf)>,
+    ) -> MidgeResult<()> {
+        std::thread::Builder::new()
+            .name("midge-sst-gc".to_string())
+            .spawn(move || {
+                for (sst_name, sst_path) in ssts {
+                    if let Err(error) = storage.delete_sst_object_blocking(&sst_name) {
+                        tracing::warn!(
+                            sst_name,
+                            %error,
+                            "Failed to delete obsolete SST from cloud storage; keeping local orphan for retry"
+                        );
+                        continue;
+                    }
+
+                    match std::fs::remove_file(&sst_path) {
+                        Ok(()) => {
+                            tracing::info!(
+                                sst_name,
+                                path = %sst_path.display(),
+                                "Deleted obsolete SST after cloud provider cleanup"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                sst_name,
+                                path = %sst_path.display(),
+                                %error,
+                                "Failed to delete obsolete local SST after cloud provider cleanup"
+                            );
+                        }
+                    }
+                }
+            })
+            .map(|_| ())
+            .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))
     }
 }
 
