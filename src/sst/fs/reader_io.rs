@@ -48,6 +48,7 @@ pub struct SstFileIo {
 
 impl SstFileIo {
     /// Create a new SST reader using the provided filesystem
+    #[must_use]
     pub fn new(path_str: &str, fs: Arc<dyn Fs>) -> Self {
         Self {
             path: FsPath::new(path_str),
@@ -66,6 +67,10 @@ impl SstFileIo {
     }
 
     /// Open and load metadata from an SST file
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST footer, metadata, or backing file cannot be read.
     pub fn open(path_str: &str, fs: Arc<dyn Fs>) -> MidgeResult<Self> {
         let mut reader = Self::new(path_str, fs);
         reader.load_metadata()?;
@@ -74,6 +79,10 @@ impl SstFileIo {
 
     /// Open an SST file using `RealFs` (convenience method for single-file access)
     /// This creates a new `RealFs` instance for the parent directory of the SST file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the filesystem cannot be opened or the SST metadata cannot be read.
     pub fn open_with_real_fs(path: &std::path::Path) -> MidgeResult<Self> {
         let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
         let fs = Arc::new(crate::io::RealFs::new(parent)?);
@@ -87,23 +96,33 @@ impl SstFileIo {
     }
 
     /// Summarize an SST file opened via `RealFs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be opened or summarized.
     pub fn summarize_with_real_fs(path: &std::path::Path) -> MidgeResult<SstFileSummary> {
         Self::open_with_real_fs(path)?.summary()
     }
 
     /// Enable bloom filter for this reader
+    #[must_use]
     pub fn with_bloom(mut self, bloom: BloomReader) -> Self {
         self.bloom_reader = Some(bloom);
         self
     }
 
     /// Enable block bloom filter for this reader
+    #[must_use]
     pub fn with_block_bloom(mut self, block_bloom: BlockBloomFilter) -> Self {
         self.block_bloom_filter = Some(block_bloom);
         self
     }
 
     /// Load block bloom filter from footer (if present)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the block bloom handle cannot be read or decoded.
     pub fn load_block_bloom(&mut self) -> MidgeResult<()> {
         if let Some(ref footer) = self.footer {
             if let Some(block_bloom_handle) = footer.block_bloom_handle {
@@ -116,18 +135,21 @@ impl SstFileIo {
     }
 
     /// Enable sparse index for this reader
+    #[must_use]
     pub fn with_sparse_index(mut self, index: SparseIndexReader) -> Self {
         self.sparse_index = Some(Arc::new(index));
         self
     }
 
     /// Enable block cache for this reader
+    #[must_use]
     pub fn with_block_cache(mut self, cache: Arc<BlockCache>) -> Self {
         self.block_cache = Some(cache);
         self
     }
 
     /// Set the SST ID for cache key generation
+    #[must_use]
     pub fn with_sst_id(mut self, id: u64) -> Self {
         self.sst_id = id;
         self
@@ -144,6 +166,10 @@ impl SstFileIo {
     }
 
     /// Derive key-range and sequence metadata from the actual SST contents.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be scanned or has no publishable entries.
     pub fn summary(&self) -> MidgeResult<SstFileSummary> {
         use crate::sst::traits::SstStateReader;
 

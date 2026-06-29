@@ -280,6 +280,10 @@ pub const MAX_BLOCK_SIZE: usize = 64 * 1024;
 pub const BLOCK_TRAILER_SIZE: usize = 5;
 
 /// Compress block data according to policy
+///
+/// # Errors
+///
+/// Returns an error when the selected compression algorithm fails or is unsupported.
 pub fn compress_block(
     data: &[u8],
     policy: &CompressionPolicy,
@@ -302,7 +306,7 @@ pub fn compress_block(
     }
 }
 
-#[inline(always)]
+#[inline]
 fn compress_with_algo(data: &[u8], algo: CompressionAlgo) -> MidgeResult<(Bytes, CompressionAlgo)> {
     match algo {
         CompressionAlgo::None => Ok((Bytes::copy_from_slice(data), CompressionAlgo::None)),
@@ -368,7 +372,11 @@ fn compress_adaptive(
 }
 
 /// Decompress block data based on compression type.
-#[inline(always)]
+///
+/// # Errors
+///
+/// Returns an error when the compressed data is corrupt or the algorithm is unsupported.
+#[inline]
 pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult<Bytes> {
     match algo {
         CompressionAlgo::None => Ok(Bytes::copy_from_slice(compressed)),
@@ -402,6 +410,10 @@ pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult
 /// Compress block data and append a trailer (`[compressed_data][algo:u8][crc32c:u32 LE]`).
 ///
 /// CRC32C covers `compressed_data + compression_type`.
+///
+/// # Errors
+///
+/// Returns an error when block compression fails or the chosen algorithm is unsupported.
 pub fn compress_block_with_trailer(data: &[u8], policy: &CompressionPolicy) -> MidgeResult<Bytes> {
     let (compressed, algo) = compress_block(data, policy)?;
 
@@ -420,6 +432,11 @@ pub fn compress_block_with_trailer(data: &[u8], policy: &CompressionPolicy) -> M
 /// Strip the block trailer, verify CRC32C, and decompress.
 ///
 /// Input layout: `[compressed_data][algo:u8][crc32c:u32 LE]`
+///
+/// # Errors
+///
+/// Returns an error when the trailer is invalid, the CRC does not match, or
+/// decompression fails.
 pub fn decompress_block_with_trailer(block: &[u8]) -> MidgeResult<Bytes> {
     if block.len() < BLOCK_TRAILER_SIZE {
         return Err(crate::common::MidgeError::Corruption(
@@ -519,6 +536,10 @@ pub fn compress_wal_value(value: &[u8]) -> (Bytes, Option<u8>) {
 /// Decompress a WAL record value based on the compression byte.
 ///
 /// If `compression` is `None` or `Some(0)` (None algo), the value is returned as-is.
+///
+/// # Errors
+///
+/// Returns an error when the compression code is unknown or decompression fails.
 pub fn decompress_wal_value(value: &[u8], compression: Option<u8>) -> MidgeResult<Bytes> {
     match compression {
         None | Some(0) => Ok(Bytes::copy_from_slice(value)),

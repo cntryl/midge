@@ -133,6 +133,10 @@ fn add_capacity(capacity: usize, delta: usize) -> MidgeResult<usize> {
 }
 
 /// Encode a WAL record to bytes (v2 payload).
+///
+/// # Errors
+///
+/// Returns an error when record sizing overflows or value compression fails.
 pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
     // Use checked adds to avoid overflow on 32-bit systems or huge values.
     let mut capacity = PREFIX_LEN;
@@ -199,6 +203,10 @@ pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
 }
 
 /// Zero-copy decode into a borrowed view.
+///
+/// # Errors
+///
+/// Returns `MidgeError::Corruption` when the payload prefix or any TLV field is malformed.
 pub fn decode_view(data: &[u8]) -> MidgeResult<WalRecordView<'_>> {
     if data.len() < PREFIX_LEN {
         return Err(corruption("truncated WAL payload prefix"));
@@ -310,6 +318,11 @@ pub fn decode_view(data: &[u8]) -> MidgeResult<WalRecordView<'_>> {
 ///
 /// If the record carries a `COMPRESSION` tag, the value is transparently
 /// decompressed before being returned.
+/// Decode an owned WAL record from a payload buffer.
+///
+/// # Errors
+///
+/// Returns an error when the payload is malformed or value decompression fails.
 pub fn decode(bytes: impl Buf) -> MidgeResult<WalRecord> {
     // WAL frames must be contiguous; enforce this.
     let data = bytes.chunk();

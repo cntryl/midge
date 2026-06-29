@@ -3,6 +3,11 @@ use crate::common::{MidgeError, MidgeResult};
 pub const WAL_FRAME_HEADER_LEN: usize = 8;
 pub const WAL_MAX_RECORD_LEN: usize = 64 * 1024 * 1024;
 
+/// Compute the encoded WAL frame length for a payload.
+///
+/// # Errors
+///
+/// Returns `MidgeError::InvalidArgument` when `payload_len` exceeds the WAL limits.
 pub fn encoded_frame_len(payload_len: usize) -> MidgeResult<usize> {
     if payload_len > WAL_MAX_RECORD_LEN {
         return Err(MidgeError::InvalidArgument(format!(
@@ -17,6 +22,11 @@ pub fn encoded_frame_len(payload_len: usize) -> MidgeResult<usize> {
     Ok(WAL_FRAME_HEADER_LEN + payload_len)
 }
 
+/// Append a length-prefixed WAL frame to `dst`.
+///
+/// # Errors
+///
+/// Returns `MidgeError::InvalidArgument` when the payload exceeds the WAL limits.
 pub fn append_frame(dst: &mut Vec<u8>, payload: &[u8]) -> MidgeResult<()> {
     let frame_len = encoded_frame_len(payload.len())?;
     let crc = crc32c::crc32c(payload);
@@ -28,6 +38,12 @@ pub fn append_frame(dst: &mut Vec<u8>, payload: &[u8]) -> MidgeResult<()> {
     Ok(())
 }
 
+/// Decode the fixed-size WAL frame header.
+///
+/// # Errors
+///
+/// Returns `MidgeError::Corruption` when the header is malformed or declares
+/// an oversized payload.
 pub fn decode_frame_header(header: &[u8]) -> MidgeResult<(usize, u32)> {
     if header.len() != WAL_FRAME_HEADER_LEN {
         return Err(MidgeError::Corruption(format!(
@@ -53,6 +69,11 @@ pub fn decode_frame_header(header: &[u8]) -> MidgeResult<(usize, u32)> {
     Ok((payload_len, expected_crc))
 }
 
+/// Verify the CRC32C of a WAL frame payload.
+///
+/// # Errors
+///
+/// Returns `MidgeError::Corruption` when the CRC does not match.
 pub fn verify_frame_crc(payload: &[u8], expected_crc: u32) -> MidgeResult<()> {
     let actual_crc = crc32c::crc32c(payload);
     if actual_crc != expected_crc {

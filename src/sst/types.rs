@@ -69,11 +69,13 @@ impl Footer {
     }
 
     #[must_use]
+    #[must_use]
     pub fn with_trie(mut self, trie_handle: BlockHandle) -> Self {
         self.trie_handle = Some(trie_handle);
         self
     }
 
+    #[must_use]
     #[must_use]
     pub fn with_block_bloom(mut self, block_bloom_handle: BlockHandle) -> Self {
         self.block_bloom_handle = Some(block_bloom_handle);
@@ -114,6 +116,10 @@ impl Footer {
     }
 
     /// Decode footer from 48, 56, or 72 bytes (backward compatible)
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::Corruption` when the footer is truncated or has an invalid magic value.
     pub fn decode(data: &[u8]) -> crate::common::MidgeResult<Self> {
         if data.len() < 48 {
             return Err(crate::common::MidgeError::Corruption(
@@ -236,6 +242,11 @@ impl SstMetadata {
         buf
     }
 
+    /// Decode SST metadata from the meta block payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::Corruption` when the metadata block is truncated.
     pub fn decode(data: &[u8]) -> crate::common::MidgeResult<Self> {
         if data.len() < 20 {
             return Err(crate::common::MidgeError::Corruption(
@@ -299,6 +310,11 @@ pub fn encode_range_tombstones(tombstones: &[RangeTombstone]) -> Vec<u8> {
     buf
 }
 
+/// Decode serialized range tombstones.
+///
+/// # Errors
+///
+/// Returns `MidgeError::Corruption` when the encoded tombstone block is truncated.
 pub fn decode_range_tombstones(data: &[u8]) -> crate::common::MidgeResult<Vec<RangeTombstone>> {
     if data.len() < 4 {
         return Err(crate::common::MidgeError::Corruption(

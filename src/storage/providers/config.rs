@@ -618,6 +618,11 @@ impl CloudProviderConfig {
     }
 
     /// Override a provider endpoint when that provider supports endpoint overrides.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when the selected provider does not
+    /// support endpoint overrides.
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> MidgeResult<Self> {
         let endpoint = endpoint.into();
         match &mut self {
@@ -650,6 +655,11 @@ impl CloudProviderConfig {
     }
 
     /// Override path-style addressing for S3-compatible providers that expose it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when the selected provider does not
+    /// support path-style overrides.
     pub fn with_path_style(mut self, path_style: bool) -> MidgeResult<Self> {
         match &mut self {
             Self::S3Compatible {
@@ -673,6 +683,11 @@ impl CloudProviderConfig {
     }
 
     /// Override the signing region for S3-family providers that carry a region.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when the selected provider does not
+    /// support S3 region overrides.
     pub fn with_s3_region(mut self, region: impl Into<String>) -> MidgeResult<Self> {
         let region = region.into();
         match &mut self {
@@ -691,6 +706,10 @@ impl CloudProviderConfig {
     }
 
     /// Override GCS project ID metadata for callers that need to preserve it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when called for a non-GCS provider.
     pub fn with_gcs_project_id(mut self, project_id: impl Into<String>) -> MidgeResult<Self> {
         if let Self::Gcs {
             project_id: target, ..
@@ -707,6 +726,11 @@ impl CloudProviderConfig {
     }
 
     /// Override credentials when the credential kind matches the provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when the credential family does not
+    /// match the provider family.
     pub fn with_credentials<C: Into<CloudCredentialSource>>(
         self,
         credentials: C,
@@ -715,21 +739,38 @@ impl CloudProviderConfig {
     }
 
     /// Override credentials for an S3-family provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when called for a non-S3-family provider.
     pub fn with_s3_credentials(self, credentials: S3CredentialSource) -> MidgeResult<Self> {
         self.try_with_credentials(credentials)
     }
 
     /// Override credentials for an Azure provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when called for a non-Azure provider.
     pub fn with_azure_credentials(self, credentials: AzureCredentialSource) -> MidgeResult<Self> {
         self.try_with_credentials(credentials)
     }
 
     /// Override credentials for a GCS provider, updating the API style as needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when called for a non-GCS provider.
     pub fn with_gcs_credentials(self, credentials: GcsCredentialSource) -> MidgeResult<Self> {
         self.try_with_credentials(credentials)
     }
 
     /// Fallible credential override for dynamic provider/credential configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when the credential family does not
+    /// match the provider family or when the Azure account requirements are violated.
     pub fn try_with_credentials<C: Into<CloudCredentialSource>>(
         mut self,
         credentials: C,
