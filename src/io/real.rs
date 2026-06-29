@@ -1,26 +1,28 @@
 //! Real filesystem implementation
 //!
-//! Direct mapping to std::fs with path sanitization.
+//! Direct mapping to `std::fs` with path sanitization.
 //! Suitable for production use.
 //!
 //! Notes:
 //! - `read_at` / `write_at` use true positional IO when available (no shared cursor):
-//!   - Unix: std::os::unix::fs::FileExt::{read_at, write_at}
-//!   - Windows: std::os::windows::fs::FileExt::{seek_read, seek_write}
+//!   - Unix: `std::os::unix::fs::FileExt::{read_at`, `write_at`}
+//!   - Windows: `std::os::windows::fs::FileExt::{seek_read`, `seek_write`}
 //! - `sync_dir` is implemented on Unix (fsync dir). On Windows it remains best-effort/no-op.
 
-use super::traits::*;
+use super::traits::{
+    DirEntry, Durability, File, FileCaps, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions,
+};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Global flag to enforce memory-mode constraint at RealFs construction time.
-/// Set to true when engine is opened in memory mode, preventing any RealFs usage.
+/// Global flag to enforce memory-mode constraint at `RealFs` construction time.
+/// Set to true when engine is opened in memory mode, preventing any `RealFs` usage.
 #[allow(dead_code)]
 static MEMORY_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Set the global memory-mode flag. Called by Engine::open before runtime init.
+/// Set the global memory-mode flag. Called by `Engine::open` before runtime init.
 #[allow(dead_code)]
 pub fn set_memory_mode(enabled: bool) {
     MEMORY_MODE_ACTIVE.store(enabled, Ordering::SeqCst);
@@ -48,11 +50,15 @@ impl RealFs {
     ///
     /// # Note
     /// Callers are responsible for ensuring this is not called in memory-only mode.
-    /// Higher-level code (EventLoop, lease creation, etc.) should check memory_mode
-    /// and use MockFs instead when appropriate.
+    /// Higher-level code (`EventLoop`, lease creation, etc.) should check `memory_mode`
+    /// and use `MockFs` instead when appropriate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the base directory cannot be created.
     pub fn new(base_path: impl AsRef<Path>) -> FsResult<Self> {
         let path = base_path.as_ref().to_path_buf();
-        fs::create_dir_all(&path).map_err(|e| io_err("create_dir_all", &path, e))?;
+        fs::create_dir_all(&path).map_err(|e| io_err("create_dir_all", &path, &e))?;
         Ok(Self { base_path: path })
     }
 
@@ -66,10 +72,10 @@ impl RealFs {
         for component in Path::new(&rel.0).components() {
             match component {
                 Component::Normal(part) => out.push(part),
-                Component::CurDir => {}
-                Component::ParentDir => {}
-                Component::RootDir => {}
-                Component::Prefix(_) => {}
+                Component::CurDir
+                | Component::ParentDir
+                | Component::RootDir
+                | Component::Prefix(_) => {}
             }
         }
         out
@@ -134,7 +140,7 @@ impl Fs for RealFs {
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         let full = self.full_path(path);
-        fs::remove_file(&full).map_err(|e| io_err("remove_file", &full, e))
+        fs::remove_file(&full).map_err(|e| io_err("remove_file", &full, &e))
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -143,25 +149,25 @@ impl Fs for RealFs {
 
     fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
         let full = self.full_path(path);
-        let meta = fs::metadata(&full).map_err(|e| io_err("metadata", &full, e))?;
+        let meta = fs::metadata(&full).map_err(|e| io_err("metadata", &full, &e))?;
         Ok(Metadata { len: meta.len() })
     }
 
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         let full = self.full_path(path);
-        fs::create_dir_all(&full).map_err(|e| io_err("create_dir_all", &full, e))
+        fs::create_dir_all(&full).map_err(|e| io_err("create_dir_all", &full, &e))
     }
 
     fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
         let full = self.full_path(path);
         let entries = fs::read_dir(&full)
-            .map_err(|e| io_err("read_dir", &full, e))?
+            .map_err(|e| io_err("read_dir", &full, &e))?
             .map(|entry| {
-                let entry = entry.map_err(|e| io_err("read_dir_entry", &full, e))?;
+                let entry = entry.map_err(|e| io_err("read_dir_entry", &full, &e))?;
                 let name = entry.file_name().to_string_lossy().to_string();
                 let is_dir = entry
                     .file_type()
-                    .map_err(|e| io_err("file_type", &full, e))?
+                    .map_err(|e| io_err("file_type", &full, &e))?
                     .is_dir();
                 Ok(DirEntry { name, is_dir })
             })
@@ -171,7 +177,7 @@ impl Fs for RealFs {
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         let full = self.full_path(path);
-        fs::remove_dir_all(&full).map_err(|e| io_err("remove_dir_all", &full, e))
+        fs::remove_dir_all(&full).map_err(|e| io_err("remove_dir_all", &full, &e))
     }
 
     fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()> {
@@ -185,8 +191,8 @@ impl Fs for RealFs {
         #[cfg(unix)]
         {
             // fs::File::open works for directories on Unix.
-            let dir = fs::File::open(&full).map_err(|e| io_err("open_dir", &full, e))?;
-            dir.sync_all().map_err(|e| io_err("fsync_dir", &full, e))?;
+            let dir = fs::File::open(&full).map_err(|e| io_err("open_dir", &full, &e))?;
+            dir.sync_all().map_err(|e| io_err("fsync_dir", &full, &e))?;
             Ok(())
         }
 
@@ -210,10 +216,10 @@ impl Fs for RealFs {
 
         // Ensure destination parent exists (helps callers that assume it).
         if let Some(parent) = Self::parent_dir(&to_full) {
-            fs::create_dir_all(parent).map_err(|e| io_err("create_dir_all", parent, e))?;
+            fs::create_dir_all(parent).map_err(|e| io_err("create_dir_all", parent, &e))?;
         }
 
-        fs::rename(&from_full, &to_full).map_err(|e| io_err("rename", &to_full, e))
+        fs::rename(&from_full, &to_full).map_err(|e| io_err("rename", &to_full, &e))
     }
 }
 
@@ -341,7 +347,7 @@ impl File for RealFile {
                 if err.kind() == std::io::ErrorKind::WouldBlock {
                     return Err(FsError::AlreadyExists("file is already locked".to_string()));
                 }
-                return Err(FsError::Io(format!("flock failed: {}", err)));
+                return Err(FsError::Io(format!("flock failed: {err}")));
             }
             Ok(())
         }
@@ -412,7 +418,7 @@ impl File for RealFile {
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 
-fn io_err(op: &str, path: &Path, e: io::Error) -> FsError {
+fn io_err(op: &str, path: &Path, e: &io::Error) -> FsError {
     FsError::Io(format!("{op} {}: {e}", path.display()))
 }
 
@@ -495,6 +501,7 @@ fn write_all_at_windows(file: &fs::File, mut offset: u64, mut src: &[u8]) -> FsR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::OpenMode;
     use tempfile::TempDir;
 
     #[test]

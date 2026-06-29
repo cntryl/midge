@@ -2,7 +2,9 @@
 //!
 //! Deterministic, no I/O, suitable for testing.
 
-use super::traits::*;
+use super::traits::{
+    DirEntry, Durability, File, FileCaps, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions,
+};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -21,12 +23,14 @@ pub struct MockFs {
 
 impl MockFs {
     /// Create a new empty mock filesystem
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Get file contents for testing
     #[allow(dead_code)]
+    #[must_use]
     pub fn get_file(&self, path: &str) -> Option<Vec<u8>> {
         self.files.lock().get(path).map(|f| f.data.clone())
     }
@@ -36,6 +40,26 @@ impl MockFs {
     pub fn clear(&self) {
         self.files.lock().clear();
     }
+}
+
+fn checked_range(offset: u64, len: u64, file_len: usize) -> FsResult<(usize, usize)> {
+    let start = usize::try_from(offset)
+        .map_err(|_| FsError::Io("offset does not fit usize".to_string()))?;
+    let requested_end = offset
+        .checked_add(len)
+        .ok_or_else(|| FsError::Io("offset + len overflow".to_string()))?;
+    let end = usize::try_from(requested_end)
+        .map_err(|_| FsError::Io("end offset does not fit usize".to_string()))?;
+
+    if start > file_len {
+        return Err(FsError::Io("offset beyond file".to_string()));
+    }
+
+    Ok((start, end.min(file_len)))
+}
+
+fn checked_write_start(offset: u64) -> FsResult<usize> {
+    usize::try_from(offset).map_err(|_| FsError::Io("offset does not fit usize".to_string()))
 }
 
 impl Fs for MockFs {
@@ -160,18 +184,12 @@ pub struct MockFile<'a> {
     fs: &'a MockFs,
 }
 
-impl<'a> File for MockFile<'a> {
+impl File for MockFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         let files = self.fs.files.lock();
         if let Some(data) = files.get(&self.path) {
-            let start = offset as usize;
-            let end = (offset + len) as usize;
-
-            if start > data.data.len() {
-                return Err(FsError::Io("offset beyond file".to_string()));
-            }
-
-            let slice = &data.data[start..end.min(data.data.len())];
+            let (start, end) = checked_range(offset, len, data.data.len())?;
+            let slice = &data.data[start..end];
             Ok(Bytes::from(slice.to_vec()))
         } else {
             Err(FsError::NotFound(self.path.clone()))
@@ -181,8 +199,10 @@ impl<'a> File for MockFile<'a> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         let mut files = self.fs.files.lock();
         if let Some(file_data) = files.get_mut(&self.path) {
-            let start = offset as usize;
-            let end = start + data.len();
+            let start = checked_write_start(offset)?;
+            let end = start
+                .checked_add(data.len())
+                .ok_or_else(|| FsError::Io("write length overflow".to_string()))?;
 
             if end > file_data.data.len() {
                 file_data.data.resize(end, 0);
@@ -238,14 +258,8 @@ impl File for MockPersistentFile {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         let files = self.files.lock();
         if let Some(data) = files.get(&self.path) {
-            let start = offset as usize;
-            let end = (offset + len) as usize;
-
-            if start > data.data.len() {
-                return Err(FsError::Io("offset beyond file".to_string()));
-            }
-
-            let slice = &data.data[start..end.min(data.data.len())];
+            let (start, end) = checked_range(offset, len, data.data.len())?;
+            let slice = &data.data[start..end];
             Ok(Bytes::from(slice.to_vec()))
         } else {
             Err(FsError::NotFound(self.path.clone()))
@@ -255,8 +269,10 @@ impl File for MockPersistentFile {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         let mut files = self.files.lock();
         if let Some(file_data) = files.get_mut(&self.path) {
-            let start = offset as usize;
-            let end = start + data.len();
+            let start = checked_write_start(offset)?;
+            let end = start
+                .checked_add(data.len())
+                .ok_or_else(|| FsError::Io("write length overflow".to_string()))?;
 
             if end > file_data.data.len() {
                 file_data.data.resize(end, 0);
@@ -315,6 +331,7 @@ impl File for MockPersistentFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::OpenMode;
 
     #[test]
     fn should_read_written_data_when_writing() -> FsResult<()> {

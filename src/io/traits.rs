@@ -158,6 +158,10 @@ pub trait File: Send {
     fn len(&self) -> FsResult<u64>;
 
     /// Check if file is empty
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file length cannot be queried.
     fn is_empty(&self) -> FsResult<bool> {
         Ok(self.len()? == 0)
     }

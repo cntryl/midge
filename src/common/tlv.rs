@@ -11,10 +11,10 @@ use bytes::{BufMut, BytesMut};
 #[inline]
 pub fn encode_varint32(buf: &mut BytesMut, mut value: u32) {
     while value >= 0x80 {
-        buf.put_u8(u8::try_from(value & 0x7f).expect("7-bit chunk fits in u8") | 0x80);
+        buf.put_u8((value.to_le_bytes()[0] & 0x7f) | 0x80);
         value >>= 7;
     }
-    buf.put_u8(u8::try_from(value).expect("final varint byte fits in u8"));
+    buf.put_u8(value.to_le_bytes()[0]);
 }
 
 /// Encode a varint32 with a tag and length prefix (single-pass, zero-allocation)
@@ -24,17 +24,26 @@ pub fn encode_varint_with_tag(buf: &mut BytesMut, tag: u8, mut value: u32) {
 
     // Max 5 bytes for u32 varint
     let mut tmp = [0u8; 5];
-    let mut i = 0;
+    let mut i = 0usize;
 
     while value >= 0x80 {
-        tmp[i] = u8::try_from(value & 0x7f).expect("7-bit chunk fits in u8") | 0x80;
+        tmp[i] = (value.to_le_bytes()[0] & 0x7f) | 0x80;
         value >>= 7;
         i += 1;
     }
-    tmp[i] = u8::try_from(value).expect("final varint byte fits in u8");
+    tmp[i] = value.to_le_bytes()[0];
     i += 1;
 
-    buf.put_u8(u8::try_from(i).expect("u32 varint length is at most 5 bytes"));
+    const MAX_VARINT32_LEN: u8 = 5;
+    let len = match i {
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        4 => 4,
+        5 => MAX_VARINT32_LEN,
+        _ => unreachable!("u32 varint length never exceeds 5 bytes"),
+    };
+    buf.put_u8(len);
     buf.put_slice(&tmp[..i]);
 }
 
@@ -160,7 +169,8 @@ pub fn decode_tlv_field(data: &[u8]) -> MidgeResult<(u8, &[u8], usize)> {
     }
 
     let (len, len_bytes) = decode_varint32_with_len(&data[1..])?;
-    let len = usize::try_from(len).expect("u32 length fits in usize on supported targets");
+    let len = usize::try_from(len)
+        .map_err(|_| MidgeError::Corruption("TLV field length does not fit usize".into()))?;
     let header_len = 1 + len_bytes;
 
     if data.len() < header_len + len {

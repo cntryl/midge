@@ -192,12 +192,11 @@ impl std::iter::Iterator for Iterator {
             return None;
         }
 
-        if self.position >= self.results.len() {
-            if !self.try_load_next_batch() {
+        if self.position >= self.results.len()
+            && !self.try_load_next_batch() {
                 self.exhausted = true;
                 return None;
             }
-        }
 
         let pair = self.results[self.position].clone();
         self.position += 1;
