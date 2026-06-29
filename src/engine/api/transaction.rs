@@ -156,7 +156,7 @@ pub struct Transaction {
     id: u64,
     /// Column family this transaction is bound to
     cf_id: ColumnFamilyId,
-    /// Transaction mode (ReadOnly or ReadWrite)
+    /// Transaction mode (`ReadOnly` or `ReadWrite`)
     mode: TransactionMode,
     /// Isolation behavior used during commit conflict handling.
     isolation_level: IsolationLevel,
@@ -204,6 +204,10 @@ impl Transaction {
     }
 
     /// Add a put (upsert) to the transaction's write set
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when called on a read-only transaction.
     pub fn put(
         &mut self,
         key: Vec<u8>,
@@ -221,6 +225,10 @@ impl Transaction {
     }
 
     /// Add an insert (error if exists) to the transaction's write set
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when called on a read-only transaction.
     pub fn insert(
         &mut self,
         key: Vec<u8>,
@@ -238,6 +246,10 @@ impl Transaction {
     }
 
     /// Add a delete to the transaction's write set
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when called on a read-only transaction.
     pub fn delete(&mut self, key: Vec<u8>) -> MidgeResult<()> {
         if self.is_read_only() {
             return Err(MidgeError::InvalidArgument(
@@ -250,8 +262,13 @@ impl Transaction {
 
     /// Add a delete range (atomic tombstone) to the transaction's write set
     ///
-    /// Deletes all keys in the range [start_key, end_key) atomically as part of
+    /// Deletes all keys in the range [`start_key`, `end_key`) atomically as part of
     /// the transaction commit. This is atomic with any puts/deletes in the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when called on a read-only transaction
+    /// or when `start_key > end_key`.
     pub fn delete_range(&mut self, start_key: Vec<u8>, end_key: Vec<u8>) -> MidgeResult<()> {
         if self.is_read_only() {
             return Err(MidgeError::InvalidArgument(
@@ -282,6 +299,7 @@ impl Transaction {
         self.cf_id
     }
 
+    #[must_use]
     pub fn isolation_level(&self) -> IsolationLevel {
         self.isolation_level
     }
@@ -290,6 +308,12 @@ impl Transaction {
         self.isolation_level = isolation_level;
     }
 
+    /// Commit this transaction with the provided durability options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when commit coordination, WAL durability, or cloud durability
+    /// confirmation fails.
     pub fn commit(mut self, opts: crate::engine::api::WriteOptions) -> MidgeResult<()> {
         if self.is_read_only() {
             self.unregister_snapshot();
@@ -302,7 +326,7 @@ impl Transaction {
             return sync_result;
         }
 
-        let ops = self.take_runtime_ops();
+        let runtime_ops = self.take_runtime_ops();
         let isolation_policy = match self.isolation_level() {
             IsolationLevel::LastWriteWins => {
                 crate::runtime::TransactionIsolationPolicy::LastWriteWins
@@ -315,7 +339,7 @@ impl Transaction {
         let durability_policy = Some(effective_wal_durability_policy(self.cloud_mode, opts)?);
         let commit_result = self.coordinator.submit_ops(
             &self.runtime_handle,
-            ops,
+            runtime_ops,
             durability_policy,
             Some(self.start_sequence()),
             isolation_policy,
@@ -333,6 +357,11 @@ impl Transaction {
         result
     }
 
+    /// Roll back this transaction and unregister its snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if snapshot cleanup fails.
     pub fn rollback(mut self) -> MidgeResult<()> {
         self.unregister_snapshot();
         Ok(())
@@ -358,6 +387,7 @@ impl Transaction {
         self.snapshot_registered = false;
     }
 
+    #[must_use]
     pub fn start_sequence(&self) -> u64 {
         self.start_sequence
     }
@@ -418,6 +448,10 @@ impl Transaction {
     /// then falls back to the engine state at the transaction's snapshot sequence.
     ///
     /// Executes directly against the immutable snapshot (no message passing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transaction snapshot is unavailable.
     pub fn get(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
         // Check transaction's write set first (read-your-own-writes)
         if let Some(value_opt) = self.get_from_write_set(key) {
@@ -439,6 +473,10 @@ impl Transaction {
     ///
     /// Query must explicitly specify all scan parameters (start, end, direction, limit).
     /// Executes directly against the immutable snapshot (no message passing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transaction snapshot is unavailable.
     pub fn scan(&self, query: &super::query::Query) -> MidgeResult<super::iterator::Iterator> {
         let start = query.effective_start().unwrap_or(&[]);
         let end_vec = query.effective_end().unwrap_or_default();
@@ -464,7 +502,7 @@ impl Transaction {
             merged.insert(key.to_vec(), Some(value));
         }
 
-        for intent in self.write_set.iter() {
+        for intent in &self.write_set {
             match intent {
                 WriteIntent::Put { key, value, .. } | WriteIntent::Insert { key, value, .. } => {
                     merged.insert(key.clone(), Some(bytes::Bytes::from(value.clone())));

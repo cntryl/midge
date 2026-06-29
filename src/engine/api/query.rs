@@ -28,6 +28,7 @@ impl Default for Query {
 
 impl Query {
     /// Create a new empty query
+    #[must_use]
     pub fn new() -> Self {
         Self {
             start: None,
@@ -39,30 +40,35 @@ impl Query {
     }
 
     /// Set the start key (inclusive)
+    #[must_use]
     pub fn start_key(mut self, k: Bytes) -> Self {
         self.start = Some(k);
         self
     }
 
     /// Set the end key (exclusive)
+    #[must_use]
     pub fn end_key(mut self, k: Bytes) -> Self {
         self.end = Some(k);
         self
     }
 
     /// Set a prefix filter
+    #[must_use]
     pub fn prefix(mut self, p: Bytes) -> Self {
         self.prefix = Some(p);
         self
     }
 
     /// Set the maximum number of results
+    #[must_use]
     pub fn limit(mut self, n: usize) -> Self {
         self.limit = Some(n);
         self
     }
 
     /// Reverse the iteration direction
+    #[must_use]
     pub fn reverse(mut self) -> Self {
         self.direction = Direction::Reverse;
         self
@@ -73,8 +79,8 @@ impl Query {
     pub fn effective_start(&self) -> Option<&[u8]> {
         self.start
             .as_ref()
-            .map(|b| b.as_ref())
-            .or_else(|| self.prefix.as_ref().map(|p| p.as_ref()))
+            .map(std::convert::AsRef::as_ref)
+            .or_else(|| self.prefix.as_ref().map(std::convert::AsRef::as_ref))
     }
 
     /// Get the effective end bound for iteration

@@ -6,7 +6,7 @@
 //! All reads and writes execute within explicit transactions.
 //!
 //! Key responsibilities:
-//! - Transaction lifecycle entry (begin_tx)
+//! - Transaction lifecycle entry (`begin_tx`)
 //! - Column family management
 //! - Flush and compaction control
 //! - Metrics and observability
@@ -49,14 +49,17 @@ pub struct ColumnFamilyHandle {
 }
 
 impl ColumnFamilyHandle {
+    #[must_use]
     pub fn new(id: ColumnFamilyId, name: String) -> Self {
         Self { id, name }
     }
 
+    #[must_use]
     pub fn id(&self) -> ColumnFamilyId {
         self.id
     }
 
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -79,7 +82,7 @@ pub struct IngestModeSnapshot {
 /// is managed by the runtime actors.
 pub struct Engine {
     /// Runtime (owns the event loop thread)
-    _runtime: Option<Runtime>,
+    runtime: Option<Runtime>,
     /// Handle to submit work to the runtime
     runtime_handle: RuntimeHandle,
     /// Database path
@@ -100,11 +103,11 @@ pub struct Engine {
     /// Column families registry (CF ID -> Handle)
     column_families: ColumnFamilyRegistry,
     /// Primary instance lease (enforces single-writer exclusivity)
-    _lease: Option<Arc<dyn crate::lease::PrimaryLease>>,
+    lease: Option<Arc<dyn crate::lease::PrimaryLease>>,
     /// Primary instance lease guard
-    _lease_guard: Option<crate::lease::LeaseGuard>,
+    lease_guard: Option<crate::lease::LeaseGuard>,
     /// Lease heartbeat (keeps lease renewed)
-    _lease_heartbeat: Option<std::sync::Mutex<crate::lease::LeaseHeartbeat>>,
+    lease_heartbeat: Option<std::sync::Mutex<crate::lease::LeaseHeartbeat>>,
     /// Per-CF ingest coordinators for write batching
     ingest_coordinators: dashmap::DashMap<ColumnFamilyId, Arc<ingest::IngestCoordinator>>,
 }
@@ -115,7 +118,7 @@ impl Drop for Engine {
         tracing::debug!("Engine dropping, initiating cleanup");
 
         // Stop lease heartbeat first
-        if let Some(heartbeat_mutex) = self._lease_heartbeat.take() {
+        if let Some(heartbeat_mutex) = self.lease_heartbeat.take() {
             if let Ok(mut heartbeat) = heartbeat_mutex.lock() {
                 heartbeat.stop();
                 tracing::trace!("Engine: lease heartbeat stopped");
@@ -124,7 +127,7 @@ impl Drop for Engine {
 
         // Shutdown all ingest coordinators
         let ingest_count = self.ingest_coordinators.len();
-        for entry in self.ingest_coordinators.iter() {
+        for entry in &self.ingest_coordinators {
             entry.value().shutdown();
         }
         tracing::trace!(count = ingest_count, "Engine: ingest coordinators shutdown");
@@ -133,17 +136,17 @@ impl Drop for Engine {
         // Send shutdown message first
         let _ = self.runtime_handle.shutdown();
         // Then drop the runtime which will wait for the thread to finish
-        self._runtime.take();
+        self.runtime.take();
         tracing::trace!("Engine: runtime shutdown complete");
 
         // Release lease via the PrimaryLease interface
-        if let Some(lease) = self._lease.take() {
+        if let Some(lease) = self.lease.take() {
             let _ = lease.release();
             tracing::trace!("Engine: lease released");
         }
 
         // Drop the guard last
-        self._lease_guard.take();
+        self.lease_guard.take();
 
         tracing::debug!(
             elapsed_ms = drop_start.elapsed().as_millis(),
@@ -305,6 +308,11 @@ impl Engine {
     ///
     /// The storage backend is specified by `OpenOptions.storage`. There is no
     /// inference from paths or sentinel strings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the engine cannot initialize its storage, runtime,
+    /// manifest, or recovery state.
     pub fn open(opts: OpenOptions) -> MidgeResult<Self> {
         startup::EngineStartup::open(opts)
     }
@@ -313,7 +321,7 @@ impl Engine {
     ///
     /// Returns None if the column family doesn't exist.
     pub fn get_column_family(&self, name: &str) -> Option<ColumnFamilyHandle> {
-        for entry in self.column_families.iter() {
+        for entry in &self.column_families {
             if entry.value().name() == name {
                 return Some(entry.value().clone());
             }
@@ -340,7 +348,7 @@ impl Engine {
     /// - Stop accepting new writes
     /// - Trigger graceful shutdown
     pub fn is_primary_lease_healthy(&self) -> bool {
-        if let Some(ref heartbeat_mutex) = self._lease_heartbeat {
+        if let Some(ref heartbeat_mutex) = self.lease_heartbeat {
             if let Ok(heartbeat) = heartbeat_mutex.lock() {
                 return heartbeat.is_healthy();
             }
@@ -349,9 +357,13 @@ impl Engine {
         false
     }
 
-    /// Open a database with the provided MidgeOptions.
+    /// Open a database with the provided `MidgeOptions`.
     ///
     /// Convenience method for testkit and standard testing patterns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when engine startup fails for the derived open options.
     pub fn open_with_options(opts: crate::testkit::MidgeOptions) -> MidgeResult<Self> {
         let open_opts = opts.to_open_options();
         Self::open(open_opts)
@@ -542,6 +554,10 @@ impl Engine {
     }
 
     /// Force a flush of a specific column family
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the flush cannot be scheduled or completed.
     pub fn flush_cf(&self, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
         let response = self
             .runtime_handle
@@ -563,7 +579,12 @@ impl Engine {
     ///
     /// # Arguments
     /// * `cf_id` - Column family ID
-    /// * `mode` - Transaction mode (ReadOnly or ReadWrite)
+    /// * `mode` - Transaction mode (`ReadOnly` or `ReadWrite`)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when snapshot registration fails or the column family does
+    /// not exist.
     ///
     /// # Panics
     /// Panics if called while ingest mode is active. This is a programmer error:
@@ -625,7 +646,7 @@ impl Engine {
         }
 
         let coordinator = self.ingest_coordinators.get(&cf_id).ok_or_else(|| {
-            MidgeError::InvalidArgument(format!("column family {} does not exist", cf_id))
+            MidgeError::InvalidArgument(format!("column family {cf_id} does not exist"))
         })?;
 
         Ok(api::Transaction::new(api::TransactionInit {
@@ -644,6 +665,10 @@ impl Engine {
     /// Wait for a write stall to clear for `cf_id`.
     ///
     /// Returns `Ok(true)` if the stall cleared within `timeout`, `Ok(false)` on timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the wait request cannot be sent or the runtime reports a failure.
     pub fn wait_for_write_stall_clear(
         &self,
         cf_id: ColumnFamilyId,
@@ -658,8 +683,7 @@ impl Engine {
             Some(RuntimeResponse::Ok { .. }) => Ok(true),
             Some(RuntimeResponse::Error { error, .. }) => Err(error),
             Some(other) => Err(MidgeError::Internal(format!(
-                "Unexpected response to WaitForWriteStallClear: {:?}",
-                other
+                "Unexpected response to WaitForWriteStallClear: {other:?}"
             ))),
             None => {
                 // Best-effort cancel: prevents waiter accumulation under timeouts.
@@ -729,6 +753,10 @@ impl Engine {
     }
 
     /// Shutdown the engine gracefully
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when shutdown coordination fails.
     pub fn shutdown(self) -> MidgeResult<()> {
         self.runtime_handle.shutdown()
     }
@@ -736,6 +764,10 @@ impl Engine {
     // === Column Family Lifecycle ===
 
     /// Create a new column family with the given name
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the column family cannot be created or persisted.
     pub fn create_column_family(&self, name: &str) -> MidgeResult<ColumnFamilyHandle> {
         let response = self.runtime_handle.send_and_wait_filtered(
             RuntimeMsg::ManifestCreateColumnFamily {
@@ -778,6 +810,10 @@ impl Engine {
 
     /// Drop a column family by ID
     /// Drop a column family (used by tests)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the column family cannot be dropped or persisted.
     pub fn drop_column_family(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {
         let response = self.runtime_handle.send_and_wait_filtered(
             RuntimeMsg::ManifestDropColumnFamily {
@@ -819,6 +855,11 @@ impl Engine {
     }
 
     /// List all active column families
+    ///
+    /// # Errors
+    ///
+    /// This method currently does not return an error, but preserves a result-based
+    /// API for compatibility with future runtime-backed implementations.
     pub fn list_column_families(&self) -> MidgeResult<Vec<ColumnFamilyHandle>> {
         Ok(self
             .column_families
@@ -828,6 +869,10 @@ impl Engine {
     }
 
     /// Compact all data (schedule compactions and wait for completion)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when compaction scheduling or completion fails.
     pub fn compact_all(&self) -> MidgeResult<()> {
         let request_id = next_request_id()?;
         let resp = self
@@ -852,6 +897,10 @@ impl Engine {
     ///
     /// Use this for monitoring read performance and tuning compaction triggers.
     /// Get read amplification metrics (used by tests)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime cannot provide a metrics snapshot.
     pub fn get_read_amp_metrics(&self) -> MidgeResult<ReadAmpMetricsSnapshot> {
         let response = self
             .runtime_handle
@@ -894,6 +943,10 @@ impl Engine {
     /// Get startup recovery metrics snapshot.
     ///
     /// Returns counters from the runtime's recovery phase executed during engine open.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime cannot provide a recovery snapshot.
     pub fn get_recovery_metrics(&self) -> MidgeResult<RecoveryMetricsSnapshot> {
         let response = self
             .runtime_handle
@@ -922,6 +975,10 @@ impl Engine {
     }
 
     /// Get an operator-facing snapshot of runtime metrics and health.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime cannot provide a metrics snapshot.
     pub fn get_runtime_metrics(&self) -> MidgeResult<RuntimeMetricsSnapshot> {
         let response = self
             .runtime_handle
@@ -939,6 +996,10 @@ impl Engine {
     }
 
     /// Get a stable snapshot of the current SST layout and pinned snapshot state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime cannot provide a storage-layout snapshot.
     pub fn get_storage_layout(&self) -> MidgeResult<StorageLayoutSnapshot> {
         let response = self
             .runtime_handle
@@ -956,6 +1017,10 @@ impl Engine {
     }
 
     /// Run a non-mutating integrity pass over manifest, intent-log, WAL, and SST files.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when verification is unsupported or the verification pass fails.
     pub fn verify_storage(&self) -> MidgeResult<StorageVerificationReport> {
         if self.memory_mode {
             return Err(MidgeError::NotSupported(
@@ -973,6 +1038,10 @@ impl Engine {
     }
 
     /// Verify a storage directory without opening a runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the verification pass fails.
     pub fn verify_path(path: impl Into<PathBuf>) -> MidgeResult<StorageVerificationReport> {
         Self::verify_storage_path_internal(&path.into(), None)
     }
@@ -1106,7 +1175,7 @@ mod tests {
     #[test]
     fn should_support_empty_column_family_name() {
         // Arrange
-        let handle = ColumnFamilyHandle::new(1, "".to_string());
+        let handle = ColumnFamilyHandle::new(1, String::new());
 
         // Act
 
@@ -1245,7 +1314,7 @@ mod tests {
         let handle = ColumnFamilyHandle::new(5, "test".to_string());
 
         // Act
-        let debug_str = format!("{:?}", handle);
+        let debug_str = format!("{handle:?}");
 
         // Assert: should be debuggable
         assert!(!debug_str.is_empty());
@@ -1540,7 +1609,7 @@ mod tests {
 
         fn submit_list(&self, prefix: String, callback: crate::storage::cloud::CloudCallback) {
             if prefix.ends_with(&self.omitted_prefix) {
-                let _ = callback.send(crate::storage::cloud::CloudEvent::ListComplete {
+                let _ = callback.send(crate::storage::cloud::CloudEvent::List {
                     prefix,
                     result: crate::storage::cloud::CloudOutcome::Ok(Vec::new()),
                 });
