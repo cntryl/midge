@@ -11,7 +11,7 @@
 //!
 //! Most tests run on all storage modes to validate cross-platform consistency.
 //! Some intentionally exclude cloud mode when the invariant is not meaningful
-//! under CloudAsync durability semantics.
+//! under `CloudAsync` durability semantics.
 
 use bytes::Bytes;
 mod common;
@@ -75,7 +75,7 @@ fn should_retrieve_stored_values_when_hundred_megabytes() {
         // Assert: Verify size and content
         assert!(got.is_some(), "failed to retrieve 10MB value in {mode}");
         assert_eq!(
-            got.as_ref().map(|b| b.len()),
+            got.as_ref().map(bytes::Bytes::len),
             Some(10_000_000),
             "retrieved value size mismatch in {mode}"
         );
@@ -395,7 +395,7 @@ fn should_batch_concurrent_puts_when_cloud_async_mode() {
         // Assert: batching occurred (uploads/segments < puts)
         let uploads: usize = std::fs::read_dir(&cloud_wal_dir)
             .unwrap_or_else(|e| panic!("read_dir({cloud_wal_dir:?}) failed: {e}"))
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| matches!(e.path().extension().and_then(|s| s.to_str()), Some("wal")))
             .count();
 

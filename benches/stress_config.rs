@@ -7,7 +7,7 @@
 /// - `BENCH_RUNS`: Number of measurement runs per stress test (default: 1, CI: 3). Increase to 5 for regression detection.
 /// - `BENCH_WARMUP`: Number of warmup runs before measurement (default: 1).
 ///
-/// **set_elements(N)** in each `#[stress_test]`: N must match the logical number of operations
+/// **`set_elements(N)`** in each `#[stress_test]`: N must match the logical number of operations
 /// inside `ctx.measure(|| { ... })` so that throughput (elements/time) reported by
 /// `cntryl-tools summarize-benchmarks` is meaningful and comparable across scenarios.
 ///
@@ -20,7 +20,7 @@
 /// - Throughput-only metrics miss isolation violations or fairness issues
 ///
 /// Recommended improvements:
-/// 1. Increase BENCH_RUNS to 5 for local development, 3+ for CI
+/// 1. Increase `BENCH_RUNS` to 5 for local development, 3+ for CI
 /// 2. Track latency distributions: p50, p95, p99, max (not just throughput)
 /// 3. Set explicit thresholds:
 ///    - Hotpath (ns-µs): Flag if >5% regression
@@ -29,7 +29,7 @@
 /// 4. For MVCC/concurrent tests, measure fairness: writer latency under snapshot contention
 /// 5. For cloud tests, measure recovery correctness (not just throughput)
 ///
-/// See: BENCHMARK_AUDIT.md → Part 2 for detailed signal quality analysis
+/// See: `BENCHMARK_AUDIT.md` → Part 2 for detailed signal quality analysis
 #[allow(dead_code)]
 pub struct BenchConfig {
     pub runs: usize,

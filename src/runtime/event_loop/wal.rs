@@ -6,17 +6,36 @@ use crossbeam::channel::Receiver;
 
 pub(super) struct WalCoordinator;
 
+pub(super) struct ApplyTransactionRequest {
+    pub request_id: u64,
+    pub ops: Vec<TransactionOp>,
+    pub durability_policy: Option<DurabilityPolicy>,
+    pub start_sequence: Option<u64>,
+    pub isolation_policy: TransactionIsolationPolicy,
+}
+
+pub(super) struct AppendRequest {
+    pub request_id: u64,
+    pub cf_id: crate::types::ColumnFamilyId,
+    pub key: Vec<u8>,
+    pub value: Option<Vec<u8>>,
+    pub ttl_seconds: Option<u64>,
+    pub insert_only: bool,
+}
+
 impl WalCoordinator {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_transaction(
         event_loop: &mut EventLoop,
         msg_rx: &Receiver<RuntimeMsg>,
-        request_id: u64,
-        ops: Vec<TransactionOp>,
-        durability_policy: Option<DurabilityPolicy>,
-        start_sequence: Option<u64>,
-        isolation_policy: TransactionIsolationPolicy,
+        request: ApplyTransactionRequest,
     ) -> HandleOutcome {
+        let ApplyTransactionRequest {
+            request_id,
+            ops,
+            durability_policy,
+            start_sequence,
+            isolation_policy,
+        } = request;
         if !Self::accept_write(event_loop, request_id) {
             return HandleOutcome::Continue;
         }
@@ -79,17 +98,19 @@ impl WalCoordinator {
         HandleOutcome::Continue
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn append(
         event_loop: &mut EventLoop,
         msg_rx: &Receiver<RuntimeMsg>,
-        request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
-        key: Vec<u8>,
-        value: Option<Vec<u8>>,
-        ttl_seconds: Option<u64>,
-        insert_only: bool,
+        request: AppendRequest,
     ) -> HandleOutcome {
+        let AppendRequest {
+            request_id,
+            cf_id,
+            key,
+            value,
+            ttl_seconds,
+            insert_only,
+        } = request;
         if !Self::accept_write(event_loop, request_id) {
             return HandleOutcome::Continue;
         }
@@ -170,24 +191,26 @@ impl WalCoordinator {
 
     pub(super) fn sync(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
         let result = event_loop.wal_actor.sync(&mut event_loop.state);
-        let resp = result
-            .map(|_| RuntimeResponse::Ok { request_id })
-            .unwrap_or_else(|error| RuntimeResponse::Error {
+        let resp = result.map_or_else(
+            |error| RuntimeResponse::Error {
                 request_id,
                 error: crate::common::MidgeError::Internal(error.to_string()),
-            });
+            },
+            |_| RuntimeResponse::Ok { request_id },
+        );
         event_loop.respond(request_id, resp);
         HandleOutcome::Continue
     }
 
     pub(super) fn rotate(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
         let result = event_loop.wal_actor.rotate(&mut event_loop.state);
-        let resp = result
-            .map(|_| RuntimeResponse::Ok { request_id })
-            .unwrap_or_else(|error| RuntimeResponse::Error {
+        let resp = result.map_or_else(
+            |error| RuntimeResponse::Error {
                 request_id,
                 error: crate::common::MidgeError::Internal(error.to_string()),
-            });
+            },
+            |()| RuntimeResponse::Ok { request_id },
+        );
         event_loop.respond(request_id, resp);
         HandleOutcome::Continue
     }

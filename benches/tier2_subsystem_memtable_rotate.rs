@@ -19,8 +19,8 @@ fn make_kv_pairs(count: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
     (0..count)
         .map(|i| {
             (
-                format!("key_{:010}", i).into_bytes(),
-                format!("value_{:010}", i).into_bytes(),
+                format!("key_{i:010}").into_bytes(),
+                format!("value_{i:010}").into_bytes(),
             )
         })
         .collect()
@@ -44,7 +44,7 @@ fn bench_memtable_rotate_small(c: &mut Criterion) {
             }
             // Drain (simulate rotation)
             black_box(memtable.iter_all(u64::MAX))
-        })
+        });
     });
 
     group.finish();
@@ -68,7 +68,7 @@ fn bench_memtable_rotate_large(c: &mut Criterion) {
             }
             // Drain (simulate rotation)
             black_box(memtable.iter_all(u64::MAX))
-        })
+        });
     });
 
     group.finish();

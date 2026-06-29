@@ -8,7 +8,7 @@
 //! - Delete replay and multi-write visibility after reopen
 //! - Repeated clean reopen cycles and post-reopen write continuity
 //!
-//! **Storage Modes**: LocalDisk + CloudBacked ONLY (requires persistence)
+//! **Storage Modes**: `LocalDisk` + `CloudBacked` ONLY (requires persistence)
 //!
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
@@ -59,8 +59,7 @@ fn should_recover_from_clean_shutdown_when_reopening() {
             assert_eq!(
                 tx.get(b"key1").expect("get"),
                 Some(Bytes::from_static(b"value1")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -68,8 +67,7 @@ fn should_recover_from_clean_shutdown_when_reopening() {
             assert_eq!(
                 tx.get(b"key2").expect("get"),
                 Some(Bytes::from_static(b"value2")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
     });
@@ -115,8 +113,7 @@ fn should_recover_after_clean_shutdown_when_writes_include_flushed_and_unflushed
             assert_eq!(
                 tx.get(b"flushed_key").expect("get"),
                 Some(Bytes::from_static(b"flushed_value")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
             // Unflushed data recoverable from WAL
             let tx = engine
@@ -125,8 +122,7 @@ fn should_recover_after_clean_shutdown_when_writes_include_flushed_and_unflushed
             assert_eq!(
                 tx.get(b"unflushed_key").expect("get"),
                 Some(Bytes::from_static(b"unflushed_value")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
     });
@@ -162,8 +158,7 @@ fn should_preserve_first_commit_given_conflict_abort_when_reopening() {
             // Assert
             assert!(
                 matches!(conflict, Err(cntryl_midge::MidgeError::WriteConflict(_))),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
 
@@ -181,8 +176,7 @@ fn should_preserve_first_commit_given_conflict_abort_when_reopening() {
             assert_eq!(
                 tx.get(b"key").expect("get"),
                 Some(Bytes::from_static(b"from_tx1")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
     });
@@ -199,8 +193,8 @@ fn should_recover_unflushed_data_when_reopening_after_clean_shutdown() {
 
             // Write data
             for i in 0..100 {
-                let key = format!("key_{:03}", i);
-                let value = format!("value_{:03}", i);
+                let key = format!("key_{i:03}");
+                let value = format!("value_{i:03}");
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
@@ -218,16 +212,15 @@ fn should_recover_unflushed_data_when_reopening_after_clean_shutdown() {
 
             // Data should be recoverable from WAL
             for i in 0..100 {
-                let key = format!("key_{:03}", i);
-                let expected = Bytes::from(format!("value_{:03}", i));
+                let key = format!("key_{i:03}");
+                let expected = Bytes::from(format!("value_{i:03}"));
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get"),
                     Some(expected),
-                    "mode: {}",
-                    mode
+                    "mode: {mode}"
                 );
             }
         }
@@ -278,8 +271,7 @@ fn should_prefer_wal_given_wal_newer_than_sst_when_recovering() {
             assert_eq!(
                 tx.get(b"key").expect("get"),
                 Some(Bytes::from_static(b"value_v2")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
     });
@@ -317,8 +309,7 @@ fn should_skip_wal_entries_given_already_in_sst_when_recovering() {
             assert_eq!(
                 tx.get(b"key").expect("get"),
                 Some(Bytes::from_static(b"value_v1")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
     });
@@ -335,13 +326,13 @@ fn should_replay_wal_in_order_given_multiple_writes_when_recovering() {
 
             // Write sequence (order matters)
             for i in 0..100 {
-                let key = format!("seq_key_{:03}", i);
+                let key = format!("seq_key_{i:03}");
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
                 tx.put(
                     key.as_bytes().to_vec(),
-                    format!("value_{:03}", i).as_bytes().to_vec(),
+                    format!("value_{i:03}").as_bytes().to_vec(),
                     None,
                 )
                 .expect("put");
@@ -357,16 +348,15 @@ fn should_replay_wal_in_order_given_multiple_writes_when_recovering() {
 
             // Verify correct order (last write wins for same key)
             for i in 0..100 {
-                let key = format!("seq_key_{:03}", i);
-                let expected = Bytes::from(format!("value_{:03}", i));
+                let key = format!("seq_key_{i:03}");
+                let expected = Bytes::from(format!("value_{i:03}"));
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get"),
                     Some(expected),
-                    "mode: {}",
-                    mode
+                    "mode: {mode}"
                 );
             }
         }
@@ -415,8 +405,7 @@ fn should_recover_deletes_when_reopening_after_clean_shutdown() {
                 .expect("begin_tx");
             assert!(
                 tx.get(b"to_delete").expect("get").is_none(),
-                "delete not recovered from WAL in mode: {}",
-                mode
+                "delete not recovered from WAL in mode: {mode}"
             );
         }
     });
@@ -465,8 +454,7 @@ fn should_recover_independent_committed_transactions_when_reopening_after_clean_
             assert_eq!(
                 tx.get(b"key1").expect("get"),
                 Some(Bytes::from_static(b"value1")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -474,8 +462,7 @@ fn should_recover_independent_committed_transactions_when_reopening_after_clean_
             assert_eq!(
                 tx.get(b"key2").expect("get"),
                 Some(Bytes::from_static(b"value2")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -483,8 +470,7 @@ fn should_recover_independent_committed_transactions_when_reopening_after_clean_
             assert_eq!(
                 tx.get(b"key3").expect("get"),
                 Some(Bytes::from_static(b"value3")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
     });
@@ -525,8 +511,7 @@ fn should_recover_from_wal_when_reopening_after_clean_shutdown() {
             assert_eq!(
                 tx.get(b"key").expect("get"),
                 Some(Bytes::from_static(b"value")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
     });
@@ -544,7 +529,7 @@ fn should_preserve_consistency_when_reopening_after_clean_shutdown() {
             // Write multiple batches
             for batch_num in 0..3 {
                 for i in 0..10 {
-                    let key = format!("batch_{}_key_{:02}", batch_num, i);
+                    let key = format!("batch_{batch_num}_key_{i:02}");
                     let mut tx = engine
                         .begin_tx(cf.id(), TransactionMode::ReadWrite)
                         .expect("begin_tx");
@@ -564,7 +549,7 @@ fn should_preserve_consistency_when_reopening_after_clean_shutdown() {
             // All writes should be recoverable
             for batch_num in 0..3 {
                 for i in 0..10 {
-                    let key = format!("batch_{}_key_{:02}", batch_num, i);
+                    let key = format!("batch_{batch_num}_key_{i:02}");
                     let expected = Bytes::from_static(b"value");
                     let tx = engine
                         .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -572,8 +557,7 @@ fn should_preserve_consistency_when_reopening_after_clean_shutdown() {
                     assert_eq!(
                         tx.get(key.as_bytes()).expect("get"),
                         Some(expected.clone()),
-                        "mode: {}",
-                        mode
+                        "mode: {mode}"
                     );
                 }
             }
@@ -625,8 +609,7 @@ fn should_be_idempotent_when_reopening_multiple_times_after_clean_shutdown() {
             assert_eq!(
                 tx.get(b"key1").expect("get"),
                 Some(Bytes::from_static(b"value1")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -634,8 +617,7 @@ fn should_be_idempotent_when_reopening_multiple_times_after_clean_shutdown() {
             assert_eq!(
                 tx.get(b"key2").expect("get"),
                 Some(Bytes::from_static(b"value2")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
     });
@@ -667,7 +649,7 @@ fn should_maintain_exactly_once_visibility_when_reopening_multiple_times_after_c
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
             let val = tx.get(b"key").expect("get");
-            assert_eq!(val, Some(Bytes::from_static(b"value")), "mode: {}", mode);
+            assert_eq!(val, Some(Bytes::from_static(b"value")), "mode: {mode}");
             // Engine is dropped again after the first reopen
         }
 
@@ -681,7 +663,7 @@ fn should_maintain_exactly_once_visibility_when_reopening_multiple_times_after_c
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
             let val = tx.get(b"key").expect("get");
-            assert_eq!(val, Some(Bytes::from_static(b"value")), "mode: {}", mode);
+            assert_eq!(val, Some(Bytes::from_static(b"value")), "mode: {mode}");
         }
     });
 }
@@ -721,8 +703,7 @@ fn should_continue_sequence_numbers_when_new_writes_follow_clean_reopen() {
             assert_eq!(
                 tx.get(b"seq_1").expect("get"),
                 Some(Bytes::from_static(b"value_1")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
 
             // Write new data (sequence numbers should continue)
@@ -752,8 +733,7 @@ fn should_continue_sequence_numbers_when_new_writes_follow_clean_reopen() {
             assert_eq!(
                 tx.get(b"seq_1").expect("get"),
                 Some(Bytes::from_static(b"value_1")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -761,8 +741,7 @@ fn should_continue_sequence_numbers_when_new_writes_follow_clean_reopen() {
             assert_eq!(
                 tx.get(b"seq_3").expect("get"),
                 Some(Bytes::from_static(b"value_3")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -770,8 +749,7 @@ fn should_continue_sequence_numbers_when_new_writes_follow_clean_reopen() {
             assert_eq!(
                 tx.get(b"seq_4").expect("get"),
                 Some(Bytes::from_static(b"value_4")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
     });
@@ -788,7 +766,7 @@ fn should_replay_valid_wal_records_when_reopening_after_clean_shutdown() {
 
             // Write valid records
             for i in 0..50 {
-                let key = format!("valid_{:03}", i);
+                let key = format!("valid_{i:03}");
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
@@ -806,15 +784,14 @@ fn should_replay_valid_wal_records_when_reopening_after_clean_shutdown() {
 
             // Valid committed records should be recovered on reopen
             for i in 0..50 {
-                let key = format!("valid_{:03}", i);
+                let key = format!("valid_{i:03}");
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get"),
                     Some(Bytes::from_static(b"value")),
-                    "mode: {}",
-                    mode
+                    "mode: {mode}"
                 );
             }
         }

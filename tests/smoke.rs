@@ -319,7 +319,7 @@ fn should_preserve_all_committed_values_given_multiple_writes_when_written() {
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
-        tx.put(format!("key{}", i).into_bytes(), b"val".to_vec(), None)
+        tx.put(format!("key{i}").into_bytes(), b"val".to_vec(), None)
             .expect("put");
         tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     }
@@ -330,7 +330,7 @@ fn should_preserve_all_committed_values_given_multiple_writes_when_written() {
         .unwrap();
     for i in 0..10 {
         assert_eq!(
-            tx.get(format!("key{}", i).as_bytes())
+            tx.get(format!("key{i}").as_bytes())
                 .expect("get committed key"),
             Some(Bytes::from_static(b"val"))
         );

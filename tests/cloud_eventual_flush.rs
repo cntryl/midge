@@ -10,7 +10,7 @@ fn buffered_cloud_policy() -> CloudRuntimePolicyOverrides {
     CloudRuntimePolicyOverrides {
         eventual_flush_segment_gap: Some(BUFFERED_TEST_GAP),
         wal_seal_min_segment_bytes: Some(usize::MAX),
-        wal_seal_max_flush_delay: Some(Duration::from_secs(3600)),
+        wal_seal_max_flush_delay: Some(Duration::from_hours(1)),
         wal_seal_max_pending_writes: Some(1),
     }
 }
@@ -244,7 +244,7 @@ fn should_reset_memtable_wal_gap_after_reopen_before_new_segment_churn() {
         opts_for_mode("cloud").with_cloud_runtime_policy_overrides(CloudRuntimePolicyOverrides {
             eventual_flush_segment_gap: None,
             wal_seal_min_segment_bytes: Some(usize::MAX),
-            wal_seal_max_flush_delay: Some(Duration::from_secs(3600)),
+            wal_seal_max_flush_delay: Some(Duration::from_hours(1)),
             wal_seal_max_pending_writes: Some(1),
         });
 

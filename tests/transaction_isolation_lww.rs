@@ -28,8 +28,7 @@ fn should_hide_uncommitted_writes_given_uncommitted_write_when_read_different_mo
         assert_eq!(
             reader.get(b"key").expect("read uncommitted key"),
             None,
-            "mode: {}",
-            mode
+            "mode: {mode}"
         );
     });
 }
@@ -67,8 +66,7 @@ fn should_apply_last_committed_write_given_multiple_commits_when_last_write_wins
         assert_eq!(
             reader.get(b"key").expect("read final key"),
             Some(Bytes::from_static(b"from_txn2")),
-            "mode: {}",
-            mode
+            "mode: {mode}"
         );
     });
 }
@@ -121,8 +119,7 @@ fn should_allow_lost_update_given_concurrent_writes_when_lost_update_occurs() {
         assert_eq!(
             reader.get(b"counter").expect("read final counter"),
             Some(Bytes::from_static(b"1")),
-            "mode: {}",
-            mode
+            "mode: {mode}"
         );
     });
 }
@@ -160,8 +157,7 @@ fn should_abort_second_commit_given_conflicting_writes_when_abort_on_write_confl
                 second_commit,
                 Err(cntryl_midge::MidgeError::WriteConflict(_))
             ),
-            "mode: {}",
-            mode
+            "mode: {mode}"
         );
 
         let reader = engine
@@ -170,8 +166,7 @@ fn should_abort_second_commit_given_conflicting_writes_when_abort_on_write_confl
         assert_eq!(
             reader.get(b"key").expect("read final key"),
             Some(Bytes::from_static(b"from_tx1")),
-            "mode: {}",
-            mode
+            "mode: {mode}"
         );
     });
 }
@@ -210,8 +205,7 @@ fn should_abort_delete_range_commit_given_overlapping_recent_writes_when_abort_o
                 second_commit,
                 Err(cntryl_midge::MidgeError::WriteConflict(_))
             ),
-            "mode: {}",
-            mode
+            "mode: {mode}"
         );
 
         let reader = engine
@@ -220,8 +214,7 @@ fn should_abort_delete_range_commit_given_overlapping_recent_writes_when_abort_o
         assert_eq!(
             reader.get(b"m").expect("read final key"),
             Some(Bytes::from_static(b"v1")),
-            "mode: {}",
-            mode
+            "mode: {mode}"
         );
     });
 }
@@ -260,8 +253,7 @@ fn should_abort_point_write_commit_given_recent_overlapping_delete_range_when_ab
                 second_commit,
                 Err(cntryl_midge::MidgeError::WriteConflict(_))
             ),
-            "mode: {} (empty-range overlap must conflict in strict mode)",
-            mode
+            "mode: {mode} (empty-range overlap must conflict in strict mode)"
         );
     });
 }

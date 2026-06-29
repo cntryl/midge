@@ -37,7 +37,7 @@ fn should_preserve_flushed_values_when_reopening_after_short_upload_window() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..100 {
-                let key = format!("partial_upload_key_{:04}", i);
+                let key = format!("partial_upload_key_{i:04}");
                 tx.put(
                     key.as_bytes().to_vec(),
                     b"value_before_upload".to_vec(),
@@ -60,13 +60,11 @@ fn should_preserve_flushed_values_when_reopening_after_short_upload_window() {
                 .expect("begin_tx");
 
             for i in 0..100 {
-                let key = format!("partial_upload_key_{:04}", i);
+                let key = format!("partial_upload_key_{i:04}");
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get reopened value"),
                     Some(Bytes::from_static(b"value_before_upload")),
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
         }
@@ -93,7 +91,7 @@ fn should_preserve_both_flushed_batches_when_reopening_after_compaction_request(
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..50 {
-                let key = format!("manifest_fail_key_{:04}", i);
+                let key = format!("manifest_fail_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None)
                     .expect("put first flushed batch");
             }
@@ -104,7 +102,7 @@ fn should_preserve_both_flushed_batches_when_reopening_after_compaction_request(
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 50..100 {
-                let key = format!("manifest_fail_key_{:04}", i);
+                let key = format!("manifest_fail_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None)
                     .expect("put second flushed batch");
             }
@@ -123,7 +121,7 @@ fn should_preserve_both_flushed_batches_when_reopening_after_compaction_request(
                 .expect("begin_tx");
 
             for i in 0..100 {
-                let key = format!("manifest_fail_key_{:04}", i);
+                let key = format!("manifest_fail_key_{i:04}");
                 let expected = if i < 50 {
                     Bytes::from_static(b"v1")
                 } else {
@@ -132,9 +130,7 @@ fn should_preserve_both_flushed_batches_when_reopening_after_compaction_request(
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get reopened batch value"),
                     Some(expected),
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
         }
@@ -154,7 +150,7 @@ fn should_preserve_flushed_values_when_reopening_after_background_upload_delay()
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..75 {
-                let key = format!("retry_key_{:04}", i);
+                let key = format!("retry_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"retry_value".to_vec(), None)
                     .expect("put retry value");
             }
@@ -174,14 +170,12 @@ fn should_preserve_flushed_values_when_reopening_after_background_upload_delay()
                 .expect("begin_tx");
 
             for i in 0..75 {
-                let key = format!("retry_key_{:04}", i);
+                let key = format!("retry_key_{i:04}");
                 assert_eq!(
                     tx.get(key.as_bytes())
                         .expect("get retry value after reopen"),
                     Some(Bytes::from_static(b"retry_value")),
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
         }
@@ -200,7 +194,7 @@ fn should_preserve_snapshot_visibility_when_flushing_with_snapshot_open() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..100 {
-            let key = format!("exposure_key_{:04}", i);
+            let key = format!("exposure_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"safe_value".to_vec(), None)
                 .expect("put safe value");
         }
@@ -215,13 +209,11 @@ fn should_preserve_snapshot_visibility_when_flushing_with_snapshot_open() {
 
         // Assert
         for i in 0..100 {
-            let key = format!("exposure_key_{:04}", i);
+            let key = format!("exposure_key_{i:04}");
             assert_eq!(
                 snapshot.get(key.as_bytes()).expect("snapshot get"),
                 Some(Bytes::from_static(b"safe_value")),
-                "snapshot saw unexpected value in mode: {} key: {}",
-                mode,
-                key
+                "snapshot saw unexpected value in mode: {mode} key: {key}"
             );
         }
     });
@@ -240,7 +232,7 @@ fn should_preserve_both_generations_when_reopening_after_compaction_request() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..100 {
-                let key = format!("midcompact_key_{:04}", i);
+                let key = format!("midcompact_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"gen1".to_vec(), None)
                     .expect("put generation 1 value");
             }
@@ -251,7 +243,7 @@ fn should_preserve_both_generations_when_reopening_after_compaction_request() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 100..200 {
-                let key = format!("midcompact_key_{:04}", i);
+                let key = format!("midcompact_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"gen2".to_vec(), None)
                     .expect("put generation 2 value");
             }
@@ -271,7 +263,7 @@ fn should_preserve_both_generations_when_reopening_after_compaction_request() {
                 .expect("begin_tx");
 
             for i in 0..200 {
-                let key = format!("midcompact_key_{:04}", i);
+                let key = format!("midcompact_key_{i:04}");
                 let expected = if i < 100 {
                     Bytes::from_static(b"gen1")
                 } else {
@@ -281,9 +273,7 @@ fn should_preserve_both_generations_when_reopening_after_compaction_request() {
                     tx.get(key.as_bytes())
                         .expect("get reopened generation value"),
                     Some(expected),
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
         }
@@ -303,7 +293,7 @@ fn should_preserve_values_when_reopening_after_flush_attempt() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..50 {
-                let key = format!("cloud_offline_key_{:04}", i);
+                let key = format!("cloud_offline_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"offline_value".to_vec(), None)
                     .expect("put offline value");
             }
@@ -321,13 +311,11 @@ fn should_preserve_values_when_reopening_after_flush_attempt() {
                 .expect("begin_tx");
 
             for i in 0..50 {
-                let key = format!("cloud_offline_key_{:04}", i);
+                let key = format!("cloud_offline_key_{i:04}");
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get reopened offline value"),
                     Some(Bytes::from_static(b"offline_value")),
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
         }
@@ -347,7 +335,7 @@ fn should_preserve_multiple_flushed_batches_when_reopening_after_short_upload_wi
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..50 {
-                let key = format!("resume_key_{:04}", i);
+                let key = format!("resume_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"batch1".to_vec(), None)
                     .expect("put batch1 value");
             }
@@ -358,7 +346,7 @@ fn should_preserve_multiple_flushed_batches_when_reopening_after_short_upload_wi
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 50..100 {
-                let key = format!("resume_key_{:04}", i);
+                let key = format!("resume_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"batch2".to_vec(), None)
                     .expect("put batch2 value");
             }
@@ -379,7 +367,7 @@ fn should_preserve_multiple_flushed_batches_when_reopening_after_short_upload_wi
                 .expect("begin_tx");
 
             for i in 0..100 {
-                let key = format!("resume_key_{:04}", i);
+                let key = format!("resume_key_{i:04}");
                 let expected = if i < 50 {
                     Bytes::from_static(b"batch1")
                 } else {
@@ -388,9 +376,7 @@ fn should_preserve_multiple_flushed_batches_when_reopening_after_short_upload_wi
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get reopened resume value"),
                     Some(expected),
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
         }
@@ -410,7 +396,7 @@ fn should_preserve_flushed_values_when_reopening_after_short_retry_window() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..60 {
-                let key = format!("dedup_key_{:04}", i);
+                let key = format!("dedup_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"dedup_value".to_vec(), None)
                     .expect("put dedup value");
             }
@@ -431,13 +417,11 @@ fn should_preserve_flushed_values_when_reopening_after_short_retry_window() {
                 .expect("begin_tx");
 
             for i in 0..60 {
-                let key = format!("dedup_key_{:04}", i);
+                let key = format!("dedup_key_{i:04}");
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get reopened dedup value"),
                     Some(Bytes::from_static(b"dedup_value")),
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
         }

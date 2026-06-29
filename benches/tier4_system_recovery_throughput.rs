@@ -10,7 +10,7 @@
 //! - State-dependent recovery cost (recovery depends on manifests, WALs, levels)
 //!
 //! NOT measured:
-//! - Clean reopen (Tier 3: tier3_system_recovery.rs)
+//! - Clean reopen (Tier 3: `tier3_system_recovery.rs`)
 
 #[path = "./stress_config.rs"]
 mod stress_config;

@@ -4,7 +4,7 @@
 //! **Run Frequency:** Every PR (CI gate)
 //!
 //! Covers critical block cache hot paths:
-//! - Single hot key lookups (get_hot)
+//! - Single hot key lookups (`get_hot`)
 //! - Batch lookups for hits and misses
 //! - Insert operations (single and batch)
 //! - Eviction under memory pressure
@@ -79,7 +79,7 @@ fn bench_get_hot_single(c: &mut Criterion) {
     let hot_key = make_cache_key(42 * 4096);
 
     group.bench_function("4k_block", |b| {
-        b.iter(|| black_box(cache.get(black_box(&hot_key))))
+        b.iter(|| black_box(cache.get(black_box(&hot_key))));
     });
 
     group.finish();
@@ -113,7 +113,7 @@ fn bench_insert_single(c: &mut Criterion) {
             let key = insert_keys[key_index % insert_keys.len()];
             key_index = key_index.wrapping_add(1);
             cache.put(black_box(key), black_box(block_data.clone()));
-        })
+        });
     });
 
     group.finish();
@@ -148,7 +148,7 @@ fn bench_get_batch_hit(c: &mut Criterion) {
                 }
             }
             black_box(count)
-        })
+        });
     });
 
     group.finish();
@@ -188,7 +188,7 @@ fn bench_get_batch_miss(c: &mut Criterion) {
                 }
             }
             black_box(count)
-        })
+        });
     });
 
     group.finish();
@@ -224,7 +224,7 @@ fn bench_insert_batch(c: &mut Criterion) {
                     black_box(());
                 },
                 BatchSize::SmallInput,
-            )
+            );
         },
     );
 

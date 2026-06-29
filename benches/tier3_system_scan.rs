@@ -5,8 +5,8 @@
 //! This test only answers: "How fast can we seek and start iteration?"
 //!
 //! **Important:** This benchmark measures iterator setup cost plus first element only.
-//! It does NOT measure full scan throughput. For that, see tier4_ycsb_workload_e.rs
-//! or tier2_subsystem benchmarks that consume entire iterator results.
+//! It does NOT measure full scan throughput. For that, see `tier4_ycsb_workload_e.rs`
+//! or `tier2_subsystem` benchmarks that consume entire iterator results.
 
 #[path = "./stress_config.rs"]
 mod stress_config;

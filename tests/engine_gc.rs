@@ -41,7 +41,7 @@ fn get_storage_path_if_local(_opts: &MidgeOptions) -> Option<PathBuf> {
 #[test]
 fn should_collect_orphaned_sst_files_after_compaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!("\n=== GC: Collect Orphaned SST Files (mode: {}) ===", mode);
+        eprintln!("\n=== GC: Collect Orphaned SST Files (mode: {mode}) ===");
 
         // Arrange
         let engine = open_with_mode(opts.clone(), mode);
@@ -52,7 +52,7 @@ fn should_collect_orphaned_sst_files_after_compaction() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..100 {
-            let key = format!("key_{:04}", i);
+            let key = format!("key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
         }
         tx.commit(WriteOptions::buffered()).expect("commit");
@@ -63,7 +63,7 @@ fn should_collect_orphaned_sst_files_after_compaction() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 100..150 {
-            let key = format!("key_{:04}", i);
+            let key = format!("key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
         }
         tx.commit(WriteOptions::buffered()).expect("commit");
@@ -78,13 +78,9 @@ fn should_collect_orphaned_sst_files_after_compaction() {
             .expect("begin_tx");
         // Verify all keys still readable after compaction
         for i in 0..150 {
-            let key = format!("key_{:04}", i);
+            let key = format!("key_{i:04}");
             let val = tx.get(key.as_bytes()).expect("get during compaction");
-            assert!(
-                val.is_some(),
-                "key lost during compaction in mode: {}",
-                mode
-            );
+            assert!(val.is_some(), "key lost during compaction in mode: {mode}");
         }
 
         // For local/cloud modes, verify orphaned SST files are cleaned
@@ -99,10 +95,7 @@ fn should_collect_orphaned_sst_files_after_compaction() {
 #[test]
 fn should_not_collect_sst_files_referenced_by_manifest() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!(
-            "\n=== GC: Preserve Referenced SST Files (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== GC: Preserve Referenced SST Files (mode: {mode}) ===");
 
         // Arrange
         let engine = open_with_mode(opts.clone(), mode);
@@ -113,7 +106,7 @@ fn should_not_collect_sst_files_referenced_by_manifest() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..50 {
-            let key = format!("key_{:04}", i);
+            let key = format!("key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
         }
@@ -127,12 +120,11 @@ fn should_not_collect_sst_files_referenced_by_manifest() {
 
         // Assert: SST is still readable (proof it exists)
         for i in 0..50 {
-            let key = format!("key_{:04}", i);
+            let key = format!("key_{i:04}");
             let val = tx.get(key.as_bytes()).expect("get");
             assert!(
                 val.is_some(),
-                "SST file prematurely deleted in mode: {}",
-                mode
+                "SST file prematurely deleted in mode: {mode}"
             );
         }
 
@@ -143,10 +135,7 @@ fn should_not_collect_sst_files_referenced_by_manifest() {
 #[test]
 fn should_run_gc_after_configurable_interval() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!(
-            "\n=== GC: Configurable Interval Triggering (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== GC: Configurable Interval Triggering (mode: {mode}) ===");
 
         // Arrange: Set up engine with default compaction and GC timing
         let engine = open_with_mode(opts.clone(), mode);
@@ -157,7 +146,7 @@ fn should_run_gc_after_configurable_interval() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..100 {
-            let key = format!("batch1_key_{:04}", i);
+            let key = format!("batch1_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
         }
         tx.commit(WriteOptions::buffered()).expect("commit");
@@ -168,7 +157,7 @@ fn should_run_gc_after_configurable_interval() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..100 {
-            let key = format!("batch2_key_{:04}", i);
+            let key = format!("batch2_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None).ok();
         }
         tx.commit(WriteOptions::buffered()).expect("commit");
@@ -182,11 +171,10 @@ fn should_run_gc_after_configurable_interval() {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin_tx");
         for i in 0..100 {
-            let key = format!("batch1_key_{:04}", i);
+            let key = format!("batch1_key_{i:04}");
             assert!(
                 tx.get(key.as_bytes()).ok().flatten().is_some(),
-                "batch 1 data lost in mode: {}",
-                mode
+                "batch 1 data lost in mode: {mode}"
             );
         }
 
@@ -197,10 +185,7 @@ fn should_run_gc_after_configurable_interval() {
 #[test]
 fn should_persist_gc_state_across_restart() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        eprintln!(
-            "\n=== GC: Persist State Across Restart (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== GC: Persist State Across Restart (mode: {mode}) ===");
 
         // Arrange
         // Act: Write and trigger compaction
@@ -213,7 +198,7 @@ fn should_persist_gc_state_across_restart() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..75 {
-                let key = format!("persist_key_{:04}", i);
+                let key = format!("persist_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
             }
             tx.commit(WriteOptions::buffered()).expect("commit");
@@ -224,7 +209,7 @@ fn should_persist_gc_state_across_restart() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 75..150 {
-                let key = format!("persist_key_{:04}", i);
+                let key = format!("persist_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None).ok();
             }
             tx.commit(WriteOptions::buffered()).expect("commit");
@@ -245,11 +230,10 @@ fn should_persist_gc_state_across_restart() {
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
             for i in 0..150 {
-                let key = format!("persist_key_{:04}", i);
+                let key = format!("persist_key_{i:04}");
                 assert!(
                     tx.get(key.as_bytes()).ok().flatten().is_some(),
-                    "data lost after restart in mode: {}",
-                    mode
+                    "data lost after restart in mode: {mode}"
                 );
             }
 
@@ -261,7 +245,7 @@ fn should_persist_gc_state_across_restart() {
 #[test]
 fn should_handle_gc_with_active_readers() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!("\n=== GC: Handle Active Readers (mode: {}) ===", mode);
+        eprintln!("\n=== GC: Handle Active Readers (mode: {mode}) ===");
 
         let engine = Arc::new(open_with_mode(opts.clone(), mode));
         let cf = engine.create_column_family("test").expect("create cf");
@@ -271,7 +255,7 @@ fn should_handle_gc_with_active_readers() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..100 {
-            let key = format!("reader_key_{:04}", i);
+            let key = format!("reader_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"snapshot_value".to_vec(), None)
                 .ok();
         }
@@ -297,8 +281,7 @@ fn should_handle_gc_with_active_readers() {
         let val = snapshot.get(b"reader_key_0000").expect("get");
         assert!(
             val.is_some(),
-            "snapshot read failed during compaction in mode: {}",
-            mode
+            "snapshot read failed during compaction in mode: {mode}"
         );
 
         // Wait for compaction thread
@@ -310,11 +293,10 @@ fn should_handle_gc_with_active_readers() {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin_tx");
         for i in 0..100 {
-            let key = format!("reader_key_{:04}", i);
+            let key = format!("reader_key_{i:04}");
             assert!(
                 tx.get(key.as_bytes()).ok().flatten().is_some(),
-                "data lost after compaction in mode: {}",
-                mode
+                "data lost after compaction in mode: {mode}"
             );
         }
 
@@ -329,10 +311,7 @@ fn should_handle_gc_with_active_readers() {
 #[test]
 fn should_collect_orphaned_wal_segments_after_flush() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!(
-            "\n=== GC: Collect Orphaned WAL Segments (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== GC: Collect Orphaned WAL Segments (mode: {mode}) ===");
 
         // Arrange
         let engine = open_with_mode(opts.clone(), mode);
@@ -343,7 +322,7 @@ fn should_collect_orphaned_wal_segments_after_flush() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..50 {
-            let key = format!("wal_key_{:04}", i);
+            let key = format!("wal_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"wal_value".to_vec(), None)
                 .ok();
         }
@@ -357,9 +336,9 @@ fn should_collect_orphaned_wal_segments_after_flush() {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin_tx");
         for i in 0..50 {
-            let key = format!("wal_key_{:04}", i);
+            let key = format!("wal_key_{i:04}");
             let val = tx.get(key.as_bytes()).expect("get");
-            assert!(val.is_some(), "data lost after flush in mode: {}", mode);
+            assert!(val.is_some(), "data lost after flush in mode: {mode}");
         }
 
         // For local/cloud modes, old WAL segments should be marked for deletion
@@ -372,7 +351,7 @@ fn should_collect_orphaned_wal_segments_after_flush() {
 #[test]
 fn should_not_collect_wal_segments_still_needed_for_recovery() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        eprintln!("\n=== GC: Preserve WAL for Recovery (mode: {}) ===", mode);
+        eprintln!("\n=== GC: Preserve WAL for Recovery (mode: {mode}) ===");
 
         // Arrange
         // Act: Write uncommitted data and crash
@@ -385,7 +364,7 @@ fn should_not_collect_wal_segments_still_needed_for_recovery() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..30 {
-                let key = format!("recovery_key_{:04}", i);
+                let key = format!("recovery_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"recovery_value".to_vec(), None)
                     .ok();
             }
@@ -403,12 +382,11 @@ fn should_not_collect_wal_segments_still_needed_for_recovery() {
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
             for i in 0..30 {
-                let key = format!("recovery_key_{:04}", i);
+                let key = format!("recovery_key_{i:04}");
                 let val = tx.get(key.as_bytes()).expect("get");
                 assert!(
                     val.is_some(),
-                    "WAL segment was incorrectly GC'd in mode: {}",
-                    mode
+                    "WAL segment was incorrectly GC'd in mode: {mode}"
                 );
             }
 

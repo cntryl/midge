@@ -43,7 +43,7 @@ struct MockSst {
 /// Pre-generate all keys for SST (deterministic, no allocations in benchmark)
 fn precompute_sst_keys() -> Vec<Bytes> {
     (0..TOTAL_KEYS)
-        .map(|i| Bytes::from(format!("user:tenant:key:{:010}", i)))
+        .map(|i| Bytes::from(format!("user:tenant:key:{i:010}")))
         .collect()
 }
 
@@ -53,7 +53,7 @@ fn precompute_query_keys(seed: usize) -> (Vec<Bytes>, Vec<Bytes>) {
         .map(|i| {
             // Pick keys that exist in SST (use deterministic pattern)
             let idx = (i * 7 + seed) % TOTAL_KEYS;
-            Bytes::from(format!("user:tenant:key:{:010}", idx))
+            Bytes::from(format!("user:tenant:key:{idx:010}"))
         })
         .collect();
 
@@ -165,7 +165,7 @@ fn bench_point_read_bloom_enabled(c: &mut Criterion) {
             }
 
             black_box((bloom_checks, bloom_rejects, blocks_read, cache_hits))
-        })
+        });
     });
 
     group.finish();
@@ -215,7 +215,7 @@ fn bench_point_read_bloom_disabled(c: &mut Criterion) {
             }
 
             black_box((blocks_read, cache_hits))
-        })
+        });
     });
 
     group.finish();
@@ -258,7 +258,7 @@ fn bench_point_read_bloom_comparison(c: &mut Criterion) {
                         }
                     }
                     black_box((bloom_rejects, blocks_read))
-                })
+                });
             } else {
                 b.iter(|| {
                     let mut blocks_read = 0u32;
@@ -275,7 +275,7 @@ fn bench_point_read_bloom_comparison(c: &mut Criterion) {
                         }
                     }
                     black_box(blocks_read)
-                })
+                });
             }
         });
     }

@@ -331,8 +331,8 @@ fn should_succeed_given_best_effort_when_committing_transaction_during_bulk_load
             let mut txn = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
-            let key = format!("bulk_key_{}", i).into_bytes();
-            let value = format!("bulk_value_{}", i).into_bytes();
+            let key = format!("bulk_key_{i}").into_bytes();
+            let value = format!("bulk_value_{i}").into_bytes();
             txn.put(key, value, None).unwrap();
             txn.commit(write_opts).unwrap();
         }
@@ -511,8 +511,7 @@ fn should_reject_delete_range_given_reversed_bounds_when_added_to_transaction() 
         // Assert
         assert!(
             matches!(result, Err(cntryl_midge::MidgeError::InvalidArgument(_))),
-            "mode: {}",
-            mode
+            "mode: {mode}"
         );
     });
 }
@@ -713,7 +712,7 @@ fn should_support_best_effort_during_bulk_load_phase_when_followed_by_flush() {
             let mut txn = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
-            let key = format!("bulk_{:05}", i).into_bytes();
+            let key = format!("bulk_{i:05}").into_bytes();
             let value = format!("data_{}", i * 2).into_bytes();
             txn.put(key, value, None).unwrap();
             txn.commit(best_effort_opts).unwrap();

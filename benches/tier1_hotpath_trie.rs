@@ -4,8 +4,8 @@
 //! **Run Frequency:** Every PR (CI gate)
 //!
 //! Covers trie index hot paths:
-//! - Exact key lookup (find_block)
-//! - Prefix range lookup (find_prefix_range)
+//! - Exact key lookup (`find_block`)
+//! - Prefix range lookup (`find_prefix_range`)
 //! - Hit/miss scenarios at different trie depths
 
 #[path = "./criterion_config.rs"]
@@ -28,7 +28,7 @@ fn bench_trie_find_block(c: &mut Criterion) {
     let mut builder = TrieBuilder::new();
     for i in 0..100 {
         // Use zero-padded format to ensure lexicographic order matches numeric order
-        let key = format!("user:{:03}:profile", i);
+        let key = format!("user:{i:03}:profile");
         builder.add_key(key.as_bytes(), i as u32).unwrap();
     }
     let encoded = builder.finish();
@@ -43,21 +43,21 @@ fn bench_trie_find_block(c: &mut Criterion) {
         b.iter(|| {
             let block_id = reader.find_block(black_box(key_hit));
             black_box(block_id);
-        })
+        });
     });
 
     group.bench_function("find_miss", |b| {
         b.iter(|| {
             let block_id = reader.find_block(black_box(key_miss));
             black_box(block_id);
-        })
+        });
     });
 
     group.bench_function("find_partial_match", |b| {
         b.iter(|| {
             let block_id = reader.find_block(black_box(key_partial));
             black_box(block_id);
-        })
+        });
     });
 
     group.finish();
@@ -74,7 +74,7 @@ fn bench_trie_prefix_range(c: &mut Criterion) {
     for user_id in 0..10 {
         for resource in &["prefs", "profile", "settings"] {
             // Sorted order: prefs < profile < settings
-            let key = format!("user:{:02}:{}", user_id, resource);
+            let key = format!("user:{user_id:02}:{resource}");
             builder.add_key(key.as_bytes(), user_id as u32).unwrap();
         }
     }
@@ -94,7 +94,7 @@ fn bench_trie_prefix_range(c: &mut Criterion) {
                 total = total.wrapping_add(blocks.len());
             }
             black_box(total);
-        })
+        });
     });
 
     group.bench_function("prefix_all_users", |b| {
@@ -105,7 +105,7 @@ fn bench_trie_prefix_range(c: &mut Criterion) {
                 total = total.wrapping_add(blocks.len());
             }
             black_box(total);
-        })
+        });
     });
 
     group.bench_function("prefix_no_match", |b| {
@@ -116,7 +116,7 @@ fn bench_trie_prefix_range(c: &mut Criterion) {
                 misses += usize::from(blocks.is_empty());
             }
             black_box(misses);
-        })
+        });
     });
 
     group.finish();
@@ -131,7 +131,7 @@ fn bench_trie_key_patterns(c: &mut Criterion) {
     // Short keys with high branching (use zero-padded for lexicographic order)
     let mut builder_short = TrieBuilder::new();
     for i in 0..100 {
-        let key = format!("k{:03}", i);
+        let key = format!("k{i:03}");
         builder_short.add_key(key.as_bytes(), i as u32).unwrap();
     }
     let encoded_short = builder_short.finish();
@@ -140,7 +140,7 @@ fn bench_trie_key_patterns(c: &mut Criterion) {
     // Long keys with shared prefix
     let mut builder_long = TrieBuilder::new();
     for i in 0..100 {
-        let key = format!("very_long_shared_prefix_key_{:010}", i);
+        let key = format!("very_long_shared_prefix_key_{i:010}");
         builder_long.add_key(key.as_bytes(), i as u32).unwrap();
     }
     let encoded_long = builder_long.finish();
@@ -150,7 +150,7 @@ fn bench_trie_key_patterns(c: &mut Criterion) {
         b.iter(|| {
             let block_id = reader_short.find_block(black_box(b"k050"));
             black_box(block_id);
-        })
+        });
     });
 
     group.bench_function("long_keys_shared_prefix", |b| {
@@ -158,7 +158,7 @@ fn bench_trie_key_patterns(c: &mut Criterion) {
             let block_id =
                 reader_long.find_block(black_box(b"very_long_shared_prefix_key_0000000050"));
             black_box(block_id);
-        })
+        });
     });
 
     group.finish();

@@ -18,8 +18,8 @@ fn should_measure_concurrent_ingest_coordinator_metrics_when_multiple_threads_wr
     let ops_per_thread = 10000;
 
     println!("\n=== Running concurrent write test ===");
-    println!("Threads: {}", num_threads);
-    println!("Operations per thread: {}", ops_per_thread);
+    println!("Threads: {num_threads}");
+    println!("Operations per thread: {ops_per_thread}");
 
     // Act
     let start = std::time::Instant::now();
@@ -29,8 +29,8 @@ fn should_measure_concurrent_ingest_coordinator_metrics_when_multiple_threads_wr
         let engine_clone = Arc::clone(&engine);
         let handle = thread::spawn(move || {
             for op_id in 0..ops_per_thread {
-                let key = format!("key-t{:02}-o{:06}", thread_id, op_id);
-                let value = format!("val-{}", op_id);
+                let key = format!("key-t{thread_id:02}-o{op_id:06}");
+                let value = format!("val-{op_id}");
 
                 let mut tx = engine_clone
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
@@ -51,11 +51,11 @@ fn should_measure_concurrent_ingest_coordinator_metrics_when_multiple_threads_wr
 
     // Assert
     let elapsed = start.elapsed();
-    let total_ops = (num_threads * ops_per_thread) as f64;
+    let total_ops = f64::from(num_threads * ops_per_thread);
     let throughput = total_ops / elapsed.as_secs_f64();
 
     println!("\nCompleted in {:.2}s", elapsed.as_secs_f64());
-    println!("Throughput: {:.0} ops/sec", throughput);
+    println!("Throughput: {throughput:.0} ops/sec");
 
     // Give ingest threads time to log final stats
     thread::sleep(Duration::from_millis(100));

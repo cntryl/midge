@@ -145,7 +145,7 @@ fn should_handle_many_writes_efficiently_when_writing_100_keys() {
 
     // Assert: All writes succeeded and data is retrievable
     let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-    for i in [0, 25, 50, 75, 99].iter() {
+    for i in &[0, 25, 50, 75, 99] {
         let key = format!("write_test_{i:03}");
         let got = tx.get(key.as_bytes()).expect("get");
         assert_eq!(
@@ -183,7 +183,7 @@ fn should_handle_many_deletes_efficiently_when_deleting_50_keys() {
 
     // Assert: All deleted
     let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-    for i in [0, 10, 25, 49].iter() {
+    for i in &[0, 10, 25, 49] {
         let key = format!("delete_test_{i:02}");
         let got = tx.get(key.as_bytes()).expect("get");
         assert_eq!(got, None, "expected key to be deleted but found it");

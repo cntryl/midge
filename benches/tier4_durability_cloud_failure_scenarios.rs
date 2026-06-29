@@ -67,12 +67,10 @@ fn run_puts_and_validate(
         let first_exists = verify_tx.get(&first_key).ok().flatten().is_some();
         let last_exists = verify_tx.get(&last_key).ok().flatten().is_some();
 
-        if !first_exists || !last_exists {
-            panic!(
-                "{}: Durability validation failed. first={}, last={}",
-                scenario_name, first_exists, last_exists
-            );
-        }
+        assert!(
+            !(!first_exists || !last_exists),
+            "{scenario_name}: Durability validation failed. first={first_exists}, last={last_exists}"
+        );
     }
 
     ctx.tag("validation", "pass");

@@ -77,7 +77,7 @@ fn should_scan_inserted_keys_given_cloud_mode_when_range_scanned() {
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..20 {
-        let key = format!("cloud_scan_{:02}", i);
+        let key = format!("cloud_scan_{i:02}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin scan seed transaction");

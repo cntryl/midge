@@ -13,7 +13,7 @@ fn should_read_from_sst_after_flush() -> MidgeResult<()> {
 
     // Write keys that will be flushed to SST
     for i in 0..10 {
-        let key = format!("key_{:03}", i);
+        let key = format!("key_{i:03}");
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value_from_sst".to_vec(), None)?;
         tx.commit(WriteOptions::buffered())?;
@@ -47,7 +47,7 @@ fn should_track_l0_sst_reads() -> MidgeResult<()> {
     // Write and flush multiple times to create multiple L0 SSTs
     for batch in 0..3 {
         for i in 0..5 {
-            let key = format!("batch{}_key{}", batch, i);
+            let key = format!("batch{batch}_key{i}");
             let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)?;
             tx.commit(WriteOptions::buffered())?;
@@ -59,7 +59,7 @@ fn should_track_l0_sst_reads() -> MidgeResult<()> {
     // Act: Read keys that require checking multiple L0 files
     // Assert: Reads succeed across multiple L0 files
     for batch in 0..3 {
-        let key = format!("batch{}_key0", batch);
+        let key = format!("batch{batch}_key0");
         let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
         let value = read_tx.get(key.as_bytes())?;
         assert_eq!(value, Some(b"value".to_vec().into()));
@@ -79,7 +79,7 @@ fn should_use_key_ranges_for_higher_levels() -> MidgeResult<()> {
 
     // Write sorted keys
     for i in 0..20 {
-        let key = format!("key_{:03}", i);
+        let key = format!("key_{i:03}");
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None)?;
         tx.commit(WriteOptions::buffered())?;

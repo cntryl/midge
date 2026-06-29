@@ -63,7 +63,7 @@ fn print_table(results: &RefCell<HashMap<&'static str, f64>>) {
     for name in ["direct_call", "dispatch_only", "mailbox_vecdeque"] {
         if let Some(&ops) = results.get(name) {
             let relative = ops / baseline;
-            println!("{name} | {:.0} | {:.2}x", ops, relative);
+            println!("{name} | {ops:.0} | {relative:.2}x");
         }
     }
 }
@@ -92,7 +92,7 @@ fn bench_tier1(c: &mut Criterion) {
             black_box(counter);
             record_ops(&results, "direct_call", ops, duration);
             duration
-        })
+        });
     });
 
     group.bench_function("dispatch_only", |b| {
@@ -109,7 +109,7 @@ fn bench_tier1(c: &mut Criterion) {
             black_box(counter);
             record_ops(&results, "dispatch_only", ops, duration);
             duration
-        })
+        });
     });
 
     group.bench_function("mailbox_vecdeque", |b| {
@@ -131,7 +131,7 @@ fn bench_tier1(c: &mut Criterion) {
             black_box(counter);
             record_ops(&results, "mailbox_vecdeque", ops, duration);
             duration
-        })
+        });
     });
 
     group.finish();

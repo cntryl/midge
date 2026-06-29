@@ -1039,8 +1039,7 @@ fn count_sst_files(db_path: &Path) -> usize {
                 .path()
                 .extension()
                 .and_then(|ext| ext.to_str())
-                .map(|ext| ext.eq_ignore_ascii_case("sst"))
-                .unwrap_or(false)
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("sst"))
         })
         .count()
 }

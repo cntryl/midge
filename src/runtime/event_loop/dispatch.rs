@@ -1,7 +1,14 @@
 use super::{
-    cloud::CloudCoordinator, compaction::CompactionCoordinator, flush::FlushCoordinator,
-    gc::GcCoordinator, manifest::ManifestCoordinator, snapshot::SnapshotCoordinator,
-    wal::WalCoordinator, EventLoop, HandleOutcome,
+    cloud::CloudCoordinator,
+    compaction::{CompactionCompleteRequest, CompactionCoordinator},
+    control::RuntimeConfigUpdate,
+    flush::FlushCoordinator,
+    gc::GcCoordinator,
+    manifest::ManifestCoordinator,
+    snapshot::SnapshotCoordinator,
+    wal::{AppendRequest, ApplyTransactionRequest, WalCoordinator},
+    EventLoop,
+    HandleOutcome,
 };
 use crate::runtime::RuntimeMsg;
 use crossbeam::channel::Receiver;
@@ -61,7 +68,7 @@ impl RuntimeDispatcher {
                 l0_compaction_trigger,
                 wal_durability_policy,
                 wal_batch_config,
-            } => event_loop.handle_set_runtime_config(
+            } => event_loop.handle_set_runtime_config(RuntimeConfigUpdate {
                 request_id,
                 memtable_size_limit,
                 memtable_flush_threshold,
@@ -69,7 +76,7 @@ impl RuntimeDispatcher {
                 l0_compaction_trigger,
                 wal_durability_policy,
                 wal_batch_config,
-            ),
+            }),
             RuntimeMsg::GetRuntimeConfig { request_id } => {
                 event_loop.handle_get_runtime_config(request_id);
                 HandleOutcome::Continue
@@ -124,11 +131,13 @@ impl RuntimeDispatcher {
             } => WalCoordinator::apply_transaction(
                 event_loop,
                 msg_rx,
-                request_id,
-                ops,
-                durability_policy,
-                start_sequence,
-                isolation_policy,
+                ApplyTransactionRequest {
+                    request_id,
+                    ops,
+                    durability_policy,
+                    start_sequence,
+                    isolation_policy,
+                },
             ),
             RuntimeMsg::WalAppend {
                 request_id,
@@ -140,12 +149,14 @@ impl RuntimeDispatcher {
             } => WalCoordinator::append(
                 event_loop,
                 msg_rx,
-                request_id,
-                cf_id,
-                key,
-                value,
-                ttl_seconds,
-                insert_only,
+                AppendRequest {
+                    request_id,
+                    cf_id,
+                    key,
+                    value,
+                    ttl_seconds,
+                    insert_only,
+                },
             ),
             RuntimeMsg::WalAppendDeleteRange {
                 request_id,
@@ -204,12 +215,14 @@ impl RuntimeDispatcher {
                 succeeded,
             } => CompactionCoordinator::complete(
                 event_loop,
-                request_id,
-                input_ssts,
-                output_ssts,
-                cf_id,
-                target_level,
-                succeeded,
+                CompactionCompleteRequest {
+                    request_id,
+                    input_ssts,
+                    output_ssts,
+                    cf_id,
+                    target_level,
+                    succeeded,
+                },
             ),
 
             RuntimeMsg::CloudUploadSst {

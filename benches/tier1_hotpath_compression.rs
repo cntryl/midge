@@ -26,7 +26,7 @@ const TRAILER_COMPRESS_BATCH_SIZE: usize = 128;
 // Raw Compress Benchmarks
 // ============================================================================
 
-/// Benchmark raw compress_block for each algorithm on a 16 KB compressible block.
+/// Benchmark raw `compress_block` for each algorithm on a 16 KB compressible block.
 fn bench_compress_raw(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_compress_raw");
     group.sampling_mode(SamplingMode::Flat);
@@ -47,7 +47,7 @@ fn bench_compress_raw(c: &mut Criterion) {
             b.iter(|| {
                 let out = compress_block(black_box(&data), black_box(policy)).unwrap();
                 black_box(out)
-            })
+            });
         });
     }
 
@@ -58,7 +58,7 @@ fn bench_compress_raw(c: &mut Criterion) {
 // Raw Decompress Benchmarks
 // ============================================================================
 
-/// Benchmark raw decompress_block for each algorithm.
+/// Benchmark raw `decompress_block` for each algorithm.
 fn bench_decompress_raw(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_decompress_raw");
     group.sampling_mode(SamplingMode::Flat);
@@ -85,7 +85,7 @@ fn bench_decompress_raw(c: &mut Criterion) {
             b.iter(|| {
                 let out = decompress_block(black_box(compressed), *algo).unwrap();
                 black_box(out)
-            })
+            });
         });
     }
 
@@ -96,7 +96,7 @@ fn bench_decompress_raw(c: &mut Criterion) {
 // Block Trailer (compress + CRC / decompress + verify)
 // ============================================================================
 
-/// Benchmark compress_block_with_trailer (compress + append algo + CRC32C).
+/// Benchmark `compress_block_with_trailer` (compress + append algo + CRC32C).
 fn bench_compress_trailer(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_compress_trailer");
     group.sampling_mode(SamplingMode::Flat);
@@ -116,7 +116,7 @@ fn bench_compress_trailer(c: &mut Criterion) {
                 bytes = bytes.wrapping_add(out.len());
             }
             black_box(bytes)
-        })
+        });
     });
 
     group.bench_function("zstd3", |b| {
@@ -127,13 +127,13 @@ fn bench_compress_trailer(c: &mut Criterion) {
                 bytes = bytes.wrapping_add(out.len());
             }
             black_box(bytes)
-        })
+        });
     });
 
     group.finish();
 }
 
-/// Benchmark decompress_block_with_trailer (CRC verify + decompress).
+/// Benchmark `decompress_block_with_trailer` (CRC verify + decompress).
 fn bench_decompress_trailer(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_decompress_trailer");
     group.sampling_mode(SamplingMode::Flat);
@@ -152,14 +152,14 @@ fn bench_decompress_trailer(c: &mut Criterion) {
         b.iter(|| {
             let out = decompress_block_with_trailer(black_box(&lz4_block)).unwrap();
             black_box(out)
-        })
+        });
     });
 
     group.bench_function("zstd3", |b| {
         b.iter(|| {
             let out = decompress_block_with_trailer(black_box(&zstd3_block)).unwrap();
             black_box(out)
-        })
+        });
     });
 
     group.finish();
@@ -185,7 +185,7 @@ fn bench_wal_value_compress(c: &mut Criterion) {
         b.iter(|| {
             let out = compress_wal_value(black_box(&small_val));
             black_box(out)
-        })
+        });
     });
 
     group.throughput(Throughput::Bytes(1024));
@@ -194,7 +194,7 @@ fn bench_wal_value_compress(c: &mut Criterion) {
         b.iter(|| {
             let out = compress_wal_value(black_box(&medium_val));
             black_box(out)
-        })
+        });
     });
 
     group.finish();
@@ -219,7 +219,7 @@ fn bench_wal_value_decompress(c: &mut Criterion) {
         b.iter(|| {
             let out = decompress_wal_value(black_box(&passthrough), pass_byte).unwrap();
             black_box(out)
-        })
+        });
     });
 
     group.throughput(Throughput::Bytes(1024));
@@ -228,7 +228,7 @@ fn bench_wal_value_decompress(c: &mut Criterion) {
         b.iter(|| {
             let out = decompress_wal_value(black_box(&compressed), comp_byte).unwrap();
             black_box(out)
-        })
+        });
     });
 
     group.finish();

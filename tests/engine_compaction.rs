@@ -20,7 +20,7 @@ fn should_preserve_snapshot_reads_when_flushing_while_snapshot_is_open() {
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     for i in 0..100 {
-        let key = format!("concurrent_key_{:04}", i);
+        let key = format!("concurrent_key_{i:04}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin write tx");
@@ -68,7 +68,7 @@ fn should_preserve_both_write_batches_after_flushing_between_batches() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin first batch tx");
         for i in 0..500 {
-            let key = format!("key_{:04}", i);
+            let key = format!("key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None)
                 .expect("put first batch value");
         }
@@ -84,7 +84,7 @@ fn should_preserve_both_write_batches_after_flushing_between_batches() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin second batch tx");
         for i in 500..1000 {
-            let key = format!("key_{:04}", i);
+            let key = format!("key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None)
                 .expect("put second batch value");
         }
@@ -110,7 +110,7 @@ fn should_preserve_range_tombstones_after_flushing_deleted_range() {
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     for i in 100..900 {
-        let key = format!("k{:04}", i);
+        let key = format!("k{i:04}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin seed tx");
@@ -157,7 +157,7 @@ fn should_preserve_large_values_after_flushing() {
 
     // Act
     for i in 0..10 {
-        let key = format!("large_{:02}", i);
+        let key = format!("large_{i:02}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin large value tx");
@@ -187,7 +187,7 @@ fn should_preserve_latest_overwritten_value_after_flushing() {
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     for version in 0..100 {
-        let value = format!("v{}", version);
+        let value = format!("v{version}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin overwrite tx");
@@ -224,7 +224,7 @@ fn should_preserve_all_keys_after_repeated_flushes() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin batch tx");
         for i in 0..500 {
-            let key = format!("batch{:02}_key{:04}", batch, i);
+            let key = format!("batch{batch:02}_key{i:04}");
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put batch value");
         }
@@ -272,7 +272,7 @@ fn should_publish_compacted_ssts_in_manifest_when_compaction_completes() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin batch tx");
         for i in 0..100 {
-            let key = format!("batch{:02}_key{:04}", batch, i);
+            let key = format!("batch{batch:02}_key{i:04}");
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put batch value");
         }
@@ -330,7 +330,7 @@ fn should_cleanup_input_ssts_after_compaction_manifest_publishes() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin batch tx");
         for i in 0..100 {
-            let key = format!("batch{:02}_key{:04}", batch, i);
+            let key = format!("batch{batch:02}_key{i:04}");
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put batch value");
         }
@@ -348,7 +348,7 @@ fn should_cleanup_input_ssts_after_compaction_manifest_publishes() {
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .expect("begin new batch tx");
     for i in 0..100 {
-        let key = format!("batch99_key{:04}", i);
+        let key = format!("batch99_key{i:04}");
         tx.put(key.as_bytes().to_vec(), b"new_value".to_vec(), None)
             .expect("put new batch value");
     }

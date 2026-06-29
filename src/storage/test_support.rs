@@ -1,5 +1,3 @@
-#![allow(clippy::items_after_test_module)]
-
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,7 +17,7 @@ pub(crate) struct CloudBackedTestSetup {
 /// Builds a deterministic, filesystem-backed “cloud” for tests.
 ///
 /// The engine/testkit should not know about folders/blobs; it only needs the
-/// resulting HybridStorage, event stream, and a recovery directory.
+/// resulting `HybridStorage`, event stream, and a recovery directory.
 pub(crate) fn build_cloud_backed_filesystem_simulation(
     db_path: &Path,
 ) -> MidgeResult<CloudBackedTestSetup> {

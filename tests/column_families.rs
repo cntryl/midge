@@ -275,7 +275,10 @@ fn should_list_all_column_families_given_multiple_cfs_when_listing() {
 
         // Assert
         assert_eq!(cfs.len(), 3); // default + cf1 + cf2
-        let names: Vec<&str> = cfs.iter().map(|cf| cf.name()).collect();
+        let names: Vec<&str> = cfs
+            .iter()
+            .map(cntryl_midge::ColumnFamilyHandle::name)
+            .collect();
         assert!(names.contains(&"default"));
         assert!(names.contains(&"cf1"));
         assert!(names.contains(&"cf2"));
@@ -294,7 +297,10 @@ fn should_not_list_dropped_cf_given_cf_dropped_when_listing() {
         let cfs = engine.list_column_families().unwrap();
 
         // Assert
-        let names: Vec<&str> = cfs.iter().map(|cf| cf.name()).collect();
+        let names: Vec<&str> = cfs
+            .iter()
+            .map(cntryl_midge::ColumnFamilyHandle::name)
+            .collect();
         assert!(!names.contains(&"test_cf"));
     });
 }
@@ -398,7 +404,7 @@ fn should_isolate_data_given_different_data_volumes_when_reading() {
 
         // Act - write different amounts to each CF
         for i in 0..100 {
-            let key = format!("key{}", i);
+            let key = format!("key{i}");
             let mut tx = engine
                 .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
@@ -445,7 +451,7 @@ fn should_isolate_compaction_given_per_cf_data_when_compacting() {
 
         // Write data to both CFs
         for i in 0..50 {
-            let key = format!("key{}", i);
+            let key = format!("key{i}");
             let mut tx1 = engine
                 .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
@@ -501,7 +507,10 @@ fn should_persist_cf_metadata_given_restart_when_cf_created() {
         {
             let engine = open_with_mode(opts, mode);
             let cfs = engine.list_column_families().unwrap();
-            let names: Vec<&str> = cfs.iter().map(|cf| cf.name()).collect();
+            let names: Vec<&str> = cfs
+                .iter()
+                .map(cntryl_midge::ColumnFamilyHandle::name)
+                .collect();
             assert!(names.contains(&"test_cf"));
         }
     });
@@ -589,7 +598,10 @@ fn should_persist_cf_drop_given_restart_when_cf_was_dropped() {
         {
             let engine = open_with_mode(opts, mode);
             let cfs = engine.list_column_families().unwrap();
-            let names: Vec<&str> = cfs.iter().map(|cf| cf.name()).collect();
+            let names: Vec<&str> = cfs
+                .iter()
+                .map(cntryl_midge::ColumnFamilyHandle::name)
+                .collect();
             assert!(!names.contains(&"test_cf"));
         }
     });
@@ -722,13 +734,13 @@ fn should_maintain_cf_isolation_given_many_cfs_when_operating() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let mut cfs = Vec::new();
         for i in 0..10 {
-            let name = format!("cf{}", i);
+            let name = format!("cf{i}");
             cfs.push(engine.create_column_family(&name).unwrap());
         }
 
         // Act - write unique value to each CF
         for (i, cf) in cfs.iter().enumerate() {
-            let value = format!("value{}", i);
+            let value = format!("value{i}");
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
@@ -739,7 +751,7 @@ fn should_maintain_cf_isolation_given_many_cfs_when_operating() {
 
         // Assert - each CF has its own value
         for (i, cf) in cfs.iter().enumerate() {
-            let expected = format!("value{}", i);
+            let expected = format!("value{i}");
             let tx_read = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                 .unwrap();

@@ -1,7 +1,7 @@
 //! Tests for transaction crash recovery and durability semantics
 //!
-//! All tests parametrized across durable storage modes only (LocalDisk, CloudBacked)
-//! Pattern: for_each_storage_mode(&durable_storage_modes(), |mode, opts| { ... })
+//! All tests parametrized across durable storage modes only (`LocalDisk`, `CloudBacked`)
+//! Pattern: `for_each_storage_mode(&durable_storage_modes()`, |mode, opts| { ... })
 
 use bytes::Bytes;
 mod common;
@@ -11,7 +11,7 @@ use common::*;
 // TRANSACTION CRASH RECOVERY
 // ============================================================================
 
-/// should_persist_atomic_transactions_after_restart
+/// `should_persist_atomic_transactions_after_restart`
 /// Verify committed transaction persists across crash/restart
 /// Phase 1: Commit transaction, then crash (drop engine)
 /// Phase 2: Restart and verify transaction data persisted
@@ -52,20 +52,18 @@ fn should_persist_atomic_transactions_after_restart() {
             assert_eq!(
                 got1,
                 Some(Bytes::from_static(b"tx_value1")),
-                "tx_key1 not persisted in mode: {}",
-                mode
+                "tx_key1 not persisted in mode: {mode}"
             );
             assert_eq!(
                 got2,
                 Some(Bytes::from_static(b"tx_value2")),
-                "tx_key2 not persisted in mode: {}",
-                mode
+                "tx_key2 not persisted in mode: {mode}"
             );
         }
     });
 }
 
-/// should_not_persist_uncommitted_transaction_after_restart
+/// `should_not_persist_uncommitted_transaction_after_restart`
 /// Verify uncommitted transaction rolls back across crash/restart
 /// Phase 1: Create transaction, write but don't commit, then crash
 /// Phase 2: Restart and verify data was rolled back
@@ -101,14 +99,14 @@ fn should_not_persist_uncommitted_transaction_after_restart() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                 .expect("begin_tx");
             let got = tx_read.get(b"uncommitted_key").expect("get");
-            assert_eq!(got, None, "uncommitted data persisted in mode: {}", mode);
+            assert_eq!(got, None, "uncommitted data persisted in mode: {mode}");
         }
     });
 }
 
-/// should_recover_after_abort_given_transaction_with_delete_range_when_restart
-/// Verify delete_range in transaction persists and recovers correctly
-/// Phase 1: Write initial data, commit transaction with delete_range, crash
+/// `should_recover_after_abort_given_transaction_with_delete_range_when_restart`
+/// Verify `delete_range` in transaction persists and recovers correctly
+/// Phase 1: Write initial data, commit transaction with `delete_range`, crash
 /// Phase 2: Restart and verify deleted keys are gone
 #[test]
 fn should_recover_after_abort_given_transaction_with_delete_range_when_restart() {
@@ -121,7 +119,7 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
             let engine = open_with_mode(opts_clone.clone(), mode);
             let cf = engine.create_column_family("test").expect("create cf");
             for i in 0..10 {
-                let key = format!("key{}", i);
+                let key = format!("key{i}");
                 let mut tx = engine
                     .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                     .expect("begin_tx");
@@ -160,30 +158,27 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
             assert_eq!(
                 tx_read.get(b"key2").unwrap(),
                 Some(Bytes::from_static(b"initial_value")),
-                "key2 should exist in mode: {}",
-                mode
+                "key2 should exist in mode: {mode}"
             );
 
             // Keys in range should be deleted
             assert_eq!(
                 tx_read.get(b"key5").unwrap(),
                 None,
-                "key5 should be deleted in mode: {}",
-                mode
+                "key5 should be deleted in mode: {mode}"
             );
 
             // Keys after range should exist
             assert_eq!(
                 tx_read.get(b"key8").unwrap(),
                 Some(Bytes::from_static(b"initial_value")),
-                "key8 should exist in mode: {}",
-                mode
+                "key8 should exist in mode: {mode}"
             );
         }
     });
 }
 
-/// should_recover_committed_spill_given_restart_after_commit
+/// `should_recover_committed_spill_given_restart_after_commit`
 /// Verify large transaction with spill commits and recovers data
 #[test]
 fn should_recover_committed_spill_given_restart_after_commit() {
@@ -202,8 +197,8 @@ fn should_recover_committed_spill_given_restart_after_commit() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..200 {
-                let key = format!("spill_key{:04}", i);
-                let value = format!("spill_value_{:04}", i);
+                let key = format!("spill_key{i:04}");
+                let value = format!("spill_value_{i:04}");
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
@@ -221,23 +216,21 @@ fn should_recover_committed_spill_given_restart_after_commit() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                 .expect("begin_tx");
             for i in 0..200 {
-                let key = format!("spill_key{:04}", i);
-                let expected = format!("spill_value_{:04}", i);
+                let key = format!("spill_key{i:04}");
+                let expected = format!("spill_value_{i:04}");
                 let got = tx_read.get(key.as_bytes()).expect("get");
                 let got_str = got.as_ref().map(|b| String::from_utf8_lossy(b).to_string());
                 assert_eq!(
                     got_str,
                     Some(expected),
-                    "spill key {} mismatch in mode: {}",
-                    key,
-                    mode
+                    "spill key {key} mismatch in mode: {mode}"
                 );
             }
         }
     });
 }
 
-/// should_rollback_uncommitted_spill_given_restart_before_commit
+/// `should_rollback_uncommitted_spill_given_restart_before_commit`
 /// Verify spilled data from uncommitted transaction is not recovered
 #[test]
 fn should_rollback_uncommitted_spill_given_restart_before_commit() {
@@ -256,8 +249,8 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..200 {
-                let key = format!("uncom_key{:04}", i);
-                let value = format!("uncom_value_{:04}", i);
+                let key = format!("uncom_key{i:04}");
+                let value = format!("uncom_value_{i:04}");
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
@@ -273,19 +266,18 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                 .expect("begin_tx");
             for i in 0..200 {
-                let key = format!("uncom_key{:04}", i);
+                let key = format!("uncom_key{i:04}");
                 let got = tx_read.get(key.as_bytes()).expect("get");
                 assert_eq!(
                     got, None,
-                    "uncommitted spill data {} recovered in mode: {}",
-                    key, mode
+                    "uncommitted spill data {key} recovered in mode: {mode}"
                 );
             }
         }
     });
 }
 
-/// should_handle_transaction_abort_idempotency_given_multiple_restart_cycles
+/// `should_handle_transaction_abort_idempotency_given_multiple_restart_cycles`
 /// Verify multiple restart cycles maintain consistency
 #[test]
 fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
@@ -302,8 +294,8 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
                 let mut tx = engine
                     .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                     .expect("begin_tx");
-                let key = format!("cycle{}_key", cycle);
-                let value = format!("cycle{}_value", cycle);
+                let key = format!("cycle{cycle}_key");
+                let value = format!("cycle{cycle}_value");
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
                 tx.commit(cntryl_midge::WriteOptions::buffered())
@@ -313,8 +305,8 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
             {
                 let engine = open_with_mode(opts_clone.clone(), mode);
                 let cf = engine.create_column_family("test").expect("create cf");
-                let key = format!("cycle{}_key", cycle);
-                let expected = format!("cycle{}_value", cycle);
+                let key = format!("cycle{cycle}_key");
+                let expected = format!("cycle{cycle}_value");
                 let tx_read = engine
                     .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                     .expect("begin_tx");
@@ -323,9 +315,7 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
                 assert_eq!(
                     got_str,
                     Some(expected),
-                    "cycle {} mismatch in mode: {}",
-                    cycle,
-                    mode
+                    "cycle {cycle} mismatch in mode: {mode}"
                 );
             }
         }
@@ -334,7 +324,7 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
     });
 }
 
-/// should_maintain_exactly_once_semantics_given_transaction_with_crash
+/// `should_maintain_exactly_once_semantics_given_transaction_with_crash`
 /// Verify exactly-once semantics for concurrent operations with crash
 #[test]
 fn should_maintain_exactly_once_semantics_given_transaction_with_crash() {
@@ -370,14 +360,13 @@ fn should_maintain_exactly_once_semantics_given_transaction_with_crash() {
             assert_eq!(
                 got,
                 Some(Bytes::from_static(b"value2")),
-                "idempotent key has wrong value in mode: {}",
-                mode
+                "idempotent key has wrong value in mode: {mode}"
             );
         }
     });
 }
 
-/// should_recover_large_transaction_given_crash_during_spill
+/// `should_recover_large_transaction_given_crash_during_spill`
 /// Verify recovery when crash occurs during spill operation
 #[test]
 fn should_recover_large_transaction_given_crash_during_spill() {
@@ -396,7 +385,7 @@ fn should_recover_large_transaction_given_crash_during_spill() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..200 {
-                let key = format!("large_key{:04}", i);
+                let key = format!("large_key{i:04}");
                 let value = format!("large_value_{:04}_{}", i, "x".repeat(100)); // 100 byte values
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
@@ -414,15 +403,15 @@ fn should_recover_large_transaction_given_crash_during_spill() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                 .expect("begin_tx");
             for i in 0..200 {
-                let key = format!("large_key{:04}", i);
+                let key = format!("large_key{i:04}");
                 let got = tx_read.get(key.as_bytes()).expect("get");
-                assert!(got.is_some(), "large key {} missing in mode: {}", key, mode);
+                assert!(got.is_some(), "large key {key} missing in mode: {mode}");
             }
         }
     });
 }
 
-/// should_not_lose_transaction_writes_given_incomplete_wal_sync
+/// `should_not_lose_transaction_writes_given_incomplete_wal_sync`
 /// Verify transaction writes are not lost even with partial WAL sync
 #[test]
 fn should_not_lose_transaction_writes_given_incomplete_wal_sync() {
@@ -456,14 +445,13 @@ fn should_not_lose_transaction_writes_given_incomplete_wal_sync() {
             assert_eq!(
                 got,
                 Some(Bytes::from_static(b"wal_test_value")),
-                "WAL write lost in mode: {}",
-                mode
+                "WAL write lost in mode: {mode}"
             );
         }
     });
 }
 
-/// should_survive_mid_spill_crash_given_transaction_recovery
+/// `should_survive_mid_spill_crash_given_transaction_recovery`
 /// Verify system survives and recovers correctly after mid-spill crash
 #[test]
 fn should_survive_mid_spill_crash_given_transaction_recovery() {
@@ -482,8 +470,8 @@ fn should_survive_mid_spill_crash_given_transaction_recovery() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..300 {
-                let key = format!("mid_spill_{:04}", i);
-                let value = format!("value_{:04}", i);
+                let key = format!("mid_spill_{i:04}");
+                let value = format!("value_{i:04}");
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
@@ -500,9 +488,9 @@ fn should_survive_mid_spill_crash_given_transaction_recovery() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                 .expect("begin_tx");
             for i in 0..300 {
-                let key = format!("mid_spill_{:04}", i);
+                let key = format!("mid_spill_{i:04}");
                 let got = tx_read.get(key.as_bytes()).expect("get");
-                assert!(got.is_some(), "mid-spill key {} missing", key);
+                assert!(got.is_some(), "mid-spill key {key} missing");
             }
         }
     });

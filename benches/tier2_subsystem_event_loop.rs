@@ -63,7 +63,7 @@ fn print_table(results: &RefCell<HashMap<&'static str, f64>>) {
     for name in ["direct_call", "channel_cross_thread", "park_wake"] {
         if let Some(&ops) = results.get(name) {
             let relative = ops / baseline;
-            println!("{name} | {:.0} | {:.2}x", ops, relative);
+            println!("{name} | {ops:.0} | {relative:.2}x");
         }
     }
 }
@@ -92,7 +92,7 @@ fn bench_tier2(c: &mut Criterion) {
             black_box(counter);
             record_ops(&results, "direct_call", ops, duration);
             duration
-        })
+        });
     });
 
     group.bench_function("channel_cross_thread", |b| {
@@ -127,7 +127,7 @@ fn bench_tier2(c: &mut Criterion) {
             let _ = consumer.join();
             record_ops(&results, "channel_cross_thread", ops, duration);
             duration
-        })
+        });
     });
 
     group.bench_function("park_wake", |b| {
@@ -162,7 +162,7 @@ fn bench_tier2(c: &mut Criterion) {
             let _ = consumer.join();
             record_ops(&results, "park_wake", ops, duration);
             duration
-        })
+        });
     });
 
     group.finish();

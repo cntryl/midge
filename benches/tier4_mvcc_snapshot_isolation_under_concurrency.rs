@@ -175,16 +175,14 @@ fn tier4_mvcc_snapshot_isolation_under_concurrency_4threads(ctx: &mut StressCont
             sorted.sort_unstable();
             sorted[sorted.len() * 99 / 100]
         };
-        ctx.tag("writer_p99_latency_us", format!("{}", p99_us).as_str());
+        ctx.tag("writer_p99_latency_us", format!("{p99_us}").as_str());
     }
 
-    ctx.tag("isolation_violations", format!("{}", violations).as_str());
-    if violations > 0 {
-        panic!(
-            "MVCC isolation violation detected: {} dirty reads",
-            violations
-        );
-    }
+    ctx.tag("isolation_violations", format!("{violations}").as_str());
+    assert!(
+        violations <= 0,
+        "MVCC isolation violation detected: {violations} dirty reads"
+    );
 
     drop(engine);
 }
@@ -287,15 +285,15 @@ fn tier4_mvcc_long_snapshot_fairness_10sec(ctx: &mut StressContext) {
         let p99_us = sorted[sorted.len() * 99 / 100];
         let max_us = sorted[sorted.len() - 1];
 
-        ctx.tag("writer_p50_latency_us", format!("{}", p50_us).as_str());
-        ctx.tag("writer_p95_latency_us", format!("{}", p95_us).as_str());
-        ctx.tag("writer_p99_latency_us", format!("{}", p99_us).as_str());
-        ctx.tag("writer_max_latency_us", format!("{}", max_us).as_str());
+        ctx.tag("writer_p50_latency_us", format!("{p50_us}").as_str());
+        ctx.tag("writer_p95_latency_us", format!("{p95_us}").as_str());
+        ctx.tag("writer_p99_latency_us", format!("{p99_us}").as_str());
+        ctx.tag("writer_max_latency_us", format!("{max_us}").as_str());
 
         // Sanity check: p99 should not be catastrophically high
         // (expected range: 10-1000Âµs depending on machine)
         if p99_us > 10_000 {
-            eprintln!("Warning: writer p99 latency is very high: {}Âµs", p99_us);
+            eprintln!("Warning: writer p99 latency is very high: {p99_us}Âµs");
         }
     }
 

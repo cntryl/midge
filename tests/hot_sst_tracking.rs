@@ -17,7 +17,7 @@ fn should_preserve_reads_given_two_flushed_batches_when_repeatedly_accessed() ->
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..10 {
-        let key = format!("batch1_key{:03}", i);
+        let key = format!("batch1_key{i:03}");
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value1".to_vec(), None)?;
         tx.commit(WriteOptions::best_effort())?;
@@ -25,7 +25,7 @@ fn should_preserve_reads_given_two_flushed_batches_when_repeatedly_accessed() ->
     engine.flush_cf(&cf)?;
 
     for i in 0..10 {
-        let key = format!("batch2_key{:03}", i);
+        let key = format!("batch2_key{i:03}");
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value2".to_vec(), None)?;
         tx.commit(WriteOptions::best_effort())?;
@@ -59,8 +59,8 @@ fn should_return_latest_value_given_overlapping_l0_keys_when_multiple_batches_fl
 
     for batch in 0..3 {
         for i in 0..5 {
-            let key = format!("key{:03}", i);
-            let value = format!("value_batch{}", batch);
+            let key = format!("key{i:03}");
+            let value = format!("value_batch{batch}");
             let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)?;
             tx.commit(WriteOptions::best_effort())?;
@@ -90,7 +90,7 @@ fn should_find_keys_given_disjoint_key_ranges_when_flushed() -> MidgeResult<()> 
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..10 {
-        let key = format!("a{:03}", i);
+        let key = format!("a{i:03}");
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value_a".to_vec(), None)?;
         tx.commit(WriteOptions::best_effort())?;
@@ -98,7 +98,7 @@ fn should_find_keys_given_disjoint_key_ranges_when_flushed() -> MidgeResult<()> 
     engine.flush_cf(&cf)?;
 
     for i in 0..10 {
-        let key = format!("b{:03}", i);
+        let key = format!("b{i:03}");
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value_b".to_vec(), None)?;
         tx.commit(WriteOptions::best_effort())?;
@@ -106,7 +106,7 @@ fn should_find_keys_given_disjoint_key_ranges_when_flushed() -> MidgeResult<()> 
     engine.flush_cf(&cf)?;
 
     for i in 0..10 {
-        let key = format!("c{:03}", i);
+        let key = format!("c{i:03}");
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value_c".to_vec(), None)?;
         tx.commit(WriteOptions::best_effort())?;
@@ -131,7 +131,7 @@ fn should_preserve_readability_given_mixed_access_pattern_when_keys_repeatedly_a
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..20 {
-        let key = format!("key{:03}", i);
+        let key = format!("key{i:03}");
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None)?;
         tx.commit(WriteOptions::best_effort())?;

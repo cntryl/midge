@@ -314,10 +314,7 @@ fn should_update_ttl_given_overwrite_with_new_ttl_when_writing() {
 #[test]
 fn should_expire_keys_covered_by_range_tombstone_during_compaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!(
-            "\n=== TTL: Expire Keys Covered by Range Tombstone (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== TTL: Expire Keys Covered by Range Tombstone (mode: {mode}) ===");
 
         // Arrange: Write keys with TTL in range [k3, k8)
         let engine = Arc::new(open_with_mode(opts.clone(), mode));
@@ -328,7 +325,7 @@ fn should_expire_keys_covered_by_range_tombstone_during_compaction() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         for i in 1..=10 {
-            let key = format!("k{}", i);
+            let key = format!("k{i}");
             tx.put(key.as_bytes().to_vec(), b"ttl_value".to_vec(), Some(1))
                 .unwrap();
         }
@@ -374,10 +371,7 @@ fn should_expire_keys_covered_by_range_tombstone_during_compaction() {
 #[test]
 fn should_handle_ttl_expiry_during_multi_level_compaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!(
-            "\n=== TTL: Multi-Level Compaction with Expiry (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== TTL: Multi-Level Compaction with Expiry (mode: {mode}) ===");
 
         // Arrange: Build multi-level LSM with different TTLs
         let engine = Arc::new(open_with_mode(opts.clone(), mode));
@@ -388,7 +382,7 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         for i in 0..50 {
-            let key = format!("level0_key_{:04}", i);
+            let key = format!("level0_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"l0_value".to_vec(), Some(1))
                 .unwrap();
         }
@@ -400,7 +394,7 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         for i in 50..100 {
-            let key = format!("level1_key_{:04}", i);
+            let key = format!("level1_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"l1_value".to_vec(), Some(3600))
                 .unwrap();
         }
@@ -419,7 +413,7 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
         // L0 keys should be gone (expired)
         let l0_found = (0..50)
             .filter(|i| {
-                let key = format!("level0_key_{:04}", i);
+                let key = format!("level0_key_{i:04}");
                 tx.get(key.as_bytes()).ok().flatten().is_some()
             })
             .count();
@@ -428,23 +422,20 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
         // L1 keys should remain (not expired)
         let l1_found = (50..100)
             .filter(|i| {
-                let key = format!("level1_key_{:04}", i);
+                let key = format!("level1_key_{i:04}");
                 tx.get(key.as_bytes()).ok().flatten().is_some()
             })
             .count();
         assert!(l1_found >= 40, "L1 keys should remain");
 
-        eprintln!(
-            "âœ“ Multi-level compaction handled TTL correctly; L1 retained: {}",
-            l1_found
-        );
+        eprintln!("âœ“ Multi-level compaction handled TTL correctly; L1 retained: {l1_found}");
     });
 }
 
 #[test]
 fn should_not_expose_ttl_expired_key_covered_by_range_tombstone() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!("\n=== TTL: Don't Expose TTL+Tombstone (mode: {}) ===", mode);
+        eprintln!("\n=== TTL: Don't Expose TTL+Tombstone (mode: {mode}) ===");
 
         // Arrange: Create scenario with both TTL and tombstone covering same key
         let engine = Arc::new(open_with_mode(opts.clone(), mode));

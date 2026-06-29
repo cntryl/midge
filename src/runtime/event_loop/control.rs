@@ -1,6 +1,16 @@
 use super::{EventLoop, HandleOutcome};
 use crate::runtime::RuntimeResponse;
 
+pub(super) struct RuntimeConfigUpdate {
+    pub request_id: u64,
+    pub memtable_size_limit: Option<usize>,
+    pub memtable_flush_threshold: Option<usize>,
+    pub enable_compaction: Option<bool>,
+    pub l0_compaction_trigger: Option<usize>,
+    pub wal_durability_policy: Option<crate::wal::DurabilityPolicy>,
+    pub wal_batch_config: Option<crate::wal::policy::BatchConfig>,
+}
+
 impl EventLoop {
     pub(super) fn handle_noop(&self, request_id: u64) {
         self.respond(request_id, RuntimeResponse::Ok { request_id });
@@ -30,14 +40,14 @@ impl EventLoop {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
     ) {
-        if !self.state.should_stall_writes(cf_id) {
-            self.respond(request_id, RuntimeResponse::Ok { request_id });
-        } else {
+        if self.state.should_stall_writes(cf_id) {
             self.write_stall_waiters.insert(request_id, cf_id);
             self.write_stall_waiter_queues
                 .entry(cf_id)
                 .or_default()
                 .push_back(request_id);
+        } else {
+            self.respond(request_id, RuntimeResponse::Ok { request_id });
         }
 
         self.drain_auto_flush_memtables();
@@ -100,17 +110,19 @@ impl EventLoop {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn handle_set_runtime_config(
         &mut self,
-        request_id: u64,
-        memtable_size_limit: Option<usize>,
-        memtable_flush_threshold: Option<usize>,
-        enable_compaction: Option<bool>,
-        l0_compaction_trigger: Option<usize>,
-        wal_durability_policy: Option<crate::wal::DurabilityPolicy>,
-        wal_batch_config: Option<crate::wal::policy::BatchConfig>,
+        update: RuntimeConfigUpdate,
     ) -> HandleOutcome {
+        let RuntimeConfigUpdate {
+            request_id,
+            memtable_size_limit,
+            memtable_flush_threshold,
+            enable_compaction,
+            l0_compaction_trigger,
+            wal_durability_policy,
+            wal_batch_config,
+        } = update;
         if let Some(ms) = memtable_size_limit {
             self.state.memtable_size_limit = ms;
         }

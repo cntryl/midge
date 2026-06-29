@@ -47,28 +47,28 @@ fn bench_sparse_index_find_block(c: &mut Criterion) {
         b.iter(|| {
             let range = reader.find_block_range(black_box(key_beginning));
             black_box(range);
-        })
+        });
     });
 
     group.bench_function("find_middle", |b| {
         b.iter(|| {
             let range = reader.find_block_range(black_box(key_middle));
             black_box(range);
-        })
+        });
     });
 
     group.bench_function("find_end", |b| {
         b.iter(|| {
             let range = reader.find_block_range(black_box(key_end));
             black_box(range);
-        })
+        });
     });
 
     group.bench_function("find_after_last", |b| {
         b.iter(|| {
             let range = reader.find_block_range(black_box(key_after));
             black_box(range);
-        })
+        });
     });
 
     group.finish();
@@ -97,7 +97,7 @@ fn bench_sparse_index_sizes(c: &mut Criterion) {
         let reader = SparseIndexReader::new(entries).unwrap();
         let lookup_key = format!("key_{:010}", (size / 2) * 100);
 
-        group.bench_function(format!("{}_entries", size), |b| {
+        group.bench_function(format!("{size}_entries"), |b| {
             b.iter(|| {
                 let mut found = 0usize;
                 for _ in 0..lookup_batch_size {
@@ -105,7 +105,7 @@ fn bench_sparse_index_sizes(c: &mut Criterion) {
                     found = found.wrapping_add(range.start_block);
                 }
                 black_box(found);
-            })
+            });
         });
     }
 

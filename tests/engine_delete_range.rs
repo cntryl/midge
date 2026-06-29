@@ -1,6 +1,6 @@
 //! Delete Range Integration Tests
 //!
-//! Tests range deletion operations end-to-end using the public MidgeEngine API.
+//! Tests range deletion operations end-to-end using the public `MidgeEngine` API.
 
 use bytes::Bytes;
 mod common;
@@ -45,26 +45,22 @@ fn should_delete_keys_in_range_given_delete_range_when_querying() {
         assert_eq!(
             tx.get(b"key1").expect("get1"),
             Some(Bytes::from_static(b"val1")),
-            "key1 should exist (outside range) in mode: {}",
-            mode
+            "key1 should exist (outside range) in mode: {mode}"
         );
         assert_eq!(
             tx.get(b"key2").expect("get2"),
             None,
-            "key2 should be deleted (in range) in mode: {}",
-            mode
+            "key2 should be deleted (in range) in mode: {mode}"
         );
         assert_eq!(
             tx.get(b"key3").expect("get3"),
             None,
-            "key3 should be deleted (in range) in mode: {}",
-            mode
+            "key3 should be deleted (in range) in mode: {mode}"
         );
         assert_eq!(
             tx.get(b"key4").expect("get4"),
             Some(Bytes::from_static(b"val4")),
-            "key4 should exist (outside range) in mode: {}",
-            mode
+            "key4 should exist (outside range) in mode: {mode}"
         );
     });
 }
@@ -98,8 +94,7 @@ fn should_handle_empty_range_given_start_equals_end_when_delete_range() {
         assert_eq!(
             tx.get(b"key").expect("get"),
             Some(Bytes::from_static(b"val")),
-            "key should exist (empty range) in mode: {}",
-            mode
+            "key should exist (empty range) in mode: {mode}"
         );
     });
 }
@@ -120,8 +115,7 @@ fn should_reject_delete_range_given_reversed_bounds_when_called() {
         // Assert
         assert!(
             matches!(result, Err(cntryl_midge::MidgeError::InvalidArgument(_))),
-            "mode: {}",
-            mode
+            "mode: {mode}"
         );
     });
 }
@@ -156,8 +150,7 @@ fn should_delete_key_given_delete_range_with_single_key_when_matching() {
         assert_eq!(
             tx.get(b"target").expect("get"),
             None,
-            "target should be deleted in mode: {}",
-            mode
+            "target should be deleted in mode: {mode}"
         );
     });
 }
@@ -170,7 +163,7 @@ fn should_allow_multiple_delete_ranges_when_called_sequentially() {
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..20 {
-            let key = format!("k{:02}", i);
+            let key = format!("k{i:02}");
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .unwrap();
@@ -196,7 +189,7 @@ fn should_allow_multiple_delete_ranges_when_called_sequentially() {
         // Assert
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
         for i in 0..20 {
-            let key = format!("k{:02}", i);
+            let key = format!("k{i:02}");
             let should_exist = !((3..10).contains(&i) || (15..18).contains(&i));
             let result = tx.get(key.as_bytes()).expect("get");
             assert_eq!(
@@ -262,7 +255,7 @@ fn should_handle_concurrent_delete_ranges_when_multiple_threads() {
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..100 {
-            let key = format!("key{:03}", i);
+            let key = format!("key{i:03}");
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .unwrap();
@@ -298,7 +291,7 @@ fn should_handle_concurrent_delete_ranges_when_multiple_threads() {
         // Assert
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
         for i in 0..100 {
-            let key = format!("key{:03}", i);
+            let key = format!("key{i:03}");
             let should_exist = !(0..50).contains(&i);
             let got = tx.get(key.as_bytes()).expect("get");
             assert_eq!(

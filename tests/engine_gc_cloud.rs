@@ -5,7 +5,7 @@
 //! - Preservation of referenced cloud objects
 //! - Graceful handling of cloud list/delete failures
 //!
-//! **Storage Modes**: Cloud only (uses MockStorage for failure injection)
+//! **Storage Modes**: Cloud only (uses `MockStorage` for failure injection)
 //!
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
@@ -39,15 +39,12 @@ impl CloudOpTracker {
         self.operations
             .lock()
             .unwrap()
-            .push(format!("delete:{}", key));
+            .push(format!("delete:{key}"));
     }
 
     #[allow(dead_code)]
     fn record_write(&self, key: String) {
-        self.operations
-            .lock()
-            .unwrap()
-            .push(format!("write:{}", key));
+        self.operations.lock().unwrap().push(format!("write:{key}"));
     }
 
     #[allow(dead_code)]
@@ -56,7 +53,7 @@ impl CloudOpTracker {
             .lock()
             .unwrap()
             .iter()
-            .any(|op| op.as_str() == format!("delete:{}", key))
+            .any(|op| op.as_str() == format!("delete:{key}"))
     }
 
     #[allow(dead_code)]
@@ -84,10 +81,7 @@ fn should_collect_orphaned_cloud_objects_after_compaction() {
     // Note: This test validates the GC logic without requiring actual cloud storage.
     // We test with local mode as a proxy (cloud behavior is identical for file collection).
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Cloud GC: Collect Orphaned Objects (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Cloud GC: Collect Orphaned Objects (mode: {mode}) ===");
 
         // Arrange: Create engine and SSTs
         let engine = open_with_mode(opts.clone(), mode);
@@ -98,7 +92,7 @@ fn should_collect_orphaned_cloud_objects_after_compaction() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..100 {
-            let key = format!("cloudsst_key_{:04}", i);
+            let key = format!("cloudsst_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"cloud_value_a".to_vec(), None)
                 .ok();
         }
@@ -110,7 +104,7 @@ fn should_collect_orphaned_cloud_objects_after_compaction() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 100..200 {
-            let key = format!("cloudsst_key_{:04}", i);
+            let key = format!("cloudsst_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"cloud_value_b".to_vec(), None)
                 .ok();
         }
@@ -125,12 +119,11 @@ fn should_collect_orphaned_cloud_objects_after_compaction() {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin_tx");
         for i in 0..200 {
-            let key = format!("cloudsst_key_{:04}", i);
+            let key = format!("cloudsst_key_{i:04}");
             let val = tx.get(key.as_bytes()).expect("get");
             assert!(
                 val.is_some(),
-                "data lost during cloud object compaction in mode: {}",
-                mode
+                "data lost during cloud object compaction in mode: {mode}"
             );
         }
 
@@ -141,10 +134,7 @@ fn should_collect_orphaned_cloud_objects_after_compaction() {
 #[test]
 fn should_not_collect_cloud_objects_referenced_by_manifest() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Cloud GC: Preserve Referenced Objects (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Cloud GC: Preserve Referenced Objects (mode: {mode}) ===");
 
         // Arrange
         let engine = open_with_mode(opts.clone(), mode);
@@ -155,7 +145,7 @@ fn should_not_collect_cloud_objects_referenced_by_manifest() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..100 {
-            let key = format!("ref_key_{:04}", i);
+            let key = format!("ref_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
         }
@@ -171,15 +161,14 @@ fn should_not_collect_cloud_objects_referenced_by_manifest() {
         // Assert: Check manifest indirectly via data availability
         let mut found = 0;
         for i in 0..100 {
-            let key = format!("ref_key_{:04}", i);
+            let key = format!("ref_key_{i:04}");
             if tx.get(key.as_bytes()).ok().flatten().is_some() {
                 found += 1;
             }
         }
         assert_eq!(
             found, 100,
-            "manifest-referenced cloud objects were incorrectly deleted in mode: {}",
-            mode
+            "manifest-referenced cloud objects were incorrectly deleted in mode: {mode}"
         );
 
         eprintln!("âœ“ All manifest-referenced cloud objects preserved");
@@ -189,7 +178,7 @@ fn should_not_collect_cloud_objects_referenced_by_manifest() {
 #[test]
 fn should_handle_gc_when_cloud_list_fails() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Cloud GC: Handle List Failure (mode: {}) ===", mode);
+        eprintln!("\n=== Cloud GC: Handle List Failure (mode: {mode}) ===");
 
         // Arrange: Set up engine
         let engine = open_with_mode(opts.clone(), mode);
@@ -200,7 +189,7 @@ fn should_handle_gc_when_cloud_list_fails() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..50 {
-            let key = format!("list_fail_key_{:04}", i);
+            let key = format!("list_fail_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
         }
@@ -212,7 +201,7 @@ fn should_handle_gc_when_cloud_list_fails() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 50..100 {
-            let key = format!("list_fail_key_{:04}", i);
+            let key = format!("list_fail_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
         }
@@ -234,8 +223,7 @@ fn should_handle_gc_when_cloud_list_fails() {
         let val = tx.get(b"list_fail_key_0000").expect("get");
         assert!(
             val.is_some(),
-            "engine failed to continue after cloud list failure in mode: {}",
-            mode
+            "engine failed to continue after cloud list failure in mode: {mode}"
         );
 
         eprintln!("âœ“ Engine gracefully handled cloud list failure");
@@ -245,7 +233,7 @@ fn should_handle_gc_when_cloud_list_fails() {
 #[test]
 fn should_handle_gc_when_cloud_delete_fails() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Cloud GC: Handle Delete Failure (mode: {}) ===", mode);
+        eprintln!("\n=== Cloud GC: Handle Delete Failure (mode: {mode}) ===");
 
         // Arrange: Create test data
         let engine = open_with_mode(opts.clone(), mode);
@@ -256,7 +244,7 @@ fn should_handle_gc_when_cloud_delete_fails() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..50 {
-            let key = format!("del_fail_key_{:04}", i);
+            let key = format!("del_fail_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
         }
@@ -268,7 +256,7 @@ fn should_handle_gc_when_cloud_delete_fails() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 50..100 {
-            let key = format!("del_fail_key_{:04}", i);
+            let key = format!("del_fail_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
         }
@@ -292,7 +280,7 @@ fn should_handle_gc_when_cloud_delete_fails() {
         // Verify all data is still present (failed deletes didn't corrupt data)
         let mut readable = 0;
         for i in 0..100 {
-            let key = format!("del_fail_key_{:04}", i);
+            let key = format!("del_fail_key_{i:04}");
             if tx.get(key.as_bytes()).ok().flatten().is_some() {
                 readable += 1;
             }
@@ -300,9 +288,7 @@ fn should_handle_gc_when_cloud_delete_fails() {
 
         assert!(
             readable >= 90,
-            "significant data loss after delete failure in mode: {} (readable: {})",
-            mode,
-            readable
+            "significant data loss after delete failure in mode: {mode} (readable: {readable})"
         );
 
         eprintln!("âœ“ Engine gracefully handled cloud delete failure");

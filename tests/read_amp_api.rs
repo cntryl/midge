@@ -16,7 +16,7 @@ fn should_expose_read_amp_metrics_through_api() -> MidgeResult<()> {
 
     // Write data
     for i in 0..20 {
-        let key = format!("key{:03}", i);
+        let key = format!("key{i:03}");
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None)?;
         tx.commit(WriteOptions::buffered())?;
@@ -34,7 +34,7 @@ fn should_expose_read_amp_metrics_through_api() -> MidgeResult<()> {
 
     // Act: Perform reads and get metrics
     for i in 0..5 {
-        let key = format!("key{:03}", i);
+        let key = format!("key{i:03}");
         let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
         let _ = read_tx.get(key.as_bytes())?;
     }
@@ -78,8 +78,8 @@ fn should_track_l0_overlap_in_metrics() -> MidgeResult<()> {
     // Create 3 overlapping L0 files
     for batch in 0..3 {
         for i in 0..5 {
-            let key = format!("key{:03}", i); // Same key range
-            let value = format!("value_batch{}", batch);
+            let key = format!("key{i:03}"); // Same key range
+            let value = format!("value_batch{batch}");
             let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)?;
             tx.commit(WriteOptions::buffered())?;
@@ -137,7 +137,7 @@ fn should_accumulate_metrics_over_multiple_reads() -> MidgeResult<()> {
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..10 {
-        let key = format!("key{:03}", i);
+        let key = format!("key{i:03}");
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)?;
         tx.commit(WriteOptions::buffered())?;
@@ -147,7 +147,7 @@ fn should_accumulate_metrics_over_multiple_reads() -> MidgeResult<()> {
 
     // Act: Perform multiple reads
     for i in 0..10 {
-        let key = format!("key{:03}", i);
+        let key = format!("key{i:03}");
         let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
         let _ = read_tx.get(key.as_bytes())?;
     }
@@ -178,7 +178,7 @@ fn should_report_budget_violations_when_exceeded() -> MidgeResult<()> {
 
     // Create 10 L0 files all with same key (extreme overlap)
     for batch in 0..10 {
-        let value = format!("value{}", batch);
+        let value = format!("value{batch}");
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(b"hotkey".to_vec(), value.as_bytes().to_vec(), None)?;
         tx.commit(WriteOptions::buffered())?;

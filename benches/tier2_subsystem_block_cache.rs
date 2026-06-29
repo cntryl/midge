@@ -78,10 +78,10 @@ fn bench_hotset_rotation(c: &mut Criterion) {
                         }
                     }
                 }
-                black_box(())
+                black_box(());
             },
             criterion::BatchSize::SmallInput,
-        )
+        );
     });
 
     group.finish();
@@ -114,7 +114,7 @@ fn bench_lru_eviction_10k(c: &mut Criterion) {
                 black_box(cache)
             },
             criterion::BatchSize::SmallInput,
-        )
+        );
     });
 
     group.finish();

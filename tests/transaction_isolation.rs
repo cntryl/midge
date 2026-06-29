@@ -468,7 +468,7 @@ fn should_read_latest_committed_value_after_multiple_updates() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             update_tx
-                .put(b"key".to_vec(), format!("v{}", i).as_bytes().to_vec(), None)
+                .put(b"key".to_vec(), format!("v{i}").as_bytes().to_vec(), None)
                 .unwrap();
             update_tx
                 .commit(cntryl_midge::WriteOptions::buffered())
@@ -504,8 +504,8 @@ fn should_maintain_isolation_under_concurrent_transaction_pressure_when_stressed
                 let mut txn = engine_clone
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                     .unwrap();
-                let key = format!("key{}", i);
-                let value = format!("value{}", i);
+                let key = format!("key{i}");
+                let value = format!("value{i}");
                 txn.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .unwrap();
                 txn.commit(cntryl_midge::WriteOptions::buffered())
@@ -523,8 +523,8 @@ fn should_maintain_isolation_under_concurrent_transaction_pressure_when_stressed
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
         for i in 0..20 {
-            let key = format!("key{}", i);
-            let expected = format!("value{}", i);
+            let key = format!("key{i}");
+            let expected = format!("value{i}");
             assert_eq!(
                 read_tx.get(key.as_bytes()).unwrap(),
                 Some(Bytes::copy_from_slice(expected.as_bytes()))
@@ -541,8 +541,8 @@ fn should_handle_high_concurrency_readers_given_many_transactions_when_active() 
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..10 {
-            let key = format!("key{}", i);
-            let value = format!("value{}", i);
+            let key = format!("key{i}");
+            let value = format!("value{i}");
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
@@ -566,7 +566,7 @@ fn should_handle_high_concurrency_readers_given_many_transactions_when_active() 
 
                 // Read all keys
                 for i in 0..10 {
-                    let key = format!("key{}", i);
+                    let key = format!("key{i}");
                     let read_tx = engine_clone
                         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                         .unwrap();
@@ -603,8 +603,8 @@ fn should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent() {
                 let mut txn = engine_clone
                     .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                     .unwrap();
-                let key = format!("key{}", i);
-                let value = format!("value{}", i);
+                let key = format!("key{i}");
+                let value = format!("value{i}");
                 txn.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .unwrap();
                 txn.commit(cntryl_midge::WriteOptions::buffered())
@@ -625,7 +625,7 @@ fn should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent() {
 
                 // Read random keys
                 for i in 0..5 {
-                    let key = format!("key{}", i);
+                    let key = format!("key{i}");
                     let read_tx = engine_clone
                         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                         .unwrap();

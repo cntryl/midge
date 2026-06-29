@@ -153,8 +153,7 @@ impl SweepConfig {
         let output_path = std::env::var("MIDGE_MEMTABLE_SWEEP_OUTPUT")
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT_PATH));
+            .map_or_else(|| PathBuf::from(DEFAULT_OUTPUT_PATH), PathBuf::from);
 
         Ok(Self {
             writes,

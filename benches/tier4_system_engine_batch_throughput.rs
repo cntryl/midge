@@ -9,8 +9,8 @@
 //! - End-to-end write throughput (ops/sec)
 //!
 //! NOT measured:
-//! - Single put cost (Tier 3: tier3_system_engine.rs)
-//! - Single get cost (Tier 3: tier3_system_engine.rs)
+//! - Single put cost (Tier 3: `tier3_system_engine.rs`)
+//! - Single get cost (Tier 3: `tier3_system_engine.rs`)
 
 #[path = "./stress_config.rs"]
 mod stress_config;
@@ -48,7 +48,7 @@ fn run_batch_commit_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops: u
             tx.put(k.to_vec(), v.clone(), None).expect("put");
         }
         tx.commit(cntryl_midge::WriteOptions::buffered())
-            .expect("commit")
+            .expect("commit");
     });
 
     drop(engine);

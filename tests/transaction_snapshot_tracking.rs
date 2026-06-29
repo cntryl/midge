@@ -69,7 +69,7 @@ fn should_report_active_snapshot_immediately_when_begin_tx_returns() -> MidgeRes
         let metrics = engine
             .get_runtime_metrics()
             .expect("get runtime metrics immediately after begin_tx");
-        assert_eq!(metrics.active_snapshots, 1, "mode: {}", mode);
+        assert_eq!(metrics.active_snapshots, 1, "mode: {mode}");
 
         drop(tx);
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
@@ -90,7 +90,7 @@ fn should_report_snapshot_retention_pressure_metrics_when_snapshot_pins_ssts() -
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin seed tx");
         for i in 0..32 {
-            let key = format!("metric_key_{:03}", i);
+            let key = format!("metric_key_{i:03}");
             seed.put(key.into_bytes(), b"v".to_vec(), None)
                 .expect("seed put");
         }
@@ -106,9 +106,9 @@ fn should_report_snapshot_retention_pressure_metrics_when_snapshot_pins_ssts() -
         let metrics = engine
             .get_runtime_metrics()
             .expect("get runtime metrics with active snapshot");
-        assert_eq!(metrics.active_snapshots, 1, "mode: {}", mode);
-        assert!(metrics.pinned_ssts > 0, "mode: {}", mode);
-        assert!(metrics.oldest_snapshot_age_seconds <= 1, "mode: {}", mode);
+        assert_eq!(metrics.active_snapshots, 1, "mode: {mode}");
+        assert!(metrics.pinned_ssts > 0, "mode: {mode}");
+        assert!(metrics.oldest_snapshot_age_seconds <= 1, "mode: {mode}");
 
         drop(snapshot);
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
@@ -225,8 +225,7 @@ fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active(
         assert_eq!(
             snapshot_value,
             Some(bytes::Bytes::from_static(b"v1")),
-            "mode: {}",
-            mode
+            "mode: {mode}"
         );
 
         drop(snapshot);
@@ -239,8 +238,7 @@ fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active(
         assert_eq!(
             current.get(b"k").expect("current get"),
             None,
-            "mode: {}",
-            mode
+            "mode: {mode}"
         );
     });
 
@@ -259,7 +257,7 @@ fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_act
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin seed tx");
         for i in 0..64 {
-            let key = format!("gc_key_{:03}", i);
+            let key = format!("gc_key_{i:03}");
             seed.put(key.into_bytes(), b"old".to_vec(), None)
                 .expect("seed put");
         }
@@ -277,7 +275,7 @@ fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_act
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin overwrite tx");
             for i in 0..64 {
-                let key = format!("gc_key_{:03}", i);
+                let key = format!("gc_key_{i:03}");
                 overwrite
                     .put(key.into_bytes(), generation.as_bytes().to_vec(), None)
                     .expect("overwrite put");
@@ -294,9 +292,9 @@ fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_act
         let rows: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
 
         // Assert
-        assert_eq!(rows.len(), 64, "mode: {}", mode);
+        assert_eq!(rows.len(), 64, "mode: {mode}");
         for (_key, value) in rows {
-            assert_eq!(value, bytes::Bytes::from_static(b"old"), "mode: {}", mode);
+            assert_eq!(value, bytes::Bytes::from_static(b"old"), "mode: {mode}");
         }
 
         let current = engine
@@ -305,8 +303,7 @@ fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_act
         assert_eq!(
             current.get(b"gc_key_000").expect("current get"),
             Some(bytes::Bytes::from_static(b"new2")),
-            "mode: {}",
-            mode
+            "mode: {mode}"
         );
         drop(current);
 
@@ -329,7 +326,7 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() ->
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin seed tx");
         for i in 0..32 {
-            let key = format!("concurrent_key_{:03}", i);
+            let key = format!("concurrent_key_{i:03}");
             seed.put(key.into_bytes(), b"baseline".to_vec(), None)
                 .expect("seed put");
         }
@@ -348,7 +345,7 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() ->
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin overwrite tx");
             for i in 0..32 {
-                let key = format!("concurrent_key_{:03}", i);
+                let key = format!("concurrent_key_{i:03}");
                 let value = format!("round_{round}").into_bytes();
                 tx.put(key.into_bytes(), value, None)
                     .expect("overwrite put");
@@ -362,13 +359,12 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() ->
                 .scan(&Query::new())
                 .expect("snapshot scan after compaction round");
             let rows: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
-            assert_eq!(rows.len(), 32, "mode: {}", mode);
+            assert_eq!(rows.len(), 32, "mode: {mode}");
             for (_key, value) in rows {
                 assert_eq!(
                     value,
                     bytes::Bytes::from_static(b"baseline"),
-                    "mode: {}",
-                    mode
+                    "mode: {mode}"
                 );
             }
         }
@@ -378,13 +374,12 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() ->
             .scan(&Query::new())
             .expect("snapshot scan after compaction");
         let rows: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
-        assert_eq!(rows.len(), 32, "mode: {}", mode);
+        assert_eq!(rows.len(), 32, "mode: {mode}");
         for (_key, value) in rows {
             assert_eq!(
                 value,
                 bytes::Bytes::from_static(b"baseline"),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
 

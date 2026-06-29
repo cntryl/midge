@@ -12,7 +12,7 @@
 //! **Storage Modes**: Local only (requires filesystem verification)
 //!
 //! Naming convention:
-//!   should_<behavior>_when_crashing_<at_point>
+//!   should_<behavior>_`when_crashing`_<`at_point`>
 
 use std::fs;
 use std::io::Write;
@@ -178,10 +178,10 @@ fn should_crash_in_child_when_compaction_crash_scenario_requested() {
     // Act
     match scenario.to_string_lossy().as_ref() {
         "crash_before_manifest_publish" => {
-            child_create_data_and_compact_with_crash_before_publish(&db_path)
+            child_create_data_and_compact_with_crash_before_publish(&db_path);
         }
         "crash_before_manifest_persist" => {
-            child_create_data_and_compact_with_crash_before_persist(&db_path)
+            child_create_data_and_compact_with_crash_before_persist(&db_path);
         }
         "crash_before_sst_gc" => child_create_data_and_compact_with_crash_before_gc(&db_path),
         other => panic!("unknown compaction crash scenario: {other}"),
@@ -216,7 +216,7 @@ fn child_create_data_and_compact_with_crash_before_persist(db_path: &Path) {
             .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
             .expect("begin batch tx");
         for i in 0..100 {
-            let key = format!("compaction_key_batch{:02}_{:04}", batch, i);
+            let key = format!("compaction_key_batch{batch:02}_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"compaction_value".to_vec(), None)
                 .expect("put");
             // Record this commit
@@ -231,7 +231,7 @@ fn child_create_data_and_compact_with_crash_before_persist(db_path: &Path) {
                 .append(true)
                 .open(&committed_log)
                 .expect("open commits log")
-                .write_all(format!("{}\n", json).as_bytes())
+                .write_all(format!("{json}\n").as_bytes())
                 .expect("write commit record");
         }
         tx.commit(WriteOptions::buffered()).expect("commit batch");
@@ -269,7 +269,7 @@ fn child_create_data_and_compact_with_crash_before_publish(db_path: &Path) {
             .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
             .expect("begin batch tx");
         for i in 0..100 {
-            let key = format!("compaction_prepublish_key_batch{:02}_{:04}", batch, i);
+            let key = format!("compaction_prepublish_key_batch{batch:02}_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"compaction_value".to_vec(), None)
                 .expect("put");
             let committed_log = db_path.join("commits.ndjson");
@@ -283,7 +283,7 @@ fn child_create_data_and_compact_with_crash_before_publish(db_path: &Path) {
                 .append(true)
                 .open(&committed_log)
                 .expect("open commits log")
-                .write_all(format!("{}\n", json).as_bytes())
+                .write_all(format!("{json}\n").as_bytes())
                 .expect("write commit record");
         }
         tx.commit(WriteOptions::buffered()).expect("commit batch");
@@ -319,7 +319,7 @@ fn child_create_data_and_compact_with_crash_before_gc(db_path: &Path) {
             .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
             .expect("begin batch tx");
         for i in 0..100 {
-            let key = format!("compaction_key_batch{:02}_{:04}", batch, i);
+            let key = format!("compaction_key_batch{batch:02}_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"compaction_value".to_vec(), None)
                 .expect("put");
             // Record this commit
@@ -334,7 +334,7 @@ fn child_create_data_and_compact_with_crash_before_gc(db_path: &Path) {
                 .append(true)
                 .open(&committed_log)
                 .expect("open commits log")
-                .write_all(format!("{}\n", json).as_bytes())
+                .write_all(format!("{json}\n").as_bytes())
                 .expect("write commit record");
         }
         tx.commit(WriteOptions::buffered()).expect("commit batch");

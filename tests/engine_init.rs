@@ -12,8 +12,8 @@ fn should_create_engine_in_all_modes() {
 
         // Assert
         match result {
-            Ok(_) => println!("Engine created successfully in mode: {}", mode),
-            Err(e) => panic!("Failed to create engine in mode {}: {}", mode, e),
+            Ok(_) => println!("Engine created successfully in mode: {mode}"),
+            Err(e) => panic!("Failed to create engine in mode {mode}: {e}"),
         }
     });
 }
@@ -29,7 +29,7 @@ fn should_create_engine_in_memory() {
     // Assert
     match result {
         Ok(_) => println!("Engine created successfully"),
-        Err(e) => panic!("Failed to create engine: {}", e),
+        Err(e) => panic!("Failed to create engine: {e}"),
     }
 }
 
@@ -44,7 +44,7 @@ fn should_create_engine_in_local_mode() {
     // Assert
     match result {
         Ok(_) => println!("Engine created successfully in local mode"),
-        Err(e) => panic!("Failed to create engine in local mode: {}", e),
+        Err(e) => panic!("Failed to create engine in local mode: {e}"),
     }
 }
 
@@ -59,6 +59,6 @@ fn should_create_engine_in_cloud_mode() {
     // Assert
     match result {
         Ok(_) => println!("Engine created successfully in cloud mode"),
-        Err(e) => panic!("Failed to create engine in cloud mode: {}", e),
+        Err(e) => panic!("Failed to create engine in cloud mode: {e}"),
     }
 }

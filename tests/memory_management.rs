@@ -18,7 +18,7 @@ fn should_handle_small_memory_budget_without_unexpected_errors() {
         let mut stall_encountered = false;
 
         for i in 0..1000 {
-            let key = format!("key_{:08}", i);
+            let key = format!("key_{i:08}");
             let value = vec![b'x'; 1024]; // 1KB value
 
             let mut tx = engine
@@ -27,7 +27,7 @@ fn should_handle_small_memory_budget_without_unexpected_errors() {
             tx.put(key.into_bytes(), value, None).unwrap();
 
             match tx.commit(WriteOptions::buffered()) {
-                Ok(_) => {
+                Ok(()) => {
                     _write_count += 1;
                 }
                 Err(MidgeError::WriteStall(_)) => {
@@ -35,7 +35,7 @@ fn should_handle_small_memory_budget_without_unexpected_errors() {
                     break;
                 }
                 Err(e) => {
-                    panic!("Unexpected error: {:?}", e);
+                    panic!("Unexpected error: {e:?}");
                 }
             }
 
@@ -54,14 +54,12 @@ fn should_handle_small_memory_budget_without_unexpected_errors() {
             // keeps making progress and does not end in a degraded memory state.
             assert!(
                 stall_encountered || _write_count > 0,
-                "Expected progress or backpressure in mode {}",
-                mode
+                "Expected progress or backpressure in mode {mode}"
             );
             assert_ne!(
                 metrics.health,
                 EngineHealth::WriteStalled,
-                "Engine should not remain write-stalled after final flush in mode {}",
-                mode
+                "Engine should not remain write-stalled after final flush in mode {mode}"
             );
         }
     });

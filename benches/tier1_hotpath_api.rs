@@ -98,8 +98,8 @@ fn bench_batch_put(c: &mut Criterion) {
                         tx.put(keys[i].to_vec(), vals[i].to_vec(), None).unwrap();
                     }
                     tx.commit(write_opts).unwrap();
-                    black_box(())
-                })
+                    black_box(());
+                });
             },
         );
     }
@@ -153,7 +153,7 @@ fn bench_single_get(c: &mut Criterion) {
                 }
             }
             black_box(hits)
-        })
+        });
     });
 
     // Miss rate benchmark - use keys not in the populated set
@@ -181,7 +181,7 @@ fn bench_single_get(c: &mut Criterion) {
                 }
             }
             black_box(misses)
-        })
+        });
     });
 
     // CRITICAL: Flush memtable to prevent unbounded version-chain growth
@@ -223,7 +223,7 @@ fn bench_single_put(c: &mut Criterion) {
                 black_box(counter);
             },
             BatchSize::SmallInput,
-        )
+        );
     });
 
     group.finish();

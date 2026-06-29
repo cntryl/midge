@@ -24,8 +24,8 @@ fn should_group_concurrent_batch_submissions_when_multiple_threads_submit() {
             let engine_clone = Arc::clone(&engine);
             thread::spawn(move || {
                 for batch_num in 0..batches_per_thread {
-                    let key = format!("key_{}_{}", thread_id, batch_num);
-                    let value = format!("value_{}", thread_id);
+                    let key = format!("key_{thread_id}_{batch_num}");
+                    let value = format!("value_{thread_id}");
 
                     // Each thread submits a small batch
                     let mut tx = engine_clone
@@ -46,7 +46,7 @@ fn should_group_concurrent_batch_submissions_when_multiple_threads_submit() {
     }
 
     let elapsed = start.elapsed();
-    let total_ops = (batches_per_thread * num_threads) as f64;
+    let total_ops = f64::from(batches_per_thread * num_threads);
     let throughput = total_ops / elapsed.as_secs_f64();
 
     // Assert: Verify that operations completed successfully and measure throughput
@@ -87,7 +87,7 @@ fn should_handle_concurrent_writes_correctly_with_write_grouping() {
             let engine_clone = Arc::clone(&engine);
             thread::spawn(move || {
                 for op_num in 0..ops_per_thread {
-                    let key = format!("key_{}_{}", thread_id, op_num);
+                    let key = format!("key_{thread_id}_{op_num}");
                     let value = "x".repeat(100); // 100 bytes value
 
                     let mut tx = engine_clone
@@ -115,7 +115,7 @@ fn should_handle_concurrent_writes_correctly_with_write_grouping() {
     let result = read_tx.get(key.as_bytes());
     assert!(result.is_ok(), "Should be able to read back values");
 
-    let total_ops = (ops_per_thread * num_threads) as f64;
+    let total_ops = f64::from(ops_per_thread * num_threads);
     let throughput = total_ops / elapsed.as_secs_f64();
     println!(
         "âœ“ Write grouping with backpressure: {} ops from {} threads, {:.0} ops/sec",
@@ -168,8 +168,5 @@ fn should_maintain_ordering_with_write_grouping() {
         );
     }
 
-    println!(
-        "âœ“ Ordering maintained across {} sequential operations",
-        num_sequential_ops
-    );
+    println!("âœ“ Ordering maintained across {num_sequential_ops} sequential operations");
 }

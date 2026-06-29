@@ -42,7 +42,7 @@ impl RangeScan {
         }
     }
 
-    /// Execute scan with cache, returning (blocks_read, cache_hits)
+    /// Execute scan with cache, returning (`blocks_read`, `cache_hits`)
     fn execute(&self, cache: &BlockCache, sst_id: u64, miss_block_data: &Bytes) -> (u32, u32) {
         let mut blocks_read = 0u32;
         let mut cache_hits = 0u32;
@@ -84,7 +84,7 @@ fn bench_range_scan_warm_cache(c: &mut Criterion) {
     let miss_block_data = precompute_block_data();
 
     for &num_blocks in &[10, 100, 1000] {
-        let mut group = c.benchmark_group(format!("range_scan_warm_cache_{}_blocks", num_blocks));
+        let mut group = c.benchmark_group(format!("range_scan_warm_cache_{num_blocks}_blocks"));
         group.sampling_mode(SamplingMode::Flat);
         group.throughput(Throughput::Elements(num_blocks as u64));
 
@@ -99,7 +99,7 @@ fn bench_range_scan_warm_cache(c: &mut Criterion) {
                 let (blocks_read, cache_hits) = scan.execute(&cache, SST_ID, &miss_block_data);
 
                 black_box((blocks_read, cache_hits))
-            })
+            });
         });
 
         group.finish();
@@ -113,7 +113,7 @@ fn bench_range_scan_cold_cache(c: &mut Criterion) {
     let miss_block_data = precompute_block_data();
 
     for &num_blocks in &[10, 100, 1000] {
-        let mut group = c.benchmark_group(format!("range_scan_cold_cache_{}_blocks", num_blocks));
+        let mut group = c.benchmark_group(format!("range_scan_cold_cache_{num_blocks}_blocks"));
         group.sampling_mode(SamplingMode::Flat);
         group.throughput(Throughput::Elements(num_blocks as u64));
 
@@ -130,7 +130,7 @@ fn bench_range_scan_cold_cache(c: &mut Criterion) {
                     black_box((blocks_read, cache_hits))
                 },
                 criterion::BatchSize::SmallInput,
-            )
+            );
         });
 
         group.finish();
@@ -172,7 +172,7 @@ fn bench_range_scan_strided_access(c: &mut Criterion) {
                         }
                     }
                     black_box(cache_hits)
-                })
+                });
             } else {
                 b.iter_batched(
                     || BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru),
@@ -189,7 +189,7 @@ fn bench_range_scan_strided_access(c: &mut Criterion) {
                         black_box(blocks_read)
                     },
                     criterion::BatchSize::SmallInput,
-                )
+                );
             }
         });
     }

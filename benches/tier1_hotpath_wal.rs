@@ -5,10 +5,10 @@
 //!
 //! Covers WAL record encoding/decoding hot paths:
 //! - TLV format serialization/deserialization
-//! - Fast path optimizations (encode_delete, encode_put_simple)
+//! - Fast path optimizations (`encode_delete`, `encode_put_simple`)
 //! - Parallel encoding for batches
 //!
-//! Note: I/O benchmarks are in tier2_subsystem/wal_io.rs
+//! Note: I/O benchmarks are in `tier2_subsystem/wal_io.rs`
 
 #[path = "./criterion_config.rs"]
 mod criterion_config;

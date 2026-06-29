@@ -265,7 +265,7 @@ fn should_expose_only_successful_commits_when_random_wal_append_crash_interrupts
             if let Some(value) = actual {
                 let expected = committed
                     .get(key.as_bytes())
-                    .unwrap_or_else(|| panic!("visible key {:?} never committed", key));
+                    .unwrap_or_else(|| panic!("visible key {key:?} never committed"));
                 assert_eq!(
                     value.as_ref(),
                     expected.as_slice(),
@@ -472,9 +472,10 @@ fn child_manifest_crash_after_sync(db_path: &Path) {
     configure_abort_failpoint("midge::manifest::after_temp_sync_before_rename");
 
     let trigger_cf = std::env::var(ENV_TRIGGER_CF).expect("trigger cf env");
-    if engine.get_column_family(&trigger_cf).is_some() {
-        panic!("trigger column family must be unique per child run");
-    }
+    assert!(
+        !engine.get_column_family(&trigger_cf).is_some(),
+        "trigger column family must be unique per child run"
+    );
     engine
         .create_column_family(&trigger_cf)
         .expect("manifest persist should reach failpoint");
@@ -656,9 +657,10 @@ fn configure_nth_abort_failpoint(name: &str, target: usize) {
     let hits = Arc::new(AtomicUsize::new(0));
     let hits_for_callback = Arc::clone(&hits);
     fail::cfg_callback(name, move || {
-        if hits_for_callback.fetch_add(1, Ordering::SeqCst) + 1 == target {
-            panic!("abort on wal append hit {target}");
-        }
+        assert!(
+            hits_for_callback.fetch_add(1, Ordering::SeqCst) + 1 != target,
+            "abort on wal append hit {target}"
+        );
     })
     .expect("configure nth abort failpoint");
     std::mem::forget(scenario);

@@ -4,7 +4,7 @@
 //! **Run Frequency:** Every PR (CI gate)
 //!
 //! Covers iterator hot paths (operations that occur per-key during scans):
-//! - Sequential iteration over memtable (iter_all)
+//! - Sequential iteration over memtable (`iter_all`)
 //! - Range scan with bounds (start/end keys)
 //! - Iterator seek operation
 //!
@@ -27,7 +27,7 @@ const ITER_SINGLE_STEP_BATCH_SIZE: usize = 256;
 /// Pre-compute a key (deterministic, no allocation in hot path)
 #[inline]
 fn make_key(i: usize) -> Bytes {
-    Bytes::from(format!("key_{:010}", i))
+    Bytes::from(format!("key_{i:010}"))
 }
 
 /// Pre-compute value of given size
@@ -60,12 +60,12 @@ fn bench_iter_sequential(c: &mut Criterion) {
         let sl = create_populated_skiplist(count);
 
         group.throughput(Throughput::Elements(count as u64));
-        group.bench_function(format!("{}_keys", count), |b| {
+        group.bench_function(format!("{count}_keys"), |b| {
             b.iter(|| {
                 // Simulate sequential iteration by collecting all entries
                 let entries = sl.range(None, None);
                 black_box(entries.len());
-            })
+            });
         });
     }
 
@@ -96,7 +96,7 @@ fn bench_range_bounded(c: &mut Criterion) {
                 Some(black_box(end_key_narrow.as_ref())),
             );
             black_box(entries.len());
-        })
+        });
     });
 
     // Wide range (80 keys)
@@ -108,7 +108,7 @@ fn bench_range_bounded(c: &mut Criterion) {
                 Some(black_box(end_key_wide.as_ref())),
             );
             black_box(entries.len());
-        })
+        });
     });
 
     group.finish();
@@ -138,7 +138,7 @@ fn bench_iter_single_step(c: &mut Criterion) {
                 seen += usize::from(!entries.is_empty());
             }
             black_box(seen);
-        })
+        });
     });
 
     group.finish();
@@ -169,7 +169,7 @@ fn bench_range_position(c: &mut Criterion) {
                 Some(black_box(end_beginning.as_ref())),
             );
             black_box(entries.len());
-        })
+        });
     });
 
     group.bench_function("middle", |b| {
@@ -179,7 +179,7 @@ fn bench_range_position(c: &mut Criterion) {
                 Some(black_box(end_middle.as_ref())),
             );
             black_box(entries.len());
-        })
+        });
     });
 
     group.bench_function("end", |b| {
@@ -189,7 +189,7 @@ fn bench_range_position(c: &mut Criterion) {
                 Some(black_box(end_end.as_ref())),
             );
             black_box(entries.len());
-        })
+        });
     });
 
     group.finish();
@@ -210,7 +210,7 @@ fn bench_range_bounds_vs_unbounded(c: &mut Criterion) {
         b.iter(|| {
             let entries = sl.range(None, None);
             black_box(entries.len());
-        })
+        });
     });
 
     group.bench_function("bounded", |b| {
@@ -220,7 +220,7 @@ fn bench_range_bounds_vs_unbounded(c: &mut Criterion) {
                 Some(black_box(end_key.as_ref())),
             );
             black_box(entries.len());
-        })
+        });
     });
 
     group.finish();

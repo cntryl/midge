@@ -1,6 +1,6 @@
 //! Tests for transaction spill behavior and memory management
 //!
-//! Tests 1-12: durable storage modes (LocalDisk, CloudBacked) with spill
+//! Tests 1-12: durable storage modes (`LocalDisk`, `CloudBacked`) with spill
 //! Test 13: memory-only mode (no spill files)
 
 use bytes::Bytes;
@@ -11,7 +11,7 @@ use common::*;
 // TRANSACTION SPILL TESTS
 // ============================================================================
 
-/// should_commit_large_transaction_given_many_writes_exceeding_memory_limit
+/// `should_commit_large_transaction_given_many_writes_exceeding_memory_limit`
 /// Verify all writes commit despite spill triggered by small memory limit
 /// Act: Write 100 keys with small memory budget, commit
 /// Assert: All keys persisted despite spilling to disk
@@ -30,8 +30,8 @@ fn should_commit_large_transaction_given_many_writes_exceeding_memory_limit() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..100 {
-            let key = format!("key{:04}", i);
-            let value = format!("value_{:04}", i);
+            let key = format!("key{i:04}");
+            let value = format!("value_{i:04}");
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                 .expect("put");
         }
@@ -43,22 +43,20 @@ fn should_commit_large_transaction_given_many_writes_exceeding_memory_limit() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
         for i in 0..100 {
-            let key = format!("key{:04}", i);
-            let expected = format!("value_{:04}", i);
+            let key = format!("key{i:04}");
+            let expected = format!("value_{i:04}");
             let got = tx_read.get(key.as_bytes()).expect("get");
             let got_str = got.as_ref().map(|b| String::from_utf8_lossy(b).to_string());
             assert_eq!(
                 got_str,
                 Some(expected),
-                "key {} mismatch in mode: {}",
-                key,
-                mode
+                "key {key} mismatch in mode: {mode}"
             );
         }
     });
 }
 
-/// should_handle_very_large_transaction_given_multiple_spills_when_persisted
+/// `should_handle_very_large_transaction_given_multiple_spills_when_persisted`
 /// Verify multiple spill files created and handled correctly
 /// Act: Write 500 keys to force multiple spill files
 /// Assert: All spill files managed and data recovered
@@ -77,8 +75,8 @@ fn should_handle_very_large_transaction_given_multiple_spills_when_persisted() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..500 {
-            let key = format!("big_key{:04}", i);
-            let value = format!("big_value_{:04}", i);
+            let key = format!("big_key{i:04}");
+            let value = format!("big_value_{i:04}");
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                 .expect("put");
         }
@@ -90,14 +88,14 @@ fn should_handle_very_large_transaction_given_multiple_spills_when_persisted() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
         for i in (0..500).step_by(50) {
-            let key = format!("big_key{:04}", i);
+            let key = format!("big_key{i:04}");
             let got = tx_read.get(key.as_bytes()).expect("get");
-            assert!(got.is_some(), "key {} not found after multiple spills", key);
+            assert!(got.is_some(), "key {key} not found after multiple spills");
         }
     });
 }
 
-/// should_preserve_data_integrity_given_large_transaction_with_specific_values
+/// `should_preserve_data_integrity_given_large_transaction_with_specific_values`
 /// Verify data integrity maintained through spill/commit cycle
 #[test]
 fn should_preserve_data_integrity_given_large_transaction_with_specific_values() {
@@ -114,7 +112,7 @@ fn should_preserve_data_integrity_given_large_transaction_with_specific_values()
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..200 {
-            let key = format!("integrity_test_{:04}", i);
+            let key = format!("integrity_test_{i:04}");
             let value = format!("pattern_{}_{}", i % 10, "x".repeat(50));
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                 .expect("put");
@@ -127,21 +125,20 @@ fn should_preserve_data_integrity_given_large_transaction_with_specific_values()
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
         for i in 0..200 {
-            let key = format!("integrity_test_{:04}", i);
+            let key = format!("integrity_test_{i:04}");
             let expected = format!("pattern_{}_{}", i % 10, "x".repeat(50));
             let got = tx_read.get(key.as_bytes()).expect("get");
             let got_str = got.as_ref().map(|b| String::from_utf8_lossy(b).to_string());
             assert_eq!(
                 got_str,
                 Some(expected),
-                "integrity check failed for key {}",
-                key
+                "integrity check failed for key {key}"
             );
         }
     });
 }
 
-/// should_preserve_key_order_given_large_transaction_when_iterating
+/// `should_preserve_key_order_given_large_transaction_when_iterating`
 /// Verify key order preserved through spill operations
 #[test]
 fn should_preserve_key_order_given_large_transaction_when_iterating() {
@@ -158,7 +155,7 @@ fn should_preserve_key_order_given_large_transaction_when_iterating() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..200 {
-            let key = format!("order_test_{:04}", i);
+            let key = format!("order_test_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"v".to_vec(), None)
                 .expect("put");
         }
@@ -170,19 +167,18 @@ fn should_preserve_key_order_given_large_transaction_when_iterating() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
         for i in 0..200 {
-            let key = format!("order_test_{:04}", i);
+            let key = format!("order_test_{i:04}");
             let got = tx_read.get(key.as_bytes()).expect("get");
             assert_eq!(
                 got,
                 Some(Bytes::from_static(b"v")),
-                "order check failed for key {}",
-                key
+                "order check failed for key {key}"
             );
         }
     });
 }
 
-/// should_rollback_spilled_transaction_given_drop_without_commit
+/// `should_rollback_spilled_transaction_given_drop_without_commit`
 /// Verify spilled transaction data cleaned up on drop
 #[test]
 fn should_rollback_spilled_transaction_given_drop_without_commit() {
@@ -200,7 +196,7 @@ fn should_rollback_spilled_transaction_given_drop_without_commit() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..200 {
-                let key = format!("rollback_test_{:04}", i);
+                let key = format!("rollback_test_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
             }
@@ -211,11 +207,11 @@ fn should_rollback_spilled_transaction_given_drop_without_commit() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
         let got = tx_read.get(b"rollback_test_0000").expect("get");
-        assert_eq!(got, None, "rolled back data persisted in mode: {}", mode);
+        assert_eq!(got, None, "rolled back data persisted in mode: {mode}");
     });
 }
 
-/// should_cleanup_spill_files_given_transaction_rollback_when_finalizing
+/// `should_cleanup_spill_files_given_transaction_rollback_when_finalizing`
 /// Verify spill files cleaned up on transaction rollback
 #[test]
 fn should_cleanup_spill_files_given_transaction_rollback_when_finalizing() {
@@ -233,7 +229,7 @@ fn should_cleanup_spill_files_given_transaction_rollback_when_finalizing() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..300 {
-                let key = format!("spill_cleanup_{:04}", i);
+                let key = format!("spill_cleanup_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
             }
@@ -262,7 +258,7 @@ fn should_cleanup_spill_files_given_transaction_rollback_when_finalizing() {
     });
 }
 
-/// should_rollback_uncommitted_spill_given_restart_before_commit
+/// `should_rollback_uncommitted_spill_given_restart_before_commit`
 /// Verify spilled data rolled back after restart if not committed
 #[test]
 fn should_rollback_uncommitted_spill_given_restart_before_commit() {
@@ -281,7 +277,7 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..300 {
-                let key = format!("uncom_spill_{:04}", i);
+                let key = format!("uncom_spill_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
             }
@@ -296,12 +292,12 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                 .expect("begin_tx");
             let got = tx_read.get(b"uncom_spill_0000").expect("get");
-            assert_eq!(got, None, "uncommitted spill recovered in mode: {}", mode);
+            assert_eq!(got, None, "uncommitted spill recovered in mode: {mode}");
         }
     });
 }
 
-/// should_recover_committed_spill_given_restart_after_commit
+/// `should_recover_committed_spill_given_restart_after_commit`
 /// Verify spilled data recovered after restart if committed
 #[test]
 fn should_recover_committed_spill_given_restart_after_commit() {
@@ -320,7 +316,7 @@ fn should_recover_committed_spill_given_restart_after_commit() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..300 {
-                let key = format!("com_spill_{:04}", i);
+                let key = format!("com_spill_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
             }
@@ -346,7 +342,7 @@ fn should_recover_committed_spill_given_restart_after_commit() {
     });
 }
 
-/// should_not_starve_foreground_writes_given_background_spill_activity
+/// `should_not_starve_foreground_writes_given_background_spill_activity`
 /// Verify foreground writes not blocked by spill
 #[test]
 fn should_not_starve_foreground_writes_given_background_spill_activity() {
@@ -363,7 +359,7 @@ fn should_not_starve_foreground_writes_given_background_spill_activity() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..500 {
-            let key = format!("tx_{:04}", i);
+            let key = format!("tx_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put");
         }
@@ -393,7 +389,7 @@ fn should_not_starve_foreground_writes_given_background_spill_activity() {
     });
 }
 
-/// should_handle_concurrent_large_transactions_given_memory_pressure
+/// `should_handle_concurrent_large_transactions_given_memory_pressure`
 /// Verify system handles concurrent large transactions
 #[test]
 fn should_handle_concurrent_large_transactions_given_memory_pressure() {
@@ -414,7 +410,7 @@ fn should_handle_concurrent_large_transactions_given_memory_pressure() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..200 {
-                let key = format!("t1_key_{:04}", i);
+                let key = format!("t1_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"t1_value".to_vec(), None)
                     .expect("put");
             }
@@ -431,7 +427,7 @@ fn should_handle_concurrent_large_transactions_given_memory_pressure() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..200 {
-                let key = format!("t2_key_{:04}", i);
+                let key = format!("t2_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"t2_value".to_vec(), None)
                     .expect("put");
             }
@@ -462,7 +458,7 @@ fn should_handle_concurrent_large_transactions_given_memory_pressure() {
     });
 }
 
-/// should_handle_transaction_with_tiny_memory_limit_given_forced_spill
+/// `should_handle_transaction_with_tiny_memory_limit_given_forced_spill`
 /// Verify system handles extremely tight memory limits
 #[test]
 fn should_handle_transaction_with_tiny_memory_limit_given_forced_spill() {
@@ -479,8 +475,8 @@ fn should_handle_transaction_with_tiny_memory_limit_given_forced_spill() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..20 {
-            let key = format!("tiny_{:02}", i);
-            let value = format!("value{:02}", i);
+            let key = format!("tiny_{i:02}");
+            let value = format!("value{i:02}");
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                 .expect("put");
         }
@@ -496,7 +492,7 @@ fn should_handle_transaction_with_tiny_memory_limit_given_forced_spill() {
     });
 }
 
-/// should_handle_mixed_value_sizes_in_spilled_transaction_when_committed
+/// `should_handle_mixed_value_sizes_in_spilled_transaction_when_committed`
 /// Verify transaction handles mixed sized values through spill
 #[test]
 fn should_handle_mixed_value_sizes_in_spilled_transaction_when_committed() {
@@ -513,7 +509,7 @@ fn should_handle_mixed_value_sizes_in_spilled_transaction_when_committed() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..100 {
-            let key = format!("mixed_{:04}", i);
+            let key = format!("mixed_{i:04}");
             let value = if i % 3 == 0 {
                 b"tiny".to_vec()
             } else if i % 3 == 1 {
@@ -535,21 +531,21 @@ fn should_handle_mixed_value_sizes_in_spilled_transaction_when_committed() {
 
         let got_med = tx_read.get(b"mixed_0001").expect("get");
         assert_eq!(
-            got_med.as_ref().map(|b| b.len()),
+            got_med.as_ref().map(bytes::Bytes::len),
             Some(256),
             "medium size wrong"
         );
 
         let got_large = tx_read.get(b"mixed_0002").expect("get");
         assert_eq!(
-            got_large.as_ref().map(|b| b.len()),
+            got_large.as_ref().map(bytes::Bytes::len),
             Some(512),
             "large size wrong"
         );
     });
 }
 
-/// should_not_create_disk_artifacts_given_large_transaction_when_memory_mode
+/// `should_not_create_disk_artifacts_given_large_transaction_when_memory_mode`
 /// Verify memory-only mode doesn't create spill files
 #[test]
 fn should_not_create_disk_artifacts_given_large_transaction_when_memory_mode() {
@@ -564,7 +560,7 @@ fn should_not_create_disk_artifacts_given_large_transaction_when_memory_mode() {
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .expect("begin_tx");
     for i in 0..500 {
-        let key = format!("mem_only_{:04}", i);
+        let key = format!("mem_only_{i:04}");
         tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
             .expect("put");
     }

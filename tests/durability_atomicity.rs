@@ -8,7 +8,7 @@
 //! - Data visibility after successful flush/compaction-adjacent operations
 //! - An in-memory transaction atomicity guardrail for concurrent reads
 //!
-//! **Storage Modes**: LocalDisk + CloudBacked ONLY (requires persistence)
+//! **Storage Modes**: `LocalDisk` + `CloudBacked` ONLY (requires persistence)
 //!
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
@@ -59,7 +59,7 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
-            assert!(tx.get(b"key1").expect("get").is_some(), "mode: {}", mode);
+            assert!(tx.get(b"key1").expect("get").is_some(), "mode: {mode}");
 
             // key2 should be readable from the later committed write on reopen
             let tx = engine
@@ -68,8 +68,7 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
             assert_eq!(
                 tx.get(b"key2").expect("get"),
                 Some(Bytes::from_static(b"value2")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
     });
@@ -86,7 +85,7 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
 
             // Write and flush (manifest updated)
             for i in 0..5 {
-                let key = format!("flushed_{:02}", i);
+                let key = format!("flushed_{i:02}");
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
@@ -98,7 +97,7 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
 
             // Write more after manifest update (in WAL only)
             for i in 0..5 {
-                let key = format!("unflushed_{:02}", i);
+                let key = format!("unflushed_{i:02}");
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
@@ -116,25 +115,23 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
 
             // All data should be recovered (flushed + WAL)
             for i in 0..5 {
-                let key = format!("flushed_{:02}", i);
+                let key = format!("flushed_{i:02}");
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
                 assert!(
                     tx.get(key.as_bytes()).expect("get").is_some(),
-                    "mode: {}",
-                    mode
+                    "mode: {mode}"
                 );
             }
             for i in 0..5 {
-                let key = format!("unflushed_{:02}", i);
+                let key = format!("unflushed_{i:02}");
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
                 assert!(
                     tx.get(key.as_bytes()).expect("get").is_some(),
-                    "mode: {}",
-                    mode
+                    "mode: {mode}"
                 );
             }
         }
@@ -180,8 +177,7 @@ fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
             assert_eq!(
                 tx.get(b"key").expect("get"),
                 Some(Bytes::from_static(b"value_new")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
     });
@@ -223,7 +219,7 @@ fn should_apply_wal_tombstone_when_reopening_after_clean_shutdown() {
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
-            assert_eq!(tx.get(b"key").expect("get"), None, "mode: {}", mode);
+            assert_eq!(tx.get(b"key").expect("get"), None, "mode: {mode}");
         }
     });
 }
@@ -243,7 +239,7 @@ fn should_preserve_data_visibility_when_reopening_after_successful_flush_and_cle
 
             // Flush the committed writes to persistent storage
             for i in 0..20 {
-                let key = format!("key_{:03}", i);
+                let key = format!("key_{i:03}");
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
@@ -263,14 +259,13 @@ fn should_preserve_data_visibility_when_reopening_after_successful_flush_and_cle
 
             // Data should still be visible after the successful flush and reopen
             for i in 0..20 {
-                let key = format!("key_{:03}", i);
+                let key = format!("key_{i:03}");
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
                 assert!(
                     tx.get(key.as_bytes()).expect("get").is_some(),
-                    "mode: {}",
-                    mode
+                    "mode: {mode}"
                 );
             }
         }
@@ -295,7 +290,7 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
                         .create_column_family("test")
                         .expect("create cf");
                     for i in 0..5 {
-                        let key = format!("t_{}_k_{:02}", thread_id, i);
+                        let key = format!("t_{thread_id}_k_{i:02}");
                         let mut tx = engine_clone
                             .begin_tx(cf.id(), TransactionMode::ReadWrite)
                             .expect("begin_tx");
@@ -322,14 +317,13 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
             // All writes should be recoverable (no partial updates)
             for thread_id in 0..2 {
                 for i in 0..5 {
-                    let key = format!("t_{}_k_{:02}", thread_id, i);
+                    let key = format!("t_{thread_id}_k_{i:02}");
                     let tx = engine
                         .begin_tx(cf.id(), TransactionMode::ReadOnly)
                         .expect("begin_tx");
                     assert!(
                         tx.get(key.as_bytes()).expect("get").is_some(),
-                        "mode: {}",
-                        mode
+                        "mode: {mode}"
                     );
                 }
             }
@@ -348,7 +342,7 @@ fn should_preserve_single_cf_data_when_reopening_after_flush() {
 
             // Write to a single CF, then flush it
             for i in 0..5 {
-                let key = format!("key_{:02}", i);
+                let key = format!("key_{i:02}");
                 let mut tx = engine
                     .begin_tx(cf_default.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
@@ -370,14 +364,13 @@ fn should_preserve_single_cf_data_when_reopening_after_flush() {
 
             // All data should be recoverable after reopen
             for i in 0..5 {
-                let key = format!("key_{:02}", i);
+                let key = format!("key_{i:02}");
                 let tx = engine
                     .begin_tx(cf_default.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
                 assert!(
                     tx.get(key.as_bytes()).expect("get").is_some(),
-                    "mode: {}",
-                    mode
+                    "mode: {mode}"
                 );
             }
         }
@@ -395,13 +388,13 @@ fn should_preserve_data_when_reopening_after_flush_with_optional_compaction() {
 
             // Create enough data to trigger compaction
             for i in 0..30 {
-                let key = format!("key_{:03}", i);
+                let key = format!("key_{i:03}");
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
                 tx.put(
                     key.as_bytes().to_vec(),
-                    format!("value_{:03}", i).as_bytes().to_vec(),
+                    format!("value_{i:03}").as_bytes().to_vec(),
                     None,
                 )
                 .expect("put");
@@ -419,14 +412,13 @@ fn should_preserve_data_when_reopening_after_flush_with_optional_compaction() {
 
             // All data should still be present
             for i in 0..30 {
-                let key = format!("key_{:03}", i);
+                let key = format!("key_{i:03}");
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
                 assert!(
                     tx.get(key.as_bytes()).expect("get").is_some(),
-                    "mode: {}",
-                    mode
+                    "mode: {mode}"
                 );
             }
         }
@@ -444,7 +436,7 @@ fn should_preserve_original_data_when_reopening_after_flush() {
 
             // Create data
             for i in 0..20 {
-                let key = format!("key_{:02}", i);
+                let key = format!("key_{i:02}");
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
@@ -464,14 +456,13 @@ fn should_preserve_original_data_when_reopening_after_flush() {
 
             // All original data should be present
             for i in 0..20 {
-                let key = format!("key_{:02}", i);
+                let key = format!("key_{i:02}");
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
                 assert!(
                     tx.get(key.as_bytes()).expect("get").is_some(),
-                    "mode: {}",
-                    mode
+                    "mode: {mode}"
                 );
             }
         }
@@ -489,7 +480,7 @@ fn should_preserve_updated_values_when_reopening_after_multiple_flushes() {
 
             // Create initial SST
             for i in 0..15 {
-                let key = format!("old_{:02}", i);
+                let key = format!("old_{i:02}");
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
@@ -501,7 +492,7 @@ fn should_preserve_updated_values_when_reopening_after_multiple_flushes() {
 
             // Overwrite the same keys and flush again
             for i in 0..15 {
-                let key = format!("old_{:02}", i);
+                let key = format!("old_{i:02}");
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
@@ -521,14 +512,13 @@ fn should_preserve_updated_values_when_reopening_after_multiple_flushes() {
 
             // Updated data should be present
             for i in 0..15 {
-                let key = format!("old_{:02}", i);
+                let key = format!("old_{i:02}");
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
                 assert!(
                     tx.get(key.as_bytes()).expect("get").is_some(),
-                    "mode: {}",
-                    mode
+                    "mode: {mode}"
                 );
             }
         }
@@ -546,7 +536,7 @@ fn should_recover_valid_wal_records_when_reopening_after_clean_shutdown() {
 
             // Write valid records
             for i in 0..10 {
-                let key = format!("valid_{:02}", i);
+                let key = format!("valid_{i:02}");
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
@@ -565,15 +555,14 @@ fn should_recover_valid_wal_records_when_reopening_after_clean_shutdown() {
 
             // Valid records should be recovered after reopen
             for i in 0..10 {
-                let key = format!("valid_{:02}", i);
+                let key = format!("valid_{i:02}");
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get"),
                     Some(Bytes::from_static(b"value")),
-                    "mode: {}",
-                    mode
+                    "mode: {mode}"
                 );
             }
         }
@@ -604,7 +593,7 @@ fn should_evict_oldest_entries_when_idempotency_cache_exceeds_limit() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
 
-        let key = format!("key_{:08}", i);
+        let key = format!("key_{i:08}");
         tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
             .expect("put");
 
@@ -621,7 +610,7 @@ fn should_evict_oldest_entries_when_idempotency_cache_exceeds_limit() {
 /// Phase 0 Guardrail #3: Transaction atomicity barrier enforcement
 ///
 /// Validates that reads see consistent state when a transaction is committed
-/// in Batched mode. The pending_txn_min_seq barrier prevents seeing partial
+/// in Batched mode. The `pending_txn_min_seq` barrier prevents seeing partial
 /// transaction state.
 ///
 /// NOTE: This test validates that the transaction is atomic - the read sees

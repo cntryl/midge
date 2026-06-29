@@ -1,7 +1,7 @@
 //! Core KV Engine Integration Tests
 //!
 //! Tests the basic put/get/delete operations end-to-end using the public
-//! MidgeEngine API. These tests are **storage-mode invariant**: every supported
+//! `MidgeEngine` API. These tests are **storage-mode invariant**: every supported
 //! backend (Memory, FS, Cloud) must pass with identical behavior.
 //!
 //! Naming convention:
@@ -41,8 +41,7 @@ fn should_get_value_given_existing_key_when_put() {
         assert_eq!(
             got,
             Some(Bytes::from_static(b"value")),
-            "unexpected value in mode: {}",
-            mode
+            "unexpected value in mode: {mode}"
         );
     });
 }
@@ -61,7 +60,7 @@ fn should_return_none_given_nonexistent_key_when_get() {
         let got = tx.get(b"nonexistent").expect("get");
 
         // Assert
-        assert_eq!(got, None, "expected None in mode: {}", mode);
+        assert_eq!(got, None, "expected None in mode: {mode}");
     });
 }
 
@@ -94,8 +93,7 @@ fn should_overwrite_value_given_existing_key_when_put() {
         assert_eq!(
             got,
             Some(Bytes::from_static(b"value2")),
-            "incorrect overwrite behavior in mode: {}",
-            mode
+            "incorrect overwrite behavior in mode: {mode}"
         );
     });
 }
@@ -120,7 +118,7 @@ fn should_handle_empty_value_when_put() {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin_tx");
         let got = tx.get(b"key").expect("get empty");
-        assert_eq!(got, Some(Bytes::new()), "failed in mode: {}", mode);
+        assert_eq!(got, Some(Bytes::new()), "failed in mode: {mode}");
     });
 }
 
@@ -148,8 +146,7 @@ fn should_handle_binary_data_when_put() {
         assert_eq!(
             got,
             Some(Bytes::from(data)),
-            "binary mismatch in mode: {}",
-            mode
+            "binary mismatch in mode: {mode}"
         );
     });
 }
@@ -180,7 +177,7 @@ fn should_return_none_given_deleted_key_when_get() {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin_tx");
         let got = tx.get(b"key").expect("get");
-        assert_eq!(got, None, "expected None after delete in mode: {}", mode);
+        assert_eq!(got, None, "expected None after delete in mode: {mode}");
     });
 }
 
@@ -235,9 +232,7 @@ fn should_handle_many_operations_when_sequential() {
             assert_eq!(
                 got,
                 Some(Bytes::from(expected)),
-                "mismatch for key {} in mode: {}",
-                key,
-                mode
+                "mismatch for key {key} in mode: {mode}"
             );
         }
     });
@@ -269,8 +264,7 @@ fn should_retrieve_written_data_across_storage_modes() {
         let got = tx.get(b"artifact_test_0").expect("get");
         assert!(
             got.is_some(),
-            "failed to retrieve written data in mode: {}",
-            mode
+            "failed to retrieve written data in mode: {mode}"
         );
     });
 }

@@ -3,12 +3,21 @@ use crate::runtime::{CompactionPlan, RuntimeResponse};
 
 pub(super) struct CompactionCoordinator;
 
+pub(super) struct CompactionCompleteRequest {
+    pub request_id: u64,
+    pub input_ssts: Vec<String>,
+    pub output_ssts: Vec<String>,
+    pub cf_id: crate::types::ColumnFamilyId,
+    pub target_level: u32,
+    pub succeeded: bool,
+}
+
 impl CompactionCoordinator {
     pub(super) fn check(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
         match event_loop.schedule_one_background_compaction_if_needed("CheckCompaction") {
             Ok(_) => event_loop.respond(request_id, RuntimeResponse::Ok { request_id }),
             Err(error) => {
-                event_loop.respond(request_id, RuntimeResponse::Error { request_id, error })
+                event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             }
         }
         HandleOutcome::Continue
@@ -143,16 +152,18 @@ impl CompactionCoordinator {
         HandleOutcome::Continue
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn complete(
         event_loop: &mut EventLoop,
-        request_id: u64,
-        input_ssts: Vec<String>,
-        output_ssts: Vec<String>,
-        cf_id: crate::types::ColumnFamilyId,
-        target_level: u32,
-        succeeded: bool,
+        request: CompactionCompleteRequest,
     ) -> HandleOutcome {
+        let CompactionCompleteRequest {
+            request_id,
+            input_ssts,
+            output_ssts,
+            cf_id,
+            target_level,
+            succeeded,
+        } = request;
         let mut allow_emergent_followup = false;
 
         let _prev = event_loop
@@ -232,8 +243,7 @@ impl CompactionCoordinator {
                 RuntimeResponse::Error {
                     request_id,
                     error: crate::common::MidgeError::Internal(format!(
-                        "failed to apply compaction to manifest: {}",
-                        error
+                        "failed to apply compaction to manifest: {error}"
                     )),
                 },
             );
@@ -250,8 +260,7 @@ impl CompactionCoordinator {
                 RuntimeResponse::Error {
                     request_id,
                     error: crate::common::MidgeError::Internal(format!(
-                        "failed to persist manifest after compaction: {}",
-                        error
+                        "failed to persist manifest after compaction: {error}"
                     )),
                 },
             );
@@ -268,8 +277,7 @@ impl CompactionCoordinator {
                 RuntimeResponse::Error {
                     request_id,
                     error: crate::common::MidgeError::Internal(format!(
-                        "failed to mirror manifest after compaction: {}",
-                        error
+                        "failed to mirror manifest after compaction: {error}"
                     )),
                 },
             );
@@ -330,8 +338,7 @@ impl CompactionCoordinator {
                 RuntimeResponse::Error {
                     request_id,
                     error: crate::common::MidgeError::Internal(format!(
-                        "failed to mirror cleared compaction publication intent: {}",
-                        error
+                        "failed to mirror cleared compaction publication intent: {error}"
                     )),
                 },
             );

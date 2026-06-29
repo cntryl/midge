@@ -694,8 +694,8 @@ fn should_allow_concurrent_writes_to_different_keys() {
                 let mut txn = engine_clone
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                     .unwrap();
-                let key = format!("key{}", i);
-                let value = format!("value{}", i);
+                let key = format!("key{i}");
+                let value = format!("value{i}");
                 txn.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .unwrap();
                 txn.commit(cntryl_midge::WriteOptions::buffered())
@@ -712,8 +712,8 @@ fn should_allow_concurrent_writes_to_different_keys() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
         for i in 0..10 {
-            let key = format!("key{}", i);
-            let expected = format!("value{}", i);
+            let key = format!("key{i}");
+            let expected = format!("value{i}");
             assert_eq!(
                 read_tx.get(key.as_bytes()).unwrap(),
                 Some(Bytes::from(expected.as_bytes().to_vec()))
@@ -738,7 +738,7 @@ fn should_handle_high_contention_writes_without_panic() {
                 let mut txn = engine_clone
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                     .unwrap();
-                let value = format!("value{}", i);
+                let value = format!("value{i}");
                 txn.put(b"hotkey".to_vec(), value.as_bytes().to_vec(), None)
                     .unwrap();
                 txn.commit(cntryl_midge::WriteOptions::buffered())
@@ -788,7 +788,7 @@ fn should_handle_concurrent_read_modify_writes_without_panic() {
                 let mut txn = engine_clone
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                     .unwrap();
-                let new_value = format!("{}", i);
+                let new_value = format!("{i}");
                 txn.put(b"counter".to_vec(), new_value.as_bytes().to_vec(), None)
                     .unwrap();
                 txn.commit(cntryl_midge::WriteOptions::buffered())
@@ -831,7 +831,7 @@ fn should_handle_high_concurrency_optimistic_locking() {
                 let mut txn = engine_clone
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                     .unwrap();
-                let write_val = format!("{}", i);
+                let write_val = format!("{i}");
                 txn.put(b"value".to_vec(), write_val.as_bytes().to_vec(), None)
                     .unwrap();
                 txn.commit(cntryl_midge::WriteOptions::buffered())
@@ -990,16 +990,8 @@ fn should_not_reject_writes_when_no_conflict_exists_given_disjoint_keys() {
         let r2 = txn2.commit(cntryl_midge::WriteOptions::buffered());
 
         // Assert: Both must succeed (no false positive conflict detection)
-        assert!(
-            r1.is_ok(),
-            "Non-conflicting write 1 was rejected in {}",
-            mode
-        );
-        assert!(
-            r2.is_ok(),
-            "Non-conflicting write 2 was rejected in {}",
-            mode
-        );
+        assert!(r1.is_ok(), "Non-conflicting write 1 was rejected in {mode}");
+        assert!(r2.is_ok(), "Non-conflicting write 2 was rejected in {mode}");
 
         let read_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -1059,14 +1051,12 @@ fn should_preserve_both_writes_when_non_overlapping_keys_given_concurrent_commit
         assert_eq!(
             v1,
             Some(Bytes::from_static(b"new1")),
-            "key1 update lost in {}",
-            mode
+            "key1 update lost in {mode}"
         );
         assert_eq!(
             v2,
             Some(Bytes::from_static(b"new2")),
-            "key2 update lost in {}",
-            mode
+            "key2 update lost in {mode}"
         );
     });
 }

@@ -115,8 +115,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
         "local" => {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
+                .map_or(0, |d| d.as_nanos());
             let test_dir = PathBuf::from(format!(
                 "target/tmp/midge_test_local_{}_{}_{}",
                 std::process::id(),
@@ -137,8 +136,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
         "cloud" => {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
+                .map_or(0, |d| d.as_nanos());
             let test_dir = PathBuf::from(format!(
                 "target/tmp/midge_test_cloud_{}_{}_{}",
                 std::process::id(),
@@ -158,7 +156,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 memory_budget: None,
             }
         }
-        _ => panic!("unknown storage mode: {}", mode),
+        _ => panic!("unknown storage mode: {mode}"),
     }
 }
 
@@ -247,7 +245,10 @@ pub fn assert_get_equals(
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin_tx failed");
     let result = tx.get(key).expect("get failed");
-    assert_eq!(result.as_ref().map(|b| b.as_ref()), Some(expected));
+    assert_eq!(
+        result.as_ref().map(std::convert::AsRef::as_ref),
+        Some(expected)
+    );
 }
 
 pub fn assert_key_absent(engine: &MidgeEngine, cf: &ColumnFamilyHandle, key: &[u8]) {

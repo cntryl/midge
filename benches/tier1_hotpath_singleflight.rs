@@ -49,7 +49,7 @@ fn bench_singleflight_flush_fanout(c: &mut Criterion) {
                     black_box(ran)
                 },
                 BatchSize::SmallInput,
-            )
+            );
         });
 
         // Optional: includes submit_async + flush + wait, mapping closely to the
@@ -77,7 +77,7 @@ fn bench_singleflight_flush_fanout(c: &mut Criterion) {
                     total = total.wrapping_add(ran);
                 }
                 black_box(total)
-            })
+            });
         });
     }
 

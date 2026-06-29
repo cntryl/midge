@@ -7,7 +7,7 @@
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
 //!
-//! These tests run across all storage modes (Memory, LocalDisk, CloudBacked).
+//! These tests run across all storage modes (Memory, `LocalDisk`, `CloudBacked`).
 
 use bytes::Bytes;
 mod common;
@@ -45,8 +45,8 @@ fn should_iterate_all_keys_in_order_given_populated_db_when_scanning() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -62,8 +62,8 @@ fn should_iterate_all_keys_in_order_given_populated_db_when_scanning() {
         // Assert
         assert_eq!(results.len(), 10);
         for (idx, (k, v)) in results.iter().enumerate() {
-            assert_eq!(k, format!("k{:02}", idx).as_bytes());
-            assert_eq!(v, format!("v{:02}", idx).as_bytes());
+            assert_eq!(k, format!("k{idx:02}").as_bytes());
+            assert_eq!(v, format!("v{idx:02}").as_bytes());
         }
     });
 }
@@ -80,8 +80,8 @@ fn should_iterate_in_reverse_given_reverse_query_when_scanning() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -117,8 +117,8 @@ fn should_limit_results_given_limit_query_when_scanning() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -250,8 +250,8 @@ fn should_skip_deleted_keys_given_tombstones_when_scanning() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -292,8 +292,8 @@ fn should_respect_range_tombstones_given_delete_range_when_scanning() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -381,8 +381,8 @@ fn should_match_regular_scan_given_streaming_scan_when_comparing() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -416,8 +416,8 @@ fn should_respect_limit_given_streaming_scan_when_limited() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -452,8 +452,8 @@ fn should_respect_limit_in_reverse_query_when_limited() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -487,8 +487,8 @@ fn should_apply_tombstones_given_streaming_scan_when_keys_deleted() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -529,8 +529,8 @@ fn should_handle_large_scan_given_many_keys_when_iterating() {
             .unwrap();
         for i in 0..500 {
             tx.put(
-                format!("k{:04}", i).as_bytes().to_vec(),
-                format!("v{:04}", i).as_bytes().to_vec(),
+                format!("k{i:04}").as_bytes().to_vec(),
+                format!("v{i:04}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -548,8 +548,8 @@ fn should_handle_large_scan_given_many_keys_when_iterating() {
 
         // Verify ordering
         for (idx, (k, v)) in results.iter().enumerate() {
-            assert_eq!(k, format!("k{:04}", idx).as_bytes());
-            assert_eq!(v, format!("v{:04}", idx).as_bytes());
+            assert_eq!(k, format!("k{idx:04}").as_bytes());
+            assert_eq!(v, format!("v{idx:04}").as_bytes());
         }
     });
 }
@@ -562,8 +562,8 @@ fn should_iterate_memtable_plus_multiple_ssts_given_flushed_batches_when_scannin
 
     for batch in 0..3 {
         for i in 0..20 {
-            let key = format!("sst{:02}_k{:02}", batch, i);
-            let value = format!("sst{:02}_v{:02}", batch, i);
+            let key = format!("sst{batch:02}_k{i:02}");
+            let value = format!("sst{batch:02}_v{i:02}");
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
@@ -574,8 +574,8 @@ fn should_iterate_memtable_plus_multiple_ssts_given_flushed_batches_when_scannin
     }
 
     for i in 0..10 {
-        let key = format!("mem_k{:02}", i);
-        let value = format!("mem_v{:02}", i);
+        let key = format!("mem_k{i:02}");
+        let value = format!("mem_v{i:02}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
@@ -728,8 +728,8 @@ fn should_handle_concurrent_streaming_scans_when_multiple_threads() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -776,8 +776,8 @@ fn should_produce_identical_results_given_repeated_scans_when_rewinding() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();

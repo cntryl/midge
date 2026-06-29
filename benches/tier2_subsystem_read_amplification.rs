@@ -30,7 +30,7 @@ const SCAN_WIDTH: usize = 10;
 
 #[inline]
 fn key_from_index(idx: usize) -> Bytes {
-    Bytes::from(format!("key:{:010}", idx))
+    Bytes::from(format!("key:{idx:010}"))
 }
 
 fn precompute_zipf_keys(count: usize, max_key: usize, alpha: f64) -> Vec<Bytes> {
@@ -63,10 +63,10 @@ struct SstSimulator {
 }
 
 impl SstSimulator {
-    /// Create SST with keys in range [start_key, start_key+num_keys)
+    /// Create SST with keys in range [`start_key`, `start_key+num_keys`)
     fn new(sst_id: u64, start_key: usize, num_keys: usize) -> Self {
         let keys: Vec<Bytes> = (start_key..start_key + num_keys)
-            .map(|i| Bytes::from(format!("key:{:010}", i)))
+            .map(|i| Bytes::from(format!("key:{i:010}")))
             .collect();
 
         let num_blocks = num_keys.div_ceil(KEYS_PER_BLOCK);
@@ -125,7 +125,7 @@ impl SstSimulator {
 struct LsmSimulator {
     /// Level -> Vec of SSTs
     levels: Vec<Vec<SstSimulator>>,
-    /// Cache: (sst_id, block_idx) -> bool
+    /// Cache: (`sst_id`, `block_idx`) -> bool
     cache: std::collections::HashMap<(u64, usize), bool>,
     cache_capacity: usize,
 }
@@ -183,7 +183,7 @@ impl LsmSimulator {
                             // Add to cache (with simple LRU eviction)
                             if self.cache.len() >= self.cache_capacity {
                                 // Evict first entry (simple FIFO for now)
-                                if let Some(k) = self.cache.keys().next().cloned() {
+                                if let Some(k) = self.cache.keys().next().copied() {
                                     self.cache.remove(&k);
                                 }
                             }
@@ -202,15 +202,15 @@ impl LsmSimulator {
         (blocks_read, cache_hits, found)
     }
 
-    /// Range scan across keys [start_key, start_key+num_keys)
-    /// Returns (total_blocks_read, cache_hits, keys_found)
+    /// Range scan across keys [`start_key`, `start_key+num_keys`)
+    /// Returns (`total_blocks_read`, `cache_hits`, `keys_found`)
     fn scan(&mut self, start_key: usize, num_keys: usize) -> (u32, u32, u32) {
         let mut blocks_read = 0u32;
         let mut cache_hits = 0u32;
         let mut keys_found = 0u32;
 
         let keys: Vec<Bytes> = (start_key..start_key + num_keys)
-            .map(|i| Bytes::from(format!("key:{:010}", i)))
+            .map(|i| Bytes::from(format!("key:{i:010}")))
             .collect();
 
         for key in &keys {
@@ -232,7 +232,7 @@ impl LsmSimulator {
 }
 
 /// Zipfian key distribution generator
-/// Returns keys with frequency distribution: P(key_i) ∝ 1 / (i+1)^alpha
+/// Returns keys with frequency distribution: `P(key_i)` ∝ 1 / (i+1)^alpha
 struct ZipfianDistribution {
     seed: u64,
     alpha: f64,
@@ -252,7 +252,7 @@ impl ZipfianDistribution {
     fn next(&mut self) -> usize {
         // Simple LCG for determinism
         self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-        let u = ((self.seed >> 32) as f64) / (u32::MAX as f64); // [0, 1)
+        let u = ((self.seed >> 32) as f64) / f64::from(u32::MAX); // [0, 1)
 
         // Inverse transform sampling for Zipfian
         let zeta = 1.6; // Approximate zeta(2, 1.5) for alpha=1.5
@@ -297,7 +297,7 @@ fn bench_read_amp_point_lookups_zipfian(c: &mut Criterion) {
             }
 
             black_box((total_blocks_read, total_cache_hits, total_found))
-        })
+        });
     });
 
     group.finish();
@@ -341,7 +341,7 @@ fn bench_read_amp_mixed_get_scan(c: &mut Criterion) {
             }
 
             black_box((total_blocks_read, total_cache_hits, total_found))
-        })
+        });
     });
 
     group.finish();
@@ -374,7 +374,7 @@ fn bench_read_amp_uniform_distribution(c: &mut Criterion) {
             }
 
             black_box((total_blocks_read, total_cache_hits, total_found))
-        })
+        });
     });
 
     group.finish();

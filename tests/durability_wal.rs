@@ -7,7 +7,7 @@
 //! - Record replay during recovery
 //! - Corruption handling
 //!
-//! **Storage Modes**: LocalDisk + CloudBacked ONLY (requires persistence)
+//! **Storage Modes**: `LocalDisk` + `CloudBacked` ONLY (requires persistence)
 //!
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
@@ -54,14 +54,12 @@ fn should_recover_writes_given_unflushed_memtable_when_reopening() {
             assert_eq!(
                 tx.get(b"key1").expect("get"),
                 Some(Bytes::from_static(b"value1")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
             assert_eq!(
                 tx.get(b"key2").expect("get"),
                 Some(Bytes::from_static(b"value2")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
     });
@@ -95,8 +93,7 @@ fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
             assert_eq!(
                 tx.get(b"critical_key").expect("get"),
                 Some(Bytes::from_static(b"critical_value")),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
     });
@@ -115,7 +112,7 @@ fn should_call_fsync_given_wal_sync_enabled_when_put() {
         let result = tx.put(b"test_key".to_vec(), b"test_value".to_vec(), None);
 
         // Assert: Put succeeds (fsync was called without blocking)
-        assert!(result.is_ok(), "put should succeed in mode: {}", mode);
+        assert!(result.is_ok(), "put should succeed in mode: {mode}");
         tx.commit(WriteOptions::buffered()).unwrap();
     });
 }
@@ -137,8 +134,8 @@ fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
             // Write enough data to trigger WAL rotation
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
             for i in 0..1000 {
-                let key = format!("key_{:04}", i);
-                let value = format!("value_{:04}_with_padding_to_exceed_buffer_size", i);
+                let key = format!("key_{i:04}");
+                let value = format!("value_{i:04}_with_padding_to_exceed_buffer_size");
                 tx.put(key.into_bytes(), value.into_bytes(), None)
                     .expect("put");
             }
@@ -155,21 +152,9 @@ fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
 
             // Spot check across the range
             let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-            assert!(
-                tx.get(b"key_0000").expect("get").is_some(),
-                "mode: {}",
-                mode
-            );
-            assert!(
-                tx.get(b"key_0500").expect("get").is_some(),
-                "mode: {}",
-                mode
-            );
-            assert!(
-                tx.get(b"key_0999").expect("get").is_some(),
-                "mode: {}",
-                mode
-            );
+            assert!(tx.get(b"key_0000").expect("get").is_some(), "mode: {mode}");
+            assert!(tx.get(b"key_0500").expect("get").is_some(), "mode: {mode}");
+            assert!(tx.get(b"key_0999").expect("get").is_some(), "mode: {mode}");
         }
     });
 }
@@ -192,8 +177,8 @@ fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
             for batch in 0..3 {
                 let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
                 for i in 0..100 {
-                    let key = format!("batch_{}_key_{:03}", batch, i);
-                    let value = format!("batch_{}_value_{:03}", batch, i);
+                    let key = format!("batch_{batch}_key_{i:03}");
+                    let value = format!("batch_{batch}_value_{i:03}");
                     tx.put(key.into_bytes(), value.into_bytes(), None)
                         .expect("put");
                 }
@@ -211,12 +196,10 @@ fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
             let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
             for batch in 0..3 {
                 for i in 0..100 {
-                    let key = format!("batch_{}_key_{:03}", batch, i);
+                    let key = format!("batch_{batch}_key_{i:03}");
                     assert!(
                         tx.get(key.as_bytes()).expect("get").is_some(),
-                        "Missing key from batch {} in mode: {}",
-                        batch,
-                        mode
+                        "Missing key from batch {batch} in mode: {mode}"
                     );
                 }
             }
@@ -240,8 +223,8 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
                 let engine_clone = std::sync::Arc::clone(&engine);
                 let handle = std::thread::spawn(move || {
                     for i in 0..20 {
-                        let key = format!("thread_{}_key_{:02}", thread_id, i);
-                        let value = format!("thread_{}_value_{:02}", thread_id, i);
+                        let key = format!("thread_{thread_id}_key_{i:02}");
+                        let value = format!("thread_{thread_id}_value_{i:02}");
                         let mut tx = engine_clone
                             .begin_tx(cf_id, TransactionMode::ReadWrite)
                             .unwrap();
@@ -268,12 +251,10 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
             let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
             for thread_id in 0..5 {
                 for i in 0..20 {
-                    let key = format!("thread_{}_key_{:02}", thread_id, i);
+                    let key = format!("thread_{thread_id}_key_{i:02}");
                     assert!(
                         tx.get(key.as_bytes()).expect("get").is_some(),
-                        "Missing write from thread {} in mode: {}",
-                        thread_id,
-                        mode
+                        "Missing write from thread {thread_id} in mode: {mode}"
                     );
                 }
             }
@@ -298,7 +279,7 @@ fn should_skip_corrupted_wal_tail_given_truncated_tail_when_recovering() {
             // Write data (some will be in incomplete record at tail)
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
             for i in 0..10 {
-                let key = format!("key_{:02}", i);
+                let key = format!("key_{i:02}");
                 tx.put(key.into_bytes(), b"value".to_vec(), None)
                     .expect("put");
             }
@@ -423,13 +404,11 @@ fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
             let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
             assert!(
                 tx.get(b"valid_key_1").expect("get").is_some(),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
             assert!(
                 tx.get(b"valid_key_2").expect("get").is_some(),
-                "mode: {}",
-                mode
+                "mode: {mode}"
             );
         }
     });

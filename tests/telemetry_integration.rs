@@ -22,7 +22,7 @@ fn should_preserve_all_values_given_repeated_reads_when_values_accessed_repeated
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin write transaction");
         for i in 0..50 {
-            let key = format!("metrics_read_key_{:04}", i);
+            let key = format!("metrics_read_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"metric_value".to_vec(), None)
                 .expect("put read-path value");
         }
@@ -36,13 +36,11 @@ fn should_preserve_all_values_given_repeated_reads_when_values_accessed_repeated
 
         // Assert
         for i in 0..50 {
-            let key = format!("metrics_read_key_{:04}", i);
+            let key = format!("metrics_read_key_{i:04}");
             assert_eq!(
                 tx.get(key.as_bytes()).expect("read repeated-read key"),
                 Some(Bytes::from_static(b"metric_value")),
-                "mode: {} key: {}",
-                mode,
-                key
+                "mode: {mode} key: {key}"
             );
         }
     });
@@ -62,7 +60,7 @@ fn should_preserve_all_written_values_given_large_write_batch_when_written() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin write batch transaction");
         for i in 0..100 {
-            let key = format!("metrics_write_key_{:04}", i);
+            let key = format!("metrics_write_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), value.to_vec(), None)
                 .expect("put write-batch value");
         }
@@ -73,13 +71,11 @@ fn should_preserve_all_written_values_given_large_write_batch_when_written() {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin verification transaction");
         for i in 0..100 {
-            let key = format!("metrics_write_key_{:04}", i);
+            let key = format!("metrics_write_key_{i:04}");
             assert_eq!(
                 tx.get(key.as_bytes()).expect("read write-batch key"),
                 Some(Bytes::from_static(value)),
-                "mode: {} key: {}",
-                mode,
-                key
+                "mode: {mode} key: {key}"
             );
         }
     });
@@ -96,7 +92,7 @@ fn should_preserve_all_values_given_compaction_when_requested() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin first batch transaction");
         for i in 0..100 {
-            let key = format!("compact_metric_key_{:04}", i);
+            let key = format!("compact_metric_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"gen1".to_vec(), None)
                 .expect("put first compaction batch value");
         }
@@ -107,7 +103,7 @@ fn should_preserve_all_values_given_compaction_when_requested() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin second batch transaction");
         for i in 100..200 {
-            let key = format!("compact_metric_key_{:04}", i);
+            let key = format!("compact_metric_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"gen2".to_vec(), None)
                 .expect("put second compaction batch value");
         }
@@ -122,7 +118,7 @@ fn should_preserve_all_values_given_compaction_when_requested() {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin verification transaction");
         for i in 0..200 {
-            let key = format!("compact_metric_key_{:04}", i);
+            let key = format!("compact_metric_key_{i:04}");
             let expected = if i < 100 {
                 Bytes::from_static(b"gen1")
             } else {
@@ -131,9 +127,7 @@ fn should_preserve_all_values_given_compaction_when_requested() {
             assert_eq!(
                 tx.get(key.as_bytes()).expect("read compacted key"),
                 Some(expected),
-                "mode: {} key: {}",
-                mode,
-                key
+                "mode: {mode} key: {key}"
             );
         }
     });
@@ -150,7 +144,7 @@ fn should_preserve_repeated_reads_given_short_cache_warmup_window_when_reads_rep
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin cache seed transaction");
         for i in 0..100 {
-            let key = format!("cache_metric_key_{:04}", i);
+            let key = format!("cache_metric_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"cached_value".to_vec(), None)
                 .expect("put cache seed value");
         }
@@ -162,7 +156,7 @@ fn should_preserve_repeated_reads_given_short_cache_warmup_window_when_reads_rep
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin first read transaction");
         for i in 0..50 {
-            let key = format!("cache_metric_key_{:04}", i);
+            let key = format!("cache_metric_key_{i:04}");
             assert_eq!(
                 tx.get(key.as_bytes()).expect("read first-pass cache key"),
                 Some(Bytes::from_static(b"cached_value"))
@@ -177,13 +171,11 @@ fn should_preserve_repeated_reads_given_short_cache_warmup_window_when_reads_rep
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin second read transaction");
         for i in 0..50 {
-            let key = format!("cache_metric_key_{:04}", i);
+            let key = format!("cache_metric_key_{i:04}");
             assert_eq!(
                 tx.get(key.as_bytes()).expect("read second-pass cache key"),
                 Some(Bytes::from_static(b"cached_value")),
-                "mode: {} key: {}",
-                mode,
-                key
+                "mode: {mode} key: {key}"
             );
         }
     });
@@ -203,7 +195,7 @@ fn should_preserve_large_values_given_wal_backed_write_batch_when_flushed() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin wal-sized write transaction");
         for i in 0..100 {
-            let key = format!("wal_metric_key_{:04}", i);
+            let key = format!("wal_metric_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), value.clone(), None)
                 .expect("put wal-sized value");
         }
@@ -236,7 +228,7 @@ fn should_preserve_existing_data_given_placeholder_reset_when_new_write_added() 
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin initial seed transaction");
         for i in 0..50 {
-            let key = format!("reset_metric_key_{:04}", i);
+            let key = format!("reset_metric_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put initial reset key");
         }
@@ -255,13 +247,11 @@ fn should_preserve_existing_data_given_placeholder_reset_when_new_write_added() 
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin verification transaction");
         for i in 0..50 {
-            let key = format!("reset_metric_key_{:04}", i);
+            let key = format!("reset_metric_key_{i:04}");
             assert_eq!(
                 tx.get(key.as_bytes()).expect("read preserved reset key"),
                 Some(Bytes::from_static(b"value")),
-                "mode: {} key: {}",
-                mode,
-                key
+                "mode: {mode} key: {key}"
             );
         }
         assert_eq!(
