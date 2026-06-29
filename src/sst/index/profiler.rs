@@ -123,7 +123,7 @@ impl KeyStructureProfiler {
 
         // Calculate average shared prefix
         let avg_shared_prefix = if key_count > 1 {
-            self.shared_prefix_sum as f32 / (key_count - 1) as f32
+            usize_to_f32(self.shared_prefix_sum) / usize_to_f32(key_count - 1)
         } else {
             0.0
         };
@@ -165,7 +165,7 @@ impl KeyStructureProfiler {
         let mut entropy = 0.0;
         for &count in &self.byte_freq {
             if count > 0 {
-                let p = count as f32 / self.total_bytes as f32;
+                let p = usize_to_f32(count) / usize_to_f32(self.total_bytes);
                 entropy -= p * p.log2();
             }
         }
@@ -197,17 +197,17 @@ impl KeyStructureProfiler {
             return 0.0;
         }
 
-        let mean_len =
-            self.keys.iter().map(std::vec::Vec::len).sum::<usize>() as f32 / self.keys.len() as f32;
+        let mean_len = usize_to_f32(self.keys.iter().map(std::vec::Vec::len).sum::<usize>())
+            / usize_to_f32(self.keys.len());
         let variance = self
             .keys
             .iter()
             .map(|k| {
-                let diff = k.len() as f32 - mean_len;
+                let diff = usize_to_f32(k.len()) - mean_len;
                 diff * diff
             })
             .sum::<f32>()
-            / self.keys.len() as f32;
+            / usize_to_f32(self.keys.len());
 
         variance.sqrt()
     }
@@ -224,9 +224,28 @@ fn lcp(a: &[u8], b: &[u8]) -> usize {
     a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }
 
+fn usize_to_f32(value: usize) -> f32 {
+    let value = u64::try_from(value).unwrap_or(u64::MAX);
+    let chunk_0 = u16::try_from(value & 0xFFFF).unwrap_or(u16::MAX);
+    let chunk_1 = u16::try_from((value >> 16) & 0xFFFF).unwrap_or(u16::MAX);
+    let chunk_2 = u16::try_from((value >> 32) & 0xFFFF).unwrap_or(u16::MAX);
+    let chunk_3 = u16::try_from((value >> 48) & 0xFFFF).unwrap_or(u16::MAX);
+    f32::from(chunk_0)
+        + f32::from(chunk_1) * 65_536.0
+        + f32::from(chunk_2) * 4_294_967_296.0
+        + f32::from(chunk_3) * 281_474_976_710_656.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= f32::EPSILON,
+            "expected {expected}, got {actual}"
+        );
+    }
 
     #[test]
     fn should_profile_structured_keys() {
@@ -303,8 +322,8 @@ mod tests {
 
         // Assert
         assert_eq!(profile.key_count, 0);
-        assert_eq!(profile.avg_shared_prefix, 0.0);
-        assert_eq!(profile.entropy, 0.0);
+        assert_close(profile.avg_shared_prefix, 0.0);
+        assert_close(profile.entropy, 0.0);
         assert_eq!(profile.common_prefix_len, 0);
     }
 
@@ -334,7 +353,7 @@ mod tests {
 
         // Assert
         assert_eq!(profile.key_count, 1);
-        assert_eq!(profile.avg_shared_prefix, 0.0);
+        assert_close(profile.avg_shared_prefix, 0.0);
         assert!(profile.entropy >= 0.0);
     }
 
@@ -382,9 +401,9 @@ mod tests {
 
         // Assert
         assert_eq!(profile.key_count, 3);
-        assert_eq!(profile.avg_shared_prefix, 4.0); // All bytes match
+        assert_close(profile.avg_shared_prefix, 4.0); // All bytes match
         assert_eq!(profile.common_prefix_len, 4);
-        assert_eq!(profile.key_length_variance, 0.0);
+        assert_close(profile.key_length_variance, 0.0);
     }
 
     #[test]
@@ -394,7 +413,7 @@ mod tests {
 
         // Act
         for i in 0..255 {
-            let byte = i as u8;
+            let byte = u8::try_from(i).unwrap();
             profiler.add_key(&[byte]);
         }
         let profile = profiler.finish();
@@ -415,7 +434,7 @@ mod tests {
         let profile = profiler.finish();
 
         // Assert
-        assert_eq!(profile.entropy, 0.0); // All same byte
+        assert_close(profile.entropy, 0.0); // All same byte
     }
 
     #[test]

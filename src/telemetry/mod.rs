@@ -27,7 +27,7 @@ impl Telemetry {
     /// Initialize global telemetry
     pub fn init(config: TelemetryConfig) -> crate::common::MidgeResult<()> {
         let enabled = config.enabled;
-        let metrics = Metrics::new(&config)?;
+        let metrics = Metrics::new(&config);
 
         #[cfg(feature = "telemetry")]
         if enabled {

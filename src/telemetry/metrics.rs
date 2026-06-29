@@ -3,7 +3,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::common::MidgeResult;
 use crate::telemetry::config::TelemetryConfig;
 
 /// Metric counters (atomic, zero-copy)
@@ -123,8 +122,9 @@ pub struct Metrics {
 
 impl Metrics {
     /// Create a new metrics collector
-    pub fn new(config: &TelemetryConfig) -> MidgeResult<Self> {
-        Ok(Self {
+    #[must_use]
+    pub fn new(config: &TelemetryConfig) -> Self {
+        Self {
             puts: Arc::new(AtomicU64::new(0)),
             deletes: Arc::new(AtomicU64::new(0)),
             merges: Arc::new(AtomicU64::new(0)),
@@ -198,7 +198,7 @@ impl Metrics {
             event_loop_wakes: Arc::new(AtomicU64::new(0)),
             event_loop_batch_total: Arc::new(AtomicU64::new(0)),
             enabled: config.enabled && config.enable_metrics,
-        })
+        }
     }
 
     #[inline]
@@ -647,7 +647,7 @@ impl Metrics {
             return None;
         }
         let hits = self.idempotency_cache_hits.load(Ordering::Relaxed);
-        Some(hits as f64 / total as f64)
+        Some(u64_to_f64(hits) / u64_to_f64(total))
     }
 
     /// Get average pending transaction duration in milliseconds
@@ -658,7 +658,7 @@ impl Metrics {
             return None;
         }
         let total = self.pending_txn_duration_ms_total.load(Ordering::Relaxed);
-        Some(total as f64 / count as f64)
+        Some(u64_to_f64(total) / u64_to_f64(count))
     }
 
     /// Get all metrics as a snapshot
@@ -762,7 +762,7 @@ impl MetricsSnapshot {
         if total == 0 {
             0.0
         } else {
-            self.cache_hits as f64 / total as f64
+            u64_to_f64(self.cache_hits) / u64_to_f64(total)
         }
     }
 
@@ -777,6 +777,13 @@ impl MetricsSnapshot {
     }
 }
 
+fn u64_to_f64(value: u64) -> f64 {
+    let upper = u32::try_from(value >> 32).unwrap_or(u32::MAX);
+    let lower_mask = u64::from(u32::MAX);
+    let lower = u32::try_from(value & lower_mask).unwrap_or(u32::MAX);
+    f64::from(upper) * 4_294_967_296.0 + f64::from(lower)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,7 +792,7 @@ mod tests {
     fn should_record_metrics_atomically() {
         // Arrange
         let config = TelemetryConfig::default().with_enabled(true);
-        let metrics = Metrics::new(&config).unwrap();
+        let metrics = Metrics::new(&config);
 
         // Act
         metrics.record_put();
@@ -803,7 +810,7 @@ mod tests {
     fn should_calculate_cache_hit_ratio() {
         // Arrange
         let config = TelemetryConfig::default().with_enabled(true);
-        let metrics = Metrics::new(&config).unwrap();
+        let metrics = Metrics::new(&config);
 
         // Act
         metrics.record_cache_hit();
@@ -820,7 +827,7 @@ mod tests {
     fn should_not_record_when_disabled() {
         // Arrange
         let config = TelemetryConfig::default().with_enabled(false);
-        let metrics = Metrics::new(&config).unwrap();
+        let metrics = Metrics::new(&config);
 
         // Act
         metrics.record_put();
@@ -836,7 +843,7 @@ mod tests {
     fn should_record_recovery_metrics_when_replay_occurs() {
         // Arrange
         let config = TelemetryConfig::default().with_enabled(true);
-        let metrics = Metrics::new(&config).unwrap();
+        let metrics = Metrics::new(&config);
 
         // Act
         metrics.record_wal_recovery(42, 4096);
@@ -855,7 +862,7 @@ mod tests {
     fn should_record_strict_write_conflict_metrics_with_breakdown() {
         // Arrange
         let config = TelemetryConfig::default().with_enabled(true);
-        let metrics = Metrics::new(&config).unwrap();
+        let metrics = Metrics::new(&config);
 
         // Act
         metrics.record_write_conflict_point();
