@@ -8,10 +8,18 @@ use crate::common::MidgeResult;
 /// Reader contract for SST implementations
 pub trait SstReader: Send + Sync {
     /// Get the value for a specific key, if present
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be read or decoded.
     fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>>;
 
     /// Scan a key range [start, end) where either bound may be None
     /// Returns list of (key, value) pairs
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be scanned or decoded.
     fn scan_range(
         &self,
         start: Option<&[u8]>,
@@ -22,16 +30,28 @@ pub trait SstReader: Send + Sync {
 /// Stateful reader contract exposing tombstones and metadata
 pub trait SstStateReader: Send + Sync {
     /// Get presence state (value/tombstone/absent) for a specific key
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be read or decoded.
     fn get_state(&self, key: &[u8]) -> MidgeResult<super::types::KeyState>;
 
     /// Scan a key range returning presence state for each key
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be scanned or decoded.
     fn scan_range_state(
         &self,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
     ) -> MidgeResult<Vec<(Bytes, super::types::KeyState)>>;
 
-    /// Snapshot-aware point lookup (entries with seq > snapshot_seq are ignored)
+    /// Snapshot-aware point lookup (entries with seq > `snapshot_seq` are ignored)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be read or decoded.
     fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<super::types::KeyState> {
         let state = self.get_state(key)?;
         match state {
@@ -61,19 +81,35 @@ pub trait SstWriter: Send {
     type Reader: SstReaderExt;
 
     /// Add a key-value entry to the SST
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the key-value pair cannot be appended to the SST.
     fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()>;
 
     /// Finalize and produce a reader instance
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be finalized.
     fn finish(self) -> MidgeResult<Self::Reader>;
 }
 
 /// Object-safe SST writer for polymorphic use
 pub trait DynSstWriter: Send {
     /// Add a simple key-value entry
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the key-value pair cannot be appended to the SST.
     fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()>;
 
     /// Add an entry with metadata
-    /// op_type: 0=Put, 1=Insert, 2=Delete
+    /// `op_type`: 0=Put, 1=Insert, 2=Delete
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the entry cannot be appended to the SST.
     fn add_with_meta(
         &mut self,
         key: &[u8],
@@ -89,21 +125,37 @@ pub trait DynSstWriter: Send {
     }
 
     /// Add a range tombstone
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the range tombstone cannot be appended to the SST.
     fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()> {
         let _ = (start, end, seq);
         Ok(())
     }
 
     /// Finalize and get SST bytes
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be finalized.
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>>;
 }
 
 /// Factory trait for creating SST writers and readers
 pub trait SstFactory: Send + Sync {
     /// Create a new dynamic SST writer
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the writer cannot be created.
     fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>>;
 
     /// Open an existing SST file for reading
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be opened or decoded.
     fn open(&self, path: &Path) -> MidgeResult<Box<dyn SstReaderExt>>;
 }
 
@@ -419,7 +471,7 @@ mod tests {
     #[test]
     fn should_get_handle_large_values() {
         // Arrange
-        let large_value = vec![42u8; 100000];
+        let large_value = vec![42u8; 100_000];
         let mut reader = MockSstReader::new();
         reader.insert(b"key".to_vec(), large_value.clone());
 

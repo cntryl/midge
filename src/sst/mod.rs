@@ -201,19 +201,19 @@
 //! SSTs intentionally use synchronous, direct filesystem I/O via `std::fs` rather than
 //! the callback-driven `StorageBackend` trait. This is correct because:
 //!
-//! - **Immutable after finalize()**: SST files never change once written, only read or deleted
+//! - **Immutable after `finalize()`**: SST files never change once written, only read or deleted
 //! - **Blocking I/O required**: SST access patterns (seek + read at offset) need synchronous I/O
-//! - **Local files first**: SSTs are written locally, then persisted to cloud via HybridStorage
+//! - **Local files first**: SSTs are written locally, then persisted to cloud via `HybridStorage`
 //! - **Hot path on read side**: Reader needs fast, direct access without callback overhead
 //!
 //! ### Integration with Storage Layer
 //!
-//! - **Write path**: Compaction creates SSTs via `FsSstFactoryIo` (using io::Fs abstraction)
+//! - **Write path**: Compaction creates SSTs via `FsSstFactoryIo` (using `io::Fs` abstraction)
 //!   → Files stored in local directory
-//!   → HybridStorage persists to cloud (via `StorageBackend` callbacks)
+//!   → `HybridStorage` persists to cloud (via `StorageBackend` callbacks)
 //!
 //! - **Read path**: Queries use `SstFileIo` to read local SSTs
-//!   → Uses io::Fs for flexible filesystem backends (Real, Mock, Chaos)
+//!   → Uses `io::Fs` for flexible filesystem backends (Real, Mock, Chaos)
 //!   → Block cache + bloom filters for optimization
 //!   → No cloud access on read (reads hit local cache or cloud-synced local file)
 //!
@@ -223,7 +223,7 @@
 //! - **encoding**: TLV-based entry encoding for SST files
 //! - **types**: SST file format types (blocks, footers, handles)
 //! - **traits**: Reader/Writer/Factory contracts for SST implementations
-//! - **fs**: Filesystem-backed SST implementation (uses io::Fs abstraction)
+//! - **fs**: Filesystem-backed SST implementation (uses `io::Fs` abstraction)
 
 use crate::common::MidgeResult;
 use crate::iterators::skiplist::OpType;
@@ -256,19 +256,19 @@ pub const SST_SEQUENCE_WIDTH: usize = 20;
 /// Format a canonical SST filename. Storage roots already encode the object
 /// type via the `sst/` directory or cloud prefix, so the file name only carries
 /// ordering identity.
+#[must_use]
 pub fn file_name(cf_id: u32, level: u32, sequence: u64) -> String {
-    format!(
-        "{cf_id:06}_{level:02}_{sequence:0width$}.sst",
-        width = SST_SEQUENCE_WIDTH
-    )
+    format!("{cf_id:06}_{level:02}_{sequence:0SST_SEQUENCE_WIDTH$}.sst")
 }
 
 /// Format the cloud object key for an SST file.
+#[must_use]
 pub fn object_key(file_name: &str) -> String {
     format!("sst/{file_name}")
 }
 
 /// Format the temporary staging path for an SST file inside the local SST root.
+#[must_use]
 pub fn temp_object_key(file_name: &str) -> String {
     format!("sst/{file_name}.tmp")
 }
@@ -285,8 +285,25 @@ pub struct KvPair {
 
 /// Memtable trait for lock-free concurrent access
 pub trait Memtable: Send + Sync {
+    /// Insert or update a value in the memtable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value cannot be recorded in the underlying memtable.
     fn put(&self, key: Vec<u8>, value: Vec<u8>) -> MidgeResult<()>;
+
+    /// Read the latest visible value for `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot service the read.
     fn get(&self, key: &[u8]) -> MidgeResult<Option<Vec<u8>>>;
+
+    /// Record a tombstone for `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tombstone cannot be recorded.
     fn delete(&self, key: Vec<u8>) -> MidgeResult<()>;
     fn size_bytes(&self) -> usize;
 }
@@ -299,6 +316,7 @@ pub struct SkipListMemtable {
 }
 
 impl SkipListMemtable {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             skiplist: Arc::new(SkipList::new()),
@@ -319,8 +337,7 @@ impl SkipListMemtable {
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_millis() as u64);
 
         exp_time <= now
     }
@@ -347,6 +364,7 @@ impl SkipListMemtable {
 
     /// Iterate over all entries in the memtable.
     /// Returns (key, value, sequence) tuples in sorted order.
+    #[must_use]
     pub fn iter_all(&self, max_seq: u64) -> Vec<(Vec<u8>, Option<Vec<u8>>, u64)> {
         self.iter_all_with_meta(max_seq)
             .into_iter()
@@ -355,6 +373,10 @@ impl SkipListMemtable {
     }
 
     /// Get visible value at or before `snapshot_seq` (respecting expirations).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot service the lookup.
     pub fn get_at_seq(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<Option<Vec<u8>>> {
         let visible = self.skiplist.get_visible_with_exp(key, snapshot_seq);
 
@@ -375,6 +397,11 @@ impl SkipListMemtable {
     ///
     /// Expired visible values are surfaced as tombstones so older versions do
     /// not reappear through lower layers during snapshot reads.
+    /// Get the full presence state for a key at `snapshot_seq`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot service the lookup.
     pub fn get_key_state_at(
         &self,
         key: &[u8],
@@ -409,6 +436,11 @@ impl SkipListMemtable {
     ///
     /// Returns Bytes instead of `Vec<u8>`, avoiding allocation for callers
     /// that can work with the Arc-based Bytes type.
+    /// Get the latest visible value as `Bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot service the lookup.
     pub fn get_bytes(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
         let visible = self.skiplist.get_visible_with_exp(key, u64::MAX);
 
@@ -426,6 +458,11 @@ impl SkipListMemtable {
     }
 
     /// Get value at sequence as Bytes (zero-copy, for snapshot reads).
+    /// Get the visible value at `snapshot_seq` as `Bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot service the lookup.
     pub fn get_bytes_at_seq(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<Option<Bytes>> {
         let visible = self.skiplist.get_visible_with_exp(key, snapshot_seq);
 
@@ -446,6 +483,11 @@ impl SkipListMemtable {
     ///
     /// Expired visible values are surfaced as tombstones so they suppress older
     /// values during cross-layer merges.
+    /// Scan the key-state view across a range at `snapshot_seq`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot service the scan.
     pub fn range_state_at(
         &self,
         start: Option<&[u8]>,
@@ -487,6 +529,11 @@ impl SkipListMemtable {
     }
 
     /// Put with explicit sequence and optional expiration (Unix millis)
+    /// Insert or update a value using an explicit sequence number.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot record the write.
     pub fn put_with_seq(
         &self,
         key: Vec<u8>,
@@ -498,6 +545,11 @@ impl SkipListMemtable {
     }
 
     /// Put with explicit sequence, accepting pre-allocated Bytes (zero-copy fast path).
+    /// Insert or update a `Bytes` value using an explicit sequence number.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot record the write.
     pub fn put_bytes_with_seq(
         &self,
         key: Bytes,
@@ -514,6 +566,11 @@ impl SkipListMemtable {
     }
 
     /// Put with optional expiration (backwards compatible) - generates seq internally
+    /// Insert or update a value with an expiration timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot record the write.
     pub fn put_with_exp(
         &self,
         key: Vec<u8>,
@@ -525,11 +582,21 @@ impl SkipListMemtable {
     }
 
     /// Delete with explicit sequence (tombstone)
+    /// Record a tombstone using an explicit sequence number.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot record the tombstone.
     pub fn delete_with_seq(&self, key: Vec<u8>, seq: u64) -> MidgeResult<()> {
         self.delete_bytes_with_seq(Bytes::from(key), seq)
     }
 
     /// Delete with explicit sequence, accepting pre-allocated Bytes (zero-copy fast path).
+    /// Record a tombstone using an explicit sequence number and `Bytes` key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot record the tombstone.
     pub fn delete_bytes_with_seq(&self, key: Bytes, seq: u64) -> MidgeResult<()> {
         let size_delta = key.len() + 16;
         self.skiplist.delete(key, seq);
@@ -538,7 +605,12 @@ impl SkipListMemtable {
         Ok(())
     }
 
-    /// Delete range with explicit sequence [start_key, end_key)
+    /// Delete range with explicit sequence [`start_key`, `end_key`)
+    /// Record a range tombstone using an explicit sequence number.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot record the tombstone.
     pub fn delete_range_with_seq(
         &self,
         start_key: &[u8],
