@@ -145,7 +145,7 @@ pub struct CompactionPlan {
     pub input_files: Vec<String>,
     pub source_level: u32,
     pub target_level: u32,
-    pub cf_id: crate::engine::ColumnFamilyId,
+    pub cf_id: crate::types::ColumnFamilyId,
 }
 
 /// Simplified file metadata for message passing.
@@ -156,7 +156,7 @@ pub struct FileMeta {
     pub size_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_crc32c: Option<u32>,
-    pub cf_id: crate::engine::ColumnFamilyId,
+    pub cf_id: crate::types::ColumnFamilyId,
     pub smallest_key: Option<Vec<u8>>,
     pub largest_key: Option<Vec<u8>>,
     pub smallest_seq: Option<u64>,
@@ -173,18 +173,18 @@ pub struct FileMeta {
 #[derive(Debug, Clone)]
 pub enum TransactionOp {
     Put {
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Bytes,
         value: Bytes,
         ttl_seconds: Option<u64>,
         insert_only: bool,
     },
     Delete {
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Bytes,
     },
     DeleteRange {
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start_key: Bytes,
         end_key: Bytes,
     },
@@ -205,11 +205,11 @@ pub enum IntentLogEntry {
     /// Seqno allocated
     SeqnoAllocated {
         seqno: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     },
     /// Flush plan created
     FlushPlanned {
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         seqno_range: (u64, u64),
     },
     /// Compaction plan created
@@ -220,14 +220,14 @@ pub enum IntentLogEntry {
     /// Flush output SST is durable and awaiting publication cleanup.
     FlushPublish {
         phase: PublicationPhase,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         sequence: u64,
         file_meta: FileMeta,
     },
     /// Compaction output SSTs are durable and awaiting publication cleanup.
     CompactionPublish {
         phase: PublicationPhase,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         removed: Vec<String>,
         added: Vec<FileMeta>,
     },
@@ -253,12 +253,12 @@ pub enum RuntimeMsg {
     /// Request memtable flush for a column family.
     FlushMemtable {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     },
     /// Memtable flush completed.
     FlushComplete {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         sst_name: String,
         sequence: u64,
     },
@@ -276,7 +276,7 @@ pub enum RuntimeMsg {
         request_id: u64,
         input_ssts: Vec<String>,
         output_ssts: Vec<String>,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         target_level: u32,
         succeeded: bool,
     },
@@ -285,7 +285,7 @@ pub enum RuntimeMsg {
     /// Append record to WAL.
     WalAppend {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Vec<u8>,
         value: Option<Vec<u8>>,
         ttl_seconds: Option<u64>, // TTL in seconds, None means no expiration
@@ -295,7 +295,7 @@ pub enum RuntimeMsg {
     /// Append delete range tombstone to WAL.
     WalAppendDeleteRange {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
         durability_policy: Option<DurabilityPolicy>,
@@ -365,7 +365,7 @@ pub enum RuntimeMsg {
     /// Drop a column family (soft delete).
     ManifestDropColumnFamily {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     },
 
     /// Begin an ingest barrier: prevent new compactions, bump ingest epoch,
@@ -402,10 +402,10 @@ pub enum RuntimeMsg {
     /// durability_waiters until the frontier advances.
     Read {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Vec<u8>,
         sequence: u64, // Read at this sequence number or earlier.
-        requested_durability: crate::engine::api::Durability, // Durability level requested
+        requested_durability: crate::types::ReadDurability, // Durability level requested
     },
     /// Scan a range of keys from memtables and SST files.
     ///
@@ -414,11 +414,11 @@ pub enum RuntimeMsg {
     /// the scan must not return data with seqno > local_durable_seq.
     RangeScan {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start: Vec<u8>,
         end: Vec<u8>,
         sequence: u64, // Read at this sequence number or earlier.
-        requested_durability: crate::engine::api::Durability, // Durability level requested
+        requested_durability: crate::types::ReadDurability, // Durability level requested
     },
 
     // === Observability ===
@@ -447,7 +447,7 @@ pub enum RuntimeMsg {
     /// allowing transactions to execute reads directly without message passing.
     CaptureReadSnapshot {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         sequence: u64,
     },
 
@@ -458,7 +458,7 @@ pub enum RuntimeMsg {
     /// to halve the message-passing overhead of `begin_tx`.
     BeginTransaction {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     },
 
     /// Register a transaction snapshot so compaction/GC can respect active readers.
@@ -488,7 +488,7 @@ pub enum RuntimeMsg {
     /// Used by Engine::commit() to expose backpressure before accepting writes.
     CheckWriteStall {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     },
 
     /// Block until writes are no longer stalled for `cf_id`.
@@ -497,7 +497,7 @@ pub enum RuntimeMsg {
     /// until a stall-clearing event occurs (e.g. flush completion).
     WaitForWriteStallClear {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     },
 
     /// Best-effort cancel for a previous `WaitForWriteStallClear` request.
@@ -665,7 +665,7 @@ pub enum RuntimeResponse {
     },
     ColumnFamilyCreated {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     },
     ReadAmpMetricsSnapshot {
         request_id: u64,
@@ -692,13 +692,13 @@ pub enum RuntimeResponse {
     /// Stable operator-facing runtime metrics snapshot.
     RuntimeMetricsSnapshot {
         request_id: u64,
-        snapshot: Box<crate::engine::RuntimeMetricsSnapshot>,
+        snapshot: Box<crate::types::RuntimeMetricsSnapshot>,
     },
 
     /// Stable operator-facing storage layout snapshot.
     StorageLayoutSnapshot {
         request_id: u64,
-        snapshot: crate::engine::StorageLayoutSnapshot,
+        snapshot: crate::types::StorageLayoutSnapshot,
     },
 
     /// Current authoritative runtime sequence.
@@ -970,7 +970,7 @@ impl RuntimeHandle {
     ///
     /// Used by Engine::commit() to expose backpressure to clients before
     /// accepting new write transactions.
-    pub fn check_write_stall(&self, cf_id: crate::engine::ColumnFamilyId) -> MidgeResult<bool> {
+    pub fn check_write_stall(&self, cf_id: crate::types::ColumnFamilyId) -> MidgeResult<bool> {
         let response = self.send_and_wait(RuntimeMsg::CheckWriteStall {
             request_id: next_request_id()?,
             cf_id,

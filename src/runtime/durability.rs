@@ -4,7 +4,7 @@
 //! Owns the policy-independent parts of durability enforcement.
 
 use crate::common::KeyedGroupCommit;
-use crate::engine::api::Durability;
+use crate::types::ReadDurability;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
@@ -40,20 +40,20 @@ pub enum DurabilityWaiter {
     },
     Read {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Vec<u8>,
         sequence: u64,
         #[allow(dead_code)]
-        requested_durability: Durability,
+        requested_durability: ReadDurability,
     },
     RangeScan {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start: Vec<u8>,
         end: Vec<u8>,
         sequence: u64,
         #[allow(dead_code)]
-        requested_durability: Durability,
+        requested_durability: ReadDurability,
     },
 }
 
@@ -106,7 +106,7 @@ impl DurabilityCoordinator {
     pub fn is_durable(
         &self,
         sequence: u64,
-        requested_durability: Durability,
+        requested_durability: ReadDurability,
         local_durable_seq: u64,
         cloud_durable_seq: u64,
     ) -> bool {
@@ -116,8 +116,8 @@ impl DurabilityCoordinator {
         }
 
         match requested_durability {
-            Durability::Strict | Durability::Steady => sequence <= local_durable_seq,
-            Durability::CloudPersisted => sequence <= cloud_durable_seq,
+            ReadDurability::Strict | ReadDurability::Steady => sequence <= local_durable_seq,
+            ReadDurability::CloudPersisted => sequence <= cloud_durable_seq,
         }
     }
 

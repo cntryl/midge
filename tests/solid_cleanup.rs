@@ -2,9 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use cntryl_midge::{
-    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, Engine, EngineHealth,
-    GcsApiStyle, GcsCredentialSource, MidgeResult, OpenOptions, RecoveryPolicy, S3CredentialSource,
-    Storage,
+    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, ColumnFamilyId, Engine,
+    EngineHealth, GcsApiStyle, GcsCredentialSource, MidgeResult, OpenOptions, RecoveryPolicy,
+    RuntimeMetricsSnapshot, S3CredentialSource, Storage, StorageLayoutSnapshot,
 };
 
 fn source_path(relative: &str) -> PathBuf {
@@ -35,6 +35,11 @@ fn should_reexport_shared_public_types_from_crate_root() {
     let _health = EngineHealth::Healthy;
     let _storage = Storage::InMemory;
     let _credential = CloudCredentialSource::S3(S3CredentialSource::environment());
+    let _cf_id: ColumnFamilyId = 0;
+    let _runtime_metrics: fn(&Engine) -> MidgeResult<RuntimeMetricsSnapshot> =
+        Engine::get_runtime_metrics;
+    let _storage_layout: fn(&Engine) -> MidgeResult<StorageLayoutSnapshot> =
+        Engine::get_storage_layout;
 
     // Act
     let provider = CloudProviderConfig::gcs("bucket")
@@ -49,6 +54,45 @@ fn should_reexport_shared_public_types_from_crate_root() {
             ..
         }
     ));
+}
+
+#[test]
+fn should_keep_runtime_free_of_engine_owned_type_imports() {
+    // Arrange
+    let mut sources = Vec::new();
+    collect_rust_sources(&source_path("src/runtime"), &mut sources);
+    let forbidden = ["crate::engine::", "crate::engine::api::"];
+
+    // Act / Assert
+    for source in sources {
+        let content = fs::read_to_string(&source).expect("runtime source should be readable");
+        for pattern in forbidden {
+            assert!(
+                !content.contains(pattern),
+                "{} should not depend on engine-owned path {pattern}",
+                source.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn should_construct_runtime_observability_dtos_from_shared_types() {
+    // Arrange
+    let state = read_source("src/runtime/state.rs");
+    let runtime = read_source("src/runtime/mod.rs");
+    let engine = read_source("src/engine/mod.rs");
+    let shared = read_source("src/types.rs");
+
+    // Act / Assert
+    assert!(state.contains("crate::types::RuntimeMetricsSnapshot"));
+    assert!(state.contains("crate::types::StorageLayoutSnapshot"));
+    assert!(runtime.contains("Box<crate::types::RuntimeMetricsSnapshot>"));
+    assert!(runtime.contains("snapshot: crate::types::StorageLayoutSnapshot"));
+    assert!(!engine.contains("pub struct RuntimeMetricsSnapshot"));
+    assert!(!engine.contains("pub struct StorageLayoutSnapshot"));
+    assert!(shared.contains("pub struct RuntimeMetricsSnapshot"));
+    assert!(shared.contains("pub struct StorageLayoutSnapshot"));
 }
 
 #[test]

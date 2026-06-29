@@ -13,7 +13,7 @@ impl EventLoop {
     pub(super) fn handle_check_write_stall(
         &self,
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     ) {
         let is_stalled = self.state.should_stall_writes(cf_id);
         self.respond(
@@ -28,7 +28,7 @@ impl EventLoop {
     pub(super) fn handle_wait_for_write_stall_clear(
         &mut self,
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     ) {
         if !self.state.should_stall_writes(cf_id) {
             self.respond(request_id, RuntimeResponse::Ok { request_id });

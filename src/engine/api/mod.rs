@@ -26,5 +26,5 @@ pub(crate) use transaction::TransactionInit;
 pub use transaction::{IsolationLevel, Transaction, TransactionMode};
 pub use write_options::WriteOptions;
 
-// Internal types needed by runtime but not part of public API
-pub(crate) use options::Durability;
+// Internal alias kept for engine code while the type is owned below `engine`.
+pub(crate) use crate::types::ReadDurability as Durability;

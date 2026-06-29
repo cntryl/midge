@@ -32,7 +32,7 @@ impl WriteResult {
 impl EventLoop {
     pub(super) fn wake_write_stall_waiters(&mut self) {
         // Avoid borrowing issues by snapshotting keys.
-        let cf_ids: Vec<crate::engine::ColumnFamilyId> =
+        let cf_ids: Vec<crate::types::ColumnFamilyId> =
             self.write_stall_waiter_queues.keys().copied().collect();
 
         for cf_id in cf_ids {

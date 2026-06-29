@@ -25,7 +25,7 @@ pub const CLOUD_UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 pub enum PendingCloudWrite {
     Single {
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Vec<u8>,
         value: Option<Vec<u8>>,
         sequence: u64,
@@ -33,7 +33,7 @@ pub enum PendingCloudWrite {
         enqueued_at: Instant,
     },
     DeleteRange {
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
         sequence: u64,
@@ -50,19 +50,19 @@ pub enum PendingCloudWrite {
 #[derive(Debug)]
 pub enum TransactionApplyOp {
     Put {
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: bytes::Bytes,
         value: bytes::Bytes,
         expiration: Option<u64>,
         sequence: u64,
     },
     Delete {
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: bytes::Bytes,
         sequence: u64,
     },
     DeleteRange {
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start_key: bytes::Bytes,
         end_key: bytes::Bytes,
         sequence: u64,
@@ -111,7 +111,7 @@ impl CloudWriteQueue {
     /// Enqueue single write
     pub fn enqueue_write(
         &mut self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Vec<u8>,
         value: Option<Vec<u8>>,
         sequence: u64,
@@ -140,7 +140,7 @@ impl CloudWriteQueue {
     /// Enqueue delete range
     pub fn enqueue_delete_range(
         &mut self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
         sequence: u64,
@@ -258,7 +258,7 @@ impl CloudWriteQueue {
     }
 
     /// Check if a key exists in pending writes (for insert_only validation)
-    pub fn contains_key(&self, cf_id: crate::engine::ColumnFamilyId, key: &[u8]) -> bool {
+    pub fn contains_key(&self, cf_id: crate::types::ColumnFamilyId, key: &[u8]) -> bool {
         for pending in &self.queue {
             match pending {
                 PendingCloudWrite::Single {

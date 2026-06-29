@@ -18,7 +18,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct ReadSnapshot {
     /// CF ID
-    pub cf_id: crate::engine::ColumnFamilyId,
+    pub cf_id: crate::types::ColumnFamilyId,
     /// Active memtable snapshot
     pub memtable: Arc<SkipListMemtable>,
     /// Immutable memtables (newest to oldest)

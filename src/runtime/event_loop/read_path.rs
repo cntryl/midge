@@ -12,7 +12,7 @@ impl EventLoop {
     /// Create an immutable read snapshot for a column family
     pub(super) fn create_read_snapshot(
         &self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     ) -> Option<super::super::ReadSnapshot> {
         let cf_state = self.state.column_families.get(&cf_id)?;
 
@@ -50,7 +50,7 @@ impl EventLoop {
     pub(super) fn is_sequence_durable(
         &self,
         sequence: u64,
-        requested_durability: crate::engine::api::Durability,
+        requested_durability: crate::types::ReadDurability,
     ) -> bool {
         self.durability.is_durable(
             sequence,
@@ -65,10 +65,10 @@ impl EventLoop {
     pub(super) fn handle_msg_read(
         &self,
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Vec<u8>,
         sequence: u64,
-        requested_durability: crate::engine::api::Durability,
+        requested_durability: crate::types::ReadDurability,
     ) {
         let visible_up_to = sequence;
 
@@ -111,11 +111,11 @@ impl EventLoop {
     pub(super) fn handle_msg_range_scan(
         &self,
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start: Vec<u8>,
         end: Vec<u8>,
         sequence: u64,
-        requested_durability: crate::engine::api::Durability,
+        requested_durability: crate::types::ReadDurability,
     ) {
         let visible_up_to = sequence;
 
@@ -164,7 +164,7 @@ impl EventLoop {
     /// Local read path: memtable → immutable memtables → SST
     pub(super) fn handle_read(
         &self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
         seq: u64,
     ) -> Option<Vec<u8>> {

@@ -90,9 +90,9 @@ pub struct EventLoop {
     pub(super) worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
 
     /// Waiters blocked on write stall clearing (request_id -> cf_id).
-    pub(super) write_stall_waiters: HashMap<u64, crate::engine::ColumnFamilyId>,
+    pub(super) write_stall_waiters: HashMap<u64, crate::types::ColumnFamilyId>,
     /// FIFO queues of waiters per CF.
-    pub(super) write_stall_waiter_queues: HashMap<crate::engine::ColumnFamilyId, VecDeque<u64>>,
+    pub(super) write_stall_waiter_queues: HashMap<crate::types::ColumnFamilyId, VecDeque<u64>>,
     /// Lock-free snapshot cache shared with Engine for read-path bypass.
     pub(super) snapshot_cache: Option<Arc<SnapshotCache>>,
 
@@ -278,7 +278,7 @@ impl EventLoop {
 
     fn build_sst_file_meta(
         &self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         level: u32,
         sst_name: &str,
     ) -> crate::common::MidgeResult<crate::runtime::FileMeta> {
@@ -595,7 +595,7 @@ impl EventLoop {
 
     fn publish_flushed_sst(
         &mut self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         sst_name: &str,
         sequence: u64,
         file_meta: Option<crate::runtime::FileMeta>,

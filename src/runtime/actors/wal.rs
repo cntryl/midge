@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 /// Parameters for WAL append operation
 pub struct AppendParams {
     pub request_id: u64,
-    pub cf_id: crate::engine::ColumnFamilyId,
+    pub cf_id: crate::types::ColumnFamilyId,
     pub key: Bytes,
     pub value: Option<Bytes>,
     pub insert_only: bool,
@@ -1008,7 +1008,7 @@ impl WalActor {
         ops: &[crate::runtime::TransactionOp],
         start_sequence: u64,
     ) -> MidgeResult<()> {
-        let mut checked_keys: HashSet<(crate::engine::ColumnFamilyId, Vec<u8>)> = HashSet::new();
+        let mut checked_keys: HashSet<(crate::types::ColumnFamilyId, Vec<u8>)> = HashSet::new();
 
         for op in ops {
             match op {
@@ -1097,7 +1097,7 @@ impl WalActor {
     fn latest_key_sequence(
         &self,
         state: &RuntimeState,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
     ) -> Option<u64> {
         let cf_state = state.column_families.get(&cf_id)?;
@@ -1130,7 +1130,7 @@ impl WalActor {
     fn latest_range_sequence(
         &self,
         state: &RuntimeState,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start_key: &[u8],
         end_key: &[u8],
     ) -> Option<u64> {
@@ -1317,7 +1317,7 @@ impl WalActor {
     fn key_exists(
         &self,
         state: &RuntimeState,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
     ) -> bool {
         if let Some(cf_state) = state.column_families.get(&cf_id) {
@@ -1336,7 +1336,7 @@ impl WalActor {
     fn key_exists_or_pending(
         &self,
         state: &RuntimeState,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
     ) -> bool {
         if self.key_exists(state, cf_id, key) {
@@ -1355,7 +1355,7 @@ impl WalActor {
         &self,
         state: &mut RuntimeState,
         sequence: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Bytes,
         value: Option<Bytes>,
         expiration: Option<u64>,

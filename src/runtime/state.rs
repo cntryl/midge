@@ -20,7 +20,7 @@ const MAX_IDEMPOTENCY_CACHE_SIZE: usize = 100_000;
 const MAX_RECENT_DELETE_RANGES: usize = 4096;
 #[derive(Debug, Clone)]
 pub struct RecentDeleteRange {
-    pub cf_id: crate::engine::ColumnFamilyId,
+    pub cf_id: crate::types::ColumnFamilyId,
     pub start_key: Vec<u8>,
     pub end_key: Vec<u8>,
     pub sequence: u64,
@@ -113,7 +113,7 @@ pub(crate) enum FlushReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FlushCandidate {
-    pub cf_id: crate::engine::ColumnFamilyId,
+    pub cf_id: crate::types::ColumnFamilyId,
     pub reason: FlushReason,
 }
 
@@ -124,7 +124,7 @@ impl RuntimeState {
             .max(1)
     }
 
-    pub fn is_immutable_memtable_queue_full(&self, cf_id: crate::engine::ColumnFamilyId) -> bool {
+    pub fn is_immutable_memtable_queue_full(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
         self.column_families.get(&cf_id).is_some_and(|cf_state| {
             cf_state.immutable_memtables.len() >= self.max_immutable_memtables
         })
@@ -138,7 +138,7 @@ impl RuntimeState {
     ///
     /// This intentionally excludes active memtable size: active memtable pressure
     /// should trigger flush, not block the flush that would relieve it.
-    pub fn should_hard_stall_writes(&self, cf_id: crate::engine::ColumnFamilyId) -> bool {
+    pub fn should_hard_stall_writes(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
         if self.write_stalled {
             return true;
         }
@@ -158,11 +158,11 @@ impl RuntimeState {
     }
 
     /// Compatibility wrapper for write-admission callsites.
-    pub fn should_stall_writes(&self, cf_id: crate::engine::ColumnFamilyId) -> bool {
+    pub fn should_stall_writes(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
         self.should_hard_stall_writes(cf_id)
     }
 
-    pub fn memtable_needs_flush(&self, cf_id: crate::engine::ColumnFamilyId) -> bool {
+    pub fn memtable_needs_flush(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
         if let Some(cf_state) = self.column_families.get(&cf_id) {
             return cf_state.memtable.size_bytes() >= self.memtable_flush_trigger_bytes();
         }
@@ -171,7 +171,7 @@ impl RuntimeState {
 
     pub(crate) fn active_memtable_wal_segment_gap(
         &self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     ) -> u64 {
         self.column_families
             .get(&cf_id)
@@ -734,7 +734,7 @@ impl RuntimeState {
         })
     }
 
-    pub fn runtime_metrics_snapshot(&self) -> crate::engine::RuntimeMetricsSnapshot {
+    pub fn runtime_metrics_snapshot(&self) -> crate::types::RuntimeMetricsSnapshot {
         let now = Instant::now();
         let pinned_ssts = self.get_pinned_sst_names().len();
         let oldest_snapshot_age_seconds = self
@@ -758,7 +758,7 @@ impl RuntimeState {
         let residue = self.storage_residue_assessment();
         let telemetry = crate::telemetry::Telemetry::global().map(|t| t.metrics().snapshot());
 
-        crate::engine::RuntimeMetricsSnapshot {
+        crate::types::RuntimeMetricsSnapshot {
             health: self.health(),
             current_sequence: self.sequence,
             manifest_last_persisted_sequence: self.manifest.last_persisted_sequence,
@@ -816,14 +816,14 @@ impl RuntimeState {
         }
     }
 
-    pub fn storage_layout_snapshot(&self) -> crate::engine::StorageLayoutSnapshot {
+    pub fn storage_layout_snapshot(&self) -> crate::types::StorageLayoutSnapshot {
         let mut levels =
-            std::collections::BTreeMap::<u32, Vec<crate::engine::StorageFileLayout>>::new();
+            std::collections::BTreeMap::<u32, Vec<crate::types::StorageFileLayout>>::new();
         for file in &self.manifest.files {
             levels
                 .entry(file.level)
                 .or_default()
-                .push(crate::engine::StorageFileLayout {
+                .push(crate::types::StorageFileLayout {
                     name: file.name.clone(),
                     level: file.level,
                     cf_id: file.cf_id,
@@ -840,7 +840,7 @@ impl RuntimeState {
             .map(|(level, mut files)| {
                 files.sort_by(|a, b| a.name.cmp(&b.name));
                 let total_bytes = files.iter().map(|file| file.size_bytes).sum();
-                crate::engine::StorageLayoutLevel {
+                crate::types::StorageLayoutLevel {
                     level,
                     file_count: files.len(),
                     total_bytes,
@@ -856,7 +856,7 @@ impl RuntimeState {
             .iter()
             .map(
                 |(snapshot_id, (sequence, created_at, ref_count, _pinned_ssts))| {
-                    crate::engine::SnapshotPinSnapshot {
+                    crate::types::SnapshotPinSnapshot {
                         snapshot_id: *snapshot_id,
                         sequence: *sequence,
                         age_seconds: now.duration_since(*created_at).as_secs(),
@@ -868,7 +868,7 @@ impl RuntimeState {
         active_snapshots.sort_by_key(|snapshot| snapshot.snapshot_id);
         let residue = self.storage_residue_assessment();
 
-        crate::engine::StorageLayoutSnapshot {
+        crate::types::StorageLayoutSnapshot {
             health: self.health(),
             manifest_last_persisted_sequence: self.manifest.last_persisted_sequence,
             manifest_next_wal_seq: self.manifest.next_wal_seq,
@@ -1252,7 +1252,7 @@ impl RuntimeState {
 
     pub fn record_compaction_publication_intent(
         &mut self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         removed: Vec<String>,
         added: Vec<crate::runtime::FileMeta>,
     ) -> MidgeResult<()> {
@@ -1830,7 +1830,7 @@ impl RuntimeState {
 
     pub fn record_delete_range(
         &mut self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start_key: &[u8],
         end_key: &[u8],
         sequence: u64,
@@ -1865,7 +1865,7 @@ impl RuntimeState {
 
     pub fn latest_covering_delete_range_sequence(
         &self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
     ) -> Option<u64> {
         self.recent_delete_ranges
@@ -1881,7 +1881,7 @@ impl RuntimeState {
 
     pub fn latest_overlapping_delete_range_sequence(
         &self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start_key: &[u8],
         end_key: &[u8],
     ) -> Option<u64> {
@@ -1896,13 +1896,13 @@ impl RuntimeState {
             .map(|entry| entry.sequence)
     }
 
-    pub fn get_cf(&self, cf_id: crate::engine::ColumnFamilyId) -> Option<&ColumnFamilyState> {
+    pub fn get_cf(&self, cf_id: crate::types::ColumnFamilyId) -> Option<&ColumnFamilyState> {
         self.column_families.get(&cf_id)
     }
 
     pub fn get_cf_mut(
         &mut self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     ) -> Option<&mut ColumnFamilyState> {
         self.column_families.get_mut(&cf_id)
     }
@@ -1926,7 +1926,7 @@ mod tests {
 
     fn grow_active_memtable(
         state: &mut RuntimeState,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         target_bytes: usize,
     ) {
         let mut seq = 1_u64;

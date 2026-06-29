@@ -1199,18 +1199,3 @@ mod tests {
         assert_eq!(cloned.goal, original.goal);
     }
 }
-
-/// Durability level for runtime use
-///
-/// NOTE: This enum is for INTERNAL runtime durability tracking only.
-/// It should NOT be exposed in OpenOptions or any user-facing configuration.
-/// Write-time durability decisions use WriteOptions::DurabilityPolicy instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Durability {
-    /// Strict - fsync on every write
-    Strict,
-    /// Steady - fsync every N ms
-    Steady,
-    /// CloudPersisted - wait for cloud backup
-    CloudPersisted,
-}

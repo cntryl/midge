@@ -58,7 +58,7 @@ impl FlushActor {
     pub fn handle_flush(
         &mut self,
         state: &mut RuntimeState,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<FlushOutput> {
         // Invariant: a flush may create output files early, but those files are
@@ -229,7 +229,7 @@ impl FlushActor {
         &self,
         memtable: &std::sync::Arc<crate::sst::SkipListMemtable>,
         path: &Path,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         sst_name: &str,
     ) -> MidgeResult<crate::runtime::FileMeta> {
         // Invariant: this function may write a complete SST file, but it does
@@ -297,7 +297,7 @@ impl FlushActor {
     pub fn handle_flush_complete(
         &mut self,
         state: &mut RuntimeState,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         sst_name: &str,
         sequence: u64,
     ) {

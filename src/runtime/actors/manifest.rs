@@ -234,7 +234,7 @@ impl ManifestActor {
     pub fn drop_column_family(
         &mut self,
         state: &mut RuntimeState,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     ) -> MidgeResult<()> {
         // Prevent dropping default CF
         if cf_id == 0 {
