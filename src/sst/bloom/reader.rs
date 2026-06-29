@@ -22,6 +22,11 @@ impl BloomReader {
     ///
     /// Format: \[`num_bits`: u32\]\[`key_count`: u32\]\[k: u8\]\[bits...\]
     /// Validates: `num_bits` > 0, k ∈ \[1,8\], bits size matches
+    ///
+    /// # Errors
+    /// Returns `MidgeError::Corruption` when the serialized header is
+    /// truncated, contains invalid parameters, or the payload length does not
+    /// match the declared bit count.
     pub fn deserialize(data: &[u8]) -> MidgeResult<Self> {
         if data.len() < 9 {
             return Err(MidgeError::Corruption(
@@ -29,8 +34,10 @@ impl BloomReader {
             ));
         }
 
-        let num_bits = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        let key_count = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+        let num_bits = usize::try_from(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+            .unwrap_or(usize::MAX);
+        let key_count = usize::try_from(u32::from_le_bytes([data[4], data[5], data[6], data[7]]))
+            .unwrap_or(usize::MAX);
         let k = data[8];
 
         // Safety: num_bits=0 would cause mod-by-zero panic in contains()
@@ -85,7 +92,9 @@ impl BloomReader {
 
         // FPR = (1 - e^(-k*n/m))^k
         // where k = number of hash functions, n = key count, m = number of bits
-        let exponent = -f64::from(self.k) * (self.key_count as f64) / (self.num_bits as f64);
+        let key_count = f64::from(usize_to_u32(self.key_count));
+        let num_bits = f64::from(usize_to_u32(self.num_bits));
+        let exponent = -f64::from(self.k) * key_count / num_bits;
         (1.0 - exponent.exp()).powi(i32::from(self.k))
     }
 }
@@ -95,7 +104,7 @@ impl BloomFilterOps for BloomReader {
         // Compute both hashes ONCE (Kirsch-Mitzenmacher optimization)
         let h1 = xxh3_64_with_seed(key, SEED1);
         let h2 = xxh3_64_with_seed(key, SEED2);
-        let num_bits = self.num_bits as u64;
+        let num_bits = usize_to_u64(self.num_bits);
 
         // Unroll loop by 4 to reduce branch misprediction overhead on constrained CPUs.
         // Each check is independent enough for ILP (instruction-level parallelism).
@@ -104,11 +113,11 @@ impl BloomFilterOps for BloomReader {
 
         // Process 4 hash functions at a time
         for group in 0..k_full_groups {
-            let base_i = (group * 4) as u64;
+            let base_i = usize_to_u64(group * 4);
 
             // Check hash function at base_i
             let combined1 = h1.wrapping_add(base_i.wrapping_mul(h2));
-            let bit_index1 = (combined1 % num_bits) as usize;
+            let bit_index1 = u64_to_usize(combined1 % num_bits);
             let byte_index1 = bit_index1 / 8;
             let bit_offset1 = bit_index1 % 8;
             if byte_index1 >= self.bits.len() || (self.bits[byte_index1] & (1 << bit_offset1)) == 0
@@ -118,7 +127,7 @@ impl BloomFilterOps for BloomReader {
 
             // Check hash function at base_i+1
             let combined2 = h1.wrapping_add((base_i + 1).wrapping_mul(h2));
-            let bit_index2 = (combined2 % num_bits) as usize;
+            let bit_index2 = u64_to_usize(combined2 % num_bits);
             let byte_index2 = bit_index2 / 8;
             let bit_offset2 = bit_index2 % 8;
             if byte_index2 >= self.bits.len() || (self.bits[byte_index2] & (1 << bit_offset2)) == 0
@@ -128,7 +137,7 @@ impl BloomFilterOps for BloomReader {
 
             // Check hash function at base_i+2
             let combined3 = h1.wrapping_add((base_i + 2).wrapping_mul(h2));
-            let bit_index3 = (combined3 % num_bits) as usize;
+            let bit_index3 = u64_to_usize(combined3 % num_bits);
             let byte_index3 = bit_index3 / 8;
             let bit_offset3 = bit_index3 % 8;
             if byte_index3 >= self.bits.len() || (self.bits[byte_index3] & (1 << bit_offset3)) == 0
@@ -138,7 +147,7 @@ impl BloomFilterOps for BloomReader {
 
             // Check hash function at base_i+3
             let combined4 = h1.wrapping_add((base_i + 3).wrapping_mul(h2));
-            let bit_index4 = (combined4 % num_bits) as usize;
+            let bit_index4 = u64_to_usize(combined4 % num_bits);
             let byte_index4 = bit_index4 / 8;
             let bit_offset4 = bit_index4 % 8;
             if byte_index4 >= self.bits.len() || (self.bits[byte_index4] & (1 << bit_offset4)) == 0
@@ -149,8 +158,9 @@ impl BloomFilterOps for BloomReader {
 
         // Handle remaining 0-3 hash functions
         for i in 0..k_remainder {
-            let combined = h1.wrapping_add((k_full_groups as u64 * 4 + i as u64).wrapping_mul(h2));
-            let bit_index = (combined % num_bits) as usize;
+            let hash_index = usize_to_u64(k_full_groups * 4 + i);
+            let combined = h1.wrapping_add(hash_index.wrapping_mul(h2));
+            let bit_index = u64_to_usize(combined % num_bits);
             let byte_index = bit_index / 8;
             let bit_offset = bit_index % 8;
 
@@ -168,15 +178,29 @@ impl BloomFilterOps for BloomReader {
 
     fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
+        let num_bits = usize_to_u32(self.num_bits);
+        let key_count = usize_to_u32(self.key_count);
 
         // Format (NEW): \[num_bits: u32\]\[key_count: u32\]\[k: u8\]\[bits...\]
-        result.extend_from_slice(&(self.num_bits as u32).to_le_bytes());
-        result.extend_from_slice(&(self.key_count as u32).to_le_bytes());
+        result.extend_from_slice(&num_bits.to_le_bytes());
+        result.extend_from_slice(&key_count.to_le_bytes());
         result.push(self.k);
         result.extend_from_slice(&self.bits);
 
         result
     }
+}
+
+fn u64_to_usize(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn usize_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 impl BloomReader {
@@ -369,7 +393,7 @@ mod tests {
         let fpr = reader.estimated_fpr();
 
         // Assert
-        assert_eq!(fpr, 0.0);
+        assert!(fpr.abs() <= f64::EPSILON);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::sst::trie::node::{TrieEdge, TrieNode};
 use bytes::{BufMut, BytesMut};
+use std::io::Cursor;
 
 /// Encode trie nodes to compact binary format
 ///
@@ -23,7 +24,7 @@ pub fn encode_trie(nodes: &[TrieNode]) -> Vec<u8> {
     let mut buf = BytesMut::new();
 
     // Write node count
-    encode_varint(&mut buf, nodes.len() as u64);
+    encode_varint(&mut buf, usize_to_u64(nodes.len()));
 
     // Write each node
     for node in nodes {
@@ -38,7 +39,7 @@ fn encode_node(buf: &mut BytesMut, node: &TrieNode) {
     encode_varint(buf, u64::from(node.prefix_len));
 
     // key_delta length + data
-    encode_varint(buf, node.key_delta.len() as u64);
+    encode_varint(buf, usize_to_u64(node.key_delta.len()));
     buf.put_slice(&node.key_delta);
 
     // block_id (0 = None, 1-based for Some)
@@ -52,7 +53,7 @@ fn encode_node(buf: &mut BytesMut, node: &TrieNode) {
     );
 
     // child_count
-    encode_varint(buf, node.children.len() as u64);
+    encode_varint(buf, usize_to_u64(node.children.len()));
 
     // children
     for child in &node.children {
@@ -62,11 +63,16 @@ fn encode_node(buf: &mut BytesMut, node: &TrieNode) {
 }
 
 /// Decode trie nodes from binary format
+///
+/// # Errors
+/// Returns `MidgeError::Corruption` when the encoded node count, node fields,
+/// or child references overflow local in-memory representations or the input is
+/// truncated.
 pub fn decode_trie(data: &[u8]) -> MidgeResult<Vec<TrieNode>> {
-    let mut cursor = std::io::Cursor::new(data);
+    let mut cursor = Cursor::new(data);
 
     // Read node count
-    let node_count = decode_varint(&mut cursor)? as usize;
+    let node_count = decode_usize(&mut cursor, "Trie node count")?;
     let mut nodes = Vec::with_capacity(node_count);
 
     // Read each node
@@ -77,40 +83,43 @@ pub fn decode_trie(data: &[u8]) -> MidgeResult<Vec<TrieNode>> {
     Ok(nodes)
 }
 
-fn decode_node(cursor: &mut std::io::Cursor<&[u8]>) -> MidgeResult<TrieNode> {
+fn decode_node(cursor: &mut Cursor<&[u8]>) -> MidgeResult<TrieNode> {
     // prefix_len
-    let prefix_len = decode_varint(cursor)? as u16;
+    let prefix_len = decode_u16(cursor, "Trie prefix length")?;
 
     // key_delta
-    let key_delta_len = decode_varint(cursor)? as usize;
-    let pos = cursor.position() as usize;
+    let key_delta_len = decode_usize(cursor, "Trie key delta length")?;
+    let pos = cursor_position(cursor)?;
     let data = cursor.get_ref();
     if pos + key_delta_len > data.len() {
         return Err(MidgeError::Corruption("Trie key_delta truncated".into()));
     }
     let key_delta = data[pos..pos + key_delta_len].to_vec();
-    cursor.set_position((pos + key_delta_len) as u64);
+    cursor.set_position(usize_to_u64(pos + key_delta_len));
 
     // block_id (0 = None, 1-based for Some)
     let block_id_raw = decode_varint(cursor)?;
     let block_id = if block_id_raw == 0 {
         None
     } else {
-        Some((block_id_raw - 1) as u32)
+        Some(
+            u32::try_from(block_id_raw - 1)
+                .map_err(|_| MidgeError::Corruption("Trie block_id overflow".into()))?,
+        )
     };
 
     // child_count
-    let child_count = decode_varint(cursor)? as usize;
+    let child_count = decode_usize(cursor, "Trie child count")?;
 
     // children
     let mut children = Vec::with_capacity(child_count);
     for _ in 0..child_count {
-        if cursor.position() >= cursor.get_ref().len() as u64 {
+        if cursor.position() >= usize_to_u64(cursor.get_ref().len()) {
             return Err(MidgeError::Corruption("Trie children truncated".into()));
         }
-        let first_byte = cursor.get_ref()[cursor.position() as usize];
+        let first_byte = cursor.get_ref()[cursor_position(cursor)?];
         cursor.set_position(cursor.position() + 1);
-        let child_index = decode_varint(cursor)? as u32;
+        let child_index = decode_u32(cursor, "Trie child index")?;
         children.push(TrieEdge::new(first_byte, child_index));
     }
 
@@ -124,22 +133,22 @@ fn decode_node(cursor: &mut std::io::Cursor<&[u8]>) -> MidgeResult<TrieNode> {
 
 fn encode_varint(buf: &mut BytesMut, mut value: u64) {
     while value >= 0x80 {
-        buf.put_u8((value as u8) | 0x80);
+        buf.put_u8(value.to_le_bytes()[0] | 0x80);
         value >>= 7;
     }
-    buf.put_u8(value as u8);
+    buf.put_u8(value.to_le_bytes()[0]);
 }
 
-fn decode_varint(cursor: &mut std::io::Cursor<&[u8]>) -> MidgeResult<u64> {
+fn decode_varint(cursor: &mut Cursor<&[u8]>) -> MidgeResult<u64> {
     let mut result = 0u64;
     let mut shift = 0;
 
     loop {
-        if cursor.position() >= cursor.get_ref().len() as u64 {
+        if cursor.position() >= usize_to_u64(cursor.get_ref().len()) {
             return Err(MidgeError::Corruption("Varint truncated".into()));
         }
 
-        let byte = cursor.get_ref()[cursor.position() as usize];
+        let byte = cursor.get_ref()[cursor_position(cursor)?];
         cursor.set_position(cursor.position() + 1);
 
         result |= u64::from(byte & 0x7f) << shift;
@@ -153,6 +162,30 @@ fn decode_varint(cursor: &mut std::io::Cursor<&[u8]>) -> MidgeResult<u64> {
             return Err(MidgeError::Corruption("Varint overflow".into()));
         }
     }
+}
+
+fn decode_usize(cursor: &mut Cursor<&[u8]>, field: &str) -> MidgeResult<usize> {
+    usize::try_from(decode_varint(cursor)?)
+        .map_err(|_| MidgeError::Corruption(format!("{field} overflow")))
+}
+
+fn decode_u32(cursor: &mut Cursor<&[u8]>, field: &str) -> MidgeResult<u32> {
+    u32::try_from(decode_varint(cursor)?)
+        .map_err(|_| MidgeError::Corruption(format!("{field} overflow")))
+}
+
+fn decode_u16(cursor: &mut Cursor<&[u8]>, field: &str) -> MidgeResult<u16> {
+    u16::try_from(decode_varint(cursor)?)
+        .map_err(|_| MidgeError::Corruption(format!("{field} overflow")))
+}
+
+fn cursor_position(cursor: &Cursor<&[u8]>) -> MidgeResult<usize> {
+    usize::try_from(cursor.position())
+        .map_err(|_| MidgeError::Corruption("Cursor position overflow".into()))
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -300,7 +333,10 @@ mod tests {
         // Arrange
         let mut parent = TrieNode::new(0, b"parent".to_vec(), None);
         for i in 0..100 {
-            parent.add_child(TrieEdge::new(i as u8, i as u32));
+            parent.add_child(TrieEdge::new(
+                u8::try_from(i).unwrap(),
+                u32::try_from(i).unwrap(),
+            ));
         }
         let mut children = vec![parent];
 
@@ -309,7 +345,7 @@ mod tests {
             children.push(TrieNode::new(
                 0,
                 format!("child{i}").into_bytes(),
-                Some(i as u32),
+                Some(u32::try_from(i).unwrap()),
             ));
         }
 

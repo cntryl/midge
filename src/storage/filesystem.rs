@@ -42,10 +42,10 @@ impl FileSystem {
         for component in Path::new(key).components() {
             match component {
                 Component::Normal(part) => out.push(part),
-                Component::CurDir => {}
-                Component::ParentDir => {}
-                Component::RootDir => {}
-                Component::Prefix(_) => {}
+                Component::CurDir
+                | Component::ParentDir
+                | Component::RootDir
+                | Component::Prefix(_) => {}
             }
         }
         out
@@ -55,13 +55,13 @@ impl FileSystem {
 fn write_file_with_parents(full_path: &Path, data: Vec<u8>) -> StorageOutcome<()> {
     if let Some(parent) = full_path.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
-            return StorageOutcome::Err(format!("mkdir {parent:?}: {e}"));
+            return StorageOutcome::Err(format!("mkdir {}: {e}", parent.display()));
         }
     }
 
     match fs::write(full_path, data) {
         Ok(()) => StorageOutcome::Ok(()),
-        Err(e) => StorageOutcome::Err(format!("write {full_path:?}: {e}")),
+        Err(e) => StorageOutcome::Err(format!("write {}: {e}", full_path.display())),
     }
 }
 
@@ -71,7 +71,7 @@ impl StorageBackend for FileSystem {
 
         let outcome = match fs::read(&full_path) {
             Ok(bytes) => StorageOutcome::Ok(bytes),
-            Err(e) => StorageOutcome::Err(format!("read {full_path:?}: {e}")),
+            Err(e) => StorageOutcome::Err(format!("read {}: {e}", full_path.display())),
         };
 
         let _ = callback.send(StorageEvent::ReadComplete {
@@ -87,9 +87,9 @@ impl StorageBackend for FileSystem {
             // Always try to create parent directories if present.
             if let Some(parent) = full_path.parent() {
                 if let Err(e) = fs::create_dir_all(parent) {
-                    StorageOutcome::Err(format!("mkdir {parent:?}: {e}"))
+                    StorageOutcome::Err(format!("mkdir {}: {e}", parent.display()))
                 } else if let Err(e) = fs::write(&full_path, data) {
-                    StorageOutcome::Err(format!("write {full_path:?}: {e}"))
+                    StorageOutcome::Err(format!("write {}: {e}", full_path.display()))
                 } else {
                     StorageOutcome::Ok(())
                 }
@@ -97,7 +97,7 @@ impl StorageBackend for FileSystem {
                 // Path has no parent (e.g., "foo") — still attempt the write.
                 match fs::write(&full_path, data) {
                     Ok(()) => StorageOutcome::Ok(()),
-                    Err(e) => StorageOutcome::Err(format!("write {full_path:?}: {e}")),
+                    Err(e) => StorageOutcome::Err(format!("write {}: {e}", full_path.display())),
                 }
             }
         };
@@ -143,9 +143,10 @@ impl StorageBackend for FileSystem {
                         StorageOutcome::Err("precondition failed: etag mismatch".to_string())
                     }
                 }
-                Err(error) => {
-                    StorageOutcome::Err(format!("precondition failed: read {full_path:?}: {error}"))
-                }
+                Err(error) => StorageOutcome::Err(format!(
+                    "precondition failed: read {}: {error}",
+                    full_path.display()
+                )),
             }
         } else if if_none_match.as_deref() == Some("*") {
             write_file_with_parents(&full_path, data)
@@ -164,7 +165,7 @@ impl StorageBackend for FileSystem {
 
         let outcome = match fs::remove_file(&full_path) {
             Ok(()) => StorageOutcome::Ok(()),
-            Err(e) => StorageOutcome::Err(format!("delete {full_path:?}: {e}")),
+            Err(e) => StorageOutcome::Err(format!("delete {}: {e}", full_path.display())),
         };
 
         let _ = callback.send(StorageEvent::DeleteComplete {
@@ -195,17 +196,19 @@ impl StorageBackend for FileSystem {
                     if current == expected.trim_matches('"') {
                         match fs::remove_file(&full_path) {
                             Ok(()) => StorageOutcome::Ok(()),
-                            Err(error) => {
-                                StorageOutcome::Err(format!("delete {full_path:?}: {error}"))
-                            }
+                            Err(error) => StorageOutcome::Err(format!(
+                                "delete {}: {error}",
+                                full_path.display()
+                            )),
                         }
                     } else {
                         StorageOutcome::Err("precondition failed: etag mismatch".to_string())
                     }
                 }
-                Err(error) => {
-                    StorageOutcome::Err(format!("precondition failed: read {full_path:?}: {error}"))
-                }
+                Err(error) => StorageOutcome::Err(format!(
+                    "precondition failed: read {}: {error}",
+                    full_path.display()
+                )),
             }
         } else {
             StorageOutcome::Err(
@@ -235,7 +238,7 @@ impl StorageBackend for FileSystem {
 
                     StorageOutcome::Ok(items)
                 }
-                Err(e) => StorageOutcome::Err(format!("list {full:?}: {e}")),
+                Err(e) => StorageOutcome::Err(format!("list {}: {e}", full.display())),
             }
         } else {
             StorageOutcome::Ok(Vec::new())

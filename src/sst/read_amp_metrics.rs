@@ -111,7 +111,7 @@ impl ReadAmpMetrics {
         if reads == 0 {
             return 0.0;
         }
-        self.ssts_touched_total() as f64 / reads as f64
+        u64_to_f64(self.ssts_touched_total()) / u64_to_f64(reads)
     }
 
     /// Get average L0 SSTs touched per read
@@ -120,7 +120,7 @@ impl ReadAmpMetrics {
         if reads == 0 {
             return 0.0;
         }
-        self.l0_ssts_touched_total() as f64 / reads as f64
+        u64_to_f64(self.l0_ssts_touched_total()) / u64_to_f64(reads)
     }
 
     /// Get average blocks read per read operation
@@ -129,7 +129,7 @@ impl ReadAmpMetrics {
         if reads == 0 {
             return 0.0;
         }
-        self.blocks_read_total() as f64 / reads as f64
+        u64_to_f64(self.blocks_read_total()) / u64_to_f64(reads)
     }
 
     /// Get L0 overlap rate (what fraction of SST touches are L0)
@@ -138,7 +138,7 @@ impl ReadAmpMetrics {
         if total_ssts == 0 {
             return 0.0;
         }
-        self.l0_ssts_touched_total() as f64 / total_ssts as f64
+        u64_to_f64(self.l0_ssts_touched_total()) / u64_to_f64(total_ssts)
     }
 
     /// Get SST budget violation rate
@@ -147,7 +147,7 @@ impl ReadAmpMetrics {
         if reads == 0 {
             return 0.0;
         }
-        self.sst_budget_violations.load(Ordering::Relaxed) as f64 / reads as f64
+        u64_to_f64(self.sst_budget_violations.load(Ordering::Relaxed)) / u64_to_f64(reads)
     }
 
     /// Get block budget violation rate
@@ -156,7 +156,7 @@ impl ReadAmpMetrics {
         if reads == 0 {
             return 0.0;
         }
-        self.block_budget_violations.load(Ordering::Relaxed) as f64 / reads as f64
+        u64_to_f64(self.block_budget_violations.load(Ordering::Relaxed)) / u64_to_f64(reads)
     }
 
     /// Reset all metrics to zero
@@ -189,9 +189,23 @@ impl Clone for ReadAmpMetrics {
     }
 }
 
+fn u64_to_f64(value: u64) -> f64 {
+    let upper = u32::try_from(value >> 32).unwrap_or(u32::MAX);
+    let lower_mask = u64::from(u32::MAX);
+    let lower = u32::try_from(value & lower_mask).unwrap_or(u32::MAX);
+    f64::from(upper) * 4_294_967_296.0 + f64::from(lower)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= f64::EPSILON,
+            "expected {expected}, got {actual}"
+        );
+    }
 
     #[test]
     fn should_create_new_metrics() {
@@ -203,7 +217,7 @@ mod tests {
         // Assert
         assert_eq!(metrics.reads_total(), 0);
         assert_eq!(metrics.ssts_touched_total(), 0);
-        assert_eq!(metrics.avg_ssts_per_read(), 0.0);
+        assert_close(metrics.avg_ssts_per_read(), 0.0);
     }
 
     #[test]
@@ -243,9 +257,9 @@ mod tests {
         metrics.record_read(6, 3, 15);
 
         // Assert
-        assert_eq!(metrics.avg_ssts_per_read(), 4.0); // (4+2+6)/3 = 4.0
-        assert_eq!(metrics.avg_l0_ssts_per_read(), 2.0); // (2+1+3)/3 = 2.0
-        assert_eq!(metrics.avg_blocks_per_read(), 10.0); // (10+5+15)/3 = 10.0
+        assert_close(metrics.avg_ssts_per_read(), 4.0); // (4+2+6)/3 = 4.0
+        assert_close(metrics.avg_l0_ssts_per_read(), 2.0); // (2+1+3)/3 = 2.0
+        assert_close(metrics.avg_blocks_per_read(), 10.0); // (10+5+15)/3 = 10.0
     }
 
     #[test]
@@ -257,7 +271,7 @@ mod tests {
         metrics.record_read(10, 8, 20); // 80% L0
 
         // Assert
-        assert_eq!(metrics.l0_overlap_rate(), 0.8);
+        assert_close(metrics.l0_overlap_rate(), 0.8);
     }
 
     #[test]
@@ -277,8 +291,8 @@ mod tests {
 
         // Assert
         assert_eq!(metrics.reads_total(), 3);
-        assert_eq!(metrics.sst_budget_violation_rate(), 1.0 / 3.0); // 1/3
-        assert_eq!(metrics.block_budget_violation_rate(), 2.0 / 3.0); // 2/3
+        assert_close(metrics.sst_budget_violation_rate(), 1.0 / 3.0); // 1/3
+        assert_close(metrics.block_budget_violation_rate(), 2.0 / 3.0); // 2/3
     }
 
     #[test]
@@ -289,9 +303,9 @@ mod tests {
         // Act
 
         // Assert
-        assert_eq!(metrics.avg_ssts_per_read(), 0.0);
-        assert_eq!(metrics.l0_overlap_rate(), 0.0);
-        assert_eq!(metrics.sst_budget_violation_rate(), 0.0);
+        assert_close(metrics.avg_ssts_per_read(), 0.0);
+        assert_close(metrics.l0_overlap_rate(), 0.0);
+        assert_close(metrics.sst_budget_violation_rate(), 0.0);
     }
 
     #[test]
@@ -308,7 +322,7 @@ mod tests {
         // Assert
         assert_eq!(metrics.reads_total(), 0);
         assert_eq!(metrics.ssts_touched_total(), 0);
-        assert_eq!(metrics.avg_ssts_per_read(), 0.0);
+        assert_close(metrics.avg_ssts_per_read(), 0.0);
     }
 
     #[test]
