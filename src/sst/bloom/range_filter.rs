@@ -32,11 +32,13 @@ impl RangeFilter {
     }
 
     /// Get the minimum key
+    #[must_use]
     pub fn min_key(&self) -> &[u8] {
         &self.min_key
     }
 
     /// Get the maximum key
+    #[must_use]
     pub fn max_key(&self) -> &[u8] {
         &self.max_key
     }
@@ -44,18 +46,21 @@ impl RangeFilter {
     /// Check if a query range overlaps with this filter's range
     ///
     /// Ranges [a, b] and [c, d] overlap if NOT (b < c OR d < a)
+    #[must_use]
     pub fn overlaps_with(&self, query_min: &[u8], query_max: &[u8]) -> bool {
         !(self.max_key.as_slice() < query_min || query_max < self.min_key.as_slice())
     }
 
     /// Check if a point key is within the filter's range
+    #[must_use]
     pub fn contains_point(&self, key: &[u8]) -> bool {
         key >= self.min_key.as_slice() && key <= self.max_key.as_slice()
     }
 
     /// Serialize the range filter
     ///
-    /// Format: \[min_len: u32\]\[min_key...\]\[max_len: u32\]\[max_key...\]
+    /// Format: \[`min_len`: u32\]\[`min_key`...\]\[`max_len`: u32\]\[`max_key`...\]
+    #[must_use]
     pub fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
         result.extend_from_slice(&(self.min_key.len() as u32).to_le_bytes());

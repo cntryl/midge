@@ -11,7 +11,7 @@ use std::hash::Hash;
 /// - Call `join(waiter)` to register a waiter under the current key.
 /// - When the current key is sealed (e.g. WAL segment rotation), call `rotate_to(new_key)`
 ///   to move all pending waiters for the sealed key into an inflight bucket.
-/// - When the keyed work completes (e.g. CloudAck for that WAL segment), call
+/// - When the keyed work completes (e.g. `CloudAck` for that WAL segment), call
 ///   `complete(key)` to drain the waiters and notify them externally.
 pub struct KeyedGroupCommit<K, W> {
     state: Mutex<KeyedState<K, W>>,

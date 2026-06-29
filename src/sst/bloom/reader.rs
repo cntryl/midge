@@ -5,8 +5,8 @@ use crate::common::{MidgeError, MidgeResult};
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 /// Seeds for the two base hashes (must match writer)
-const SEED1: u64 = 0x9E3779B185EBCA87;
-const SEED2: u64 = 0xC2B2AE3D27D4EB4F;
+const SEED1: u64 = 0x9E37_79B1_85EB_CA87;
+const SEED2: u64 = 0xC2B2_AE3D_27D4_EB4F;
 
 /// Bloom filter reader for querying an existing filter
 #[derive(Debug, Clone)]
@@ -20,8 +20,8 @@ pub struct BloomReader {
 impl BloomReader {
     /// Deserialize a bloom filter from bytes (format-aware with corruption checks).
     ///
-    /// Format: \[num_bits: u32\]\[key_count: u32\]\[k: u8\]\[bits...\]
-    /// Validates: num_bits > 0, k ∈ \[1,8\], bits size matches
+    /// Format: \[`num_bits`: u32\]\[`key_count`: u32\]\[k: u8\]\[bits...\]
+    /// Validates: `num_bits` > 0, k ∈ \[1,8\], bits size matches
     pub fn deserialize(data: &[u8]) -> MidgeResult<Self> {
         if data.len() < 9 {
             return Err(MidgeError::Corruption(
@@ -43,8 +43,7 @@ impl BloomReader {
         // Safety: k ∈ [1,8] (adaptive k range from writer)
         if !matches!(k, 1..=8) {
             return Err(MidgeError::Corruption(format!(
-                "Bloom filter k={} out of range [1, 8] — data corruption detected",
-                k
+                "Bloom filter k={k} out of range [1, 8] — data corruption detected"
             )));
         }
 
@@ -66,16 +65,19 @@ impl BloomReader {
     }
 
     /// Get the number of keys that were added to this filter
+    #[must_use]
     pub fn key_count(&self) -> usize {
         self.key_count
     }
 
     /// Get the number of bits in the filter
+    #[must_use]
     pub fn num_bits(&self) -> usize {
         self.num_bits
     }
 
     /// Calculate the false positive rate of this filter
+    #[must_use]
     pub fn estimated_fpr(&self) -> f64 {
         if self.key_count == 0 {
             return 0.0;
@@ -83,8 +85,8 @@ impl BloomReader {
 
         // FPR = (1 - e^(-k*n/m))^k
         // where k = number of hash functions, n = key count, m = number of bits
-        let exponent = -(self.k as f64) * (self.key_count as f64) / (self.num_bits as f64);
-        (1.0 - exponent.exp()).powi(self.k as i32)
+        let exponent = -f64::from(self.k) * (self.key_count as f64) / (self.num_bits as f64);
+        (1.0 - exponent.exp()).powi(i32::from(self.k))
     }
 }
 
@@ -182,6 +184,7 @@ impl BloomReader {
     ///
     /// Returns results without allocating per-key; enables vectorized processing
     /// and early termination for downstream pipelines.
+    #[must_use]
     pub fn contains_batch(&self, keys: &[&[u8]]) -> super::batch::BatchBloomResults {
         use super::batch::BatchBloomResults;
 
@@ -262,7 +265,7 @@ mod tests {
         // Arrange
         let mut writer = BloomWriter::new(100, 0.01);
         for i in 0..100 {
-            writer.insert(format!("key{}", i).as_bytes());
+            writer.insert(format!("key{i}").as_bytes());
         }
         let reader = writer.finish();
 
@@ -279,7 +282,7 @@ mod tests {
         // Arrange
         let mut writer = BloomWriter::new(100, 0.01);
         for i in 0..50 {
-            writer.insert(format!("key{}", i).as_bytes());
+            writer.insert(format!("key{i}").as_bytes());
         }
 
         // Act
@@ -329,7 +332,7 @@ mod tests {
         // Arrange
         let mut writer = BloomWriter::new(100, 0.01);
         for i in 0..25 {
-            writer.insert(format!("key{}", i).as_bytes());
+            writer.insert(format!("key{i}").as_bytes());
         }
 
         // Act
@@ -374,7 +377,7 @@ mod tests {
         // Arrange
         let mut writer = BloomWriter::new(100, 0.01);
         for i in 0..100 {
-            writer.insert(format!("key{}", i).as_bytes());
+            writer.insert(format!("key{i}").as_bytes());
         }
 
         // Act
@@ -391,12 +394,12 @@ mod tests {
         // Arrange
         let mut writer_low = BloomWriter::new(100, 0.01);
         for i in 0..10 {
-            writer_low.insert(format!("key{}", i).as_bytes());
+            writer_low.insert(format!("key{i}").as_bytes());
         }
 
         let mut writer_high = BloomWriter::new(100, 0.01);
         for i in 0..100 {
-            writer_high.insert(format!("key{}", i).as_bytes());
+            writer_high.insert(format!("key{i}").as_bytes());
         }
 
         // Act
@@ -495,7 +498,7 @@ mod tests {
         // Arrange
         let mut writer = BloomWriter::new(10000, 0.01);
         for i in 0..10000 {
-            writer.insert(format!("key{}", i).as_bytes());
+            writer.insert(format!("key{i}").as_bytes());
         }
 
         // Act
@@ -527,12 +530,12 @@ mod tests {
         // Arrange
         let mut writer_small = BloomWriter::new(10, 0.01);
         for i in 0..10 {
-            writer_small.insert(format!("key{}", i).as_bytes());
+            writer_small.insert(format!("key{i}").as_bytes());
         }
 
         let mut writer_large = BloomWriter::new(10000, 0.01);
         for i in 0..10000 {
-            writer_large.insert(format!("key{}", i).as_bytes());
+            writer_large.insert(format!("key{i}").as_bytes());
         }
 
         // Act
@@ -580,7 +583,7 @@ mod tests {
         // Arrange - Build filter with deterministic keys and measure false positives
         let mut writer = BloomWriter::new(1000, 0.01);
         for i in 0..1000 {
-            writer.insert(format!("key{:010}", i).as_bytes());
+            writer.insert(format!("key{i:010}").as_bytes());
         }
         let reader = writer.finish();
 
@@ -632,7 +635,7 @@ mod tests {
         // Arrange
         let mut writer = BloomWriter::new(100, 0.01);
         for i in 0..50 {
-            writer.insert(format!("key{}", i).as_bytes());
+            writer.insert(format!("key{i}").as_bytes());
         }
         let reader = writer.finish();
 

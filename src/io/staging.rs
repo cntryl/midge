@@ -62,22 +62,19 @@ where
             )
             .map_err(|error| {
                 map_error(format!(
-                    "failed to open staging file {:?}: {:?}",
-                    temp_path, error
+                    "failed to open staging file {temp_path:?}: {error:?}"
                 ))
             })?;
 
         file.write_at(0, Bytes::copy_from_slice(data))
             .map_err(|error| {
                 map_error(format!(
-                    "failed to write staging file {:?}: {:?}",
-                    temp_path, error
+                    "failed to write staging file {temp_path:?}: {error:?}"
                 ))
             })?;
         file.sync(Durability::Durable).map_err(|error| {
             map_error(format!(
-                "failed to sync staging file {:?}: {:?}",
-                temp_path, error
+                "failed to sync staging file {temp_path:?}: {error:?}"
             ))
         })?;
         drop(file);
@@ -86,8 +83,7 @@ where
 
         fs.rename_atomic(temp_path, target_path).map_err(|error| {
             map_error(format!(
-                "failed to rename staging file {:?} -> {:?}: {:?}",
-                temp_path, target_path, error
+                "failed to rename staging file {temp_path:?} -> {target_path:?}: {error:?}"
             ))
         })?;
 

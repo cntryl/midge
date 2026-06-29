@@ -11,34 +11,34 @@
 //!
 //! **Base**: [s3.rs] - Generic S3-compatible REST implementation
 //! - Object PUT/GET/DELETE/LIST/HEAD
-//! - SigV4 signing (optional, can be extended)
+//! - `SigV4` signing (optional, can be extended)
 //! - Works with any S3-compatible service
 //!
-//! **AWS**: [aws.rs] - AWS S3 with full SigV4 signing
+//! **AWS**: [aws.rs] - AWS S3 with full `SigV4` signing
 //! - Uses AWS region, access key, secret key
-//! - Proper AWS SigV4 request signing
-//! - Extends [S3Provider]
+//! - Proper AWS `SigV4` request signing
+//! - Extends [`S3Provider`]
 //!
 //! **Wasabi**: [wasabi.rs] - Wasabi Cloud Storage
 //! - S3-compatible API
 //! - Access key + secret key auth
-//! - Extends [S3Provider]
+//! - Extends [`S3Provider`]
 //!
-//! **MinIO**: [minio.rs] - MinIO S3-compatible storage
-//! - On-premise or cloud-hosted MinIO
+//! **`MinIO`**: [minio.rs] - `MinIO` S3-compatible storage
+//! - On-premise or cloud-hosted `MinIO`
 //! - Access key + secret key auth
-//! - Extends [S3Provider]
+//! - Extends [`S3Provider`]
 //!
 //! **OCI**: [oci.rs] - Oracle Cloud Infrastructure S3-compatible API
 //! - OCI Namespace + bucket structure
 //! - Custom signing (placeholder)
-//! - Extends [S3Provider]
+//! - Extends [`S3Provider`]
 //!
 //! ### Direct REST APIs
 //!
 //! **Google Cloud Storage**: [gcs.rs]
 //! - Direct REST API (no SDK)
-//! - OAuth2 authentication (placeholder)
+//! - `OAuth2` authentication (placeholder)
 //! - Standalone implementation
 //!
 //! **Azure Blob Storage**: [azure.rs]

@@ -122,7 +122,7 @@ impl GcActor {
 
             // Actually delete the file
             match std::fs::remove_file(&sst_path) {
-                Ok(_) => {
+                Ok(()) => {
                     tracing::info!(sst_name, path = %sst_path.display(), "Deleted obsolete SST");
                     deleted_count += 1;
                 }

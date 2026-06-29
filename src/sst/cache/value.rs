@@ -29,12 +29,14 @@ impl CacheValue {
     }
 
     /// Get the size of the cached data in bytes
+    #[must_use]
     pub fn size_bytes(&self) -> usize {
         self.data.len()
     }
 
     /// Increment access count and return the new value
     #[inline(always)]
+    #[must_use]
     pub fn increment_access(&self) -> u64 {
         self.access_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -42,6 +44,7 @@ impl CacheValue {
     }
 
     /// Get current access count
+    #[must_use]
     pub fn access_count(&self) -> u64 {
         self.access_count.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -163,7 +166,7 @@ mod tests {
             let v = std::sync::Arc::clone(&value);
             let handle = std::thread::spawn(move || {
                 for _ in 0..10 {
-                    v.increment_access();
+                    let _ = v.increment_access();
                 }
             });
             handles.push(handle);
@@ -204,11 +207,11 @@ mod tests {
         // Arrange
         let data = Bytes::from(&b"test"[..]);
         let value1 = CacheValue::new(data);
-        value1.increment_access();
+        let _ = value1.increment_access();
 
         // Act
         let value2 = value1.clone();
-        value2.increment_access();
+        let _ = value2.increment_access();
 
         // Assert (both share the same Arc, so access count is shared)
         assert_eq!(value1.access_count(), 2);
@@ -238,7 +241,7 @@ mod tests {
 
         // Act
         let value2 = value1.clone();
-        value1.increment_access();
+        let _ = value1.increment_access();
 
         // Assert (clones share the same Arc for access_count)
         assert_eq!(value2.access_count(), 1);

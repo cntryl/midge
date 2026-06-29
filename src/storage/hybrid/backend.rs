@@ -2,26 +2,26 @@
 //!
 //! CRITICAL ARCHITECTURE:
 //!
-//! HybridStorage has TWO SEPARATE ROLES:
+//! `HybridStorage` has TWO SEPARATE ROLES:
 //!
 //! 1. OBJECT STORAGE (SSTs, metadata):
-//!    - submit_read/write/delete/list for SST files
+//!    - `submit_read/write/delete/list` for SST files
 //!    - Local + cloud merging/fallback
 //!    - Cloud writes only for sst/ prefix
 //!
-//! 2. WAL DURABILITY PIPELINE (CloudAsync mode):
-//!    - enqueue_wal_segment() - queue WAL for cloud upload
-//!    - process_uploads() - initiate cloud uploads
-//!    - poll() - retrieve CloudAck/CloudFail events
-//!    - NEVER uses submit_write() for WAL
+//! 2. WAL DURABILITY PIPELINE (`CloudAsync` mode):
+//!    - `enqueue_wal_segment()` - queue WAL for cloud upload
+//!    - `process_uploads()` - initiate cloud uploads
+//!    - `poll()` - retrieve CloudAck/CloudFail events
+//!    - NEVER uses `submit_write()` for WAL
 //!
 //! WAL Flow:
-//!   WalActor → local append barrier → memtable visibility →
-//!   enqueue_wal_segment() → process_uploads() → cloud backend →
-//!   CloudAck event → WalActor advances cloud durability bookkeeping
+//!   `WalActor` → local append barrier → memtable visibility →
+//!   `enqueue_wal_segment()` → `process_uploads()` → cloud backend →
+//!   `CloudAck` event → `WalActor` advances cloud durability bookkeeping
 //!
 //! SST Flow:
-//!   Engine → submit_write() → local write + cloud write (if sst/) → done
+//!   Engine → `submit_write()` → local write + cloud write (if sst/) → done
 
 use super::actor;
 use super::policy;
@@ -134,9 +134,9 @@ impl CloudWalPruneGuard {
 /// Managed by a Storage Budget Actor to enforce disk constraints, watermarks,
 /// and coordination between local caching and cloud durability.
 ///
-/// CloudAsync Durability:
+/// `CloudAsync` Durability:
 /// - Tracks pending WAL segment uploads
-/// - Emits CloudAck when cloud confirms durability
+/// - Emits `CloudAck` when cloud confirms durability
 /// - Handles retries and failure reporting
 pub struct HybridStorage {
     /// Local storage backend (usually filesystem)
@@ -145,7 +145,7 @@ pub struct HybridStorage {
     cloud: Arc<dyn StorageBackend>,
     /// Storage Budget Actor for disk management
     budget_actor: Arc<Mutex<actor::StorageBudgetActor>>,
-    /// Pending WAL segment uploads (CloudAsync mode)
+    /// Pending WAL segment uploads (`CloudAsync` mode)
     upload_queue: Arc<Mutex<VecDeque<UploadState>>>,
     /// Completed events ready for polling
     event_queue: Arc<Mutex<VecDeque<StorageEvent>>>,
@@ -400,7 +400,7 @@ impl HybridStorage {
         }
     }
 
-    /// Enqueue a WAL segment for cloud upload (CloudAsync mode)
+    /// Enqueue a WAL segment for cloud upload (`CloudAsync` mode)
     ///
     /// This is the WAL durability pipeline entry point.
     pub fn enqueue_wal_segment(&self, segment_id: u64, local_path: PathBuf, max_sequence: u64) {
@@ -452,10 +452,10 @@ impl HybridStorage {
     ///
     /// Initiates cloud uploads for pending WAL segments.
     /// This is the ONLY place where WAL segments are uploaded to cloud.
-    /// - Reads pending uploads from upload_queue
-    /// - Initiates cloud upload via cloud backend (not submit_write)
+    /// - Reads pending uploads from `upload_queue`
+    /// - Initiates cloud upload via cloud backend (not `submit_write`)
     /// - Handles retries on failure (up to 3 attempts)
-    /// - Emits CloudAck/CloudFail events to event_queue
+    /// - Emits CloudAck/CloudFail events to `event_queue`
     ///
     /// Non-blocking - actual uploads happen asynchronously in the dedicated worker thread.
     ///
@@ -1412,8 +1412,7 @@ impl HybridStorage {
                 if proof.content_crc32c != Some(expected_content_crc32c) {
                     let actual = proof
                         .content_crc32c
-                        .map(|crc| format!("{crc:08x}"))
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .map_or_else(|| "unknown".to_string(), |crc| format!("{crc:08x}"));
                     return Err(format!(
                         "cached cloud SST '{sst_name}' content crc32c {actual} does not match manifest {expected_content_crc32c:08x}"
                     ));
@@ -1579,7 +1578,7 @@ impl HybridStorage {
             let (tx, rx) = std::sync::mpsc::channel();
             guard.cloud.submit_get(proof.key.clone(), tx);
             match rx.recv_timeout(Duration::from_secs(30)) {
-                Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                Ok(crate::storage::cloud::CloudEvent::Get {
                     result: crate::storage::cloud::CloudOutcome::Ok(data),
                     ..
                 }) => {
@@ -1592,7 +1591,7 @@ impl HybridStorage {
                     let (head_tx, head_rx) = std::sync::mpsc::channel();
                     guard.cloud.submit_head(proof.key.clone(), head_tx);
                     match head_rx.recv_timeout(Duration::from_secs(30)) {
-                        Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+                        Ok(crate::storage::cloud::CloudEvent::Head {
                             result: crate::storage::cloud::CloudOutcome::Ok(actual),
                             ..
                         }) => {
@@ -1608,7 +1607,7 @@ impl HybridStorage {
                                 ));
                             }
                         }
-                        Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+                        Ok(crate::storage::cloud::CloudEvent::Head {
                             result: crate::storage::cloud::CloudOutcome::Err(error),
                             ..
                         }) => {
@@ -1631,7 +1630,7 @@ impl HybridStorage {
                         }
                     }
                 }
-                Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                Ok(crate::storage::cloud::CloudEvent::Get {
                     result: crate::storage::cloud::CloudOutcome::Err(error),
                     ..
                 }) => {
@@ -2189,7 +2188,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_put(key.to_string(), data, vec![], tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(crate::storage::cloud::CloudEvent::PutComplete {
+            Ok(crate::storage::cloud::CloudEvent::Put {
                 result: crate::storage::cloud::CloudOutcome::Ok(()),
                 ..
             }) => {}
@@ -2201,7 +2200,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_head(key.to_string(), tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+            Ok(crate::storage::cloud::CloudEvent::Head {
                 result: crate::storage::cloud::CloudOutcome::Ok(metadata),
                 ..
             }) => StorageObjectMetadata {

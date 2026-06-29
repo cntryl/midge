@@ -136,10 +136,10 @@ impl StorageBudgetActor {
     }
 
     /// Complete a cloud upload
-    fn complete_cloud_upload(&mut self, _sst_id: u64, _actual_size: u64) {
+    fn complete_cloud_upload(&mut self, sst_id: u64, actual_size: u64) {
         // When cloud upload completes, the SST is stable in cloud.
         // We can now consider it for local eviction.
-        self.pending_evictions.push_back((_sst_id, _actual_size));
+        self.pending_evictions.push_back((sst_id, actual_size));
         tracing::info!("Cloud upload completed; SST marked for potential eviction");
     }
 

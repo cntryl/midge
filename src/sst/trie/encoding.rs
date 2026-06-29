@@ -7,17 +7,18 @@ use bytes::{BufMut, BytesMut};
 /// Encode trie nodes to compact binary format
 ///
 /// Layout:
-///   \[ varint node_count \]
-///   \[ node_0 \]
-///   \[ node_1 \]
+///   \[ varint `node_count` \]
+///   \[ `node_0` \]
+///   \[ `node_1` \]
 ///   ...
 ///
 /// Each node:
-///   [ varint prefix_len ]
-///   [ varint key_delta_len ] + key_delta
-///   [ varint block_id ] (0 = None, 1-based offset)
-///   [ varint child_count ]
-///   [ children: varint child_index ]*child_count
+///   [ varint `prefix_len` ]
+///   [ varint `key_delta_len` ] + `key_delta`
+///   [ varint `block_id` ] (0 = None, 1-based offset)
+///   [ varint `child_count` ]
+///   [ children: varint `child_index` ]*`child_count`
+#[must_use]
 pub fn encode_trie(nodes: &[TrieNode]) -> Vec<u8> {
     let mut buf = BytesMut::new();
 
@@ -34,7 +35,7 @@ pub fn encode_trie(nodes: &[TrieNode]) -> Vec<u8> {
 
 fn encode_node(buf: &mut BytesMut, node: &TrieNode) {
     // prefix_len
-    encode_varint(buf, node.prefix_len as u64);
+    encode_varint(buf, u64::from(node.prefix_len));
 
     // key_delta length + data
     encode_varint(buf, node.key_delta.len() as u64);
@@ -46,7 +47,7 @@ fn encode_node(buf: &mut BytesMut, node: &TrieNode) {
         buf,
         match node.block_id {
             None => 0,
-            Some(id) => (id as u64) + 1,
+            Some(id) => u64::from(id) + 1,
         },
     );
 
@@ -56,7 +57,7 @@ fn encode_node(buf: &mut BytesMut, node: &TrieNode) {
     // children
     for child in &node.children {
         buf.put_u8(child.first_byte);
-        encode_varint(buf, child.child_index as u64);
+        encode_varint(buf, u64::from(child.child_index));
     }
 }
 
@@ -141,7 +142,7 @@ fn decode_varint(cursor: &mut std::io::Cursor<&[u8]>) -> MidgeResult<u64> {
         let byte = cursor.get_ref()[cursor.position() as usize];
         cursor.set_position(cursor.position() + 1);
 
-        result |= ((byte & 0x7f) as u64) << shift;
+        result |= u64::from(byte & 0x7f) << shift;
 
         if byte & 0x80 == 0 {
             return Ok(result);
@@ -307,7 +308,7 @@ mod tests {
         for i in 0..100 {
             children.push(TrieNode::new(
                 0,
-                format!("child{}", i).into_bytes(),
+                format!("child{i}").into_bytes(),
                 Some(i as u32),
             ));
         }
@@ -363,10 +364,10 @@ mod tests {
         let node2 = TrieNode::new(5, b"".to_vec(), None);
         let node3 = TrieNode::new(u16::MAX, vec![0; 500], Some(u32::MAX - 1));
 
-        let nodes = vec![node1, node2, node3];
+        let trie_nodes = vec![node1, node2, node3];
 
         // Act
-        let encoded = encode_trie(&nodes);
+        let encoded = encode_trie(&trie_nodes);
         let decoded = decode_trie(&encoded).unwrap();
 
         // Assert

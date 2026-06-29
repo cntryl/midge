@@ -178,8 +178,7 @@ impl CloudStartupRecovery {
             let actual_crc32c = crc32c::crc32c(data);
             if actual_crc32c != expected_crc32c {
                 return Err(MidgeError::RecoveryFailed(format!(
-                    "SST '{}' content crc32c {:08x} does not match manifest {:08x}",
-                    sst_name, actual_crc32c, expected_crc32c
+                    "SST '{sst_name}' content crc32c {actual_crc32c:08x} does not match manifest {expected_crc32c:08x}"
                 )));
             }
         }
@@ -242,19 +241,17 @@ impl CloudStartupRecovery {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_list(prefix.to_string(), tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(crate::storage::cloud::CloudEvent::ListComplete { result, .. }) => match result {
+            Ok(crate::storage::cloud::CloudEvent::List { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(keys) => Ok(keys),
                 crate::storage::cloud::CloudOutcome::Err(error) => Err(MidgeError::Internal(
-                    format!("cloud list '{}': {}", prefix, error),
+                    format!("cloud list '{prefix}': {error}"),
                 )),
             },
             Ok(other) => Err(MidgeError::Internal(format!(
-                "unexpected cloud list response for '{}': {:?}",
-                prefix, other
+                "unexpected cloud list response for '{prefix}': {other:?}"
             ))),
             Err(error) => Err(MidgeError::Internal(format!(
-                "cloud list '{}' timed out or failed: {}",
-                prefix, error
+                "cloud list '{prefix}' timed out or failed: {error}"
             ))),
         }
     }
@@ -266,19 +263,17 @@ impl CloudStartupRecovery {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_get(key.to_string(), tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(crate::storage::cloud::CloudEvent::GetComplete { result, .. }) => match result {
+            Ok(crate::storage::cloud::CloudEvent::Get { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(data) => Ok(data),
-                crate::storage::cloud::CloudOutcome::Err(error) => Err(MidgeError::Internal(
-                    format!("cloud get '{}': {}", key, error),
-                )),
+                crate::storage::cloud::CloudOutcome::Err(error) => {
+                    Err(MidgeError::Internal(format!("cloud get '{key}': {error}")))
+                }
             },
             Ok(other) => Err(MidgeError::Internal(format!(
-                "unexpected cloud get response for '{}': {:?}",
-                key, other
+                "unexpected cloud get response for '{key}': {other:?}"
             ))),
             Err(error) => Err(MidgeError::Internal(format!(
-                "cloud get '{}' timed out or failed: {}",
-                key, error
+                "cloud get '{key}' timed out or failed: {error}"
             ))),
         }
     }
@@ -290,24 +285,22 @@ impl CloudStartupRecovery {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_get(key.to_string(), tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(crate::storage::cloud::CloudEvent::GetComplete { result, .. }) => match result {
+            Ok(crate::storage::cloud::CloudEvent::Get { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(data) => Ok(Some(data)),
                 crate::storage::cloud::CloudOutcome::Err(error)
                     if crate::storage::cloud::is_not_found_error(&error) =>
                 {
                     Ok(None)
                 }
-                crate::storage::cloud::CloudOutcome::Err(error) => Err(MidgeError::Internal(
-                    format!("cloud get '{}': {}", key, error),
-                )),
+                crate::storage::cloud::CloudOutcome::Err(error) => {
+                    Err(MidgeError::Internal(format!("cloud get '{key}': {error}")))
+                }
             },
             Ok(other) => Err(MidgeError::Internal(format!(
-                "unexpected cloud get response for '{}': {:?}",
-                key, other
+                "unexpected cloud get response for '{key}': {other:?}"
             ))),
             Err(error) => Err(MidgeError::Internal(format!(
-                "cloud get '{}' timed out or failed: {}",
-                key, error
+                "cloud get '{key}' timed out or failed: {error}"
             ))),
         }
     }
@@ -319,24 +312,22 @@ impl CloudStartupRecovery {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_head(key.to_string(), tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(crate::storage::cloud::CloudEvent::HeadComplete { result, .. }) => match result {
+            Ok(crate::storage::cloud::CloudEvent::Head { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(metadata) => Ok(Some(metadata)),
                 crate::storage::cloud::CloudOutcome::Err(error)
                     if crate::storage::cloud::is_not_found_error(&error) =>
                 {
                     Ok(None)
                 }
-                crate::storage::cloud::CloudOutcome::Err(error) => Err(MidgeError::Internal(
-                    format!("cloud head '{}': {}", key, error),
-                )),
+                crate::storage::cloud::CloudOutcome::Err(error) => {
+                    Err(MidgeError::Internal(format!("cloud head '{key}': {error}")))
+                }
             },
             Ok(other) => Err(MidgeError::Internal(format!(
-                "unexpected cloud head response for '{}': {:?}",
-                key, other
+                "unexpected cloud head response for '{key}': {other:?}"
             ))),
             Err(error) => Err(MidgeError::Internal(format!(
-                "cloud head '{}' timed out or failed: {}",
-                key, error
+                "cloud head '{key}' timed out or failed: {error}"
             ))),
         }
     }
@@ -358,19 +349,17 @@ impl CloudStartupRecovery {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_put(key.to_string(), data, headers, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(crate::storage::cloud::CloudEvent::PutComplete { result, .. }) => match result {
+            Ok(crate::storage::cloud::CloudEvent::Put { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(()) => Ok(()),
-                crate::storage::cloud::CloudOutcome::Err(error) => Err(MidgeError::Internal(
-                    format!("cloud put '{}': {}", key, error),
-                )),
+                crate::storage::cloud::CloudOutcome::Err(error) => {
+                    Err(MidgeError::Internal(format!("cloud put '{key}': {error}")))
+                }
             },
             Ok(other) => Err(MidgeError::Internal(format!(
-                "unexpected cloud put response for '{}': {:?}",
-                key, other
+                "unexpected cloud put response for '{key}': {other:?}"
             ))),
             Err(error) => Err(MidgeError::Internal(format!(
-                "cloud put '{}' timed out or failed: {}",
-                key, error
+                "cloud put '{key}' timed out or failed: {error}"
             ))),
         }
     }
@@ -384,8 +373,7 @@ impl CloudStartupRecovery {
                 let manifest: crate::metadata::Manifest =
                     serde_json::from_slice(data).map_err(|error| {
                         MidgeError::Internal(format!(
-                            "cloud metadata '{}' is invalid: {}",
-                            file_name, error
+                            "cloud metadata '{file_name}' is invalid: {error}"
                         ))
                     })?;
                 Ok(Some(manifest.last_persisted_sequence))
@@ -439,14 +427,12 @@ impl CloudStartupRecovery {
                 let etag = metadata.etag.trim().to_string();
                 if etag.is_empty() {
                     return Err(MidgeError::Internal(format!(
-                        "cloud metadata '{}' cannot be conditionally updated without an etag",
-                        key
+                        "cloud metadata '{key}' cannot be conditionally updated without an etag"
                     )));
                 }
                 let current = Self::blocking_cloud_get_optional(cloud, key)?.ok_or_else(|| {
                     MidgeError::Internal(format!(
-                        "cloud metadata '{}' disappeared after HEAD precondition",
-                        key
+                        "cloud metadata '{key}' disappeared after HEAD precondition"
                     ))
                 })?;
                 if let Some(remote_sequence) =
@@ -471,8 +457,7 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<Arc<dyn crate::io::traits::Fs>> {
         let real = crate::io::real::RealFs::new(db_path).map_err(|error| {
             MidgeError::RecoveryFailed(format!(
-                "failed to initialize recovery staging filesystem: {}",
-                error
+                "failed to initialize recovery staging filesystem: {error}"
             ))
         })?;
         Ok(Arc::new(real))
@@ -500,8 +485,7 @@ impl CloudStartupRecovery {
                 }
                 Err(error) => {
                     return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to download cloud metadata '{}': {}",
-                        key, error
+                        "failed to download cloud metadata '{key}': {error}"
                     )))
                 }
             };
@@ -618,8 +602,7 @@ impl CloudStartupRecovery {
                     continue;
                 }
                 return Err(MidgeError::RecoveryFailed(format!(
-                    "failed to mirror cloud metadata '{}': {}",
-                    key, error
+                    "failed to mirror cloud metadata '{key}': {error}"
                 )));
             }
         }
@@ -658,8 +641,7 @@ impl CloudStartupRecovery {
             }
             Err(error) => {
                 return Err(MidgeError::RecoveryFailed(format!(
-                    "failed to list cloud WAL objects: {}",
-                    error
+                    "failed to list cloud WAL objects: {error}"
                 )))
             }
         };
@@ -681,13 +663,10 @@ impl CloudStartupRecovery {
                 continue;
             };
 
-            let prefer_candidate = segment_keys
-                .get(&segment_id)
-                .map(|existing_key| {
-                    existing_key != &crate::wal::cloud_segment_object_key(segment_id)
-                        && logical_key == crate::wal::cloud_segment_object_key(segment_id)
-                })
-                .unwrap_or(true);
+            let prefer_candidate = segment_keys.get(&segment_id).is_none_or(|existing_key| {
+                existing_key != &crate::wal::cloud_segment_object_key(segment_id)
+                    && logical_key == crate::wal::cloud_segment_object_key(segment_id)
+            });
 
             if prefer_candidate {
                 segment_keys.insert(segment_id, logical_key.to_string());
@@ -703,8 +682,7 @@ impl CloudStartupRecovery {
                 }
                 Err(error) => {
                     return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to download cloud WAL '{}': {}",
-                        logical_key, error
+                        "failed to download cloud WAL '{logical_key}': {error}"
                     )))
                 }
             };
@@ -953,8 +931,7 @@ impl CloudStartupRecovery {
                                 Ok(None) => {
                                     if state.recovery_policy == RecoveryPolicy::Strict {
                                         return Err(MidgeError::RecoveryFailed(format!(
-                                            "authoritative cloud SST '{}' is missing",
-                                            sst_name
+                                            "authoritative cloud SST '{sst_name}' is missing"
                                         )));
                                     }
                                     state.opened_in_salvage_mode = true;
@@ -988,8 +965,7 @@ impl CloudStartupRecovery {
                     Ok(None) => {
                         if state.recovery_policy == RecoveryPolicy::Strict {
                             return Err(MidgeError::RecoveryFailed(format!(
-                                "authoritative cloud SST '{}' is missing",
-                                sst_name
+                                "authoritative cloud SST '{sst_name}' is missing"
                             )));
                         }
                         state.opened_in_salvage_mode = true;
@@ -1006,8 +982,7 @@ impl CloudStartupRecovery {
                     }
                     Err(error) => {
                         return Err(MidgeError::RecoveryFailed(format!(
-                            "failed to validate cloud SST '{}': {}",
-                            sst_name, error
+                            "failed to validate cloud SST '{sst_name}': {error}"
                         )))
                     }
                 }
@@ -1019,8 +994,7 @@ impl CloudStartupRecovery {
                 Ok(None) => {
                     if state.recovery_policy == RecoveryPolicy::Strict {
                         return Err(MidgeError::RecoveryFailed(format!(
-                            "authoritative cloud SST '{}' is missing",
-                            sst_name
+                            "authoritative cloud SST '{sst_name}' is missing"
                         )));
                     }
                     state.opened_in_salvage_mode = true;
@@ -1039,8 +1013,7 @@ impl CloudStartupRecovery {
                 }
                 Err(error) => {
                     return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to restore cloud SST '{}': {}",
-                        sst_name, error
+                        "failed to restore cloud SST '{sst_name}': {error}"
                     )))
                 }
             };
@@ -1073,8 +1046,7 @@ impl CloudStartupRecovery {
             if let Err(error) = crate::sst::fs::SstFileIo::open_with_real_fs(&local_path) {
                 if state.recovery_policy == RecoveryPolicy::Strict {
                     return Err(MidgeError::RecoveryFailed(format!(
-                        "restored cloud SST '{}' is invalid: {}",
-                        sst_name, error
+                        "restored cloud SST '{sst_name}' is invalid: {error}"
                     )));
                 }
                 state.opened_in_salvage_mode = true;
@@ -1108,7 +1080,7 @@ impl CloudStartupRecovery {
                     proofs
                         .entry(file_meta.name.clone())
                         .and_modify(|proof| {
-                            proof.merge_from(CloudSstRecoveryProof::from_runtime(file_meta))
+                            proof.merge_from(CloudSstRecoveryProof::from_runtime(file_meta));
                         })
                         .or_insert_with(|| CloudSstRecoveryProof::from_runtime(file_meta));
                 }
@@ -1118,7 +1090,7 @@ impl CloudStartupRecovery {
                         proofs
                             .entry(file_meta.name.clone())
                             .and_modify(|proof| {
-                                proof.merge_from(CloudSstRecoveryProof::from_runtime(file_meta))
+                                proof.merge_from(CloudSstRecoveryProof::from_runtime(file_meta));
                             })
                             .or_insert_with(|| CloudSstRecoveryProof::from_runtime(file_meta));
                     }
@@ -1143,8 +1115,7 @@ impl StartupStoragePath {
                     let counter = IN_MEMORY_OPEN_COUNTER.fetch_add(1, Ordering::SeqCst);
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .map(|duration| duration.as_nanos())
-                        .unwrap_or(0);
+                        .map_or(0, |duration| duration.as_nanos());
                     PathBuf::from(format!(
                         "target/tmp/midge_test_memory_{}_{}_{}",
                         std::process::id(),
@@ -1189,21 +1160,19 @@ impl StartupLease {
     fn acquire(storage: &Storage) -> MidgeResult<Self> {
         let lease = crate::lease::create_lease(storage).map_err(|error| {
             MidgeError::Internal(format!(
-                "failed to create lease for storage backend: {}",
-                error
+                "failed to create lease for storage backend: {error}"
             ))
         })?;
 
         let lease_guard = lease.clone().try_acquire().map_err(|error| match error {
             crate::lease::LeaseError::AcquisitionFailed(message) => MidgeError::Internal(format!(
                 "FATAL: another Midge instance is already running against this storage. \
-                 Only one writable instance is allowed at a time. Error: {}",
-                message
+                 Only one writable instance is allowed at a time. Error: {message}"
             )),
             crate::lease::LeaseError::IoError(message) => {
-                MidgeError::Internal(format!("lease acquisition I/O error: {}", message))
+                MidgeError::Internal(format!("lease acquisition I/O error: {message}"))
             }
-            _ => MidgeError::Internal(format!("lease acquisition failed: {}", error)),
+            _ => MidgeError::Internal(format!("lease acquisition failed: {error}")),
         })?;
 
         tracing::warn!(
@@ -1529,7 +1498,7 @@ impl FacadeAssembly {
         }
 
         Ok(Engine {
-            _runtime: Some(started.runtime),
+            runtime: Some(started.runtime),
             runtime_handle: started.runtime_handle,
             db_path: storage_path.db_path,
             memory_mode: storage_path.memory_mode,
@@ -1543,9 +1512,9 @@ impl FacadeAssembly {
             )),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
             column_families,
-            _lease: Some(startup_lease.lease),
-            _lease_guard: Some(startup_lease.lease_guard),
-            _lease_heartbeat: Some(std::sync::Mutex::new(lease_heartbeat)),
+            lease: Some(startup_lease.lease),
+            lease_guard: Some(startup_lease.lease_guard),
+            lease_heartbeat: Some(std::sync::Mutex::new(lease_heartbeat)),
             ingest_coordinators,
         })
     }

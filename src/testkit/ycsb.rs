@@ -25,6 +25,7 @@ pub struct XorShift64 {
 }
 
 impl XorShift64 {
+    #[must_use]
     pub fn new(seed: u64) -> Self {
         Self { state: seed.max(1) }
     }
@@ -39,6 +40,7 @@ impl XorShift64 {
     }
 }
 
+#[must_use]
 pub fn configured_initial_keys(default: usize) -> usize {
     std::env::var("MIDGE_YCSB_INITIAL_KEYS")
         .ok()
@@ -47,6 +49,7 @@ pub fn configured_initial_keys(default: usize) -> usize {
         .unwrap_or(default)
 }
 
+#[must_use]
 pub fn configured_value_size() -> usize {
     std::env::var("MIDGE_YCSB_VALUE_SIZE_BYTES")
         .ok()
@@ -55,24 +58,29 @@ pub fn configured_value_size() -> usize {
         .unwrap_or(DEFAULT_VALUE_SIZE)
 }
 
+#[must_use]
 pub fn logical_entry_size_bytes() -> usize {
     KEY_SIZE + configured_value_size()
 }
 
+#[must_use]
 pub fn logical_dataset_bytes(initial_keys: usize) -> u64 {
     initial_keys as u64 * logical_entry_size_bytes() as u64
 }
 
+#[must_use]
 pub fn make_key(id: u64) -> [u8; KEY_SIZE] {
     let mut k = [0u8; KEY_SIZE];
     k[..8].copy_from_slice(&id.to_be_bytes());
     k
 }
 
+#[must_use]
 pub fn make_value(fill: u8) -> Vec<u8> {
     vec![fill; configured_value_size()]
 }
 
+#[must_use]
 pub fn open_tier4_engine(mut opts: MidgeOptions) -> Engine {
     // Tier-4 workloads should exercise the full system shape.
     opts.enable_compaction = true;
@@ -118,8 +126,7 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
     let cf_id = cf.id();
     if trace {
         eprintln!(
-            "[midge][ycsb] starting load: initial_keys={} batch_ops={} threads={}",
-            initial_keys, batch_ops, threads
+            "[midge][ycsb] starting load: initial_keys={initial_keys} batch_ops={batch_ops} threads={threads}"
         );
     }
 
@@ -154,7 +161,7 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
             tx.commit(api::WriteOptions::best_effort())
                 .expect("commit failed");
             if trace {
-                eprintln!("[midge][ycsb] loaded {} keys (final)", initial_keys);
+                eprintln!("[midge][ycsb] loaded {initial_keys} keys (final)");
             }
         }
     } else {
@@ -205,8 +212,7 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
                             .expect("commit failed");
                         if trace {
                             eprintln!(
-                                "[midge][ycsb] worker={} loaded {}..{} (final)",
-                                worker, start, end
+                                "[midge][ycsb] worker={worker} loaded {start}..{end} (final)"
                             );
                         }
                     }
@@ -259,6 +265,7 @@ fn splitmix64(mut x: u64) -> u64 {
 /// Deterministically derive a pseudo-random u64 from `(seed, client_id, op_index, draw_index)`.
 ///
 /// Use this to feed Zipfian generators without introducing true randomness.
+#[must_use]
 pub fn deterministic_u64(seed: u64, client_id: usize, op_index: u64, draw_index: u64) -> u64 {
     let base = seed
         ^ ((client_id as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93))
@@ -342,15 +349,14 @@ where
     let last_op_ts = Arc::new(AtomicU64::new(
         SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_millis() as u64),
     ));
 
     for client_id in 0..clients {
         let engine = Arc::clone(&engine);
         let stop = Arc::clone(&stop);
         let barrier = Arc::clone(&barrier);
-        let mut step = make_client(client_id, Arc::clone(&stop));
+        let mut client_step = make_client(client_id, Arc::clone(&stop));
         let last_op_ts = Arc::clone(&last_op_ts);
 
         // Get the CF (it was created in load phase)
@@ -381,22 +387,20 @@ where
 
             while !stop.load(Ordering::Acquire) {
                 let start = Instant::now();
-                step(&engine, &cf, op_index);
+                client_step(&engine, &cf, op_index);
                 let elapsed = start.elapsed();
 
                 // Update heartbeat timestamp after each logical operation.
                 let now_ms = SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
+                    .map_or(0, |d| d.as_millis() as u64);
                 last_op_ts.store(now_ms, Ordering::Release);
 
                 if let Some(threshold) = slow_op_ms {
                     let el_ms = elapsed.as_millis() as u64;
                     if el_ms >= threshold {
                         eprintln!(
-                            "[midge][ycsb][slow_op] client={} op_index={} elapsed_ms={} threshold_ms={}",
-                            client_id, op_index, el_ms, threshold
+                            "[midge][ycsb][slow_op] client={client_id} op_index={op_index} elapsed_ms={el_ms} threshold_ms={threshold}"
                         );
                     }
                 }
@@ -422,18 +426,15 @@ where
                 }
                 let now_ms = SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
+                    .map_or(0, |d| d.as_millis() as u64);
                 let last_ms = last_op_ts.load(Ordering::Acquire);
                 let elapsed = now_ms.saturating_sub(last_ms);
                 if elapsed >= watchdog_secs.saturating_mul(1000) {
                     eprintln!(
-                        "[midge][ycsb][watchdog] No progress for {} ms (threshold {}s). Panicking to capture diagnostics.",
-                        elapsed,
-                        watchdog_secs
+                        "[midge][ycsb][watchdog] No progress for {elapsed} ms (threshold {watchdog_secs}s). Panicking to capture diagnostics."
                     );
                     // Suggest the user run with RUST_BACKTRACE=1 for stack traces.
-                    panic!("YCSB watchdog detected stall: elapsed={} ms", elapsed);
+                    panic!("YCSB watchdog detected stall: elapsed={elapsed} ms");
                 }
                 thread::sleep(poll_interval);
             }

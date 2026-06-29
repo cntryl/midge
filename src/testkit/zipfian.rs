@@ -15,6 +15,7 @@ pub struct ZipfianGenerator {
 }
 
 impl ZipfianGenerator {
+    #[must_use]
     pub fn new(items: usize, theta: f64) -> Self {
         let zeta_n = Self::zeta(items, theta);
         let zeta_2 = Self::zeta(2, theta);
@@ -43,7 +44,7 @@ impl ZipfianGenerator {
         // Deterministic [0,1) from u64, no FP RNG in hot loop.
         let u: f64 = {
             let r = next_u64();
-            (r as f64) / 18446744073709551616.0 // 2^64
+            (r as f64) / 18_446_744_073_709_551_616.0 // 2^64
         };
 
         let uz = u * self.zeta_n;

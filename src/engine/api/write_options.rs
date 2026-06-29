@@ -23,29 +23,31 @@ pub enum DurabilityPolicy {
     /// Best-effort persistence - fastest but no durability on crash before flush
     /// Only use for bulk loads or testing
     BestEffort,
-    /// CloudAsync strict mode - force immediate WAL seal + rotate + upload,
+    /// `CloudAsync` strict mode - force immediate WAL seal + rotate + upload,
     /// then block until cloud upload completes. Use ONLY when cloud durability
-    /// is explicitly required. Regular CloudAsync uses background uploads and
+    /// is explicitly required. Regular `CloudAsync` uses background uploads and
     /// never blocks commits.
     CloudStrict,
 }
 
 impl WriteOptions {
-    /// Create WriteOptions with Sync policy
+    /// Create `WriteOptions` with Sync policy
+    #[must_use]
     pub fn sync() -> Self {
         Self {
             policy: DurabilityPolicy::Sync,
         }
     }
 
-    /// Create WriteOptions with Buffered policy
+    /// Create `WriteOptions` with Buffered policy
+    #[must_use]
     pub fn buffered() -> Self {
         Self {
             policy: DurabilityPolicy::Buffered,
         }
     }
 
-    /// Create WriteOptions with BestEffort policy
+    /// Create `WriteOptions` with `BestEffort` policy
     ///
     /// Best-effort persistence: data written to memtable with no WAL overhead.
     /// Data is visible for reads and can be flushed to SST, but provides NO durability guarantee
@@ -63,17 +65,19 @@ impl WriteOptions {
     /// 3. Switch to `buffered()` or `sync()` for measured workload
     /// 4. If engine restarts, reload initial dataset from scratch
     ///
+    #[must_use]
     pub fn best_effort() -> Self {
         Self {
             policy: DurabilityPolicy::BestEffort,
         }
     }
 
-    /// Create WriteOptions with CloudStrict policy.
+    /// Create `WriteOptions` with `CloudStrict` policy.
     ///
     /// Forces immediate WAL seal + rotate + cloud upload, then blocks until
     /// upload completes. Use ONLY when cloud durability is explicitly required.
-    /// Regular CloudAsync mode uses background uploads and never blocks commits.
+    /// Regular `CloudAsync` mode uses background uploads and never blocks commits.
+    #[must_use]
     pub fn cloud_strict() -> Self {
         Self {
             policy: DurabilityPolicy::CloudStrict,
@@ -81,21 +85,25 @@ impl WriteOptions {
     }
 
     /// Get durability policy
+    #[must_use]
     pub fn policy(&self) -> DurabilityPolicy {
         self.policy
     }
 
     /// Check if this is sync mode
+    #[must_use]
     pub fn is_sync(&self) -> bool {
         matches!(self.policy, DurabilityPolicy::Sync)
     }
 
     /// Check if using best-effort persistence (no durability guarantee)
+    #[must_use]
     pub fn is_best_effort(&self) -> bool {
         matches!(self.policy, DurabilityPolicy::BestEffort)
     }
 
     /// Check if this requires strict cloud durability
+    #[must_use]
     pub fn is_cloud_strict(&self) -> bool {
         matches!(self.policy, DurabilityPolicy::CloudStrict)
     }
@@ -105,8 +113,8 @@ impl WriteOptions {
     /// Maps the user-facing API durability choices to runtime WAL durability policies:
     /// - Sync → Strict (fsync after every write)
     /// - Buffered → Batched (periodic fsync)
-    /// - BestEffort → BestEffort (skip WAL entirely)
-    /// - CloudStrict → CloudAsync (wait for cloud durability)
+    /// - `BestEffort` → `BestEffort` (skip WAL entirely)
+    /// - `CloudStrict` → `CloudAsync` (wait for cloud durability)
     pub(crate) fn to_wal_durability_policy(self) -> crate::wal::DurabilityPolicy {
         match self.policy {
             DurabilityPolicy::Sync => crate::wal::DurabilityPolicy::Strict,

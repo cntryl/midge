@@ -46,7 +46,7 @@ impl CompactionActor {
         self.compactor.config.l0_file_count_threshold
     }
 
-    /// Open an SST reader using the actor's configured SstFactory
+    /// Open an SST reader using the actor's configured `SstFactory`
     pub fn open_sst_reader(
         &self,
         path: &std::path::Path,

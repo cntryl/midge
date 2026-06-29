@@ -57,8 +57,7 @@ impl<I: Iterator<Item = CompactionVersion>> StreamDeduplicate<I> {
     pub fn new(inner: I) -> Self {
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
 
         Self {
             inner,
@@ -213,8 +212,7 @@ pub fn collect_versions(
 pub fn deduplicate_versions(versions: &[CompactionVersion]) -> Vec<CompactionVersion> {
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
 
     // Map: key -> newest visible version (by sequence).
     let mut newest_by_key: BTreeMap<Vec<u8>, CompactionVersion> = BTreeMap::new();

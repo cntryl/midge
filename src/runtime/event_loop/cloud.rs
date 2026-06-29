@@ -14,12 +14,13 @@ impl CloudCoordinator {
             &sst_name,
             event_loop.hybrid_storage.as_ref(),
         );
-        let resp = result
-            .map(|_| RuntimeResponse::Ok { request_id })
-            .unwrap_or_else(|error| RuntimeResponse::Error {
+        let resp = result.map_or_else(
+            |error| RuntimeResponse::Error {
                 request_id,
                 error: crate::common::MidgeError::Internal(error.to_string()),
-            });
+            },
+            |()| RuntimeResponse::Ok { request_id },
+        );
         event_loop.respond(request_id, resp);
         HandleOutcome::Continue
     }
@@ -32,12 +33,13 @@ impl CloudCoordinator {
         let result = event_loop
             .cloud_actor
             .upload_wal(&mut event_loop.state, segment_id);
-        let resp = result
-            .map(|_| RuntimeResponse::Ok { request_id })
-            .unwrap_or_else(|error| RuntimeResponse::Error {
+        let resp = result.map_or_else(
+            |error| RuntimeResponse::Error {
                 request_id,
                 error: crate::common::MidgeError::Internal(error.to_string()),
-            });
+            },
+            |()| RuntimeResponse::Ok { request_id },
+        );
         event_loop.respond(request_id, resp);
         HandleOutcome::Continue
     }

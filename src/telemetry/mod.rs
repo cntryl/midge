@@ -92,8 +92,7 @@ impl Telemetry {
                 .build()
                 .map_err(|e| {
                     crate::common::MidgeError::Internal(format!(
-                        "Failed to initialize OTLP exporter: {}",
-                        e
+                        "Failed to initialize OTLP exporter: {e}"
                     ))
                 })?;
 

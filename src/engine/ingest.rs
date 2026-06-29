@@ -7,9 +7,9 @@
 //! Design:
 //! - Each column family has one ingest loop/task
 //! - Concurrent writers enqueue write intents instead of committing immediately
-//! - The ingest loop builds a WriteBatch and commits as a SINGLE transaction
+//! - The ingest loop builds a `WriteBatch` and commits as a SINGLE transaction
 //! - Batching policy: flush when max ops/bytes/deadline reached
-//! - Backpressure: bounded queue enforces WriteStall semantics
+//! - Backpressure: bounded queue enforces `WriteStall` semantics
 //! - Correctness: writes are atomic, ordered per CF, errors propagate to caller
 
 use crate::common::{MidgeError, MidgeResult};
@@ -80,7 +80,7 @@ pub(crate) struct BatchResponse {
 
 /// Coordinator for write grouping / leader-based batching
 ///
-/// This mechanism reduces the rate of ApplyTransaction messages sent to the runtime
+/// This mechanism reduces the rate of `ApplyTransaction` messages sent to the runtime
 /// by merging multiple pending batch submissions from concurrent threads into a
 /// single transaction. The "leader" thread drains pending requests and commits them
 /// as a merged batch, reducing single-threaded event loop contention.
@@ -90,7 +90,7 @@ pub(crate) struct BatchResponse {
 /// - Low concurrency (batching few): decreases timeout to reduce latency
 /// - Self-tunes to workload pattern
 ///
-/// This is inspired by the write grouping pattern used in RocksDB, PebbleDB, etc.
+/// This is inspired by the write grouping pattern used in `RocksDB`, `PebbleDB`, etc.
 pub(crate) struct WriteGroupCoordinator {
     /// Atomic flag: true if a thread is actively serving as leader
     leader_active: AtomicBool,
@@ -209,7 +209,7 @@ pub(crate) struct IngestWrite {
 
 impl IngestWrite {
     fn estimated_size(&self) -> usize {
-        self.key.len() + self.value.as_ref().map(|v| v.len()).unwrap_or(0) + 64
+        self.key.len() + self.value.as_ref().map_or(0, bytes::Bytes::len) + 64
     }
 
     fn to_transaction_op(&self) -> TransactionOp {
@@ -288,14 +288,13 @@ impl IngestCoordinator {
         let stall_flag_clone = Arc::clone(&stall_flag);
 
         let thread_handle = thread::Builder::new()
-            .name(format!("midge-ingest-cf{}", cf_id))
+            .name(format!("midge-ingest-cf{cf_id}"))
             .spawn(move || {
                 Self::ingest_loop(cf_id, runtime, write_rx, stop_rx, stall_flag_clone);
             })
             .map_err(|e| {
                 crate::common::MidgeError::Internal(format!(
-                    "Failed to spawn ingest thread for CF {}: {}",
-                    cf_id, e
+                    "Failed to spawn ingest thread for CF {cf_id}: {e}"
                 ))
             })?;
 
@@ -316,7 +315,7 @@ impl IngestCoordinator {
 
     /// Submit a point write to the ingest queue.
     ///
-    /// Returns WriteStall if queue is full (backpressure), or the sequence number on success.
+    /// Returns `WriteStall` if queue is full (backpressure), or the sequence number on success.
     pub fn submit_write(
         &self,
         cf_id: crate::engine::ColumnFamilyId,
@@ -354,13 +353,13 @@ impl IngestCoordinator {
     /// Submit a batch with write grouping / leader-based batching.
     ///
     /// This implementation reduces message rate to the runtime event loop by merging
-    /// multiple concurrent batch submissions into a single ApplyTransaction.
+    /// multiple concurrent batch submissions into a single `ApplyTransaction`.
     ///
-    /// The key idea (from RocksDB write grouping):
+    /// The key idea (from `RocksDB` write grouping):
     /// - First caller becomes "leader" (via atomic CAS)
     /// - Leader drains all pending requests from the queue
     /// - Leader merges all ops into a single transaction
-    /// - Leader sends ONE ApplyTransaction to runtime
+    /// - Leader sends ONE `ApplyTransaction` to runtime
     /// - Leader fans-out the response to all waiters
     /// - Other callers wait for the leader's response
     ///
@@ -437,7 +436,7 @@ impl IngestCoordinator {
                         pending_requests.push((pending.result_tx, pending.durability_policy));
                         (pending.ops, pending.durability_policy, false)
                     }
-                    Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                 },
             };
 
@@ -537,28 +536,25 @@ impl IngestCoordinator {
     ) {
         let error_msg = match result {
             Ok(_) => None,
-            Err(e) => Some(format!("Write group commit failed: {:?}", e)),
+            Err(e) => Some(format!("Write group commit failed: {e:?}")),
         };
 
         for (waiter_tx, _) in pending_requests {
-            match result {
-                Ok(seq) => {
-                    if waiter_tx.send(Ok(*seq)).is_err() {
-                        tracing::warn!(
-                            cf_id = self.cf_id,
-                            seq = *seq,
-                            "failed to send write result to waiter (receiver dropped)"
-                        );
-                    }
+            if let Ok(seq) = result {
+                if waiter_tx.send(Ok(*seq)).is_err() {
+                    tracing::warn!(
+                        cf_id = self.cf_id,
+                        seq = *seq,
+                        "failed to send write result to waiter (receiver dropped)"
+                    );
                 }
-                Err(_) => {
-                    let err_msg = error_msg.clone().unwrap_or_default();
-                    if waiter_tx.send(Err(MidgeError::Internal(err_msg))).is_err() {
-                        tracing::warn!(
-                            cf_id = self.cf_id,
-                            "failed to send error to waiter (receiver dropped)"
-                        );
-                    }
+            } else {
+                let err_msg = error_msg.clone().unwrap_or_default();
+                if waiter_tx.send(Err(MidgeError::Internal(err_msg))).is_err() {
+                    tracing::warn!(
+                        cf_id = self.cf_id,
+                        "failed to send error to waiter (receiver dropped)"
+                    );
                 }
             }
         }
@@ -672,8 +668,7 @@ impl IngestCoordinator {
                 if let Some(expected) = expected_op_count {
                     if op_count != expected {
                         return Err(MidgeError::Internal(format!(
-                            "Batch op count mismatch: expected {}, got {}",
-                            expected, op_count
+                            "Batch op count mismatch: expected {expected}, got {op_count}"
                         )));
                     }
                 }
@@ -733,16 +728,13 @@ impl IngestCoordinator {
                 // within MAX_BATCH_DELAY even if no more writes arrive.
                 let remaining = MAX_BATCH_DELAY.saturating_sub(batch.first_enqueued.elapsed());
                 crossbeam::channel::select! {
-                    recv(write_rx) -> msg => match msg {
-                        Ok(intent) => {
-                            batch.add(intent);
-                            true
-                        }
-                        Err(_) => {
-                            // write channel disconnected — flush & exit
-                            Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
-                            break;
-                        }
+                    recv(write_rx) -> msg => if let Ok(intent) = msg {
+                        batch.add(intent);
+                        true
+                    } else {
+                        // write channel disconnected — flush & exit
+                        Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
+                        break;
                     },
                     recv(stop_rx) -> _ => {
                         while let Ok(intent) = write_rx.try_recv() {
@@ -845,7 +837,7 @@ impl IngestCoordinator {
         let ops: Vec<TransactionOp> = batch
             .intents
             .iter()
-            .map(|i| i.to_transaction_op())
+            .map(IngestWrite::to_transaction_op)
             .collect();
 
         // Fast path: check cached stall flag (avoids round-trip in common case)
@@ -855,8 +847,7 @@ impl IngestCoordinator {
             // Verify stall is still active via runtime
             if let Ok(true) = runtime.check_write_stall(cf_id) {
                 let err_msg = format!(
-                    "Memory budget exceeded for CF {}: immutable queue full or memory threshold exceeded",
-                    cf_id
+                    "Memory budget exceeded for CF {cf_id}: immutable queue full or memory threshold exceeded"
                 );
                 for intent in batch.intents.drain(..) {
                     let _ = intent
@@ -896,7 +887,7 @@ impl IngestCoordinator {
             }
             Err(e) => {
                 // Failure: propagate error to all callers
-                let err_msg = format!("Batch commit failed: {:?}", e);
+                let err_msg = format!("Batch commit failed: {e:?}");
                 for intent in batch.intents.drain(..) {
                     if intent
                         .result_tx

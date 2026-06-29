@@ -1,4 +1,4 @@
-//! Factory for creating io::Fs-backed SST readers and writers
+//! Factory for creating `io::Fs-backed` SST readers and writers
 
 use crate::common::MidgeResult;
 use crate::sst::traits::{DynSstWriter, SstFactory};
@@ -13,7 +13,7 @@ use crate::sst::types::{
     encode_range_tombstones, BlockHandle, Footer, RangeTombstone, SstMetadata, SST_FORMAT_V2,
 };
 
-/// SST factory that uses io::Fs abstraction
+/// SST factory that uses `io::Fs` abstraction
 /// Allows using different filesystem implementations (Real, Mock, Chaos) for testing
 pub struct FsSstFactoryIo {
     fs: Arc<dyn Fs>,
@@ -32,18 +32,20 @@ impl FsSstFactoryIo {
     }
 
     /// Create with custom block size
+    #[must_use]
     pub fn with_block_size(mut self, block_size: usize) -> Self {
         self.block_size = block_size;
         self
     }
 
     /// Set the compression policy for SST blocks produced by this factory.
+    #[must_use]
     pub fn with_compression_policy(mut self, policy: CompressionPolicy) -> Self {
         self.compression_policy = policy;
         self
     }
 
-    /// Open an SST file using the io::Fs backend
+    /// Open an SST file using the `io::Fs` backend
     pub fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         let path_str = path.to_str().unwrap_or("").to_string();
         let start = std::time::Instant::now();
@@ -54,8 +56,7 @@ impl FsSstFactoryIo {
             .fs
             .metadata(&crate::io::FsPath::new(path_str.as_str()))
             .ok()
-            .map(|m| m.len)
-            .unwrap_or(0);
+            .map_or(0, |m| m.len);
         tracing::info!(path = ?path, size_bytes = size, open_ms = elapsed.as_secs_f64() * 1000.0, "sst reader opened");
         Ok(Box::new(reader))
     }
@@ -139,7 +140,7 @@ impl DynSstWriter for InMemorySstWriter {
     ) -> MidgeResult<()> {
         self.entries.push(PendingEntry {
             key: key.to_vec(),
-            value: value.map(|bytes| bytes.to_vec()),
+            value: value.map(<[u8]>::to_vec),
             sequence: seq,
             op_type,
             expiration,

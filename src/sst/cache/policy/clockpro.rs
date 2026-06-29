@@ -5,7 +5,7 @@
 //! - Scan resistance via hot/cold separation
 //! - Adaptive hot-set sizing based on workload
 //!
-//! The algorithm maintains a circular buffer with per-entry metadata (ref_bit, hot_bit)
+//! The algorithm maintains a circular buffer with per-entry metadata (`ref_bit`, `hot_bit`)
 //! and sweeps through with a clock hand, clearing reference bits and selecting victims
 //! from cold, unreferenced entries.
 //!
@@ -39,7 +39,7 @@ struct SlotMetadata {
 pub struct ClockProPolicy {
     /// Per-slot metadata (indexed by internal slot ID)
     slots: Mutex<Vec<SlotMetadata>>,
-    /// Map from CacheKey to slot index for O(1) access/removal
+    /// Map from `CacheKey` to slot index for O(1) access/removal
     key_to_slot: Mutex<HashMap<CacheKey, usize>>,
     /// Clock hand position (next slot to examine)
     hand: Mutex<usize>,
@@ -53,12 +53,14 @@ pub struct ClockProPolicy {
 
 impl ClockProPolicy {
     /// Create a new CLOCK-Pro policy
+    #[must_use]
     pub fn new() -> Self {
         const DEFAULT_CAPACITY: usize = 1024;
         Self::with_capacity(DEFAULT_CAPACITY)
     }
 
     /// Create a new CLOCK-Pro policy with explicit capacity
+    #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         let capacity = capacity.max(16);
         let hot_target = capacity / 4; // Start with ~25% hot target

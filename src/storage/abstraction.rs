@@ -311,7 +311,7 @@ pub trait StorageFile: Send {
     fn read_ranges(&self, ranges: &[ReadRange]) -> StorageResult<Vec<Vec<u8>>> {
         let mut out = Vec::with_capacity(ranges.len());
         for r in ranges {
-            out.push(self.read_at(r.offset, r.len as u64)?);
+            out.push(self.read_at(r.offset, u64::from(r.len))?);
         }
         Ok(out)
     }

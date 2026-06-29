@@ -5,15 +5,15 @@
 //! - Syncing WAL to disk
 //! - Rotating WAL segments
 //! - Coordinating with cloud actor for WAL uploads
-//! - Tracking local_durable_seq and cloud_durable_seq frontiers
+//! - Tracking `local_durable_seq` and `cloud_durable_seq` frontiers
 //! - Managing pending requests waiting for cloud durability
 //!
 //! ARCHITECTURAL RULES:
-//! - ALWAYS uses FsWalWriter (never creates new backends)
-//! - Assigns global sequence numbers via state.next_sequence()
-//! - Tracks two durability frontiers for CloudAsync mode
+//! - ALWAYS uses `FsWalWriter` (never creates new backends)
+//! - Assigns global sequence numbers via `state.next_sequence()`
+//! - Tracks two durability frontiers for `CloudAsync` mode
 //! - Does NOT block event loop waiting for cloud
-//! - Queues pending requests and completes them when cloud_durable_seq advances
+//! - Queues pending requests and completes them when `cloud_durable_seq` advances
 //!
 //! NOTE: `DurabilityPolicy::CloudAsync` is wired as an async cloud-backed mode.
 //! Local WAL append is the immediate visibility barrier; cloud durability advances
@@ -54,13 +54,13 @@ pub struct AppendParams {
 pub struct WalActor {
     /// WAL writer (owned by this actor)
     writer: Option<Box<dyn WalWriter>>,
-    /// Filesystem backend for WAL files (io::Fs abstraction)
+    /// Filesystem backend for WAL files (`io::Fs` abstraction)
     wal_fs: Option<Arc<dyn Fs>>,
     /// Buffered writes pending sync
     pending_sync_count: usize,
     /// Durability policy (determines sync behavior)
     durability_policy: DurabilityPolicy,
-    /// Pending writes waiting for cloud durability (CloudAsync mode only)
+    /// Pending writes waiting for cloud durability (`CloudAsync` mode only)
     /// These writes are in local WAL but NOT in memtable yet
     cloud_write_queue: CloudWriteQueue,
     /// Bytes written since last sync (for batched mode)
@@ -70,7 +70,7 @@ pub struct WalActor {
     /// Flush generation for batched/local durability group commit
     flush_generation: u64,
 
-    /// Batch configuration governing max_delay_ms and max_bytes
+    /// Batch configuration governing `max_delay_ms` and `max_bytes`
     batch_config: BatchConfig,
     /// Last wall-clock time we performed a WAL fsync
     last_sync_instant: Instant,
@@ -226,7 +226,7 @@ impl WalActor {
         self.flush_generation
     }
 
-    /// Number of times sync_internal has been called (for tests/diagnostics)
+    /// Number of times `sync_internal` has been called (for tests/diagnostics)
     pub fn sync_calls(&self) -> u64 {
         self.sync_calls
     }
@@ -238,7 +238,7 @@ impl WalActor {
     }
 
     /// Check for timed-out pending cloud writes
-    /// Returns number of writes that have exceeded CLOUD_UPLOAD_TIMEOUT
+    /// Returns number of writes that have exceeded `CLOUD_UPLOAD_TIMEOUT`
     pub fn count_timed_out_writes(&self) -> usize {
         self.cloud_write_queue.count_timed_out_writes()
     }
@@ -247,12 +247,12 @@ impl WalActor {
     ///
     /// - Strict: fsync immediately + apply to memtable + respond
     /// - Batched: batch writes + apply to memtable immediately + respond
-    /// - CloudMirrored: fsync + apply to memtable + schedule cloud upload + respond
-    /// - CloudAsync: local append barrier + apply to memtable + queue for cloud confirmation
+    /// - `CloudMirrored`: fsync + apply to memtable + schedule cloud upload + respond
+    /// - `CloudAsync`: local append barrier + apply to memtable + queue for cloud confirmation
     ///
     /// Returns the assigned sequence number.
     ///
-    /// IDEMPOTENCY: Uses request_id to detect retries. If the same request_id is seen twice,
+    /// IDEMPOTENCY: Uses `request_id` to detect retries. If the same `request_id` is seen twice,
     /// returns the same sequence number instead of allocating a new one.
     pub fn append(
         &mut self,
@@ -434,8 +434,7 @@ impl WalActor {
                         "CloudAsync timeout: pending writes not acknowledged by cloud"
                     );
                     return Err(MidgeError::Internal(format!(
-                        "{} pending writes exceeded cloud upload timeout",
-                        timed_out
+                        "{timed_out} pending writes exceeded cloud upload timeout"
                     )));
                 }
 
@@ -496,7 +495,7 @@ impl WalActor {
 
     /// Append a delete range tombstone to WAL.
     ///
-    /// This writes a single DeleteRange record covering [start_key, end_key).
+    /// This writes a single `DeleteRange` record covering [`start_key`, `end_key`).
     /// Much more efficient than scanning and deleting each key individually.
     pub fn append_delete_range(
         &mut self,
@@ -630,8 +629,7 @@ impl WalActor {
                 let timed_out = self.count_timed_out_writes();
                 if timed_out > 0 {
                     return Err(MidgeError::Internal(format!(
-                        "{} pending writes exceeded cloud upload timeout",
-                        timed_out
+                        "{timed_out} pending writes exceeded cloud upload timeout"
                     )));
                 }
 
@@ -686,13 +684,13 @@ impl WalActor {
     ///
     /// This method:
     /// - allocates a single transaction id
-    /// - writes TxnBegin marker (unless BestEffort)
-    /// - writes all operation records (in order, unless BestEffort)
-    /// - writes TxnCommit marker at the end of the transaction path (unless BestEffort)
+    /// - writes `TxnBegin` marker (unless `BestEffort`)
+    /// - writes all operation records (in order, unless `BestEffort`)
+    /// - writes `TxnCommit` marker at the end of the transaction path (unless `BestEffort`)
     /// - applies all operations to memtables (in order)
     ///
     /// The `durability_policy` parameter allows per-request durability control.
-    /// If Some(DurabilityPolicy::BestEffort), WAL writes are skipped entirely
+    /// If `Some(DurabilityPolicy::BestEffort)`, WAL writes are skipped entirely
     /// (only memtable updates happen) for maximum bulk-load performance.
     /// If None, uses the actor's configured durability policy.
     ///
@@ -724,7 +722,7 @@ impl WalActor {
         }
 
         // Preflight insert-only operations so we can fail without writing any WAL records.
-        for op in ops.iter() {
+        for op in &ops {
             if let crate::runtime::TransactionOp::Put {
                 cf_id,
                 key,
@@ -891,7 +889,7 @@ impl WalActor {
             }
         }
 
-        let op_count = apply_ops.len();
+        let apply_op_count = apply_ops.len();
 
         // For batched mode, mark the sequence range as pending atomicity
         // Reads at sequences >= begin_seq must wait for the batch to become durable
@@ -912,7 +910,7 @@ impl WalActor {
                     t.metrics().record_write_stall_cloud();
                 }
                 tracing::warn!(
-                    op_count,
+                    apply_op_count,
                     pending_count = self.cloud_write_queue.len(),
                     pending_bytes = self.cloud_write_queue.pending_bytes(),
                     "CloudAsync batch stall: pending queue at capacity"
@@ -931,8 +929,7 @@ impl WalActor {
                     "CloudAsync batch timeout: pending writes not acknowledged by cloud"
                 );
                 return Err(MidgeError::Internal(format!(
-                    "{} pending writes exceeded cloud upload timeout",
-                    timed_out
+                    "{timed_out} pending writes exceeded cloud upload timeout"
                 )));
             }
 
@@ -985,21 +982,26 @@ impl WalActor {
 
             tracing::trace!(
                 commit_sequence = last_sequence,
-                op_count,
+                apply_op_count,
                 "Applied batch to memtable (CloudAsync)"
             );
         } else {
             self.apply_ops_to_memtables(state, apply_ops)?;
         }
 
-        tracing::trace!(txn_id, last_sequence, op_count, "WAL transaction apply");
+        tracing::trace!(
+            txn_id,
+            last_sequence,
+            apply_op_count,
+            "WAL transaction apply"
+        );
 
         // Return deferred=true if using group commit (Batched or CloudAsync modes)
         let deferred = matches!(
             effective_durability,
             DurabilityPolicy::Batched | DurabilityPolicy::CloudAsync
         );
-        Ok((last_sequence, op_count, deferred))
+        Ok((last_sequence, apply_op_count, deferred))
     }
 
     fn ensure_no_write_conflicts(
@@ -1023,8 +1025,7 @@ impl WalActor {
                         if latest_seq > start_sequence {
                             Self::record_write_conflict_point();
                             return Err(MidgeError::WriteConflict(format!(
-                                "key conflict on cf {} for key {:?}: latest seq {} > tx start {}",
-                                cf_id, key, latest_seq, start_sequence
+                                "key conflict on cf {cf_id} for key {key:?}: latest seq {latest_seq} > tx start {start_sequence}"
                             )));
                         }
                     }
@@ -1035,8 +1036,7 @@ impl WalActor {
                         if range_seq > start_sequence {
                             Self::record_write_conflict_point();
                             return Err(MidgeError::WriteConflict(format!(
-                                "key conflict on cf {} for key {:?}: covered by delete-range seq {} > tx start {}",
-                                cf_id, key, range_seq, start_sequence
+                                "key conflict on cf {cf_id} for key {key:?}: covered by delete-range seq {range_seq} > tx start {start_sequence}"
                             )));
                         }
                     }
@@ -1060,12 +1060,7 @@ impl WalActor {
                         if latest_seq > start_sequence {
                             Self::record_write_conflict_range();
                             return Err(MidgeError::WriteConflict(format!(
-                                "range conflict on cf {} for [{:?}, {:?}): latest seq {} > tx start {}",
-                                cf_id,
-                                start_key,
-                                end_key,
-                                latest_seq,
-                                start_sequence
+                                "range conflict on cf {cf_id} for [{start_key:?}, {end_key:?}): latest seq {latest_seq} > tx start {start_sequence}"
                             )));
                         }
                     }
@@ -1078,12 +1073,7 @@ impl WalActor {
                         if range_seq > start_sequence {
                             Self::record_write_conflict_range();
                             return Err(MidgeError::WriteConflict(format!(
-                                "range conflict on cf {} for [{:?}, {:?}): overlaps delete-range seq {} > tx start {}",
-                                cf_id,
-                                start_key,
-                                end_key,
-                                range_seq,
-                                start_sequence
+                                "range conflict on cf {cf_id} for [{start_key:?}, {end_key:?}): overlaps delete-range seq {range_seq} > tx start {start_sequence}"
                             )));
                         }
                     }
@@ -1384,7 +1374,7 @@ impl WalActor {
         Ok(())
     }
 
-    /// Apply a delete_range operation to the memtable
+    /// Apply a `delete_range` operation to the memtable
     fn apply_delete_range_to_memtable(
         &self,
         state: &mut RuntimeState,
@@ -1527,7 +1517,7 @@ impl WalActor {
 
     /// Flush WAL buffers without fsync.
     ///
-    /// CloudAsync durability uses local WAL as a staging file for upload.
+    /// `CloudAsync` durability uses local WAL as a staging file for upload.
     /// We avoid fsync on every write, but do a flush+fsync only when sealing
     /// a segment right before upload so the uploader reads a complete file.
     pub fn flush_for_cloud_upload(&mut self, state: &mut RuntimeState) -> MidgeResult<u64> {
@@ -1554,7 +1544,7 @@ impl WalActor {
         Ok(segment_max_sequence)
     }
 
-    /// Clear buffered WAL accounting after a CloudAsync segment is successfully
+    /// Clear buffered WAL accounting after a `CloudAsync` segment is successfully
     /// sealed, rotated, and enqueued for upload.
     pub fn complete_cloud_upload_seal(&mut self, state: &mut RuntimeState) {
         state.wal.pending_writes = 0;
@@ -1569,7 +1559,7 @@ impl WalActor {
         // Time-based check (max_delay_ms) OR byte-count threshold
         let by_bytes = self.bytes_since_sync >= self.batch_config.max_bytes;
         let by_time = self.last_sync_instant.elapsed().as_millis()
-            >= (self.batch_config.max_delay_ms as u128);
+            >= u128::from(self.batch_config.max_delay_ms);
         by_bytes || by_time
     }
 
@@ -1618,9 +1608,9 @@ impl WalActor {
         Ok(())
     }
 
-    /// Handle cloud upload completion (CloudAsync durability)
+    /// Handle cloud upload completion (`CloudAsync` durability)
     ///
-    /// Updates cloud_durable_seq and completes any pending writes
+    /// Updates `cloud_durable_seq` and completes any pending writes
     /// by applying them to memtable.
     pub fn handle_cloud_upload_complete(
         &mut self,

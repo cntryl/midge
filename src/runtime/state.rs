@@ -99,7 +99,7 @@ pub struct CloudState {
 /// while snapshots are reading from those SSTs.
 #[derive(Default)]
 pub struct SnapshotState {
-    /// Active snapshots: snapshot_id → (sequence, created_at, ref_count, pinned_ssts)
+    /// Active snapshots: `snapshot_id` → (sequence, `created_at`, `ref_count`, `pinned_ssts`)
     pub active_snapshots: HashMap<u64, (u64, Instant, usize, HashSet<String>)>,
     /// Maximum time to hold a snapshot (1 hour by default)
     pub max_snapshot_lifetime: std::time::Duration,
@@ -173,18 +173,15 @@ impl RuntimeState {
         &self,
         cf_id: crate::types::ColumnFamilyId,
     ) -> u64 {
-        self.column_families
-            .get(&cf_id)
-            .map(|cf_state| {
-                if cf_state.memtable.size_bytes() == 0 {
-                    0
-                } else {
-                    self.wal
-                        .current_segment_id
-                        .saturating_sub(cf_state.active_memtable_started_in_segment)
-                }
-            })
-            .unwrap_or(0)
+        self.column_families.get(&cf_id).map_or(0, |cf_state| {
+            if cf_state.memtable.size_bytes() == 0 {
+                0
+            } else {
+                self.wal
+                    .current_segment_id
+                    .saturating_sub(cf_state.active_memtable_started_in_segment)
+            }
+        })
     }
 
     pub(crate) fn max_memtable_wal_segment_gap(&self) -> u64 {
@@ -277,8 +274,8 @@ impl RuntimeState {
 ///
 /// Important:
 /// - This type does NOT handle per-request routing.
-/// - Response routing is handled exclusively by ResponseRouter
-///   (shared between RuntimeHandle and EventLoop).
+/// - Response routing is handled exclusively by `ResponseRouter`
+///   (shared between `RuntimeHandle` and `EventLoop`).
 pub struct RuntimeState {
     // === Paths ===
     pub db_path: PathBuf,
@@ -295,9 +292,9 @@ pub struct RuntimeState {
     pub pending_txn_min_seq: Option<u64>,
     /// Start time of pending transaction (for Phase 3 duration metrics)
     pub pending_txn_start_time: Option<std::time::Instant>,
-    /// Idempotency cache: request_id → (first_sequence, count, confirmed_at)
-    /// Prevents duplicate sequence allocation on retry of same request_id.
-    /// Entries cleared when durability frontier advances past confirmed_at.
+    /// Idempotency cache: `request_id` → (`first_sequence`, count, `confirmed_at`)
+    /// Prevents duplicate sequence allocation on retry of same `request_id`.
+    /// Entries cleared when durability frontier advances past `confirmed_at`.
     pub sequence_idempotency_cache: HashMap<u64, (u64, usize, u64)>,
 
     // === Column Families ===
@@ -365,16 +362,16 @@ pub struct RuntimeState {
     /// the running compactions drain.
     pub active_compactions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 
-    /// Condvar used to wait for active_compactions == 0.
+    /// Condvar used to wait for `active_compactions` == 0.
     pub active_compactions_notify: std::sync::Arc<(parking_lot::Mutex<()>, parking_lot::Condvar)>,
 
-    /// Whether an ingest barrier is currently active. This is set at BeginIngest
-    /// and cleared at EndIngest so tools and tests can detect when ingest mode
+    /// Whether an ingest barrier is currently active. This is set at `BeginIngest`
+    /// and cleared at `EndIngest` so tools and tests can detect when ingest mode
     /// is enforced.
     pub ingest_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
     /// Pending CompactAll/BeginIngest requests waiting for compactions to finish.
-    /// Maps request_id -> completion_condition (e.g., "CompactAll", "BeginIngest").
+    /// Maps `request_id` -> `completion_condition` (e.g., "`CompactAll`", "`BeginIngest`").
     pub pending_compaction_waits: parking_lot::Mutex<std::collections::HashMap<u64, String>>,
 }
 
@@ -391,7 +388,7 @@ impl RuntimeState {
     }
 
     /// Create new runtime state with the given database path.
-    /// If memory_mode is true, filesystem is never touched.
+    /// If `memory_mode` is true, filesystem is never touched.
     pub fn new(db_path: PathBuf, memory_mode: bool) -> Self {
         Self::try_new(db_path, memory_mode, crate::config::RecoveryPolicy::Strict)
             .expect("runtime state initialization failed")
@@ -409,7 +406,7 @@ impl RuntimeState {
     /// Create new runtime state with an optional override for WAL recovery.
     ///
     /// When `recovery_wal_dir` is provided, recovery replays WAL from that
-    /// directory (instead of `db_path/wal`). This is used for CloudAsync mode
+    /// directory (instead of `db_path/wal`). This is used for `CloudAsync` mode
     /// where cloud WAL is the source of truth.
     pub fn new_with_recovery_dir(
         db_path: PathBuf,
@@ -445,12 +442,14 @@ impl RuntimeState {
             std::sync::Arc::new(crate::io::MockFs::new())
         } else {
             std::sync::Arc::new(crate::io::real::RealFs::new(&db_path).map_err(|e| {
-                MidgeError::RecoveryFailed(format!("failed to initialize filesystem: {}", e))
+                MidgeError::RecoveryFailed(format!("failed to initialize filesystem: {e}"))
             })?)
         };
 
         // Load manifest (prefer snapshot + journal replay) — only if not in memory mode
-        let manifest = if !memory_mode {
+        let manifest = if memory_mode {
+            Manifest::default()
+        } else {
             let strict_manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
                 &fs,
                 crate::config::RecoveryPolicy::Strict,
@@ -463,8 +462,7 @@ impl RuntimeState {
                 Err(e) => {
                     if recovery_policy == crate::config::RecoveryPolicy::Strict {
                         return Err(MidgeError::RecoveryFailed(format!(
-                            "failed to load manifest: {}",
-                            e
+                            "failed to load manifest: {e}"
                         )));
                     }
                     opened_in_salvage_mode = true;
@@ -485,12 +483,12 @@ impl RuntimeState {
                     })
                 }
             }
-        } else {
-            Manifest::default()
         };
 
         // Load intent log if present (using FS via persistence helpers)
-        let intent_log = if !memory_mode {
+        let intent_log = if memory_mode {
+            Vec::new()
+        } else {
             let strict_intent = crate::runtime::IntentPersistence::load_with_fs_and_policy(
                 &fs,
                 crate::config::RecoveryPolicy::Strict,
@@ -500,8 +498,7 @@ impl RuntimeState {
                 Err(e) => {
                     if recovery_policy == crate::config::RecoveryPolicy::Strict {
                         return Err(MidgeError::RecoveryFailed(format!(
-                            "failed to load intent log: {}",
-                            e
+                            "failed to load intent log: {e}"
                         )));
                     }
                     opened_in_salvage_mode = true;
@@ -522,12 +519,11 @@ impl RuntimeState {
                     })
                 }
             }
-        } else {
-            Vec::new()
         };
 
         // Default: allow up to 10 immutable memtables before stall
-        let _max_immutable_memtables = 10;
+        let max_immutable_memtables = 10;
+        let _ = max_immutable_memtables;
 
         let mut column_families = HashMap::new();
         column_families.insert(0, ColumnFamilyState::new(0, "default".into()));
@@ -593,7 +589,7 @@ impl RuntimeState {
                             if let Some(cf_state) = column_families.get_mut(&cf_id) {
                                 cf_state.memtable = recovered_memtable;
                             } else {
-                                let name = format!("cf_{}", cf_id);
+                                let name = format!("cf_{cf_id}");
                                 let mut cf_state = ColumnFamilyState::new(cf_id, name);
                                 cf_state.memtable = recovered_memtable;
                                 column_families.insert(cf_id, cf_state);
@@ -605,8 +601,7 @@ impl RuntimeState {
                     Err(e) => {
                         if recovery_policy == crate::config::RecoveryPolicy::Strict {
                             return Err(MidgeError::RecoveryFailed(format!(
-                                "WAL recovery failed: {}",
-                                e
+                                "WAL recovery failed: {e}"
                             )));
                         }
                         opened_in_salvage_mode = true;
@@ -617,8 +612,7 @@ impl RuntimeState {
                 Err(e) => {
                     if recovery_policy == crate::config::RecoveryPolicy::Strict {
                         return Err(MidgeError::RecoveryFailed(format!(
-                            "failed to initialize WAL recovery storage: {}",
-                            e
+                            "failed to initialize WAL recovery storage: {e}"
                         )));
                     }
                     opened_in_salvage_mode = true;
@@ -688,7 +682,7 @@ impl RuntimeState {
             cloud: CloudState::default(),
             snapshots: SnapshotState {
                 active_snapshots: HashMap::new(),
-                max_snapshot_lifetime: std::time::Duration::from_secs(3600), // 1 hour default
+                max_snapshot_lifetime: std::time::Duration::from_hours(1), // 1 hour default
             },
             recent_delete_ranges: Vec::new(),
             memtable_size_limit: 64 * 1024 * 1024, // 64MB
@@ -1059,8 +1053,8 @@ impl RuntimeState {
         }
     }
 
-    /// Check if we have cached sequences for this request_id.
-    /// Returns (first_sequence, count) if found and not yet confirmed.
+    /// Check if we have cached sequences for this `request_id`.
+    /// Returns (`first_sequence`, count) if found and not yet confirmed.
     pub fn get_cached_sequences(&self, request_id: u64) -> Option<(u64, usize)> {
         self.sequence_idempotency_cache
             .get(&request_id)
@@ -1068,10 +1062,10 @@ impl RuntimeState {
     }
 
     /// Allocate sequences idempotently.
-    /// If request_id is already in cache, return cached sequences.
+    /// If `request_id` is already in cache, return cached sequences.
     /// Otherwise, allocate count new sequences and cache them.
     ///
-    /// PHASE 0 GUARDRAIL: Enforces MAX_IDEMPOTENCY_CACHE_SIZE to prevent unbounded
+    /// PHASE 0 GUARDRAIL: Enforces `MAX_IDEMPOTENCY_CACHE_SIZE` to prevent unbounded
     /// memory growth under cloud upload stalls. Evicts oldest confirmed entries
     /// when limit is exceeded.
     pub fn allocate_sequences_idempotent(&mut self, request_id: u64, count: usize) -> (u64, usize) {
@@ -1152,8 +1146,8 @@ impl RuntimeState {
         self.sequence_idempotency_cache.len()
     }
 
-    /// Confirm sequences for a request_id (mark as durable).
-    /// This updates the confirmed_at frontier to current local_durable_seq.
+    /// Confirm sequences for a `request_id` (mark as durable).
+    /// This updates the `confirmed_at` frontier to current `local_durable_seq`.
     pub fn confirm_sequences(&mut self, request_id: u64) {
         if let Some(entry) = self.sequence_idempotency_cache.get_mut(&request_id) {
             entry.2 = self.wal.local_durable_seq;
@@ -1165,8 +1159,8 @@ impl RuntimeState {
         }
     }
 
-    /// Confirm sequences for a request_id with an explicit confirmed_at sequence
-    /// Useful for CloudAsync paths where the confirmation frontier is `cloud_durable_seq`.
+    /// Confirm sequences for a `request_id` with an explicit `confirmed_at` sequence
+    /// Useful for `CloudAsync` paths where the confirmation frontier is `cloud_durable_seq`.
     pub fn confirm_sequences_at(&mut self, request_id: u64, confirmed_at_seq: u64) {
         if let Some(entry) = self.sequence_idempotency_cache.get_mut(&request_id) {
             entry.2 = confirmed_at_seq;
@@ -1500,16 +1494,14 @@ impl RuntimeState {
         let path = self.sst_dir.join(sst_name);
         if !path.exists() {
             return self.handle_recovery_issue(format!(
-                "recovery intent references missing SST '{}'",
-                sst_name
+                "recovery intent references missing SST '{sst_name}'"
             ));
         }
 
         match crate::sst::fs::SstFileIo::open_with_real_fs(&path) {
             Ok(_) => Ok(true),
             Err(error) => self.handle_recovery_issue(format!(
-                "recovery intent references invalid SST '{}': {}",
-                sst_name, error
+                "recovery intent references invalid SST '{sst_name}': {error}"
             )),
         }
     }
@@ -1522,8 +1514,7 @@ impl RuntimeState {
             Err(error) => {
                 if self.recovery_policy == crate::config::RecoveryPolicy::Strict {
                     Err(MidgeError::RecoveryFailed(format!(
-                        "failed to delete SST '{}' during recovery: {}",
-                        sst_name, error
+                        "failed to delete SST '{sst_name}' during recovery: {error}"
                     )))
                 } else {
                     self.opened_in_salvage_mode = true;
@@ -1683,8 +1674,7 @@ impl RuntimeState {
         if manifest_changed {
             if let Err(error) = self.persist_manifest_checkpoint() {
                 let _ = self.handle_recovery_issue(format!(
-                    "failed to persist manifest checkpoint after intent replay: {}",
-                    error
+                    "failed to persist manifest checkpoint after intent replay: {error}"
                 ))?;
             }
         }
@@ -1699,8 +1689,7 @@ impl RuntimeState {
                 crate::runtime::IntentPersistence::save(&self.db_path, &self.intent_log)
             {
                 let _ = self.handle_recovery_issue(format!(
-                    "failed to clear intent log after replay: {}",
-                    error
+                    "failed to clear intent log after replay: {error}"
                 ))?;
             }
         }
@@ -1713,7 +1702,7 @@ impl RuntimeState {
     /// while the snapshot is active and performing range scans.
     ///
     /// Returns true if snapshot was registered successfully.
-    /// Returns false if snapshot_id already exists (duplicate registration).
+    /// Returns false if `snapshot_id` already exists (duplicate registration).
     pub fn register_snapshot(
         &mut self,
         snapshot_id: u64,
@@ -2320,7 +2309,7 @@ mod tests {
     fn should_preserve_non_expired_snapshots_when_enforcement_runs() {
         // Arrange
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
-        state.snapshots.max_snapshot_lifetime = std::time::Duration::from_secs(3600);
+        state.snapshots.max_snapshot_lifetime = std::time::Duration::from_hours(1);
         assert!(state.register_snapshot(2, 11, vec!["002.sst".to_string()]));
 
         // Act

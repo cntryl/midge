@@ -214,7 +214,7 @@ impl Manifest {
         }
     }
 
-    /// Apply a ManifestEdit (journal replay or live append)
+    /// Apply a `ManifestEdit` (journal replay or live append)
     pub fn apply_edit(&mut self, edit: &crate::metadata::ManifestEdit) {
         match edit {
             crate::metadata::ManifestEdit::AddSst(meta) => {
@@ -690,7 +690,7 @@ mod tests {
         for level in 0..4 {
             for i in 0..3 {
                 manifest.add_file(FileMeta {
-                    name: format!("l{}_f{}.sst", level, i),
+                    name: format!("l{level}_f{i}.sst"),
                     level,
                     ..Default::default()
                 });

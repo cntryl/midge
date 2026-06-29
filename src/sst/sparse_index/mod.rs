@@ -5,7 +5,7 @@
 //!
 //! - **Writer**: Samples every Nth key (default 16) during SST creation
 //! - **Reader**: Binary searches samples to find containing block range
-//! - **BlockRange**: Result type indicating which blocks to search (start to end inclusive)
+//! - **`BlockRange`**: Result type indicating which blocks to search (start to end inclusive)
 
 pub mod reader;
 pub mod shared;

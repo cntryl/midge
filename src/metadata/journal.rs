@@ -65,7 +65,7 @@ pub struct FsyncMarker {
 const BATCH_RECORD_TYPE: u8 = 8;
 const FSYNC_MARKER_TYPE: u8 = 9;
 
-/// Configurable journal sync policy (can be set via env var MIDGE_MANIFEST_SYNC_POLICY)
+/// Configurable journal sync policy (can be set via env var `MIDGE_MANIFEST_SYNC_POLICY`)
 #[derive(Default, PartialEq, Eq, Debug, Clone, Copy)]
 pub enum ManifestSyncPolicy {
     #[default]
@@ -129,15 +129,15 @@ impl Default for ManifestSyncState {
     }
 }
 
-use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-static MANIFEST_SYNC_STATE: Lazy<Mutex<ManifestSyncState>> = Lazy::new(|| {
-    Mutex::new(ManifestSyncState {
-        batches_since_fsync: 0,
-        last_fsync: std::time::Instant::now(),
-        last_policy: ManifestSyncPolicy::default(),
-    })
-});
+static MANIFEST_SYNC_STATE: std::sync::LazyLock<Mutex<ManifestSyncState>> =
+    std::sync::LazyLock::new(|| {
+        Mutex::new(ManifestSyncState {
+            batches_since_fsync: 0,
+            last_fsync: std::time::Instant::now(),
+            last_policy: ManifestSyncPolicy::default(),
+        })
+    });
 
 const JOURNAL_FILE: &str = "manifest.journal";
 
@@ -231,25 +231,25 @@ pub fn append_edit_with_fs(
     Ok(())
 }
 
-/// Convenience wrapper: append via a RealFs created from db_path (backwards compatible)
+/// Convenience wrapper: append via a `RealFs` created from `db_path` (backwards compatible)
 pub fn append_edit(db_path: &Path, edit: &ManifestEdit) -> MidgeResult<()> {
     let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
         std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
-            crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e))
+            crate::common::MidgeError::Internal(format!("failed to create RealFs: {e:?}"))
         })?);
     append_edit_with_fs(&fs, edit)
 }
 
-/// Convenience wrapper: replay journal via a RealFs created from db_path (backwards compatible)
+/// Convenience wrapper: replay journal via a `RealFs` created from `db_path` (backwards compatible)
 pub fn replay_journal(db_path: &Path) -> MidgeResult<Vec<ManifestEdit>> {
     let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
         std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
-            crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e))
+            crate::common::MidgeError::Internal(format!("failed to create RealFs: {e:?}"))
         })?);
     replay_journal_with_fs(&fs)
 }
 
-/// Replay a journal file at db_path. Returns Vec<ManifestEdit> in order.
+/// Replay a journal file at `db_path`. Returns Vec<ManifestEdit> in order.
 /// Stops cleanly on partial or corrupt tail record (returns edits up to that point).
 pub fn replay_journal_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
@@ -483,11 +483,11 @@ pub fn append_edit_batch_with_fs(
     Ok(())
 }
 
-/// Convenience wrapper: append batch via a RealFs created from db_path (backwards compatible)
+/// Convenience wrapper: append batch via a `RealFs` created from `db_path` (backwards compatible)
 pub fn append_edit_batch(db_path: &Path, batch: &[ManifestEdit]) -> MidgeResult<()> {
     let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
         std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
-            crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e))
+            crate::common::MidgeError::Internal(format!("failed to create RealFs: {e:?}"))
         })?);
     append_edit_batch_with_fs(&fs, batch)
 }
@@ -536,13 +536,13 @@ pub fn append_fsync_marker_with_fs(
             .ok()
             .as_deref()
             == Some("1"));
-    if !skip_fsync {
-        f.sync(Durability::Durable)
-            .map_err(crate::common::MidgeError::from)?;
-    } else {
+    if skip_fsync {
         tracing::info!(
             "skip_manifest_fsync enabled: append_fsync_marker did not fsync (bench mode)"
         );
+    } else {
+        f.sync(Durability::Durable)
+            .map_err(crate::common::MidgeError::from)?;
     }
 
     Ok(())

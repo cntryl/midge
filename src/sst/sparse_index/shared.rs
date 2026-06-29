@@ -17,6 +17,7 @@ pub struct IndexEntry {
 
 impl IndexEntry {
     /// Create a new index entry
+    #[must_use]
     pub fn new(key: Vec<u8>, block_handle: BlockHandle, block_index: usize) -> Self {
         Self {
             key,
@@ -26,6 +27,7 @@ impl IndexEntry {
     }
 
     /// Get the size of this entry in bytes (for serialization estimates)
+    #[must_use]
     pub fn size_bytes(&self) -> usize {
         4 + self.key.len() + 16 + 8 // size + key + handle(offset+size) + index
     }
@@ -42,6 +44,7 @@ pub struct BlockRange {
 
 impl BlockRange {
     /// Create a new block range
+    #[must_use]
     pub fn new(start_block: usize, end_block: usize) -> Self {
         Self {
             start_block,
@@ -50,6 +53,7 @@ impl BlockRange {
     }
 
     /// Number of blocks in this range
+    #[must_use]
     pub fn block_count(&self) -> usize {
         self.end_block - self.start_block + 1
     }
@@ -102,7 +106,7 @@ mod tests {
     #[test]
     fn should_handle_large_key_in_entry() {
         // Arrange
-        let large_key = b"x".repeat(1000).to_vec();
+        let large_key = b"x".repeat(1000).clone();
         let entry = IndexEntry::new(large_key.clone(), BlockHandle::new(0, 100), 0);
 
         // Act
@@ -192,13 +196,13 @@ mod tests {
     #[test]
     fn should_handle_large_block_range() {
         // Arrange
-        let range = BlockRange::new(0, 1000000);
+        let range = BlockRange::new(0, 1_000_000);
 
         // Act
         let count = range.block_count();
 
         // Assert
-        assert_eq!(count, 1000001);
+        assert_eq!(count, 1_000_001);
     }
 
     #[test]
@@ -207,7 +211,7 @@ mod tests {
         let entry = IndexEntry::new(b"key".to_vec(), BlockHandle::new(100, 200), 5);
 
         // Act
-        let formatted = format!("{:?}", entry);
+        let formatted = format!("{entry:?}");
 
         // Assert
         assert!(formatted.contains("IndexEntry"));
@@ -219,7 +223,7 @@ mod tests {
         let range = BlockRange::new(5, 15);
 
         // Act
-        let formatted = format!("{:?}", range);
+        let formatted = format!("{range:?}");
 
         // Assert
         assert!(formatted.contains("BlockRange"));

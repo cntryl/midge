@@ -14,7 +14,7 @@ use crate::common::MidgeResult;
 /// Container for block-level bloom filters
 ///
 /// Stores one bloom per data block, with metadata to map block index → bloom offset.
-/// Serialized as: [num_blocks: u32] [offsets: u32[]] [bloom_data: variable]
+/// Serialized as: [`num_blocks`: u32] [offsets: u32[]] [`bloom_data`: variable]
 #[derive(Debug, Clone)]
 pub struct BlockBloomFilter {
     /// Number of data blocks
@@ -27,6 +27,7 @@ pub struct BlockBloomFilter {
 
 impl BlockBloomFilter {
     /// Create a new block bloom filter container
+    #[must_use]
     pub fn new() -> Self {
         Self {
             num_blocks: 0,
@@ -46,6 +47,7 @@ impl BlockBloomFilter {
     }
 
     /// Serialize the entire block bloom structure
+    #[must_use]
     pub fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
 
@@ -102,6 +104,7 @@ impl BlockBloomFilter {
     }
 
     /// Check if a key might be in the specified block (fail-safe on corruption)
+    #[must_use]
     pub fn might_contain_in_block(&self, block_idx: usize, key: &[u8]) -> BloomTestResult {
         if block_idx >= self.num_blocks {
             // Fail-safe: return MightBePresent for out-of-bounds index
@@ -136,11 +139,13 @@ impl BlockBloomFilter {
     }
 
     /// Get the number of blocks
+    #[must_use]
     pub fn num_blocks(&self) -> usize {
         self.num_blocks
     }
 
     /// Get the size in bytes
+    #[must_use]
     pub fn size_bytes(&self) -> usize {
         4 + (self.offsets.len() * 4) + self.bloom_data.len()
     }
@@ -190,8 +195,8 @@ mod tests {
         // Act
         for i in 0..5 {
             let mut bloom = BloomWriter::with_defaults(50);
-            bloom.insert(format!("block{}_key1", i).as_bytes());
-            bloom.insert(format!("block{}_key2", i).as_bytes());
+            bloom.insert(format!("block{i}_key1").as_bytes());
+            bloom.insert(format!("block{i}_key2").as_bytes());
             filter.add_block_bloom(&bloom);
         }
 
@@ -205,7 +210,7 @@ mod tests {
         let mut filter = BlockBloomFilter::new();
         for i in 0..3 {
             let mut bloom = BloomWriter::with_defaults(100);
-            bloom.insert(format!("key{}", i).as_bytes());
+            bloom.insert(format!("key{i}").as_bytes());
             filter.add_block_bloom(&bloom);
         }
 
@@ -348,7 +353,7 @@ mod tests {
 
         // Insert 100 keys
         for i in 0..100 {
-            bloom.insert(format!("key{:04}", i).as_bytes());
+            bloom.insert(format!("key{i:04}").as_bytes());
         }
         filter.add_block_bloom(&bloom);
 
@@ -358,14 +363,14 @@ mod tests {
 
         // Assert - all inserted keys should be "might be present"
         for i in 0..100 {
-            let result = deserialized.might_contain_in_block(0, format!("key{:04}", i).as_bytes());
+            let result = deserialized.might_contain_in_block(0, format!("key{i:04}").as_bytes());
             assert_eq!(result, BloomTestResult::MightBePresent);
         }
 
         // Assert - most non-inserted keys should be "definitely not present"
         let mut rejections = 0;
         for i in 1000..1100 {
-            let result = deserialized.might_contain_in_block(0, format!("key{:04}", i).as_bytes());
+            let result = deserialized.might_contain_in_block(0, format!("key{i:04}").as_bytes());
             if result == BloomTestResult::DefinitelyNotPresent {
                 rejections += 1;
             }

@@ -68,11 +68,13 @@ impl MidgeOptions {
     ///
     /// When a transaction exceeds this memory limit, it will spill to disk.
     /// Set to `None` for unlimited memory.
+    #[must_use]
     pub fn memory_budget(mut self, bytes: usize) -> Self {
         self.memory_budget = Some(bytes);
         self
     }
 
+    #[must_use]
     pub fn with_cloud_runtime_policy_overrides(
         mut self,
         overrides: CloudRuntimePolicyOverrides,
@@ -81,7 +83,8 @@ impl MidgeOptions {
         self
     }
 
-    /// Convert MidgeOptions to OpenOptions for use with Engine::open.
+    /// Convert `MidgeOptions` to `OpenOptions` for use with `Engine::open`.
+    #[must_use]
     pub fn to_open_options(&self) -> crate::OpenOptions {
         let storage = match &self.storage_mode {
             StorageMode::Memory => crate::Storage::InMemory,
@@ -143,35 +146,41 @@ impl MidgeOptions {
 // ===== Mode lists =====
 
 /// All available storage modes for integration tests (uppercase: backward-compatible).
+#[must_use]
 pub fn all_storage_modes() -> Vec<&'static str> {
     vec!["Memory", "LocalDisk"]
 }
 
 /// All supported storage modes for parametrized tests (lowercase: new convention).
 /// Includes: memory, local (disk), cloud (backed).
+#[must_use]
 pub fn all_storage_modes_new() -> Vec<&'static str> {
     vec!["memory", "local", "cloud"]
 }
 
 /// Durable storage modes only: local disk and cloud.
 /// Use this for tests that require persistence (SST, WAL, recovery, durability).
+#[must_use]
 pub fn durable_storage_modes() -> &'static [&'static str] {
     &["local", "cloud"]
 }
 
 /// Memory-only storage mode.
 /// Use this for tests that explicitly need non-persistent storage.
+#[must_use]
 pub fn memory_storage_modes() -> Vec<&'static str> {
     vec!["memory"]
 }
 
 /// Filesystem-only storage mode.
 /// Use this for tests that require filesystem-specific behavior.
+#[must_use]
 pub fn filesystem_storage_modes() -> Vec<&'static str> {
     vec!["local"]
 }
 
 /// Disk storage modes for testing (uppercase: backward-compatible).
+#[must_use]
 pub fn disk_storage_modes() -> Vec<&'static str> {
     vec!["LocalDisk"]
 }
@@ -179,6 +188,7 @@ pub fn disk_storage_modes() -> Vec<&'static str> {
 // ===== Option constructors =====
 
 /// Create memory-only options for testing.
+#[must_use]
 pub fn memory_opts() -> MidgeOptions {
     opts_for_mode("memory")
 }
@@ -210,8 +220,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
         "local" => {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
+                .map_or(0, |d| d.as_nanos());
             let test_dir = PathBuf::from(format!(
                 "target/tmp/midge_test_local_{}_{}_{}",
                 std::process::id(),
@@ -233,8 +242,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
         "cloud" => {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
+                .map_or(0, |d| d.as_nanos());
             let test_dir = PathBuf::from(format!(
                 "target/tmp/midge_test_cloud_{}_{}_{}",
                 std::process::id(),
@@ -259,7 +267,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 cloud_runtime_policy_overrides: None,
             }
         }
-        _ => panic!("unknown storage mode: {}", mode),
+        _ => panic!("unknown storage mode: {mode}"),
     }
 }
 
@@ -267,7 +275,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
 ///
 /// # Arguments
 /// * `modes` - Slice of mode names ("memory", "local", "cloud")
-/// * `test_fn` - Closure that receives (mode_name, opts) for each mode
+/// * `test_fn` - Closure that receives (`mode_name`, opts) for each mode
 pub fn for_each_storage_mode<F>(modes: &[&str], test_fn: F)
 where
     F: Fn(&str, MidgeOptions),
@@ -287,11 +295,13 @@ where
 }
 
 /// Create a temporary directory for tests.
+#[must_use]
 pub fn test_temp_dir() -> tempfile::TempDir {
     tempfile::TempDir::new().expect("Failed to create temp dir")
 }
 
 /// Options for compaction tests.
+#[must_use]
 pub fn compaction_test_opts() -> MidgeOptions {
     MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
@@ -308,6 +318,7 @@ pub fn compaction_test_opts() -> MidgeOptions {
 }
 
 /// Options for manual compaction tests.
+#[must_use]
 pub fn manual_compaction_test_opts() -> MidgeOptions {
     MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
@@ -324,6 +335,7 @@ pub fn manual_compaction_test_opts() -> MidgeOptions {
 }
 
 /// Options for durability tests.
+#[must_use]
 pub fn durability_opts() -> MidgeOptions {
     MidgeOptions {
         storage_mode: StorageMode::LocalDisk {

@@ -45,7 +45,7 @@ impl EventLoop {
     }
 
     /// Check if a sequence number is durable at the requested level.
-    /// Special case: u64::MAX (latest available) always returns true and bypasses durability checks.
+    /// Special case: `u64::MAX` (latest available) always returns true and bypasses durability checks.
     #[inline]
     pub(super) fn is_sequence_durable(
         &self,
@@ -61,7 +61,7 @@ impl EventLoop {
     }
 
     /// Handle a Read message: check durability frontier or queue for later.
-    /// NOTE: This is a fallback path - transactions now execute reads directly against their stored ReadSnapshot.
+    /// NOTE: This is a fallback path - transactions now execute reads directly against their stored `ReadSnapshot`.
     pub(super) fn handle_msg_read(
         &self,
         request_id: u64,
@@ -106,8 +106,8 @@ impl EventLoop {
         }
     }
 
-    /// Handle a RangeScan message: check durability frontier or queue for later.
-    /// NOTE: This is a fallback path - transactions now execute scans directly against their stored ReadSnapshot.
+    /// Handle a `RangeScan` message: check durability frontier or queue for later.
+    /// NOTE: This is a fallback path - transactions now execute scans directly against their stored `ReadSnapshot`.
     pub(super) fn handle_msg_range_scan(
         &self,
         request_id: u64,

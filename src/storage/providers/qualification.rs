@@ -304,8 +304,7 @@ fn configured_real_s3_provider() -> Option<CloudProviderConfig> {
     let region = std::env::var(REAL_S3_REGION_ENV).unwrap_or_else(|_| "us-east-1".to_string());
     let path_style = std::env::var(REAL_S3_PATH_STYLE_ENV)
         .ok()
-        .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "off"))
-        .unwrap_or(true);
+        .is_none_or(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "off"));
 
     let provider =
         CloudProviderConfig::s3_compatible(bucket, region, endpoint, access_key, secret_key);
@@ -327,11 +326,10 @@ fn peas_available_or_skip(label: &str) -> bool {
         return true;
     }
 
-    if peas_required() {
-        panic!(
-            "{label}: Peas is required by {REQUIRE_PEAS_ENV}, but {PEAS_ENDPOINT} is unreachable"
-        );
-    }
+    assert!(
+        !peas_required(),
+        "{label}: Peas is required by {REQUIRE_PEAS_ENV}, but {PEAS_ENDPOINT} is unreachable"
+    );
 
     eprintln!("{label}: skipping Peas qualification test because {PEAS_ENDPOINT} is unreachable");
     false
@@ -349,14 +347,12 @@ fn peas_required() -> bool {
 }
 
 fn peas_required_from_value(value: Option<&str>) -> bool {
-    value
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    value.is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn ensure_peas_namespace(provider: &CloudProviderConfig) -> Result<(), String> {
@@ -393,17 +389,15 @@ fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, S
     headers.sort_by(|left, right| left.0.cmp(&right.0));
     let canonical_headers = headers
         .iter()
-        .map(|(name, value)| format!("{}:{}\n", name, value))
+        .map(|(name, value)| format!("{name}:{value}\n"))
         .collect::<String>();
     let signed_headers = headers
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>()
         .join(";");
-    let canonical_request = format!(
-        "{}\n{}\n\n{}\n{}\n{}",
-        method, path, canonical_headers, signed_headers, payload_hash
-    );
+    let canonical_request =
+        format!("{method}\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
     let scope = format!("{date}/{region}/s3/aws4_request");
     let string_to_sign = format!(
         "AWS4-HMAC-SHA256\n{}\n{}\n{}",
@@ -416,14 +410,13 @@ fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, S
         mac.update(data.as_bytes());
         mac.finalize().into_bytes().to_vec()
     }
-    let k_date = hmac_sha256(format!("AWS4{}", PEAS_SECRET_KEY).as_bytes(), &date);
+    let k_date = hmac_sha256(format!("AWS4{PEAS_SECRET_KEY}").as_bytes(), &date);
     let k_region = hmac_sha256(&k_date, region);
     let k_service = hmac_sha256(&k_region, "s3");
     let k_signing = hmac_sha256(&k_service, "aws4_request");
     let signature = hex::encode(hmac_sha256(&k_signing, &string_to_sign));
     let authorization = format!(
-        "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
-        PEAS_ACCESS_KEY, scope, signed_headers, signature
+        "AWS4-HMAC-SHA256 Credential={PEAS_ACCESS_KEY}/{scope}, SignedHeaders={signed_headers}, Signature={signature}"
     );
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -668,7 +661,7 @@ fn put(
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_put(key.to_string(), data, headers, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(CloudEvent::PutComplete { result, .. }) => match result {
+        Ok(CloudEvent::Put { result, .. }) => match result {
             CloudOutcome::Ok(()) => Ok(()),
             CloudOutcome::Err(error) => Err(error),
         },
@@ -680,7 +673,7 @@ fn get(backend: &CloudStorage, key: &str) -> Result<Vec<u8>, String> {
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_get(key.to_string(), tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(CloudEvent::GetComplete { result, .. }) => match result {
+        Ok(CloudEvent::Get { result, .. }) => match result {
             CloudOutcome::Ok(data) => Ok(data),
             CloudOutcome::Err(error) => Err(error),
         },
@@ -697,7 +690,7 @@ fn range(
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_get_range(key.to_string(), start, end, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(CloudEvent::GetRangeComplete { result, .. }) => match result {
+        Ok(CloudEvent::GetRange { result, .. }) => match result {
             CloudOutcome::Ok(data) => Ok(data),
             CloudOutcome::Err(error) => Err(error),
         },
@@ -709,7 +702,7 @@ fn head(backend: &CloudStorage, key: &str) -> Result<ObjectMetadata, String> {
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_head(key.to_string(), tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(CloudEvent::HeadComplete { result, .. }) => match result {
+        Ok(CloudEvent::Head { result, .. }) => match result {
             CloudOutcome::Ok(metadata) => Ok(metadata),
             CloudOutcome::Err(error) => Err(error),
         },
@@ -721,7 +714,7 @@ fn list(backend: &CloudStorage, prefix: &str) -> Result<Vec<String>, String> {
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_list(prefix.to_string(), tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(CloudEvent::ListComplete { result, .. }) => match result {
+        Ok(CloudEvent::List { result, .. }) => match result {
             CloudOutcome::Ok(keys) => Ok(keys),
             CloudOutcome::Err(error) => Err(error),
         },
@@ -733,7 +726,7 @@ fn delete(backend: &CloudStorage, key: &str) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_delete(key.to_string(), tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(CloudEvent::DeleteComplete { result, .. }) => match result {
+        Ok(CloudEvent::Delete { result, .. }) => match result {
             CloudOutcome::Ok(()) => Ok(()),
             CloudOutcome::Err(error) => Err(error),
         },

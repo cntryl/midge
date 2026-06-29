@@ -18,6 +18,7 @@ use super::MidgeOptions;
 ///
 /// # Panics
 /// Panics if the engine fails to open.
+#[must_use]
 pub fn open_with_mode(opts: MidgeOptions, _mode: &str) -> crate::Engine {
     crate::Engine::open_with_options(opts).expect("failed to open engine")
 }
@@ -28,6 +29,7 @@ pub struct DurabilityTestContext {
 }
 
 impl DurabilityTestContext {
+    #[must_use]
     pub fn new() -> Self {
         Self { _private: () }
     }
@@ -55,6 +57,7 @@ pub mod test_helpers {
     use std::time::Duration;
 
     /// Wait for a signal with default timeout.
+    #[must_use]
     pub fn wait_for_signal_default<T>(rx: std::sync::mpsc::Receiver<T>) -> Option<T> {
         rx.recv_timeout(Duration::from_secs(5)).ok()
     }

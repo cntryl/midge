@@ -1,10 +1,10 @@
 //! Event loop — central message dispatcher
 //!
-//! Receives messages from RuntimeHandle and routes them to the correct actor.
+//! Receives messages from `RuntimeHandle` and routes them to the correct actor.
 //!
 //! Copilot note:
 //! - Per-request routing is done exclusively via `router.complete()`.
-//! - EventLoop never touches pending_responses directly.
+//! - `EventLoop` never touches `pending_responses` directly.
 //! - All read paths are local (memtables → SST later).
 //! - All actor responses flow through `respond()`.
 //!
@@ -14,7 +14,7 @@
 //!
 //! - `read_path` — point reads, range scans, durability-aware message handlers
 //! - `durability_sync` — WAL sync, group commit, durability waiter completion
-//! - `cloud_integration` — CloudAsync WAL flush, cloud ack/fail handling
+//! - `cloud_integration` — `CloudAsync` WAL flush, cloud ack/fail handling
 //! - `write_batch` — group commit write draining, backpressure / write stall
 
 mod cloud;
@@ -97,7 +97,7 @@ pub struct EventLoop {
     /// (compaction threads will use this to report completion).
     pub(super) worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
 
-    /// Waiters blocked on write stall clearing (request_id -> cf_id).
+    /// Waiters blocked on write stall clearing (`request_id` -> `cf_id`).
     pub(super) write_stall_waiters: HashMap<u64, crate::types::ColumnFamilyId>,
     /// FIFO queues of waiters per CF.
     pub(super) write_stall_waiter_queues: HashMap<crate::types::ColumnFamilyId, VecDeque<u64>>,
@@ -412,15 +412,15 @@ impl EventLoop {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_get(key.to_string(), tx);
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+            Ok(crate::storage::cloud::CloudEvent::Get {
                 result: crate::storage::cloud::CloudOutcome::Ok(data),
                 ..
             }) => Ok(Some(data)),
-            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+            Ok(crate::storage::cloud::CloudEvent::Get {
                 result: crate::storage::cloud::CloudOutcome::Err(error),
                 ..
             }) if crate::storage::cloud::is_not_found_error(&error) => Ok(None),
-            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+            Ok(crate::storage::cloud::CloudEvent::Get {
                 result: crate::storage::cloud::CloudOutcome::Err(error),
                 ..
             }) => Err(format!("cloud metadata get '{key}' failed: {error}")),
@@ -438,15 +438,15 @@ impl EventLoop {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_head(key.to_string(), tx);
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+            Ok(crate::storage::cloud::CloudEvent::Head {
                 result: crate::storage::cloud::CloudOutcome::Ok(metadata),
                 ..
             }) => Ok(Some(metadata)),
-            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+            Ok(crate::storage::cloud::CloudEvent::Head {
                 result: crate::storage::cloud::CloudOutcome::Err(error),
                 ..
             }) if crate::storage::cloud::is_not_found_error(&error) => Ok(None),
-            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+            Ok(crate::storage::cloud::CloudEvent::Head {
                 result: crate::storage::cloud::CloudOutcome::Err(error),
                 ..
             }) => Err(format!("cloud metadata head '{key}' failed: {error}")),
@@ -541,7 +541,7 @@ impl EventLoop {
         cloud.submit_put(key.clone(), data, headers, tx);
 
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(crate::storage::cloud::CloudEvent::PutComplete { result, .. }) => match result {
+            Ok(crate::storage::cloud::CloudEvent::Put { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(()) => Ok(()),
                 crate::storage::cloud::CloudOutcome::Err(error) => {
                     Err(crate::common::MidgeError::Internal(format!(
@@ -725,7 +725,7 @@ impl EventLoop {
         }
     }
 
-    /// Helper: deliver a RuntimeResponse to the requester via the router.
+    /// Helper: deliver a `RuntimeResponse` to the requester via the router.
     #[inline]
     pub(super) fn respond(&self, request_id: u64, resp: RuntimeResponse) {
         self.router.complete(resp);
@@ -923,8 +923,7 @@ pub(super) mod tests {
     fn unique_test_db_path(prefix: &str) -> std::path::PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
             "{prefix}_{}_{}_{}",

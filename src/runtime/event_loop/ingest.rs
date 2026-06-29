@@ -67,7 +67,7 @@ impl EventLoop {
             self.respond(request_id, RuntimeResponse::Ok { request_id });
         } else {
             let mut pending = self.state.pending_compaction_waits.lock();
-            pending.insert(request_id, format!("BeginIngest(epoch={})", new_epoch));
+            pending.insert(request_id, format!("BeginIngest(epoch={new_epoch})"));
             tracing::debug!(
                 component = "ingest",
                 "begin_ingest queued; waiting for {} active compactions to drain (epoch={})",
@@ -80,7 +80,7 @@ impl EventLoop {
     pub(super) fn handle_end_ingest(&mut self, request_id: u64) {
         tracing::info!("EndIngest: flushing memtables and restoring scheduling");
 
-        let cf_ids: Vec<u32> = self.state.column_families.keys().cloned().collect();
+        let cf_ids: Vec<u32> = self.state.column_families.keys().copied().collect();
         for cf_id in cf_ids {
             if let Ok(flush_output) =
                 self.flush_actor

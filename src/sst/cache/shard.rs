@@ -40,7 +40,7 @@ struct AdmissionRequest {
 
 /// A single cache shard (partition) with lock-free access
 ///
-/// Contains a portion of the cache entries using DashMap for concurrent access,
+/// Contains a portion of the cache entries using `DashMap` for concurrent access,
 /// with its own eviction policy and metrics. Admission and eviction happen
 /// asynchronously in a background worker thread.
 pub struct CacheShard {
@@ -69,6 +69,7 @@ impl CacheShard {
     /// `policy_type`: Eviction policy to use
     ///
     /// Returns `Arc<Self>` because the background worker needs a reference
+    #[must_use]
     pub fn new(max_bytes: u64, policy_type: CachePolicyType) -> Arc<Self> {
         let (tx, rx) = bounded(10_000);
 
@@ -128,7 +129,7 @@ impl CacheShard {
     pub fn get(&self, key: &CacheKey) -> Option<CacheValue> {
         if let Some(value_ref) = self.entries.get(key) {
             let value = value_ref.value().clone();
-            value.increment_access();
+            let _ = value.increment_access();
             self.policy.on_access(*key);
             self.metrics.record_hit();
             Some(value)
@@ -361,10 +362,9 @@ impl CacheShard {
                 // Successfully evicted - notify policy
                 self.policy.on_remove(victim_key);
                 return Some(value);
-            } else {
-                // Victim was stale - notify policy and retry
-                self.policy.on_stale(victim_key);
             }
+            // Victim was stale - notify policy and retry
+            self.policy.on_stale(victim_key);
         }
 
         // Failed to find valid victim after retries
@@ -517,7 +517,7 @@ mod tests {
         // Act
         for i in 0..5 {
             let key = CacheKey::for_data(i, 0);
-            shard.put_sync(key, Bytes::from(format!("value_{}", i).into_bytes()));
+            shard.put_sync(key, Bytes::from(format!("value_{i}").into_bytes()));
         }
         shard.clear();
 
@@ -655,7 +655,7 @@ mod tests {
         let mut lens = Vec::new();
         for i in 0..10 {
             let key = CacheKey::for_data(i, 0);
-            shard.put_sync(key, Bytes::from(format!("data_{}", i).into_bytes()));
+            shard.put_sync(key, Bytes::from(format!("data_{i}").into_bytes()));
             lens.push(shard.len());
         }
 
@@ -692,8 +692,8 @@ mod tests {
         // Act (both should work, just with different eviction strategies)
         for i in 0..5 {
             let key = CacheKey::for_data(i, 0);
-            shard_lru.put_sync(key, Bytes::from(format!("data{}", i).into_bytes()));
-            shard_tinyfu.put_sync(key, Bytes::from(format!("data{}", i).into_bytes()));
+            shard_lru.put_sync(key, Bytes::from(format!("data{i}").into_bytes()));
+            shard_tinyfu.put_sync(key, Bytes::from(format!("data{i}").into_bytes()));
         }
         let lru_len = shard_lru.len();
         let tinylfu_len = shard_tinyfu.len();

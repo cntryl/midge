@@ -23,9 +23,9 @@ pub enum LeaseError {
 impl fmt::Display for LeaseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AcquisitionFailed(msg) => write!(f, "lease acquisition failed: {}", msg),
-            Self::RenewalFailed(msg) => write!(f, "lease renewal failed: {}", msg),
-            Self::IoError(msg) => write!(f, "lease I/O error: {}", msg),
+            Self::AcquisitionFailed(msg) => write!(f, "lease acquisition failed: {msg}"),
+            Self::RenewalFailed(msg) => write!(f, "lease renewal failed: {msg}"),
+            Self::IoError(msg) => write!(f, "lease I/O error: {msg}"),
             Self::AlreadyReleased => write!(f, "lease already released"),
         }
     }

@@ -55,7 +55,7 @@ impl EvictionActor {
             let mut actor = self
                 .hybrid_storage
                 .budget_actor()
-                .map_err(|e| format!("Failed to lock SBA: {}", e))?;
+                .map_err(|e| format!("Failed to lock SBA: {e}"))?;
             actor.next_eviction()
         };
 

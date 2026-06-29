@@ -1,7 +1,7 @@
-//! CloudAsync Write Queue Management
+//! `CloudAsync` Write Queue Management
 //!
 //! Manages pending writes waiting for cloud durability acknowledgment.
-//! Isolated from WalActor to reduce complexity and improve testability.
+//! Isolated from `WalActor` to reduce complexity and improve testability.
 //!
 //! SEMANTIC CONSTRAINTS (Phase 2 refactor - no behavior changes):
 //! - Backpressure thresholds must remain identical (100k writes, 100MB)
@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// Maximum number of pending cloud writes before returning WriteStall
+/// Maximum number of pending cloud writes before returning `WriteStall`
 pub const MAX_PENDING_CLOUD_WRITES: usize = 100_000;
 
 /// Approximate memory threshold for pending cloud writes (100MB)
@@ -69,7 +69,7 @@ pub enum TransactionApplyOp {
     },
 }
 
-/// CloudAsync write queue with backpressure management
+/// `CloudAsync` write queue with backpressure management
 pub struct CloudWriteQueue {
     /// Queue of pending writes
     queue: VecDeque<PendingCloudWrite>,
@@ -92,7 +92,7 @@ impl CloudWriteQueue {
             || self.pending_bytes >= MAX_PENDING_CLOUD_WRITE_BYTES
     }
 
-    /// Count timed-out writes exceeding CLOUD_UPLOAD_TIMEOUT
+    /// Count timed-out writes exceeding `CLOUD_UPLOAD_TIMEOUT`
     pub fn count_timed_out_writes(&self) -> usize {
         let now = Instant::now();
         self.queue
@@ -117,7 +117,7 @@ impl CloudWriteQueue {
         sequence: u64,
         expiration: Option<u64>,
     ) {
-        let estimated_bytes = key.len() + value.as_ref().map_or(0, |v| v.len()) + 64;
+        let estimated_bytes = key.len() + value.as_ref().map_or(0, std::vec::Vec::len) + 64;
         self.pending_bytes += estimated_bytes;
 
         self.queue.push_back(PendingCloudWrite::Single {
@@ -195,7 +195,7 @@ impl CloudWriteQueue {
         );
     }
 
-    /// Drain writes up to cloud_durable_seq
+    /// Drain writes up to `cloud_durable_seq`
     /// Returns iterator of writes that became durable
     pub fn drain_until(&mut self, cloud_durable_seq: u64) -> Vec<PendingCloudWrite> {
         let mut drained = Vec::new();
@@ -218,7 +218,7 @@ impl CloudWriteQueue {
             // Decrement pending bytes
             let dequeued_bytes = match &pending {
                 PendingCloudWrite::Single { key, value, .. } => {
-                    key.len() + value.as_ref().map_or(0, |v| v.len()) + 64
+                    key.len() + value.as_ref().map_or(0, std::vec::Vec::len) + 64
                 }
                 PendingCloudWrite::DeleteRange {
                     start_key, end_key, ..
@@ -257,7 +257,7 @@ impl CloudWriteQueue {
         self.pending_bytes
     }
 
-    /// Check if a key exists in pending writes (for insert_only validation)
+    /// Check if a key exists in pending writes (for `insert_only` validation)
     pub fn contains_key(&self, cf_id: crate::types::ColumnFamilyId, key: &[u8]) -> bool {
         for pending in &self.queue {
             match pending {

@@ -1,7 +1,7 @@
 //! Google Cloud Storage Provider
 //!
 //! Production implementation using direct JSON API (no SDK dependency):
-//! - OAuth2 Bearer token authentication
+//! - `OAuth2` Bearer token authentication
 //! - Service-account HMAC key authentication (for S3-interop or simple setups)
 //! - Non-blocking callback-based API via `CloudExecutor`
 //! - All operations routed through the same `CloudBackend` trait as S3/Azure
@@ -50,9 +50,9 @@ const ENCODE_SET: &AsciiSet = &CONTROLS
 /// GCS authentication credentials.
 #[derive(Debug, Clone)]
 pub enum GcsCredential {
-    /// OAuth2 Bearer token (short-lived, from gcloud CLI or metadata server).
+    /// `OAuth2` Bearer token (short-lived, from gcloud CLI or metadata server).
     BearerToken { token: String },
-    /// Service-account HMAC key pair (for HMAC-based auth, simpler than OAuth2).
+    /// Service-account HMAC key pair (for HMAC-based auth, simpler than `OAuth2`).
     HmacKey { access_id: String, secret: String },
 }
 
@@ -73,7 +73,7 @@ pub struct GcsProvider {
 }
 
 impl GcsProvider {
-    /// Create provider with an OAuth2 Bearer token.
+    /// Create provider with an `OAuth2` Bearer token.
     pub fn with_bearer_token(
         bucket: String,
         project_id: String,
@@ -82,7 +82,7 @@ impl GcsProvider {
         Self::with_bearer_token_endpoint(bucket, project_id, token, None)
     }
 
-    /// Create provider with an OAuth2 Bearer token and optional endpoint override.
+    /// Create provider with an `OAuth2` Bearer token and optional endpoint override.
     pub fn with_bearer_token_endpoint(
         bucket: String,
         project_id: String,
@@ -177,7 +177,7 @@ impl GcsProvider {
         &self.bucket
     }
 
-    /// Expose project_id for tests.
+    /// Expose `project_id` for tests.
     #[cfg(test)]
     pub(crate) fn project_id(&self) -> &str {
         &self.project_id
@@ -310,8 +310,7 @@ fn token_from_adc_file(path: &std::path::Path) -> MidgeResult<CachedGcsToken> {
         Some("service_account") => fetch_service_account_token(&json),
         Some("external_account") => fetch_external_account_token(&json),
         other => Err(MidgeError::InvalidArgument(format!(
-            "unsupported GCS ADC credential type {:?}",
-            other
+            "unsupported GCS ADC credential type {other:?}"
         ))),
     }
 }
@@ -377,8 +376,7 @@ fn external_account_subject_token(json: &serde_json::Value) -> MidgeResult<Strin
         })?;
     let content = std::fs::read_to_string(file).map_err(|error| {
         MidgeError::Internal(format!(
-            "failed to read GCS external_account subject token file '{}': {}",
-            file, error
+            "failed to read GCS external_account subject token file '{file}': {error}"
         ))
     })?;
 
@@ -401,8 +399,7 @@ fn external_account_subject_token(json: &serde_json::Value) -> MidgeResult<Strin
             let token_json: serde_json::Value =
                 serde_json::from_str(&content).map_err(|error| {
                     MidgeError::InvalidArgument(format!(
-                        "failed to parse GCS external_account subject token JSON '{}': {}",
-                        file, error
+                        "failed to parse GCS external_account subject token JSON '{file}': {error}"
                     ))
                 })?;
             token_json
@@ -411,8 +408,7 @@ fn external_account_subject_token(json: &serde_json::Value) -> MidgeResult<Strin
                 .map(str::to_string)
                 .ok_or_else(|| {
                     MidgeError::InvalidArgument(format!(
-                        "GCS external_account subject token JSON missing string field {}",
-                        field
+                        "GCS external_account subject token JSON missing string field {field}"
                     ))
                 })
         }
@@ -427,8 +423,7 @@ fn external_account_subject_token(json: &serde_json::Value) -> MidgeResult<Strin
             }
         }
         Some(format) => Err(MidgeError::InvalidArgument(format!(
-            "unsupported GCS external_account subject token format {}",
-            format
+            "unsupported GCS external_account subject token format {format}"
         ))),
     }
 }
@@ -442,8 +437,7 @@ fn impersonate_gcs_service_account(
         .build()
         .map_err(|error| {
             MidgeError::Internal(format!(
-                "GCS service account impersonation client init: {}",
-                error
+                "GCS service account impersonation client init: {error}"
             ))
         })?;
     let response = client
@@ -456,20 +450,18 @@ fn impersonate_gcs_service_account(
         .send()
         .map_err(|error| {
             MidgeError::Internal(format!(
-                "GCS service account impersonation request: {}",
-                error
+                "GCS service account impersonation request: {error}"
             ))
         })?;
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().unwrap_or_default();
         return Err(MidgeError::Internal(format!(
-            "GCS service account impersonation failed with status {}: {}",
-            status, body
+            "GCS service account impersonation failed with status {status}: {body}"
         )));
     }
     let body = response.text().map_err(|error| {
-        MidgeError::Internal(format!("GCS service account impersonation body: {}", error))
+        MidgeError::Internal(format!("GCS service account impersonation body: {error}"))
     })?;
     parse_impersonated_access_token_json(&body)
 }
@@ -516,10 +508,10 @@ fn fetch_service_account_token(json: &serde_json::Value) -> MidgeResult<CachedGc
     let signing_input = format!(
         "{}.{}",
         URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).map_err(|error| {
-            MidgeError::Internal(format!("failed to encode GCS JWT header: {}", error))
+            MidgeError::Internal(format!("failed to encode GCS JWT header: {error}"))
         })?),
         URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).map_err(|error| {
-            MidgeError::Internal(format!("failed to encode GCS JWT claims: {}", error))
+            MidgeError::Internal(format!("failed to encode GCS JWT claims: {error}"))
         })?)
     );
     let assertion = sign_service_account_jwt(private_key, &signing_input)?;
@@ -540,8 +532,7 @@ fn sign_service_account_jwt(private_key: &str, signing_input: &str) -> MidgeResu
         Ok(key) => key,
         Err(pkcs8_error) => RsaPrivateKey::from_pkcs1_pem(private_key).map_err(|pkcs1_error| {
             MidgeError::InvalidArgument(format!(
-                "invalid GCS service account private key: PKCS#8 parse failed: {}; PKCS#1 parse failed: {}",
-                pkcs8_error, pkcs1_error
+                "invalid GCS service account private key: PKCS#8 parse failed: {pkcs8_error}; PKCS#1 parse failed: {pkcs1_error}"
             ))
         })?,
     };
@@ -564,23 +555,22 @@ fn fetch_metadata_token() -> MidgeResult<CachedGcsToken> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
-        .map_err(|error| MidgeError::Internal(format!("GCS metadata client init: {}", error)))?;
+        .map_err(|error| MidgeError::Internal(format!("GCS metadata client init: {error}")))?;
     let response = client
         .get(url)
         .header("Metadata-Flavor", "Google")
         .send()
-        .map_err(|error| MidgeError::Internal(format!("GCS metadata token request: {}", error)))?;
+        .map_err(|error| MidgeError::Internal(format!("GCS metadata token request: {error}")))?;
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().unwrap_or_default();
         return Err(MidgeError::Internal(format!(
-            "GCS metadata token request failed with status {}: {}",
-            status, body
+            "GCS metadata token request failed with status {status}: {body}"
         )));
     }
     let body = response
         .text()
-        .map_err(|error| MidgeError::Internal(format!("GCS metadata response body: {}", error)))?;
+        .map_err(|error| MidgeError::Internal(format!("GCS metadata response body: {error}")))?;
     parse_access_token_json(&body)
 }
 
@@ -593,30 +583,29 @@ fn post_form_for_access_token(url: &str, values: &[(&str, String)]) -> MidgeResu
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .map_err(|error| MidgeError::Internal(format!("GCS token client init: {}", error)))?;
+        .map_err(|error| MidgeError::Internal(format!("GCS token client init: {error}")))?;
     let response = client
         .post(url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
-        .map_err(|error| MidgeError::Internal(format!("GCS token request: {}", error)))?;
+        .map_err(|error| MidgeError::Internal(format!("GCS token request: {error}")))?;
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().unwrap_or_default();
         return Err(MidgeError::Internal(format!(
-            "GCS token request failed with status {}: {}",
-            status, body
+            "GCS token request failed with status {status}: {body}"
         )));
     }
     let body = response
         .text()
-        .map_err(|error| MidgeError::Internal(format!("GCS token response body: {}", error)))?;
+        .map_err(|error| MidgeError::Internal(format!("GCS token response body: {error}")))?;
     parse_access_token_json(&body)
 }
 
 fn parse_access_token_json(body: &str) -> MidgeResult<CachedGcsToken> {
     let json: serde_json::Value = serde_json::from_str(body)
-        .map_err(|error| MidgeError::Internal(format!("GCS token JSON parse: {}", error)))?;
+        .map_err(|error| MidgeError::Internal(format!("GCS token JSON parse: {error}")))?;
     let access_token = json
         .get("access_token")
         .and_then(|value| value.as_str())
@@ -624,17 +613,18 @@ fn parse_access_token_json(body: &str) -> MidgeResult<CachedGcsToken> {
         .ok_or_else(|| MidgeError::Internal("GCS token response missing access_token".into()))?;
     let expires_at = json
         .get("expires_in")
-        .and_then(|value| value.as_u64())
-        .map(|ttl| current_unix_secs().saturating_add(ttl))
-        .unwrap_or_else(|| current_unix_secs().saturating_add(3600));
+        .and_then(serde_json::Value::as_u64)
+        .map_or_else(
+            || current_unix_secs().saturating_add(3600),
+            |ttl| current_unix_secs().saturating_add(ttl),
+        );
     Ok(CachedGcsToken::expiring(access_token, expires_at))
 }
 
 fn parse_impersonated_access_token_json(body: &str) -> MidgeResult<CachedGcsToken> {
     let json: serde_json::Value = serde_json::from_str(body).map_err(|error| {
         MidgeError::Internal(format!(
-            "GCS service account impersonation JSON parse: {}",
-            error
+            "GCS service account impersonation JSON parse: {error}"
         ))
     })?;
     let access_token = json
@@ -650,8 +640,10 @@ fn parse_impersonated_access_token_json(body: &str) -> MidgeResult<CachedGcsToke
         .get("expireTime")
         .and_then(|value| value.as_str())
         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .map(|datetime| datetime.timestamp().max(0) as u64)
-        .unwrap_or_else(|| current_unix_secs().saturating_add(3600));
+        .map_or_else(
+            || current_unix_secs().saturating_add(3600),
+            |datetime| datetime.timestamp().max(0) as u64,
+        );
     Ok(CachedGcsToken::expiring(access_token, expires_at))
 }
 
@@ -665,9 +657,7 @@ fn current_unix_secs() -> u64 {
 fn required_json_str<'a>(json: &'a serde_json::Value, field: &str) -> MidgeResult<&'a str> {
     json.get(field)
         .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            MidgeError::InvalidArgument(format!("GCS credential JSON missing {}", field))
-        })
+        .ok_or_else(|| MidgeError::InvalidArgument(format!("GCS credential JSON missing {field}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -853,21 +843,21 @@ impl CloudBackend for GcsBackend {
             .with_body(data)
             .with_header("Content-Type", "application/octet-stream");
         // Attach any additional headers provided by caller (e.g. conditional headers)
-        for (name, value) in headers.into_iter() {
+        for (name, value) in headers {
             request = request.with_header(name, value);
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status < 400 => CloudEvent::PutComplete {
+            Ok(resp) if resp.status < 400 => CloudEvent::Put {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
-            Ok(resp) => CloudEvent::PutComplete {
+            Ok(resp) => CloudEvent::Put {
                 key: ctx,
                 result: CloudOutcome::Err(format!("GCS PUT status {}", resp.status)),
             },
-            Err(err) => CloudEvent::PutComplete {
+            Err(err) => CloudEvent::Put {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -877,21 +867,21 @@ impl CloudBackend for GcsBackend {
         let url = self.download_url(&key);
         let request = CloudRequest::new(Method::GET, url);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => CloudEvent::GetComplete {
+            Ok(resp) if resp.status == 200 => CloudEvent::Get {
                 key: ctx,
                 result: CloudOutcome::Ok(resp.body),
             },
-            Ok(resp) if resp.status == 404 => CloudEvent::GetComplete {
+            Ok(resp) if resp.status == 404 => CloudEvent::Get {
                 key: ctx,
                 result: CloudOutcome::Err("not found".into()),
             },
-            Ok(resp) => CloudEvent::GetComplete {
+            Ok(resp) => CloudEvent::Get {
                 key: ctx,
                 result: CloudOutcome::Err(format!("GCS GET status {}", resp.status)),
             },
-            Err(err) => CloudEvent::GetComplete {
+            Err(err) => CloudEvent::Get {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -901,27 +891,27 @@ impl CloudBackend for GcsBackend {
         let url = self.download_url(&key);
         let range = match end {
             Some(e) => format!("bytes={}-{}", start, e.saturating_sub(1)),
-            None => format!("bytes={}-", start),
+            None => format!("bytes={start}-"),
         };
         let request = CloudRequest::new(Method::GET, url).with_header("Range", range);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 206 || resp.status == 200 => CloudEvent::GetRangeComplete {
+            Ok(resp) if resp.status == 206 || resp.status == 200 => CloudEvent::GetRange {
                 key: ctx,
                 start,
                 end,
                 result: CloudOutcome::Ok(resp.body),
             },
-            Ok(resp) => CloudEvent::GetRangeComplete {
+            Ok(resp) => CloudEvent::GetRange {
                 key: ctx,
                 start,
                 end,
                 result: CloudOutcome::Err(format!("GCS GET_RANGE status {}", resp.status)),
             },
-            Err(err) => CloudEvent::GetRangeComplete {
+            Err(err) => CloudEvent::GetRange {
                 key: ctx,
                 start,
                 end,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -930,7 +920,7 @@ impl CloudBackend for GcsBackend {
     fn submit_delete(&self, key: String, headers: Vec<(String, String)>, callback: CloudCallback) {
         let mut url = self.metadata_url(&key);
         let mut request = CloudRequest::new(Method::DELETE, String::new());
-        for (name, value) in headers.into_iter() {
+        for (name, value) in headers {
             if self.mode == GcsBackendMode::Json
                 && name.eq_ignore_ascii_case("x-goog-if-generation-match")
             {
@@ -941,21 +931,21 @@ impl CloudBackend for GcsBackend {
         }
         request.url = url;
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 204 || resp.status == 200 => CloudEvent::DeleteComplete {
+            Ok(resp) if resp.status == 204 || resp.status == 200 => CloudEvent::Delete {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
-            Ok(resp) if resp.status == 404 => CloudEvent::DeleteComplete {
+            Ok(resp) if resp.status == 404 => CloudEvent::Delete {
                 key: ctx,
                 result: CloudOutcome::Ok(()), // idempotent delete
             },
-            Ok(resp) => CloudEvent::DeleteComplete {
+            Ok(resp) => CloudEvent::Delete {
                 key: ctx,
                 result: CloudOutcome::Err(format!("GCS DELETE status {}", resp.status)),
             },
-            Err(err) => CloudEvent::DeleteComplete {
+            Err(err) => CloudEvent::Delete {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -993,8 +983,7 @@ impl CloudBackend for GcsBackend {
                         state.items.extend(extract_xml_tag_values(&body, "Key"));
                         let truncated = extract_xml_tag_values(&body, "IsTruncated")
                             .first()
-                            .map(|value| value.eq_ignore_ascii_case("true"))
-                            .unwrap_or(false);
+                            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
                         state.page_token = extract_xml_tag_values(&body, "NextMarker")
                             .into_iter()
                             .next()
@@ -1017,13 +1006,13 @@ impl CloudBackend for GcsBackend {
                 Ok(state.page_token.is_some())
             },
             |ctx, result| match result {
-                Ok(state) => CloudEvent::ListComplete {
+                Ok(state) => CloudEvent::List {
                     prefix: ctx,
                     result: CloudOutcome::Ok(state.items),
                 },
-                Err(err) => CloudEvent::ListComplete {
+                Err(err) => CloudEvent::List {
                     prefix: ctx,
-                    result: CloudOutcome::Err(format!("{:?}", err)),
+                    result: CloudOutcome::Err(format!("{err:?}")),
                 },
             },
         );
@@ -1060,28 +1049,28 @@ impl CloudBackend for GcsBackend {
                     .headers
                     .iter()
                     .find(|(name, _)| name.eq_ignore_ascii_case("x-goog-generation"))
-                    .map(|(_, value)| value.to_string())
+                    .map(|(_, value)| value.clone())
                     .or_else(|| extract_json_string_value(&body, "generation"));
                 let metadata = match generation {
                     Some(generation) => ObjectMetadata::with_generation(size, etag, 0, generation),
                     None => ObjectMetadata::new(size, etag, 0),
                 };
-                CloudEvent::HeadComplete {
+                CloudEvent::Head {
                     key: ctx,
                     result: CloudOutcome::Ok(metadata),
                 }
             }
-            Ok(resp) if resp.status == 404 => CloudEvent::HeadComplete {
+            Ok(resp) if resp.status == 404 => CloudEvent::Head {
                 key: ctx,
                 result: CloudOutcome::Err("not found".into()),
             },
-            Ok(resp) => CloudEvent::HeadComplete {
+            Ok(resp) => CloudEvent::Head {
                 key: ctx,
                 result: CloudOutcome::Err(format!("GCS HEAD status {}", resp.status)),
             },
-            Err(err) => CloudEvent::HeadComplete {
+            Err(err) => CloudEvent::Head {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1091,7 +1080,7 @@ impl CloudBackend for GcsBackend {
 /// Extract a string value from a JSON body by key name.
 /// Simple parser — avoids adding a JSON dependency for lightweight metadata extraction.
 fn extract_json_string_value(body: &str, key: &str) -> Option<String> {
-    let pattern = format!("\"{}\"", key);
+    let pattern = format!("\"{key}\"");
     let start = body.find(&pattern)?;
     let after_key = &body[start + pattern.len()..];
     let after_colon = after_key.trim_start().strip_prefix(':')?;
@@ -1102,7 +1091,7 @@ fn extract_json_string_value(body: &str, key: &str) -> Option<String> {
 
 fn extract_gcs_json_list(body: &str) -> MidgeResult<(Vec<String>, Option<String>)> {
     let json: serde_json::Value = serde_json::from_str(body)
-        .map_err(|error| MidgeError::Internal(format!("GCS list JSON parse: {}", error)))?;
+        .map_err(|error| MidgeError::Internal(format!("GCS list JSON parse: {error}")))?;
     let items = json
         .get("items")
         .and_then(|value| value.as_array())
@@ -1123,8 +1112,8 @@ fn extract_gcs_json_list(body: &str) -> MidgeResult<(Vec<String>, Option<String>
 }
 
 fn extract_xml_tag_values(body: &str, tag: &str) -> Vec<String> {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
     let mut values = Vec::new();
     let mut rest = body;
     while let Some(start) = rest.find(&open) {
@@ -1212,7 +1201,7 @@ impl CloudSigner for BearerTokenSigner {
                 .retain(|(n, _)| !n.eq_ignore_ascii_case("Authorization"));
             request
                 .headers
-                .push(("Authorization".into(), format!("Bearer {}", token)));
+                .push(("Authorization".into(), format!("Bearer {token}")));
         }
         Ok(())
     }
@@ -1236,7 +1225,7 @@ impl Goog1HmacSigner {
 impl CloudSigner for Goog1HmacSigner {
     fn sign(&self, request: &mut CloudRequest) -> MidgeResult<()> {
         let url = url::Url::parse(&request.url).map_err(|err| {
-            crate::common::MidgeError::InvalidArgument(format!("url parse: {}", err))
+            crate::common::MidgeError::InvalidArgument(format!("url parse: {err}"))
         })?;
         let date = Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
         request.headers.retain(|(n, _)| {
@@ -1248,14 +1237,12 @@ impl CloudSigner for Goog1HmacSigner {
             .headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("content-md5"))
-            .map(|(_, value)| value.as_str())
-            .unwrap_or("");
+            .map_or("", |(_, value)| value.as_str());
         let content_type = request
             .headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-            .map(|(_, value)| value.as_str())
-            .unwrap_or("");
+            .map_or("", |(_, value)| value.as_str());
         let resource = if url.path().is_empty() {
             "/"
         } else {
@@ -1546,7 +1533,7 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut buf = [0_u8; 2048];
                 let _ = std::io::Read::read(&mut stream, &mut buf);
-                let body = format!(r#"{{"access_token":"{}","expires_in":1}}"#, token);
+                let body = format!(r#"{{"access_token":"{token}","expires_in":1}}"#);
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                     body.len(),
@@ -1569,9 +1556,8 @@ mod tests {
                     "client_id":"client",
                     "client_secret":"secret",
                     "refresh_token":"refresh",
-                    "token_uri":"{}"
-                }}"#,
-                token_url
+                    "token_uri":"{token_url}"
+                }}"#
             ),
         )
         .unwrap();

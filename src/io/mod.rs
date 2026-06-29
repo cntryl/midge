@@ -11,12 +11,12 @@
 //! - **Vectorized first-class**: `readv_at`, `writev_at`, `appendv` for efficiency
 //! - **Platform-optimizable**: Implementations can use preadv/pwritev, direct I/O, etc.
 //! - **Fully domain-agnostic**: Zero knowledge of WAL, SST, actors, etc.
-//! - **Swappable**: RealFs, MockFs, ChaosFs for different scenarios
+//! - **Swappable**: `RealFs`, `MockFs`, `ChaosFs` for different scenarios
 //!
 //! ## Module Structure
 //!
 //! - **`traits`**: Core `Fs` and `File` abstractions
-//! - **`real`**: `RealFs` - production filesystem via std::fs
+//! - **`real`**: `RealFs` - production filesystem via `std::fs`
 //! - **`mock`**: `MockFs` - in-memory deterministic backend
 //! - **`chaos`**: `ChaosFs` - failure injection wrapper
 //! - **`staging`**: atomic temp-write + rename helpers for bootstrap files

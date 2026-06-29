@@ -35,7 +35,7 @@ impl IntentPersistence {
                 tracing::debug!(path = ?p, "intent file not found, using empty log");
                 return Ok(Vec::new());
             }
-            Err(e) => return Err(format!("fs exists error: {:?}", e)),
+            Err(e) => return Err(format!("fs exists error: {e:?}")),
             Ok(true) => {}
         }
 
@@ -49,18 +49,18 @@ impl IntentPersistence {
                     truncate: false,
                 },
             )
-            .map_err(|e| format!("failed to open intent file: {:?}", e))?;
+            .map_err(|e| format!("failed to open intent file: {e:?}"))?;
         let len = file
             .len()
-            .map_err(|e| format!("failed to stat intent file: {:?}", e))?;
+            .map_err(|e| format!("failed to stat intent file: {e:?}"))?;
         let data = file
             .read_at(0, len)
-            .map_err(|e| format!("failed to read intent file: {:?}", e))?;
+            .map_err(|e| format!("failed to read intent file: {e:?}"))?;
         let intents: Vec<IntentLogEntry> = serde_json::from_slice(&data).map_err(|e| {
             if recovery_policy == crate::config::RecoveryPolicy::Strict {
-                format!("failed to parse intent JSON: {}", e)
+                format!("failed to parse intent JSON: {e}")
             } else {
-                format!("failed to parse intent JSON (salvage mode): {}", e)
+                format!("failed to parse intent JSON (salvage mode): {e}")
             }
         })?;
 
@@ -80,7 +80,7 @@ impl IntentPersistence {
         use std::sync::Arc;
 
         let real =
-            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {e:?}"))?;
         let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
         Self::load_with_fs_and_policy(&fs, recovery_policy)
     }
@@ -93,7 +93,7 @@ impl IntentPersistence {
         use crate::io::traits::FsPath;
 
         let json = serde_json::to_vec_pretty(intents)
-            .map_err(|e| format!("failed to serialize intent log to JSON: {}", e))?;
+            .map_err(|e| format!("failed to serialize intent log to JSON: {e}"))?;
 
         let temp = FsPath::new(Self::INTENT_FILE_TEMP);
         let target = FsPath::new(Self::INTENT_FILE);
@@ -120,7 +120,7 @@ impl IntentPersistence {
         use std::sync::Arc;
 
         let real =
-            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {e:?}"))?;
         let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
         Self::save_with_fs(&fs, intents)
     }
@@ -132,23 +132,23 @@ impl IntentPersistence {
         let temp = FsPath::new(Self::INTENT_FILE_TEMP);
         match fs.exists(&p) {
             Ok(false) => {}
-            Err(e) => return Err(format!("fs exists error: {:?}", e)),
+            Err(e) => return Err(format!("fs exists error: {e:?}")),
             Ok(true) => {}
         }
 
         if fs
             .exists(&p)
-            .map_err(|e| format!("fs exists error: {:?}", e))?
+            .map_err(|e| format!("fs exists error: {e:?}"))?
         {
             fs.remove_file(&p)
-                .map_err(|e| format!("failed to delete intent file: {:?}", e))?;
+                .map_err(|e| format!("failed to delete intent file: {e:?}"))?;
         }
         if fs
             .exists(&temp)
-            .map_err(|e| format!("fs exists error: {:?}", e))?
+            .map_err(|e| format!("fs exists error: {e:?}"))?
         {
             fs.remove_file(&temp)
-                .map_err(|e| format!("failed to delete temp intent file: {:?}", e))?;
+                .map_err(|e| format!("failed to delete temp intent file: {e:?}"))?;
         }
         tracing::debug!(path = ?p, temp_path = ?temp, "intent file deleted");
         Ok(())
@@ -158,11 +158,11 @@ impl IntentPersistence {
         let p = Self::intent_path(db_path);
         let temp = db_path.join(Self::INTENT_FILE_TEMP);
         if p.exists() {
-            fs::remove_file(&p).map_err(|e| format!("failed to delete intent file: {}", e))?;
+            fs::remove_file(&p).map_err(|e| format!("failed to delete intent file: {e}"))?;
         }
         if temp.exists() {
             fs::remove_file(&temp)
-                .map_err(|e| format!("failed to delete temp intent file: {}", e))?;
+                .map_err(|e| format!("failed to delete temp intent file: {e}"))?;
         }
         tracing::debug!(path = ?p, temp_path = ?temp, "intent file deleted");
         Ok(())
@@ -180,9 +180,8 @@ mod tests {
         let pid = std::process::id();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let test_dir = std::env::temp_dir().join(format!("midge_intent_test_{}_{}", pid, nanos));
+            .map_or(0, |d| d.as_nanos());
+        let test_dir = std::env::temp_dir().join(format!("midge_intent_test_{pid}_{nanos}"));
         let _ = std::fs::remove_dir_all(&test_dir);
         std::fs::create_dir_all(&test_dir).expect("failed to create test dir");
         test_dir

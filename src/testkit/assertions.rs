@@ -13,7 +13,10 @@ pub fn assert_get_equals(
         .begin_tx(cf.id(), TransactionMode::ReadOnly)
         .expect("begin_tx failed");
     let result = tx.get(key).expect("get failed");
-    assert_eq!(result.as_ref().map(|b| b.as_ref()), Some(expected));
+    assert_eq!(
+        result.as_ref().map(std::convert::AsRef::as_ref),
+        Some(expected)
+    );
 }
 
 /// Assert that a key is absent (returns None).

@@ -2,7 +2,7 @@
 //!
 //! Provides a sharded LRU/TinyLFU/CLOCK-Pro cache for SST blocks with:
 //! - **Sharding**: 16 independent shards to reduce lock contention
-//! - **Pluggable policies**: LRU, TinyLFU, CLOCK-Pro eviction
+//! - **Pluggable policies**: LRU, `TinyLFU`, CLOCK-Pro eviction
 //! - **Admission control**: Prevent cache pollution from scans
 //! - **Metrics**: Hit/miss/eviction tracking per shard
 
@@ -39,6 +39,7 @@ impl BlockCache {
     /// `capacity_bytes`: Total cache capacity in bytes
     /// `num_shards`: Number of shards (default 16)
     /// `policy_type`: Eviction policy
+    #[must_use]
     pub fn new(capacity_bytes: u64, num_shards: usize, policy_type: CachePolicyType) -> Self {
         let shard_capacity = capacity_bytes / num_shards as u64;
         let mut shards = Vec::with_capacity(num_shards);
@@ -51,6 +52,7 @@ impl BlockCache {
     }
 
     /// Create a new block cache with default settings (16 shards, LRU)
+    #[must_use]
     pub fn new_default(capacity_bytes: u64) -> Self {
         Self::new(capacity_bytes, 16, CachePolicyType::Lru)
     }
@@ -64,6 +66,7 @@ impl BlockCache {
 
     /// Get a cached block
     #[inline(always)]
+    #[must_use]
     pub fn get(&self, key: &CacheKey) -> Option<CacheValue> {
         self.get_shard(key).get(key)
     }
@@ -80,10 +83,11 @@ impl BlockCache {
     /// Performs admission, insert, and eviction synchronously.
     #[cfg(test)]
     pub fn put_sync(&self, key: CacheKey, value: Bytes) {
-        self.get_shard(&key).put_sync(key, value)
+        self.get_shard(&key).put_sync(key, value);
     }
 
     /// Remove a block from the cache
+    #[must_use]
     pub fn remove(&self, key: &CacheKey) -> Option<CacheValue> {
         self.get_shard(key).remove(key)
     }
@@ -96,6 +100,7 @@ impl BlockCache {
     }
 
     /// Get aggregated metrics across all shards
+    #[must_use]
     pub fn metrics(&self) -> CacheMetrics {
         let mut total_hits = 0u64;
         let mut total_misses = 0u64;
@@ -127,21 +132,25 @@ impl BlockCache {
     }
 
     /// Get total size in bytes
+    #[must_use]
     pub fn size_bytes(&self) -> u64 {
         self.shards.iter().map(|s| s.size_bytes()).sum()
     }
 
     /// Get total number of entries
+    #[must_use]
     pub fn len(&self) -> usize {
         self.shards.iter().map(|s| s.len()).sum()
     }
 
     /// Check if cache is empty
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.shards.iter().all(|s| s.is_empty())
     }
 
     /// Get number of shards
+    #[must_use]
     pub fn num_shards(&self) -> usize {
         self.num_shards
     }
@@ -262,8 +271,8 @@ mod tests {
 
         // Act
         cache.put_sync(key, Bytes::from(&b"test"[..]));
-        cache.get(&key);
-        cache.get(&key);
+        let _ = cache.get(&key);
+        let _ = cache.get(&key);
         let _ = cache.get(&CacheKey::for_data(999, 999));
 
         // Assert

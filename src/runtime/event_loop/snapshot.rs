@@ -25,8 +25,7 @@ impl SnapshotCoordinator {
                 RuntimeResponse::Error {
                     request_id,
                     error: crate::common::MidgeError::Internal(format!(
-                        "Column family {} not found",
-                        cf_id
+                        "Column family {cf_id} not found"
                     )),
                 },
             );
@@ -70,8 +69,7 @@ impl SnapshotCoordinator {
                 RuntimeResponse::Error {
                     request_id,
                     error: crate::common::MidgeError::InvalidArgument(format!(
-                        "snapshot {} is already registered",
-                        snapshot_id
+                        "snapshot {snapshot_id} is already registered"
                     )),
                 },
             );

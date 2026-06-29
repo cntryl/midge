@@ -43,6 +43,7 @@ impl Default for ReadAmpMetrics {
 
 impl ReadAmpMetrics {
     /// Create a new metrics instance
+    #[must_use]
     pub fn new() -> Self {
         Self {
             reads_total: AtomicU64::new(0),

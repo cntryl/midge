@@ -1,7 +1,7 @@
-//! MinIO S3-compatible object storage provider
+//! `MinIO` S3-compatible object storage provider
 //!
-//! Specialized implementation leveraging generic S3 provider for MinIO:
-//! - Local or cloud-hosted MinIO deployments
+//! Specialized implementation leveraging generic S3 provider for `MinIO`:
+//! - Local or cloud-hosted `MinIO` deployments
 //! - Simple access key / secret key authentication
 //! - Automatic path-style endpoint configuration
 //! - Support for custom endpoints (local, self-hosted, or cloud providers)
@@ -9,27 +9,27 @@
 use super::s3::{S3Config, S3Provider};
 use crate::common::MidgeResult;
 
-/// MinIO S3-compatible object storage provider
+/// `MinIO` S3-compatible object storage provider
 ///
 /// Leverages the generic S3 implementation with MinIO-specific defaults.
-/// MinIO is fully S3-compatible and uses standard access key/secret key authentication.
+/// `MinIO` is fully S3-compatible and uses standard access key/secret key authentication.
 ///
 /// # Deployment modes
 /// - **Local**: `http://localhost:9000` for development
-/// - **Self-hosted**: Private MinIO cluster on your infrastructure
-/// - **Cloud**: MinIO Operator on Kubernetes or other managed services
+/// - **Self-hosted**: Private `MinIO` cluster on your infrastructure
+/// - **Cloud**: `MinIO` Operator on Kubernetes or other managed services
 pub struct MinioProvider {
     inner: S3Provider,
 }
 
 impl MinioProvider {
-    /// Create MinIO provider
+    /// Create `MinIO` provider
     ///
     /// # Arguments
-    /// * `bucket` - MinIO bucket name
-    /// * `endpoint` - MinIO endpoint URL (e.g., "http://localhost:9000" or "https://minio.example.com")
-    /// * `access_key` - MinIO access key
-    /// * `secret_key` - MinIO secret key
+    /// * `bucket` - `MinIO` bucket name
+    /// * `endpoint` - `MinIO` endpoint URL (e.g., "<http://localhost:9000>" or "<https://minio.example.com>")
+    /// * `access_key` - `MinIO` access key
+    /// * `secret_key` - `MinIO` secret key
     pub fn new(
         bucket: String,
         endpoint: String,
@@ -40,12 +40,12 @@ impl MinioProvider {
         S3Provider::custom(config, access_key, secret_key).map(|inner| Self { inner })
     }
 
-    /// Access the underlying S3Provider for lower-level operations
+    /// Access the underlying `S3Provider` for lower-level operations
     pub fn inner(&self) -> &S3Provider {
         &self.inner
     }
 
-    /// Convert into the underlying S3Provider
+    /// Convert into the underlying `S3Provider`
     pub fn into_inner(self) -> S3Provider {
         self.inner
     }

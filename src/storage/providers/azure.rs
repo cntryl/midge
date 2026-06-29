@@ -44,7 +44,7 @@ pub enum AzureCredential {
     /// SAS token — pre-signed query string appended to every URL.
     SasToken { token: String },
     /// Managed Identity — OAuth bearer tokens from Azure IMDS.
-    /// Supports both system-assigned and user-assigned (via client_id).
+    /// Supports both system-assigned and user-assigned (via `client_id`).
     ManagedIdentity { client_id: Option<String> },
     /// Lightweight OAuth credential resolved without Azure SDKs or CLI shell-out.
     OAuth { source: String },
@@ -141,8 +141,7 @@ impl AzureProvider {
             account_key,
             endpoint
                 .as_ref()
-                .map(AzureEndpoint::emulator_compat)
-                .unwrap_or(false),
+                .is_some_and(AzureEndpoint::emulator_compat),
         )?;
         let executor = CloudExecutor::new(Some(Arc::new(signer)))?;
         let backend = Arc::new(AzureBackend::new(
@@ -274,14 +273,14 @@ impl AzureProvider {
     /// Create provider with automatic credential discovery from environment.
     ///
     /// Credentials are discovered in the following order:
-    /// 1. **SharedKey**: `AZURE_STORAGE_KEY` or connection string
+    /// 1. **`SharedKey`**: `AZURE_STORAGE_KEY` or connection string
     /// 2. **SAS Token**: `AZURE_STORAGE_SAS_TOKEN`
     /// 3. **Managed Identity**: `AZURE_CLIENT_ID` (or system-assigned if none)
     ///
     /// # Environment Variables
     /// - `AZURE_STORAGE_CONNECTION_STRING`: Full connection string (highest priority)
     /// - `AZURE_STORAGE_ACCOUNT`: Storage account name (if not in args)
-    /// - `AZURE_STORAGE_KEY`: Account key for SharedKey auth
+    /// - `AZURE_STORAGE_KEY`: Account key for `SharedKey` auth
     /// - `AZURE_STORAGE_SAS_TOKEN`: SAS token
     /// - `AZURE_CLIENT_ID`: User-assigned managed identity client ID
     pub fn from_env(account_name: String, container: String) -> MidgeResult<Self> {
@@ -409,8 +408,7 @@ impl AzureProvider {
                 Self::with_managed_identity(account_name, container, client_id)
             }
             other => Err(MidgeError::InvalidArgument(format!(
-                "unsupported Azure OAuth credential source in this path: {:?}",
-                other
+                "unsupported Azure OAuth credential source in this path: {other:?}"
             ))),
         }
     }
@@ -490,10 +488,10 @@ impl AzureConnectionString {
                 "accountkey" => parsed.account_key = Some(value.to_string()),
                 "sharedaccesssignature" => parsed.sas_token = Some(value.to_string()),
                 "blobendpoint" => {
-                    parsed.blob_endpoint = Some(value.trim_end_matches('/').to_string())
+                    parsed.blob_endpoint = Some(value.trim_end_matches('/').to_string());
                 }
                 "defaultendpointsprotocol" => {
-                    parsed.default_endpoints_protocol = Some(value.to_string())
+                    parsed.default_endpoints_protocol = Some(value.to_string());
                 }
                 "endpointsuffix" => parsed.endpoint_suffix = Some(value.to_string()),
                 "usedevelopmentstorage" if value.eq_ignore_ascii_case("true") => {
@@ -552,10 +550,7 @@ fn account_endpoint_looks_emulated(endpoint: &str, account_name: &str) -> bool {
     let Ok(url) = url::Url::parse(endpoint) else {
         return false;
     };
-    let host_is_local = matches!(
-        url.host_str(),
-        Some("127.0.0.1") | Some("localhost") | Some("::1")
-    );
+    let host_is_local = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1"));
     let first_path_segment = url
         .path_segments()
         .and_then(|mut segments| segments.next())
@@ -629,7 +624,7 @@ impl AzureBackend {
     fn object_url(&self, key: &str) -> String {
         let base = format!("{}/{}", self.base_url(), self.canonical_key(key));
         match &self.sas_token {
-            Some(tok) => format!("{}?{}", base, tok),
+            Some(tok) => format!("{base}?{tok}"),
             None => base,
         }
     }
@@ -646,7 +641,7 @@ impl AzureBackend {
             base.push_str(&urlencoding::encode(marker));
         }
         match &self.sas_token {
-            Some(tok) => format!("{}&{}", base, tok),
+            Some(tok) => format!("{base}&{tok}"),
             None => base,
         }
     }
@@ -694,21 +689,21 @@ impl CloudBackend for AzureBackend {
             .with_header("x-ms-blob-type", "BlockBlob")
             .with_header("Content-Length", len.to_string());
         // Merge provided headers into the request (caller-controlled; e.g. If-None-Match)
-        for (name, value) in headers.into_iter() {
+        for (name, value) in headers {
             request = request.with_header(name, value);
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status < 400 => CloudEvent::PutComplete {
+            Ok(resp) if resp.status < 400 => CloudEvent::Put {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
-            Ok(resp) => CloudEvent::PutComplete {
+            Ok(resp) => CloudEvent::Put {
                 key: ctx,
                 result: CloudOutcome::Err(format!("Azure PUT status {}", resp.status)),
             },
-            Err(err) => CloudEvent::PutComplete {
+            Err(err) => CloudEvent::Put {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -718,21 +713,21 @@ impl CloudBackend for AzureBackend {
         let url = self.object_url(&key);
         let request = CloudRequest::new(Method::GET, url);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => CloudEvent::GetComplete {
+            Ok(resp) if resp.status == 200 => CloudEvent::Get {
                 key: ctx,
                 result: CloudOutcome::Ok(resp.body),
             },
-            Ok(resp) if resp.status == 404 => CloudEvent::GetComplete {
+            Ok(resp) if resp.status == 404 => CloudEvent::Get {
                 key: ctx,
                 result: CloudOutcome::Err("not found".into()),
             },
-            Ok(resp) => CloudEvent::GetComplete {
+            Ok(resp) => CloudEvent::Get {
                 key: ctx,
                 result: CloudOutcome::Err(format!("Azure GET status {}", resp.status)),
             },
-            Err(err) => CloudEvent::GetComplete {
+            Err(err) => CloudEvent::Get {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -742,27 +737,27 @@ impl CloudBackend for AzureBackend {
         let url = self.object_url(&key);
         let range = match end {
             Some(e) => format!("bytes={}-{}", start, e.saturating_sub(1)),
-            None => format!("bytes={}-", start),
+            None => format!("bytes={start}-"),
         };
         let request = CloudRequest::new(Method::GET, url).with_header("x-ms-range", range);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 206 || resp.status == 200 => CloudEvent::GetRangeComplete {
+            Ok(resp) if resp.status == 206 || resp.status == 200 => CloudEvent::GetRange {
                 key: ctx,
                 start,
                 end,
                 result: CloudOutcome::Ok(resp.body),
             },
-            Ok(resp) => CloudEvent::GetRangeComplete {
+            Ok(resp) => CloudEvent::GetRange {
                 key: ctx,
                 start,
                 end,
                 result: CloudOutcome::Err(format!("Azure GET_RANGE status {}", resp.status)),
             },
-            Err(err) => CloudEvent::GetRangeComplete {
+            Err(err) => CloudEvent::GetRange {
                 key: ctx,
                 start,
                 end,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -771,21 +766,21 @@ impl CloudBackend for AzureBackend {
     fn submit_delete(&self, key: String, headers: Vec<(String, String)>, callback: CloudCallback) {
         let url = self.object_url(&key);
         let mut request = CloudRequest::new(Method::DELETE, url);
-        for (name, value) in headers.into_iter() {
+        for (name, value) in headers {
             request = request.with_header(name, value);
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status < 400 => CloudEvent::DeleteComplete {
+            Ok(resp) if resp.status < 400 => CloudEvent::Delete {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
-            Ok(resp) => CloudEvent::DeleteComplete {
+            Ok(resp) => CloudEvent::Delete {
                 key: ctx,
                 result: CloudOutcome::Err(format!("Azure DELETE status {}", resp.status)),
             },
-            Err(err) => CloudEvent::DeleteComplete {
+            Err(err) => CloudEvent::Delete {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -820,13 +815,13 @@ impl CloudBackend for AzureBackend {
                 Ok(state.marker.is_some())
             },
             |ctx, result| match result {
-                Ok(state) => CloudEvent::ListComplete {
+                Ok(state) => CloudEvent::List {
                     prefix: ctx,
                     result: CloudOutcome::Ok(state.items),
                 },
-                Err(err) => CloudEvent::ListComplete {
+                Err(err) => CloudEvent::List {
                     prefix: ctx,
-                    result: CloudOutcome::Err(format!("{:?}", err)),
+                    result: CloudOutcome::Err(format!("{err:?}")),
                 },
             },
         );
@@ -850,18 +845,18 @@ impl CloudBackend for AzureBackend {
                     .map(|(_, v)| v.trim_matches('"').to_string())
                     .unwrap_or_default();
                 let metadata = ObjectMetadata::new(size, etag, 0);
-                CloudEvent::HeadComplete {
+                CloudEvent::Head {
                     key: ctx,
                     result: CloudOutcome::Ok(metadata),
                 }
             }
-            Ok(resp) => CloudEvent::HeadComplete {
+            Ok(resp) => CloudEvent::Head {
                 key: ctx,
                 result: CloudOutcome::Err(format!("Azure HEAD status {}", resp.status)),
             },
-            Err(err) => CloudEvent::HeadComplete {
+            Err(err) => CloudEvent::Head {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -950,8 +945,7 @@ impl SharedKeySigner {
             .map(|(n, v)| (n.to_lowercase(), v.trim().to_string()))
             .collect();
         x_ms.sort_by(|a, b| a.0.cmp(&b.0));
-        let canonical_headers: String =
-            x_ms.iter().map(|(k, v)| format!("{}:{}\n", k, v)).collect();
+        let canonical_headers: String = x_ms.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
 
         // Canonicalized resource: /{account}/{path}?{sorted-query-params}
         let path = url.path();
@@ -962,7 +956,7 @@ impl SharedKeySigner {
             .collect();
         query_pairs.sort();
         for (k, v) in &query_pairs {
-            canonical_resource.push_str(&format!("\n{}:{}", k, v));
+            canonical_resource.push_str(&format!("\n{k}:{v}"));
         }
 
         if self.emulator_compat {
@@ -1008,7 +1002,7 @@ impl SharedKeySigner {
 impl CloudSigner for SharedKeySigner {
     fn sign(&self, request: &mut CloudRequest) -> MidgeResult<()> {
         let url = url::Url::parse(&request.url)
-            .map_err(|e| MidgeError::InvalidArgument(format!("url parse: {}", e)))?;
+            .map_err(|e| MidgeError::InvalidArgument(format!("url parse: {e}")))?;
 
         // Ensure mandatory x-ms-* headers.
         let now = Utc::now();
@@ -1023,7 +1017,7 @@ impl CloudSigner for SharedKeySigner {
             .headers
             .push(("x-ms-version".into(), "2024-11-04".into()));
 
-        let content_length = request.body.as_ref().map(|b| b.len());
+        let content_length = request.body.as_ref().map(std::vec::Vec::len);
 
         let sts = self.string_to_sign(
             request.method.as_str(),
@@ -1212,7 +1206,7 @@ impl CloudSigner for OAuthTokenSigner {
         let token = self.get_token()?;
         request
             .headers
-            .push(("Authorization".into(), format!("Bearer {}", token)));
+            .push(("Authorization".into(), format!("Bearer {token}")));
         let date = Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
         request.headers.push(("x-ms-date".into(), date));
         request
@@ -1223,7 +1217,7 @@ impl CloudSigner for OAuthTokenSigner {
 }
 
 fn required_env(name: &str) -> MidgeResult<String> {
-    std::env::var(name).map_err(|_| MidgeError::InvalidArgument(format!("missing {}", name)))
+    std::env::var(name).map_err(|_| MidgeError::InvalidArgument(format!("missing {name}")))
 }
 
 fn post_azure_token_form(tenant_id: &str, values: &[(&str, String)]) -> MidgeResult<CachedToken> {
@@ -1239,26 +1233,25 @@ fn post_azure_token_form(tenant_id: &str, values: &[(&str, String)]) -> MidgeRes
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .map_err(|error| MidgeError::Internal(format!("Azure OAuth client init: {}", error)))?;
+        .map_err(|error| MidgeError::Internal(format!("Azure OAuth client init: {error}")))?;
     let response = client
         .post(url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
-        .map_err(|error| MidgeError::Internal(format!("Azure OAuth token request: {}", error)))?;
+        .map_err(|error| MidgeError::Internal(format!("Azure OAuth token request: {error}")))?;
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().unwrap_or_default();
         return Err(MidgeError::Internal(format!(
-            "Azure OAuth token request failed with status {}: {}",
-            status, body
+            "Azure OAuth token request failed with status {status}: {body}"
         )));
     }
     let body = response
         .text()
-        .map_err(|error| MidgeError::Internal(format!("Azure OAuth token body: {}", error)))?;
+        .map_err(|error| MidgeError::Internal(format!("Azure OAuth token body: {error}")))?;
     let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|error| MidgeError::Internal(format!("Azure OAuth token JSON: {}", error)))?;
+        .map_err(|error| MidgeError::Internal(format!("Azure OAuth token JSON: {error}")))?;
     let access_token = json
         .get("access_token")
         .and_then(|value| value.as_str())
@@ -1274,7 +1267,7 @@ fn post_azure_token_form(tenant_id: &str, values: &[(&str, String)]) -> MidgeRes
         .and_then(|value| value.parse::<u64>().ok())
         .or_else(|| {
             json.get("expires_in")
-                .and_then(|value| value.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .map(|ttl| now.saturating_add(ttl))
         })
         .unwrap_or_else(|| now.saturating_add(3600));
@@ -1285,8 +1278,8 @@ fn post_azure_token_form(tenant_id: &str, values: &[(&str, String)]) -> MidgeRes
 }
 
 fn extract_xml_tag_values(body: &str, tag: &str) -> Vec<String> {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
     let mut values = Vec::new();
     let mut rest = body;
     while let Some(start) = rest.find(&open) {
@@ -1313,7 +1306,7 @@ fn decode_xml_entities(value: &str) -> String {
 ///
 /// Supports:
 /// - System-assigned managed identity
-/// - User-assigned managed identity (via client_id)
+/// - User-assigned managed identity (via `client_id`)
 /// - Multiple IMDS endpoints (VM, App Service, Container Apps)
 /// - Token caching and automatic refresh
 struct ManagedIdentitySigner {
@@ -1350,14 +1343,14 @@ impl ManagedIdentitySigner {
 
         // Add client_id for user-assigned identity
         if let Some(ref client_id) = self.client_id {
-            url.push_str(&format!("&client_id={}", client_id));
+            url.push_str(&format!("&client_id={client_id}"));
         }
 
         // Make synchronous HTTP request to IMDS
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .map_err(|e| MidgeError::Internal(format!("IMDS client init: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("IMDS client init: {e}")))?;
 
         let response = client
             .get(&url)
@@ -1365,9 +1358,8 @@ impl ManagedIdentitySigner {
             .send()
             .map_err(|e| {
                 MidgeError::Internal(format!(
-                    "Failed to fetch managed identity token from IMDS: {}. \
-                     Ensure managed identity is enabled on this Azure resource.",
-                    e
+                    "Failed to fetch managed identity token from IMDS: {e}. \
+                     Ensure managed identity is enabled on this Azure resource."
                 ))
             })?;
 
@@ -1375,19 +1367,18 @@ impl ManagedIdentitySigner {
             let status = response.status();
             let body = response.text().unwrap_or_default();
             return Err(MidgeError::Internal(format!(
-                "IMDS token request failed with status {}: {}. \
-                 Ensure managed identity is properly configured.",
-                status, body
+                "IMDS token request failed with status {status}: {body}. \
+                 Ensure managed identity is properly configured."
             )));
         }
 
         // Parse JSON response
         let body = response
             .text()
-            .map_err(|e| MidgeError::Internal(format!("Failed to read IMDS response: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("Failed to read IMDS response: {e}")))?;
 
         let json: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|e| MidgeError::Internal(format!("Failed to parse IMDS JSON: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("Failed to parse IMDS JSON: {e}")))?;
 
         let access_token = json["access_token"]
             .as_str()
@@ -1466,7 +1457,7 @@ impl CloudSigner for ManagedIdentitySigner {
         // Add Bearer token authorization header
         request
             .headers
-            .push(("Authorization".into(), format!("Bearer {}", token)));
+            .push(("Authorization".into(), format!("Bearer {token}")));
 
         // Add required Azure headers
         let now = Utc::now();

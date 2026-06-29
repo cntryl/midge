@@ -117,7 +117,7 @@
 //!
 //! - **[`providers`]**: Cloud provider implementations
 //!   - Generic S3 (base implementation)
-//!   - AWS S3, Wasabi, MinIO (S3-compatible wrappers)
+//!   - AWS S3, Wasabi, `MinIO` (S3-compatible wrappers)
 //!   - Azure Blob Storage, Google Cloud Storage, OCI stubs
 //!
 //! - **[`local_fs_storage`]**: Legacy `Storage` trait implementation
@@ -152,7 +152,7 @@
 //!
 //! 1. **No futures in engine thread**: All async work happens in `CloudExecutor`'s embedded tokio runtime
 //! 2. **Callback-driven hot path**: No blocking or waiting; results sent via mpsc channels
-//! 3. **WAL ordering**: Local write → memtable visibility → cloud upload → CloudAck
+//! 3. **WAL ordering**: Local write → memtable visibility → cloud upload → `CloudAck`
 //! 4. **Deterministic testing**: `MockCloudBackend` for synchronous test execution
 
 pub(crate) mod cloud;
@@ -241,7 +241,7 @@ impl StorageObjectMetadata {
 
 /// Storage events sent back to the runtime after async I/O.
 ///
-/// These events are sent via StorageCallback channels when operations complete.
+/// These events are sent via `StorageCallback` channels when operations complete.
 /// This unified event type works for both filesystem and cloud backends.
 #[derive(Debug, Clone)]
 pub enum StorageEvent {
@@ -283,7 +283,7 @@ pub enum StorageEvent {
         result: StorageOutcome<()>,
     },
     /// Backpressure activated - disk watermark exceeded
-    /// Runtime should pause flushes until BackpressureOff
+    /// Runtime should pause flushes until `BackpressureOff`
     BackpressureOn,
     /// Backpressure released - disk usage below threshold
     /// Runtime can resume normal operations
@@ -292,7 +292,7 @@ pub enum StorageEvent {
 
 /// Serializable result type for storage operations.
 ///
-/// Can be converted to/from MidgeResult for compatibility.
+/// Can be converted to/from `MidgeResult` for compatibility.
 #[derive(Debug, Clone)]
 pub enum StorageOutcome<T: Clone> {
     Ok(T),
@@ -311,7 +311,7 @@ impl<T: Clone> StorageOutcome<T> {
     }
 }
 
-/// Callback type: a sync channel to send StorageEvent back to runtime
+/// Callback type: a sync channel to send `StorageEvent` back to runtime
 pub type StorageCallback = std::sync::mpsc::Sender<StorageEvent>;
 
 /// NEW async-compatible storage backend trait.
@@ -319,7 +319,7 @@ pub type StorageCallback = std::sync::mpsc::Sender<StorageEvent>;
 /// CRITICAL DESIGN:
 /// - All operations return immediately (non-blocking)
 /// - Real I/O happens asynchronously (in thread pools or tokio tasks)
-/// - Results are reported back via StorageCallback
+/// - Results are reported back via `StorageCallback`
 /// - Same trait for both filesystem and cloud backends
 ///
 /// This allows:

@@ -1,11 +1,11 @@
-//! Filesystem WAL writer using io::Fs abstraction
+//! Filesystem WAL writer using `io::Fs` abstraction
 //!
-//! This writer uses the base io::Fs trait instead of storage abstractions directly,
+//! This writer uses the base `io::Fs` trait instead of storage abstractions directly,
 //! allowing for swappable implementations (Real, Mock, Chaos) for testing.
 //!
 //! Architectural rules (Copilot: read carefully and DO NOT modify):
 //! ---------------------------------------------------------------
-//! • FsWalWriterIo ONLY appends bytes to the active WAL file `wal.log`.
+//! • `FsWalWriterIo` ONLY appends bytes to the active WAL file `wal.log`.
 //! • It NEVER assigns sequence numbers.
 //! • It NEVER rotates WAL segments.
 //! • It NEVER writes metadata beyond the encoded WAL record format.
@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 
-/// Filesystem-backed WAL writer using io::Fs.
+/// Filesystem-backed WAL writer using `io::Fs`.
 ///
 /// This struct is responsible ONLY for writing bytes to `wal.log`.
 /// It does not manage segment rotation, sequence assignment, recovery,
@@ -170,7 +170,7 @@ impl FsWalWriterIo {
 
                 if attempt > 0 {
                     if let Some(t) = crate::telemetry::Telemetry::global() {
-                        t.metrics().record_wal_backpressure_wait(attempt as u64);
+                        t.metrics().record_wal_backpressure_wait(u64::from(attempt));
                     }
                 }
 

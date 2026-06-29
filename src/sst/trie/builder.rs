@@ -18,6 +18,7 @@ pub struct TrieBuilder {
 
 impl TrieBuilder {
     /// Create a new trie builder
+    #[must_use]
     pub fn new() -> Self {
         // Create root node with empty key
         let root = TrieNode::new(0, Vec::new(), None);
@@ -132,14 +133,14 @@ impl TrieBuilder {
 
         // Create node for new key
         let new_suffix = remaining[split_pos..].to_vec();
-        if !new_suffix.is_empty() {
+        if new_suffix.is_empty() {
+            // New key ends at split point
+            intermediate.block_id = Some(block_id);
+        } else {
             let new_node = TrieNode::new(split_pos as u16, new_suffix.clone(), Some(block_id));
             let new_node_index = self.nodes.len() as u32;
             self.nodes.push(new_node);
             intermediate.add_child(TrieEdge::new(new_suffix[0], new_node_index));
-        } else {
-            // New key ends at split point
-            intermediate.block_id = Some(block_id);
         }
 
         // Replace original node with intermediate
@@ -147,11 +148,13 @@ impl TrieBuilder {
     }
 
     /// Finish building and return serialized trie
+    #[must_use]
     pub fn finish(self) -> Vec<u8> {
         encoding::encode_trie(&self.nodes)
     }
 
     /// Get number of nodes in trie
+    #[must_use]
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
@@ -320,7 +323,7 @@ mod tests {
 
         // Act
         for i in 0..100 {
-            let key = format!("key_{:04}", i).into_bytes();
+            let key = format!("key_{i:04}").into_bytes();
             builder.add_key(&key, i as u32).unwrap();
         }
 

@@ -43,7 +43,7 @@ impl StorageBudgetPolicy {
     /// Bytes remaining before high watermark
     pub fn bytes_until_high_watermark(&self, used_bytes: u64) -> i64 {
         let high_threshold =
-            (self.max_local_bytes as f64 * (self.high_watermark_percent as f64 / 100.0)) as u64;
+            (self.max_local_bytes as f64 * (f64::from(self.high_watermark_percent) / 100.0)) as u64;
         high_threshold as i64 - used_bytes as i64
     }
 }

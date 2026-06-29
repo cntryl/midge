@@ -18,7 +18,7 @@ pub enum ReadDurability {
     Strict,
     /// Steady - fsync every N ms.
     Steady,
-    /// CloudPersisted - wait for cloud backup.
+    /// `CloudPersisted` - wait for cloud backup.
     CloudPersisted,
 }
 

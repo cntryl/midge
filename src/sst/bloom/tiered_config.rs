@@ -25,6 +25,7 @@ impl TieredBloomConfig {
     /// - L0: 0.1% (hot, small)
     /// - L1: 1.0% (moderate)
     /// - L2+: 5.0% (large, cold)
+    #[must_use]
     pub fn balanced() -> Self {
         Self {
             l0_fpr: 0.001,     // 0.1%
@@ -37,6 +38,7 @@ impl TieredBloomConfig {
     /// - L0: 0.01% (ultra-fine)
     /// - L1: 0.1%
     /// - L2+: 1.0%
+    #[must_use]
     pub fn aggressive() -> Self {
         Self {
             l0_fpr: 0.0001,
@@ -49,6 +51,7 @@ impl TieredBloomConfig {
     /// - L0: 0.5%
     /// - L1: 2.0%
     /// - L2+: 10.0%
+    #[must_use]
     pub fn conservative() -> Self {
         Self {
             l0_fpr: 0.005,
@@ -58,6 +61,7 @@ impl TieredBloomConfig {
     }
 
     /// Create a uniform configuration (all levels same FPR)
+    #[must_use]
     pub fn uniform(fpr: f64) -> Self {
         Self {
             l0_fpr: fpr,
@@ -67,6 +71,7 @@ impl TieredBloomConfig {
     }
 
     /// Get FPR for a specific level
+    #[must_use]
     pub fn fpr_for_level(&self, level: usize) -> f64 {
         match level {
             0 => self.l0_fpr,
@@ -76,7 +81,8 @@ impl TieredBloomConfig {
     }
 
     /// Estimate space savings vs uniform 1% FPR
-    /// Returns (total_bits_saved, percentage_saved)
+    /// Returns (`total_bits_saved`, `percentage_saved`)
+    #[must_use]
     pub fn estimate_space_savings_vs_uniform(
         &self,
         l0_keys: usize,
@@ -170,7 +176,7 @@ mod tests {
 
         // Act
         let config = TieredBloomConfig::balanced();
-        let (saved, pct) = config.estimate_space_savings_vs_uniform(1000, 10000, 100000);
+        let (saved, pct) = config.estimate_space_savings_vs_uniform(1000, 10_000, 100_000);
 
         // Tiered should save space by having higher FPR on larger levels
         // Assert
@@ -185,7 +191,7 @@ mod tests {
 
         // Act
         let config = TieredBloomConfig::balanced();
-        let display = format!("{}", config);
+        let display = format!("{config}");
 
         // Assert
         assert!(display.contains("L0"));

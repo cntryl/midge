@@ -245,8 +245,7 @@ impl ManifestActor {
 
         if !state.manifest.delete_column_family(cf_id) {
             return Err(crate::common::MidgeError::Internal(format!(
-                "Column family {} not found or already deleted",
-                cf_id
+                "Column family {cf_id} not found or already deleted"
             )));
         }
 
@@ -387,7 +386,7 @@ mod tests {
         // Arrange: create a temp dir and a leftover .tmp file (simulate crash before rename)
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let sst_name = crate::sst::file_name(0, 0, 2);
-        let tmp_name = format!("{}.tmp", sst_name);
+        let tmp_name = format!("{sst_name}.tmp");
         let tmp_path = tmp.path().join(&tmp_name);
 
         // Write a temp file but do not rename

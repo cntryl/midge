@@ -4,8 +4,8 @@ use super::reader::BloomReader;
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 /// Seeds for the two base hashes (used in double-hashing formula)
-const SEED1: u64 = 0x9E3779B185EBCA87;
-const SEED2: u64 = 0xC2B2AE3D27D4EB4F;
+const SEED1: u64 = 0x9E37_79B1_85EB_CA87;
+const SEED2: u64 = 0xC2B2_AE3D_27D4_EB4F;
 
 /// Bloom filter membership test result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,11 +18,13 @@ pub enum BloomTestResult {
 
 impl BloomTestResult {
     /// Returns true if the key might be present (useful for conditional logic)
+    #[must_use]
     pub fn might_be_present(&self) -> bool {
         matches!(self, BloomTestResult::MightBePresent)
     }
 
     /// Returns true if the key is definitely not present
+    #[must_use]
     pub fn definitely_not_present(&self) -> bool {
         matches!(self, BloomTestResult::DefinitelyNotPresent)
     }
@@ -62,6 +64,7 @@ impl BloomWriter {
     /// # Arguments
     /// * `estimated_keys` - Expected number of keys in the SST
     /// * `false_positive_rate` - Target false positive rate (default 0.01 for 1%)
+    #[must_use]
     pub fn new(estimated_keys: usize, false_positive_rate: f64) -> Self {
         let num_bits = Self::calculate_bit_size(estimated_keys, false_positive_rate);
         let num_bytes = num_bits.div_ceil(8);
@@ -77,11 +80,12 @@ impl BloomWriter {
     }
 
     /// Create a bloom filter with default parameters (1% FPR)
+    #[must_use]
     pub fn with_defaults(estimated_keys: usize) -> Self {
         Self::new(estimated_keys, 0.01)
     }
 
-    /// Calculate optimal k: k_opt = round((m/n) * ln(2)), clamped to [1, 8]
+    /// Calculate optimal k: `k_opt` = round((m/n) * ln(2)), clamped to [1, 8]
     fn calculate_optimal_k(num_bits: usize, estimated_keys: usize) -> u8 {
         if estimated_keys == 0 || num_bits == 0 {
             return 1;
@@ -98,7 +102,7 @@ impl BloomWriter {
         let h2 = xxh3_64_with_seed(key, SEED2);
         let num_bits = self.num_bits as u64;
 
-        for i in 0..(self.k as u64) {
+        for i in 0..u64::from(self.k) {
             let combined = h1.wrapping_add(i.wrapping_mul(h2));
             let bit_index = (combined % num_bits) as usize;
             let byte_index = bit_index / 8;
@@ -126,6 +130,7 @@ impl BloomWriter {
     }
 
     /// Finalize and return the bloom filter reader
+    #[must_use]
     pub fn finish(self) -> BloomReader {
         BloomReader {
             bits: self.bits,
@@ -136,11 +141,13 @@ impl BloomWriter {
     }
 
     /// Get the current size in bytes
+    #[must_use]
     pub fn size_bytes(&self) -> usize {
         self.bits.len()
     }
 
     /// Get the actual key count
+    #[must_use]
     pub fn key_count(&self) -> usize {
         self.key_count
     }
@@ -153,7 +160,7 @@ impl BloomFilterOps for BloomWriter {
         let h2 = xxh3_64_with_seed(key, SEED2);
         let num_bits = self.num_bits as u64;
 
-        for i in 0..(self.k as u64) {
+        for i in 0..u64::from(self.k) {
             let combined = h1.wrapping_add(i.wrapping_mul(h2));
             let bit_index = (combined % num_bits) as usize;
             let byte_index = bit_index / 8;
@@ -283,7 +290,7 @@ mod tests {
         let mut counts = Vec::new();
         for i in 0..10 {
             let before = filter.key_count();
-            filter.insert(format!("key{}", i).as_bytes());
+            filter.insert(format!("key{i}").as_bytes());
             let after = filter.key_count();
             counts.push((before, after));
         }
@@ -370,7 +377,7 @@ mod tests {
         // Arrange
         let mut writer = BloomWriter::new(1000, 0.01);
         for i in 0..1000 {
-            writer.insert(format!("key{}", i).as_bytes());
+            writer.insert(format!("key{i}").as_bytes());
         }
 
         // Act
@@ -414,13 +421,13 @@ mod tests {
         // Arrange
 
         // Act
-        let size_fpr_001 = BloomWriter::calculate_bit_size(100, 0.001);
-        let size_fpr_01 = BloomWriter::calculate_bit_size(100, 0.01);
+        let strict_fpr_size = BloomWriter::calculate_bit_size(100, 0.001);
+        let moderate_fpr_size = BloomWriter::calculate_bit_size(100, 0.01);
         let size_fpr_1 = BloomWriter::calculate_bit_size(100, 0.1);
 
         // Assert (lower FPR requires more bits)
-        assert!(size_fpr_001 > size_fpr_01);
-        assert!(size_fpr_01 > size_fpr_1);
+        assert!(strict_fpr_size > moderate_fpr_size);
+        assert!(moderate_fpr_size > size_fpr_1);
     }
 
     #[test]

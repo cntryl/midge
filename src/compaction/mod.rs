@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn should_handle_large_sequence_numbers_when_formatting() {
         // Arrange
-        let plan = CompactionPlan::new(0, 0, 1).with_output_seq(999999999);
+        let plan = CompactionPlan::new(0, 0, 1).with_output_seq(999_999_999);
         let cf_dir = Path::new("cf_01");
 
         // Act

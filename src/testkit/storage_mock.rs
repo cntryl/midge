@@ -11,6 +11,7 @@ pub struct MockStorage {
 }
 
 impl MockStorage {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             data: Arc::new(Mutex::new(HashMap::new())),
@@ -36,7 +37,7 @@ impl StorageBackend for MockStorage {
             key,
             result: match result {
                 Ok(v) => StorageOutcome::Ok(v),
-                Err(e) => StorageOutcome::Err(format!("{:?}", e)),
+                Err(e) => StorageOutcome::Err(format!("{e:?}")),
             },
         };
         let _ = callback.send(event);

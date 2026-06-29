@@ -1,11 +1,11 @@
-//! Filesystem WAL reader using io::Fs abstraction
+//! Filesystem WAL reader using `io::Fs` abstraction
 //!
-//! This reader uses the base io::Fs trait instead of storage abstractions directly,
+//! This reader uses the base `io::Fs` trait instead of storage abstractions directly,
 //! allowing for swappable implementations (Real, Mock, Chaos) for testing.
 //!
 //! Architectural invariants (Copilot: DO NOT VIOLATE):
 //! --------------------------------------------------
-//! • FsWalReaderIo reads **only** from the active WAL file `wal.log`.
+//! • `FsWalReaderIo` reads **only** from the active WAL file `wal.log`.
 //! • It must treat EOF mid-record as **corruption**, not success.
 //! • It must not assume the file ends cleanly.
 //! • It must use the canonical format:
@@ -20,7 +20,7 @@ use crate::wal::traits::{WalReader, WalReaderDyn};
 use crate::wal::types::{WalPos, WalRecord};
 use std::sync::Arc;
 
-/// Filesystem-backed WAL reader using io::Fs.
+/// Filesystem-backed WAL reader using `io::Fs`.
 ///
 /// This struct provides low-level, corruption-aware reading semantics
 /// with swappable filesystem backends.
@@ -78,8 +78,7 @@ impl WalReader for FsWalReaderIo {
         }
         if pos > file_len {
             return Err(MidgeError::Corruption(format!(
-                "WAL read_at past EOF: pos={} file_len={}",
-                pos, file_len
+                "WAL read_at past EOF: pos={pos} file_len={file_len}"
             )));
         }
         if file_len.saturating_sub(pos) < crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 {
@@ -100,8 +99,7 @@ impl WalReader for FsWalReaderIo {
             .saturating_add(len as u64);
         if need_end > file_len {
             return Err(MidgeError::Corruption(format!(
-                "Incomplete WAL record at pos {} (len={}, file_len={})",
-                pos, len, file_len
+                "Incomplete WAL record at pos {pos} (len={len}, file_len={file_len})"
             )));
         }
 
@@ -212,7 +210,7 @@ mod tests {
         match result {
             Ok(None) => Ok(()),
             Ok(Some(_)) => panic!("Expected None for empty file"),
-            Err(_) => panic!("Expected None for empty file, not error"),
+            Err(error) => panic!("Expected None for empty file, not error: {error}"),
         }
     }
 }

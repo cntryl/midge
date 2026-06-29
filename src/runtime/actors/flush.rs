@@ -51,7 +51,7 @@ impl FlushActor {
     /// Handle a flush request for a column family
     ///
     /// If SBA is available, reserves space before flushing. Handles backpressure
-    /// responses (WaitForCloud, WaitForCompaction, RejectNoSpace).
+    /// responses (`WaitForCloud`, `WaitForCompaction`, `RejectNoSpace`).
     ///
     /// This freezes the active memtable and queues it for background flush.
     /// Returns the name of the SST file that will be created.
@@ -120,8 +120,7 @@ impl FlushActor {
             let max_immutable = state.max_immutable_memtables;
             let immutable_count = state
                 .get_cf(cf_id)
-                .map(|cf| cf.immutable_memtables.len())
-                .unwrap_or(0);
+                .map_or(0, |cf| cf.immutable_memtables.len());
 
             tracing::warn!(
                 cf_id = cf_id,
@@ -133,8 +132,7 @@ impl FlushActor {
                 t.metrics().record_write_stall_memory();
             }
             return Err(MidgeError::WriteStall(format!(
-                "immutable memtable queue full ({}/{}); flush in progress",
-                immutable_count, max_immutable
+                "immutable memtable queue full ({immutable_count}/{max_immutable}); flush in progress"
             )));
         }
 
@@ -143,7 +141,7 @@ impl FlushActor {
         // Get the column family (after stall check to avoid borrow issues)
         let cf = state
             .get_cf_mut(cf_id)
-            .ok_or_else(|| MidgeError::Internal(format!("Column family {} not found", cf_id)))?;
+            .ok_or_else(|| MidgeError::Internal(format!("Column family {cf_id} not found")))?;
 
         if cf.memtable.size_bytes() == 0 {
             return Ok(FlushOutput {

@@ -27,7 +27,7 @@ pub fn ensure_or_create_format_marker(db_path: &Path) -> MidgeResult<u32> {
 
     std::fs::write(
         &marker_path,
-        format!("{}{}\n", FORMAT_PREFIX, CURRENT_FORMAT_VERSION),
+        format!("{FORMAT_PREFIX}{CURRENT_FORMAT_VERSION}\n"),
     )?;
     Ok(CURRENT_FORMAT_VERSION)
 }

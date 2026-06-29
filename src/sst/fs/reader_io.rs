@@ -1,6 +1,6 @@
-//! Filesystem-backed SST reader using io::Fs abstraction (new approach)
+//! Filesystem-backed SST reader using `io::Fs` abstraction (new approach)
 //!
-//! This reader uses the base io::Fs trait instead of std::fs directly,
+//! This reader uses the base `io::Fs` trait instead of `std::fs` directly,
 //! allowing for swappable implementations (Real, Mock, Chaos) for testing.
 
 use bytes::Bytes;
@@ -29,8 +29,8 @@ pub struct SstFileSummary {
     pub largest_seq: u64,
 }
 
-/// SST file reader using io::Fs abstraction
-/// Identical to SstFile but accepts `Arc<dyn Fs>` for the filesystem backend
+/// SST file reader using `io::Fs` abstraction
+/// Identical to `SstFile` but accepts `Arc<dyn Fs>` for the filesystem backend
 pub struct SstFileIo {
     path: FsPath,
     fs: Arc<dyn Fs>,
@@ -72,8 +72,8 @@ impl SstFileIo {
         Ok(reader)
     }
 
-    /// Open an SST file using RealFs (convenience method for single-file access)
-    /// This creates a new RealFs instance for the parent directory of the SST file.
+    /// Open an SST file using `RealFs` (convenience method for single-file access)
+    /// This creates a new `RealFs` instance for the parent directory of the SST file.
     pub fn open_with_real_fs(path: &std::path::Path) -> MidgeResult<Self> {
         let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
         let fs = Arc::new(crate::io::RealFs::new(parent)?);
@@ -86,7 +86,7 @@ impl SstFileIo {
         Self::open(&path_str, fs)
     }
 
-    /// Summarize an SST file opened via RealFs.
+    /// Summarize an SST file opened via `RealFs`.
     pub fn summarize_with_real_fs(path: &std::path::Path) -> MidgeResult<SstFileSummary> {
         Self::open_with_real_fs(path)?.summary()
     }
@@ -159,15 +159,13 @@ impl SstFileIo {
             let key_vec = key.to_vec();
             if smallest_key
                 .as_ref()
-                .map(|current| key_vec.as_slice() < current.as_slice())
-                .unwrap_or(true)
+                .is_none_or(|current| key_vec.as_slice() < current.as_slice())
             {
                 smallest_key = Some(key_vec.clone());
             }
             if largest_key
                 .as_ref()
-                .map(|current| key_vec.as_slice() > current.as_slice())
-                .unwrap_or(true)
+                .is_none_or(|current| key_vec.as_slice() > current.as_slice())
             {
                 largest_key = Some(key_vec);
             }
@@ -176,35 +174,27 @@ impl SstFileIo {
                 KeyState::Value(_, seq, _, _) | KeyState::Tombstone(seq) => seq,
                 KeyState::Absent => continue,
             };
-            smallest_seq = Some(smallest_seq.map(|current| current.min(seq)).unwrap_or(seq));
-            largest_seq = Some(largest_seq.map(|current| current.max(seq)).unwrap_or(seq));
+            smallest_seq = Some(smallest_seq.map_or(seq, |current| current.min(seq)));
+            largest_seq = Some(largest_seq.map_or(seq, |current| current.max(seq)));
         }
 
         for tombstone in self.range_tombstones() {
             if smallest_key
                 .as_ref()
-                .map(|current| tombstone.start.as_slice() < current.as_slice())
-                .unwrap_or(true)
+                .is_none_or(|current| tombstone.start.as_slice() < current.as_slice())
             {
                 smallest_key = Some(tombstone.start.clone());
             }
             if largest_key
                 .as_ref()
-                .map(|current| tombstone.end.as_slice() > current.as_slice())
-                .unwrap_or(true)
+                .is_none_or(|current| tombstone.end.as_slice() > current.as_slice())
             {
                 largest_key = Some(tombstone.end.clone());
             }
-            smallest_seq = Some(
-                smallest_seq
-                    .map(|current| current.min(tombstone.seq))
-                    .unwrap_or(tombstone.seq),
-            );
-            largest_seq = Some(
-                largest_seq
-                    .map(|current| current.max(tombstone.seq))
-                    .unwrap_or(tombstone.seq),
-            );
+            smallest_seq =
+                Some(smallest_seq.map_or(tombstone.seq, |current| current.min(tombstone.seq)));
+            largest_seq =
+                Some(largest_seq.map_or(tombstone.seq, |current| current.max(tombstone.seq)));
         }
 
         Ok(SstFileSummary {
@@ -734,23 +724,20 @@ impl crate::sst::SstStateReader for SstFileIo {
         let mut best_match: Option<SstEntry> = None;
         let index = self.scan_index()?;
 
-        for (_first_key, handle) in index.iter() {
+        for (_first_key, handle) in &index {
             let block_data = self.read_block(handle)?;
             for entry in self.scan_block_entries_from_bytes(&block_data)? {
                 if entry.key.as_slice() == key
                     && best_match
                         .as_ref()
-                        .map(|current| entry.sequence > current.sequence)
-                        .unwrap_or(true)
+                        .is_none_or(|current| entry.sequence > current.sequence)
                 {
                     best_match = Some(entry);
                 }
             }
         }
 
-        Ok(best_match
-            .map(Self::state_from_entry)
-            .unwrap_or(crate::sst::types::KeyState::Absent))
+        Ok(best_match.map_or(crate::sst::types::KeyState::Absent, Self::state_from_entry))
     }
 
     fn get_state_at(
@@ -761,7 +748,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         let mut best_match: Option<SstEntry> = None;
         let index = self.scan_index()?;
 
-        for (_first_key, handle) in index.iter() {
+        for (_first_key, handle) in &index {
             let block_data = self.read_block(handle)?;
             for entry in self.scan_block_entries_from_bytes(&block_data)? {
                 if entry.key.as_slice() != key {
@@ -772,8 +759,7 @@ impl crate::sst::SstStateReader for SstFileIo {
                 }
                 if best_match
                     .as_ref()
-                    .map(|current| entry.sequence > current.sequence)
-                    .unwrap_or(true)
+                    .is_none_or(|current| entry.sequence > current.sequence)
                 {
                     best_match = Some(entry);
                 }
@@ -782,8 +768,7 @@ impl crate::sst::SstStateReader for SstFileIo {
 
         let now_millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_millis() as u64);
 
         Ok(match best_match {
             Some(entry) if entry.is_tombstone() => KeyState::Tombstone(entry.sequence),

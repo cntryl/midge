@@ -18,7 +18,7 @@ pub enum WalOpKind {
     Put,
     Insert,
     Delete,
-    /// Delete all keys in range [key, range_end)
+    /// Delete all keys in range [key, `range_end`)
     DeleteRange,
     /// Begin a transaction
     TxnBegin,
@@ -29,6 +29,7 @@ pub enum WalOpKind {
 impl WalOpKind {
     /// Convert operation to wire format (TLV encoding).
     #[inline]
+    #[must_use]
     pub fn to_wire_format(self) -> u8 {
         match self {
             WalOpKind::Put => 0,
@@ -51,8 +52,7 @@ impl WalOpKind {
             4 => Ok(WalOpKind::TxnBegin),
             5 => Ok(WalOpKind::TxnCommit),
             _ => Err(crate::common::MidgeError::Corruption(format!(
-                "Invalid WAL operation type: {}",
-                byte
+                "Invalid WAL operation type: {byte}"
             ))),
         }
     }
@@ -65,10 +65,10 @@ pub struct WalRecord {
     #[serde(default)]
     pub cf_id: ColumnFamilyId,
 
-    /// Operation type (Put, Insert, Delete, DeleteRange, TxnBegin, TxnCommit)
+    /// Operation type (Put, Insert, Delete, `DeleteRange`, `TxnBegin`, `TxnCommit`)
     pub op: WalOpKind,
 
-    /// Key for the operation (or range start for DeleteRange)
+    /// Key for the operation (or range start for `DeleteRange`)
     pub key: Bytes,
 
     /// Value for Put/Insert operations, None for Delete/DeleteRange
@@ -81,7 +81,7 @@ pub struct WalRecord {
     #[serde(default)]
     pub expiration: Option<u64>,
 
-    /// Optional range end for DeleteRange operations (exclusive).
+    /// Optional range end for `DeleteRange` operations (exclusive).
     #[serde(default)]
     pub range_end: Option<Bytes>,
 
@@ -158,8 +158,7 @@ impl WalRecord {
         let expiration = if ttl_seconds > 0 {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+                .map_or(0, |d| d.as_millis() as u64);
             Some(now + (ttl_seconds * 1000))
         } else {
             None
@@ -184,8 +183,7 @@ impl WalRecord {
         if let Some(exp_time) = self.expiration {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+                .map_or(0, |d| d.as_millis() as u64);
             now > exp_time
         } else {
             false
@@ -195,8 +193,8 @@ impl WalRecord {
     /// Get the size in bytes of this record when serialized
     pub fn estimated_size(&self) -> usize {
         let key_size = self.key.len();
-        let value_size = self.value.as_ref().map(|v| v.len()).unwrap_or(0);
-        let range_end_size = self.range_end.as_ref().map(|r| r.len()).unwrap_or(0);
+        let value_size = self.value.as_ref().map_or(0, bytes::Bytes::len);
+        let range_end_size = self.range_end.as_ref().map_or(0, bytes::Bytes::len);
         4 + 1 + 8 + 4 + key_size + 4 + value_size + range_end_size + 20 + 8
     }
 }

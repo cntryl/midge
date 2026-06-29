@@ -56,20 +56,20 @@ pub enum MidgeError {
 impl fmt::Display for MidgeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MidgeError::Io(e) => write!(f, "IO error: {}", e),
+            MidgeError::Io(e) => write!(f, "IO error: {e}"),
             MidgeError::NotFound => write!(f, "Not found"),
-            MidgeError::InvalidArgument(msg) => write!(f, "Invalid argument: {}", msg),
-            MidgeError::Corruption(msg) => write!(f, "Corruption: {}", msg),
-            MidgeError::NotSupported(msg) => write!(f, "Not supported: {}", msg),
-            MidgeError::Internal(msg) => write!(f, "Internal error: {}", msg),
+            MidgeError::InvalidArgument(msg) => write!(f, "Invalid argument: {msg}"),
+            MidgeError::Corruption(msg) => write!(f, "Corruption: {msg}"),
+            MidgeError::NotSupported(msg) => write!(f, "Not supported: {msg}"),
+            MidgeError::Internal(msg) => write!(f, "Internal error: {msg}"),
             MidgeError::InvalidPath => write!(f, "Invalid path"),
-            MidgeError::NoSpace(msg) => write!(f, "No space left on device: {}", msg),
-            MidgeError::RecoveryFailed(msg) => write!(f, "Recovery failed: {}", msg),
-            MidgeError::CompatibilityError(msg) => write!(f, "Compatibility error: {}", msg),
-            MidgeError::WriteStall(msg) => write!(f, "Write stall: {}", msg),
-            MidgeError::MemoryModeViolation(msg) => write!(f, "Memory mode violation: {}", msg),
-            MidgeError::Fenced(msg) => write!(f, "Fenced: writer epoch is stale: {}", msg),
-            MidgeError::WriteConflict(msg) => write!(f, "Write conflict: {}", msg),
+            MidgeError::NoSpace(msg) => write!(f, "No space left on device: {msg}"),
+            MidgeError::RecoveryFailed(msg) => write!(f, "Recovery failed: {msg}"),
+            MidgeError::CompatibilityError(msg) => write!(f, "Compatibility error: {msg}"),
+            MidgeError::WriteStall(msg) => write!(f, "Write stall: {msg}"),
+            MidgeError::MemoryModeViolation(msg) => write!(f, "Memory mode violation: {msg}"),
+            MidgeError::Fenced(msg) => write!(f, "Fenced: writer epoch is stale: {msg}"),
+            MidgeError::WriteConflict(msg) => write!(f, "Write conflict: {msg}"),
         }
     }
 }

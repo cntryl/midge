@@ -55,13 +55,13 @@ impl FileSystem {
 fn write_file_with_parents(full_path: &Path, data: Vec<u8>) -> StorageOutcome<()> {
     if let Some(parent) = full_path.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
-            return StorageOutcome::Err(format!("mkdir {:?}: {}", parent, e));
+            return StorageOutcome::Err(format!("mkdir {parent:?}: {e}"));
         }
     }
 
     match fs::write(full_path, data) {
-        Ok(_) => StorageOutcome::Ok(()),
-        Err(e) => StorageOutcome::Err(format!("write {:?}: {}", full_path, e)),
+        Ok(()) => StorageOutcome::Ok(()),
+        Err(e) => StorageOutcome::Err(format!("write {full_path:?}: {e}")),
     }
 }
 
@@ -71,7 +71,7 @@ impl StorageBackend for FileSystem {
 
         let outcome = match fs::read(&full_path) {
             Ok(bytes) => StorageOutcome::Ok(bytes),
-            Err(e) => StorageOutcome::Err(format!("read {:?}: {}", full_path, e)),
+            Err(e) => StorageOutcome::Err(format!("read {full_path:?}: {e}")),
         };
 
         let _ = callback.send(StorageEvent::ReadComplete {
@@ -87,17 +87,17 @@ impl StorageBackend for FileSystem {
             // Always try to create parent directories if present.
             if let Some(parent) = full_path.parent() {
                 if let Err(e) = fs::create_dir_all(parent) {
-                    StorageOutcome::Err(format!("mkdir {:?}: {}", parent, e))
+                    StorageOutcome::Err(format!("mkdir {parent:?}: {e}"))
                 } else if let Err(e) = fs::write(&full_path, data) {
-                    StorageOutcome::Err(format!("write {:?}: {}", full_path, e))
+                    StorageOutcome::Err(format!("write {full_path:?}: {e}"))
                 } else {
                     StorageOutcome::Ok(())
                 }
             } else {
                 // Path has no parent (e.g., "foo") — still attempt the write.
                 match fs::write(&full_path, data) {
-                    Ok(_) => StorageOutcome::Ok(()),
-                    Err(e) => StorageOutcome::Err(format!("write {:?}: {}", full_path, e)),
+                    Ok(()) => StorageOutcome::Ok(()),
+                    Err(e) => StorageOutcome::Err(format!("write {full_path:?}: {e}")),
                 }
             }
         };
@@ -143,10 +143,9 @@ impl StorageBackend for FileSystem {
                         StorageOutcome::Err("precondition failed: etag mismatch".to_string())
                     }
                 }
-                Err(error) => StorageOutcome::Err(format!(
-                    "precondition failed: read {:?}: {}",
-                    full_path, error
-                )),
+                Err(error) => {
+                    StorageOutcome::Err(format!("precondition failed: read {full_path:?}: {error}"))
+                }
             }
         } else if if_none_match.as_deref() == Some("*") {
             write_file_with_parents(&full_path, data)
@@ -164,8 +163,8 @@ impl StorageBackend for FileSystem {
         let full_path = self.full_path(&key);
 
         let outcome = match fs::remove_file(&full_path) {
-            Ok(_) => StorageOutcome::Ok(()),
-            Err(e) => StorageOutcome::Err(format!("delete {:?}: {}", full_path, e)),
+            Ok(()) => StorageOutcome::Ok(()),
+            Err(e) => StorageOutcome::Err(format!("delete {full_path:?}: {e}")),
         };
 
         let _ = callback.send(StorageEvent::DeleteComplete {
@@ -195,19 +194,18 @@ impl StorageBackend for FileSystem {
                     let current = StorageObjectMetadata::content_crc(data.len() as u64, &data).etag;
                     if current == expected.trim_matches('"') {
                         match fs::remove_file(&full_path) {
-                            Ok(_) => StorageOutcome::Ok(()),
+                            Ok(()) => StorageOutcome::Ok(()),
                             Err(error) => {
-                                StorageOutcome::Err(format!("delete {:?}: {}", full_path, error))
+                                StorageOutcome::Err(format!("delete {full_path:?}: {error}"))
                             }
                         }
                     } else {
                         StorageOutcome::Err("precondition failed: etag mismatch".to_string())
                     }
                 }
-                Err(error) => StorageOutcome::Err(format!(
-                    "precondition failed: read {:?}: {}",
-                    full_path, error
-                )),
+                Err(error) => {
+                    StorageOutcome::Err(format!("precondition failed: read {full_path:?}: {error}"))
+                }
             }
         } else {
             StorageOutcome::Err(
@@ -237,7 +235,7 @@ impl StorageBackend for FileSystem {
 
                     StorageOutcome::Ok(items)
                 }
-                Err(e) => StorageOutcome::Err(format!("list {:?}: {}", full, e)),
+                Err(e) => StorageOutcome::Err(format!("list {full:?}: {e}")),
             }
         } else {
             StorageOutcome::Ok(Vec::new())
@@ -472,7 +470,7 @@ mod tests {
                 assert_eq!(key, "test.txt");
                 match result {
                     StorageOutcome::Ok(content) => assert_eq!(content, data),
-                    StorageOutcome::Err(e) => panic!("Read failed: {}", e),
+                    StorageOutcome::Err(e) => panic!("Read failed: {e}"),
                 }
             }
             _ => panic!("Expected ReadComplete"),
@@ -516,7 +514,7 @@ mod tests {
         match event {
             StorageEvent::ReadComplete { result, .. } => match result {
                 StorageOutcome::Ok(content) => assert_eq!(content, data),
-                StorageOutcome::Err(e) => panic!("Read failed: {}", e),
+                StorageOutcome::Err(e) => panic!("Read failed: {e}"),
             },
             _ => panic!("Expected ReadComplete"),
         }
@@ -538,7 +536,7 @@ mod tests {
         match event {
             StorageEvent::ReadComplete { result, .. } => match result {
                 StorageOutcome::Ok(content) => assert!(content.is_empty()),
-                StorageOutcome::Err(e) => panic!("Read failed: {}", e),
+                StorageOutcome::Err(e) => panic!("Read failed: {e}"),
             },
             _ => panic!("Expected ReadComplete"),
         }
@@ -561,7 +559,7 @@ mod tests {
         match event {
             StorageEvent::ReadComplete { result, .. } => match result {
                 StorageOutcome::Ok(content) => assert_eq!(content, data),
-                StorageOutcome::Err(e) => panic!("Read failed: {}", e),
+                StorageOutcome::Err(e) => panic!("Read failed: {e}"),
             },
             _ => panic!("Expected ReadComplete"),
         }
@@ -704,7 +702,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_list("".into(), tx);
+        fs.submit_list(String::new(), tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -715,7 +713,7 @@ mod tests {
                     assert!(items.contains(&"file1.txt".to_string()));
                     assert!(items.contains(&"file2.txt".to_string()));
                 }
-                StorageOutcome::Err(e) => panic!("List failed: {}", e),
+                StorageOutcome::Err(e) => panic!("List failed: {e}"),
             },
             _ => panic!("Expected ListComplete"),
         }
@@ -729,14 +727,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_list("".into(), tx);
+        fs.submit_list(String::new(), tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
             StorageEvent::ListComplete { result, .. } => match result {
                 StorageOutcome::Ok(items) => assert!(items.is_empty()),
-                StorageOutcome::Err(e) => panic!("List failed: {}", e),
+                StorageOutcome::Err(e) => panic!("List failed: {e}"),
             },
             _ => panic!("Expected ListComplete"),
         }
@@ -757,7 +755,7 @@ mod tests {
         match event {
             StorageEvent::ListComplete { result, .. } => match result {
                 StorageOutcome::Ok(items) => assert!(items.is_empty()),
-                StorageOutcome::Err(e) => panic!("List failed: {}", e),
+                StorageOutcome::Err(e) => panic!("List failed: {e}"),
             },
             _ => panic!("Expected ListComplete"),
         }

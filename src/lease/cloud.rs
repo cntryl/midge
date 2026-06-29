@@ -122,7 +122,7 @@ impl CloudStorageLease {
             LEASE_OBJECT_KEY.to_string()
         } else {
             let prefix = self.config.prefix.trim_end_matches('/');
-            format!("{}/{}", prefix, LEASE_OBJECT_KEY)
+            format!("{prefix}/{LEASE_OBJECT_KEY}")
         }
     }
 
@@ -145,12 +145,12 @@ impl CloudStorageLease {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| LeaseError::IoError(format!("failed to create lease dir: {}", e)))?;
+                .map_err(|e| LeaseError::IoError(format!("failed to create lease dir: {e}")))?;
         }
 
         let content = format_lease_document(doc);
         std::fs::write(&path, content)
-            .map_err(|e| LeaseError::IoError(format!("failed to write lease file: {}", e)))
+            .map_err(|e| LeaseError::IoError(format!("failed to write lease file: {e}")))
     }
 
     /// Remove the local lease coordination file.
@@ -158,7 +158,7 @@ impl CloudStorageLease {
         let path = self.local_lease_path();
         if path.exists() {
             std::fs::remove_file(&path)
-                .map_err(|e| LeaseError::IoError(format!("failed to remove lease file: {}", e)))?;
+                .map_err(|e| LeaseError::IoError(format!("failed to remove lease file: {e}")))?;
         }
         Ok(())
     }
@@ -170,21 +170,18 @@ impl CloudStorageLease {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_head(LEASE_OBJECT_KEY.to_string(), tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(CloudEvent::HeadComplete { result, .. }) => match result {
+            Ok(CloudEvent::Head { result, .. }) => match result {
                 CloudOutcome::Ok(metadata) => Ok(Some(metadata)),
                 CloudOutcome::Err(error) if is_remote_not_found(&error) => Ok(None),
                 CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
-                    "cloud lease HEAD failed: {}",
-                    error
+                    "cloud lease HEAD failed: {error}"
                 ))),
             },
             Ok(other) => Err(LeaseError::IoError(format!(
-                "unexpected cloud lease HEAD response: {:?}",
-                other
+                "unexpected cloud lease HEAD response: {other:?}"
             ))),
             Err(error) => Err(LeaseError::IoError(format!(
-                "cloud lease HEAD timed out: {}",
-                error
+                "cloud lease HEAD timed out: {error}"
             ))),
         }
     }
@@ -196,26 +193,23 @@ impl CloudStorageLease {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_get(LEASE_OBJECT_KEY.to_string(), tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(CloudEvent::GetComplete { result, .. }) => match result {
+            Ok(CloudEvent::Get { result, .. }) => match result {
                 CloudOutcome::Ok(bytes) => {
                     let content = String::from_utf8(bytes).map_err(|error| {
-                        LeaseError::IoError(format!("cloud lease document is not UTF-8: {}", error))
+                        LeaseError::IoError(format!("cloud lease document is not UTF-8: {error}"))
                     })?;
                     Ok(parse_lease_document(&content))
                 }
                 CloudOutcome::Err(error) if is_remote_not_found(&error) => Ok(None),
                 CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
-                    "cloud lease GET failed: {}",
-                    error
+                    "cloud lease GET failed: {error}"
                 ))),
             },
             Ok(other) => Err(LeaseError::IoError(format!(
-                "unexpected cloud lease GET response: {:?}",
-                other
+                "unexpected cloud lease GET response: {other:?}"
             ))),
             Err(error) => Err(LeaseError::IoError(format!(
-                "cloud lease GET timed out: {}",
-                error
+                "cloud lease GET timed out: {error}"
             ))),
         }
     }
@@ -236,20 +230,17 @@ impl CloudStorageLease {
             tx,
         );
         match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(CloudEvent::PutComplete { result, .. }) => match result {
+            Ok(CloudEvent::Put { result, .. }) => match result {
                 CloudOutcome::Ok(()) => Ok(()),
                 CloudOutcome::Err(error) => Err(LeaseError::AcquisitionFailed(format!(
-                    "cloud lease conditional write failed: {}",
-                    error
+                    "cloud lease conditional write failed: {error}"
                 ))),
             },
             Ok(other) => Err(LeaseError::IoError(format!(
-                "unexpected cloud lease PUT response: {:?}",
-                other
+                "unexpected cloud lease PUT response: {other:?}"
             ))),
             Err(error) => Err(LeaseError::IoError(format!(
-                "cloud lease PUT timed out: {}",
-                error
+                "cloud lease PUT timed out: {error}"
             ))),
         }
     }
@@ -261,22 +252,19 @@ impl CloudStorageLease {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_delete_with_headers(LEASE_OBJECT_KEY.to_string(), headers, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(CloudEvent::DeleteComplete { result, .. }) => match result {
+            Ok(CloudEvent::Delete { result, .. }) => match result {
                 CloudOutcome::Ok(()) => Ok(()),
                 CloudOutcome::Err(error) if is_remote_not_found(&error) => Ok(()),
                 CloudOutcome::Err(error) if is_remote_precondition_failed(&error) => Ok(()),
                 CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
-                    "cloud lease DELETE failed: {}",
-                    error
+                    "cloud lease DELETE failed: {error}"
                 ))),
             },
             Ok(other) => Err(LeaseError::IoError(format!(
-                "unexpected cloud lease DELETE response: {:?}",
-                other
+                "unexpected cloud lease DELETE response: {other:?}"
             ))),
             Err(error) => Err(LeaseError::IoError(format!(
-                "cloud lease DELETE timed out: {}",
-                error
+                "cloud lease DELETE timed out: {error}"
             ))),
         }
     }
@@ -548,7 +536,7 @@ impl LeaseDocument {
 
 /// Format a lease document as a simple key-value text file.
 ///
-/// Uses a simple line-based format rather than pulling in serde_json,
+/// Uses a simple line-based format rather than pulling in `serde_json`,
 /// keeping dependencies minimal for the lease subsystem.
 fn format_lease_document(doc: &LeaseDocument) -> String {
     format!(
@@ -804,7 +792,7 @@ mod tests {
         cloud.submit_get(LEASE_OBJECT_KEY.to_string(), tx);
         let event = rx.recv().unwrap();
         let bytes = match event {
-            CloudEvent::GetComplete {
+            CloudEvent::Get {
                 result: CloudOutcome::Ok(bytes),
                 ..
             } => bytes,
@@ -868,7 +856,7 @@ mod tests {
         let key = lease.lease_key();
 
         // Assert
-        assert_eq!(key, format!("test/prefix/{}", LEASE_OBJECT_KEY));
+        assert_eq!(key, format!("test/prefix/{LEASE_OBJECT_KEY}"));
     }
 
     #[test]

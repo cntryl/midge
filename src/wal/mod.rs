@@ -4,12 +4,12 @@
 //!
 //! ## Implementation
 //!
-//! Uses modern io::Fs-based implementations for production code:
+//! Uses modern `io::Fs-based` implementations for production code:
 //! - [`fs::FsWalWriterIo`] - Append records to WAL
 //! - [`fs::FsWalReaderIo`] - Read records from WAL
 //! - [`fs::FsWalFactoryIo`] - Factory for creating readers/writers
 //!
-//! The io::Fs abstraction enables better testability with swappable implementations
+//! The `io::Fs` abstraction enables better testability with swappable implementations
 //! (Real, Mock, Chaos). All production code has been migrated to this interface.
 
 pub mod encoding;
@@ -28,28 +28,33 @@ pub const ACTIVE_FILE_NAME: &str = "wal.log";
 pub const WAL_SEGMENT_ID_WIDTH: usize = 20;
 
 /// Format a canonical sealed WAL segment filename for the given segment id.
+#[must_use]
 pub fn segment_file_name(segment_id: u64) -> String {
-    format!("{segment_id:0width$}.wal", width = WAL_SEGMENT_ID_WIDTH)
+    format!("{segment_id:0WAL_SEGMENT_ID_WIDTH$}.wal")
 }
 
 /// Format the full cloud object key for a sealed WAL segment.
+#[must_use]
 pub fn segment_object_key(segment_id: u64) -> String {
     format!("wal/{}", segment_file_name(segment_id))
 }
 
 /// Backward-compatible alias for callers that operate specifically on cloud WAL
 /// objects.
+#[must_use]
 pub fn cloud_segment_file_name(segment_id: u64) -> String {
     segment_file_name(segment_id)
 }
 
 /// Backward-compatible alias for callers that operate specifically on cloud WAL
 /// objects.
+#[must_use]
 pub fn cloud_segment_object_key(segment_id: u64) -> String {
     segment_object_key(segment_id)
 }
 
 /// Parse a WAL segment id from a cloud key, staged filename, or legacy name.
+#[must_use]
 pub fn parse_segment_id(name: &str) -> Option<u64> {
     let file_name = name.strip_prefix("wal/").unwrap_or(name);
 

@@ -99,7 +99,7 @@ impl CloudExecutor {
             .enable_all()
             .build()
             .map_err(|e| {
-                MidgeError::Internal(format!("Failed to build cloud tokio runtime: {}", e))
+                MidgeError::Internal(format!("Failed to build cloud tokio runtime: {e}"))
             })?;
 
         Ok(Self {
@@ -195,7 +195,7 @@ impl CloudExecutor {
 
     async fn execute_request(client: Client, request: CloudRequest) -> MidgeResult<CloudResponse> {
         let mut builder = client.request(request.method.clone(), &request.url);
-        for (k, v) in request.headers.iter() {
+        for (k, v) in &request.headers {
             builder = builder.header(k, v);
         }
         if let Some(body) = request.body {

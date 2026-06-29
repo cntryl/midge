@@ -25,7 +25,7 @@ pub struct ReadSnapshot {
     pub immutable_memtables: Vec<Arc<SkipListMemtable>>,
     /// SST file metadata for this CF
     pub sst_files: Vec<FileMeta>,
-    /// SST filesystem handle (rooted at db_path)
+    /// SST filesystem handle (rooted at `db_path`)
     pub sst_fs: Arc<dyn Fs>,
     /// SST path prefix relative to the fs root (typically "sst")
     pub sst_path_prefix: std::path::PathBuf,
@@ -37,8 +37,7 @@ impl ReadSnapshot {
     fn current_time_millis() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
+            .map_or(0, |d| d.as_millis() as u64)
     }
 
     fn is_expired(expiration: Option<u64>) -> bool {
@@ -128,7 +127,7 @@ impl ReadSnapshot {
         memory_mode: bool,
     ) -> Self {
         // Extract cf_id from first SST file or default to DEFAULT
-        let cf_id = sst_files.first().map(|f| f.cf_id).unwrap_or(0);
+        let cf_id = sst_files.first().map_or(0, |f| f.cf_id);
         Self {
             cf_id,
             memtable,

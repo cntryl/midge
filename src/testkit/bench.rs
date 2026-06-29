@@ -40,6 +40,7 @@ pub struct RuntimeCounterSnapshot {
 }
 
 impl RuntimeCounterSnapshot {
+    #[must_use]
     pub fn from_runtime_metrics(metrics: &RuntimeMetricsSnapshot) -> Self {
         Self {
             write_stalls_total: metrics.write_stalls_total,
@@ -67,6 +68,7 @@ pub struct RuntimeCounterDeltas {
 }
 
 impl RuntimeCounterDeltas {
+    #[must_use]
     pub fn between(start: RuntimeCounterSnapshot, end: RuntimeCounterSnapshot) -> Self {
         Self {
             write_stalls_total: end
@@ -90,6 +92,7 @@ impl RuntimeCounterDeltas {
 }
 
 impl MemtableSweepSize {
+    #[must_use]
     pub fn default_derived() -> Self {
         Self {
             label: "default".to_string(),
@@ -97,6 +100,7 @@ impl MemtableSweepSize {
         }
     }
 
+    #[must_use]
     pub fn explicit(bytes: usize) -> Self {
         Self {
             label: format_memtable_size_label(bytes),
@@ -116,9 +120,8 @@ pub fn unique_bench_path(prefix: &str) -> PathBuf {
     let base_dir = std::env::var("MIDGE_BENCH_DIR")
         .ok()
         .filter(|val| !val.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base_dir.join(format!("midge_bench_{}_{}_{}", prefix, pid, counter))
+        .map_or_else(std::env::temp_dir, PathBuf::from);
+    base_dir.join(format!("midge_bench_{prefix}_{pid}_{counter}"))
 }
 
 pub fn default_memtable_sweep_sizes() -> Vec<MemtableSweepSize> {
@@ -158,6 +161,7 @@ pub fn parse_memtable_sweep_sizes(input: Option<&str>) -> Result<Vec<MemtableSwe
     Ok(sizes)
 }
 
+#[must_use]
 pub fn format_memtable_size_label(bytes: usize) -> String {
     if bytes.is_multiple_of(1024 * 1024) {
         format!("{}MiB", bytes / (1024 * 1024))
@@ -215,6 +219,7 @@ impl std::fmt::Display for BenchStorageMode {
 
 impl BenchStorageMode {
     /// Return string representation for benchmark IDs.
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             BenchStorageMode::Memory => "memory",
@@ -239,14 +244,14 @@ pub const DURABLE_STORAGE_MODES: [BenchStorageMode; 1] = [BenchStorageMode::Loca
 #[derive(Clone, Debug)]
 pub struct BenchEngineConfig {
     pub storage_mode: BenchStorageMode,
-    /// High-level tuning knobs (use the public OpenOptions builder).
+    /// High-level tuning knobs (use the public `OpenOptions` builder).
     pub goal: Goal,
     pub workload: WorkloadProfile,
     pub memory_budget: MemoryBudget,
     /// Optional WAL batch config to control group commit behavior for benches.
     pub wal_batch_config: Option<crate::wal::policy::BatchConfig>,
     pub enable_compaction: bool,
-    /// Optional override for memtable size (bytes). If None, derived from OpenOptions.
+    /// Optional override for memtable size (bytes). If None, derived from `OpenOptions`.
     pub memtable_size: Option<usize>,
 }
 
@@ -265,6 +270,7 @@ impl Default for BenchEngineConfig {
 }
 
 impl BenchEngineConfig {
+    #[must_use]
     pub fn memory() -> Self {
         Self {
             storage_mode: BenchStorageMode::Memory,
@@ -272,6 +278,7 @@ impl BenchEngineConfig {
         }
     }
 
+    #[must_use]
     pub fn local_disk() -> Self {
         Self {
             storage_mode: BenchStorageMode::LocalDisk,
@@ -279,31 +286,37 @@ impl BenchEngineConfig {
         }
     }
 
+    #[must_use]
     pub fn with_goal(mut self, goal: Goal) -> Self {
         self.goal = goal;
         self
     }
 
+    #[must_use]
     pub fn with_workload(mut self, workload: WorkloadProfile) -> Self {
         self.workload = workload;
         self
     }
 
+    #[must_use]
     pub fn with_memory_budget(mut self, budget: MemoryBudget) -> Self {
         self.memory_budget = budget;
         self
     }
 
+    #[must_use]
     pub fn with_wal_batch_config(mut self, cfg: crate::wal::policy::BatchConfig) -> Self {
         self.wal_batch_config = Some(cfg);
         self
     }
 
+    #[must_use]
     pub fn with_compaction(mut self, enabled: bool) -> Self {
         self.enable_compaction = enabled;
         self
     }
 
+    #[must_use]
     pub fn with_memtable_size(mut self, size: usize) -> Self {
         self.memtable_size = Some(size);
         self
@@ -313,6 +326,7 @@ impl BenchEngineConfig {
     ///
     /// `db_path` is required for `LocalDisk` storage mode and should be the
     /// filesystem path the engine will use. Pass `None` for `Memory` mode.
+    #[must_use]
     pub fn build_midge_options(&self, db_path: Option<PathBuf>) -> MidgeOptions {
         let storage_mode = match self.storage_mode {
             BenchStorageMode::Memory => StorageMode::Memory,
@@ -338,6 +352,7 @@ impl BenchEngineConfig {
 }
 
 /// Setup a benchmark engine with the given configuration.
+#[must_use]
 pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> Engine {
     let path = unique_bench_path(prefix);
 
@@ -351,6 +366,7 @@ pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> Engine {
 }
 
 /// Setup engine with storage mode (convenience wrapper with defaults).
+#[must_use]
 pub fn setup_engine_with_mode(prefix: &str, mode: BenchStorageMode) -> Engine {
     let config = BenchEngineConfig {
         storage_mode: mode,
@@ -361,6 +377,7 @@ pub fn setup_engine_with_mode(prefix: &str, mode: BenchStorageMode) -> Engine {
 
 /// Setup a benchmark engine at a specific path with the given configuration.
 /// This creates a NEW database at the path (deletes any existing data).
+#[must_use]
 pub fn setup_engine_at_path(path: &Path, config: &BenchEngineConfig) -> Engine {
     let _ = std::fs::remove_dir_all(path);
     reopen_engine_at_path(path, config)
@@ -368,6 +385,7 @@ pub fn setup_engine_at_path(path: &Path, config: &BenchEngineConfig) -> Engine {
 
 /// Reopen an existing database at a specific path.
 /// Does NOT delete existing data - use for recovery/reopen tests.
+#[must_use]
 pub fn reopen_engine_at_path(path: &Path, config: &BenchEngineConfig) -> Engine {
     if let BenchStorageMode::Memory = config.storage_mode {
         panic!("setup_engine_at_path requires persistent storage");
@@ -378,6 +396,7 @@ pub fn reopen_engine_at_path(path: &Path, config: &BenchEngineConfig) -> Engine 
 }
 
 /// Setup Arc-wrapped engine for concurrent benchmarks.
+#[must_use]
 pub fn setup_engine_arc(prefix: &str, mode: BenchStorageMode) -> Arc<Engine> {
     Arc::new(setup_engine_with_mode(prefix, mode))
 }
@@ -549,6 +568,7 @@ where
 /// let count = consume_iterator(iter);
 /// println!("Scanned {} items", count);
 /// ```
+#[must_use]
 pub fn consume_iterator(mut iter: crate::engine::api::iterator::Iterator) -> usize {
     let mut count = 0;
     while iter.next().is_some() {
@@ -574,6 +594,7 @@ pub fn consume_iterator(mut iter: crate::engine::api::iterator::Iterator) -> usi
 /// let count = consume_n_from_iterator(iter, 100);
 /// println!("Scanned {} items (max 100)", count);
 /// ```
+#[must_use]
 pub fn consume_n_from_iterator(
     mut iter: crate::engine::api::iterator::Iterator,
     n: usize,
@@ -611,11 +632,12 @@ mod tests {
         });
 
         // Act
-        let _d = run_single_shot_from_seed(&seed, &BenchEngineConfig::default(), |_engine| {});
+        let duration =
+            run_single_shot_from_seed(&seed, &BenchEngineConfig::default(), |_engine| {});
 
         // Assert
         // Just ensure no panic and a sane duration.
-        assert!(_d.as_nanos() > 0);
+        assert!(duration.as_nanos() > 0);
     }
 
     #[test]
@@ -633,7 +655,7 @@ mod tests {
         let seq_timed = seq.clone();
 
         // Act
-        let _d = run_single_shot_with_restore(
+        let duration = run_single_shot_with_restore(
             &seed,
             &BenchEngineConfig::default(),
             move |_engine| {
@@ -647,7 +669,7 @@ mod tests {
         // Assert
         let captured = seq.lock().unwrap().clone();
         assert_eq!(captured, vec!["restore", "timed"]);
-        assert!(_d.as_nanos() > 0);
+        assert!(duration.as_nanos() > 0);
     }
 
     #[test]

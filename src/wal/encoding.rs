@@ -15,10 +15,10 @@
 //!   - `val: [u8; len]`
 //!
 //! Required fields:
-//! - OP, CF_ID, SEQ, KEY
+//! - OP, `CF_ID`, SEQ, KEY
 //!
 //! Optional fields:
-//! - VALUE, EXPIRATION, RANGE_END, TXN_ID, COMPRESSION
+//! - VALUE, EXPIRATION, `RANGE_END`, `TXN_ID`, COMPRESSION
 //!
 //! Unknown tags are skipped (forward-compatible). Duplicate tags are accepted; the
 //! *last* occurrence wins.
@@ -199,7 +199,7 @@ pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
 }
 
 /// Zero-copy decode into a borrowed view.
-pub fn decode_view<'a>(data: &'a [u8]) -> MidgeResult<WalRecordView<'a>> {
+pub fn decode_view(data: &[u8]) -> MidgeResult<WalRecordView<'_>> {
     if data.len() < PREFIX_LEN {
         return Err(corruption("truncated WAL payload prefix"));
     }
@@ -306,7 +306,7 @@ pub fn decode_view<'a>(data: &'a [u8]) -> MidgeResult<WalRecordView<'a>> {
 
 /// Compatibility adapter: decode into owned `WalRecord`.
 ///
-/// This allocates for key/value/range_end. Prefer [`decode_view`] in hot paths.
+/// This allocates for `key/value/range_end`. Prefer [`decode_view`] in hot paths.
 ///
 /// If the record carries a `COMPRESSION` tag, the value is transparently
 /// decompressed before being returned.
@@ -464,7 +464,7 @@ mod tests {
         // Assert
         match err {
             MidgeError::Corruption(_) => {}
-            other => panic!("expected corruption error, got: {:?}", other),
+            other => panic!("expected corruption error, got: {other:?}"),
         }
     }
 
@@ -481,7 +481,7 @@ mod tests {
         // Assert
         match err {
             MidgeError::Corruption(_) => {}
-            other => panic!("expected corruption error, got: {:?}", other),
+            other => panic!("expected corruption error, got: {other:?}"),
         }
     }
 
@@ -499,7 +499,7 @@ mod tests {
         // Assert
         match err {
             MidgeError::Corruption(_) => {}
-            other => panic!("expected corruption error, got: {:?}", other),
+            other => panic!("expected corruption error, got: {other:?}"),
         }
     }
 

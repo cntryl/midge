@@ -49,7 +49,7 @@ pub(crate) const MAX_QUEUE_DEPTH: usize = 5000;
 /// When pool reaches this size, excess buffers are dropped instead of pooled
 /// Sized to accommodate sustained high-concurrency writes:
 /// - 64 buffers × ~1KB average ≈ 64KB pool overhead (minimal)
-/// - Provides ~1.3% of MAX_QUEUE_DEPTH as pooled buffers
+/// - Provides ~1.3% of `MAX_QUEUE_DEPTH` as pooled buffers
 /// - Balances memory usage with allocation avoidance for most workloads
 pub(crate) const MAX_BUFFER_POOL_SIZE: usize = 64;
 

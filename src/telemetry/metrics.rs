@@ -101,7 +101,7 @@ pub struct Metrics {
     pub idempotency_cache_evictions: Arc<AtomicU64>,
 
     // Phase 3 observability: Transaction and sequence metrics
-    /// Total number of pending transactions started (set pending_txn_min_seq)
+    /// Total number of pending transactions started (set `pending_txn_min_seq`)
     pub pending_txn_started: Arc<AtomicU64>,
     /// Total milliseconds transactions spent pending (sum of all durations)
     pub pending_txn_duration_ms_total: Arc<AtomicU64>,
@@ -123,7 +123,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Create a new metrics collector
-    pub fn new(_config: &TelemetryConfig) -> MidgeResult<Self> {
+    pub fn new(config: &TelemetryConfig) -> MidgeResult<Self> {
         Ok(Self {
             puts: Arc::new(AtomicU64::new(0)),
             deletes: Arc::new(AtomicU64::new(0)),
@@ -197,7 +197,7 @@ impl Metrics {
             idempotency_cache_hits: Arc::new(AtomicU64::new(0)),
             event_loop_wakes: Arc::new(AtomicU64::new(0)),
             event_loop_batch_total: Arc::new(AtomicU64::new(0)),
-            enabled: _config.enabled && _config.enable_metrics,
+            enabled: config.enabled && config.enable_metrics,
         })
     }
 

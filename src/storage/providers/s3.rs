@@ -1,9 +1,9 @@
 //! Generic S3-compatible provider implementation
 //!
 //! Supports any S3-compatible storage:
-//! - AWS S3 (with SigV4 credential handling)
+//! - AWS S3 (with `SigV4` credential handling)
 //! - Wasabi (simple access key/secret)
-//! - MinIO (local or cloud)
+//! - `MinIO` (local or cloud)
 //! - Oracle Cloud Infrastructure (OCI S3 compatibility)
 //! - Any other S3-compatible service
 
@@ -197,8 +197,7 @@ impl DefaultAwsCredentialProvider {
         })?;
         let token = std::fs::read_to_string(&token_file).map_err(|e| {
             MidgeError::Internal(format!(
-                "failed to read AWS_WEB_IDENTITY_TOKEN_FILE '{}': {}",
-                token_file, e
+                "failed to read AWS_WEB_IDENTITY_TOKEN_FILE '{token_file}': {e}"
             ))
         })?;
         let token = token.trim();
@@ -221,13 +220,13 @@ impl DefaultAwsCredentialProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .map_err(|e| MidgeError::Internal(format!("sts client init failed: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("sts client init failed: {e}")))?;
         let resp = client
             .post(&endpoint)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body)
             .send()
-            .map_err(|e| MidgeError::Internal(format!("sts assume role call failed: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("sts assume role call failed: {e}")))?;
 
         if !resp.status().is_success() {
             return Err(MidgeError::Internal(format!(
@@ -238,7 +237,7 @@ impl DefaultAwsCredentialProvider {
 
         let xml = resp
             .text()
-            .map_err(|e| MidgeError::Internal(format!("failed to read sts response: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("failed to read sts response: {e}")))?;
 
         let access_key = extract_xml_tag(&xml, "AccessKeyId")?;
         let secret_key = extract_xml_tag(&xml, "SecretAccessKey")?;
@@ -261,7 +260,7 @@ impl DefaultAwsCredentialProvider {
     fn resolve_ecs_task_role(&self) -> MidgeResult<CachedAwsCredentials> {
         let endpoint =
             if let Ok(relative_uri) = std::env::var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI") {
-                format!("http://169.254.170.2{}", relative_uri)
+                format!("http://169.254.170.2{relative_uri}")
             } else if let Ok(full_uri) = std::env::var("AWS_CONTAINER_CREDENTIALS_FULL_URI") {
                 full_uri
             } else {
@@ -273,20 +272,20 @@ impl DefaultAwsCredentialProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
-            .map_err(|e| MidgeError::Internal(format!("ecs client init failed: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("ecs client init failed: {e}")))?;
 
         let mut request = client.get(&endpoint);
         if let Ok(auth_token) = std::env::var("AWS_CONTAINER_AUTHORIZATION_TOKEN") {
             request = request.header("Authorization", auth_token);
         } else if let Ok(token_file) = std::env::var("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE") {
             let token = std::fs::read_to_string(&token_file)
-                .map_err(|e| MidgeError::Internal(format!("failed to read token file: {}", e)))?;
+                .map_err(|e| MidgeError::Internal(format!("failed to read token file: {e}")))?;
             request = request.header("Authorization", token.trim());
         }
 
         let resp = request
             .send()
-            .map_err(|e| MidgeError::Internal(format!("ecs credential fetch failed: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("ecs credential fetch failed: {e}")))?;
         if !resp.status().is_success() {
             return Err(MidgeError::Internal(format!(
                 "ecs credential endpoint returned {}",
@@ -295,7 +294,7 @@ impl DefaultAwsCredentialProvider {
         }
         let text = resp
             .text()
-            .map_err(|e| MidgeError::Internal(format!("failed to read ecs response: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("failed to read ecs response: {e}")))?;
         self.parse_json_credentials(&text)
     }
 
@@ -303,7 +302,7 @@ impl DefaultAwsCredentialProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(3))
             .build()
-            .map_err(|e| MidgeError::Internal(format!("imds client init failed: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("imds client init failed: {e}")))?;
 
         let token = client
             .put("http://169.254.169.254/latest/api/token")
@@ -325,7 +324,7 @@ impl DefaultAwsCredentialProvider {
         }
         let role_resp = role_req
             .send()
-            .map_err(|e| MidgeError::Internal(format!("imds role name fetch failed: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("imds role name fetch failed: {e}")))?;
         if !role_resp.status().is_success() {
             return Err(MidgeError::Internal(format!(
                 "imds role name endpoint returned {}",
@@ -334,7 +333,7 @@ impl DefaultAwsCredentialProvider {
         }
         let role_name = role_resp
             .text()
-            .map_err(|e| MidgeError::Internal(format!("failed to read imds role name: {}", e)))?
+            .map_err(|e| MidgeError::Internal(format!("failed to read imds role name: {e}")))?
             .lines()
             .next()
             .unwrap_or_default()
@@ -346,17 +345,15 @@ impl DefaultAwsCredentialProvider {
             ));
         }
 
-        let creds_url = format!(
-            "http://169.254.169.254/latest/meta-data/iam/security-credentials/{}",
-            role_name
-        );
+        let creds_url =
+            format!("http://169.254.169.254/latest/meta-data/iam/security-credentials/{role_name}");
         let mut creds_req = client.get(&creds_url);
         if let Some(ref token_value) = token {
             creds_req = creds_req.header("X-aws-ec2-metadata-token", token_value);
         }
         let creds_resp = creds_req
             .send()
-            .map_err(|e| MidgeError::Internal(format!("imds credential fetch failed: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("imds credential fetch failed: {e}")))?;
         if !creds_resp.status().is_success() {
             return Err(MidgeError::Internal(format!(
                 "imds credentials endpoint returned {}",
@@ -365,13 +362,13 @@ impl DefaultAwsCredentialProvider {
         }
         let text = creds_resp
             .text()
-            .map_err(|e| MidgeError::Internal(format!("failed to read imds credentials: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("failed to read imds credentials: {e}")))?;
         self.parse_json_credentials(&text)
     }
 
     fn parse_json_credentials(&self, payload: &str) -> MidgeResult<CachedAwsCredentials> {
         let json: Value = serde_json::from_str(payload)
-            .map_err(|e| MidgeError::Internal(format!("invalid credential json: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("invalid credential json: {e}")))?;
 
         let access_key = json
             .get("AccessKeyId")
@@ -386,11 +383,11 @@ impl DefaultAwsCredentialProvider {
         let session_token = json
             .get("Token")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .or_else(|| {
                 json.get("SessionToken")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
             });
         let expires_at = json
             .get("Expiration")
@@ -410,8 +407,8 @@ impl DefaultAwsCredentialProvider {
 }
 
 fn extract_xml_tag(xml: &str, tag: &str) -> MidgeResult<String> {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
     if let Some(start) = xml.find(&open) {
         let start_index = start + open.len();
         if let Some(end_rel) = xml[start_index..].find(&close) {
@@ -420,8 +417,7 @@ fn extract_xml_tag(xml: &str, tag: &str) -> MidgeResult<String> {
         }
     }
     Err(MidgeError::Internal(format!(
-        "missing {} in sts response",
-        tag
+        "missing {tag} in sts response"
     )))
 }
 
@@ -518,8 +514,7 @@ fn read_aws_profile_credentials(
         || values.contains_key("sso_session")
     {
         return Err(MidgeError::InvalidArgument(format!(
-            "AWS profile '{}' uses credential_process or SSO, which Midge does not execute without SDK/CLI support",
-            profile
+            "AWS profile '{profile}' uses credential_process or SSO, which Midge does not execute without SDK/CLI support"
         )));
     }
 
@@ -551,7 +546,7 @@ fn profile_section_name(profile: &str, is_config_file: bool) -> String {
     if !is_config_file || profile == "default" {
         profile.to_string()
     } else {
-        format!("profile {}", profile)
+        format!("profile {profile}")
     }
 }
 
@@ -627,12 +622,12 @@ impl S3Config {
         Self {
             bucket,
             region: region.clone(),
-            endpoint: Some(format!("https://s3.{}.wasabisys.com", region)),
+            endpoint: Some(format!("https://s3.{region}.wasabisys.com")),
             path_style: false,
         }
     }
 
-    /// Create config for MinIO
+    /// Create config for `MinIO`
     pub fn minio(bucket: String, endpoint: String) -> Self {
         Self {
             bucket,
@@ -648,8 +643,7 @@ impl S3Config {
             bucket,
             region: region.clone(),
             endpoint: Some(format!(
-                "https://{}.compat.objectstorage.{}.oraclecloud.com",
-                namespace, region
+                "https://{namespace}.compat.objectstorage.{region}.oraclecloud.com"
             )),
             path_style: false,
         }
@@ -671,7 +665,7 @@ pub struct S3Provider {
 }
 
 impl S3Provider {
-    /// Create provider with AWS credentials (SigV4 signing)
+    /// Create provider with AWS credentials (`SigV4` signing)
     pub fn aws(bucket: String, region: String, creds: AwsCredentials) -> MidgeResult<Self> {
         let config = S3Config::aws(bucket, region);
         Self::with_config(config, Some(creds))
@@ -707,7 +701,7 @@ impl S3Provider {
         Self::with_config(config, Some(creds))
     }
 
-    /// Create provider for MinIO (access key/secret)
+    /// Create provider for `MinIO` (access key/secret)
     pub fn minio(
         bucket: String,
         endpoint: String,
@@ -881,21 +875,21 @@ impl CloudBackend for S3Backend {
         let url = self.object_url(&key);
         let mut request = CloudRequest::new(Method::PUT, url).with_body(data);
         // Apply provided headers (e.g. conditional headers like If-None-Match)
-        for (name, value) in headers.into_iter() {
+        for (name, value) in headers {
             request = request.with_header(name, value);
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status < 400 => CloudEvent::PutComplete {
+            Ok(resp) if resp.status < 400 => CloudEvent::Put {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
-            Ok(resp) => CloudEvent::PutComplete {
+            Ok(resp) => CloudEvent::Put {
                 key: ctx,
                 result: CloudOutcome::Err(format!("unexpected status {}", resp.status)),
             },
-            Err(err) => CloudEvent::PutComplete {
+            Err(err) => CloudEvent::Put {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -905,21 +899,21 @@ impl CloudBackend for S3Backend {
         let url = self.object_url(&key);
         let request = CloudRequest::new(Method::GET, url);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => CloudEvent::GetComplete {
+            Ok(resp) if resp.status == 200 => CloudEvent::Get {
                 key: ctx,
                 result: CloudOutcome::Ok(resp.body),
             },
-            Ok(resp) if resp.status == 404 => CloudEvent::GetComplete {
+            Ok(resp) if resp.status == 404 => CloudEvent::Get {
                 key: ctx,
                 result: CloudOutcome::Err("not found".into()),
             },
-            Ok(resp) => CloudEvent::GetComplete {
+            Ok(resp) => CloudEvent::Get {
                 key: ctx,
                 result: CloudOutcome::Err(format!("status {}", resp.status)),
             },
-            Err(err) => CloudEvent::GetComplete {
+            Err(err) => CloudEvent::Get {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -930,27 +924,27 @@ impl CloudBackend for S3Backend {
         let mut request = CloudRequest::new(Method::GET, url);
         let range = match end {
             Some(e) => format!("bytes={}-{}", start, e.saturating_sub(1)),
-            None => format!("bytes={}-", start),
+            None => format!("bytes={start}-"),
         };
         request = request.with_header("Range", range);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 206 || resp.status == 200 => CloudEvent::GetRangeComplete {
+            Ok(resp) if resp.status == 206 || resp.status == 200 => CloudEvent::GetRange {
                 key: ctx,
                 start,
                 end,
                 result: CloudOutcome::Ok(resp.body),
             },
-            Ok(resp) => CloudEvent::GetRangeComplete {
+            Ok(resp) => CloudEvent::GetRange {
                 key: ctx,
                 start,
                 end,
                 result: CloudOutcome::Err(format!("status {}", resp.status)),
             },
-            Err(err) => CloudEvent::GetRangeComplete {
+            Err(err) => CloudEvent::GetRange {
                 key: ctx,
                 start,
                 end,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -959,21 +953,21 @@ impl CloudBackend for S3Backend {
     fn submit_delete(&self, key: String, headers: Vec<(String, String)>, callback: CloudCallback) {
         let url = self.object_url(&key);
         let mut request = CloudRequest::new(Method::DELETE, url);
-        for (name, value) in headers.into_iter() {
+        for (name, value) in headers {
             request = request.with_header(name, value);
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status < 400 => CloudEvent::DeleteComplete {
+            Ok(resp) if resp.status < 400 => CloudEvent::Delete {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
-            Ok(resp) => CloudEvent::DeleteComplete {
+            Ok(resp) => CloudEvent::Delete {
                 key: ctx,
                 result: CloudOutcome::Err(format!("status {}", resp.status)),
             },
-            Err(err) => CloudEvent::DeleteComplete {
+            Err(err) => CloudEvent::Delete {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1000,8 +994,7 @@ impl CloudBackend for S3Backend {
                 state.items.extend(extract_xml_tag_values(&body, "Key"));
                 let truncated = extract_xml_tag_values(&body, "IsTruncated")
                     .first()
-                    .map(|value| value.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
+                    .is_some_and(|value| value.eq_ignore_ascii_case("true"));
                 state.continuation_token = extract_xml_tag_values(&body, "NextContinuationToken")
                     .into_iter()
                     .next();
@@ -1013,13 +1006,13 @@ impl CloudBackend for S3Backend {
                 Ok(truncated)
             },
             |ctx, result| match result {
-                Ok(state) => CloudEvent::ListComplete {
+                Ok(state) => CloudEvent::List {
                     prefix: ctx,
                     result: CloudOutcome::Ok(state.items),
                 },
-                Err(err) => CloudEvent::ListComplete {
+                Err(err) => CloudEvent::List {
                     prefix: ctx,
-                    result: CloudOutcome::Err(format!("{:?}", err)),
+                    result: CloudOutcome::Err(format!("{err:?}")),
                 },
             },
         );
@@ -1043,18 +1036,18 @@ impl CloudBackend for S3Backend {
                     .map(|(_, value)| value.trim_matches('"').to_string())
                     .unwrap_or_default();
                 let metadata = ObjectMetadata::new(size, etag, 0);
-                CloudEvent::HeadComplete {
+                CloudEvent::Head {
                     key: ctx,
                     result: CloudOutcome::Ok(metadata),
                 }
             }
-            Ok(resp) => CloudEvent::HeadComplete {
+            Ok(resp) => CloudEvent::Head {
                 key: ctx,
                 result: CloudOutcome::Err(format!("status {}", resp.status)),
             },
-            Err(err) => CloudEvent::HeadComplete {
+            Err(err) => CloudEvent::Head {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{:?}", err)),
+                result: CloudOutcome::Err(format!("{err:?}")),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1065,12 +1058,12 @@ impl CloudSigner for SigV4Signer {
     fn sign(&self, request: &mut CloudRequest) -> MidgeResult<()> {
         let creds = self.resolve_credentials()?;
         let url = Url::parse(&request.url)
-            .map_err(|err| MidgeError::InvalidArgument(format!("url parse: {}", err)))?;
+            .map_err(|err| MidgeError::InvalidArgument(format!("url parse: {err}")))?;
         let host_name = url
             .host_str()
             .ok_or_else(|| MidgeError::InvalidArgument("missing host".to_string()))?;
         let host = match url.port() {
-            Some(port) => format!("{}:{}", host_name, port),
+            Some(port) => format!("{host_name}:{port}"),
             None => host_name.to_string(),
         };
         request.headers.retain(|(name, _)| {
@@ -1084,17 +1077,14 @@ impl CloudSigner for SigV4Signer {
         let now = Utc::now();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
         let date = now.format("%Y%m%d").to_string();
-        let payload_hash = match request.body.as_ref() {
-            Some(body) => {
-                let mut hasher = Sha256::new();
-                hasher.update(body);
-                hex::encode(hasher.finalize())
-            }
-            None => {
-                let mut hasher = Sha256::new();
-                hasher.update([]);
-                hex::encode(hasher.finalize())
-            }
+        let payload_hash = if let Some(body) = request.body.as_ref() {
+            let mut hasher = Sha256::new();
+            hasher.update(body);
+            hex::encode(hasher.finalize())
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update([]);
+            hex::encode(hasher.finalize())
         };
         request
             .headers
@@ -1121,7 +1111,7 @@ impl CloudSigner for SigV4Signer {
             .join(";");
         let canonical_headers = header_pairs
             .iter()
-            .map(|(name, value)| format!("{}:{}\n", name, value))
+            .map(|(name, value)| format!("{name}:{value}\n"))
             .collect::<String>();
 
         let path = if url.path().is_empty() {
@@ -1150,10 +1140,8 @@ impl CloudSigner for SigV4Signer {
         let canonical_hash = hex::encode(hasher.finalize());
 
         let credential_scope = format!("{}/{}/s3/aws4_request", date, self.region());
-        let string_to_sign = format!(
-            "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-            amz_date, credential_scope, canonical_hash
-        );
+        let string_to_sign =
+            format!("AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{canonical_hash}");
 
         let signing_key = self.signing_key(&creds.secret_key, &date)?;
         let mut mac = Hmac::<Sha256>::new_from_slice(&signing_key)
@@ -1199,7 +1187,7 @@ impl SigV4Signer {
     }
 
     fn signing_key(&self, secret_key: &str, date: &str) -> MidgeResult<Vec<u8>> {
-        let k_date = hmac_sha256(format!("AWS4{}", secret_key).as_bytes(), date.as_bytes())?;
+        let k_date = hmac_sha256(format!("AWS4{secret_key}").as_bytes(), date.as_bytes())?;
         let k_region = hmac_sha256(&k_date, self.region.as_bytes())?;
         let k_service = hmac_sha256(&k_region, b"s3")?;
         hmac_sha256(&k_service, b"aws4_request")
@@ -1235,8 +1223,8 @@ fn canonicalize_query(query: &str) -> String {
 }
 
 fn extract_xml_tag_values(body: &str, tag: &str) -> Vec<String> {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
     let mut values = Vec::new();
     let mut rest = body;
     while let Some(start) = rest.find(&open) {

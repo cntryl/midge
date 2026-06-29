@@ -1,6 +1,6 @@
 //! Filesystem-based primary lease using CAS-via-rename leader records.
 //!
-//! Previous implementation used OS file locks (flock / LockFileEx).
+//! Previous implementation used OS file locks (flock / `LockFileEx`).
 //! This version uses a persistent leader record (`.midge_leader`) that
 //! contains a monotonically increasing epoch, holder identity, and a
 //! timestamp.  Leadership is acquired via atomic rename (CAS-via-rename)
@@ -28,8 +28,8 @@ use std::time::Duration;
 
 const DEFAULT_TTL_SECS: u64 = 30;
 
-/// Per-process counter to ensure each FileSystemLease instance gets a unique
-/// holder_id, even when multiple Engine instances are opened in the same process.
+/// Per-process counter to ensure each `FileSystemLease` instance gets a unique
+/// `holder_id`, even when multiple Engine instances are opened in the same process.
 static LEASE_INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Filesystem-based lease backed by a CAS-via-rename leader store.
@@ -46,7 +46,7 @@ impl FileSystemLease {
     ///
     /// # Arguments
     /// * `db_path` - Path to the database directory
-    /// * `use_mock_fs` - If true, uses MockFs (for in-memory mode); otherwise uses RealFs
+    /// * `use_mock_fs` - If true, uses `MockFs` (for in-memory mode); otherwise uses `RealFs`
     pub fn new(db_path: PathBuf, use_mock_fs: bool) -> Result<Self, LeaseError> {
         let fs: Arc<dyn Fs> = if use_mock_fs {
             Arc::new(MockFs::new())
@@ -75,13 +75,13 @@ impl FileSystemLease {
         })
     }
 
-    /// Return a reference to the underlying leader store (for injection into WalActor).
+    /// Return a reference to the underlying leader store (for injection into `WalActor`).
     pub fn leader_store(&self) -> &Arc<FsLeaderStore> {
         &self.leader_store
     }
 }
 
-/// Write a raw leader-record payload through the FsLeaderStore's underlying Fs.
+/// Write a raw leader-record payload through the `FsLeaderStore`'s underlying Fs.
 /// Used during release to stamp a stale timestamp without going through the
 /// ownership check in `refresh_timestamp`.
 fn write_leader_record_raw(store: &FsLeaderStore, content: &str) -> Result<(), LeaseError> {
@@ -256,9 +256,7 @@ mod tests {
         // Assert
         assert!(
             epoch2 > epoch1,
-            "epoch should increase: {} > {}",
-            epoch2,
-            epoch1
+            "epoch should increase: {epoch2} > {epoch1}"
         );
     }
 

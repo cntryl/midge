@@ -24,9 +24,10 @@ impl SparseIndexReader {
 
     /// Find the block range containing a key
     ///
-    /// Returns the range of blocks to search (start_block to end_block inclusive).
-    /// For keys larger than all index entries, returns (last_block, usize::MAX).
-    /// Caller is responsible for bounding end_block to the actual SST block count.
+    /// Returns the range of blocks to search (`start_block` to `end_block` inclusive).
+    /// For keys larger than all index entries, returns (`last_block`, `usize::MAX`).
+    /// Caller is responsible for bounding `end_block` to the actual SST block count.
+    #[must_use]
     pub fn find_block_range(&self, key: &[u8]) -> BlockRange {
         if self.entries.is_empty() {
             // No index, search all blocks (caller must provide actual count)
@@ -38,7 +39,7 @@ impl SparseIndexReader {
         let mut right = self.entries.len();
 
         while left < right {
-            let mid = (left + right) / 2;
+            let mid = usize::midpoint(left, right);
             if self.entries[mid].key.as_slice() <= key {
                 left = mid + 1;
             } else {
@@ -66,11 +67,13 @@ impl SparseIndexReader {
     }
 
     /// Get number of sampled entries
+    #[must_use]
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
 
     /// Check if index is empty
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -320,7 +323,7 @@ mod tests {
         let mut entries = Vec::new();
         for i in (0..100).step_by(10) {
             entries.push(IndexEntry::new(
-                format!("key_{:04}", i).into_bytes(),
+                format!("key_{i:04}").into_bytes(),
                 handle,
                 i,
             ));
@@ -410,7 +413,7 @@ mod tests {
         let mut entries = Vec::new();
         for i in 0..100 {
             entries.push(IndexEntry::new(
-                format!("key_{:03}", i).into_bytes(),
+                format!("key_{i:03}").into_bytes(),
                 handle,
                 i,
             ));

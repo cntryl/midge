@@ -122,10 +122,10 @@ pub enum WorkloadProfile {
 /// parameters will be derived automatically.
 ///
 /// Storage backend MUST be explicitly specified via constructors:
-/// - OpenOptions::in_memory()
-/// - OpenOptions::local(path)
-/// - OpenOptions::cloud(cache_path, provider, prefix)
-/// - OpenOptions::cloud_simulated(cache_path, bucket, prefix)
+/// - `OpenOptions::in_memory()`
+/// - `OpenOptions::local(path)`
+/// - `OpenOptions::cloud(cache_path`, provider, prefix)
+/// - `OpenOptions::cloud_simulated(cache_path`, bucket, prefix)
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
     /// Storage backend (REQUIRED - no default)
@@ -149,7 +149,7 @@ pub struct OpenOptions {
     /// Explicit override for memtable flush threshold in bytes.
     explicit_memtable_flush_threshold: Option<usize>,
 
-    /// Derived memory budget in bytes (from build())
+    /// Derived memory budget in bytes (from `build()`)
     pub(crate) derived_memory_budget: usize,
 
     // Derived parameters (populated by build())
@@ -191,6 +191,7 @@ impl OpenOptions {
     /// Memtable sizing is derived automatically by default. Advanced callers can
     /// override the runtime memtable size limit and flush threshold explicitly.
     ///
+    #[must_use]
     pub fn in_memory() -> Self {
         Self {
             storage: Storage::InMemory,
@@ -288,7 +289,7 @@ impl OpenOptions {
 
     /// Create a filesystem-backed cloud simulation.
     ///
-    /// This keeps deterministic CloudAsync tests available without pretending to
+    /// This keeps deterministic `CloudAsync` tests available without pretending to
     /// connect to a real provider.
     pub fn cloud_simulated<P: Into<PathBuf>, S: Into<String>>(
         local_cache_path: P,
@@ -323,12 +324,14 @@ impl OpenOptions {
     }
 
     /// Set performance goal.
+    #[must_use]
     pub fn goal(mut self, goal: Goal) -> Self {
         self.goal = goal;
         self
     }
 
     /// Set memory budget.
+    #[must_use]
     pub fn memory_budget(mut self, budget: MemoryBudget) -> Self {
         self.memory_budget = budget;
         self
@@ -339,6 +342,7 @@ impl OpenOptions {
     /// By default, Midge derives memtable sizing from the goal, workload, and
     /// memory budget. This override applies the exact requested runtime size
     /// limit without changing `MemoryBudget`.
+    #[must_use]
     pub fn with_memtable_size_limit(mut self, bytes: usize) -> Self {
         self.explicit_memtable_size_limit = Some(Self::sanitize_memtable_bytes(bytes));
         self
@@ -349,18 +353,21 @@ impl OpenOptions {
     /// By default, the flush threshold follows the derived memtable sizing. If
     /// only `with_memtable_size_limit` is set, the flush threshold uses that
     /// same value unless this override is also provided.
+    #[must_use]
     pub fn with_memtable_flush_threshold(mut self, bytes: usize) -> Self {
         self.explicit_memtable_flush_threshold = Some(Self::sanitize_memtable_bytes(bytes));
         self
     }
 
     /// Set workload profile hint.
+    #[must_use]
     pub fn workload(mut self, profile: WorkloadProfile) -> Self {
         self.workload = profile;
         self
     }
 
     /// Set recovery policy.
+    #[must_use]
     pub fn recovery_policy(mut self, policy: RecoveryPolicy) -> Self {
         self.recovery_policy = policy;
         self
@@ -371,6 +378,7 @@ impl OpenOptions {
     /// This automatically computes all low-level parameters based on the
     /// high-level knobs (goal, memory, workload) plus optional explicit
     /// memtable overrides for advanced callers.
+    #[must_use]
     pub fn build(mut self) -> Self {
         // Derive memory budget
         let total_memory = match self.memory_budget {
@@ -481,36 +489,43 @@ impl OpenOptions {
     // Getters for derived parameters
 
     /// Get derived block size
+    #[must_use]
     pub fn block_size(&self) -> usize {
         self.block_size
     }
 
     /// Get derived memtable size limit
+    #[must_use]
     pub fn memtable_size_limit(&self) -> usize {
         self.memtable_size_limit
     }
 
     /// Get derived target SST size
+    #[must_use]
     pub fn target_sst_size(&self) -> usize {
         self.target_sst_size
     }
 
     /// Get derived block cache size
+    #[must_use]
     pub fn block_cache_size(&self) -> usize {
         self.block_cache_size
     }
 
     /// Get derived WAL buffer size
+    #[must_use]
     pub fn wal_buffer_size(&self) -> usize {
         self.wal_buffer_size
     }
 
     /// Get derived L0 compaction trigger
+    #[must_use]
     pub fn l0_compaction_trigger(&self) -> usize {
         self.l0_compaction_trigger
     }
 
     /// Get derived compression policy
+    #[must_use]
     pub fn compression_policy(&self) -> &CompressionPolicy {
         &self.compression_policy
     }

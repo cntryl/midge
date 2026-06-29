@@ -56,6 +56,7 @@ impl S3CredentialSource {
     }
 
     /// Resolve static credentials from AWS-style environment variables.
+    #[must_use]
     pub fn environment() -> Self {
         Self::Environment
     }
@@ -70,6 +71,7 @@ impl S3CredentialSource {
     }
 
     /// Use Midge's lean AWS default credential chain.
+    #[must_use]
     pub fn aws_default_chain() -> Self {
         Self::AwsDefaultChain
     }
@@ -123,16 +125,19 @@ impl AzureCredentialSource {
     }
 
     /// Resolve Azure Storage key/SAS/connection-string environment credentials.
+    #[must_use]
     pub fn storage_environment() -> Self {
         Self::StorageEnvironment
     }
 
     /// Resolve Microsoft Entra client-secret credentials from environment variables.
+    #[must_use]
     pub fn environment_client_secret() -> Self {
         Self::EnvironmentClientSecret
     }
 
     /// Resolve Azure workload identity credentials.
+    #[must_use]
     pub fn workload_identity() -> Self {
         Self::WorkloadIdentity {
             tenant_id: None,
@@ -142,6 +147,7 @@ impl AzureCredentialSource {
     }
 
     /// Resolve Azure workload identity credentials with explicit fields.
+    #[must_use]
     pub fn workload_identity_with(
         tenant_id: Option<String>,
         client_id: Option<String>,
@@ -173,6 +179,7 @@ impl AzureCredentialSource {
     }
 
     /// Resolve an Azure managed identity token.
+    #[must_use]
     pub fn managed_identity() -> Self {
         Self::ManagedIdentity { client_id: None }
     }
@@ -185,6 +192,7 @@ impl AzureCredentialSource {
     }
 
     /// Use Midge's lean Azure identity chain.
+    #[must_use]
     pub fn default_chain() -> Self {
         Self::LightweightDefaultChain
     }
@@ -202,7 +210,7 @@ pub enum GcsCredentialSource {
 }
 
 impl GcsCredentialSource {
-    /// Use a static OAuth2 bearer token.
+    /// Use a static `OAuth2` bearer token.
     pub fn bearer_token(token: impl Into<String>) -> Self {
         Self::BearerToken {
             token: token.into(),
@@ -218,6 +226,7 @@ impl GcsCredentialSource {
     }
 
     /// Use Google Application Default Credentials.
+    #[must_use]
     pub fn application_default() -> Self {
         Self::ApplicationDefault
     }
@@ -233,6 +242,7 @@ impl GcsCredentialSource {
     }
 
     /// Use the Google metadata server.
+    #[must_use]
     pub fn metadata_server() -> Self {
         Self::MetadataServer
     }
@@ -390,7 +400,7 @@ impl CloudProviderConfig {
         }
     }
 
-    /// Create MinIO config with explicit access keys.
+    /// Create `MinIO` config with explicit access keys.
     pub fn minio_static(
         bucket: impl Into<String>,
         endpoint: impl Into<String>,
@@ -404,7 +414,7 @@ impl CloudProviderConfig {
         }
     }
 
-    /// Backward-compatible MinIO constructor with explicit access keys.
+    /// Backward-compatible `MinIO` constructor with explicit access keys.
     pub fn minio(
         bucket: impl Into<String>,
         endpoint: impl Into<String>,
@@ -573,7 +583,7 @@ impl CloudProviderConfig {
         }
     }
 
-    /// Create GCS config using a static OAuth2 bearer token.
+    /// Create GCS config using a static `OAuth2` bearer token.
     pub fn gcs_bearer_token(bucket: impl Into<String>, token: impl Into<String>) -> Self {
         Self::Gcs {
             bucket: bucket.into(),
@@ -764,7 +774,7 @@ impl CloudProviderConfig {
                             .to_string(),
                     ));
                 }
-                *credential = credentials
+                *credential = credentials;
             }
             (
                 Self::Gcs {
@@ -793,6 +803,7 @@ impl CloudProviderConfig {
         Ok(self)
     }
 
+    #[must_use]
     pub fn bucket_or_container(&self) -> &str {
         match self {
             Self::AwsS3 { bucket, .. }

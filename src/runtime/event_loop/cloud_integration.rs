@@ -1,6 +1,6 @@
 //! Cloud / hybrid storage integration
 //!
-//! Handles CloudAsync WAL flush, cloud upload ack/fail events,
+//! Handles `CloudAsync` WAL flush, cloud upload ack/fail events,
 //! and hybrid storage polling/push-channel draining.
 
 use super::durability_sync::CompletionSource;
@@ -453,7 +453,7 @@ impl EventLoop {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_head(key.to_string(), tx);
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+            Ok(crate::storage::cloud::CloudEvent::Head {
                 result: crate::storage::cloud::CloudOutcome::Ok(metadata),
                 ..
             }) => Ok(crate::storage::StorageObjectMetadata {
@@ -461,7 +461,7 @@ impl EventLoop {
                 etag: metadata.etag,
                 generation: metadata.generation,
             }),
-            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+            Ok(crate::storage::cloud::CloudEvent::Head {
                 result: crate::storage::cloud::CloudOutcome::Err(error),
                 ..
             }) => Err(format!(
@@ -527,7 +527,7 @@ impl EventLoop {
             let (tx, rx) = std::sync::mpsc::channel();
             cloud.submit_get(key.clone(), tx);
             match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                Ok(crate::storage::cloud::CloudEvent::Get {
                     result: crate::storage::cloud::CloudOutcome::Ok(cloud_data),
                     ..
                 }) => {
@@ -557,7 +557,7 @@ impl EventLoop {
                         remote,
                     });
                 }
-                Ok(crate::storage::cloud::CloudEvent::GetComplete {
+                Ok(crate::storage::cloud::CloudEvent::Get {
                     result: crate::storage::cloud::CloudOutcome::Err(error),
                     ..
                 }) => return Err(format!("cloud metadata '{key}' is unreadable: {error}")),
@@ -653,7 +653,7 @@ mod tests {
             if key.ends_with("metadata/intent_log.json")
                 && self.intent_puts.fetch_add(1, Ordering::SeqCst) >= 1
             {
-                let _ = callback.send(crate::storage::cloud::CloudEvent::PutComplete {
+                let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
                     key,
                     result: crate::storage::cloud::CloudOutcome::Err(
                         "injected intent metadata put failure".to_string(),
@@ -1044,7 +1044,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_put(key.clone(), data, vec![], tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(crate::storage::cloud::CloudEvent::PutComplete {
+            Ok(crate::storage::cloud::CloudEvent::Put {
                 result: crate::storage::cloud::CloudOutcome::Ok(()),
                 ..
             }) => {}
@@ -1060,7 +1060,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_get(key.clone(), tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+            Ok(crate::storage::cloud::CloudEvent::Get {
                 result: crate::storage::cloud::CloudOutcome::Ok(data),
                 ..
             }) => data,
@@ -1090,7 +1090,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_delete(key.clone(), tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(crate::storage::cloud::CloudEvent::DeleteComplete {
+            Ok(crate::storage::cloud::CloudEvent::Delete {
                 result: crate::storage::cloud::CloudOutcome::Ok(()),
                 ..
             }) => {}
@@ -1160,7 +1160,7 @@ mod tests {
                 self.inner
                     .submit_put(key.clone(), self.advanced_manifest.clone(), vec![], tx);
                 match rx.recv_timeout(Duration::from_secs(1)) {
-                    Ok(crate::storage::cloud::CloudEvent::PutComplete {
+                    Ok(crate::storage::cloud::CloudEvent::Put {
                         result: crate::storage::cloud::CloudOutcome::Ok(()),
                         ..
                     }) => {}

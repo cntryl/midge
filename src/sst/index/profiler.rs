@@ -1,8 +1,8 @@
 //! Key structure profiler for auto-tuning SST index strategy
 //!
 //! Analyzes key patterns during SST writing to automatically choose between:
-//! - SparseIndex (for random/hash-like keys)
-//! - TrieIndex (for hierarchical/structured keys)
+//! - `SparseIndex` (for random/hash-like keys)
+//! - `TrieIndex` (for hierarchical/structured keys)
 
 use std::collections::HashMap;
 
@@ -60,6 +60,7 @@ pub struct KeyStructureProfiler {
 
 impl KeyStructureProfiler {
     /// Create a new profiler
+    #[must_use]
     pub fn new() -> Self {
         Self {
             keys: Vec::new(),
@@ -103,6 +104,7 @@ impl KeyStructureProfiler {
     }
 
     /// Finalize and generate profile
+    #[must_use]
     pub fn finish(self) -> KeyStructureProfile {
         let key_count = self.keys.len();
 
@@ -196,7 +198,7 @@ impl KeyStructureProfiler {
         }
 
         let mean_len =
-            self.keys.iter().map(|k| k.len()).sum::<usize>() as f32 / self.keys.len() as f32;
+            self.keys.iter().map(std::vec::Vec::len).sum::<usize>() as f32 / self.keys.len() as f32;
         let variance = self
             .keys
             .iter()
@@ -282,7 +284,7 @@ mod tests {
 
         // Act
         for i in 0..100 {
-            let key = format!("{:04}_key_{}", i, i);
+            let key = format!("{i:04}_key_{i}");
             profiler.add_key(key.as_bytes());
         }
         let profile = profiler.finish();
@@ -466,7 +468,7 @@ mod tests {
 
         // Act
         for i in 0..100 {
-            let key = format!("prefix_{:02}_tail", i);
+            let key = format!("prefix_{i:02}_tail");
             profiler.add_key(key.as_bytes());
         }
         let profile = profiler.finish();
@@ -499,7 +501,7 @@ mod tests {
 
         // Act
         for i in 0..10 {
-            let key = format!("key_{:04}", i);
+            let key = format!("key_{i:04}");
             profiler.add_key(key.as_bytes());
         }
         let profile = profiler.finish();

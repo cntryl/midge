@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// OTLP exporter configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OtlpConfig {
-    /// OTLP collector endpoint (e.g., "http://localhost:4317")
+    /// OTLP collector endpoint (e.g., "<http://localhost:4317>")
     pub endpoint: String,
 }
 

@@ -45,15 +45,15 @@ impl ManifestPersistence {
                     truncate: false,
                 },
             )
-            .map_err(|e| format!("failed to open {context}: {:?}", e))?;
+            .map_err(|e| format!("failed to open {context}: {e:?}"))?;
         let len = file
             .len()
-            .map_err(|e| format!("failed to stat {context}: {:?}", e))?;
+            .map_err(|e| format!("failed to stat {context}: {e:?}"))?;
         let data = file
             .read_at(0, len)
-            .map_err(|e| format!("failed to read {context}: {:?}", e))?;
+            .map_err(|e| format!("failed to read {context}: {e:?}"))?;
         let manifest: Manifest = serde_json::from_slice(&data)
-            .map_err(|e| format!("failed to parse {context} JSON: {}", e))?;
+            .map_err(|e| format!("failed to parse {context} JSON: {e}"))?;
         let elapsed = start.elapsed();
         tracing::info!(
             path = ?path,
@@ -73,8 +73,8 @@ impl ManifestPersistence {
             Ok(false) => Ok(()),
             Ok(true) => fs
                 .remove_file(path)
-                .map_err(|e| format!("failed to remove file {:?}: {:?}", path, e)),
-            Err(e) => Err(format!("fs exists error for {:?}: {:?}", path, e)),
+                .map_err(|e| format!("failed to remove file {path:?}: {e:?}")),
+            Err(e) => Err(format!("fs exists error for {path:?}: {e:?}")),
         }
     }
 
@@ -122,7 +122,7 @@ impl ManifestPersistence {
             }
             Err(e) => {
                 if recovery_policy == crate::config::RecoveryPolicy::Strict {
-                    return Err(format!("failed to replay manifest journal: {}", e));
+                    return Err(format!("failed to replay manifest journal: {e}"));
                 }
                 tracing::warn!(error = %e, "failed to replay manifest journal; proceeding with snapshot only");
             }
@@ -148,7 +148,7 @@ impl ManifestPersistence {
 
         // Serialize to pretty JSON for machine parsing with human-debuggability.
         let json = serde_json::to_vec_pretty(manifest)
-            .map_err(|e| format!("failed to serialize manifest to JSON: {}", e))?;
+            .map_err(|e| format!("failed to serialize manifest to JSON: {e}"))?;
 
         let temp_path = FsPath::new(Self::MANIFEST_FILE_TEMP);
         let target_path = FsPath::new(Self::MANIFEST_FILE);
@@ -190,13 +190,13 @@ impl ManifestPersistence {
         let temp = FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP);
 
         let json = serde_json::to_vec_pretty(manifest)
-            .map_err(|e| format!("failed to serialize manifest to JSON: {}", e))?;
+            .map_err(|e| format!("failed to serialize manifest to JSON: {e}"))?;
 
         staging::stage_bytes(fs, &temp, &snap_path, &json, |msg| msg)?;
 
         // truncate journal
         crate::metadata::journal::truncate_journal_with_fs(fs)
-            .map_err(|e| format!("failed to truncate journal: {:?}", e))?;
+            .map_err(|e| format!("failed to truncate journal: {e:?}"))?;
 
         tracing::info!(path = ?snap_path, "manifest snapshot written and journal truncated");
 
@@ -209,17 +209,17 @@ impl ManifestPersistence {
         use std::sync::Arc;
 
         let real =
-            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {e:?}"))?;
         let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
         Self::save_with_fs(&fs, manifest)
     }
 
-    /// Load manifest using a RealFs (compat wrapper)
+    /// Load manifest using a `RealFs` (compat wrapper)
     pub fn load(db_path: &Path) -> Result<Manifest, String> {
         Self::load_with_policy(db_path, crate::config::RecoveryPolicy::Strict)
     }
 
-    /// Load manifest using a RealFs with an explicit recovery policy.
+    /// Load manifest using a `RealFs` with an explicit recovery policy.
     pub fn load_with_policy(
         db_path: &Path,
         recovery_policy: crate::config::RecoveryPolicy,
@@ -228,13 +228,13 @@ impl ManifestPersistence {
         use std::sync::Arc;
 
         let real =
-            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {e:?}"))?;
         let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
         Self::load_with_fs_and_policy(&fs, recovery_policy)
     }
 
     /// Save a full manifest snapshot and truncate journal (atomic as possible).
-    /// This wrapper constructs a RealFs and delegates to the fs-backed implementation.
+    /// This wrapper constructs a `RealFs` and delegates to the fs-backed implementation.
     pub fn save_snapshot_and_truncate_journal(
         db_path: &Path,
         manifest: &Manifest,
@@ -243,7 +243,7 @@ impl ManifestPersistence {
         use std::sync::Arc;
 
         let real =
-            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {e:?}"))?;
         let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
         Self::save_snapshot_and_truncate_journal_with_fs(&fs, manifest)
     }
@@ -293,7 +293,7 @@ impl ManifestPersistence {
         use std::sync::Arc;
 
         let real =
-            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {e:?}"))?;
         let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
         Self::delete_with_fs(&fs)
     }
@@ -303,16 +303,20 @@ impl ManifestPersistence {
 mod tests {
     use super::*;
     use std::process;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
     /// Create a unique temp directory for tests
     fn create_test_dir() -> PathBuf {
         use std::time::{SystemTime, UNIX_EPOCH};
         let pid = process::id();
+        let unique_id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let test_dir = std::env::temp_dir().join(format!("midge_manifest_test_{}_{}", pid, nanos));
+            .map_or(0, |d| d.as_nanos());
+        let test_dir =
+            std::env::temp_dir().join(format!("midge_manifest_test_{pid}_{nanos}_{unique_id}"));
         let _ = std::fs::remove_dir_all(&test_dir);
         std::fs::create_dir_all(&test_dir).expect("failed to create test dir");
         test_dir
@@ -583,7 +587,7 @@ mod tests {
             smallest_seq: Some(10),
             largest_seq: Some(20),
             sublevel: 0,
-            read_count: Default::default(),
+            read_count: std::sync::Arc::default(),
         });
 
         // Act

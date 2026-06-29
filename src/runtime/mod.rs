@@ -5,7 +5,7 @@
 //!
 //! # Architecture
 //!
-//! - **EventLoop**: Receives messages and dispatches to actors
+//! - **`EventLoop`**: Receives messages and dispatches to actors
 //! - **State**: Centralized mutable state owned by runtime
 //! - **Actors**: Stateless handlers that process messages and return state updates
 //! - **Actors**: Stateless handlers that process messages and return state updates
@@ -305,8 +305,8 @@ pub enum RuntimeMsg {
     ///
     /// Sequence numbers are allocated in-order inside the runtime.
     /// The response returns the last allocated sequence for the transaction.
-    /// The durability_policy parameter allows per-request durability control
-    /// (e.g., BestEffort for bulk loads to skip WAL writes entirely).
+    /// The `durability_policy` parameter allows per-request durability control
+    /// (e.g., `BestEffort` for bulk loads to skip WAL writes entirely).
     ApplyTransaction {
         request_id: u64,
         ops: Vec<TransactionOp>,
@@ -397,9 +397,9 @@ pub enum RuntimeMsg {
     /// Query a value from memtables and SST files.
     ///
     /// INVARIANT: Reads must respect the durability frontier.
-    /// If requested_durability is Strict/Steady, the read must not return data
-    /// with seqno > local_durable_seq. Reads at higher seqnos are queued in
-    /// durability_waiters until the frontier advances.
+    /// If `requested_durability` is Strict/Steady, the read must not return data
+    /// with seqno > `local_durable_seq`. Reads at higher seqnos are queued in
+    /// `durability_waiters` until the frontier advances.
     Read {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
@@ -410,8 +410,8 @@ pub enum RuntimeMsg {
     /// Scan a range of keys from memtables and SST files.
     ///
     /// INVARIANT: Range scans must respect the durability frontier.
-    /// Same semantics as Read: if requested_durability is Strict/Steady,
-    /// the scan must not return data with seqno > local_durable_seq.
+    /// Same semantics as Read: if `requested_durability` is Strict/Steady,
+    /// the scan must not return data with seqno > `local_durable_seq`.
     RangeScan {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
@@ -454,7 +454,7 @@ pub enum RuntimeMsg {
     /// Combined begin-transaction: atomically fetch current sequence AND capture
     /// a read snapshot in a single event-loop round-trip.
     ///
-    /// Replaces the previous two-message pattern (GetCurrentSequence + CaptureReadSnapshot)
+    /// Replaces the previous two-message pattern (`GetCurrentSequence` + `CaptureReadSnapshot`)
     /// to halve the message-passing overhead of `begin_tx`.
     BeginTransaction {
         request_id: u64,
@@ -475,7 +475,7 @@ pub enum RuntimeMsg {
     UnregisterSnapshot { snapshot_id: u64 },
 
     // === Control ===
-    /// Shutdown the runtime (no request_id; fire-and-forget).
+    /// Shutdown the runtime (no `request_id`; fire-and-forget).
     Shutdown,
     /// Trigger a full compaction sweep and wait for completion.
     CompactAll { request_id: u64 },
@@ -485,7 +485,7 @@ pub enum RuntimeMsg {
     StartupPing { request_id: u64 },
 
     /// Check if writes should be stalled for a column family.
-    /// Used by Engine::commit() to expose backpressure before accepting writes.
+    /// Used by `Engine::commit()` to expose backpressure before accepting writes.
     CheckWriteStall {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
@@ -508,12 +508,23 @@ pub enum RuntimeMsg {
 }
 
 impl RuntimeMsg {
-    /// Extract the request_id for messages that expect a response.
+    /// Extract the `request_id` for messages that expect a response.
     ///
     /// Returns `None` for messages that do not participate in request/response
     /// routing (e.g., `Shutdown`).
     pub fn request_id(&self) -> Option<u64> {
-        use RuntimeMsg::*;
+        use RuntimeMsg::{
+            ApplyTransaction, BeginIngest, BeginTransaction, CancelWaitForWriteStallClear,
+            CaptureReadSnapshot, CheckCompaction, CheckGc, CheckWriteStall, CloudUploadComplete,
+            CloudUploadSst, CloudUploadWal, CompactAll, CompactionComplete, DeleteObsoleteSsts,
+            EndIngest, FlushComplete, FlushMemtable, GetCurrentSequence, GetIngestState,
+            GetReadAmpMetrics, GetRecoveryMetrics, GetRuntimeConfig, GetRuntimeMetrics,
+            GetStorageLayout, ManifestAddSst, ManifestCompactionComplete,
+            ManifestCreateColumnFamily, ManifestDropColumnFamily, ManifestPersist, Noop, RangeScan,
+            Read, RegisterSnapshot, RunCompaction, SealWalForCloud, SetRuntimeConfig, Shutdown,
+            StartupPing, UnregisterSnapshot, WaitForWriteStallClear, WalAppend,
+            WalAppendDeleteRange, WalRotate, WalSync, WalSyncComplete,
+        };
         match self {
             FlushMemtable { request_id, .. }
             | FlushComplete { request_id, .. }
@@ -565,7 +576,18 @@ impl RuntimeMsg {
     }
 
     pub fn kind_name(&self) -> &'static str {
-        use RuntimeMsg::*;
+        use RuntimeMsg::{
+            ApplyTransaction, BeginIngest, BeginTransaction, CancelWaitForWriteStallClear,
+            CaptureReadSnapshot, CheckCompaction, CheckGc, CheckWriteStall, CloudUploadComplete,
+            CloudUploadSst, CloudUploadWal, CompactAll, CompactionComplete, DeleteObsoleteSsts,
+            EndIngest, FlushComplete, FlushMemtable, GetCurrentSequence, GetIngestState,
+            GetReadAmpMetrics, GetRecoveryMetrics, GetRuntimeConfig, GetRuntimeMetrics,
+            GetStorageLayout, ManifestAddSst, ManifestCompactionComplete,
+            ManifestCreateColumnFamily, ManifestDropColumnFamily, ManifestPersist, Noop, RangeScan,
+            Read, RegisterSnapshot, RunCompaction, SealWalForCloud, SetRuntimeConfig, Shutdown,
+            StartupPing, UnregisterSnapshot, WaitForWriteStallClear, WalAppend,
+            WalAppendDeleteRange, WalRotate, WalSync, WalSyncComplete,
+        };
         match self {
             FlushMemtable { .. } => "FlushMemtable",
             FlushComplete { .. } => "FlushComplete",
@@ -618,7 +640,7 @@ impl RuntimeMsg {
 
 /// Response from runtime operations.
 ///
-/// Copilot: every response variant MUST carry the originating request_id.
+/// Copilot: every response variant MUST carry the originating `request_id`.
 #[derive(Debug)]
 pub enum RuntimeResponse {
     Ok {
@@ -713,7 +735,7 @@ pub enum RuntimeResponse {
         snapshot: Arc<super::runtime::read_snapshot::ReadSnapshot>,
     },
 
-    /// Combined response for BeginTransaction: sequence + snapshot in one round-trip.
+    /// Combined response for `BeginTransaction`: sequence + snapshot in one round-trip.
     BeginTransactionResult {
         request_id: u64,
         /// Start sequence for the transaction (current committed sequence).
@@ -771,7 +793,7 @@ impl RuntimeResponse {
     }
 }
 
-/// ResponseRouter - per-request routing using oneshot-style channels.
+/// `ResponseRouter` - per-request routing using oneshot-style channels.
 ///
 /// Uses `DashMap` for lock-free concurrent access, eliminating the
 /// `Mutex<HashMap>` contention point between caller threads (register)
@@ -788,7 +810,7 @@ impl ResponseRouter {
         }
     }
 
-    /// Register a new pending response for a given request_id.
+    /// Register a new pending response for a given `request_id`.
     ///
     /// Returns a receiver that will yield exactly one `RuntimeResponse`.
     pub fn register(&self, request_id: u64) -> Receiver<RuntimeResponse> {
@@ -823,10 +845,10 @@ impl ResponseRouter {
 /// Handle for submitting work to the runtime.
 ///
 /// Copilot:
-/// - Route responses by request_id using ResponseRouter.
-/// - Use per-request channels (bounded(1)) created via ResponseRouter::register.
-/// - Never use a single shared response_rx.
-/// - RuntimeHandle MUST be thread-safe and support concurrent callers.
+/// - Route responses by `request_id` using `ResponseRouter`.
+/// - Use per-request channels (bounded(1)) created via `ResponseRouter::register`.
+/// - Never use a single shared `response_rx`.
+/// - `RuntimeHandle` MUST be thread-safe and support concurrent callers.
 #[derive(Clone)]
 pub struct RuntimeHandle {
     msg_tx: Sender<RuntimeMsg>,
@@ -847,7 +869,7 @@ impl RuntimeHandle {
             .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))
     }
 
-    /// Register a response channel for a request_id.
+    /// Register a response channel for a `request_id`.
     ///
     /// Intended for benchmarks to pre-register receivers and avoid
     /// per-iteration allocations in hot loops.
@@ -887,8 +909,7 @@ impl RuntimeHandle {
                     Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
                         waited += std::time::Duration::from_secs(2);
                         eprintln!(
-                            "[midge] still waiting for response: request_id={request_id} kind={msg_kind} waited={:?}",
-                            waited
+                            "[midge] still waiting for response: request_id={request_id} kind={msg_kind} waited={waited:?}"
                         );
                     }
                     Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
@@ -938,7 +959,7 @@ impl RuntimeHandle {
 
     /// Submit a message and wait for a response that matches a predicate.
     ///
-    /// Since each request_id yields exactly one response, this is mainly
+    /// Since each `request_id` yields exactly one response, this is mainly
     /// useful for callers that want to validate the response shape.
     pub fn send_and_wait_filtered<F>(
         &self,
@@ -968,7 +989,7 @@ impl RuntimeHandle {
     /// Returns `true` if memory budget is exceeded (immutable memtable queue full
     /// or total memtable memory over threshold).
     ///
-    /// Used by Engine::commit() to expose backpressure to clients before
+    /// Used by `Engine::commit()` to expose backpressure to clients before
     /// accepting new write transactions.
     pub fn check_write_stall(&self, cf_id: crate::types::ColumnFamilyId) -> MidgeResult<bool> {
         let response = self.send_and_wait(RuntimeMsg::CheckWriteStall {
@@ -1010,8 +1031,7 @@ impl Runtime {
         let router = Arc::new(ResponseRouter::new());
 
         let trace_enabled = std::env::var("MIDGE_TRACE_RUNTIME")
-            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false);
+            .is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
 
         let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
 
@@ -1077,14 +1097,14 @@ impl Runtime {
                         event_loop.run(msg_rx);
                     }
                     Err(e) => {
-                        let msg = format!("Failed to create event loop: {}", e);
+                        let msg = format!("Failed to create event loop: {e}");
                         tracing::error!("{}", msg);
                         // Signal initialization failure
                         let _ = init_tx.send(Err(msg));
                     }
                 }
             })
-            .map_err(|e| MidgeError::Internal(format!("Failed to spawn runtime thread: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("Failed to spawn runtime thread: {e}")))?;
 
         self.event_loop_handle = Some(event_loop_handle);
 

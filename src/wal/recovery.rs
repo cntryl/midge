@@ -4,7 +4,7 @@
 //! memtables for each column family.
 //!
 //! Recovery order:
-//! 1) Rotated segment files: `{segment_id}.wal` in ascending segment_id order
+//! 1) Rotated segment files: `{segment_id}.wal` in ascending `segment_id` order
 //! 2) Active file: `wal.log` (if present)
 
 use super::types::{ColumnFamilyId, WalOpKind, WalRecord};
@@ -72,11 +72,11 @@ pub struct RecoveryStats {
     pub total_replay_ns: u128,
 
     /// Highest writer epoch seen across all replayed WAL records.
-    /// Records with epoch < max_epoch_seen are from stale writers and
+    /// Records with epoch < `max_epoch_seen` are from stale writers and
     /// are skipped during recovery to prevent zombie writes from
     /// corrupting the recovered state.
     pub max_epoch_seen: u64,
-    /// Number of WAL records skipped because their writer_epoch was
+    /// Number of WAL records skipped because their `writer_epoch` was
     /// less than the highest epoch observed so far (stale writer).
     pub stale_records_skipped: u64,
 }
@@ -88,6 +88,7 @@ impl Default for RecoveryStats {
 }
 
 impl RecoveryStats {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             record_count: 0,
@@ -177,13 +178,13 @@ pub fn replay_wal_with_policy(
         }
 
         if let Some(segment_id) = crate::wal::parse_segment_id(&file_name) {
-            let prefer_candidate = segment_files
-                .get(&segment_id)
-                .map(|(existing_name, _)| {
-                    existing_name != &crate::wal::cloud_segment_file_name(segment_id)
-                        && file_name == crate::wal::cloud_segment_file_name(segment_id)
-                })
-                .unwrap_or(true);
+            let prefer_candidate =
+                segment_files
+                    .get(&segment_id)
+                    .is_none_or(|(existing_name, _)| {
+                        existing_name != &crate::wal::cloud_segment_file_name(segment_id)
+                            && file_name == crate::wal::cloud_segment_file_name(segment_id)
+                    });
 
             if prefer_candidate {
                 segment_files.insert(segment_id, (file_name.clone(), join(wal_dir, &file_name)));
@@ -297,8 +298,7 @@ fn replay_wal_file(
         }
         if pos > file_len {
             return Err(MidgeError::Corruption(format!(
-                "WAL replay read past EOF at pos {} in {} (file_len={})",
-                pos, file_path, file_len
+                "WAL replay read past EOF at pos {pos} in {file_path} (file_len={file_len})"
             )));
         }
         if file_len.saturating_sub(pos) < crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 {
@@ -325,8 +325,7 @@ fn replay_wal_file(
             .saturating_add(len as u64);
         if need_end > file_len {
             return Err(MidgeError::Corruption(format!(
-                "Incomplete WAL record at pos {} in {} (len={}, file_len={})",
-                pos, file_path, len, file_len
+                "Incomplete WAL record at pos {pos} in {file_path} (len={len}, file_len={file_len})"
             )));
         }
 
@@ -453,8 +452,7 @@ fn apply_record(
             if let Some(exp) = record.expiration {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
+                    .map_or(0, |d| d.as_millis() as u64);
                 if exp <= now {
                     return Ok(());
                 }

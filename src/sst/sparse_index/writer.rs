@@ -20,11 +20,13 @@ pub struct SparseIndexWriter {
 
 impl SparseIndexWriter {
     /// Create a new sparse index writer with default sample rate (16)
+    #[must_use]
     pub fn new() -> Self {
         Self::with_sample_rate(16)
     }
 
     /// Create a new sparse index writer with custom sample rate
+    #[must_use]
     pub fn with_sample_rate(sample_rate: usize) -> Self {
         Self {
             entries: Vec::new(),
@@ -50,23 +52,31 @@ impl SparseIndexWriter {
     }
 
     /// Finish writing and return the index entries
+    #[must_use]
     pub fn finish(self) -> Vec<IndexEntry> {
         self.entries
     }
 
     /// Get current number of sampled entries
+    #[must_use]
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
 
     /// Get total keys seen
+    #[must_use]
     pub fn key_count(&self) -> usize {
         self.key_count
     }
 
     /// Estimate serialized size in bytes
+    #[must_use]
     pub fn size_bytes(&self) -> usize {
-        4 + self.entries.iter().map(|e| e.size_bytes()).sum::<usize>()
+        4 + self
+            .entries
+            .iter()
+            .map(super::shared::IndexEntry::size_bytes)
+            .sum::<usize>()
     }
 }
 
@@ -88,7 +98,7 @@ mod tests {
 
         // Act
         for i in 0..12 {
-            writer.record_key(format!("key_{:03}", i).into_bytes(), handle);
+            writer.record_key(format!("key_{i:03}").into_bytes(), handle);
         }
         let entries = writer.finish();
 
@@ -128,7 +138,7 @@ mod tests {
 
         // Act
         for i in 0..32 {
-            writer.record_key(format!("key_{:03}", i).into_bytes(), handle);
+            writer.record_key(format!("key_{i:03}").into_bytes(), handle);
         }
 
         // Assert - should estimate reasonable size
@@ -145,7 +155,7 @@ mod tests {
 
         // Act
         for i in 0..100 {
-            writer.record_key(format!("key_{:03}", i).into_bytes(), handle);
+            writer.record_key(format!("key_{i:03}").into_bytes(), handle);
         }
 
         // Assert
@@ -198,7 +208,7 @@ mod tests {
 
         // Act
         for i in 0..5 {
-            writer.record_key(format!("key_{}", i).into_bytes(), handle);
+            writer.record_key(format!("key_{i}").into_bytes(), handle);
         }
         let entries = writer.finish();
 
@@ -232,7 +242,10 @@ mod tests {
         let entries = writer.finish();
 
         // Assert - size should match sum of entry sizes
-        let expected = 4 + entries.iter().map(|e| e.size_bytes()).sum::<usize>();
+        let expected = 4 + entries
+            .iter()
+            .map(super::super::shared::IndexEntry::size_bytes)
+            .sum::<usize>();
         assert_eq!(size_before_finish, expected);
     }
 
@@ -245,7 +258,7 @@ mod tests {
         // Act
         for i in 0..50 {
             assert_eq!(writer.key_count(), i);
-            writer.record_key(format!("key_{}", i).into_bytes(), handle);
+            writer.record_key(format!("key_{i}").into_bytes(), handle);
         }
 
         // Assert
@@ -297,7 +310,7 @@ mod tests {
 
         // Act
         for i in 0..500 {
-            writer.record_key(format!("key_{}", i).into_bytes(), handle);
+            writer.record_key(format!("key_{i}").into_bytes(), handle);
         }
         let entries = writer.finish();
 
@@ -332,7 +345,7 @@ mod tests {
 
         // Act
         for i in 0..1000 {
-            writer.record_key(format!("key_{:04}", i).into_bytes(), handle);
+            writer.record_key(format!("key_{i:04}").into_bytes(), handle);
         }
         let entries = writer.finish();
 
@@ -364,7 +377,7 @@ mod tests {
 
         // Act
         for i in 0..8 {
-            writer.record_key(format!("key_{}", i).into_bytes(), handle);
+            writer.record_key(format!("key_{i}").into_bytes(), handle);
         }
         let entries = writer.finish();
 

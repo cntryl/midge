@@ -7,19 +7,19 @@
 //!
 //! Entry layout (little-endian):
 //!
-//! [shared_prefix_len: u16]
-//! [key_delta_len:   u16]
-//! [value_len:       u32]   // 0 => tombstone / no value
+//! [`shared_prefix_len`: u16]
+//! [`key_delta_len`:   u16]
+//! [`value_len`:       u32]   // 0 => tombstone / no value
 //! [sequence:        u64]
-//! [entry_type:      u8]
-//! [key_delta bytes]
+//! [`entry_type`:      u8]
+//! [`key_delta` bytes]
 //! [value bytes?]
 //!
 //! Entry length is fully deterministic from the header.
 //! Decode is zero-copy and allocation-free.
 //!
 //! Version 2 extends the header with:
-//! [expiration_millis: u64] // u64::MAX => no expiration
+//! [`expiration_millis`: u64] // `u64::MAX` => no expiration
 
 use crate::common::{MidgeError, MidgeResult};
 use bytes::{BufMut, BytesMut};
@@ -55,7 +55,7 @@ impl TryFrom<u8> for EntryType {
             1 => Ok(EntryType::Insert),
             2 => Ok(EntryType::Delete),
             3 => Ok(EntryType::Merge),
-            _ => Err(MidgeError::Corruption(format!("Invalid entry_type: {}", v))),
+            _ => Err(MidgeError::Corruption(format!("Invalid entry_type: {v}"))),
         }
     }
 }
@@ -64,6 +64,7 @@ impl TryFrom<u8> for EntryType {
 ///
 /// This appends bytes to the provided buffer (block builder style).
 #[inline]
+#[must_use]
 pub fn encode(
     key_delta: &[u8],
     shared_len: u16,
@@ -75,7 +76,7 @@ pub fn encode(
     // small header size when sums overflow on 32-bit platforms.
     let header = 2usize + 2 + 4 + 8 + 1;
     let key_len = key_delta.len();
-    let val_len = value.map_or(0, |v| v.len());
+    let val_len = value.map_or(0, <[u8]>::len);
     let cap = header
         .checked_add(key_len)
         .and_then(|s| s.checked_add(val_len))
@@ -116,7 +117,7 @@ pub struct EntryView<'a> {
     pub shared_len: u16,
     /// Borrowed slice for key delta
     pub key_delta: &'a [u8],
-    /// Absolute offset of key_delta in the original buffer
+    /// Absolute offset of `key_delta` in the original buffer
     pub key_offset: usize,
     /// Borrowed slice for value (if present)
     pub value: Option<&'a [u8]>,
@@ -131,27 +132,26 @@ pub struct EntryView<'a> {
 /// Decode a single entry starting at `offset`.
 ///
 /// This is allocation-free and returns a borrowed view.
-pub fn decode<'a>(data: &'a [u8], offset: usize) -> MidgeResult<(EntryView<'a>, usize)> {
+pub fn decode(data: &[u8], offset: usize) -> MidgeResult<(EntryView<'_>, usize)> {
     decode_with_format(data, offset, crate::sst::types::SST_FORMAT_V1)
 }
 
 /// Decode a single entry using the SST format version.
-pub fn decode_with_format<'a>(
-    data: &'a [u8],
+pub fn decode_with_format(
+    data: &[u8],
     offset: usize,
     format_version: u32,
-) -> MidgeResult<(EntryView<'a>, usize)> {
+) -> MidgeResult<(EntryView<'_>, usize)> {
     match format_version {
         crate::sst::types::SST_FORMAT_V1 => decode_v1(data, offset),
         crate::sst::types::SST_FORMAT_V2 => decode_v2(data, offset),
         other => Err(MidgeError::Corruption(format!(
-            "Unsupported SST entry format version: {}",
-            other
+            "Unsupported SST entry format version: {other}"
         ))),
     }
 }
 
-fn decode_v1<'a>(data: &'a [u8], offset: usize) -> MidgeResult<(EntryView<'a>, usize)> {
+fn decode_v1(data: &[u8], offset: usize) -> MidgeResult<(EntryView<'_>, usize)> {
     if offset >= data.len() {
         return Err(MidgeError::Corruption("Offset beyond data length".into()));
     }
@@ -229,7 +229,7 @@ fn decode_v1<'a>(data: &'a [u8], offset: usize) -> MidgeResult<(EntryView<'a>, u
     ))
 }
 
-fn decode_v2<'a>(data: &'a [u8], offset: usize) -> MidgeResult<(EntryView<'a>, usize)> {
+fn decode_v2(data: &[u8], offset: usize) -> MidgeResult<(EntryView<'_>, usize)> {
     if offset >= data.len() {
         return Err(MidgeError::Corruption("Offset beyond data length".into()));
     }
@@ -322,6 +322,7 @@ fn decode_v2<'a>(data: &'a [u8], offset: usize) -> MidgeResult<(EntryView<'a>, u
 
 /// Encode a v2 SST entry with persisted expiration metadata.
 #[inline]
+#[must_use]
 pub fn encode_v2(
     key_delta: &[u8],
     shared_len: u16,
@@ -332,7 +333,7 @@ pub fn encode_v2(
 ) -> Vec<u8> {
     let header = 2usize + 2 + 4 + 8 + 1 + 8;
     let key_len = key_delta.len();
-    let val_len = value.map_or(0, |v| v.len());
+    let val_len = value.map_or(0, <[u8]>::len);
     let cap = header
         .checked_add(key_len)
         .and_then(|s| s.checked_add(val_len))

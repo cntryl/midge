@@ -47,8 +47,8 @@ pub enum DurabilityPolicy {
     /// Best-effort persistence - write directly to memtable only.
     /// Behavior: data visible for reads and flushes to SST, but NO durability guarantee on crash before flush.
     /// Use case: bulk loads, initialization, test data where re-load is acceptable.
-    /// Safe pattern: load with best_effort() → flush_cf() → switch to buffered() or sync() for measured workload.
-    /// WARNING: data loss on crash before flush_cf() is called.
+    /// Safe pattern: load with `best_effort()` → `flush_cf()` → switch to `buffered()` or `sync()` for measured workload.
+    /// WARNING: data loss on crash before `flush_cf()` is called.
     BestEffort,
 }
 

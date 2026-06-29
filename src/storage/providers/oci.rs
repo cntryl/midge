@@ -1,9 +1,9 @@
 //! Oracle Cloud Infrastructure (OCI) Object Storage Provider
 //!
 //! Two modes of operation:
-//! 1. **S3-compatible mode** (recommended): Uses OCI's S3-compatible API via S3Provider
+//! 1. **S3-compatible mode** (recommended): Uses OCI's S3-compatible API via `S3Provider`
 //!    - Standard access key / secret key authentication
-//!    - Full CloudBackend support via S3Provider
+//!    - Full `CloudBackend` support via `S3Provider`
 //!
 //! 2. **Native OCI API** (future): Direct REST API with OCI signature-based auth
 //!    - Would use OCI's proprietary authentication headers
@@ -15,7 +15,7 @@ use crate::common::MidgeResult;
 /// Oracle Cloud Infrastructure Object Storage provider
 ///
 /// Supports both:
-/// - **S3-compatible API**: Leverages generic S3Provider for easy integration
+/// - **S3-compatible API**: Leverages generic `S3Provider` for easy integration
 /// - **Native OCI API**: (future) Direct REST API with OCI signature-based auth
 pub struct OciProvider {
     inner: S3Provider,
@@ -54,12 +54,12 @@ impl OciProvider {
         S3Provider::custom(config, String::new(), String::new()).map(|inner| Self { inner })
     }
 
-    /// Access the underlying S3Provider for lower-level operations
+    /// Access the underlying `S3Provider` for lower-level operations
     pub fn inner(&self) -> &S3Provider {
         &self.inner
     }
 
-    /// Convert into the underlying S3Provider
+    /// Convert into the underlying `S3Provider`
     pub fn into_inner(self) -> S3Provider {
         self.inner
     }

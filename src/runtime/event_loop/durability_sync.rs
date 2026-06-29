@@ -356,7 +356,7 @@ mod tests {
             DurabilityWaiter::ConfirmWalAppend { request_id } => {
                 assert_eq!(*request_id, 42);
             }
-            other => panic!("unexpected waiter variant: {:?}", other),
+            other => panic!("unexpected waiter variant: {other:?}"),
         }
     }
 
@@ -392,7 +392,7 @@ mod tests {
             DurabilityWaiter::ConfirmTransactionApply { request_id } => {
                 assert_eq!(*request_id, 99);
             }
-            other => panic!("unexpected waiter variant: {:?}", other),
+            other => panic!("unexpected waiter variant: {other:?}"),
         }
     }
 

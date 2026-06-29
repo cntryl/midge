@@ -12,12 +12,13 @@ pub struct TrieNode {
     /// Block ID if this node maps to a block (leaf nodes)
     pub block_id: Option<u32>,
 
-    /// Children sorted by first byte of key_delta
+    /// Children sorted by first byte of `key_delta`
     pub children: Vec<TrieEdge>,
 }
 
 impl TrieNode {
     /// Create a new trie node
+    #[must_use]
     pub fn new(prefix_len: u16, key_delta: Vec<u8>, block_id: Option<u32>) -> Self {
         Self {
             prefix_len,
@@ -38,6 +39,7 @@ impl TrieNode {
     }
 
     /// Find child by first byte
+    #[must_use]
     pub fn find_child(&self, byte: u8) -> Option<&TrieEdge> {
         self.children
             .binary_search_by_key(&byte, |e| e.first_byte)
@@ -46,6 +48,7 @@ impl TrieNode {
     }
 
     /// Check if this is a leaf node (maps to a block)
+    #[must_use]
     pub fn is_leaf(&self) -> bool {
         self.block_id.is_some()
     }
@@ -54,7 +57,7 @@ impl TrieNode {
 /// Edge connecting parent node to child node
 #[derive(Debug, Clone)]
 pub struct TrieEdge {
-    /// First byte of child's key_delta (for binary search)
+    /// First byte of child's `key_delta` (for binary search)
     pub first_byte: u8,
 
     /// Index of child node in flat node array
@@ -63,6 +66,7 @@ pub struct TrieEdge {
 
 impl TrieEdge {
     /// Create a new trie edge
+    #[must_use]
     pub fn new(first_byte: u8, child_index: u32) -> Self {
         Self {
             first_byte,
@@ -350,7 +354,7 @@ mod tests {
         let node = TrieNode::new(5, b"test".to_vec(), Some(42));
 
         // Act
-        let debug_str = format!("{:?}", node);
+        let debug_str = format!("{node:?}");
 
         // Assert
         assert!(debug_str.contains("TrieNode"));
@@ -395,7 +399,7 @@ mod tests {
         let edge = TrieEdge::new(b'a', 10);
 
         // Act
-        let debug_str = format!("{:?}", edge);
+        let debug_str = format!("{edge:?}");
 
         // Assert
         assert!(debug_str.contains("TrieEdge"));

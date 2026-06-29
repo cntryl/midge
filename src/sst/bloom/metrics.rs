@@ -18,6 +18,7 @@ pub struct BloomMetrics {
 
 impl BloomMetrics {
     /// Create a new metrics instance
+    #[must_use]
     pub fn new() -> Self {
         Self {
             checks: Arc::new(AtomicU64::new(0)),
@@ -48,26 +49,31 @@ impl BloomMetrics {
     }
 
     /// Get total number of checks
+    #[must_use]
     pub fn checks(&self) -> u64 {
         self.checks.load(Ordering::Relaxed)
     }
 
     /// Get number of negatives
+    #[must_use]
     pub fn negatives(&self) -> u64 {
         self.negatives.load(Ordering::Relaxed)
     }
 
     /// Get number of false positives
+    #[must_use]
     pub fn false_positives(&self) -> u64 {
         self.false_positives.load(Ordering::Relaxed)
     }
 
     /// Get number of blocks skipped
+    #[must_use]
     pub fn blocks_skipped(&self) -> u64 {
         self.blocks_skipped.load(Ordering::Relaxed)
     }
 
     /// Calculate false positive rate (0.0 - 1.0)
+    #[must_use]
     pub fn false_positive_rate(&self) -> f64 {
         let total = self.checks();
         if total == 0 {
@@ -78,6 +84,7 @@ impl BloomMetrics {
     }
 
     /// Calculate negative rate (blocks avoided / total checks)
+    #[must_use]
     pub fn negative_rate(&self) -> f64 {
         let total = self.checks();
         if total == 0 {

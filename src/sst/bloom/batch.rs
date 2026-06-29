@@ -4,8 +4,8 @@
 //! Batch processing enables:
 //! - Better CPU cache locality (5-10% speedup observed)
 //! - Vectorization-ready structure for future SIMD implementation
-//! - Early termination support (via pass_rate tracking)
-//! - Unified result collection (collect_positives, collect_negatives)
+//! - Early termination support (via `pass_rate` tracking)
+//! - Unified result collection (`collect_positives`, `collect_negatives`)
 //!
 //! Current performance: ~5-10% faster than sequential queries due to cache effects.
 //! Future SIMD implementation could achieve 3-4x speedup on large batches (100+ keys).
@@ -25,6 +25,7 @@ pub struct BatchBloomResults {
 
 impl BatchBloomResults {
     /// Create empty results for a batch (initialized to unused)
+    #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
             results: vec![2; capacity],
@@ -34,16 +35,19 @@ impl BatchBloomResults {
     }
 
     /// Check if a specific result indicates the key might be present
+    #[must_use]
     pub fn is_positive(&self, idx: usize) -> bool {
         idx < self.results.len() && self.results[idx] == 0
     }
 
     /// Check if a specific result indicates the key is absent
+    #[must_use]
     pub fn is_negative(&self, idx: usize) -> bool {
         idx < self.results.len() && self.results[idx] == 1
     }
 
-    /// Get the BloomTestResult for a specific index
+    /// Get the `BloomTestResult` for a specific index
+    #[must_use]
     pub fn get(&self, idx: usize) -> BloomTestResult {
         if idx >= self.results.len() {
             // Return a neutral value; we use MightBePresent as default
@@ -57,6 +61,7 @@ impl BatchBloomResults {
     }
 
     /// Collect indices of results that passed the filter
+    #[must_use]
     pub fn collect_positives(&self) -> Vec<usize> {
         self.results
             .iter()
@@ -66,6 +71,7 @@ impl BatchBloomResults {
     }
 
     /// Collect indices of results that failed the filter
+    #[must_use]
     pub fn collect_negatives(&self) -> Vec<usize> {
         self.results
             .iter()
@@ -75,6 +81,7 @@ impl BatchBloomResults {
     }
 
     /// Filter pass rate (positives / total)
+    #[must_use]
     pub fn pass_rate(&self) -> f64 {
         if self.results.is_empty() {
             return 0.0;
