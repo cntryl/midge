@@ -161,6 +161,51 @@ fn should_keep_event_loop_message_families_in_owned_coordinators() {
 }
 
 #[test]
+fn should_make_startup_phases_and_cloud_recovery_startup_owned() {
+    // Arrange
+    let startup = read_source("src/engine/startup.rs");
+    let required_phases = [
+        "struct StartupStoragePath",
+        "struct StartupLease",
+        "struct RuntimeStorageMaterialization",
+        "struct RuntimeRecoveryMaterialization",
+        "struct StartedRuntime",
+        "struct FacadeAssembly",
+    ];
+    let forbidden_engine_owned_recovery_calls = [
+        "Engine::hydrate_cloud_metadata",
+        "Engine::materialize_cloud_wal_recovery_dir",
+        "Engine::cloud_recovery_sst_proofs_for_intent_replay",
+        "Engine::ensure_named_sst_cache_from_cloud_storage",
+        "Engine::ensure_local_sst_cache_from_cloud",
+        "Engine::ensure_local_sst_cache_from_cloud_storage",
+        "Engine::mirror_cloud_metadata",
+    ];
+
+    // Act / Assert
+    assert!(startup.contains("struct CloudStartupRecovery"));
+    assert!(startup.contains("StartupStoragePath::resolve"));
+    assert!(startup.contains("StartupLease::acquire"));
+    assert!(startup.contains("RuntimeStorageMaterialization::materialize"));
+    assert!(startup.contains("RuntimeRecoveryMaterialization::replay_and_repair"));
+    assert!(startup.contains("StartedRuntime::start"));
+    assert!(startup.contains("FacadeAssembly::assemble"));
+    assert!(startup.contains("CloudStartupRecovery::hydrate_cloud_metadata"));
+    assert!(startup.contains("CloudStartupRecovery::materialize_cloud_wal_recovery_dir"));
+    assert!(startup.contains("CloudStartupRecovery::cloud_recovery_sst_proofs_for_intent_replay"));
+
+    for phase in required_phases {
+        assert!(startup.contains(phase), "startup should define {phase}");
+    }
+    for pattern in forbidden_engine_owned_recovery_calls {
+        assert!(
+            !startup.contains(pattern),
+            "startup should not call engine-owned recovery helper {pattern}"
+        );
+    }
+}
+
+#[test]
 fn should_keep_cloud_provider_constructors_on_same_variants() {
     // Arrange
     let aws = CloudProviderConfig::aws_s3("bucket", "us-east-1");
