@@ -367,10 +367,10 @@ impl AzureProvider {
     pub fn from_lightweight_credential_source(
         account_name: String,
         container: String,
-        source: crate::engine::api::AzureCredentialSource,
+        source: crate::config::AzureCredentialSource,
     ) -> MidgeResult<Self> {
         match source {
-            crate::engine::api::AzureCredentialSource::EnvironmentClientSecret => {
+            crate::config::AzureCredentialSource::EnvironmentClientSecret => {
                 Self::with_oauth_provider(
                     account_name,
                     container,
@@ -378,7 +378,7 @@ impl AzureProvider {
                     "environment-client-secret".to_string(),
                 )
             }
-            crate::engine::api::AzureCredentialSource::WorkloadIdentity {
+            crate::config::AzureCredentialSource::WorkloadIdentity {
                 tenant_id,
                 client_id,
                 token_file,
@@ -388,7 +388,7 @@ impl AzureProvider {
                 AzureOAuthProvider::from_workload_identity(tenant_id, client_id, token_file)?,
                 "workload-identity".to_string(),
             ),
-            crate::engine::api::AzureCredentialSource::LightweightDefaultChain => {
+            crate::config::AzureCredentialSource::LightweightDefaultChain => {
                 if AzureOAuthProvider::has_environment_client_secret() {
                     return Self::with_oauth_provider(
                         account_name,
@@ -407,7 +407,7 @@ impl AzureProvider {
                 }
                 Self::with_managed_identity(account_name, container, None)
             }
-            crate::engine::api::AzureCredentialSource::ManagedIdentity { client_id } => {
+            crate::config::AzureCredentialSource::ManagedIdentity { client_id } => {
                 Self::with_managed_identity(account_name, container, client_id)
             }
             other => Err(MidgeError::InvalidArgument(format!(

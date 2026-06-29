@@ -323,7 +323,7 @@ pub struct RuntimeState {
     /// If true, never touch filesystem (pure in-memory mode)
     pub memory_mode: bool,
     /// Recovery policy selected at engine open.
-    pub recovery_policy: crate::engine::RecoveryPolicy,
+    pub recovery_policy: crate::config::RecoveryPolicy,
     /// True if startup had to salvage around metadata or WAL issues.
     pub opened_in_salvage_mode: bool,
     /// True when runtime detected non-fatal persistence anomalies that operators should investigate.
@@ -393,7 +393,7 @@ impl RuntimeState {
     /// Create new runtime state with the given database path.
     /// If memory_mode is true, filesystem is never touched.
     pub fn new(db_path: PathBuf, memory_mode: bool) -> Self {
-        Self::try_new(db_path, memory_mode, crate::engine::RecoveryPolicy::Strict)
+        Self::try_new(db_path, memory_mode, crate::config::RecoveryPolicy::Strict)
             .expect("runtime state initialization failed")
     }
 
@@ -401,7 +401,7 @@ impl RuntimeState {
     pub fn try_new(
         db_path: PathBuf,
         memory_mode: bool,
-        recovery_policy: crate::engine::RecoveryPolicy,
+        recovery_policy: crate::config::RecoveryPolicy,
     ) -> MidgeResult<Self> {
         Self::try_new_with_recovery_dir(db_path, memory_mode, None, recovery_policy)
     }
@@ -420,7 +420,7 @@ impl RuntimeState {
             db_path,
             memory_mode,
             recovery_wal_dir,
-            crate::engine::RecoveryPolicy::Strict,
+            crate::config::RecoveryPolicy::Strict,
         )
         .expect("runtime state initialization with recovery dir failed")
     }
@@ -431,7 +431,7 @@ impl RuntimeState {
         db_path: PathBuf,
         memory_mode: bool,
         recovery_wal_dir: Option<PathBuf>,
-        recovery_policy: crate::engine::RecoveryPolicy,
+        recovery_policy: crate::config::RecoveryPolicy,
     ) -> MidgeResult<Self> {
         let (wal_dir, sst_dir) = Self::ensure_directories(&db_path, memory_mode);
         let mut opened_in_salvage_mode = false;
@@ -453,7 +453,7 @@ impl RuntimeState {
         let manifest = if !memory_mode {
             let strict_manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
                 &fs,
-                crate::engine::RecoveryPolicy::Strict,
+                crate::config::RecoveryPolicy::Strict,
             );
             match strict_manifest {
                 Ok(m) => {
@@ -461,7 +461,7 @@ impl RuntimeState {
                     m
                 }
                 Err(e) => {
-                    if recovery_policy == crate::engine::RecoveryPolicy::Strict {
+                    if recovery_policy == crate::config::RecoveryPolicy::Strict {
                         return Err(MidgeError::RecoveryFailed(format!(
                             "failed to load manifest: {}",
                             e
@@ -474,7 +474,7 @@ impl RuntimeState {
                     );
                     crate::metadata::ManifestPersistence::load_with_fs_and_policy(
                         &fs,
-                        crate::engine::RecoveryPolicy::Salvage,
+                        crate::config::RecoveryPolicy::Salvage,
                     )
                     .unwrap_or_else(|salvage_error| {
                         tracing::warn!(
@@ -493,12 +493,12 @@ impl RuntimeState {
         let intent_log = if !memory_mode {
             let strict_intent = crate::runtime::IntentPersistence::load_with_fs_and_policy(
                 &fs,
-                crate::engine::RecoveryPolicy::Strict,
+                crate::config::RecoveryPolicy::Strict,
             );
             match strict_intent {
                 Ok(v) => v,
                 Err(e) => {
-                    if recovery_policy == crate::engine::RecoveryPolicy::Strict {
+                    if recovery_policy == crate::config::RecoveryPolicy::Strict {
                         return Err(MidgeError::RecoveryFailed(format!(
                             "failed to load intent log: {}",
                             e
@@ -511,7 +511,7 @@ impl RuntimeState {
                     );
                     crate::runtime::IntentPersistence::load_with_fs_and_policy(
                         &fs,
-                        crate::engine::RecoveryPolicy::Salvage,
+                        crate::config::RecoveryPolicy::Salvage,
                     )
                     .unwrap_or_else(|salvage_error| {
                         tracing::warn!(
@@ -554,10 +554,10 @@ impl RuntimeState {
                     &crate::storage::abstraction::StoragePath::new(""),
                     &mut recovery_memtables,
                     match recovery_policy {
-                        crate::engine::RecoveryPolicy::Strict => {
+                        crate::config::RecoveryPolicy::Strict => {
                             crate::wal::recovery::ReplayPolicy::Strict
                         }
-                        crate::engine::RecoveryPolicy::Salvage => {
+                        crate::config::RecoveryPolicy::Salvage => {
                             crate::wal::recovery::ReplayPolicy::SalvageValidPrefix
                         }
                     },
@@ -603,7 +603,7 @@ impl RuntimeState {
                         stats.max_sequence.unwrap_or(0)
                     }
                     Err(e) => {
-                        if recovery_policy == crate::engine::RecoveryPolicy::Strict {
+                        if recovery_policy == crate::config::RecoveryPolicy::Strict {
                             return Err(MidgeError::RecoveryFailed(format!(
                                 "WAL recovery failed: {}",
                                 e
@@ -615,7 +615,7 @@ impl RuntimeState {
                     }
                 },
                 Err(e) => {
-                    if recovery_policy == crate::engine::RecoveryPolicy::Strict {
+                    if recovery_policy == crate::config::RecoveryPolicy::Strict {
                         return Err(MidgeError::RecoveryFailed(format!(
                             "failed to initialize WAL recovery storage: {}",
                             e
@@ -723,7 +723,7 @@ impl RuntimeState {
         Ok(state)
     }
 
-    pub fn health(&self) -> crate::engine::EngineHealth {
+    pub fn health(&self) -> crate::config::EngineHealth {
         let residue = self.storage_residue_assessment();
         crate::storage::residue::classify_engine_health(crate::storage::residue::HealthInputs {
             opened_in_salvage_mode: self.opened_in_salvage_mode,
@@ -1486,7 +1486,7 @@ impl RuntimeState {
     }
 
     fn handle_recovery_issue(&mut self, message: String) -> MidgeResult<bool> {
-        if self.recovery_policy == crate::engine::RecoveryPolicy::Strict {
+        if self.recovery_policy == crate::config::RecoveryPolicy::Strict {
             return Err(MidgeError::RecoveryFailed(message));
         }
 
@@ -1520,7 +1520,7 @@ impl RuntimeState {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => {
-                if self.recovery_policy == crate::engine::RecoveryPolicy::Strict {
+                if self.recovery_policy == crate::config::RecoveryPolicy::Strict {
                     Err(MidgeError::RecoveryFailed(format!(
                         "failed to delete SST '{}' during recovery: {}",
                         sst_name, error

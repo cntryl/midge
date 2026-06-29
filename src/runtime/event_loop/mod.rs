@@ -18,8 +18,11 @@
 //! - `write_batch` — group commit write draining, backpressure / write stall
 
 mod cloud_integration;
+mod control;
 mod durability_sync;
+mod ingest;
 mod read_path;
+mod shutdown;
 mod write_batch;
 
 use crossbeam::channel::{Receiver, TryRecvError};
@@ -99,7 +102,7 @@ pub struct EventLoop {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HandleOutcome {
+pub(super) enum HandleOutcome {
     Continue,
     Break,
 }
@@ -581,7 +584,7 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<()> {
         match self.mirror_metadata_to_authoritative_cloud() {
             Ok(()) => Ok(()),
-            Err(error) if self.state.recovery_policy == crate::engine::RecoveryPolicy::Salvage => {
+            Err(error) if self.state.recovery_policy == crate::config::RecoveryPolicy::Salvage => {
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(%error, context, "cloud metadata mirror failed during salvage-capable operation");
                 Ok(())
@@ -897,165 +900,43 @@ impl EventLoop {
     ) -> HandleOutcome {
         match msg {
             RuntimeMsg::Shutdown => {
-                tracing::info!("Runtime shutting down");
-
-                // CRITICAL: Flush and wait for pending CloudAsync segments before shutdown.
-                // This ensures all writes are cloud-durable for recovery.
-                if self.wal_actor.is_cloud_async() && self.state.wal.pending_writes > 0 {
-                    match self.seal_current_cloud_segment() {
-                        Ok(Some((segment_id, _max_sequence))) => {
-                            tracing::info!(
-                                segment_id,
-                                "Enqueued final CloudAsync segment on shutdown"
-                            );
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                "Failed to seal CloudAsync segment during shutdown"
-                            );
-                        }
-                    }
-                }
-
-                // Wait for pending uploads to complete (with timeout)
-                if self.wal_actor.is_cloud_async() {
-                    if let Some(storage) = &self.hybrid_storage {
-                        let storage_arc = storage.clone();
-                        let shutdown_start = std::time::Instant::now();
-                        let shutdown_timeout = std::time::Duration::from_secs(30);
-                        let mut last_pending = usize::MAX;
-                        let mut stagnant_rounds = 0usize;
-                        while storage_arc.pending_upload_count() > 0
-                            && shutdown_start.elapsed() < shutdown_timeout
-                        {
-                            // Process uploads
-                            self.tick_hybrid_storage();
-                            self.drain_hybrid_storage_events();
-
-                            let pending = storage_arc.pending_upload_count();
-                            if pending < last_pending {
-                                last_pending = pending;
-                                stagnant_rounds = 0;
-                            } else if self.state.persistence_anomaly_detected {
-                                stagnant_rounds = stagnant_rounds.saturating_add(1);
-                                if stagnant_rounds >= 25 {
-                                    tracing::warn!(
-                                        pending,
-                                        "aborting cloud shutdown wait after repeated failed upload progress"
-                                    );
-                                    break;
-                                }
-                            }
-
-                            // Small sleep to avoid busy-waiting
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                        }
-
-                        if storage_arc.pending_upload_count() > 0 {
-                            tracing::warn!(
-                                pending = storage_arc.pending_upload_count(),
-                                "Shutdown timeout: {} pending CloudAsync uploads not completed",
-                                storage_arc.pending_upload_count()
-                            );
-                        } else {
-                            tracing::info!("All CloudAsync uploads completed on shutdown");
-                        }
-                    }
-                }
-
-                return HandleOutcome::Break;
+                return self.handle_shutdown();
             }
 
             RuntimeMsg::Noop { request_id } => {
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
+                self.handle_noop(request_id);
             }
 
             RuntimeMsg::StartupPing { request_id } => {
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
+                self.handle_startup_ping(request_id);
             }
 
             RuntimeMsg::CheckWriteStall { request_id, cf_id } => {
-                let is_stalled = self.state.should_stall_writes(cf_id);
-                self.respond(
-                    request_id,
-                    RuntimeResponse::WriteStallStatus {
-                        request_id,
-                        is_stalled,
-                    },
-                );
+                self.handle_check_write_stall(request_id, cf_id);
             }
 
             RuntimeMsg::WaitForWriteStallClear { request_id, cf_id } => {
-                if !self.state.should_stall_writes(cf_id) {
-                    self.respond(request_id, RuntimeResponse::Ok { request_id });
-                } else {
-                    self.write_stall_waiters.insert(request_id, cf_id);
-                    self.write_stall_waiter_queues
-                        .entry(cf_id)
-                        .or_default()
-                        .push_back(request_id);
-                }
-
-                self.drain_auto_flush_memtables();
+                self.handle_wait_for_write_stall_clear(request_id, cf_id);
             }
 
             RuntimeMsg::CancelWaitForWriteStallClear { wait_request_id } => {
-                let _ = self.write_stall_waiters.remove(&wait_request_id);
+                self.handle_cancel_wait_for_write_stall_clear(wait_request_id);
             }
 
             RuntimeMsg::GetReadAmpMetrics { request_id } => {
-                let metrics = &self.state.read_amp_metrics;
-                self.respond(
-                    request_id,
-                    RuntimeResponse::ReadAmpMetricsSnapshot {
-                        request_id,
-                        reads_total: metrics.reads_total(),
-                        ssts_touched_total: metrics.ssts_touched_total(),
-                        l0_ssts_touched_total: metrics.l0_ssts_touched_total(),
-                        blocks_read_total: metrics.blocks_read_total(),
-                        avg_ssts_per_read: metrics.avg_ssts_per_read(),
-                        avg_l0_ssts_per_read: metrics.avg_l0_ssts_per_read(),
-                        avg_blocks_per_read: metrics.avg_blocks_per_read(),
-                        l0_overlap_rate: metrics.l0_overlap_rate(),
-                        sst_budget_violation_rate: metrics.sst_budget_violation_rate(),
-                        block_budget_violation_rate: metrics.block_budget_violation_rate(),
-                    },
-                );
+                self.handle_get_read_amp_metrics(request_id);
             }
 
             RuntimeMsg::GetRecoveryMetrics { request_id } => {
-                self.respond(
-                    request_id,
-                    RuntimeResponse::RecoveryMetricsSnapshot {
-                        request_id,
-                        wal_recovery_records_replayed: self.state.wal_recovery_records_replayed,
-                        wal_recovery_bytes_replayed: self.state.wal_recovery_bytes_replayed,
-                        intent_log_replay_runs: self.state.intent_log_replay_runs,
-                        intent_log_entries_replayed: self.state.intent_log_entries_replayed,
-                    },
-                );
+                self.handle_get_recovery_metrics(request_id);
             }
 
             RuntimeMsg::GetRuntimeMetrics { request_id } => {
-                self.respond(
-                    request_id,
-                    RuntimeResponse::RuntimeMetricsSnapshot {
-                        request_id,
-                        snapshot: Box::new(self.state.runtime_metrics_snapshot()),
-                    },
-                );
+                self.handle_get_runtime_metrics(request_id);
             }
 
             RuntimeMsg::GetStorageLayout { request_id } => {
-                self.respond(
-                    request_id,
-                    RuntimeResponse::StorageLayoutSnapshot {
-                        request_id,
-                        snapshot: self.state.storage_layout_snapshot(),
-                    },
-                );
+                self.handle_get_storage_layout(request_id);
             }
 
             RuntimeMsg::SetRuntimeConfig {
@@ -1067,209 +948,38 @@ impl EventLoop {
                 wal_durability_policy,
                 wal_batch_config,
             } => {
-                if let Some(ms) = memtable_size_limit {
-                    self.state.memtable_size_limit = ms;
+                let outcome = self.handle_set_runtime_config(
+                    request_id,
+                    memtable_size_limit,
+                    memtable_flush_threshold,
+                    enable_compaction,
+                    l0_compaction_trigger,
+                    wal_durability_policy,
+                    wal_batch_config,
+                );
+                if outcome == HandleOutcome::Break {
+                    return outcome;
                 }
-                if let Some(th) = memtable_flush_threshold {
-                    self.state.memtable_flush_threshold = th;
-                }
-                if let Some(ec) = enable_compaction {
-                    self.state.enable_compaction = ec;
-                }
-                if let Some(trigger) = l0_compaction_trigger {
-                    self.compaction_actor.set_l0_file_count_threshold(trigger);
-                }
-
-                self.wake_write_stall_waiters();
-
-                // Apply WAL changes to the wal actor if requested
-                if wal_durability_policy.is_some() || wal_batch_config.is_some() {
-                    let policy =
-                        wal_durability_policy.unwrap_or(self.wal_actor.durability_policy());
-                    let batch_cfg = wal_batch_config.unwrap_or(self.wal_actor.batch_config());
-                    if let Err(e) = self.wal_actor.set_durability(policy, batch_cfg) {
-                        self.respond(
-                            request_id,
-                            RuntimeResponse::Error {
-                                request_id,
-                                error: crate::common::MidgeError::Internal(e.to_string()),
-                            },
-                        );
-                        return HandleOutcome::Continue;
-                    }
-                }
-
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
             }
 
             RuntimeMsg::GetRuntimeConfig { request_id } => {
-                self.respond(
-                    request_id,
-                    RuntimeResponse::RuntimeConfigSnapshot {
-                        request_id,
-                        memtable_size_limit: self.state.memtable_size_limit,
-                        memtable_flush_threshold: self.state.memtable_flush_threshold,
-                        enable_compaction: self.state.enable_compaction,
-                        l0_compaction_trigger: self.compaction_actor.l0_file_count_threshold(),
-                        wal_durability_policy: self.wal_actor.durability_policy(),
-                        wal_batch_config: self.wal_actor.batch_config(),
-                    },
-                );
+                self.handle_get_runtime_config(request_id);
             }
 
             RuntimeMsg::GetIngestState { request_id } => {
-                let active = self
-                    .state
-                    .ingest_active
-                    .load(std::sync::atomic::Ordering::SeqCst);
-                self.respond(
-                    request_id,
-                    RuntimeResponse::IngestState {
-                        request_id,
-                        ingest_active: active,
-                    },
-                );
+                self.handle_get_ingest_state(request_id);
             }
 
             RuntimeMsg::BeginIngest { request_id } => {
-                // ─────────────────────────────────────────────────────────────────────
-                // INGEST BARRIER — scope: active_compactions ONLY
-                //
-                // We wait ONLY for active compaction jobs to drain. We do NOT wait for:
-                //   - WAL sync (batched writes flush on their own schedule)
-                //   - memtable flush (handled separately on EndIngest)
-                //   - stats, maintenance, or background monitoring
-                //
-                // The invariant: once begin_ingest returns, no compaction work is
-                // running or can be scheduled until end_ingest is called.
-                // ─────────────────────────────────────────────────────────────────────
-
-                let active = self
-                    .state
-                    .active_compactions
-                    .load(std::sync::atomic::Ordering::SeqCst);
-                let current_epoch = self
-                    .state
-                    .ingest_epoch
-                    .load(std::sync::atomic::Ordering::SeqCst);
-
-                tracing::info!(
-                    component = "ingest",
-                    invariant = "begin_ingest_barrier",
-                    ingest_epoch = current_epoch,
-                    "ingest: begin_ingest requested"
-                );
-                tracing::info!(
-                    component = "ingest",
-                    invariant = "begin_ingest_barrier",
-                    active_compactions = active,
-                    ingest_epoch = current_epoch,
-                    "ingest: active_compactions={} (will wait for drain)",
-                    active
-                );
-
-                // Prevent new compactions and mark ingest active
-                self.state.enable_compaction = false;
-                self.state
-                    .ingest_active
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-
-                // Bump epoch so in-flight compactions will see the change and abort cooperatively
-                let new_epoch = self
-                    .state
-                    .ingest_epoch
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                    + 1;
-
-                // Check if active compactions are already zero
-                let active = self
-                    .state
-                    .active_compactions
-                    .load(std::sync::atomic::Ordering::SeqCst);
-
-                if active == 0 {
-                    // No active compactions; can proceed immediately
-                    tracing::info!(
-                        component = "ingest",
-                        invariant = "begin_ingest_barrier",
-                        ingest_epoch = new_epoch,
-                        "ingest: ingestion barrier enabled — no active compactions to drain"
-                    );
-                    self.respond(request_id, RuntimeResponse::Ok { request_id });
-                } else {
-                    // Queue request to be completed when active_compactions reaches 0.
-                    // Don't block the event loop — check completion in CompactionComplete handler.
-                    let mut pending = self.state.pending_compaction_waits.lock();
-                    pending.insert(request_id, format!("BeginIngest(epoch={})", new_epoch));
-                    tracing::debug!(
-                        component = "ingest",
-                        "begin_ingest queued; waiting for {} active compactions to drain (epoch={})",
-                        active,
-                        new_epoch
-                    );
-                }
+                self.handle_begin_ingest(request_id);
             }
 
             RuntimeMsg::EndIngest { request_id } => {
-                tracing::info!("EndIngest: flushing memtables and restoring scheduling");
-
-                // Trigger flush for each column family to ensure memtables are persisted
-                let cf_ids: Vec<u32> = self.state.column_families.keys().cloned().collect();
-                for cf_id in cf_ids {
-                    // Flush and complete bookkeeping
-                    if let Ok(sst_name) = self.flush_actor.handle_flush(
-                        &mut self.state,
-                        cf_id,
-                        self.hybrid_storage.as_ref(),
-                    ) {
-                        let sequence = self.state.sequence;
-                        let _ = self.publish_flushed_sst(
-                            cf_id,
-                            &sst_name.sst_name,
-                            sequence,
-                            sst_name.file_meta,
-                        );
-                    }
-                }
-                self.wake_write_stall_waiters();
-
-                // Bump epoch again to invalidate any in-flight compactions that missed the earlier epoch
-                let new_epoch = self
-                    .state
-                    .ingest_epoch
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                    + 1;
-                tracing::info!(
-                    ingest_epoch = new_epoch,
-                    "EndIngest: ingestion barrier lifted"
-                );
-
-                // Clear ingest active before resuming compaction scheduling
-                self.state
-                    .ingest_active
-                    .store(false, std::sync::atomic::Ordering::SeqCst);
-
-                // Optionally kick compaction checks once so background compaction resumes
-                if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
-                    let _ = self.compaction_actor.run_compaction(
-                        &mut self.state,
-                        plan,
-                        self.hybrid_storage.as_ref(),
-                        self.worker_msg_tx.clone(),
-                    );
-                }
-
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
+                self.handle_end_ingest(request_id);
             }
 
             RuntimeMsg::GetCurrentSequence { request_id } => {
-                self.respond(
-                    request_id,
-                    RuntimeResponse::CurrentSequence {
-                        request_id,
-                        sequence: self.state.sequence,
-                    },
-                );
+                self.handle_get_current_sequence(request_id);
             }
 
             RuntimeMsg::CaptureReadSnapshot {

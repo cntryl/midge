@@ -107,7 +107,7 @@ impl GcsProvider {
     pub(crate) fn with_bearer_credential_endpoint(
         bucket: String,
         project_id: String,
-        source: &crate::engine::api::GcsCredentialSource,
+        source: &crate::config::GcsCredentialSource,
         endpoint: Option<String>,
     ) -> MidgeResult<Self> {
         let provider = GcsTokenProvider::from_source(source)?;
@@ -197,7 +197,7 @@ impl Drop for GcsProvider {
 }
 
 pub(crate) fn resolve_bearer_token_from_source(
-    source: &crate::engine::api::GcsCredentialSource,
+    source: &crate::config::GcsCredentialSource,
 ) -> MidgeResult<String> {
     Ok(GcsTokenProvider::from_source(source)?
         .fetch_token()?
@@ -249,26 +249,22 @@ enum GcsTokenProvider {
 }
 
 impl GcsTokenProvider {
-    fn from_source(source: &crate::engine::api::GcsCredentialSource) -> MidgeResult<Self> {
+    fn from_source(source: &crate::config::GcsCredentialSource) -> MidgeResult<Self> {
         match source {
-            crate::engine::api::GcsCredentialSource::BearerToken { token } => {
+            crate::config::GcsCredentialSource::BearerToken { token } => {
                 Ok(Self::StaticBearer(token.clone()))
             }
-            crate::engine::api::GcsCredentialSource::ApplicationDefault => {
-                Ok(Self::ApplicationDefault)
-            }
-            crate::engine::api::GcsCredentialSource::ServiceAccountJsonFile { path } => {
+            crate::config::GcsCredentialSource::ApplicationDefault => Ok(Self::ApplicationDefault),
+            crate::config::GcsCredentialSource::ServiceAccountJsonFile { path } => {
                 Ok(Self::ServiceAccountFile(path.clone()))
             }
-            crate::engine::api::GcsCredentialSource::AuthorizedUserJsonFile { path } => {
+            crate::config::GcsCredentialSource::AuthorizedUserJsonFile { path } => {
                 Ok(Self::AuthorizedUserFile(path.clone()))
             }
-            crate::engine::api::GcsCredentialSource::MetadataServer => Ok(Self::MetadataServer),
-            crate::engine::api::GcsCredentialSource::HmacKey { .. } => {
-                Err(MidgeError::InvalidArgument(
-                    "GCS HMAC credentials are not bearer-token credentials".to_string(),
-                ))
-            }
+            crate::config::GcsCredentialSource::MetadataServer => Ok(Self::MetadataServer),
+            crate::config::GcsCredentialSource::HmacKey { .. } => Err(MidgeError::InvalidArgument(
+                "GCS HMAC credentials are not bearer-token credentials".to_string(),
+            )),
         }
     }
 

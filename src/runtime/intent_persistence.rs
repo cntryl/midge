@@ -20,12 +20,12 @@ impl IntentPersistence {
     pub fn load_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     ) -> Result<Vec<IntentLogEntry>, String> {
-        Self::load_with_fs_and_policy(fs, crate::engine::RecoveryPolicy::Strict)
+        Self::load_with_fs_and_policy(fs, crate::config::RecoveryPolicy::Strict)
     }
 
     pub fn load_with_fs_and_policy(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
-        recovery_policy: crate::engine::RecoveryPolicy,
+        recovery_policy: crate::config::RecoveryPolicy,
     ) -> Result<Vec<IntentLogEntry>, String> {
         use crate::io::traits::FsPath;
 
@@ -57,7 +57,7 @@ impl IntentPersistence {
             .read_at(0, len)
             .map_err(|e| format!("failed to read intent file: {:?}", e))?;
         let intents: Vec<IntentLogEntry> = serde_json::from_slice(&data).map_err(|e| {
-            if recovery_policy == crate::engine::RecoveryPolicy::Strict {
+            if recovery_policy == crate::config::RecoveryPolicy::Strict {
                 format!("failed to parse intent JSON: {}", e)
             } else {
                 format!("failed to parse intent JSON (salvage mode): {}", e)
@@ -69,12 +69,12 @@ impl IntentPersistence {
     }
 
     pub fn load(db_path: &Path) -> Result<Vec<IntentLogEntry>, String> {
-        Self::load_with_policy(db_path, crate::engine::RecoveryPolicy::Strict)
+        Self::load_with_policy(db_path, crate::config::RecoveryPolicy::Strict)
     }
 
     pub fn load_with_policy(
         db_path: &Path,
-        recovery_policy: crate::engine::RecoveryPolicy,
+        recovery_policy: crate::config::RecoveryPolicy,
     ) -> Result<Vec<IntentLogEntry>, String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;

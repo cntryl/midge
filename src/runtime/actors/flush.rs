@@ -271,9 +271,9 @@ impl FlushActor {
         }
         let add_ns = add_start.elapsed().as_nanos();
 
-        // Finish and write to path (finish_to_path does its own timing)
+        // Finish and write to path (helper records its own timing)
         let finish_start = std::time::Instant::now();
-        Box::new(writer).finish_to_path(path)?;
+        crate::sst::fs::finish_writer_to_path(writer, path)?;
         let finish_ns = finish_start.elapsed().as_nanos();
 
         tracing::info!(path = ?path, added = added_count, add_ms = (add_ns as f64) / 1_000_000.0, finish_ms = (finish_ns as f64) / 1_000_000.0, "memtable -> sst flush breakdown");

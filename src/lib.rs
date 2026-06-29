@@ -26,6 +26,7 @@
 
 // Foundation - no dependencies
 pub mod common;
+pub mod config;
 
 // Internal modules — used by engine/runtime; the compiler reports "dead" because
 // no external crate references them. They are exercised by unit tests within each module.

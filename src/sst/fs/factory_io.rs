@@ -321,7 +321,7 @@ mod tests {
         writer.add_with_meta(b"alpha", None, 9, 2, None)?;
         writer.add_with_meta(b"beta", Some(b"value-b"), 8, 1, None)?;
         writer.add_range_tombstone(b"cat", b"cow", 7)?;
-        writer.finish_to_path(&path)?;
+        crate::sst::fs::finish_writer_to_path(writer, &path)?;
 
         // Act
         let reader = factory.open(std::path::Path::new("stateful.sst"))?;

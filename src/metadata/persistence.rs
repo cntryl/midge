@@ -82,13 +82,13 @@ impl ManifestPersistence {
     pub fn load_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     ) -> Result<Manifest, String> {
-        Self::load_with_fs_and_policy(fs, crate::engine::RecoveryPolicy::Strict)
+        Self::load_with_fs_and_policy(fs, crate::config::RecoveryPolicy::Strict)
     }
 
     /// Load manifest using the requested recovery policy.
     pub fn load_with_fs_and_policy(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
-        recovery_policy: crate::engine::RecoveryPolicy,
+        recovery_policy: crate::config::RecoveryPolicy,
     ) -> Result<Manifest, String> {
         use crate::io::traits::FsPath;
 
@@ -121,7 +121,7 @@ impl ManifestPersistence {
                 tracing::info!(replayed = edits.len(), "manifest journal replayed");
             }
             Err(e) => {
-                if recovery_policy == crate::engine::RecoveryPolicy::Strict {
+                if recovery_policy == crate::config::RecoveryPolicy::Strict {
                     return Err(format!("failed to replay manifest journal: {}", e));
                 }
                 tracing::warn!(error = %e, "failed to replay manifest journal; proceeding with snapshot only");
@@ -216,13 +216,13 @@ impl ManifestPersistence {
 
     /// Load manifest using a RealFs (compat wrapper)
     pub fn load(db_path: &Path) -> Result<Manifest, String> {
-        Self::load_with_policy(db_path, crate::engine::RecoveryPolicy::Strict)
+        Self::load_with_policy(db_path, crate::config::RecoveryPolicy::Strict)
     }
 
     /// Load manifest using a RealFs with an explicit recovery policy.
     pub fn load_with_policy(
         db_path: &Path,
-        recovery_policy: crate::engine::RecoveryPolicy,
+        recovery_policy: crate::config::RecoveryPolicy,
     ) -> Result<Manifest, String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;

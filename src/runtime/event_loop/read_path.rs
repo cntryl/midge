@@ -243,7 +243,7 @@ mod tests {
         let factory = std::sync::Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
         let mut writer = factory.create()?;
         writer.add_with_meta(b"a", Some(b"va".as_ref()), 10, 0, None)?;
-        Box::new(writer).finish_to_path(&sst_path)?;
+        crate::sst::fs::finish_writer_to_path(writer, &sst_path)?;
 
         // Add manifest entry pointing to the SST we just wrote
         let file_meta = crate::metadata::FileMeta {

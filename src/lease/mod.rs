@@ -37,7 +37,7 @@ pub use heartbeat::LeaseHeartbeat;
 pub use traits::{format_leader_record, parse_leader_record, LeaderRecord};
 pub use traits::{LeaderStore, LeaseError, LeaseGuard, PrimaryLease};
 
-use crate::engine::api::Storage;
+use crate::config::Storage;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 

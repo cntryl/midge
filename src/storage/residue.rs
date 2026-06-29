@@ -1,4 +1,4 @@
-use crate::engine::EngineHealth;
+use crate::config::EngineHealth;
 use crate::metadata::Manifest;
 use std::collections::HashSet;
 use std::path::Path;
