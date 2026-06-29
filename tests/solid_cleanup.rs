@@ -15,6 +15,14 @@ fn read_source(relative: &str) -> String {
     fs::read_to_string(source_path(relative)).expect("source file should be readable")
 }
 
+fn production_source(relative: &str) -> String {
+    read_source(relative)
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).expect("source directory should be readable") {
         let entry = entry.expect("source directory entry should be readable");
@@ -93,6 +101,63 @@ fn should_construct_runtime_observability_dtos_from_shared_types() {
     assert!(!engine.contains("pub struct StorageLayoutSnapshot"));
     assert!(shared.contains("pub struct RuntimeMetricsSnapshot"));
     assert!(shared.contains("pub struct StorageLayoutSnapshot"));
+}
+
+#[test]
+fn should_keep_event_loop_message_families_in_owned_coordinators() {
+    // Arrange
+    let event_loop = production_source("src/runtime/event_loop/mod.rs");
+    let dispatcher = read_source("src/runtime/event_loop/dispatch.rs");
+    let coordinator_files = [
+        ("src/runtime/event_loop/wal.rs", "struct WalCoordinator"),
+        ("src/runtime/event_loop/flush.rs", "struct FlushCoordinator"),
+        (
+            "src/runtime/event_loop/compaction.rs",
+            "struct CompactionCoordinator",
+        ),
+        (
+            "src/runtime/event_loop/manifest.rs",
+            "struct ManifestCoordinator",
+        ),
+        ("src/runtime/event_loop/gc.rs", "struct GcCoordinator"),
+        ("src/runtime/event_loop/cloud.rs", "struct CloudCoordinator"),
+        (
+            "src/runtime/event_loop/snapshot.rs",
+            "struct SnapshotCoordinator",
+        ),
+    ];
+    let forbidden_inline_handlers = [
+        "RuntimeMsg::ApplyTransaction",
+        "RuntimeMsg::FlushMemtable",
+        "RuntimeMsg::CompactionComplete",
+        "RuntimeMsg::ManifestCreateColumnFamily",
+        "RuntimeMsg::DeleteObsoleteSsts",
+        "RuntimeMsg::CloudUploadSst",
+    ];
+
+    // Act / Assert
+    assert!(event_loop.contains("RuntimeDispatcher::handle"));
+    for pattern in forbidden_inline_handlers {
+        assert!(
+            !event_loop.contains(pattern),
+            "EventLoop core should not inline message family handler {pattern}"
+        );
+    }
+    for (file, marker) in coordinator_files {
+        let content = read_source(file);
+        assert!(content.contains(marker), "{file} should define {marker}");
+        assert!(
+            !content.contains("impl EventLoop"),
+            "{file} should own behavior through a coordinator, not an EventLoop impl dump"
+        );
+        let coordinator_name = marker
+            .strip_prefix("struct ")
+            .expect("marker should name a struct");
+        assert!(
+            dispatcher.contains(coordinator_name),
+            "dispatcher should delegate to {coordinator_name}"
+        );
+    }
 }
 
 #[test]
