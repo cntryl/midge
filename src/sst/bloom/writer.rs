@@ -90,8 +90,10 @@ impl BloomWriter {
         if estimated_keys == 0 || num_bits == 0 {
             return 1;
         }
-        let bits_per_key = (num_bits as f64) / (estimated_keys as f64);
-        let k_opt = (bits_per_key * std::f64::consts::LN_2).round() as u8;
+        let bits_per_key =
+            f64::from(usize_to_u32(num_bits)) / f64::from(usize_to_u32(estimated_keys));
+        let rounded = (bits_per_key * std::f64::consts::LN_2).round();
+        let k_opt = rounded.to_string().parse::<u8>().unwrap_or(u8::MAX);
         k_opt.clamp(1, 8)
     }
 
@@ -100,11 +102,11 @@ impl BloomWriter {
         // Compute both hashes ONCE (Kirsch-Mitzenmacher optimization)
         let h1 = xxh3_64_with_seed(key, SEED1);
         let h2 = xxh3_64_with_seed(key, SEED2);
-        let num_bits = self.num_bits as u64;
+        let num_bits = usize_to_u64(self.num_bits);
 
         for i in 0..u64::from(self.k) {
             let combined = h1.wrapping_add(i.wrapping_mul(h2));
-            let bit_index = (combined % num_bits) as usize;
+            let bit_index = u64_to_usize(combined % num_bits);
             let byte_index = bit_index / 8;
             let bit_offset = bit_index % 8;
 
@@ -125,8 +127,12 @@ impl BloomWriter {
 
         let ln_p = p.ln();
         let ln_2_sq = 2.0_f64.ln().powi(2);
-        let m = -(n as f64) * ln_p / ln_2_sq;
-        (m.ceil() as usize).max(64) // Minimum 64 bits
+        let m = -f64::from(usize_to_u32(n)) * ln_p / ln_2_sq;
+        m.ceil()
+            .to_string()
+            .parse::<usize>()
+            .unwrap_or(usize::MAX)
+            .max(64)
     }
 
     /// Finalize and return the bloom filter reader
@@ -158,11 +164,11 @@ impl BloomFilterOps for BloomWriter {
         // Compute both hashes ONCE (Kirsch-Mitzenmacher optimization)
         let h1 = xxh3_64_with_seed(key, SEED1);
         let h2 = xxh3_64_with_seed(key, SEED2);
-        let num_bits = self.num_bits as u64;
+        let num_bits = usize_to_u64(self.num_bits);
 
         for i in 0..u64::from(self.k) {
             let combined = h1.wrapping_add(i.wrapping_mul(h2));
-            let bit_index = (combined % num_bits) as usize;
+            let bit_index = u64_to_usize(combined % num_bits);
             let byte_index = bit_index / 8;
             let bit_offset = bit_index % 8;
 
@@ -185,15 +191,29 @@ impl BloomFilterOps for BloomWriter {
 
     fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
+        let num_bits = usize_to_u32(self.num_bits);
+        let key_count = usize_to_u32(self.key_count);
 
         // Format: [num_bits: u32][key_count: u32][k: u8][bits: variable]
-        result.extend_from_slice(&(self.num_bits as u32).to_le_bytes());
-        result.extend_from_slice(&(self.key_count as u32).to_le_bytes());
+        result.extend_from_slice(&num_bits.to_le_bytes());
+        result.extend_from_slice(&key_count.to_le_bytes());
         result.push(self.k);
         result.extend_from_slice(&self.bits);
 
         result
     }
+}
+
+fn u64_to_usize(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn usize_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]

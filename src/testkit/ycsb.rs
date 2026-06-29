@@ -3,10 +3,11 @@
 //! These helpers are intentionally deterministic and "boring": Tier-4 aims to
 //! measure steady-state behavior over time (load → warm-up → measured).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Barrier;
 use std::thread;
+use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
 use crate::engine::api;
@@ -81,6 +82,8 @@ pub fn make_value(fill: u8) -> Vec<u8> {
 }
 
 #[must_use]
+/// # Panics
+/// Panics if the engine cannot be opened with the derived Tier-4 options.
 pub fn open_tier4_engine(mut opts: MidgeOptions) -> Engine {
     // Tier-4 workloads should exercise the full system shape.
     opts.enable_compaction = true;
@@ -98,6 +101,9 @@ pub fn open_tier4_engine(mut opts: MidgeOptions) -> Engine {
     Engine::open_with_options(opts).expect("open tier4 engine")
 }
 
+/// # Panics
+/// Panics if transaction creation, writes, commits, or the final flush fail
+/// during deterministic dataset loading.
 pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_keys: usize) {
     // Load is not measured; optimize aggressively to keep Tier-4 runs practical.
     // Use WriteOptions::best_effort() for fastest loading of initial dataset:
@@ -118,7 +124,6 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
     // Hard-coded sensible defaults (no env lookups):
     // - Batch size: increased from 20k to 50k to amortize commit overhead.
     // - Threads: use available CPU cores, but never exceed the number of keys.
-    const DEFAULT_BATCH_OPS: usize = 50_000;
     let batch_ops: usize = DEFAULT_BATCH_OPS;
 
     let threads: usize = std::cmp::min(initial_keys.max(1), num_cpus::get().max(1));
@@ -137,9 +142,9 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
             .expect("begin_tx failed");
         let mut count = 0;
 
-        for i in 0..initial_keys as u64 {
+        for i in 0..usize_to_u64(initial_keys) {
             let k = make_key(i);
-            let v = make_value((i as usize % 251) as u8);
+            let v = make_value(fill_byte(i));
 
             tx.put(k.to_vec(), v, None).expect("put failed");
             count += 1;
@@ -185,9 +190,9 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
                         .expect("begin_tx failed");
                     let mut count = 0usize;
                     for i in start..end {
-                        let i = i as u64;
+                        let i = usize_to_u64(i);
                         let k = make_key(i);
-                        let v = make_value((i as usize % 251) as u8);
+                        let v = make_value(fill_byte(i));
                         tx.put(k.to_vec(), v, None).expect("put failed");
                         count += 1;
                         if count >= batch_ops {
@@ -242,7 +247,7 @@ where
 
     loop {
         // Reduce the cost of time checks in tight loops.
-        if (ops & 0xFF) == 0 && Instant::now() >= deadline {
+        if ops.trailing_zeros() >= 8 && Instant::now() >= deadline {
             break;
         }
 
@@ -268,7 +273,7 @@ fn splitmix64(mut x: u64) -> u64 {
 #[must_use]
 pub fn deterministic_u64(seed: u64, client_id: usize, op_index: u64, draw_index: u64) -> u64 {
     let base = seed
-        ^ ((client_id as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93))
+        ^ (usize_to_u64(client_id).wrapping_mul(0xD6E8_FEB8_6659_FD93))
         ^ op_index
         ^ draw_index.rotate_left(17);
     splitmix64(base)
@@ -281,6 +286,10 @@ pub fn deterministic_u64(seed: u64, client_id: usize, op_index: u64, draw_index:
 /// - No sleeps
 /// - No panics on expected backpressure
 /// - Cancellation-aware via the shared `stop` flag
+///
+/// # Errors
+/// Returns any non-`WriteStall` engine error from `op`, or any error returned
+/// while waiting for backpressure to clear.
 pub fn retry_write_stall<F>(
     engine: &MidgeEngine,
     cf_id: crate::engine::ColumnFamilyId,
@@ -308,7 +317,6 @@ where
                         break;
                     }
                 }
-                continue;
             }
             Err(e) => return Err(e),
         }
@@ -321,8 +329,13 @@ where
 /// - One shared engine instance (passed by `Arc`)
 /// - Each client runs a tight loop with no sleeps/pacing
 /// - The only shared state between clients is the engine and the stop flag
+///
+/// # Panics
+/// Panics if the expected benchmark column family does not exist, the optional
+/// watchdog detects a stall, or a client thread panics before reporting its
+/// completed operation count.
 pub fn run_multi_client_for_duration<MakeClient, Step>(
-    engine: Arc<MidgeEngine>,
+    engine: &Arc<MidgeEngine>,
     clients: usize,
     duration: Duration,
     make_client: MakeClient,
@@ -331,9 +344,6 @@ where
     MakeClient: Fn(usize, Arc<AtomicBool>) -> Step,
     Step: FnMut(&MidgeEngine, &ColumnFamilyHandle, u64) + Send + 'static,
 {
-    use std::sync::atomic::AtomicU64;
-    use std::time::SystemTime;
-
     let stop = Arc::new(AtomicBool::new(false));
     let barrier = Arc::new(Barrier::new(clients + 1));
     let mut handles = Vec::with_capacity(clients);
@@ -346,14 +356,10 @@ where
         .unwrap_or(30);
 
     // Shared last-op timestamp (milliseconds since UNIX_EPOCH).
-    let last_op_ts = Arc::new(AtomicU64::new(
-        SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64),
-    ));
+    let last_op_ts = Arc::new(AtomicU64::new(millis_since_epoch()));
 
     for client_id in 0..clients {
-        let engine = Arc::clone(&engine);
+        let engine = Arc::clone(engine);
         let stop = Arc::clone(&stop);
         let barrier = Arc::clone(&barrier);
         let mut client_step = make_client(client_id, Arc::clone(&stop));
@@ -376,7 +382,7 @@ where
             // Without this, all threads hit their first commit simultaneously,
             // preventing the write group coordinator from batching.
             if client_id > 0 {
-                std::thread::sleep(Duration::from_micros(client_id as u64 * 50));
+                std::thread::sleep(Duration::from_micros(usize_to_u64(client_id) * 50));
             }
 
             let mut op_index: u64 = 0;
@@ -387,17 +393,15 @@ where
 
             while !stop.load(Ordering::Acquire) {
                 let start = Instant::now();
-                client_step(&engine, &cf, op_index);
+                client_step(engine.as_ref(), &cf, op_index);
                 let elapsed = start.elapsed();
 
                 // Update heartbeat timestamp after each logical operation.
-                let now_ms = SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis() as u64);
+                let now_ms = millis_since_epoch();
                 last_op_ts.store(now_ms, Ordering::Release);
 
                 if let Some(threshold) = slow_op_ms {
-                    let el_ms = elapsed.as_millis() as u64;
+                    let el_ms = u128_to_u64(elapsed.as_millis());
                     if el_ms >= threshold {
                         eprintln!(
                             "[midge][ycsb][slow_op] client={client_id} op_index={op_index} elapsed_ms={el_ms} threshold_ms={threshold}"
@@ -424,9 +428,7 @@ where
                 if stop.load(Ordering::Acquire) {
                     break;
                 }
-                let now_ms = SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis() as u64);
+                let now_ms = millis_since_epoch();
                 let last_ms = last_op_ts.load(Ordering::Acquire);
                 let elapsed = now_ms.saturating_sub(last_ms);
                 if elapsed >= watchdog_secs.saturating_mul(1000) {
@@ -456,4 +458,24 @@ where
     }
 
     total_ops
+}
+
+const DEFAULT_BATCH_OPS: usize = 50_000;
+
+fn fill_byte(value: u64) -> u8 {
+    u8::try_from(value % 251).unwrap_or(0)
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn u128_to_u64(value: u128) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn millis_since_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| u128_to_u64(duration.as_millis()))
 }
