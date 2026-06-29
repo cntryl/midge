@@ -43,7 +43,7 @@ pub enum Durability {
     Durable,
 }
 
-/// Portable path type - avoids std::path pollution in abstraction
+/// Portable path type - avoids `std::path` pollution in abstraction
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FsPath(pub String);
 
@@ -86,10 +86,12 @@ impl FileCaps {
     pub const APPENDV: FileCaps = FileCaps(1 << 2); // Vectored append
     pub const READ_RANGES: FileCaps = FileCaps(1 << 3); // Multi-range read
 
+    #[must_use]
     pub const fn empty() -> Self {
         FileCaps(0)
     }
 
+    #[must_use]
     pub const fn contains(self, other: Self) -> bool {
         (self.0 & other.0) != 0
     }
@@ -125,15 +127,34 @@ pub struct DirEntry {
 /// Individual file handle with read/write operations
 pub trait File: Send {
     /// Read at specific offset
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the read cannot be satisfied by the backing
+    /// filesystem or storage backend.
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes>;
 
     /// Write at specific offset
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the write cannot be completed by the backing
+    /// filesystem or storage backend.
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()>;
 
     /// Append to end of file, return starting offset
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the append cannot be completed by the backing
+    /// filesystem or storage backend.
     fn append(&mut self, data: Bytes) -> FsResult<u64>;
 
     /// Get file length
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file length cannot be queried.
     fn len(&self) -> FsResult<u64>;
 
     /// Check if file is empty
@@ -142,12 +163,24 @@ pub trait File: Send {
     }
 
     /// Sync to storage device according to durability level
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requested durability cannot be reached.
     fn sync(&mut self, dur: Durability) -> FsResult<()>;
 
     /// Close file (called on drop)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be closed cleanly.
     fn close(self: Box<Self>) -> FsResult<()>;
 
     /// Vectored read at explicit offset (implementations can optimize)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the vectored read cannot be completed.
     fn readv_at(&self, offset: u64, bufs: &mut [IoSliceMut<'_>]) -> FsResult<u64> {
         // Default: fall back to scalar read then copy
         let need: usize = bufs.iter().map(|b| b.len()).sum();
@@ -164,6 +197,10 @@ pub trait File: Send {
     }
 
     /// Vectored write at explicit offset (implementations can optimize)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the vectored write cannot be completed.
     fn writev_at(&mut self, offset: u64, bufs: &[IoSlice<'_>]) -> FsResult<u64> {
         // Default: coalesce then write
         let mut total = 0usize;
@@ -179,6 +216,10 @@ pub trait File: Send {
     }
 
     /// Vectored append (WAL hot path - implementations can optimize)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the append cannot be completed.
     fn appendv(&mut self, bufs: &[IoSlice<'_>]) -> FsResult<u64> {
         // Default: coalesce then append
         let mut total = 0usize;
@@ -193,11 +234,15 @@ pub trait File: Send {
     }
 
     /// Read multiple ranges in one operation (implementations can optimize)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any requested range cannot be read.
     fn read_ranges(&self, ranges: &[ReadRange]) -> FsResult<Vec<Bytes>> {
         // Default: N scalar reads
         let mut out = Vec::with_capacity(ranges.len());
         for r in ranges {
-            out.push(self.read_at(r.offset, r.len as u64)?);
+            out.push(self.read_at(r.offset, u64::from(r.len))?);
         }
         Ok(out)
     }
@@ -210,6 +255,11 @@ pub trait File: Send {
     /// Try to acquire an exclusive lock on this file (non-blocking).
     /// Used for instance exclusivity (primary lease).
     /// Returns Ok(()) if lock acquired, Err if already locked or unsupported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lock is already held or the backend does not
+    /// support file locking.
     fn try_lock_exclusive(&self) -> FsResult<()> {
         Err(FsError::Unsupported(
             "exclusive locking not supported".to_string(),
@@ -218,6 +268,10 @@ pub trait File: Send {
 
     /// Release an exclusive lock on this file.
     /// Idempotent - safe to call even if not locked.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend does not support file locking.
     fn unlock(&self) -> FsResult<()> {
         Err(FsError::Unsupported(
             "exclusive locking not supported".to_string(),
@@ -230,11 +284,19 @@ pub trait Fs: Send + Sync + 'static {
     // --- Files ---
 
     /// Open a file
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path cannot be opened with the requested options.
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>>;
 
     /// Optional optimized method: open a persistent append handle with 'static lifetime.
     /// Implementations that can return a 'static file (e.g., real OS-backed files) may
     /// provide an implementation. Default: return Unsupported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend cannot create the handle or does not support it.
     fn open_persistent_handle(
         &self,
         _path: &FsPath,
@@ -246,31 +308,63 @@ pub trait Fs: Send + Sync + 'static {
     }
 
     /// Remove a file
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be removed.
     fn remove_file(&self, path: &FsPath) -> FsResult<()>;
 
     /// Check if file exists
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the existence check cannot be completed.
     fn exists(&self, path: &FsPath) -> FsResult<bool>;
 
     /// Get file metadata
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when metadata cannot be read.
     fn metadata(&self, path: &FsPath) -> FsResult<Metadata>;
 
     // --- Directories ---
 
     /// Create directory and all parents
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the directory hierarchy cannot be created.
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()>;
 
     /// List directory contents
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the directory cannot be enumerated.
     fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>>;
 
     /// Remove directory and all contents
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the directory tree cannot be removed.
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()>;
 
     /// Sync directory metadata to storage
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when directory metadata cannot be durably synced.
     fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()>;
 
     // --- Atomicity ---
 
     /// Atomic rename (same filesystem/volume)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the atomic rename cannot be completed.
     fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()>;
 }
 

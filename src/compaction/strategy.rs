@@ -54,7 +54,7 @@ impl CompactionPlan {
 /// Level size rules:
 ///   L0: special-case, file-count or size-based threshold.
 ///   L1: explicitly configured target.
-///   Ln (n >= 2): L1_target * level_multiplier^(n - 1)
+///   Ln (n >= 2): `L1_target` * `level_multiplier^(n` - 1)
 #[derive(Debug, Clone)]
 pub struct LeveledCompactionConfig {
     pub l0_compaction_threshold: u64,
@@ -122,7 +122,7 @@ impl Compactor {
         if l0_size > self.config.l0_compaction_threshold
             || l0_count >= self.config.l0_file_count_threshold
         {
-            return self.plan_zero_level(&levels, cf_id);
+            return Self::plan_zero_level(&levels, cf_id);
         }
 
         // ---------------------------
@@ -130,7 +130,8 @@ impl Compactor {
         // ---------------------------
         for level in 1..self.config.max_levels - 1 {
             let level_size: u64 = levels[level].iter().map(|f| f.size_bytes).sum();
-            let target_size = self.level_target_size(level as u32);
+            let target_size =
+                self.level_target_size(u32::try_from(level).expect("level index fits in u32"));
 
             if level_size > target_size {
                 return self.plan_inner_level(&levels, cf_id, level);
@@ -143,7 +144,7 @@ impl Compactor {
     /// Classic leveled size rule:
     ///   level=0: threshold tuned for L0
     ///   level=1: explicitly configured
-    ///   level>=2: l1_target_size * (multiplier^(level - 1))
+    ///   level>=2: `l1_target_size` * (multiplier^(level - 1))
     fn level_target_size(&self, level: u32) -> u64 {
         match level {
             0 => self.config.l0_compaction_threshold,
@@ -161,7 +162,7 @@ impl Compactor {
     ///
     /// **Read-aware compaction**: Prioritizes files by read heat to reduce
     /// read amplification. Hot files (frequently accessed) are compacted first.
-    fn plan_zero_level(&self, levels: &[Vec<&FileMeta>], cf_id: u32) -> Option<CompactionPlan> {
+    fn plan_zero_level(levels: &[Vec<&FileMeta>], cf_id: u32) -> Option<CompactionPlan> {
         if levels[0].is_empty() {
             return None;
         }
@@ -217,8 +218,8 @@ impl Compactor {
         Some(CompactionPlan {
             input_files,
             output_files: Vec::new(),
-            source_level: level as u32,
-            target_level: (level + 1) as u32,
+            source_level: u32::try_from(level).expect("level index fits in u32"),
+            target_level: u32::try_from(level + 1).expect("level index fits in u32"),
             cf_id,
             output_seq: 0,
             snapshot_horizon: None,
@@ -226,7 +227,7 @@ impl Compactor {
     }
 }
 
-/// Extract smallest and largest user keys across a slice of FileMeta.
+/// Extract smallest and largest user keys across a slice of `FileMeta`.
 fn smallest_and_largest(files: &[&FileMeta]) -> Option<(Vec<u8>, Vec<u8>)> {
     let smallest = files.iter().filter_map(|f| f.smallest_key.clone()).min();
     let largest = files.iter().filter_map(|f| f.largest_key.clone()).max();
@@ -237,7 +238,7 @@ fn smallest_and_largest(files: &[&FileMeta]) -> Option<(Vec<u8>, Vec<u8>)> {
     }
 }
 
-/// Return names of files whose key-ranges overlap [min_key, max_key].
+/// Return names of files whose key-ranges overlap [`min_key`, `max_key`].
 fn overlap_with_range(files: &[&FileMeta], min_key: &[u8], max_key: &[u8]) -> Vec<String> {
     files
         .iter()
@@ -289,7 +290,7 @@ mod tests {
             smallest_seq: None,
             largest_seq: None,
             sublevel: 0,
-            read_count: Default::default(),
+            read_count: std::sync::Arc::default(),
         }
     }
 
@@ -545,9 +546,9 @@ mod tests {
         let count_threshold = compactor.config.l0_file_count_threshold;
 
         let mut files = Vec::new();
-        for i in 0..count_threshold + 1 {
+        for i in 0..=count_threshold {
             files.push(make_file(
-                &format!("file{}.sst", i),
+                &format!("file{i}.sst"),
                 0,
                 0,
                 1000,

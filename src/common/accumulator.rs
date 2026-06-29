@@ -26,7 +26,7 @@ struct WaitHandle<R> {
     condvar: Condvar,
 }
 
-/// Receiver for accumulator result (replaces std::mpsc::Receiver).
+/// Receiver for accumulator result (replaces `std::mpsc::Receiver`).
 /// Allows waiting for the batch result without per-waiter channel allocation.
 #[derive(Debug, Clone)]
 pub struct AccumulatorReceiver<R> {
@@ -35,6 +35,12 @@ pub struct AccumulatorReceiver<R> {
 
 impl<R: Clone> AccumulatorReceiver<R> {
     /// Wait for and receive the result (blocks until flush completes).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the wait handle is signaled without a result, which indicates
+    /// a broken accumulator invariant.
+    #[must_use]
     pub fn recv(&self) -> R {
         let mut guard = self.handle.result.lock();
         // Wait until result is available
@@ -55,6 +61,7 @@ where
     R: Clone,
 {
     /// Create a new accumulator
+    #[must_use]
     pub fn new() -> Self {
         Self {
             state: Mutex::new(State {
@@ -120,7 +127,7 @@ where
         let mut s = self.state.lock();
         let mut out = Vec::new();
         for (v, _) in s.pending.drain(..) {
-            out.push(v)
+            out.push(v);
         }
         out
     }
