@@ -90,9 +90,11 @@ pub use types::{
 
 // Configuration
 pub use engine::{
+    Goal, MemoryBudget, OpenOptions, RecoveryPolicy, Storage, WorkloadProfile, WriteOptions,
+};
+pub use storage::providers::{
     AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, GcsApiStyle,
-    GcsCredentialSource, Goal, MemoryBudget, OpenOptions, RecoveryPolicy, S3CredentialSource,
-    Storage, WorkloadProfile, WriteOptions,
+    GcsCredentialSource, S3CredentialSource,
 };
 
 // Key/value types

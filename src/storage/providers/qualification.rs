@@ -6,7 +6,7 @@
 //! `cargo test --lib --features peas-tests storage::providers::qualification -- --test-threads=1`
 
 use super::build_cloud_storage;
-use crate::config::{CloudProviderConfig, GcsApiStyle, GcsCredentialSource};
+use super::{CloudProviderConfig, GcsApiStyle, GcsCredentialSource};
 use crate::engine::{Engine, MemoryBudget, OpenOptions, TransactionMode, WriteOptions};
 use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::net::{SocketAddr, TcpStream};

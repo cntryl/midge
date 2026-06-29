@@ -27,11 +27,13 @@
 
 use std::path::PathBuf;
 
-pub use crate::config::{
-    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, GcsApiStyle,
-    GcsCredentialSource, RecoveryPolicy, S3CredentialSource, Storage,
-};
+pub use crate::config::{RecoveryPolicy, Storage};
 use crate::sst::compression::{CompressionAlgo, CompressionPolicy};
+use crate::storage::providers::CloudProviderConfig;
+#[cfg(test)]
+use crate::storage::providers::{
+    AzureCredentialSource, GcsApiStyle, GcsCredentialSource, S3CredentialSource,
+};
 
 /// Performance optimization goal.
 ///

@@ -367,18 +367,16 @@ impl AzureProvider {
     pub fn from_lightweight_credential_source(
         account_name: String,
         container: String,
-        source: crate::config::AzureCredentialSource,
+        source: super::AzureCredentialSource,
     ) -> MidgeResult<Self> {
         match source {
-            crate::config::AzureCredentialSource::EnvironmentClientSecret => {
-                Self::with_oauth_provider(
-                    account_name,
-                    container,
-                    AzureOAuthProvider::from_environment_client_secret()?,
-                    "environment-client-secret".to_string(),
-                )
-            }
-            crate::config::AzureCredentialSource::WorkloadIdentity {
+            super::AzureCredentialSource::EnvironmentClientSecret => Self::with_oauth_provider(
+                account_name,
+                container,
+                AzureOAuthProvider::from_environment_client_secret()?,
+                "environment-client-secret".to_string(),
+            ),
+            super::AzureCredentialSource::WorkloadIdentity {
                 tenant_id,
                 client_id,
                 token_file,
@@ -388,7 +386,7 @@ impl AzureProvider {
                 AzureOAuthProvider::from_workload_identity(tenant_id, client_id, token_file)?,
                 "workload-identity".to_string(),
             ),
-            crate::config::AzureCredentialSource::LightweightDefaultChain => {
+            super::AzureCredentialSource::LightweightDefaultChain => {
                 if AzureOAuthProvider::has_environment_client_secret() {
                     return Self::with_oauth_provider(
                         account_name,
@@ -407,7 +405,7 @@ impl AzureProvider {
                 }
                 Self::with_managed_identity(account_name, container, None)
             }
-            crate::config::AzureCredentialSource::ManagedIdentity { client_id } => {
+            super::AzureCredentialSource::ManagedIdentity { client_id } => {
                 Self::with_managed_identity(account_name, container, client_id)
             }
             other => Err(MidgeError::InvalidArgument(format!(

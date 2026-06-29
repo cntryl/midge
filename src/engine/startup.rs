@@ -1324,7 +1324,7 @@ impl RuntimeStorageMaterialization {
         storage_path: &StartupStoragePath,
         startup_lease: &StartupLease,
         cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
-        provider: &crate::config::CloudProviderConfig,
+        provider: &crate::storage::providers::CloudProviderConfig,
         prefix: &str,
     ) -> MidgeResult<Self> {
         let cloud_storage = crate::storage::providers::build_cloud_storage(provider, prefix)?;

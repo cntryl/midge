@@ -247,6 +247,61 @@ fn should_keep_cloud_provider_constructors_on_same_variants() {
 }
 
 #[test]
+fn should_own_cloud_provider_config_in_storage_providers() {
+    // Arrange
+    let generic_config = read_source("src/config.rs");
+    let provider_config = read_source("src/storage/providers/config.rs");
+
+    // Act / Assert
+    assert!(!generic_config.contains("pub enum CloudProviderConfig"));
+    assert!(!generic_config.contains("pub enum S3CredentialSource"));
+    assert!(!generic_config.contains("pub enum AzureCredentialSource"));
+    assert!(!generic_config.contains("pub enum GcsCredentialSource"));
+    assert!(generic_config.contains("pub use crate::storage::providers"));
+    assert!(provider_config.contains("pub enum CloudProviderConfig"));
+    assert!(provider_config.contains("pub enum S3CredentialSource"));
+    assert!(provider_config.contains("pub enum AzureCredentialSource"));
+    assert!(provider_config.contains("pub enum GcsCredentialSource"));
+    assert!(provider_config.contains("impl CloudProviderConfig"));
+}
+
+#[test]
+fn should_delegate_provider_construction_to_provider_family_resolvers() {
+    // Arrange
+    let factory = read_source("src/storage/providers/factory.rs");
+    let s3 = read_source("src/storage/providers/s3_resolver.rs");
+    let azure = read_source("src/storage/providers/azure_resolver.rs");
+    let gcs = read_source("src/storage/providers/gcs_resolver.rs");
+    let forbidden_factory_variants = [
+        "CloudProviderConfig::AwsS3",
+        "CloudProviderConfig::S3Compatible",
+        "CloudProviderConfig::Minio",
+        "CloudProviderConfig::Wasabi",
+        "CloudProviderConfig::OciS3Compatible",
+        "CloudProviderConfig::AzureBlob",
+        "CloudProviderConfig::Gcs",
+    ];
+
+    // Act / Assert
+    assert!(factory.contains("s3_resolver::try_resolve"));
+    assert!(factory.contains("azure_resolver::try_resolve"));
+    assert!(factory.contains("gcs_resolver::try_resolve"));
+    for pattern in forbidden_factory_variants {
+        assert!(
+            !factory.contains(pattern),
+            "provider factory should not centrally match {pattern}"
+        );
+    }
+    assert!(s3.contains("pub(super) fn try_resolve"));
+    assert!(s3.contains("CloudProviderConfig::AwsS3"));
+    assert!(s3.contains("CloudProviderConfig::OciS3Compatible"));
+    assert!(azure.contains("pub(super) fn try_resolve"));
+    assert!(azure.contains("CloudProviderConfig::AzureBlob"));
+    assert!(gcs.contains("pub(super) fn try_resolve"));
+    assert!(gcs.contains("CloudProviderConfig::Gcs"));
+}
+
+#[test]
 fn should_select_same_storage_modes_from_open_options_constructors() {
     // Arrange
     let provider = CloudProviderConfig::s3_compatible_static(
@@ -280,6 +335,10 @@ fn should_keep_moved_config_types_out_of_lower_layers_engine_imports() {
         "src/lease/mod.rs",
         "src/storage/residue.rs",
         "src/storage/providers/mod.rs",
+        "src/storage/providers/factory.rs",
+        "src/storage/providers/s3_resolver.rs",
+        "src/storage/providers/azure_resolver.rs",
+        "src/storage/providers/gcs_resolver.rs",
         "src/storage/providers/azure.rs",
         "src/storage/providers/gcs.rs",
     ];
@@ -290,6 +349,10 @@ fn should_keep_moved_config_types_out_of_lower_layers_engine_imports() {
         "use crate::engine::api::CloudProviderConfig",
         "crate::engine::api::AzureCredentialSource",
         "crate::engine::api::GcsCredentialSource",
+        "crate::config::CloudProviderConfig",
+        "crate::config::AzureCredentialSource",
+        "crate::config::GcsCredentialSource",
+        "crate::config::S3CredentialSource",
     ];
 
     // Act / Assert

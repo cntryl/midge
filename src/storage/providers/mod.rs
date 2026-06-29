@@ -61,6 +61,7 @@ pub mod aws;
 pub mod azure;
 #[cfg(feature = "cloud-common")]
 mod azure_resolver;
+pub(crate) mod config;
 #[cfg(feature = "cloud-common")]
 mod factory;
 #[cfg(feature = "cloud-common")]
@@ -85,10 +86,14 @@ use std::sync::Arc;
 #[cfg(not(feature = "cloud-common"))]
 use crate::common::MidgeError;
 use crate::common::MidgeResult;
-use crate::config::CloudProviderConfig;
 #[cfg(feature = "cloud-common")]
 use crate::storage::cloud::CloudBackend;
 use crate::storage::cloud::CloudStorage;
+
+pub use config::{
+    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, GcsApiStyle,
+    GcsCredentialSource, S3CredentialSource,
+};
 
 #[cfg(feature = "cloud-common")]
 pub(crate) fn build_cloud_backend(

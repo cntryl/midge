@@ -35,10 +35,8 @@ pub use crate::types::{
     StorageLayoutSnapshot, StorageVerificationReport,
 };
 pub use api::{
-    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, Direction, GcsApiStyle,
-    GcsCredentialSource, Goal, IsolationLevel, Key, MemoryBudget, OpenOptions, Query,
-    RecoveryPolicy, S3CredentialSource, ScanIterator, Storage, Transaction, TransactionMode, Value,
-    WorkloadProfile, WriteOptions,
+    Direction, Goal, IsolationLevel, Key, MemoryBudget, OpenOptions, Query, RecoveryPolicy,
+    ScanIterator, Storage, Transaction, TransactionMode, Value, WorkloadProfile, WriteOptions,
 };
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<ColumnFamilyId, ColumnFamilyHandle>;
