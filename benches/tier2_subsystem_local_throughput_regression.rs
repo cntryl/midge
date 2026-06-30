@@ -12,17 +12,37 @@
 #[path = "./criterion_config.rs"]
 mod criterion_config;
 
+use std::time::Duration;
+
 use cntryl_midge::testkit::opts_for_mode;
 use cntryl_midge::{Engine, WriteOptions};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{
+    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
 use criterion_config::criterion_config_for_tier2;
 
 const NUM_OPS_PER_BATCH: usize = 100;
 const VALUE_SIZE: usize = 128;
 const BATCH_ITERATIONS: usize = 100;
 
+type KeyValueBatch = Vec<(Vec<u8>, Vec<u8>)>;
+
+fn make_key_value_batch() -> KeyValueBatch {
+    (0..NUM_OPS_PER_BATCH)
+        .map(|i| {
+            let key = format!("key_{i:016}").into_bytes();
+            let value_byte = u8::try_from(i % 251).expect("value byte fits in u8");
+            let value = vec![value_byte; VALUE_SIZE];
+            (key, value)
+        })
+        .collect()
+}
+
 fn benchmark_batched_writes(c: &mut Criterion) {
     let mut group = c.benchmark_group("tier2_local_throughput_regression");
+    group.sampling_mode(SamplingMode::Flat);
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(6));
 
     // Measure both memory and local modes
     for mode in &["memory", "local"] {
@@ -36,23 +56,15 @@ fn benchmark_batched_writes(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: create engine and column family
-                    let engine =
-                        Engine::open_with_options(&opts).expect("failed to open engine");
+                    let engine = Engine::open_with_options(&opts).expect("failed to open engine");
                     let cf = engine
                         .create_column_family("test")
                         .expect("failed to create column family");
-                    (engine, cf)
+                    let keys_vals = make_key_value_batch();
+                    (engine, cf, keys_vals)
                 },
-                |(engine, cf)| {
+                |(engine, cf, keys_vals)| {
                     let cf_id = cf.id();
-
-                    // Precompute keys and values
-                    let mut keys_vals = Vec::with_capacity(NUM_OPS_PER_BATCH);
-                    for i in 0..NUM_OPS_PER_BATCH {
-                        let k = format!("key_{:016}", i);
-                        let v = vec![(i % 251) as u8; VALUE_SIZE];
-                        keys_vals.push((k, v));
-                    }
 
                     // Run batches
                     for _ in 0..BATCH_ITERATIONS {
@@ -61,7 +73,7 @@ fn benchmark_batched_writes(c: &mut Criterion) {
                             .expect("begin");
 
                         for (k, v) in &keys_vals {
-                            tx.put(k.as_bytes().to_vec(), v.clone(), None).expect("put");
+                            tx.put(k.clone(), v.clone(), None).expect("put");
                         }
 
                         tx.commit(WriteOptions::buffered()).expect("commit");
@@ -77,7 +89,9 @@ fn benchmark_batched_writes(c: &mut Criterion) {
 
 fn verify_local_throughput_minimum(c: &mut Criterion) {
     let mut group = c.benchmark_group("tier2_local_throughput_threshold");
-    group.sample_size(10); // Reduce samples for faster runs
+    group.sampling_mode(SamplingMode::Flat);
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(6));
 
     let mem_opts = opts_for_mode("memory");
     let local_opts = opts_for_mode("local");
@@ -88,29 +102,24 @@ fn verify_local_throughput_minimum(c: &mut Criterion) {
             || {
                 let engine = Engine::open_with_options(&mem_opts).unwrap();
                 let cf = engine.create_column_family("test").unwrap();
-                (engine, cf)
+                let keys_vals = make_key_value_batch();
+                (engine, cf, keys_vals)
             },
-            |(engine, cf)| {
+            |(engine, cf, keys_vals)| {
                 let cf_id = cf.id();
-                let mut keys_vals = Vec::with_capacity(NUM_OPS_PER_BATCH);
-                for i in 0..NUM_OPS_PER_BATCH {
-                    let k = format!("key_{:016}", i);
-                    let v = vec![(i % 251) as u8; VALUE_SIZE];
-                    keys_vals.push((k, v));
-                }
 
                 for _ in 0..BATCH_ITERATIONS {
                     let mut tx = engine
                         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                         .expect("begin");
                     for (k, v) in &keys_vals {
-                        tx.put(k.as_bytes().to_vec(), v.clone(), None).expect("put");
+                        tx.put(k.clone(), v.clone(), None).expect("put");
                     }
                     tx.commit(WriteOptions::buffered()).expect("commit");
                 }
             },
             criterion::BatchSize::SmallInput,
-        )
+        );
     });
 
     // Benchmark local mode
@@ -119,29 +128,24 @@ fn verify_local_throughput_minimum(c: &mut Criterion) {
             || {
                 let engine = Engine::open_with_options(&local_opts).unwrap();
                 let cf = engine.create_column_family("test").unwrap();
-                (engine, cf)
+                let keys_vals = make_key_value_batch();
+                (engine, cf, keys_vals)
             },
-            |(engine, cf)| {
+            |(engine, cf, keys_vals)| {
                 let cf_id = cf.id();
-                let mut keys_vals = Vec::with_capacity(NUM_OPS_PER_BATCH);
-                for i in 0..NUM_OPS_PER_BATCH {
-                    let k = format!("key_{:016}", i);
-                    let v = vec![(i % 251) as u8; VALUE_SIZE];
-                    keys_vals.push((k, v));
-                }
 
                 for _ in 0..BATCH_ITERATIONS {
                     let mut tx = engine
                         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                         .expect("begin");
                     for (k, v) in &keys_vals {
-                        tx.put(k.as_bytes().to_vec(), v.clone(), None).expect("put");
+                        tx.put(k.clone(), v.clone(), None).expect("put");
                     }
                     tx.commit(WriteOptions::buffered()).expect("commit");
                 }
             },
             criterion::BatchSize::SmallInput,
-        )
+        );
     });
 
     group.finish();

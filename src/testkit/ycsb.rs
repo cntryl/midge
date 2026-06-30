@@ -10,6 +10,8 @@ use std::thread;
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
+use hdrhistogram::Histogram;
+
 use crate::engine::api;
 use crate::{ColumnFamilyHandle, Engine, MidgeEngine, MidgeError, MidgeResult};
 
@@ -19,6 +21,47 @@ pub const KEY_SIZE: usize = 16;
 pub const DEFAULT_VALUE_SIZE: usize = 128;
 
 pub const TIER4_MEMTABLE_SIZE_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MultiClientRunStats {
+    pub operations: u64,
+    pub latency_p50_us: u64,
+    pub latency_p95_us: u64,
+    pub latency_p99_us: u64,
+    pub latency_max_us: u64,
+}
+
+impl MultiClientRunStats {
+    #[must_use]
+    pub fn latency_tags(&self) -> [(&'static str, u64); 4] {
+        [
+            ("latency_p50_us", self.latency_p50_us),
+            ("latency_p95_us", self.latency_p95_us),
+            ("latency_p99_us", self.latency_p99_us),
+            ("latency_max_us", self.latency_max_us),
+        ]
+    }
+}
+
+struct ClientRunStats {
+    operations: u64,
+    latency_us: Histogram<u64>,
+}
+
+impl ClientRunStats {
+    fn empty() -> Self {
+        Self {
+            operations: 0,
+            latency_us: Histogram::<u64>::new(3).expect("create client latency histogram"),
+        }
+    }
+
+    fn record_latency(&mut self, elapsed: Duration) {
+        self.latency_us
+            .record(duration_to_micros(elapsed))
+            .expect("record client latency");
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct XorShift64 {
@@ -344,6 +387,25 @@ where
     MakeClient: Fn(usize, Arc<AtomicBool>) -> Step,
     Step: FnMut(&MidgeEngine, &ColumnFamilyHandle, u64) + Send + 'static,
 {
+    run_multi_client_for_duration_with_stats(engine, clients, duration, make_client).operations
+}
+
+/// Run concurrent client loops and return both throughput and tail-latency signal.
+///
+/// The latency histogram records one sample per completed logical operation.
+///
+/// # Panics
+/// Panics under the same conditions as [`run_multi_client_for_duration`].
+pub fn run_multi_client_for_duration_with_stats<MakeClient, Step>(
+    engine: &Arc<MidgeEngine>,
+    clients: usize,
+    duration: Duration,
+    make_client: MakeClient,
+) -> MultiClientRunStats
+where
+    MakeClient: Fn(usize, Arc<AtomicBool>) -> Step,
+    Step: FnMut(&MidgeEngine, &ColumnFamilyHandle, u64) + Send + 'static,
+{
     let stop = Arc::new(AtomicBool::new(false));
     let barrier = Arc::new(Barrier::new(clients + 1));
     let mut handles = Vec::with_capacity(clients);
@@ -385,6 +447,7 @@ where
                 std::thread::sleep(Duration::from_micros(usize_to_u64(client_id) * 50));
             }
 
+            let mut stats = ClientRunStats::empty();
             let mut op_index: u64 = 0;
             // Optional slow-op threshold (enable with MIDGE_YCSB_SLOW_OP_MS)
             let slow_op_ms = std::env::var("MIDGE_YCSB_SLOW_OP_MS")
@@ -409,9 +472,11 @@ where
                     }
                 }
 
+                stats.record_latency(elapsed);
+                stats.operations = stats.operations.wrapping_add(1);
                 op_index = op_index.wrapping_add(1);
             }
-            op_index
+            stats
         }));
     }
 
@@ -453,11 +518,26 @@ where
     }
 
     let mut total_ops: u64 = 0;
+    let mut latency_us = Histogram::<u64>::new(3).expect("create aggregate latency histogram");
     for h in handles {
-        total_ops = total_ops.wrapping_add(h.join().unwrap_or(0));
+        let result = h.join().unwrap_or_else(|_| ClientRunStats::empty());
+        total_ops = total_ops.wrapping_add(result.operations);
+        latency_us
+            .add(&result.latency_us)
+            .expect("merge compatible latency histograms");
     }
 
-    total_ops
+    if total_ops == 0 {
+        return MultiClientRunStats::default();
+    }
+
+    MultiClientRunStats {
+        operations: total_ops,
+        latency_p50_us: latency_us.value_at_percentile(50.0),
+        latency_p95_us: latency_us.value_at_percentile(95.0),
+        latency_p99_us: latency_us.value_at_percentile(99.0),
+        latency_max_us: latency_us.max(),
+    }
 }
 
 const DEFAULT_BATCH_OPS: usize = 50_000;
@@ -468,6 +548,10 @@ fn fill_byte(value: u64) -> u8 {
 
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn duration_to_micros(value: Duration) -> u64 {
+    u64::try_from(value.as_micros().max(1)).unwrap_or(u64::MAX)
 }
 
 fn u128_to_u64(value: u128) -> u64 {

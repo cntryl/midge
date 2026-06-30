@@ -7,13 +7,13 @@
 //! - Compaction cost scaled by overlap degree
 //! - Multi-batch, multi-file cascading
 //! - Throughput (keys/sec) vs file count
-//! - End-to-end compact_all() across staged LSM states
+//! - End-to-end `compact_all()` across staged LSM states
 //!
 //! NOT measured:
 //! - Single primitive cost (Tier 3)
 //! - In-flight memory pressure or cache effects (Tier 4 integration)
 //!
-//! All setup outside measurement; measured body is one compact_all() call,
+//! All setup outside measurement; measured body is one `compact_all()` call,
 //! but the system state before it varies to show scaling.
 
 #[path = "./stress_config.rs"]
@@ -28,7 +28,7 @@ use cntryl_midge::{testkit::MidgeOptions, MidgeEngine};
 const KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
 const DEFAULT_VALUE_SIZE: usize = 100;
 const TARGET_BATCH: usize = 1_000;
-const DEFAULT_COMPACTION_KEYS: usize = 1_000;
+const DEFAULT_COMPACTION_KEYS: usize = 10_000;
 
 fn precompute_kv(num_keys: usize, value_size: usize) -> (Vec<[u8; KEY_SIZE]>, Vec<Vec<u8>>) {
     cntryl_midge::testkit::stress::precompute_kv16_u64_be(num_keys, value_size, u8::MAX)
@@ -36,6 +36,20 @@ fn precompute_kv(num_keys: usize, value_size: usize) -> (Vec<[u8; KEY_SIZE]>, Ve
 
 fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
     cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
+}
+
+fn set_compaction_signal(
+    ctx: &mut StressContext,
+    case_name: &str,
+    logical_keys: usize,
+    value_size: usize,
+    input_files: usize,
+) {
+    ctx.tag("case", case_name);
+    ctx.tag("input_keys", logical_keys.to_string());
+    ctx.tag("input_files", input_files.to_string());
+    ctx.set_elements(logical_keys as u64);
+    ctx.set_bytes((logical_keys * (KEY_SIZE + value_size)) as u64);
 }
 
 fn run_compact_all_many_sst_case(
@@ -73,8 +87,8 @@ fn run_compact_all_many_sst_case(
         engine.flush_cf(&cf).expect("setup flush"); // Ensure durability after each batch
     }
 
-    // Measure compact_all() across many pre-flushed SST files
-    ctx.set_elements(1); // one compaction cycle
+    // Measure compact_all() across many pre-flushed SST files.
+    set_compaction_signal(ctx, "many_sst", num_keys, value_size, batches);
 
     ctx.measure_ref(&engine, |e| e.compact_all().expect("compact_all failed"));
 
@@ -109,7 +123,7 @@ fn run_many_overlapping_l0_files_case(
                 .expect("begin");
             for idx in offset..tx_end {
                 let mut k = base_keys[idx];
-                k[0] = (batch % 10) as u8;
+                k[0] = u8::try_from(batch % 10).expect("batch prefix fits in u8");
                 tx.put(k.to_vec(), base_values[idx].clone(), None)
                     .expect("setup put");
             }
@@ -119,8 +133,14 @@ fn run_many_overlapping_l0_files_case(
         engine.flush_cf(&cf).expect("setup flush");
     }
 
-    // Measure compact_all() under pathological overlap
-    ctx.set_elements(1); // one compaction cycle with high overlap
+    // Measure compact_all() under pathological overlap.
+    set_compaction_signal(
+        ctx,
+        "overlapping_l0_files",
+        total_keys,
+        value_size,
+        num_batches,
+    );
 
     ctx.measure_ref(&engine, |e| e.compact_all().expect("compact_all failed"));
 
@@ -164,8 +184,8 @@ fn run_overlap_pressure_compact_case(
         engine.flush_cf(&cf).expect("setup flush");
     }
 
-    // Measure compact_all() under full overlap pressure
-    ctx.set_elements(1); // one compaction cycle under maximum overlap
+    // Measure compact_all() under full overlap pressure.
+    set_compaction_signal(ctx, "overlap_pressure", total_keys, value_size, num_batches);
 
     ctx.measure_ref(&engine, |e| e.compact_all().expect("compact_all failed"));
 
@@ -191,25 +211,25 @@ fn tier4_compaction_compact_all_many_sst_cloud(ctx: &mut StressContext) {
 #[stress_test]
 fn tier4_compaction_many_overlapping_l0_files_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_many_overlapping_l0_files_case(ctx, opts, 250, 4, DEFAULT_VALUE_SIZE);
+    run_many_overlapping_l0_files_case(ctx, opts, 2_500, 4, DEFAULT_VALUE_SIZE);
 }
 
 #[stress_test]
 fn tier4_compaction_many_overlapping_l0_files_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_many_overlapping_l0_files_case(ctx, opts, 250, 4, DEFAULT_VALUE_SIZE);
+    run_many_overlapping_l0_files_case(ctx, opts, 2_500, 4, DEFAULT_VALUE_SIZE);
 }
 
 #[stress_test]
 fn tier4_compaction_overlap_pressure_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_overlap_pressure_compact_case(ctx, opts, 250, 4, DEFAULT_VALUE_SIZE);
+    run_overlap_pressure_compact_case(ctx, opts, 2_500, 4, DEFAULT_VALUE_SIZE);
 }
 
 #[stress_test]
 fn tier4_compaction_overlap_pressure_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_overlap_pressure_compact_case(ctx, opts, 250, 4, DEFAULT_VALUE_SIZE);
+    run_overlap_pressure_compact_case(ctx, opts, 2_500, 4, DEFAULT_VALUE_SIZE);
 }
 
 stress_main!();

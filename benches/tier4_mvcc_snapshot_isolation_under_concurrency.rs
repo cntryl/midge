@@ -49,7 +49,8 @@ struct SnapshotReader {
 fn prepopulate_snapshot_bench(engine: &Arc<cntryl_midge::Engine>, cf_id: u32, num_keys: usize) {
     for i in 0..num_keys {
         let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
-        let v = vec![u8::try_from(i).expect("prepopulated key index fits in u8"); VALUE_SIZE];
+        let fill_byte = u8::try_from(i % 251).expect("prepopulated value byte fits in u8");
+        let v = vec![fill_byte; VALUE_SIZE];
         let mut tx = engine
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();

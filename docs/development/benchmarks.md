@@ -674,7 +674,7 @@ Runs on schedule or with `[bench-extended]` commit message.
 
 - **Tier 2:** Compression subsystem (less critical)
 - **Tier 4:** Exploratory workloads (A, C, streaming, compaction_throughput, cloud_durability_base)
-- **Tier 4:** NEW high-priority tests (cloud failure scenarios, MVCC isolation under concurrency)
+- **Tier 4:** NEW high-priority tests (cloud durability modes, MVCC isolation under concurrency)
 
 **Rationale:** Deeper validation, exploratory patterns, failure modes.
 
