@@ -6,9 +6,14 @@
 use super::durability_sync::CompletionSource;
 use super::EventLoop;
 use crossbeam::channel::TryRecvError;
+use std::convert::TryFrom;
 use std::time::Instant;
 
 impl EventLoop {
+    fn elapsed_micros_to_u64(duration: std::time::Duration) -> u64 {
+        u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+    }
+
     pub(super) fn seal_current_cloud_segment(
         &mut self,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
@@ -45,7 +50,7 @@ impl EventLoop {
             .state
             .wal_dir
             .join(crate::wal::segment_file_name(segment_id));
-        storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
+        storage.enqueue_wal_segment(segment_id, &local_path, max_sequence);
         self.wal_actor.complete_cloud_upload_seal(&mut self.state);
 
         let resource = crate::wal::cloud_segment_object_key(segment_id);
@@ -66,7 +71,7 @@ impl EventLoop {
         if let Some(telemetry) = crate::telemetry::Telemetry::global() {
             telemetry.metrics().record_cloud_async_wal_segment_sealed(
                 bytes_buffered,
-                seal_start.elapsed().as_micros() as u64,
+                Self::elapsed_micros_to_u64(seal_start.elapsed()),
             );
         }
 
@@ -97,8 +102,7 @@ impl EventLoop {
         loop {
             match rx.try_recv() {
                 Ok(event) => self.handle_storage_event(event),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
     }
@@ -109,97 +113,13 @@ impl EventLoop {
                 segment_id,
                 max_sequence,
             } => {
-                if let Err(error) =
-                    self.verify_remote_wal_segment_before_ack(segment_id, max_sequence)
-                {
-                    self.handle_cloud_upload_failure(
-                        segment_id,
-                        format!("cloud WAL readback validation failed: {error}"),
-                    );
-                    return;
-                }
-
-                let resource = crate::wal::cloud_segment_object_key(segment_id);
-                self.state
-                    .cloud
-                    .pending_uploads
-                    .retain(|item| item != &resource);
-                self.cloud_acked_wal_segments
-                    .insert(segment_id, max_sequence);
-
-                let ready_segments = match self
-                    .durability
-                    .take_contiguous_acked_cloud_segments(&self.cloud_acked_wal_segments)
-                {
-                    Ok(ready_segments) => ready_segments,
-                    Err(error) => {
-                        self.cloud_acked_wal_segments.remove(&segment_id);
-                        self.handle_cloud_upload_failure(segment_id, error);
-                        return;
-                    }
-                };
-
-                let Some((durable_segment_id, durable_max_sequence)) =
-                    ready_segments.last().copied()
-                else {
-                    tracing::debug!(
-                        segment_id,
-                        max_sequence,
-                        "CloudAck buffered behind an earlier unacked WAL segment"
-                    );
-                    return;
-                };
-
-                match self.wal_actor.handle_cloud_upload_complete(
-                    &mut self.state,
-                    durable_segment_id,
-                    durable_max_sequence,
-                ) {
-                    Ok(()) => {
-                        for (ready_segment_id, _) in &ready_segments {
-                            self.remove_cloud_durable_local_wal_segment(*ready_segment_id);
-                        }
-
-                        for (seg_id, _) in ready_segments {
-                            if let Some(enqueued_at) =
-                                self.durability.take_cloud_segment_timing(seg_id)
-                            {
-                                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                                    telemetry.metrics().record_cloud_async_wal_ack_latency_us(
-                                        enqueued_at.elapsed().as_micros() as u64,
-                                    );
-                                }
-                            }
-
-                            let waiters = self.durability.complete_waiters_at(seg_id);
-                            self.complete_durability_waiters(waiters, CompletionSource::CloudAck);
-                        }
-                        self.prune_cloud_wal_segments_covered_by_manifest();
-                        self.drain_auto_flush_memtables();
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "failed to apply cloud ack");
-                    }
-                }
+                self.handle_storage_event_cloud_ack(segment_id, max_sequence);
             }
             crate::storage::StorageEvent::CloudFail { segment_id, error } => {
-                self.handle_cloud_upload_failure(segment_id, error);
+                self.handle_cloud_upload_failure(segment_id, &error);
             }
             crate::storage::StorageEvent::CloudWalPruneComplete { segment_id, result } => {
-                self.cloud_wal_prune_inflight.remove(&segment_id);
-                match result {
-                    crate::storage::StorageOutcome::Ok(()) => {
-                        self.cloud_acked_wal_segments.remove(&segment_id);
-                        tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
-                    }
-                    crate::storage::StorageOutcome::Err(error) => {
-                        tracing::warn!(
-                            segment_id,
-                            error = %error,
-                            "Failed to prune cloud-covered remote WAL segment; will retry after a future checkpoint"
-                        );
-                    }
-                }
+                self.handle_storage_event_cloud_wal_prune_complete(segment_id, result);
             }
             crate::storage::StorageEvent::BackpressureOn => {
                 tracing::warn!("storage backpressure activated — pausing flushes");
@@ -217,6 +137,99 @@ impl EventLoop {
         }
     }
 
+    fn handle_storage_event_cloud_ack(
+        &mut self,
+        segment_id: u64,
+        max_sequence: u64,
+    ) {
+        if let Err(error) = self.verify_remote_wal_segment_before_ack(segment_id, max_sequence) {
+            self.handle_cloud_upload_failure(
+                segment_id,
+                &format!("cloud WAL readback validation failed: {error}"),
+            );
+            return;
+        }
+
+        let resource = crate::wal::cloud_segment_object_key(segment_id);
+        self.state
+            .cloud
+            .pending_uploads
+            .retain(|item| item != &resource);
+        self.cloud_acked_wal_segments
+            .insert(segment_id, max_sequence);
+
+        let ready_segments = match self
+            .durability
+            .take_contiguous_acked_cloud_segments(&self.cloud_acked_wal_segments)
+        {
+            Ok(ready_segments) => ready_segments,
+            Err(error) => {
+                self.cloud_acked_wal_segments.remove(&segment_id);
+                self.handle_cloud_upload_failure(segment_id, &error);
+                return;
+            }
+        };
+
+        let Some((durable_segment_id, durable_max_sequence)) = ready_segments.last().copied() else {
+            tracing::debug!(
+                segment_id,
+                max_sequence,
+                "CloudAck buffered behind an earlier unacked WAL segment"
+            );
+            return;
+        };
+
+        match self
+            .wal_actor
+            .handle_cloud_upload_complete(&mut self.state, durable_segment_id, durable_max_sequence)
+        {
+            Ok(()) => {
+                for (ready_segment_id, _) in &ready_segments {
+                    self.remove_cloud_durable_local_wal_segment(*ready_segment_id);
+                }
+
+                for (seg_id, _) in ready_segments {
+                    if let Some(enqueued_at) = self.durability.take_cloud_segment_timing(seg_id) {
+                        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                            telemetry.metrics().record_cloud_async_wal_ack_latency_us(
+                                Self::elapsed_micros_to_u64(enqueued_at.elapsed()),
+                            );
+                        }
+                    }
+
+                    let waiters = self.durability.complete_waiters_at(seg_id);
+                    self.complete_durability_waiters(waiters, CompletionSource::CloudAck);
+                }
+                self.prune_cloud_wal_segments_covered_by_manifest();
+                self.drain_auto_flush_memtables();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to apply cloud ack");
+            }
+        }
+    }
+
+    fn handle_storage_event_cloud_wal_prune_complete(
+        &mut self,
+        segment_id: u64,
+        result: crate::storage::StorageOutcome<()>,
+    ) {
+        self.cloud_wal_prune_inflight.remove(&segment_id);
+        match result {
+            crate::storage::StorageOutcome::Ok(()) => {
+                self.cloud_acked_wal_segments.remove(&segment_id);
+                tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
+            }
+            crate::storage::StorageOutcome::Err(error) => {
+                tracing::warn!(
+                    segment_id,
+                    error = %error,
+                    "Failed to prune cloud-covered remote WAL segment; will retry after a future checkpoint"
+                );
+            }
+        }
+    }
+
     fn verify_remote_wal_segment_before_ack(
         &mut self,
         segment_id: u64,
@@ -228,7 +241,7 @@ impl EventLoop {
         storage.verify_cached_remote_wal_segment(segment_id, max_sequence)
     }
 
-    fn handle_cloud_upload_failure(&mut self, segment_id: u64, error: String) {
+    fn handle_cloud_upload_failure(&mut self, segment_id: u64, error: &str) {
         let resource = crate::wal::cloud_segment_object_key(segment_id);
         self.state
             .cloud
@@ -243,7 +256,7 @@ impl EventLoop {
 
         // Let WAL actor handle its internal failure handling and drop pending writes.
         self.wal_actor
-            .handle_cloud_upload_failed(segment_id, &error);
+            .handle_cloud_upload_failed(segment_id, error);
 
         // If we know the max_sequence for the failed segment, invalidate idempotency
         // allocations up to that sequence so retries will allocate fresh sequences.
