@@ -443,17 +443,8 @@ impl Engine {
     /// Ingest batching is orthogonal to cloud durability. Cloud-backed async mode
     /// still makes writes visible after the local WAL append barrier; it simply
     /// advances cloud durability later in the background.
-    pub(crate) fn is_ingesting(&self) -> MidgeResult<bool> {
-        let request_id = crate::runtime::next_request_id()?;
-        let resp = self
-            .runtime_handle
-            .send_and_wait(crate::runtime::RuntimeMsg::GetIngestState { request_id })?;
-        match resp {
-            crate::runtime::RuntimeResponse::IngestState { ingest_active, .. } => Ok(ingest_active),
-            _ => Err(crate::common::MidgeError::Internal(
-                "unexpected response to GetIngestState".to_string(),
-            )),
-        }
+    pub(crate) fn is_ingesting(&self) -> bool {
+        self.runtime_handle.ingest_active()
     }
 
     /// Enter a temporary ingest mode: disable compaction, relax WAL, increase memtable limits.
@@ -598,7 +589,7 @@ impl Engine {
         // HARD INVARIANT: No transactions while ingest is active.
         // ─────────────────────────────────────────────────────────────────────────
         assert!(
-            !self.is_ingesting().unwrap_or(false),
+            !self.is_ingesting(),
             "BUG: begin_tx called while ingest mode is active. \
              Violated invariant: transactions must not be started during ingest. \
              Correct ordering: exit_ingest_mode() BEFORE begin_tx()."

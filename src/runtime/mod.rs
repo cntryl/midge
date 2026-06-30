@@ -851,6 +851,7 @@ impl ResponseRouter {
 pub struct RuntimeHandle {
     msg_tx: Sender<RuntimeMsg>,
     router: Arc<ResponseRouter>,
+    ingest_active: Arc<std::sync::atomic::AtomicBool>,
     /// Lock-free snapshot cache for read-path bypass.
     ///
     /// Allows `begin_tx` to capture a read snapshot without event loop round-trip.
@@ -858,6 +859,14 @@ pub struct RuntimeHandle {
 }
 
 impl RuntimeHandle {
+    /// Return whether the runtime ingest barrier is currently active.
+    ///
+    /// This is intentionally a direct atomic read instead of an event-loop
+    /// message because transaction creation sits on the API hot path.
+    pub(crate) fn ingest_active(&self) -> bool {
+        self.ingest_active.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Submit a message to the runtime (fire-and-forget).
     ///
     /// For messages that expect a response, prefer `send_and_wait`.
@@ -1036,6 +1045,7 @@ impl Runtime {
         let handle = RuntimeHandle {
             msg_tx: msg_tx.clone(),
             router: router.clone(),
+            ingest_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             snapshot_cache,
         };
 
@@ -1072,11 +1082,13 @@ impl Runtime {
         let (init_tx, init_rx) = channel::bounded::<Result<(), String>>(1);
 
         let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
+        let ingest_active = Arc::clone(&state.ingest_active);
 
         // Handle for callers to use.
         let handle = RuntimeHandle {
             msg_tx: self.msg_tx.clone(),
             router: router.clone(),
+            ingest_active,
             snapshot_cache: snapshot_cache.clone(),
         };
 
