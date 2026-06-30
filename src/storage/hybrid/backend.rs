@@ -281,13 +281,13 @@ impl HybridStorage {
                         }
 
                         let (tx, rx) = std::sync::mpsc::channel();
-                        let cloud_key = crate::wal::cloud_segment_object_key(upload.segment_id);
-                        cloud.submit_write_with_headers(
-                            cloud_key,
-                            data,
-                            vec![("If-None-Match".into(), "*".into())],
-                            tx,
-                        );
+        let cloud_key = crate::wal::cloud_segment_object_key(upload.segment_id);
+        cloud.submit_write_with_headers(
+            &cloud_key,
+            data,
+            vec![("If-None-Match".into(), "*".into())],
+            tx,
+        );
 
                         match rx.recv() {
                             Ok(StorageEvent::WriteComplete { result, .. }) if result.is_ok() => {
@@ -645,7 +645,7 @@ impl HybridStorage {
         let (tx, rx) = std::sync::mpsc::channel();
         let cloud_key = crate::wal::cloud_segment_object_key(upload.segment_id);
         self.cloud.submit_write_with_headers(
-            cloud_key,
+            &cloud_key,
             data,
             vec![("If-None-Match".into(), "*".into())],
             tx,
@@ -779,7 +779,7 @@ impl HybridStorage {
         key: &str,
     ) -> Result<Vec<u8>, String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_read(key.to_string(), tx);
+        cloud.submit_read(key, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(StorageEvent::ReadComplete {
                 result: StorageOutcome::Ok(data),
@@ -805,7 +805,7 @@ impl HybridStorage {
         key: &str,
     ) -> Result<StorageObjectMetadata, String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_head(key.to_string(), tx);
+        cloud.submit_head(key, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Ok(metadata),
@@ -842,7 +842,7 @@ impl HybridStorage {
         key: &str,
     ) -> Result<bool, String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        backend.submit_head(key.to_string(), tx);
+        backend.submit_head(key, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Ok(_),
@@ -868,7 +868,7 @@ impl HybridStorage {
         key: &str,
     ) -> Result<bool, String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        backend.submit_delete(key.to_string(), tx);
+        backend.submit_delete(key, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(StorageEvent::DeleteComplete {
                 result: StorageOutcome::Ok(()),
@@ -899,9 +899,9 @@ impl HybridStorage {
         if let Err(error) = std::thread::Builder::new()
             .name("midge-sst-cache-gc".to_string())
             .spawn(move || {
-                let (tx, rx) = std::sync::mpsc::channel();
-                local.submit_delete(key.clone(), tx);
-                match rx.recv_timeout(Duration::from_secs(30)) {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    local.submit_delete(&key, tx);
+                    match rx.recv_timeout(Duration::from_secs(30)) {
                     Ok(StorageEvent::DeleteComplete {
                         result: StorageOutcome::Ok(()),
                         ..
@@ -1498,9 +1498,9 @@ impl HybridStorage {
                     &guard,
                 ) {
                     Ok(()) => {
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        cloud.submit_delete_with_headers(
-                            key.clone(),
+                let (tx, rx) = std::sync::mpsc::channel();
+                            cloud.submit_delete_with_headers(
+                            &key,
                             vec![("If-Match".into(), etag)],
                             tx,
                         );
@@ -1576,7 +1576,7 @@ impl HybridStorage {
 
         for proof in &guard.objects {
             let (tx, rx) = std::sync::mpsc::channel();
-            guard.cloud.submit_get(proof.key.clone(), tx);
+            guard.cloud.submit_get(&proof.key, tx);
             match rx.recv_timeout(Duration::from_secs(30)) {
                 Ok(crate::storage::cloud::CloudEvent::Get {
                     result: crate::storage::cloud::CloudOutcome::Ok(data),
@@ -1589,7 +1589,7 @@ impl HybridStorage {
                         ));
                     }
                     let (head_tx, head_rx) = std::sync::mpsc::channel();
-                    guard.cloud.submit_head(proof.key.clone(), head_tx);
+                    guard.cloud.submit_head(&proof.key, head_tx);
                     match head_rx.recv_timeout(Duration::from_secs(30)) {
                         Ok(crate::storage::cloud::CloudEvent::Head {
                             result: crate::storage::cloud::CloudOutcome::Ok(actual),
@@ -1686,7 +1686,7 @@ impl HybridStorage {
 
         let (tx_cloud, rx_cloud) = std::sync::mpsc::channel();
         self.cloud.submit_write_with_headers(
-            key.clone(),
+            &key,
             data.clone(),
             vec![("If-None-Match".into(), "*".into())],
             tx_cloud,
@@ -1728,7 +1728,7 @@ impl HybridStorage {
 
         let (tx_local, rx_local) = std::sync::mpsc::channel();
         self.local.submit_write_with_headers(
-            key.clone(),
+            &key,
             data,
             vec![("If-None-Match".into(), "*".into())],
             tx_local,
@@ -1791,16 +1791,16 @@ impl HybridStorage {
 }
 
 impl StorageBackend for HybridStorage {
-    fn submit_read(&self, key: String, callback: StorageCallback) {
+    fn submit_read(&self, key: &str, callback: StorageCallback) {
         // OBJECT STORAGE ONLY - reads SSTs, metadata, etc.
         // Try local first, fall back to cloud
 
         let local_clone = Arc::clone(&self.local);
         let cloud_clone = Arc::clone(&self.cloud);
-        let key_clone = key.clone();
+        let key = key.to_string();
 
         let (tx, rx) = std::sync::mpsc::channel();
-        local_clone.submit_read(key_clone.clone(), tx);
+        local_clone.submit_read(&key, tx);
 
         match rx.recv() {
             Ok(StorageEvent::ReadComplete {
@@ -1819,38 +1819,37 @@ impl StorageBackend for HybridStorage {
             }) => {
                 // Local miss, try cloud
                 let (tx_cloud, rx_cloud) = std::sync::mpsc::channel();
-                cloud_clone.submit_read(k, tx_cloud);
+                cloud_clone.submit_read(&k, tx_cloud);
                 if let Ok(event) = rx_cloud.recv() {
                     let _ = callback.send(event);
                 }
             }
             _ => {
                 let _ = callback.send(StorageEvent::ReadComplete {
-                    key,
+                    key: key.clone(),
                     result: StorageOutcome::Err("Hybrid read failed".to_string()),
                 });
             }
         }
     }
 
-    fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback) {
+    fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
         // OBJECT STORAGE ONLY - NOT for WAL durability
         // WAL durability uses enqueue_wal_segment() instead
 
         let local_clone = Arc::clone(&self.local);
         let cloud_clone = Arc::clone(&self.cloud);
-        let key_clone = key.clone();
         let data_clone = data.clone();
 
         // Always write to local first
         let (tx, rx) = std::sync::mpsc::channel();
-        local_clone.submit_write(key_clone, data_clone, tx);
+        local_clone.submit_write(key, data_clone, tx);
 
         match rx.recv() {
             Ok(StorageEvent::WriteComplete { ref result, .. }) => {
                 // Send result back to caller immediately (local write complete)
                 let event = StorageEvent::WriteComplete {
-                    key: key.clone(),
+                    key: key.to_string(),
                     result: result.clone(),
                 };
                 let _ = callback.send(event);
@@ -1869,26 +1868,26 @@ impl StorageBackend for HybridStorage {
             }
             _ => {
                 let _ = callback.send(StorageEvent::WriteComplete {
-                    key,
+                    key: key.to_string(),
                     result: StorageOutcome::Err("Hybrid write failed".to_string()),
                 });
             }
         }
     }
 
-    fn submit_delete(&self, key: String, callback: StorageCallback) {
+    fn submit_delete(&self, key: &str, callback: StorageCallback) {
         // OBJECT STORAGE ONLY - deletes SSTs, metadata, etc.
         // Delete from both local and cloud
 
         let local_clone = Arc::clone(&self.local);
         let cloud_clone = Arc::clone(&self.cloud);
-        let key_clone = key.clone();
+        let key = key.to_string();
 
         let (tx_local, rx_local) = std::sync::mpsc::channel();
-        local_clone.submit_delete(key_clone.clone(), tx_local);
+        local_clone.submit_delete(&key, tx_local);
 
         let (tx_cloud, rx_cloud) = std::sync::mpsc::channel();
-        cloud_clone.submit_delete(key_clone, tx_cloud);
+        cloud_clone.submit_delete(&key, tx_cloud);
 
         // Wait for both and report result
         let local_result = rx_local.recv().ok();
@@ -1914,19 +1913,19 @@ impl StorageBackend for HybridStorage {
         });
     }
 
-    fn submit_list(&self, prefix: String, callback: StorageCallback) {
+    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
         // OBJECT STORAGE ONLY - lists SSTs, metadata, etc.
         // Merge results from both local and cloud
 
         let local_clone = Arc::clone(&self.local);
         let cloud_clone = Arc::clone(&self.cloud);
-        let prefix_clone = prefix.clone();
+        let prefix = prefix.to_string();
 
         let (tx_local, rx_local) = std::sync::mpsc::channel();
-        local_clone.submit_list(prefix_clone.clone(), tx_local);
+        local_clone.submit_list(&prefix, tx_local);
 
         let (tx_cloud, rx_cloud) = std::sync::mpsc::channel();
-        cloud_clone.submit_list(prefix_clone, tx_cloud);
+        cloud_clone.submit_list(&prefix, tx_cloud);
 
         let mut results = Vec::new();
 
@@ -1954,7 +1953,7 @@ impl StorageBackend for HybridStorage {
         results.dedup();
 
         let _ = callback.send(StorageEvent::ListComplete {
-            prefix,
+            prefix: prefix.clone(),
             result: StorageOutcome::Ok(results),
         });
     }
@@ -2065,24 +2064,24 @@ mod tests {
     }
 
     impl StorageBackend for AlwaysFailingWriteBackend {
-        fn submit_read(&self, key: String, callback: StorageCallback) {
+        fn submit_read(&self, key: &str, callback: StorageCallback) {
             let _ = callback.send(StorageEvent::ReadComplete {
-                key,
+                key: key.to_string(),
                 result: StorageOutcome::Err("read unavailable".to_string()),
             });
         }
 
-        fn submit_write(&self, key: String, _data: Vec<u8>, callback: StorageCallback) {
+        fn submit_write(&self, key: &str, _data: Vec<u8>, callback: StorageCallback) {
             self.write_attempts.fetch_add(1, Ordering::SeqCst);
             let _ = callback.send(StorageEvent::WriteComplete {
-                key,
+                key: key.to_string(),
                 result: StorageOutcome::Err("write unavailable".to_string()),
             });
         }
 
         fn submit_write_with_headers(
             &self,
-            key: String,
+            key: &str,
             data: Vec<u8>,
             _headers: Vec<(String, String)>,
             callback: StorageCallback,
@@ -2090,23 +2089,23 @@ mod tests {
             self.submit_write(key, data, callback);
         }
 
-        fn submit_delete(&self, key: String, callback: StorageCallback) {
+        fn submit_delete(&self, key: &str, callback: StorageCallback) {
             let _ = callback.send(StorageEvent::DeleteComplete {
-                key,
+                key: key.to_string(),
                 result: StorageOutcome::Ok(()),
             });
         }
 
-        fn submit_list(&self, prefix: String, callback: StorageCallback) {
+        fn submit_list(&self, prefix: &str, callback: StorageCallback) {
             let _ = callback.send(StorageEvent::ListComplete {
-                prefix,
+                prefix: prefix.to_string(),
                 result: StorageOutcome::Ok(Vec::new()),
             });
         }
 
-        fn submit_head(&self, key: String, callback: StorageCallback) {
+        fn submit_head(&self, key: &str, callback: StorageCallback) {
             let _ = callback.send(StorageEvent::HeadComplete {
-                key,
+                key: key.to_string(),
                 result: StorageOutcome::Err("head unavailable".to_string()),
             });
         }
@@ -2114,7 +2113,7 @@ mod tests {
 
     fn write_cloud_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        storage.cloud.submit_write(key.to_string(), data, tx);
+        storage.cloud.submit_write(key, data, tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(StorageEvent::WriteComplete {
                 result: StorageOutcome::Ok(()),
@@ -2126,7 +2125,7 @@ mod tests {
 
     fn write_local_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        storage.local.submit_write(key.to_string(), data, tx);
+        storage.local.submit_write(key, data, tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(StorageEvent::WriteComplete {
                 result: StorageOutcome::Ok(()),
@@ -2138,7 +2137,7 @@ mod tests {
 
     fn read_local_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
         let (tx, rx) = std::sync::mpsc::channel();
-        storage.local.submit_read(key.to_string(), tx);
+        storage.local.submit_read(key, tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(StorageEvent::ReadComplete {
                 result: StorageOutcome::Ok(data),
@@ -2150,7 +2149,7 @@ mod tests {
 
     fn read_cloud_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
         let (tx, rx) = std::sync::mpsc::channel();
-        storage.cloud.submit_read(key.to_string(), tx);
+        storage.cloud.submit_read(key, tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(StorageEvent::ReadComplete {
                 result: StorageOutcome::Ok(data),
@@ -2162,7 +2161,7 @@ mod tests {
 
     fn read_hybrid_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
         let (tx, rx) = std::sync::mpsc::channel();
-        storage.submit_read(key.to_string(), tx);
+        storage.submit_read(key, tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(StorageEvent::ReadComplete {
                 result: StorageOutcome::Ok(data),
@@ -2174,7 +2173,7 @@ mod tests {
 
     fn delete_cloud_object(storage: &HybridStorage, key: &str) {
         let (tx, rx) = std::sync::mpsc::channel();
-        storage.cloud.submit_delete(key.to_string(), tx);
+        storage.cloud.submit_delete(key, tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(StorageEvent::DeleteComplete {
                 result: StorageOutcome::Ok(()),
@@ -2186,7 +2185,7 @@ mod tests {
 
     fn write_cloud_metadata_object(cloud: &CloudStorage, key: &str, data: Vec<u8>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_put(key.to_string(), data, vec![], tx);
+        cloud.submit_put(key, data, vec![], tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(crate::storage::cloud::CloudEvent::Put {
                 result: crate::storage::cloud::CloudOutcome::Ok(()),
@@ -2198,7 +2197,7 @@ mod tests {
 
     fn head_cloud_metadata_object(cloud: &CloudStorage, key: &str) -> StorageObjectMetadata {
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_head(key.to_string(), tx);
+        cloud.submit_head(key, tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(crate::storage::cloud::CloudEvent::Head {
                 result: crate::storage::cloud::CloudOutcome::Ok(metadata),
@@ -2214,7 +2213,7 @@ mod tests {
 
     fn assert_cloud_object_exists(storage: &HybridStorage, key: &str) {
         let (tx, rx) = std::sync::mpsc::channel();
-        storage.cloud.submit_head(key.to_string(), tx);
+        storage.cloud.submit_head(key, tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Ok(_),
@@ -2226,7 +2225,7 @@ mod tests {
 
     fn assert_cloud_object_missing(storage: &HybridStorage, key: &str) {
         let (tx, rx) = std::sync::mpsc::channel();
-        storage.cloud.submit_head(key.to_string(), tx);
+        storage.cloud.submit_head(key, tx);
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Err(_),

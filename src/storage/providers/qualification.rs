@@ -659,7 +659,7 @@ fn put(
     headers: Vec<(String, String)>,
 ) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::channel();
-    backend.submit_put(key.to_string(), data, headers, tx);
+    backend.submit_put(key, data, headers, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::Put { result, .. }) => match result {
             CloudOutcome::Ok(()) => Ok(()),
@@ -671,7 +671,7 @@ fn put(
 
 fn get(backend: &CloudStorage, key: &str) -> Result<Vec<u8>, String> {
     let (tx, rx) = std::sync::mpsc::channel();
-    backend.submit_get(key.to_string(), tx);
+    backend.submit_get(key, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::Get { result, .. }) => match result {
             CloudOutcome::Ok(data) => Ok(data),
@@ -688,7 +688,7 @@ fn range(
     end: Option<u64>,
 ) -> Result<Vec<u8>, String> {
     let (tx, rx) = std::sync::mpsc::channel();
-    backend.submit_get_range(key.to_string(), start, end, tx);
+    backend.submit_get_range(key, start, end, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::GetRange { result, .. }) => match result {
             CloudOutcome::Ok(data) => Ok(data),
@@ -700,7 +700,7 @@ fn range(
 
 fn head(backend: &CloudStorage, key: &str) -> Result<ObjectMetadata, String> {
     let (tx, rx) = std::sync::mpsc::channel();
-    backend.submit_head(key.to_string(), tx);
+    backend.submit_head(key, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::Head { result, .. }) => match result {
             CloudOutcome::Ok(metadata) => Ok(metadata),
@@ -712,7 +712,7 @@ fn head(backend: &CloudStorage, key: &str) -> Result<ObjectMetadata, String> {
 
 fn list(backend: &CloudStorage, prefix: &str) -> Result<Vec<String>, String> {
     let (tx, rx) = std::sync::mpsc::channel();
-    backend.submit_list(prefix.to_string(), tx);
+    backend.submit_list(prefix, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::List { result, .. }) => match result {
             CloudOutcome::Ok(keys) => Ok(keys),
@@ -724,7 +724,7 @@ fn list(backend: &CloudStorage, prefix: &str) -> Result<Vec<String>, String> {
 
 fn delete(backend: &CloudStorage, key: &str) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::channel();
-    backend.submit_delete(key.to_string(), tx);
+    backend.submit_delete(key, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::Delete { result, .. }) => match result {
             CloudOutcome::Ok(()) => Ok(()),

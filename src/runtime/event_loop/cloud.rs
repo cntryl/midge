@@ -7,21 +7,14 @@ impl CloudCoordinator {
     pub(super) fn upload_sst(
         event_loop: &mut EventLoop,
         request_id: u64,
-        sst_name: String,
+        sst_name: &str,
     ) -> HandleOutcome {
-        let result = event_loop.cloud_actor.upload_sst(
+        event_loop.cloud_actor.upload_sst(
             &mut event_loop.state,
-            &sst_name,
+            sst_name,
             event_loop.hybrid_storage.as_ref(),
         );
-        let resp = result.map_or_else(
-            |error| RuntimeResponse::Error {
-                request_id,
-                error: crate::common::MidgeError::Internal(error.to_string()),
-            },
-            |()| RuntimeResponse::Ok { request_id },
-        );
-        event_loop.respond(request_id, resp);
+        event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
         HandleOutcome::Continue
     }
 
@@ -30,28 +23,19 @@ impl CloudCoordinator {
         request_id: u64,
         segment_id: u64,
     ) -> HandleOutcome {
-        let result = event_loop
-            .cloud_actor
-            .upload_wal(&mut event_loop.state, segment_id);
-        let resp = result.map_or_else(
-            |error| RuntimeResponse::Error {
-                request_id,
-                error: crate::common::MidgeError::Internal(error.to_string()),
-            },
-            |()| RuntimeResponse::Ok { request_id },
-        );
-        event_loop.respond(request_id, resp);
+        event_loop.cloud_actor.upload_wal(&mut event_loop.state, segment_id);
+        event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
         HandleOutcome::Continue
     }
 
     pub(super) fn upload_complete(
         event_loop: &mut EventLoop,
         request_id: u64,
-        resource: String,
+        resource: &str,
     ) -> HandleOutcome {
         event_loop
             .cloud_actor
-            .handle_upload_complete(&mut event_loop.state, &resource);
+            .handle_upload_complete(&mut event_loop.state, resource);
         event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
         HandleOutcome::Continue
     }

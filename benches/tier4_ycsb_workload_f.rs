@@ -41,7 +41,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
         let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
         let cf_id = cf.id();
         let _warmup_ops = ycsb::run_multi_client_for_duration(
-            Arc::clone(&engine),
+            &engine,
             clients,
             WARMUP,
             |client_id, stop| {
@@ -80,7 +80,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
         let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
         let write_opts = cntryl_midge::WriteOptions::buffered(); // Back to buffered for measured phase
         ycsb::run_multi_client_for_duration(
-            Arc::clone(&engine),
+            &engine,
             clients,
             MEASURED,
             |client_id, stop| {

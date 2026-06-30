@@ -867,11 +867,12 @@ impl S3ListState {
 impl CloudBackend for S3Backend {
     fn submit_put(
         &self,
-        key: String,
+        key: &str,
         data: Vec<u8>,
         headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
+        let key = key.to_string();
         let url = self.object_url(&key);
         let mut request = CloudRequest::new(Method::PUT, url).with_body(data);
         // Apply provided headers (e.g. conditional headers like If-None-Match)
@@ -895,7 +896,8 @@ impl CloudBackend for S3Backend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    fn submit_get(&self, key: String, callback: CloudCallback) {
+    fn submit_get(&self, key: &str, callback: CloudCallback) {
+        let key = key.to_string();
         let url = self.object_url(&key);
         let request = CloudRequest::new(Method::GET, url);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
@@ -919,7 +921,14 @@ impl CloudBackend for S3Backend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    fn submit_get_range(&self, key: String, start: u64, end: Option<u64>, callback: CloudCallback) {
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: CloudCallback,
+    ) {
+        let key = key.to_string();
         let url = self.object_url(&key);
         let mut request = CloudRequest::new(Method::GET, url);
         let range = match end {
@@ -950,7 +959,13 @@ impl CloudBackend for S3Backend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    fn submit_delete(&self, key: String, headers: Vec<(String, String)>, callback: CloudCallback) {
+    fn submit_delete(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        let key = key.to_string();
         let url = self.object_url(&key);
         let mut request = CloudRequest::new(Method::DELETE, url);
         for (name, value) in headers {
@@ -973,7 +988,8 @@ impl CloudBackend for S3Backend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    fn submit_list(&self, prefix: String, callback: CloudCallback) {
+    fn submit_list(&self, prefix: &str, callback: CloudCallback) {
+        let prefix = prefix.to_string();
         let base_url = self.base_url();
         let state = S3ListState {
             prefix: prefix.clone(),
@@ -983,7 +999,7 @@ impl CloudBackend for S3Backend {
         };
         self.executor.spawn_request_loop(
             state,
-            prefix.clone(),
+            prefix,
             callback,
             |state| Ok(CloudRequest::new(Method::GET, state.url())),
             |state, resp| {
@@ -1018,7 +1034,8 @@ impl CloudBackend for S3Backend {
         );
     }
 
-    fn submit_head(&self, key: String, callback: CloudCallback) {
+    fn submit_head(&self, key: &str, callback: CloudCallback) {
+        let key = key.to_string();
         let url = self.object_url(&key);
         let request = CloudRequest::new(Method::HEAD, url);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {

@@ -54,7 +54,7 @@ fn run_workload_a_with_distribution(
         };
         let write_opts = cntryl_midge::WriteOptions::best_effort(); // Fast warmup: skip WAL I/O
         let _warmup_ops = ycsb::run_multi_client_for_duration(
-            Arc::clone(&engine),
+            &engine,
             clients,
             WARMUP,
             |client_id, stop| {
@@ -116,7 +116,7 @@ fn run_workload_a_with_distribution(
         };
         let write_opts = cntryl_midge::WriteOptions::buffered(); // Back to buffered for measured phase
         ycsb::run_multi_client_for_duration(
-            Arc::clone(&engine),
+            &engine,
             clients,
             MEASURED,
             |client_id, stop| {

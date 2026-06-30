@@ -26,15 +26,15 @@ impl Default for MockStorage {
 }
 
 impl StorageBackend for MockStorage {
-    fn submit_read(&self, key: String, callback: StorageCallback) {
+    fn submit_read(&self, key: &str, callback: StorageCallback) {
         let data = self.data.lock();
         let result = data
-            .get(&key)
+            .get(key)
             .cloned()
             .ok_or(crate::common::MidgeError::NotFound);
 
         let event = StorageEvent::ReadComplete {
-            key,
+            key: key.to_string(),
             result: match result {
                 Ok(v) => StorageOutcome::Ok(v),
                 Err(e) => StorageOutcome::Err(format!("{e:?}")),
@@ -43,29 +43,29 @@ impl StorageBackend for MockStorage {
         let _ = callback.send(event);
     }
 
-    fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback) {
+    fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
         let mut storage = self.data.lock();
-        storage.insert(key.clone(), data);
+        storage.insert(key.to_string(), data);
 
         let event = StorageEvent::WriteComplete {
-            key,
+            key: key.to_string(),
             result: StorageOutcome::Ok(()),
         };
         let _ = callback.send(event);
     }
 
-    fn submit_delete(&self, key: String, callback: StorageCallback) {
+    fn submit_delete(&self, key: &str, callback: StorageCallback) {
         let mut storage = self.data.lock();
-        storage.remove(&key);
+        storage.remove(key);
 
         let event = StorageEvent::DeleteComplete {
-            key,
+            key: key.to_string(),
             result: StorageOutcome::Ok(()),
         };
         let _ = callback.send(event);
     }
 
-    fn submit_list(&self, prefix: String, callback: StorageCallback) {
+    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
         let data = self.data.lock();
         let results: Vec<_> = data
             .keys()
@@ -74,7 +74,7 @@ impl StorageBackend for MockStorage {
             .collect();
 
         let event = StorageEvent::ListComplete {
-            prefix,
+            prefix: prefix.to_string(),
             result: StorageOutcome::Ok(results),
         };
         let _ = callback.send(event);

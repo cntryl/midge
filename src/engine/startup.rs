@@ -239,7 +239,7 @@ impl CloudStartupRecovery {
         prefix: &str,
     ) -> MidgeResult<Vec<String>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_list(prefix.to_string(), tx);
+        cloud.submit_list(prefix, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(crate::storage::cloud::CloudEvent::List { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(keys) => Ok(keys),
@@ -261,7 +261,7 @@ impl CloudStartupRecovery {
         key: &str,
     ) -> MidgeResult<Vec<u8>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_get(key.to_string(), tx);
+        cloud.submit_get(key, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(crate::storage::cloud::CloudEvent::Get { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(data) => Ok(data),
@@ -283,7 +283,7 @@ impl CloudStartupRecovery {
         key: &str,
     ) -> MidgeResult<Option<Vec<u8>>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_get(key.to_string(), tx);
+        cloud.submit_get(key, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(crate::storage::cloud::CloudEvent::Get { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(data) => Ok(Some(data)),
@@ -310,7 +310,7 @@ impl CloudStartupRecovery {
         key: &str,
     ) -> MidgeResult<Option<crate::storage::cloud::ObjectMetadata>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_head(key.to_string(), tx);
+        cloud.submit_head(key, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(crate::storage::cloud::CloudEvent::Head { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(metadata) => Ok(Some(metadata)),
@@ -347,7 +347,7 @@ impl CloudStartupRecovery {
         headers: Vec<(String, String)>,
     ) -> MidgeResult<()> {
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_put(key.to_string(), data, headers, tx);
+        cloud.submit_put(key, data, headers, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(crate::storage::cloud::CloudEvent::Put { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(()) => Ok(()),

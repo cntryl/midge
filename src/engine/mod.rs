@@ -1576,7 +1576,7 @@ mod tests {
     impl crate::storage::cloud::CloudBackend for ListOmittingCloudBackend {
         fn submit_put(
             &self,
-            key: String,
+            key: &str,
             data: Vec<u8>,
             headers: Vec<(String, String)>,
             callback: crate::storage::cloud::CloudCallback,
@@ -1584,13 +1584,13 @@ mod tests {
             self.inner.submit_put(key, data, headers, callback);
         }
 
-        fn submit_get(&self, key: String, callback: crate::storage::cloud::CloudCallback) {
+        fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
             self.inner.submit_get(key, callback);
         }
 
         fn submit_get_range(
             &self,
-            key: String,
+            key: &str,
             start: u64,
             end: Option<u64>,
             callback: crate::storage::cloud::CloudCallback,
@@ -1600,17 +1600,17 @@ mod tests {
 
         fn submit_delete(
             &self,
-            key: String,
+            key: &str,
             headers: Vec<(String, String)>,
             callback: crate::storage::cloud::CloudCallback,
         ) {
             self.inner.submit_delete(key, headers, callback);
         }
 
-        fn submit_list(&self, prefix: String, callback: crate::storage::cloud::CloudCallback) {
+        fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
             if prefix.ends_with(&self.omitted_prefix) {
                 let _ = callback.send(crate::storage::cloud::CloudEvent::List {
-                    prefix,
+                    prefix: prefix.to_string(),
                     result: crate::storage::cloud::CloudOutcome::Ok(Vec::new()),
                 });
                 return;
@@ -1618,7 +1618,7 @@ mod tests {
             self.inner.submit_list(prefix, callback);
         }
 
-        fn submit_head(&self, key: String, callback: crate::storage::cloud::CloudCallback) {
+        fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
             self.inner.submit_head(key, callback);
         }
     }

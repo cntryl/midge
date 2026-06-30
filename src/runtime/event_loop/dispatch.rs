@@ -68,7 +68,7 @@ impl RuntimeDispatcher {
                 l0_compaction_trigger,
                 wal_durability_policy,
                 wal_batch_config,
-            } => event_loop.handle_set_runtime_config(RuntimeConfigUpdate {
+            } => event_loop.handle_set_runtime_config(&RuntimeConfigUpdate {
                 request_id,
                 memtable_size_limit,
                 memtable_flush_threshold,
@@ -228,7 +228,7 @@ impl RuntimeDispatcher {
             RuntimeMsg::CloudUploadSst {
                 request_id,
                 sst_name,
-            } => CloudCoordinator::upload_sst(event_loop, request_id, sst_name),
+            } => CloudCoordinator::upload_sst(event_loop, request_id, &sst_name),
             RuntimeMsg::CloudUploadWal {
                 request_id,
                 segment_id,
@@ -236,7 +236,7 @@ impl RuntimeDispatcher {
             RuntimeMsg::CloudUploadComplete {
                 request_id,
                 resource,
-            } => CloudCoordinator::upload_complete(event_loop, request_id, resource),
+            } => CloudCoordinator::upload_complete(event_loop, request_id, &resource),
 
             RuntimeMsg::CheckGc { request_id } => GcCoordinator::check(event_loop, request_id),
             RuntimeMsg::DeleteObsoleteSsts {

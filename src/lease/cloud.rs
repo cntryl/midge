@@ -168,7 +168,7 @@ impl CloudStorageLease {
             return Ok(None);
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_head(LEASE_OBJECT_KEY.to_string(), tx);
+        cloud.submit_head(LEASE_OBJECT_KEY, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(CloudEvent::Head { result, .. }) => match result {
                 CloudOutcome::Ok(metadata) => Ok(Some(metadata)),
@@ -191,7 +191,7 @@ impl CloudStorageLease {
             return Ok(None);
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_get(LEASE_OBJECT_KEY.to_string(), tx);
+        cloud.submit_get(LEASE_OBJECT_KEY, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(CloudEvent::Get { result, .. }) => match result {
                 CloudOutcome::Ok(bytes) => {
@@ -224,7 +224,7 @@ impl CloudStorageLease {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_put(
-            LEASE_OBJECT_KEY.to_string(),
+            LEASE_OBJECT_KEY,
             format_lease_document(doc).into_bytes(),
             headers,
             tx,
@@ -250,7 +250,7 @@ impl CloudStorageLease {
             return self.remove_lease_file();
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_delete_with_headers(LEASE_OBJECT_KEY.to_string(), headers, tx);
+        cloud.submit_delete_with_headers(LEASE_OBJECT_KEY, headers, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(CloudEvent::Delete { result, .. }) => match result {
                 CloudOutcome::Ok(()) => Ok(()),
@@ -777,7 +777,7 @@ mod tests {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_put(
-            LEASE_OBJECT_KEY.to_string(),
+            LEASE_OBJECT_KEY,
             format_lease_document(&new_holder_doc).into_bytes(),
             vec![],
             tx,
@@ -789,7 +789,7 @@ mod tests {
 
         // Assert
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_get(LEASE_OBJECT_KEY.to_string(), tx);
+        cloud.submit_get(LEASE_OBJECT_KEY, tx);
         let event = rx.recv().unwrap();
         let bytes = match event {
             CloudEvent::Get {

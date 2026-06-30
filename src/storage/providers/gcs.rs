@@ -829,11 +829,12 @@ impl GcsListState {
 impl CloudBackend for GcsBackend {
     fn submit_put(
         &self,
-        key: String,
+        key: &str,
         data: Vec<u8>,
         headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
+        let key = key.to_string();
         let method = match self.mode {
             GcsBackendMode::Json => Method::POST,
             GcsBackendMode::Xml => Method::PUT,
@@ -863,7 +864,8 @@ impl CloudBackend for GcsBackend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    fn submit_get(&self, key: String, callback: CloudCallback) {
+    fn submit_get(&self, key: &str, callback: CloudCallback) {
+        let key = key.to_string();
         let url = self.download_url(&key);
         let request = CloudRequest::new(Method::GET, url);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
@@ -887,7 +889,14 @@ impl CloudBackend for GcsBackend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    fn submit_get_range(&self, key: String, start: u64, end: Option<u64>, callback: CloudCallback) {
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: CloudCallback,
+    ) {
+        let key = key.to_string();
         let url = self.download_url(&key);
         let range = match end {
             Some(e) => format!("bytes={}-{}", start, e.saturating_sub(1)),
@@ -917,7 +926,13 @@ impl CloudBackend for GcsBackend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    fn submit_delete(&self, key: String, headers: Vec<(String, String)>, callback: CloudCallback) {
+    fn submit_delete(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        let key = key.to_string();
         let mut url = self.metadata_url(&key);
         let mut request = CloudRequest::new(Method::DELETE, String::new());
         for (name, value) in headers {
@@ -951,7 +966,8 @@ impl CloudBackend for GcsBackend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    fn submit_list(&self, prefix: String, callback: CloudCallback) {
+    fn submit_list(&self, prefix: &str, callback: CloudCallback) {
+        let prefix = prefix.to_string();
         let state = GcsListState {
             prefix: prefix.clone(),
             endpoint: self.endpoint.clone(),
@@ -962,7 +978,7 @@ impl CloudBackend for GcsBackend {
         };
         self.executor.spawn_request_loop(
             state,
-            prefix.clone(),
+            prefix,
             callback,
             |state| Ok(CloudRequest::new(Method::GET, state.url())),
             |state, resp| {
@@ -1018,7 +1034,8 @@ impl CloudBackend for GcsBackend {
         );
     }
 
-    fn submit_head(&self, key: String, callback: CloudCallback) {
+    fn submit_head(&self, key: &str, callback: CloudCallback) {
+        let key = key.to_string();
         // GCS JSON: GET metadata URL. GCS XML: HEAD object URL.
         let url = self.metadata_url(&key);
         let method = match self.mode {

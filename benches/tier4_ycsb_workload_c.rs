@@ -41,7 +41,7 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
         let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
         let cf_id = cf.id();
         let _warmup_ops = ycsb::run_multi_client_for_duration(
-            Arc::clone(&engine),
+            &engine,
             clients,
             WARMUP,
             |client_id, _stop| {
@@ -68,7 +68,7 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
         let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
         ycsb::run_multi_client_for_duration(
-            Arc::clone(&engine),
+            &engine,
             clients,
             MEASURED,
             |client_id, _stop| {

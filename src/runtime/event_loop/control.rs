@@ -112,48 +112,40 @@ impl EventLoop {
 
     pub(super) fn handle_set_runtime_config(
         &mut self,
-        update: RuntimeConfigUpdate,
+        update: &RuntimeConfigUpdate,
     ) -> HandleOutcome {
-        let RuntimeConfigUpdate {
-            request_id,
-            memtable_size_limit,
-            memtable_flush_threshold,
-            enable_compaction,
-            l0_compaction_trigger,
-            wal_durability_policy,
-            wal_batch_config,
-        } = update;
-        if let Some(ms) = memtable_size_limit {
+        if let Some(ms) = update.memtable_size_limit {
             self.state.memtable_size_limit = ms;
         }
-        if let Some(th) = memtable_flush_threshold {
+        if let Some(th) = update.memtable_flush_threshold {
             self.state.memtable_flush_threshold = th;
         }
-        if let Some(ec) = enable_compaction {
+        if let Some(ec) = update.enable_compaction {
             self.state.enable_compaction = ec;
         }
-        if let Some(trigger) = l0_compaction_trigger {
+        if let Some(trigger) = update.l0_compaction_trigger {
             self.compaction_actor.set_l0_file_count_threshold(trigger);
         }
 
         self.wake_write_stall_waiters();
 
-        if wal_durability_policy.is_some() || wal_batch_config.is_some() {
-            let policy = wal_durability_policy.unwrap_or(self.wal_actor.durability_policy());
-            let batch_cfg = wal_batch_config.unwrap_or(self.wal_actor.batch_config());
-            if let Err(error) = self.wal_actor.set_durability(policy, batch_cfg) {
-                self.respond(
-                    request_id,
-                    RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Internal(error.to_string()),
-                    },
-                );
-                return HandleOutcome::Continue;
-            }
+        if update.wal_durability_policy.is_some() || update.wal_batch_config.is_some() {
+            let policy = update
+                .wal_durability_policy
+                .as_ref()
+                .copied()
+                .unwrap_or(self.wal_actor.durability_policy());
+            let batch_cfg = update
+                .wal_batch_config
+                .as_ref()
+                .copied()
+                .unwrap_or(self.wal_actor.batch_config());
+            self.wal_actor.set_durability(policy, batch_cfg);
         }
 
-        self.respond(request_id, RuntimeResponse::Ok { request_id });
+        self.respond(update.request_id, RuntimeResponse::Ok {
+            request_id: update.request_id,
+        });
         HandleOutcome::Continue
     }
 

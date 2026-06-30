@@ -304,9 +304,10 @@ impl WalCoordinator {
         request_id: u64,
         segment_id: u64,
     ) -> HandleOutcome {
-        event_loop
-            .wal_actor
-            .handle_sync_complete(&mut event_loop.state, segment_id);
+        crate::runtime::actors::wal::WalActor::handle_sync_complete(
+            &mut event_loop.state,
+            segment_id,
+        );
         event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
         HandleOutcome::Continue
     }

@@ -330,16 +330,16 @@ pub type StorageCallback = std::sync::mpsc::Sender<StorageEvent>;
 /// - Ready for batching and pipelining
 pub trait StorageBackend: Send + Sync + 'static {
     /// Submit a read operation. Returns immediately.
-    fn submit_read(&self, key: String, callback: StorageCallback);
+    fn submit_read(&self, key: &str, callback: StorageCallback);
 
     /// Submit a write operation. Returns immediately.
-    fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback);
+    fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback);
 
     /// Submit a conditional write operation. Backends that cannot enforce the
     /// supplied preconditions must fail closed rather than writing.
     fn submit_write_with_headers(
         &self,
-        key: String,
+        key: &str,
         data: Vec<u8>,
         headers: Vec<(String, String)>,
         callback: StorageCallback,
@@ -350,7 +350,7 @@ pub trait StorageBackend: Send + Sync + 'static {
         }
 
         let _ = callback.send(StorageEvent::WriteComplete {
-            key,
+            key: key.to_string(),
             result: StorageOutcome::Err(
                 "conditional write is not supported by this storage backend".to_string(),
             ),
@@ -358,13 +358,13 @@ pub trait StorageBackend: Send + Sync + 'static {
     }
 
     /// Submit a delete operation. Returns immediately.
-    fn submit_delete(&self, key: String, callback: StorageCallback);
+    fn submit_delete(&self, key: &str, callback: StorageCallback);
 
     /// Submit a conditional delete operation. Backends that cannot enforce the
     /// supplied preconditions must fail closed rather than deleting.
     fn submit_delete_with_headers(
         &self,
-        key: String,
+        key: &str,
         headers: Vec<(String, String)>,
         callback: StorageCallback,
     ) {
@@ -374,7 +374,7 @@ pub trait StorageBackend: Send + Sync + 'static {
         }
 
         let _ = callback.send(StorageEvent::DeleteComplete {
-            key,
+            key: key.to_string(),
             result: StorageOutcome::Err(
                 "conditional delete is not supported by this storage backend".to_string(),
             ),
@@ -382,14 +382,14 @@ pub trait StorageBackend: Send + Sync + 'static {
     }
 
     /// Submit a prefix list operation. Returns immediately.
-    fn submit_list(&self, prefix: String, callback: StorageCallback);
+    fn submit_list(&self, prefix: &str, callback: StorageCallback);
 
     /// Submit an object metadata lookup. Implementations with native HEAD
     /// support should override this. The fallback reads the object and returns
     /// a content fingerprint, which is conservative but may be more expensive.
-    fn submit_head(&self, key: String, callback: StorageCallback) {
+    fn submit_head(&self, key: &str, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_read(key.clone(), tx);
+        self.submit_read(key, tx);
         let result = match rx.recv() {
             Ok(StorageEvent::ReadComplete {
                 result: StorageOutcome::Ok(data),
@@ -406,6 +406,9 @@ pub trait StorageBackend: Send + Sync + 'static {
                 "storage HEAD fallback channel closed for '{key}': {error}"
             )),
         };
-        let _ = callback.send(StorageEvent::HeadComplete { key, result });
+        let _ = callback.send(StorageEvent::HeadComplete {
+            key: key.to_string(),
+            result,
+        });
     }
 }

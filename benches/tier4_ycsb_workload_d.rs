@@ -40,7 +40,7 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     {
         let cf_id = cf.id();
         let _warmup_ops = ycsb::run_multi_client_for_duration(
-            Arc::clone(&engine),
+            &engine,
             clients,
             WARMUP,
             |client_id, stop| {
@@ -98,7 +98,7 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
         let write_opts = cntryl_midge::WriteOptions::buffered(); // Back to buffered for measured phase
         ycsb::run_multi_client_for_duration(
-            Arc::clone(&engine),
+            &engine,
             clients,
             MEASURED,
             |client_id, stop| {

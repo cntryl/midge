@@ -69,13 +69,11 @@ impl Footer {
     }
 
     #[must_use]
-    #[must_use]
     pub fn with_trie(mut self, trie_handle: BlockHandle) -> Self {
         self.trie_handle = Some(trie_handle);
         self
     }
 
-    #[must_use]
     #[must_use]
     pub fn with_block_bloom(mut self, block_bloom_handle: BlockHandle) -> Self {
         self.block_bloom_handle = Some(block_bloom_handle);

@@ -93,6 +93,16 @@ pub struct WalActor {
 }
 
 impl WalActor {
+    fn duration_nanos_u64(duration: Duration) -> u64 {
+        u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    fn u64_to_f64(value: u64) -> f64 {
+        let upper = u32::try_from(value >> 32).unwrap_or(u32::MAX);
+        let lower = u32::try_from(value & u64::from(u32::MAX)).unwrap_or(u32::MAX);
+        f64::from(upper) * 4_294_967_296.0 + f64::from(lower)
+    }
+
     fn record_no_space_event() {
         if let Some(t) = crate::telemetry::Telemetry::global() {
             t.metrics().record_no_space_event();
@@ -118,7 +128,8 @@ impl WalActor {
         if let Some(t) = crate::telemetry::Telemetry::global() {
             t.metrics().record_wal_append(bytes_written);
             t.metrics().record_wal_append_count();
-            t.metrics().record_wal_append_ns(elapsed.as_nanos() as u64);
+            t.metrics()
+                .record_wal_append_ns(Self::duration_nanos_u64(elapsed));
         }
     }
 
@@ -136,7 +147,7 @@ impl WalActor {
         let (wal_fs, writer) = if memory_mode {
             (None, None)
         } else {
-            let fs: Arc<dyn Fs> = Arc::new(RealFs::new(&wal_dir)?);
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new(wal_dir)?);
             let factory = FsWalFactoryIo::new(Arc::clone(&fs));
             let writer = Some(factory.create_writer(crate::wal::ACTIVE_FILE_NAME)?);
             (Some(fs), writer)
@@ -191,11 +202,10 @@ impl WalActor {
         &mut self,
         policy: DurabilityPolicy,
         batch_config: crate::wal::policy::BatchConfig,
-    ) -> MidgeResult<()> {
+    ) {
         // Update batch config and policy atomically
         self.batch_config = batch_config;
         self.durability_policy = policy;
-        Ok(())
     }
 
     pub fn is_cloud_async(&self) -> bool {
@@ -241,6 +251,134 @@ impl WalActor {
     /// Returns number of writes that have exceeded `CLOUD_UPLOAD_TIMEOUT`
     pub fn count_timed_out_writes(&self) -> usize {
         self.cloud_write_queue.count_timed_out_writes()
+    }
+
+    fn ensure_cloud_async_ready(&self) -> MidgeResult<()> {
+        if self.should_apply_backpressure() {
+            if let Some(t) = crate::telemetry::Telemetry::global() {
+                t.metrics().record_write_stall_cloud();
+            }
+            tracing::warn!(
+                pending_count = self.cloud_write_queue.len(),
+                pending_bytes = self.cloud_write_queue.pending_bytes(),
+                "CloudAsync write stall: pending queue at capacity"
+            );
+            return Err(MidgeError::WriteStall(
+                "CloudAsync pending queue at capacity; cloud upload too slow".to_string(),
+            ));
+        }
+
+        let timed_out = self.count_timed_out_writes();
+        if timed_out > 0 {
+            tracing::error!(
+                timed_out_count = timed_out,
+                timeout_secs = CLOUD_UPLOAD_TIMEOUT.as_secs(),
+                "CloudAsync timeout: pending writes not acknowledged by cloud"
+            );
+            return Err(MidgeError::Internal(format!(
+                "{timed_out} pending writes exceeded cloud upload timeout"
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn apply_append_policy(
+        &mut self,
+        state: &mut RuntimeState,
+        sequence: u64,
+        cf_id: crate::types::ColumnFamilyId,
+        key: &Bytes,
+        value: Option<&Bytes>,
+        expiration: Option<u64>,
+    ) -> MidgeResult<()> {
+        match self.durability_policy {
+            DurabilityPolicy::Strict | DurabilityPolicy::CloudMirrored => {
+                self.sync_internal(state)?;
+                state.wal.local_durable_seq = sequence;
+                Self::apply_to_memtable(
+                    state,
+                    sequence,
+                    cf_id,
+                    key.clone(),
+                    value.cloned(),
+                    expiration,
+                )?;
+
+                if matches!(self.durability_policy, DurabilityPolicy::CloudMirrored) {
+                    self.cloud_write_queue.enqueue_write(
+                        cf_id,
+                        key.to_vec(),
+                        value.map(|bytes| bytes.as_ref().to_vec()),
+                        sequence,
+                        expiration,
+                    );
+                }
+            }
+            DurabilityPolicy::Batched | DurabilityPolicy::BestEffort => {
+                Self::apply_to_memtable(
+                    state,
+                    sequence,
+                    cf_id,
+                    key.clone(),
+                    value.cloned(),
+                    expiration,
+                )?;
+            }
+            DurabilityPolicy::CloudAsync => {
+                self.ensure_cloud_async_ready()?;
+                Self::apply_to_memtable(
+                    state,
+                    sequence,
+                    cf_id,
+                    key.clone(),
+                    value.cloned(),
+                    expiration,
+                )?;
+                self.cloud_write_queue.enqueue_write(
+                    cf_id,
+                    key.to_vec(),
+                    value.map(|bytes| bytes.as_ref().to_vec()),
+                    sequence,
+                    expiration,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_delete_range_policy(
+        &mut self,
+        state: &mut RuntimeState,
+        sequence: u64,
+        cf_id: u32,
+        start_key: &[u8],
+        end_key: &[u8],
+        effective_durability: DurabilityPolicy,
+    ) -> MidgeResult<()> {
+        match effective_durability {
+            DurabilityPolicy::Strict | DurabilityPolicy::CloudMirrored => {
+                self.sync_internal(state)?;
+                state.wal.local_durable_seq = sequence;
+                Self::apply_delete_range_to_memtable(state, sequence, cf_id, start_key, end_key)?;
+            }
+            DurabilityPolicy::Batched | DurabilityPolicy::BestEffort => {
+                Self::apply_delete_range_to_memtable(state, sequence, cf_id, start_key, end_key)?;
+            }
+            DurabilityPolicy::CloudAsync => {
+                self.ensure_cloud_async_ready()?;
+                Self::apply_delete_range_to_memtable(state, sequence, cf_id, start_key, end_key)?;
+                self.cloud_write_queue.enqueue_delete_range(
+                    cf_id,
+                    start_key.to_vec(),
+                    end_key.to_vec(),
+                    sequence,
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Append a record to the WAL
@@ -352,123 +490,7 @@ impl WalActor {
         self.pending_sync_count += 1;
         self.bytes_since_sync += record_size;
 
-        // Apply durability policy
-        match self.durability_policy {
-            DurabilityPolicy::Strict => {
-                // Fsync immediately, then apply to memtable
-                self.sync_internal(state)?;
-                state.wal.local_durable_seq = sequence;
-
-                // Apply to memtable - write is now visible
-                self.apply_to_memtable(
-                    state,
-                    sequence,
-                    cf_id,
-                    key.clone(),
-                    value.clone(),
-                    record.expiration,
-                )?;
-            }
-            DurabilityPolicy::Batched => {
-                // Apply to memtable immediately, but defer response until fsync completes.
-                // Caller joins the group commit waiter queue; sync completion notifies all.
-                self.apply_to_memtable(
-                    state,
-                    sequence,
-                    cf_id,
-                    key.clone(),
-                    value.clone(),
-                    record.expiration,
-                )?;
-                // Return deferred=true so caller joins group commit
-            }
-            DurabilityPolicy::CloudMirrored => {
-                // Fsync locally, apply to memtable, schedule cloud upload in background
-                self.sync_internal(state)?;
-                state.wal.local_durable_seq = sequence;
-
-                // Apply to memtable - local durability sufficient
-                self.apply_to_memtable(
-                    state,
-                    sequence,
-                    cf_id,
-                    key.clone(),
-                    value.clone(),
-                    record.expiration,
-                )?;
-
-                // Schedule cloud upload of the current WAL segment
-                // The segment has been synced locally; now background-upload to cloud.
-                self.cloud_write_queue.enqueue_write(
-                    cf_id,
-                    key.to_vec(),
-                    value.as_ref().map(|v| v.to_vec()),
-                    sequence,
-                    record.expiration,
-                );
-            }
-            DurabilityPolicy::CloudAsync => {
-                // === CRITICAL: Check backpressure before queueing ===
-                // If cloud upload is stalled, pending queue grows without bound.
-                // Prevent memory exhaustion by rejecting writes when queue is full.
-                if self.should_apply_backpressure() {
-                    if let Some(t) = crate::telemetry::Telemetry::global() {
-                        t.metrics().record_write_stall_cloud();
-                    }
-                    tracing::warn!(
-                        pending_count = self.cloud_write_queue.len(),
-                        pending_bytes = self.cloud_write_queue.pending_bytes(),
-                        "CloudAsync write stall: pending queue at capacity"
-                    );
-                    return Err(MidgeError::WriteStall(
-                        "CloudAsync pending queue at capacity; cloud upload too slow".to_string(),
-                    ));
-                }
-
-                // Check for timed-out writes
-                let timed_out = self.count_timed_out_writes();
-                if timed_out > 0 {
-                    tracing::error!(
-                        timed_out_count = timed_out,
-                        timeout_secs = CLOUD_UPLOAD_TIMEOUT.as_secs(),
-                        "CloudAsync timeout: pending writes not acknowledged by cloud"
-                    );
-                    return Err(MidgeError::Internal(format!(
-                        "{timed_out} pending writes exceeded cloud upload timeout"
-                    )));
-                }
-
-                // CRITICAL: Apply to memtable immediately for background CloudAsync.
-                // Cloud upload runs asynchronously; data must be visible for reads
-                // without waiting for upload completion. This is the key difference
-                // from the old CloudAsync behavior which blocked on cloud confirmation.
-                self.apply_to_memtable(
-                    state,
-                    sequence,
-                    cf_id,
-                    key.clone(),
-                    value.clone(),
-                    record.expiration,
-                )?;
-
-                // Queue write for cloud durability confirmation (used for telemetry/monitoring).
-                // Memtable update happened above; reads don't wait for cloud upload.
-                self.cloud_write_queue.enqueue_write(
-                    cf_id,
-                    key.to_vec(),
-                    value.as_ref().map(|v| v.to_vec()),
-                    sequence,
-                    record.expiration,
-                );
-            }
-            DurabilityPolicy::BestEffort => {
-                // Best-effort persistence: write directly to memtable only.
-                // No fsync, no cloud upload, no group commit.
-                // Data is visible for reads and can be flushed to SST, but not durable on crash before flush.
-                // Safe for bulk loads where re-load is acceptable.
-                self.apply_to_memtable(state, sequence, cf_id, key, value, record.expiration)?;
-            }
-        }
+        self.apply_append_policy(state, sequence, cf_id, &key, value.as_ref(), record.expiration)?;
 
         tracing::trace!(cf_id = cf_id, sequence, policy = ?self.durability_policy, "WAL append");
 
@@ -476,7 +498,8 @@ impl WalActor {
         if std::env::var_os("MIDGE_TRACE_WAL_APPEND").is_some()
             && self.append_calls.is_multiple_of(1000)
         {
-            let avg_ms = (self.append_total.as_secs_f64() * 1000.0) / (self.append_calls as f64);
+            let avg_ms =
+                (self.append_total.as_secs_f64() * 1000.0) / Self::u64_to_f64(self.append_calls);
             eprintln!(
                 "[midge] wal.append: calls={} total_ms={:.2} avg_ms={:.3}",
                 self.append_calls,
@@ -528,11 +551,11 @@ impl WalActor {
         let record = WalRecord {
             cf_id,
             op: WalOpKind::DeleteRange,
-            key: start_key.clone(),
+            key: start_key,
             value: None,
             seq: sequence,
             expiration: None,
-            range_end: Some(end_key.clone()),
+            range_end: Some(end_key),
             txn_id: None,
             writer_epoch: self.current_epoch,
             compression: None,
@@ -570,105 +593,15 @@ impl WalActor {
             self.bytes_since_sync += record_size;
         }
 
-        // Apply durability policy
-        match effective_durability {
-            DurabilityPolicy::Strict => {
-                self.sync_internal(state)?;
-                state.wal.local_durable_seq = sequence;
-                if let Some(range_end) = record.range_end.as_ref() {
-                    self.apply_delete_range_to_memtable(
-                        state,
-                        sequence,
-                        cf_id,
-                        record.key.as_ref(),
-                        range_end.as_ref(),
-                    )?;
-                }
-            }
-            DurabilityPolicy::Batched => {
-                // Apply to memtable immediately, but defer response until fsync completes
-                if let Some(range_end) = record.range_end.as_ref() {
-                    self.apply_delete_range_to_memtable(
-                        state,
-                        sequence,
-                        cf_id,
-                        record.key.as_ref(),
-                        range_end.as_ref(),
-                    )?;
-                }
-                // Return deferred=true so caller joins group commit
-            }
-            DurabilityPolicy::CloudMirrored => {
-                self.sync_internal(state)?;
-                state.wal.local_durable_seq = sequence;
-                if let Some(range_end) = record.range_end.as_ref() {
-                    self.apply_delete_range_to_memtable(
-                        state,
-                        sequence,
-                        cf_id,
-                        record.key.as_ref(),
-                        range_end.as_ref(),
-                    )?;
-                }
-            }
-            DurabilityPolicy::CloudAsync => {
-                if self.should_apply_backpressure() {
-                    if let Some(t) = crate::telemetry::Telemetry::global() {
-                        t.metrics().record_write_stall_cloud();
-                    }
-                    tracing::warn!(
-                        pending_count = self.cloud_write_queue.len(),
-                        pending_bytes = self.cloud_write_queue.pending_bytes(),
-                        "CloudAsync write stall on delete_range"
-                    );
-                    return Err(MidgeError::WriteStall(
-                        "CloudAsync pending queue at capacity".to_string(),
-                    ));
-                }
-
-                let timed_out = self.count_timed_out_writes();
-                if timed_out > 0 {
-                    return Err(MidgeError::Internal(format!(
-                        "{timed_out} pending writes exceeded cloud upload timeout"
-                    )));
-                }
-
-                // CRITICAL: Apply to memtable immediately for background CloudAsync.
-                // Cloud upload runs asynchronously; deletions must be visible immediately.
-                if let Some(range_end) = record.range_end.as_ref() {
-                    self.apply_delete_range_to_memtable(
-                        state,
-                        sequence,
-                        cf_id,
-                        record.key.as_ref(),
-                        range_end.as_ref(),
-                    )?;
-                }
-
-                // Queue for cloud confirmation (used for telemetry/monitoring).
-                self.cloud_write_queue.enqueue_delete_range(
-                    cf_id,
-                    record.key.to_vec(),
-                    record
-                        .range_end
-                        .as_ref()
-                        .map(|b| b.to_vec())
-                        .unwrap_or_default(),
-                    sequence,
-                );
-            }
-            DurabilityPolicy::BestEffort => {
-                // Skip WAL for delete range - apply to memtable only
-                if let Some(range_end) = record.range_end.as_ref() {
-                    self.apply_delete_range_to_memtable(
-                        state,
-                        sequence,
-                        cf_id,
-                        record.key.as_ref(),
-                        range_end.as_ref(),
-                    )?;
-                }
-            }
+        if let Some(range_end) = record.range_end.as_ref() {
+            self.apply_delete_range_policy(
+                state,
+                sequence,
+                cf_id,
+                record.key.as_ref(),
+                range_end.as_ref(),
+                effective_durability,
+            )?;
         }
 
         tracing::trace!(cf_id = cf_id, sequence, policy = ?self.durability_policy, "WAL append_delete_range");
@@ -718,7 +651,7 @@ impl WalActor {
                 )
             })?;
 
-            self.ensure_no_write_conflicts(state, &ops, start_sequence)?;
+            Self::ensure_no_write_conflicts(state, &ops, start_sequence)?;
         }
 
         // Preflight insert-only operations so we can fail without writing any WAL records.
@@ -749,7 +682,7 @@ impl WalActor {
             ops_count > 0,
             "append_transaction requires at least one operation"
         );
-        let ops_count_u64 = ops_count as u64;
+        let ops_count_u64 = u64::try_from(ops_count).unwrap_or(u64::MAX);
         // sequences: begin_seq, op_seqs[0..ops_count-1], commit_seq
         let begin_seq = state.sequence + 1;
         let first_op_seq = begin_seq + 1;
@@ -878,15 +811,7 @@ impl WalActor {
                 state.wal.local_durable_seq = last_sequence;
                 fail::fail_point!("midge::wal::txn_after_sync_before_ack");
             }
-            DurabilityPolicy::Batched => {
-                // no-op; background/timer can sync later
-            }
-            DurabilityPolicy::CloudAsync => {
-                // no local durability boundary; visibility gated on cloud ack.
-            }
-            DurabilityPolicy::BestEffort => {
-                // no-op; data is already in memtable, no WAL to sync
-            }
+            DurabilityPolicy::Batched | DurabilityPolicy::CloudAsync | DurabilityPolicy::BestEffort => {}
         }
 
         let apply_op_count = apply_ops.len();
@@ -946,7 +871,7 @@ impl WalActor {
                         expiration,
                         sequence,
                     } => {
-                        self.apply_to_memtable(
+                        Self::apply_to_memtable(
                             state,
                             sequence,
                             cf_id,
@@ -960,7 +885,7 @@ impl WalActor {
                         key,
                         sequence,
                     } => {
-                        self.apply_to_memtable(state, sequence, cf_id, key, None, None)?;
+                        Self::apply_to_memtable(state, sequence, cf_id, key, None, None)?;
                     }
                     TransactionApplyOp::DeleteRange {
                         cf_id,
@@ -968,7 +893,7 @@ impl WalActor {
                         end_key,
                         sequence,
                     } => {
-                        self.apply_delete_range_to_memtable(
+                        Self::apply_delete_range_to_memtable(
                             state, sequence, cf_id, &start_key, &end_key,
                         )?;
                     }
@@ -986,7 +911,7 @@ impl WalActor {
                 "Applied batch to memtable (CloudAsync)"
             );
         } else {
-            self.apply_ops_to_memtables(state, apply_ops)?;
+            Self::apply_ops_to_memtables(state, apply_ops)?;
         }
 
         tracing::trace!(
@@ -1005,7 +930,6 @@ impl WalActor {
     }
 
     fn ensure_no_write_conflicts(
-        &self,
         state: &RuntimeState,
         ops: &[crate::runtime::TransactionOp],
         start_sequence: u64,
@@ -1021,7 +945,7 @@ impl WalActor {
                         continue;
                     }
 
-                    if let Some(latest_seq) = self.latest_key_sequence(state, *cf_id, key) {
+                    if let Some(latest_seq) = Self::latest_key_sequence(state, *cf_id, key) {
                         if latest_seq > start_sequence {
                             Self::record_write_conflict_point();
                             return Err(MidgeError::WriteConflict(format!(
@@ -1051,7 +975,7 @@ impl WalActor {
                         _ => unreachable!(),
                     };
 
-                    if let Some(latest_seq) = self.latest_range_sequence(
+                    if let Some(latest_seq) = Self::latest_range_sequence(
                         state,
                         cf_id,
                         start_key.as_ref(),
@@ -1085,7 +1009,6 @@ impl WalActor {
     }
 
     fn latest_key_sequence(
-        &self,
         state: &RuntimeState,
         cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
@@ -1118,7 +1041,6 @@ impl WalActor {
     }
 
     fn latest_range_sequence(
-        &self,
         state: &RuntimeState,
         cf_id: crate::types::ColumnFamilyId,
         start_key: &[u8],
@@ -1266,7 +1188,6 @@ impl WalActor {
     }
 
     fn apply_ops_to_memtables(
-        &mut self,
         state: &mut RuntimeState,
         apply_ops: Vec<TransactionApplyOp>,
     ) -> MidgeResult<()> {
@@ -1279,14 +1200,14 @@ impl WalActor {
                     expiration,
                     sequence,
                 } => {
-                    self.apply_to_memtable(state, sequence, cf_id, key, Some(value), expiration)?;
+                    Self::apply_to_memtable(state, sequence, cf_id, key, Some(value), expiration)?;
                 }
                 TransactionApplyOp::Delete {
                     cf_id,
                     key,
                     sequence,
                 } => {
-                    self.apply_to_memtable(state, sequence, cf_id, key, None, None)?;
+                    Self::apply_to_memtable(state, sequence, cf_id, key, None, None)?;
                 }
                 TransactionApplyOp::DeleteRange {
                     cf_id,
@@ -1294,7 +1215,7 @@ impl WalActor {
                     end_key,
                     sequence,
                 } => {
-                    self.apply_delete_range_to_memtable(
+                    Self::apply_delete_range_to_memtable(
                         state, sequence, cf_id, &start_key, &end_key,
                     )?;
                 }
@@ -1305,7 +1226,6 @@ impl WalActor {
 
     /// Checks current in-memory view (active + immutable memtables) for existence
     fn key_exists(
-        &self,
         state: &RuntimeState,
         cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
@@ -1329,7 +1249,7 @@ impl WalActor {
         cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
     ) -> bool {
-        if self.key_exists(state, cf_id, key) {
+        if Self::key_exists(state, cf_id, key) {
             return true;
         }
 
@@ -1342,7 +1262,6 @@ impl WalActor {
 
     /// Apply a write to the memtable
     fn apply_to_memtable(
-        &self,
         state: &mut RuntimeState,
         sequence: u64,
         cf_id: crate::types::ColumnFamilyId,
@@ -1376,7 +1295,6 @@ impl WalActor {
 
     /// Apply a `delete_range` operation to the memtable
     fn apply_delete_range_to_memtable(
-        &self,
         state: &mut RuntimeState,
         sequence: u64,
         cf_id: u32,
@@ -1464,13 +1382,15 @@ impl WalActor {
             if let Some(t) = crate::telemetry::Telemetry::global() {
                 t.metrics().record_wal_sync();
                 t.metrics().record_wal_fsync_count();
-                t.metrics().record_wal_fsync_ns(elapsed.as_nanos() as u64);
+                t.metrics()
+                    .record_wal_fsync_ns(Self::duration_nanos_u64(elapsed));
             }
 
             if std::env::var_os("MIDGE_TRACE_WAL_SYNC").is_some()
                 && self.sync_calls.is_multiple_of(1000)
             {
-                let avg_ms = (self.sync_total.as_secs_f64() * 1000.0) / (self.sync_calls as f64);
+                let avg_ms =
+                    (self.sync_total.as_secs_f64() * 1000.0) / Self::u64_to_f64(self.sync_calls);
                 eprintln!(
                     "[midge] wal.sync: calls={} total_ms={:.2} avg_ms={:.3}",
                     self.sync_calls,
@@ -1612,6 +1532,74 @@ impl WalActor {
     ///
     /// Updates `cloud_durable_seq` and completes any pending writes
     /// by applying them to memtable.
+    fn apply_pending_cloud_write(
+        state: &mut RuntimeState,
+        pending: PendingCloudWrite,
+    ) -> MidgeResult<()> {
+        match pending {
+            PendingCloudWrite::Single {
+                cf_id,
+                key,
+                value,
+                sequence,
+                expiration,
+                enqueued_at,
+            } => {
+                let wait_time = Instant::now().duration_since(enqueued_at);
+                tracing::debug!(
+                    sequence,
+                    wait_ms = wait_time.as_millis(),
+                    "Applying pending single write after cloud durability"
+                );
+                let key_bytes = Bytes::from(key);
+                let value_bytes = value.map(Bytes::from);
+                Self::apply_to_memtable(
+                    state,
+                    sequence,
+                    cf_id,
+                    key_bytes,
+                    value_bytes,
+                    expiration,
+                )?;
+            }
+            PendingCloudWrite::DeleteRange {
+                cf_id,
+                start_key,
+                end_key,
+                sequence,
+                enqueued_at,
+            } => {
+                let wait_time = Instant::now().duration_since(enqueued_at);
+                tracing::debug!(
+                    cf_id,
+                    sequence,
+                    wait_ms = wait_time.as_millis(),
+                    start_len = start_key.len(),
+                    end_len = end_key.len(),
+                    "Applying pending delete_range after cloud durability"
+                );
+                Self::apply_delete_range_to_memtable(state, sequence, cf_id, &start_key, &end_key)?;
+            }
+            PendingCloudWrite::Transaction {
+                commit_sequence,
+                ops,
+                enqueued_at,
+            } => {
+                let wait_time = Instant::now().duration_since(enqueued_at);
+                let op_count = ops.len();
+                tracing::debug!(
+                    commit_sequence,
+                    op_count,
+                    wait_ms = wait_time.as_millis(),
+                    "Applying pending transaction after cloud durability"
+                );
+                Self::apply_ops_to_memtables(state, ops)?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn handle_cloud_upload_complete(
         &mut self,
         state: &mut RuntimeState,
@@ -1633,104 +1621,7 @@ impl WalActor {
             .drain_until(state.wal.cloud_durable_seq);
 
         for pending in drained_writes {
-            match pending {
-                PendingCloudWrite::Single {
-                    cf_id,
-                    key,
-                    value,
-                    sequence,
-                    expiration,
-                    enqueued_at,
-                } => {
-                    let wait_time = Instant::now().duration_since(enqueued_at);
-                    tracing::debug!(
-                        sequence,
-                        wait_ms = wait_time.as_millis(),
-                        "Applying pending single write after cloud durability"
-                    );
-                    let key_bytes = Bytes::from(key);
-                    let value_bytes = value.map(Bytes::from);
-                    self.apply_to_memtable(
-                        state,
-                        sequence,
-                        cf_id,
-                        key_bytes,
-                        value_bytes,
-                        expiration,
-                    )?;
-                }
-                PendingCloudWrite::DeleteRange {
-                    cf_id,
-                    start_key,
-                    end_key,
-                    sequence,
-                    enqueued_at,
-                } => {
-                    let wait_time = Instant::now().duration_since(enqueued_at);
-                    tracing::debug!(
-                        cf_id,
-                        sequence,
-                        wait_ms = wait_time.as_millis(),
-                        start_len = start_key.len(),
-                        end_len = end_key.len(),
-                        "Applying pending delete_range after cloud durability"
-                    );
-                    self.apply_delete_range_to_memtable(
-                        state, sequence, cf_id, &start_key, &end_key,
-                    )?;
-                }
-                PendingCloudWrite::Transaction {
-                    commit_sequence,
-                    ops,
-                    enqueued_at,
-                } => {
-                    let wait_time = Instant::now().duration_since(enqueued_at);
-                    let op_count = ops.len();
-                    tracing::debug!(
-                        commit_sequence,
-                        op_count,
-                        wait_ms = wait_time.as_millis(),
-                        "Applying pending transaction after cloud durability"
-                    );
-                    for op in ops {
-                        match op {
-                            TransactionApplyOp::Put {
-                                cf_id,
-                                key,
-                                value,
-                                expiration,
-                                sequence,
-                            } => {
-                                self.apply_to_memtable(
-                                    state,
-                                    sequence,
-                                    cf_id,
-                                    key,
-                                    Some(value),
-                                    expiration,
-                                )?;
-                            }
-                            TransactionApplyOp::Delete {
-                                cf_id,
-                                key,
-                                sequence,
-                            } => {
-                                self.apply_to_memtable(state, sequence, cf_id, key, None, None)?;
-                            }
-                            TransactionApplyOp::DeleteRange {
-                                cf_id,
-                                start_key,
-                                end_key,
-                                sequence,
-                            } => {
-                                self.apply_delete_range_to_memtable(
-                                    state, sequence, cf_id, &start_key, &end_key,
-                                )?;
-                            }
-                        }
-                    }
-                }
-            }
+            Self::apply_pending_cloud_write(state, pending)?;
         }
 
         Ok(())
@@ -1745,7 +1636,7 @@ impl WalActor {
     }
 
     /// Handle sync completion notification
-    pub fn handle_sync_complete(&mut self, state: &mut RuntimeState, segment_id: u64) {
+    pub fn handle_sync_complete(state: &mut RuntimeState, segment_id: u64) {
         tracing::debug!(segment_id, "WAL sync complete");
 
         // Update last synced info if this is newer

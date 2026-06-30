@@ -66,8 +66,8 @@ fn write_file_with_parents(full_path: &Path, data: Vec<u8>) -> StorageOutcome<()
 }
 
 impl StorageBackend for FileSystem {
-    fn submit_read(&self, key: String, callback: StorageCallback) {
-        let full_path = self.full_path(&key);
+    fn submit_read(&self, key: &str, callback: StorageCallback) {
+        let full_path = self.full_path(key);
 
         let outcome = match fs::read(&full_path) {
             Ok(bytes) => StorageOutcome::Ok(bytes),
@@ -75,13 +75,13 @@ impl StorageBackend for FileSystem {
         };
 
         let _ = callback.send(StorageEvent::ReadComplete {
-            key,
+            key: key.to_string(),
             result: outcome,
         });
     }
 
-    fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback) {
-        let full_path = self.full_path(&key);
+    fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
+        let full_path = self.full_path(key);
 
         let outcome = {
             // Always try to create parent directories if present.
@@ -103,14 +103,14 @@ impl StorageBackend for FileSystem {
         };
 
         let _ = callback.send(StorageEvent::WriteComplete {
-            key,
+            key: key.to_string(),
             result: outcome,
         });
     }
 
     fn submit_write_with_headers(
         &self,
-        key: String,
+        key: &str,
         data: Vec<u8>,
         headers: Vec<(String, String)>,
         callback: StorageCallback,
@@ -120,7 +120,7 @@ impl StorageBackend for FileSystem {
             return;
         }
 
-        let full_path = self.full_path(&key);
+        let full_path = self.full_path(key);
         let if_none_match = headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("if-none-match"))
@@ -155,13 +155,13 @@ impl StorageBackend for FileSystem {
         };
 
         let _ = callback.send(StorageEvent::WriteComplete {
-            key,
+            key: key.to_string(),
             result: outcome,
         });
     }
 
-    fn submit_delete(&self, key: String, callback: StorageCallback) {
-        let full_path = self.full_path(&key);
+    fn submit_delete(&self, key: &str, callback: StorageCallback) {
+        let full_path = self.full_path(key);
 
         let outcome = match fs::remove_file(&full_path) {
             Ok(()) => StorageOutcome::Ok(()),
@@ -169,14 +169,14 @@ impl StorageBackend for FileSystem {
         };
 
         let _ = callback.send(StorageEvent::DeleteComplete {
-            key,
+            key: key.to_string(),
             result: outcome,
         });
     }
 
     fn submit_delete_with_headers(
         &self,
-        key: String,
+        key: &str,
         headers: Vec<(String, String)>,
         callback: StorageCallback,
     ) {
@@ -185,7 +185,7 @@ impl StorageBackend for FileSystem {
             return;
         }
 
-        let full_path = self.full_path(&key);
+        let full_path = self.full_path(key);
         let outcome = if let Some((_, expected)) = headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("if-match"))
@@ -217,13 +217,13 @@ impl StorageBackend for FileSystem {
         };
 
         let _ = callback.send(StorageEvent::DeleteComplete {
-            key,
+            key: key.to_string(),
             result: outcome,
         });
     }
 
-    fn submit_list(&self, prefix: String, callback: StorageCallback) {
-        let full = self.full_path(&prefix);
+    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
+        let full = self.full_path(prefix);
 
         let outcome = if full.is_dir() {
             match fs::read_dir(&full) {
@@ -245,7 +245,7 @@ impl StorageBackend for FileSystem {
         };
 
         let _ = callback.send(StorageEvent::ListComplete {
-            prefix,
+            prefix: prefix.to_string(),
             result: outcome,
         });
     }
@@ -268,7 +268,7 @@ mod tests {
         let data = b"test data".to_vec();
 
         // Act
-        fs.submit_write("test.txt".into(), data.clone(), tx);
+        fs.submit_write("test.txt", data.clone(), tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -292,7 +292,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_write("empty.txt".into(), vec![], tx);
+        fs.submit_write("empty.txt", vec![], tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -315,7 +315,7 @@ mod tests {
         let large_data = vec![42u8; 1_000_000];
 
         // Act
-        fs.submit_write("large.bin".into(), large_data.clone(), tx);
+        fs.submit_write("large.bin", large_data.clone(), tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -337,7 +337,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_write("subdir/nested/file.txt".into(), b"data".to_vec(), tx);
+        fs.submit_write("subdir/nested/file.txt", b"data".to_vec(), tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -360,7 +360,7 @@ mod tests {
 
         // Act
         let (tx, rx) = mpsc::channel();
-        fs.submit_write("file.txt".into(), b"new".to_vec(), tx);
+        fs.submit_write("file.txt", b"new".to_vec(), tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -383,7 +383,7 @@ mod tests {
         let binary_data = vec![0u8, 1u8, 255u8, 254u8];
 
         // Act
-        fs.submit_write("binary.bin".into(), binary_data.clone(), tx);
+        fs.submit_write("binary.bin", binary_data.clone(), tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -407,7 +407,7 @@ mod tests {
 
         // Act
         fs.submit_write_with_headers(
-            "conditional-create.txt".into(),
+            "conditional-create.txt",
             b"new".to_vec(),
             vec![("If-None-Match".into(), "*".into())],
             tx,
@@ -435,7 +435,7 @@ mod tests {
 
         // Act
         fs.submit_write_with_headers(
-            "conditional-existing.txt".into(),
+            "conditional-existing.txt",
             b"new".to_vec(),
             vec![("If-None-Match".into(), "*".into())],
             tx,
@@ -464,7 +464,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read("test.txt".into(), tx);
+        fs.submit_read("test.txt", tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -488,7 +488,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read("nonexistent.txt".into(), tx);
+        fs.submit_read("nonexistent.txt", tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -510,7 +510,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read("large.bin".into(), tx);
+        fs.submit_read("large.bin", tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -532,7 +532,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read("empty.txt".into(), tx);
+        fs.submit_read("empty.txt", tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -555,7 +555,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read("binary.bin".into(), tx);
+        fs.submit_read("binary.bin", tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -580,7 +580,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_delete("file.txt".into(), tx);
+        fs.submit_delete("file.txt", tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -601,7 +601,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_delete("nonexistent.txt".into(), tx);
+        fs.submit_delete("nonexistent.txt", tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -624,7 +624,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_delete("subdir/file.txt".into(), tx);
+        fs.submit_delete("subdir/file.txt", tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -650,7 +650,7 @@ mod tests {
 
         // Act
         fs.submit_delete_with_headers(
-            "conditional.txt".into(),
+            "conditional.txt",
             vec![("If-Match".into(), etag)],
             tx,
         );
@@ -677,7 +677,7 @@ mod tests {
 
         // Act
         fs.submit_delete_with_headers(
-            "conditional-stale.txt".into(),
+            "conditional-stale.txt",
             vec![("If-Match".into(), "crc32c:00000000".into())],
             tx,
         );
@@ -705,7 +705,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_list(String::new(), tx);
+        fs.submit_list("", tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -730,7 +730,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_list(String::new(), tx);
+        fs.submit_list("", tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -751,7 +751,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_list("nonexistent".into(), tx);
+        fs.submit_list("nonexistent", tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -772,7 +772,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act - Try to use path traversal
-        fs.submit_write("../escape_dir/evil.txt".into(), b"x".to_vec(), tx);
+        fs.submit_write("../escape_dir/evil.txt", b"x".to_vec(), tx);
         let event = rx.recv().unwrap();
 
         // Assert - Should succeed but write inside base_path
@@ -794,7 +794,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act - Try absolute path
-        fs.submit_write("/etc/passwd".into(), b"x".to_vec(), tx);
+        fs.submit_write("/etc/passwd", b"x".to_vec(), tx);
         let event = rx.recv().unwrap();
 
         // Assert - Should sanitize
