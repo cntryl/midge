@@ -13,7 +13,7 @@ keywords = ["database", "kv", "lsm", "embedded", "storage"]
 categories = ["database-implementations"]
 
 [workspace.lints.clippy]
-pedantic = "warn"
+pedantic = "deny"
 
 [lib]
 name = "cntryl_midge"
