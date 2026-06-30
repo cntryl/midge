@@ -573,9 +573,21 @@ impl RuntimeState {
                             bytes_recovered = stats.bytes,
                             max_sequence = ?stats.max_sequence,
                             replay_dir = ?replay_dir,
-                            replay_ms = (stats.total_replay_ns as f64) / 1_000_000.0,
-                            wal_read_ms = (stats.wal_read_ns as f64) / 1_000_000.0,
-                            apply_ms = (stats.apply_ns as f64) / 1_000_000.0,
+                            replay_ms = std::time::Duration::from_nanos(
+                                u64::try_from(stats.total_replay_ns).unwrap_or(u64::MAX),
+                            )
+                            .as_secs_f64()
+                                * 1_000.0,
+                            wal_read_ms = std::time::Duration::from_nanos(
+                                u64::try_from(stats.wal_read_ns).unwrap_or(u64::MAX),
+                            )
+                            .as_secs_f64()
+                                * 1_000.0,
+                            apply_ms = std::time::Duration::from_nanos(
+                                u64::try_from(stats.apply_ns).unwrap_or(u64::MAX),
+                            )
+                            .as_secs_f64()
+                                * 1_000.0,
                             "WAL recovery completed successfully"
                         );
                         if stats.had_corruption {
@@ -2182,7 +2194,7 @@ mod tests {
         // Assert - Verify monotonicity constraints
         assert!(wal.cloud_durable_seq <= wal.local_durable_seq);
         assert!(wal.local_durable_seq >= wal.last_synced_seq);
-        assert!(wal.pending_writes < u64::MAX as usize);
+        assert!(wal.pending_writes < usize::MAX);
     }
 
     #[test]
