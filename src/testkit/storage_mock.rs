@@ -69,7 +69,7 @@ impl StorageBackend for MockStorage {
         let data = self.data.lock();
         let results: Vec<_> = data
             .keys()
-            .filter(|k| k.starts_with(&prefix))
+            .filter(|k| k.starts_with(prefix))
             .cloned()
             .collect();
 

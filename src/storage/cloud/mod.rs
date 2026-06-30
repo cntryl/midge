@@ -565,7 +565,7 @@ fn usize_to_u64(value: usize) -> u64 {
 impl StorageBackend for CloudStorage {
     fn submit_read(&self, key: &str, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_get(&key, tx);
+        self.submit_get(key, tx);
         if let Ok(CloudEvent::Get { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(data) => StorageOutcome::Ok(data),
@@ -581,7 +581,7 @@ impl StorageBackend for CloudStorage {
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_put(&key, data, vec![], tx);
+        self.submit_put(key, data, vec![], tx);
         if let Ok(CloudEvent::Put { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
@@ -603,7 +603,7 @@ impl StorageBackend for CloudStorage {
         callback: StorageCallback,
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_put(&key, data, headers, tx);
+        self.submit_put(key, data, headers, tx);
         if let Ok(CloudEvent::Put { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
@@ -619,7 +619,7 @@ impl StorageBackend for CloudStorage {
 
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        CloudStorage::submit_delete(self, &key, tx);
+        CloudStorage::submit_delete(self, key, tx);
         if let Ok(CloudEvent::Delete { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
@@ -640,7 +640,7 @@ impl StorageBackend for CloudStorage {
         callback: StorageCallback,
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
-        CloudStorage::submit_delete_with_headers(self, &key, headers, tx);
+        CloudStorage::submit_delete_with_headers(self, key, headers, tx);
         if let Ok(CloudEvent::Delete { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),

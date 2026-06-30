@@ -473,7 +473,7 @@ fn child_manifest_crash_after_sync(db_path: &Path) {
 
     let trigger_cf = std::env::var(ENV_TRIGGER_CF).expect("trigger cf env");
     assert!(
-        !engine.get_column_family(&trigger_cf).is_some(),
+        engine.get_column_family(&trigger_cf).is_none(),
         "trigger column family must be unique per child run"
     );
     engine
