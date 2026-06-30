@@ -124,6 +124,7 @@ pub fn unique_bench_path(prefix: &str) -> PathBuf {
     base_dir.join(format!("midge_bench_{prefix}_{pid}_{counter}"))
 }
 
+#[must_use]
 pub fn default_memtable_sweep_sizes() -> Vec<MemtableSweepSize> {
     DEFAULT_MEMTABLE_SWEEP_SIZE_BYTES
         .into_iter()
@@ -132,6 +133,15 @@ pub fn default_memtable_sweep_sizes() -> Vec<MemtableSweepSize> {
         .collect()
 }
 
+/// Parse a comma-separated memtable size list.
+///
+/// Empty input returns the default sweep sizes. Entries may be byte counts or
+/// the literal `default`.
+///
+/// # Errors
+///
+/// Returns an error when the list contains an empty entry, a non-numeric byte
+/// count other than `default`, or a zero byte count.
 pub fn parse_memtable_sweep_sizes(input: Option<&str>) -> Result<Vec<MemtableSweepSize>, String> {
     let Some(input) = input.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(default_memtable_sweep_sizes());
@@ -172,14 +182,33 @@ pub fn format_memtable_size_label(bytes: usize) -> String {
     }
 }
 
+/// Enable or disable runtime compaction for a benchmark engine.
+///
+/// # Errors
+///
+/// Returns an error if the engine cannot apply the runtime setting.
 pub fn set_runtime_compaction_enabled(engine: &Engine, enabled: bool) -> crate::MidgeResult<()> {
     engine.set_runtime_compaction_enabled(enabled)
 }
 
+/// Request one runtime compaction pass for a benchmark engine.
+///
+/// # Errors
+///
+/// Returns an error if the engine cannot enqueue or run the compaction request.
 pub fn kick_runtime_compaction_once(engine: &Engine) -> crate::MidgeResult<()> {
     engine.kick_runtime_compaction_once()
 }
 
+/// Initialize telemetry settings used by benchmark binaries.
+///
+/// Repeated initialization is treated as success when telemetry is already
+/// globally available.
+///
+/// # Errors
+///
+/// Returns an error if telemetry initialization fails for a reason other than
+/// an already initialized global telemetry instance.
 pub fn init_benchmark_telemetry() -> crate::MidgeResult<()> {
     let mut config = crate::telemetry::TelemetryConfig::new()
         .with_enabled(true)
@@ -326,6 +355,11 @@ impl BenchEngineConfig {
     ///
     /// `db_path` is required for `LocalDisk` storage mode and should be the
     /// filesystem path the engine will use. Pass `None` for `Memory` mode.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `LocalDisk` is selected without a `db_path`, or when the
+    /// currently unsupported `CloudBacked` mode is selected.
     #[must_use]
     pub fn build_midge_options(&self, db_path: Option<PathBuf>) -> MidgeOptions {
         let storage_mode = match self.storage_mode {
@@ -352,6 +386,10 @@ impl BenchEngineConfig {
 }
 
 /// Setup a benchmark engine with the given configuration.
+///
+/// # Panics
+///
+/// Panics if the benchmark engine cannot be opened with the derived options.
 #[must_use]
 pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> Engine {
     let path = unique_bench_path(prefix);
@@ -385,6 +423,11 @@ pub fn setup_engine_at_path(path: &Path, config: &BenchEngineConfig) -> Engine {
 
 /// Reopen an existing database at a specific path.
 /// Does NOT delete existing data - use for recovery/reopen tests.
+///
+/// # Panics
+///
+/// Panics if `config` uses memory storage, or if the engine cannot be opened at
+/// the requested path.
 #[must_use]
 pub fn reopen_engine_at_path(path: &Path, config: &BenchEngineConfig) -> Engine {
     if let BenchStorageMode::Memory = config.storage_mode {
@@ -443,6 +486,10 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 /// Create an on-disk "seed" directory by invoking a builder closure once.
 /// The builder receives the path where it should materialize the database.
+///
+/// # Panics
+///
+/// Panics if the provided builder panics.
 pub fn create_seed_dir<F>(seed_prefix: &str, builder: F) -> PathBuf
 where
     F: FnOnce(&Path),
@@ -459,6 +506,11 @@ where
 /// This clones the seed directory to a unique temp path, reopens the engine at
 /// that path using `config`, invokes `measure_fn` exactly once with ownership of
 /// the opened engine, measures elapsed time, then cleans up.
+///
+/// # Panics
+///
+/// Panics if the seed directory cannot be cloned, the engine cannot be opened,
+/// or `measure_fn` panics.
 pub fn run_single_shot_from_seed<F>(
     seed_path: &Path,
     config: &BenchEngineConfig,
@@ -490,6 +542,11 @@ where
 ///
 /// Useful when per-sample restore is expensive but must not be included in the
 /// timed critical section (e.g., creating multiple L0 files before `compact_all`).
+///
+/// # Panics
+///
+/// Panics if the seed directory cannot be cloned, the engine cannot be opened,
+/// or either closure panics.
 pub fn run_single_shot_with_restore<R, T>(
     seed_path: &Path,
     config: &BenchEngineConfig,
@@ -527,6 +584,11 @@ where
 /// directory path and the config.
 ///
 /// Return a value from the closure if you want its `Drop` to be excluded from timing.
+///
+/// # Panics
+///
+/// Panics if the seed directory cannot be cloned or if the provided closure
+/// panics.
 pub fn run_single_shot_open_from_seed<F, R>(
     seed_path: &Path,
     config: &BenchEngineConfig,
