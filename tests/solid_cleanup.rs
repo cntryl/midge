@@ -38,16 +38,14 @@ fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) {
 #[test]
 fn should_reexport_shared_public_types_from_crate_root() {
     // Arrange
-    let _open_fn: fn(OpenOptions) -> MidgeResult<Engine> = Engine::open;
-    let _policy = RecoveryPolicy::Strict;
-    let _health = EngineHealth::Healthy;
-    let _storage = Storage::InMemory;
-    let _credential = CloudCredentialSource::S3(S3CredentialSource::environment());
-    let _cf_id: ColumnFamilyId = 0;
-    let _runtime_metrics: fn(&Engine) -> MidgeResult<RuntimeMetricsSnapshot> =
-        Engine::get_runtime_metrics;
-    let _storage_layout: fn(&Engine) -> MidgeResult<StorageLayoutSnapshot> =
-        Engine::get_storage_layout;
+    let _: fn(OpenOptions) -> MidgeResult<Engine> = Engine::open;
+    let _: RecoveryPolicy = RecoveryPolicy::Strict;
+    let _: EngineHealth = EngineHealth::Healthy;
+    let _: Storage = Storage::InMemory;
+    let _: CloudCredentialSource = CloudCredentialSource::S3(S3CredentialSource::environment());
+    let _: ColumnFamilyId = 0;
+    let _: fn(&Engine) -> MidgeResult<RuntimeMetricsSnapshot> = Engine::get_runtime_metrics;
+    let _: fn(&Engine) -> MidgeResult<StorageLayoutSnapshot> = Engine::get_storage_layout;
 
     // Act
     let provider = CloudProviderConfig::gcs("bucket")

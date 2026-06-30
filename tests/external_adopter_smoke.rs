@@ -18,7 +18,7 @@ fn should_recover_wal_backed_commit_when_reopening_local_engine() {
 
     // Act
     {
-        let engine = open_with_mode(opts.clone(), "local");
+        let engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("smoke").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -28,7 +28,7 @@ fn should_recover_wal_backed_commit_when_reopening_local_engine() {
         tx.commit(WriteOptions::sync()).expect("sync commit");
     }
 
-    let engine = open_with_mode(opts, "local");
+    let engine = open_with_mode(&opts, "local");
     let cf = engine.get_column_family("smoke").expect("get smoke cf");
     let tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -155,7 +155,7 @@ fn should_keep_compacted_data_visible_when_compaction_crashes_before_publish() {
 fn should_filter_point_delete_tombstones_during_cross_sst_iteration() {
     // Arrange
     let _guard = lock_smoke_tests();
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("smoke").expect("create cf");
 
     for batch in 0..2 {

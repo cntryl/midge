@@ -84,13 +84,12 @@ fn should_reject_future_format_fixture_given_unsupported_version_when_reopening(
         Engine::verify_path(temp.path()).expect_err("future fixture should fail verify");
     assert_compatibility_error(verify_error);
 
-    let open_error = match Engine::open(
+    let Err(open_error) = Engine::open(
         OpenOptions::local(temp.path())
             .recovery_policy(RecoveryPolicy::Strict)
             .build(),
-    ) {
-        Ok(_) => panic!("future fixture should fail open"),
-        Err(error) => error,
+    ) else {
+        panic!("future fixture should fail open");
     };
     // Assert
     assert_compatibility_error(open_error);

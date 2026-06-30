@@ -28,7 +28,7 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write and flush to create SST file
@@ -52,7 +52,7 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // key1 should be visible (from first SST, manifest entry exists)
@@ -80,7 +80,7 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write and flush (manifest updated)
@@ -110,7 +110,7 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // All data should be recovered (flushed + WAL)
@@ -144,7 +144,7 @@ fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write, flush, then overwrite
@@ -167,7 +167,7 @@ fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // WAL should take precedence over SST when both exist
@@ -189,7 +189,7 @@ fn should_apply_wal_tombstone_when_reopening_after_clean_shutdown() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Create SST
@@ -212,7 +212,7 @@ fn should_apply_wal_tombstone_when_reopening_after_clean_shutdown() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // The WAL tombstone should hide the older flushed value after reopen
@@ -234,7 +234,7 @@ fn should_preserve_data_visibility_when_reopening_after_successful_flush_and_cle
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Flush the committed writes to persistent storage
@@ -254,7 +254,7 @@ fn should_preserve_data_visibility_when_reopening_after_successful_flush_and_cle
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Data should still be visible after the successful flush and reopen
@@ -278,7 +278,7 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
         // Arrange
         // Act (Phase 1)
         {
-            let engine = std::sync::Arc::new(open_with_mode(opts.clone(), mode));
+            let engine = std::sync::Arc::new(open_with_mode(&opts, mode));
             let _cf = engine.create_column_family("test").expect("create cf");
 
             // Concurrent writes from multiple threads
@@ -311,7 +311,7 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // All writes should be recoverable (no partial updates)
@@ -337,7 +337,7 @@ fn should_preserve_single_cf_data_when_reopening_after_flush() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf_default = engine.create_column_family("test").expect("create cf");
 
             // Write to a single CF, then flush it
@@ -359,7 +359,7 @@ fn should_preserve_single_cf_data_when_reopening_after_flush() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf_default = engine.create_column_family("test").expect("create cf");
 
             // All data should be recoverable after reopen
@@ -383,7 +383,7 @@ fn should_preserve_data_when_reopening_after_flush_with_optional_compaction() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Create enough data to trigger compaction
@@ -407,7 +407,7 @@ fn should_preserve_data_when_reopening_after_flush_with_optional_compaction() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // All data should still be present
@@ -431,7 +431,7 @@ fn should_preserve_original_data_when_reopening_after_flush() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Create data
@@ -451,7 +451,7 @@ fn should_preserve_original_data_when_reopening_after_flush() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // All original data should be present
@@ -475,7 +475,7 @@ fn should_preserve_updated_values_when_reopening_after_multiple_flushes() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Create initial SST
@@ -507,7 +507,7 @@ fn should_preserve_updated_values_when_reopening_after_multiple_flushes() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Updated data should be present
@@ -531,7 +531,7 @@ fn should_recover_valid_wal_records_when_reopening_after_clean_shutdown() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write valid records
@@ -550,7 +550,7 @@ fn should_recover_valid_wal_records_when_reopening_after_clean_shutdown() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Valid records should be recovered after reopen
@@ -582,7 +582,7 @@ fn should_recover_valid_wal_records_when_reopening_after_clean_shutdown() {
 fn should_evict_oldest_entries_when_idempotency_cache_exceeds_limit() {
     // Arrange: Create engine in memory mode
     let opts = memory_opts();
-    let engine = open_with_mode(opts, "memory");
+    let engine = open_with_mode(&opts, "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act: Simulate 2k sequence allocations (enough to test cache behavior without hanging)
@@ -623,7 +623,7 @@ fn should_maintain_atomicity_given_concurrent_reads_when_transaction_commits() {
 
     // Arrange: Create engine in memory mode
     let opts = memory_opts();
-    let engine = Arc::new(open_with_mode(opts, "memory"));
+    let engine = Arc::new(open_with_mode(&opts, "memory"));
     let cf_id = engine.create_column_family("test").expect("create cf").id();
 
     // Write initial values

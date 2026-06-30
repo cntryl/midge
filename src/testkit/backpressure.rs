@@ -12,7 +12,7 @@ use crate::Engine;
 pub fn open_engine_with_memory_budget_bytes(opts: MidgeOptions, bytes: usize) -> Engine {
     let mut opts = opts;
     opts = opts.memory_budget(bytes);
-    Engine::open_with_options(opts).expect("open engine")
+    Engine::open_with_options(&opts).expect("open engine")
 }
 
 // More helpers can be added as needed

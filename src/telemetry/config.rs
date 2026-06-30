@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn should_create_default_config() {
         let config = TelemetryConfig::default();
-        assert_eq!(config.trace_sample_rate, 1.0);
+        assert!((config.trace_sample_rate - 1.0).abs() <= f64::EPSILON);
         assert_eq!(config.service_name, "midge");
     }
 
@@ -129,8 +129,8 @@ mod tests {
         let low = TelemetryConfig::new().with_sample_rate(-0.5);
 
         // Assert
-        assert_eq!(high.trace_sample_rate, 1.0);
-        assert_eq!(low.trace_sample_rate, 0.0);
+        assert!((high.trace_sample_rate - 1.0).abs() <= f64::EPSILON);
+        assert!(low.trace_sample_rate.abs() <= f64::EPSILON);
     }
 
     #[test]

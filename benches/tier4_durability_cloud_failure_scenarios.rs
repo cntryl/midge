@@ -45,7 +45,7 @@ fn run_puts_and_validate(
     ctx.measure_ref(&engine, |e| {
         for i in 0..num_ops {
             let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
-            let v = vec![(i % 251) as u8; VALUE_SIZE];
+            let v = vec![u8::try_from(i % 251).expect("value byte fits in u8"); VALUE_SIZE];
             let mut tx = e
                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin");

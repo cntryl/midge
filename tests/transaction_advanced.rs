@@ -23,7 +23,7 @@ fn should_persist_atomic_transactions_after_restart() {
 
         // Act: Phase 1 - Write and commit
         {
-            let engine = open_with_mode(opts_clone.clone(), mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -40,7 +40,7 @@ fn should_persist_atomic_transactions_after_restart() {
 
         // Assert: Phase 2 - Recover
         {
-            let engine = open_with_mode(opts_clone, mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.get_column_family("test").expect("get cf");
 
             let tx_read = engine
@@ -75,7 +75,7 @@ fn should_not_persist_uncommitted_transaction_after_restart() {
 
         // Act: Phase 1 - Write but don't commit
         {
-            let engine = open_with_mode(opts_clone.clone(), mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -92,7 +92,7 @@ fn should_not_persist_uncommitted_transaction_after_restart() {
 
         // Assert: Phase 2 - Recover
         {
-            let engine = open_with_mode(opts_clone, mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.get_column_family("test").expect("get cf");
 
             let tx_read = engine
@@ -116,7 +116,7 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
 
         // Act: Phase 1 - Initial data
         {
-            let engine = open_with_mode(opts_clone.clone(), mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             for i in 0..10 {
                 let key = format!("key{i}");
@@ -132,7 +132,7 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
 
         // Act: Phase 2 - Delete range as a standalone CF-scoped operation
         {
-            let engine = open_with_mode(opts_clone.clone(), mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.get_column_family("test").expect("get cf");
             let mut delete_tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -148,7 +148,7 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
 
         // Assert: Phase 3 - Verify delete_range persisted
         {
-            let engine = open_with_mode(opts_clone, mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx_read = engine
@@ -190,7 +190,7 @@ fn should_recover_committed_spill_given_restart_after_commit() {
 
         // Act: Phase 1 - Write large transaction
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -209,7 +209,7 @@ fn should_recover_committed_spill_given_restart_after_commit() {
 
         // Assert: Phase 2 - Recover and verify
         {
-            let engine = open_with_mode(opts_clone, mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.get_column_family("test").expect("get cf");
 
             let tx_read = engine
@@ -242,7 +242,7 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
 
         // Act: Phase 1 - Write but don't commit
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -259,7 +259,7 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
 
         // Assert: Phase 2 - Verify no data recovered
         {
-            let engine = open_with_mode(opts_clone, mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.get_column_family("test").expect("get cf");
 
             let tx_read = engine
@@ -288,7 +288,7 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
         // Act
         for cycle in 0..3 {
             {
-                let engine = open_with_mode(opts_clone.clone(), mode);
+                let engine = open_with_mode(&opts_clone, mode);
                 let cf = engine.create_column_family("test").expect("create cf");
 
                 let mut tx = engine
@@ -303,7 +303,7 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
             }
 
             {
-                let engine = open_with_mode(opts_clone.clone(), mode);
+                let engine = open_with_mode(&opts_clone, mode);
                 let cf = engine.create_column_family("test").expect("create cf");
                 let key = format!("cycle{cycle}_key");
                 let expected = format!("cycle{cycle}_value");
@@ -334,7 +334,7 @@ fn should_maintain_exactly_once_semantics_given_transaction_with_crash() {
 
         // Act: Phase 1 - Write twice to same key
         {
-            let engine = open_with_mode(opts_clone.clone(), mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -350,7 +350,7 @@ fn should_maintain_exactly_once_semantics_given_transaction_with_crash() {
 
         // Assert: Final value should be the last write (value2)
         {
-            let engine = open_with_mode(opts_clone, mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx_read = engine
@@ -378,7 +378,7 @@ fn should_recover_large_transaction_given_crash_during_spill() {
 
         // Act: Phase 1 - Write transaction
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -396,7 +396,7 @@ fn should_recover_large_transaction_given_crash_during_spill() {
 
         // Assert: All data recovered
         {
-            let engine = open_with_mode(opts_clone, mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx_read = engine
@@ -421,7 +421,7 @@ fn should_not_lose_transaction_writes_given_incomplete_wal_sync() {
 
         // Act
         {
-            let engine = open_with_mode(opts_clone.clone(), mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -435,7 +435,7 @@ fn should_not_lose_transaction_writes_given_incomplete_wal_sync() {
 
         // Assert
         {
-            let engine = open_with_mode(opts_clone, mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx_read = engine
@@ -463,7 +463,7 @@ fn should_survive_mid_spill_crash_given_transaction_recovery() {
 
         // Act
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -481,7 +481,7 @@ fn should_survive_mid_spill_crash_given_transaction_recovery() {
 
         // Assert
         {
-            let engine = open_with_mode(opts_clone, mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx_read = engine

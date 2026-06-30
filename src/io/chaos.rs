@@ -237,7 +237,7 @@ mod tests {
     use crate::io::OpenMode;
 
     #[test]
-    fn should_inject_open_failure() -> FsResult<()> {
+    fn should_inject_open_failure() {
         // Arrange
         let inner = Arc::new(MockFs::new());
         let chaos = ChaosFs::new(inner, 1); // fail every 1st operation
@@ -257,11 +257,10 @@ mod tests {
 
         // Assert
         assert!(result.is_err());
-        Ok(())
     }
 
     #[test]
-    fn should_pass_through_when_no_fail() -> FsResult<()> {
+    fn should_pass_through_when_no_fail() {
         // Arrange
         let inner = Arc::new(MockFs::new());
         let chaos = ChaosFs::new(inner, 0); // never fail
@@ -281,6 +280,5 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        Ok(())
     }
 }

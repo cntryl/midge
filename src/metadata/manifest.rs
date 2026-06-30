@@ -383,11 +383,15 @@ mod tests {
         let mut manifest = Manifest::default();
 
         // Act
-        for i in 0..5 {
+        for i in 0_u64..5 {
             let file = FileMeta {
-                name: crate::sst::file_name(0, i as u32, i as u64),
-                level: i as u32,
-                size_bytes: 1000 + (i as u64 * 100),
+                name: crate::sst::file_name(
+                    0,
+                    u32::try_from(i).expect("loop index fits in u32"),
+                    i,
+                ),
+                level: u32::try_from(i).expect("loop index fits in u32"),
+                size_bytes: 1000 + (i * 100),
                 ..Default::default()
             };
             manifest.add_file(file);
@@ -655,17 +659,23 @@ mod tests {
         // Arrange
         let mut manifest = Manifest::default();
         let cf_id = manifest.create_column_family("cf".to_string());
-        let before = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let before = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .expect("timestamp fits in u64");
 
         // Act
         manifest.delete_column_family(cf_id);
-        let after = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let after = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .expect("timestamp fits in u64");
 
         // Assert: deleted_at is set and within time window
         let cf = manifest

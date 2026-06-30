@@ -26,7 +26,7 @@ use common::*;
 fn should_retrieve_stored_keys_when_megabyte_sized() {
     // Arrange: Create 1MB+ key (256KB minimum, test with 500KB)
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
@@ -56,7 +56,7 @@ fn should_retrieve_stored_values_when_hundred_megabytes() {
     // Arrange: Create 100MB value (or reasonable subset for tests)
     // Use 10MB for practical test speed; pattern validates for larger
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
@@ -86,7 +86,7 @@ fn should_retrieve_stored_values_when_hundred_megabytes() {
 fn should_handle_mixed_size_values_when_ranging_from_bytes_to_megabytes() {
     // Arrange
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
@@ -120,7 +120,7 @@ fn should_handle_mixed_size_values_when_ranging_from_bytes_to_megabytes() {
 fn should_handle_special_characters_in_keys_when_utf8_and_binary_mixed() {
     // Arrange
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
@@ -163,7 +163,7 @@ fn should_handle_special_characters_in_keys_when_utf8_and_binary_mixed() {
 fn should_handle_empty_database_when_no_keys_written() {
     // Arrange: Open engine and close without writing anything
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
@@ -183,7 +183,7 @@ fn should_handle_empty_database_when_no_keys_written() {
 fn should_handle_single_record_database_when_one_key_value_pair() {
     // Arrange
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
@@ -215,7 +215,7 @@ fn should_handle_single_record_database_when_one_key_value_pair() {
 fn should_handle_range_query_at_boundaries_when_first_last_and_missing() {
     // Arrange
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
@@ -254,7 +254,7 @@ fn should_handle_range_query_at_boundaries_when_first_last_and_missing() {
 fn should_handle_rapid_operations_when_one_thousand_puts_per_second() {
     // Arrange
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
@@ -281,7 +281,7 @@ fn should_handle_rapid_operations_when_one_thousand_puts_per_second() {
 fn should_handle_delete_all_pattern_when_writing_then_deleting_all_keys() {
     // Arrange: Write 100 keys
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
@@ -315,7 +315,7 @@ fn should_handle_delete_all_pattern_when_writing_then_deleting_all_keys() {
 fn should_handle_tombstone_accumulation_when_many_deletes_create_tombstones() {
     // Arrange: Rapid put/delete cycles
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
@@ -353,7 +353,7 @@ fn should_batch_concurrent_puts_when_cloud_async_mode() {
             _ => panic!("expected cloud storage mode"),
         };
 
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine
             .create_column_family("test")
             .expect("create cf")

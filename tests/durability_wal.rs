@@ -30,7 +30,7 @@ fn should_recover_writes_given_unflushed_memtable_when_reopening() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -46,7 +46,7 @@ fn should_recover_writes_given_unflushed_memtable_when_reopening() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.get_column_family("test").expect("get cf");
             let cf_id = cf.id();
 
@@ -71,7 +71,7 @@ fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -85,7 +85,7 @@ fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.get_column_family("test").expect("get cf");
             let cf_id = cf.id();
 
@@ -103,7 +103,7 @@ fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
 fn should_call_fsync_given_wal_sync_enabled_when_put() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
@@ -127,7 +127,7 @@ fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -146,7 +146,7 @@ fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
 
         // Assert (Phase 2): All writes recovered after rotation
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.get_column_family("test").expect("get cf");
             let cf_id = cf.id();
 
@@ -169,7 +169,7 @@ fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -188,7 +188,7 @@ fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
 
         // Assert (Phase 2): All records from all segments recovered
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.get_column_family("test").expect("get cf");
             let cf_id = cf.id();
 
@@ -213,7 +213,7 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = std::sync::Arc::new(open_with_mode(opts.clone(), mode));
+            let engine = std::sync::Arc::new(open_with_mode(&opts, mode));
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -244,7 +244,7 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
 
         // Assert (Phase 2): All concurrent writes recovered
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.get_column_family("test").expect("get cf");
             let cf_id = cf.id();
 
@@ -272,7 +272,7 @@ fn should_skip_corrupted_wal_tail_given_truncated_tail_when_recovering() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -289,7 +289,7 @@ fn should_skip_corrupted_wal_tail_given_truncated_tail_when_recovering() {
 
         // Assert (Phase 2): Skips corrupted records, recovers valid ones
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -307,7 +307,7 @@ fn should_not_recover_data_given_truncated_wal_append_when_reopening() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine
                 .get_column_family("test")
                 .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
@@ -323,7 +323,7 @@ fn should_not_recover_data_given_truncated_wal_append_when_reopening() {
 
         // Assert (Phase 2): Graceful recovery
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.get_column_family("test").expect("get cf");
             let cf_id = cf.id();
 
@@ -346,7 +346,7 @@ fn should_allow_data_loss_given_skipped_fsync_when_crash_occurs() {
 
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -360,7 +360,7 @@ fn should_allow_data_loss_given_skipped_fsync_when_crash_occurs() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -378,7 +378,7 @@ fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine
                 .get_column_family("test")
                 .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
@@ -396,7 +396,7 @@ fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
 
         // Assert (Phase 2): Recovery is tolerant and doesn't crash
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.get_column_family("test").expect("get cf");
             let cf_id = cf.id();
 
@@ -534,13 +534,12 @@ fn should_fail_strict_but_salvage_valid_prefix_given_corrupted_first_wal_frame_w
     corrupt_byte(&db_path.join("wal").join("wal.log"), 4);
 
     // Act
-    let strict_error = match Engine::open(
+    let Err(strict_error) = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Strict)
             .build(),
-    ) {
-        Ok(_) => panic!("strict recovery must reject corruption at byte zero frame"),
-        Err(error) => error,
+    ) else {
+        panic!("strict recovery must reject corruption at byte zero frame");
     };
 
     let salvaged = Engine::open(

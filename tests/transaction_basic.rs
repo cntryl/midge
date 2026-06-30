@@ -16,7 +16,7 @@ use std::sync::Arc;
 fn should_commit_transaction_given_multiple_operations_when_committed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -48,7 +48,7 @@ fn should_commit_transaction_given_multiple_operations_when_committed() {
 fn should_succeed_given_empty_transaction_when_committed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -66,7 +66,7 @@ fn should_succeed_given_empty_transaction_when_committed() {
 fn should_succeed_given_read_only_transaction_when_committed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut write_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -96,7 +96,7 @@ fn should_succeed_given_read_only_transaction_when_committed() {
 fn should_rollback_transaction_given_uncommitted_when_dropped() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -120,7 +120,7 @@ fn should_rollback_transaction_given_uncommitted_when_dropped() {
 fn should_rollback_all_writes_given_multiple_operations_when_dropped() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -157,7 +157,7 @@ fn should_rollback_all_writes_given_multiple_operations_when_dropped() {
 fn should_release_locks_given_aborted_transaction_when_cleanup() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act - first txn acquires lock and aborts
@@ -197,7 +197,7 @@ fn should_release_locks_given_aborted_transaction_when_cleanup() {
 fn should_allow_concurrent_writes_with_lww_semantics_given_transaction_when_active() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -233,7 +233,7 @@ fn should_allow_concurrent_writes_with_lww_semantics_given_transaction_when_acti
 fn should_read_own_writes_given_transaction_when_reading() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -256,7 +256,7 @@ fn should_read_own_writes_given_transaction_when_reading() {
 fn should_read_own_writes_given_kv_transaction_when_getting() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -276,7 +276,7 @@ fn should_read_own_writes_given_kv_transaction_when_getting() {
 fn should_hide_deleted_value_given_kv_transaction_when_getting() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -296,7 +296,7 @@ fn should_hide_deleted_value_given_kv_transaction_when_getting() {
 fn should_persist_writes_given_kv_transaction_when_committed_boxed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -322,7 +322,7 @@ fn should_persist_writes_given_kv_transaction_when_committed_boxed() {
 fn should_succeed_given_best_effort_when_committing_transaction_during_bulk_load() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange: Simulate bulk load scenario with best_effort()
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let write_opts = WriteOptions::best_effort();
 
@@ -363,7 +363,7 @@ fn should_succeed_given_best_effort_when_committing_transaction_during_bulk_load
 fn should_insert_value_given_nonexistent_key_when_insert_in_transaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -388,7 +388,7 @@ fn should_insert_value_given_nonexistent_key_when_insert_in_transaction() {
 fn should_delete_range_given_committed_engine_operation_when_delete_range() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -424,7 +424,7 @@ fn should_delete_range_given_committed_engine_operation_when_delete_range() {
 fn should_hide_deleted_range_given_scan_after_delete_range_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -465,7 +465,7 @@ fn should_hide_deleted_range_given_scan_after_delete_range_when_scanning() {
 fn should_commit_atomically_given_mixed_put_and_delete_range_when_committed_in_transaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut setup = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -499,7 +499,7 @@ fn should_commit_atomically_given_mixed_put_and_delete_range_when_committed_in_t
 fn should_reject_delete_range_given_reversed_bounds_when_added_to_transaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -520,7 +520,7 @@ fn should_reject_delete_range_given_reversed_bounds_when_added_to_transaction() 
 fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -553,7 +553,7 @@ fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
 fn should_allow_operations_given_previous_commit_failed_when_disk_full() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act - first transaction fails (simulated disk full)
@@ -595,7 +595,7 @@ fn should_persist_transaction_given_commit_when_crash_after() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let mut txn = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -607,7 +607,7 @@ fn should_persist_transaction_given_commit_when_crash_after() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.get_column_family("test").expect("get cf");
             let tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -624,7 +624,7 @@ fn should_not_persist_transaction_given_abort_when_crash_after() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let mut txn = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -636,7 +636,7 @@ fn should_not_persist_transaction_given_abort_when_crash_after() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.get_column_family("test").expect("get cf");
             let tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -653,7 +653,7 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Multiple transactions
@@ -676,7 +676,7 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.get_column_family("test").expect("get cf");
             let tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -699,15 +699,16 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
 
 #[test]
 fn should_support_best_effort_during_bulk_load_phase_when_followed_by_flush() {
+    const BULK_COUNT: usize = 1000;
+
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange: Initialize engine and column family
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("bulk_test").expect("create cf");
         let best_effort_opts = WriteOptions::best_effort();
         let buffered_opts = WriteOptions::buffered();
 
         // Arrange: Fast bulk load with best_effort (setup; data loss on crash acceptable here)
-        const BULK_COUNT: usize = 1000;
         for i in 0..BULK_COUNT {
             let mut txn = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)

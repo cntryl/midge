@@ -13,7 +13,7 @@ use common::{open_with_mode, opts_for_mode};
 #[test]
 fn should_preserve_reads_given_two_flushed_batches_when_repeatedly_accessed() -> MidgeResult<()> {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..10 {
@@ -54,7 +54,7 @@ fn should_preserve_reads_given_two_flushed_batches_when_repeatedly_accessed() ->
 fn should_return_latest_value_given_overlapping_l0_keys_when_multiple_batches_flushed(
 ) -> MidgeResult<()> {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for batch in 0..3 {
@@ -86,7 +86,7 @@ fn should_return_latest_value_given_overlapping_l0_keys_when_multiple_batches_fl
 #[test]
 fn should_find_keys_given_disjoint_key_ranges_when_flushed() -> MidgeResult<()> {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..10 {
@@ -127,7 +127,7 @@ fn should_find_keys_given_disjoint_key_ranges_when_flushed() -> MidgeResult<()> 
 fn should_preserve_readability_given_mixed_access_pattern_when_keys_repeatedly_accessed(
 ) -> MidgeResult<()> {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..20 {

@@ -15,7 +15,7 @@ use std::time::Duration;
 fn should_preserve_all_values_given_repeated_reads_when_values_accessed_repeatedly() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine
@@ -50,7 +50,7 @@ fn should_preserve_all_values_given_repeated_reads_when_values_accessed_repeated
 fn should_preserve_all_written_values_given_large_write_batch_when_written() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let value = b"metric_write_value";
@@ -85,7 +85,7 @@ fn should_preserve_all_written_values_given_large_write_batch_when_written() {
 fn should_preserve_all_values_given_compaction_when_requested() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine
@@ -137,7 +137,7 @@ fn should_preserve_all_values_given_compaction_when_requested() {
 fn should_preserve_repeated_reads_given_short_cache_warmup_window_when_reads_repeated() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine
@@ -185,7 +185,7 @@ fn should_preserve_repeated_reads_given_short_cache_warmup_window_when_reads_rep
 fn should_preserve_large_values_given_wal_backed_write_batch_when_flushed() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let value = vec![b'W'; 1024];
@@ -221,7 +221,7 @@ fn should_preserve_large_values_given_wal_backed_write_batch_when_flushed() {
 fn should_preserve_existing_data_given_placeholder_reset_when_new_write_added() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine

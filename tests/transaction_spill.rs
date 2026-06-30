@@ -22,7 +22,7 @@ fn should_commit_large_transaction_given_many_writes_exceeding_memory_limit() {
         let mut opts = opts;
         opts = opts.memory_budget(256 * 1024); // 256KB limit
 
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -67,7 +67,7 @@ fn should_handle_very_large_transaction_given_multiple_spills_when_persisted() {
         let mut opts = opts;
         opts = opts.memory_budget(128 * 1024); // 128KB - multiple spills
 
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -104,7 +104,7 @@ fn should_preserve_data_integrity_given_large_transaction_with_specific_values()
         let mut opts = opts;
         opts = opts.memory_budget(256 * 1024);
 
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -147,7 +147,7 @@ fn should_preserve_key_order_given_large_transaction_when_iterating() {
         let mut opts = opts;
         opts = opts.memory_budget(128 * 1024);
 
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -187,7 +187,7 @@ fn should_rollback_spilled_transaction_given_drop_without_commit() {
         let mut opts = opts;
         opts = opts.memory_budget(256 * 1024);
 
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -220,7 +220,7 @@ fn should_cleanup_spill_files_given_transaction_rollback_when_finalizing() {
         let mut opts = opts;
         opts = opts.memory_budget(100 * 1024);
 
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -270,7 +270,7 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
 
         // Act
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -285,7 +285,7 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
 
         // Assert
         {
-            let engine = open_with_mode(opts_clone, mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx_read = engine
@@ -309,7 +309,7 @@ fn should_recover_committed_spill_given_restart_after_commit() {
 
         // Act
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -326,7 +326,7 @@ fn should_recover_committed_spill_given_restart_after_commit() {
 
         // Assert
         {
-            let engine = open_with_mode(opts_clone, mode);
+            let engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx_read = engine
@@ -351,7 +351,7 @@ fn should_not_starve_foreground_writes_given_background_spill_activity() {
         let mut opts = opts;
         opts = opts.memory_budget(256 * 1024);
 
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -398,7 +398,7 @@ fn should_handle_concurrent_large_transactions_given_memory_pressure() {
         let mut opts = opts;
         opts = opts.memory_budget(256 * 1024);
 
-        let engine = std::sync::Arc::new(open_with_mode(opts, mode));
+        let engine = std::sync::Arc::new(open_with_mode(&opts, mode));
 
         // Act
         let engine_clone = std::sync::Arc::clone(&engine);
@@ -467,7 +467,7 @@ fn should_handle_transaction_with_tiny_memory_limit_given_forced_spill() {
         let mut opts = opts;
         opts = opts.memory_budget(32 * 1024); // 32KB - reasonable limit
 
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -501,7 +501,7 @@ fn should_handle_mixed_value_sizes_in_spilled_transaction_when_committed() {
         let mut opts = opts;
         opts = opts.memory_budget(128 * 1024);
 
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -552,7 +552,7 @@ fn should_not_create_disk_artifacts_given_large_transaction_when_memory_mode() {
     // Arrange
     let opts = memory_opts();
 
-    let engine = open_with_mode(opts, "memory");
+    let engine = open_with_mode(&opts, "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act

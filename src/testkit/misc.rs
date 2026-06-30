@@ -20,7 +20,7 @@ use super::MidgeOptions;
 /// Panics if the engine fails to open.
 #[must_use]
 pub fn open_with_mode(opts: &MidgeOptions, _mode: &str) -> crate::Engine {
-    crate::Engine::open_with_options(opts.clone()).expect("failed to open engine")
+    crate::Engine::open_with_options(opts).expect("failed to open engine")
 }
 
 /// Durability test context (stub for compatibility).
@@ -78,13 +78,13 @@ where
     F2: FnOnce(&crate::Engine),
 {
     {
-        let engine = crate::Engine::open_with_options(opts.clone()).expect("open");
+        let engine = crate::Engine::open_with_options(opts).expect("open");
         before_restart(&engine);
         drop(engine);
     }
 
     {
-        let engine = crate::Engine::open_with_options(opts.clone()).expect("reopen");
+        let engine = crate::Engine::open_with_options(opts).expect("reopen");
         after_restart(&engine);
     }
 }

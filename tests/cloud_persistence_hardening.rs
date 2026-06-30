@@ -450,9 +450,8 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
     reset_dir(&db_path.join("wal"));
 
     // Act
-    let strict_error = match Engine::open(opts.clone().to_open_options()) {
-        Ok(_) => panic!("strict cloud reopen should fail on corrupt authoritative WAL"),
-        Err(error) => error,
+    let Err(strict_error) = Engine::open(opts.clone().to_open_options()) else {
+        panic!("strict cloud reopen should fail on corrupt authoritative WAL");
     };
     let salvaged = Engine::open(cloud_open_options(&db_path, RecoveryPolicy::Salvage))
         .expect("salvage cloud reopen");
@@ -528,9 +527,8 @@ fn should_fail_strict_reopen_when_authoritative_remote_sst_is_missing() {
     }
 
     // Act
-    let error = match Engine::open(opts.to_open_options()) {
-        Ok(_) => panic!("strict reopen should reject missing remote sst"),
-        Err(error) => error,
+    let Err(error) = Engine::open(opts.to_open_options()) else {
+        panic!("strict reopen should reject missing remote sst");
     };
 
     // Assert

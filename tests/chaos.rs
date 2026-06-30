@@ -32,7 +32,7 @@ fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
         // Arrange
         // Act (Phase 1): Commit WAL-backed writes, then drop the engine
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write data (goes to WAL)
@@ -60,7 +60,7 @@ fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
 
         // Assert (Phase 2): Reopen and validate recovery
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx = engine
@@ -94,7 +94,7 @@ fn should_recover_committed_writes_when_reopening_after_flush_and_clean_shutdown
         // Arrange
         // Act (Phase 1): Commit writes, flush, then drop the engine
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Load memtable with many keys
@@ -114,7 +114,7 @@ fn should_recover_committed_writes_when_reopening_after_flush_and_clean_shutdown
 
         // Assert (Phase 2): Reopen and verify all flushed data
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx = engine
@@ -143,7 +143,7 @@ fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shu
         // Arrange
         // Act (Phase 1): Create multiple SSTs, compact, then drop the engine
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Create SST A
@@ -176,7 +176,7 @@ fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shu
 
         // Assert (Phase 2): Reopen and verify all committed data
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx = engine
@@ -210,7 +210,7 @@ fn should_preserve_readability_when_reopening_after_manifest_updates_and_clean_s
         // Arrange
         // Act (Phase 1): Flush data, run compaction-related work, then drop the engine
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write and flush (updates manifest)
@@ -231,7 +231,7 @@ fn should_preserve_readability_when_reopening_after_manifest_updates_and_clean_s
 
         // Assert (Phase 2): Reopen and verify readability
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx = engine
@@ -259,7 +259,7 @@ fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdo
         // Arrange
         // Act (Phase 1): Write, flush, add more writes, then drop the engine
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write batch 1
@@ -290,7 +290,7 @@ fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdo
 
         // Assert (Phase 2): Reopen and verify exact values
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx = engine
@@ -331,7 +331,7 @@ fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
         // Arrange
         // Act (Phase 1): Commit two WAL-backed write batches, then drop the engine
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write batch 1 (committed to WAL)
@@ -359,7 +359,7 @@ fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
 
         // Assert (Phase 2): Reopen with WAL replay
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx = engine
@@ -391,7 +391,7 @@ fn should_handle_concurrent_best_effort_writes_under_load_without_invalid_values
         eprintln!("\n=== Concurrent Best-Effort Load (mode: {mode}) ===");
 
         // Arrange: High-concurrency best-effort write load
-        let engine = std::sync::Arc::new(open_with_mode(opts.clone(), mode));
+        let engine = std::sync::Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut handles = vec![];

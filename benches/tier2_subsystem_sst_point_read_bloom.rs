@@ -95,9 +95,9 @@ fn build_mock_sst(sst_id: u64) -> MockSst {
 
     // Populate cache with some blocks (simulate warm cache)
     let block_data = Bytes::from_static(&[0xAB; 4096]);
-    for block_idx in 0..25 {
-        let key = CacheKey::for_data(sst_id, (block_idx * 4096) as u64);
-        cache.put(key, block_data.clone());
+    for block_idx in 0_u64..25 {
+        let key = CacheKey::for_data(sst_id, block_idx * 4096);
+        cache.put(key, &block_data);
     }
 
     MockSst {

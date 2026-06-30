@@ -31,7 +31,7 @@ fn write_prefixed_keys(engine: &MidgeEngine, num_keys: usize, prefix: u8) {
             .expect("begin");
         for i in start..end {
             let k = cntryl_midge::testkit::stress::key16_prefix_u64_be(prefix, i as u64);
-            let v = vec![(i % 251) as u8; VALUE_SIZE];
+            let v = vec![u8::try_from(i % 251).expect("value byte fits in u8"); VALUE_SIZE];
             tx.put(k.to_vec(), v, None).unwrap();
         }
         tx.commit(write_opts).unwrap();
@@ -43,7 +43,7 @@ fn run_scan_query_case(
     ctx: &mut StressContext,
     opts: MidgeOptions,
     setup: impl FnOnce(&MidgeEngine),
-    query: Query,
+    query: &Query,
 ) {
     let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
     let cf = engine.create_column_family("cf1").unwrap();
@@ -58,7 +58,7 @@ fn run_scan_query_case(
 
     // Measure ONLY iterator construction and first advance
     ctx.measure(|| {
-        let mut it = tx.scan(&query).expect("scan failed");
+        let mut it = tx.scan(query).expect("scan failed");
         let _ = it.next();
     });
 
@@ -79,7 +79,7 @@ fn tier3_scan_seek_memtable_only_mem(ctx: &mut StressContext) {
         |e| {
             write_prefixed_keys(e, 5_000, 0xAA);
         },
-        query,
+        &query,
     );
 }
 
@@ -99,7 +99,7 @@ fn tier3_scan_seek_l0_only_local(ctx: &mut StressContext) {
             write_prefixed_keys(e, 5_000, 0xAB);
             e.flush_cf(&cf).unwrap();
         },
-        query,
+        &query,
     );
 }
 
@@ -119,7 +119,7 @@ fn tier3_scan_seek_l0_only_cloud(ctx: &mut StressContext) {
             write_prefixed_keys(e, 5_000, 0xAC);
             e.flush_cf(&cf).unwrap();
         },
-        query,
+        &query,
     );
 }
 
@@ -145,7 +145,7 @@ fn tier3_scan_seek_multi_level_local(ctx: &mut StressContext) {
             write_prefixed_keys(e, 1_000, 0xAD);
             e.flush_cf(&cf).unwrap();
         },
-        query,
+        &query,
     );
 }
 
@@ -170,7 +170,7 @@ fn tier3_scan_seek_multi_level_cloud(ctx: &mut StressContext) {
             write_prefixed_keys(e, 1_000, 0xAE);
             e.flush_cf(&cf).unwrap();
         },
-        query,
+        &query,
     );
 }
 
@@ -193,7 +193,7 @@ fn tier3_scan_seek_after_compaction_local(ctx: &mut StressContext) {
             e.flush_cf(&cf).unwrap();
             e.compact_all().unwrap();
         },
-        query,
+        &query,
     );
 }
 
@@ -216,7 +216,7 @@ fn tier3_scan_seek_after_compaction_cloud(ctx: &mut StressContext) {
             e.flush_cf(&cf).unwrap();
             e.compact_all().unwrap();
         },
-        query,
+        &query,
     );
 }
 

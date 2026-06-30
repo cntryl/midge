@@ -230,8 +230,7 @@ fn should_succeed_after_backoff_when_write_stall_cleared() {
             .expect("put");
 
         let second_write_ok_or_stall = match txn.commit(WriteOptions::buffered()) {
-            Ok(()) => true,
-            Err(MidgeError::WriteStall(_)) => true,
+            Ok(()) | Err(MidgeError::WriteStall(_)) => true,
             Err(e) => panic!("unexpected error: {e:?}"),
         };
 
@@ -275,7 +274,7 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
             opts.memtable_size = 32 * 1024 * 1024; // 32MB for more reliable pressure
         }
 
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
@@ -361,7 +360,7 @@ fn should_handle_concurrent_writes_with_consistent_backpressure() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let mut opts = opts;
         opts = opts.memory_budget(4 * 1024 * 1024);
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         let shutdown = Arc::new(AtomicBool::new(false));

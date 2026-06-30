@@ -100,6 +100,18 @@ struct SweepResult {
     wal_fsync_count: u64,
 }
 
+struct WritePhaseStats {
+    write_elapsed: Duration,
+    commit_latencies: Histogram<u64>,
+    proactive_flushes: usize,
+    compaction_kicks: usize,
+    observed_write_stalls: u64,
+}
+
+fn usize_to_f64(value: usize) -> f64 {
+    f64::from(u32::try_from(value).expect("value fits in u32"))
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("tier5_memtable_sizing_sweep failed: {error:#}");
@@ -254,88 +266,18 @@ fn run_sweep_case_at_path(
                 .max(1),
         )
     };
-    let mut commit_latencies = Histogram::<u64>::new(3)?;
     let total_start = Instant::now();
-    let write_start = Instant::now();
-
-    let mut committed = 0usize;
-    let mut bytes_since_flush = 0usize;
-    let mut stall_retries_for_current_write = 0usize;
-    let mut proactive_flushes = 0usize;
-    let mut compaction_kicks = 0usize;
-    let mut observed_write_stalls = 0u64;
-    while committed < config.writes {
-        let key = format!("key_{committed:016}").into_bytes();
-        let estimated_write_bytes = key.len().saturating_add(value.len());
-        if let Some(proactive_flush_at) = proactive_flush_at {
-            if bytes_since_flush > 0
-                && bytes_since_flush.saturating_add(estimated_write_bytes) >= proactive_flush_at
-            {
-                flush_and_maybe_kick_compaction(&engine, &cf, scenario, &mut compaction_kicks)?;
-                proactive_flushes += 1;
-                bytes_since_flush = 0;
-            }
-        }
-
-        let commit_start = Instant::now();
-        let mut tx = match engine.begin_tx(cf_id, TransactionMode::ReadWrite) {
-            Ok(tx) => tx,
-            Err(MidgeError::WriteStall(_)) => {
-                retry_after_write_stall(
-                    &engine,
-                    &cf,
-                    committed,
-                    &mut stall_retries_for_current_write,
-                    scenario,
-                    &mut compaction_kicks,
-                    &mut observed_write_stalls,
-                )?;
-                continue;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        match tx.put(key, value.clone(), None) {
-            Ok(()) => {}
-            Err(MidgeError::WriteStall(_)) => {
-                retry_after_write_stall(
-                    &engine,
-                    &cf,
-                    committed,
-                    &mut stall_retries_for_current_write,
-                    scenario,
-                    &mut compaction_kicks,
-                    &mut observed_write_stalls,
-                )?;
-                continue;
-            }
-            Err(error) => return Err(error.into()),
-        }
-
-        match tx.commit(WriteOptions::buffered()) {
-            Ok(()) => {
-                let latency_us = commit_start.elapsed().as_micros().max(1) as u64;
-                commit_latencies.record(latency_us)?;
-                committed += 1;
-                bytes_since_flush = bytes_since_flush.saturating_add(estimated_write_bytes);
-                stall_retries_for_current_write = 0;
-            }
-            Err(MidgeError::WriteStall(_)) => {
-                retry_after_write_stall(
-                    &engine,
-                    &cf,
-                    committed,
-                    &mut stall_retries_for_current_write,
-                    scenario,
-                    &mut compaction_kicks,
-                    &mut observed_write_stalls,
-                )?;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-
-    let write_elapsed = write_start.elapsed();
+    let write_stats = execute_write_phase(
+        config,
+        scenario,
+        &engine,
+        &cf,
+        cf_id,
+        &value,
+        proactive_flush_at,
+    )?;
     let final_flush_start = Instant::now();
+    let mut compaction_kicks = write_stats.compaction_kicks;
     flush_and_maybe_kick_compaction(&engine, &cf, scenario, &mut compaction_kicks)?;
     let final_flush_elapsed = final_flush_start.elapsed();
     let pre_compaction_metrics = engine.get_runtime_metrics()?;
@@ -348,7 +290,7 @@ fn run_sweep_case_at_path(
         RuntimeCounterSnapshot::from_runtime_metrics(&metrics),
     );
     let elapsed_secs = elapsed.as_secs_f64().max(f64::EPSILON);
-    let written_bytes = config.writes.saturating_mul(config.value_bytes) as f64;
+    let written_bytes = usize_to_f64(config.writes.saturating_mul(config.value_bytes));
 
     Ok(SweepResult {
         scenario: scenario.name(),
@@ -357,22 +299,22 @@ fn run_sweep_case_at_path(
         writes: config.writes,
         value_bytes: config.value_bytes,
         elapsed_ms: elapsed.as_millis(),
-        write_elapsed_ms: write_elapsed.as_millis(),
+        write_elapsed_ms: write_stats.write_elapsed.as_millis(),
         final_flush_ms: final_flush_elapsed.as_millis(),
         compaction_drain_ms: compaction_drain_elapsed.as_millis(),
-        ops_per_sec: config.writes as f64 / elapsed_secs,
+        ops_per_sec: usize_to_f64(config.writes) / elapsed_secs,
         bytes_per_sec: written_bytes / elapsed_secs,
-        commit_p50_us: commit_latencies.value_at_percentile(50.0),
-        commit_p95_us: commit_latencies.value_at_percentile(95.0),
-        commit_p99_us: commit_latencies.value_at_percentile(99.0),
-        commit_max_us: commit_latencies.max(),
+        commit_p50_us: write_stats.commit_latencies.value_at_percentile(50.0),
+        commit_p95_us: write_stats.commit_latencies.value_at_percentile(95.0),
+        commit_p99_us: write_stats.commit_latencies.value_at_percentile(99.0),
+        commit_max_us: write_stats.commit_latencies.max(),
         runtime_memtable_size_limit: metrics.memtable_size_limit,
         runtime_memtable_flush_threshold: metrics.memtable_flush_threshold,
         sst_count: metrics.sst_count,
         sst_bytes: metrics.sst_bytes,
-        proactive_flushes,
+        proactive_flushes: write_stats.proactive_flushes,
         compaction_kicks,
-        observed_write_stalls,
+        observed_write_stalls: write_stats.observed_write_stalls,
         pre_compaction_sst_count: pre_compaction_metrics.sst_count,
         pre_compaction_sst_bytes: pre_compaction_metrics.sst_bytes,
         final_sst_count: metrics.sst_count,
@@ -385,6 +327,105 @@ fn run_sweep_case_at_path(
         wal_append_count: counter_deltas.wal_append_count,
         wal_flush_count: counter_deltas.wal_flush_count,
         wal_fsync_count: counter_deltas.wal_fsync_count,
+    })
+}
+
+fn execute_write_phase(
+    config: &SweepConfig,
+    scenario: Scenario,
+    engine: &Engine,
+    cf: &ColumnFamilyHandle,
+    cf_id: u32,
+    value: &[u8],
+    proactive_flush_at: Option<usize>,
+) -> Result<WritePhaseStats> {
+    let mut commit_latencies = Histogram::<u64>::new(3)?;
+    let write_start = Instant::now();
+    let mut committed = 0usize;
+    let mut bytes_since_flush = 0usize;
+    let mut stall_retries_for_current_write = 0usize;
+    let mut proactive_flushes = 0usize;
+    let mut compaction_kicks = 0usize;
+    let mut observed_write_stalls = 0u64;
+
+    while committed < config.writes {
+        let key = format!("key_{committed:016}").into_bytes();
+        let estimated_write_bytes = key.len().saturating_add(value.len());
+        if let Some(flush_threshold) = proactive_flush_at {
+            if bytes_since_flush > 0
+                && bytes_since_flush.saturating_add(estimated_write_bytes) >= flush_threshold
+            {
+                flush_and_maybe_kick_compaction(engine, cf, scenario, &mut compaction_kicks)?;
+                proactive_flushes += 1;
+                bytes_since_flush = 0;
+            }
+        }
+
+        let commit_start = Instant::now();
+        let mut tx = match engine.begin_tx(cf_id, TransactionMode::ReadWrite) {
+            Ok(tx) => tx,
+            Err(MidgeError::WriteStall(_)) => {
+                retry_after_write_stall(
+                    engine,
+                    cf,
+                    committed,
+                    &mut stall_retries_for_current_write,
+                    scenario,
+                    &mut compaction_kicks,
+                    &mut observed_write_stalls,
+                )?;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if let Err(error) = tx.put(key, value.to_owned(), None) {
+            match error {
+                MidgeError::WriteStall(_) => {
+                    retry_after_write_stall(
+                        engine,
+                        cf,
+                        committed,
+                        &mut stall_retries_for_current_write,
+                        scenario,
+                        &mut compaction_kicks,
+                        &mut observed_write_stalls,
+                    )?;
+                    continue;
+                }
+                other => return Err(other.into()),
+            }
+        }
+
+        match tx.commit(WriteOptions::buffered()) {
+            Ok(()) => {
+                let latency_us = u64::try_from(commit_start.elapsed().as_micros().max(1))
+                    .expect("commit latency fits in u64");
+                commit_latencies.record(latency_us)?;
+                committed += 1;
+                bytes_since_flush = bytes_since_flush.saturating_add(estimated_write_bytes);
+                stall_retries_for_current_write = 0;
+            }
+            Err(MidgeError::WriteStall(_)) => {
+                retry_after_write_stall(
+                    engine,
+                    cf,
+                    committed,
+                    &mut stall_retries_for_current_write,
+                    scenario,
+                    &mut compaction_kicks,
+                    &mut observed_write_stalls,
+                )?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Ok(WritePhaseStats {
+        write_elapsed: write_start.elapsed(),
+        commit_latencies,
+        proactive_flushes,
+        compaction_kicks,
+        observed_write_stalls,
     })
 }
 

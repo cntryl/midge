@@ -7,6 +7,11 @@ use serde::Serialize;
 use std::fs;
 use tempfile::TempDir;
 
+#[derive(Serialize)]
+enum TestIntentLogEntry {
+    WalSynced { segment_id: u64, seqno: u64 },
+}
+
 fn initialize_format_marker(db_path: &std::path::Path) {
     let engine = Engine::open(OpenOptions::local(db_path).build()).expect("initialize engine");
     drop(engine);
@@ -80,11 +85,6 @@ fn should_report_intent_log_replay_metrics_after_reopen_when_manifest_intents_pe
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     initialize_format_marker(db_path);
-
-    #[derive(Serialize)]
-    enum TestIntentLogEntry {
-        WalSynced { segment_id: u64, seqno: u64 },
-    }
 
     let intents = vec![
         TestIntentLogEntry::WalSynced {

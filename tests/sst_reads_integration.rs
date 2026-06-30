@@ -8,7 +8,7 @@ use common::{open_with_mode, opts_for_mode};
 #[test]
 fn should_read_from_sst_after_flush() -> MidgeResult<()> {
     // Arrange: Create engine
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Write keys that will be flushed to SST
@@ -41,7 +41,7 @@ fn should_read_from_sst_after_flush() -> MidgeResult<()> {
 #[test]
 fn should_track_l0_sst_reads() -> MidgeResult<()> {
     // Arrange: Create engine and write multiple batches to create L0 files
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Write and flush multiple times to create multiple L0 SSTs
@@ -74,7 +74,7 @@ fn should_track_l0_sst_reads() -> MidgeResult<()> {
 #[test]
 fn should_use_key_ranges_for_higher_levels() -> MidgeResult<()> {
     // Arrange: Create engine
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Write sorted keys
@@ -108,7 +108,7 @@ fn should_use_key_ranges_for_higher_levels() -> MidgeResult<()> {
 #[test]
 fn should_handle_memtable_and_sst_reads() -> MidgeResult<()> {
     // Arrange: Mix of memtable and SST data
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Write to SST

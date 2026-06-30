@@ -28,7 +28,7 @@ fn should_recover_from_clean_shutdown_when_reopening() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write and flush data cleanly
@@ -50,7 +50,7 @@ fn should_recover_from_clean_shutdown_when_reopening() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx = engine
@@ -79,7 +79,7 @@ fn should_recover_after_clean_shutdown_when_writes_include_flushed_and_unflushed
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write, flush, then add additional committed writes
@@ -103,7 +103,7 @@ fn should_recover_after_clean_shutdown_when_writes_include_flushed_and_unflushed
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Flushed data recoverable from SST
@@ -133,7 +133,7 @@ fn should_preserve_first_commit_given_conflict_abort_when_reopening() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx1 = engine
@@ -164,7 +164,7 @@ fn should_preserve_first_commit_given_conflict_abort_when_reopening() {
 
         // Arrange
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Read after reopen
@@ -188,7 +188,7 @@ fn should_recover_unflushed_data_when_reopening_after_clean_shutdown() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write data
@@ -207,7 +207,7 @@ fn should_recover_unflushed_data_when_reopening_after_clean_shutdown() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Data should be recoverable from WAL
@@ -237,7 +237,7 @@ fn should_prefer_wal_given_wal_newer_than_sst_when_recovering() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write v1, flush to SST
@@ -261,7 +261,7 @@ fn should_prefer_wal_given_wal_newer_than_sst_when_recovering() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Should prefer newer value from WAL
@@ -283,7 +283,7 @@ fn should_skip_wal_entries_given_already_in_sst_when_recovering() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write v1, flush to SST (WAL can be discarded)
@@ -299,7 +299,7 @@ fn should_skip_wal_entries_given_already_in_sst_when_recovering() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Should recover from SST (WAL not needed)
@@ -321,7 +321,7 @@ fn should_replay_wal_in_order_given_multiple_writes_when_recovering() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write sequence (order matters)
@@ -343,7 +343,7 @@ fn should_replay_wal_in_order_given_multiple_writes_when_recovering() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Verify correct order (last write wins for same key)
@@ -373,7 +373,7 @@ fn should_recover_deletes_when_reopening_after_clean_shutdown() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write and flush
@@ -396,12 +396,12 @@ fn should_recover_deletes_when_reopening_after_clean_shutdown() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
-            let _cf = engine.create_column_family("test").expect("create cf");
+            let engine = open_with_mode(&opts, mode);
+            let cf = engine.create_column_family("test").expect("create cf");
 
             // Deletion should be recovered from WAL
             let tx = engine
-                .begin_tx(_cf.id(), TransactionMode::ReadOnly)
+                .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
             assert!(
                 tx.get(b"to_delete").expect("get").is_none(),
@@ -417,24 +417,24 @@ fn should_recover_independent_committed_transactions_when_reopening_after_clean_
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
-            let _cf = engine.create_column_family("test").expect("create cf");
+            let engine = open_with_mode(&opts, mode);
+            let cf = engine.create_column_family("test").expect("create cf");
 
             // Commit three independent transactions before shutdown
             let mut tx = engine
-                .begin_tx(_cf.id(), TransactionMode::ReadWrite)
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             tx.put(b"key1".to_vec(), b"value1".to_vec(), None)
                 .expect("put");
             tx.commit(WriteOptions::buffered()).expect("commit");
             let mut tx = engine
-                .begin_tx(_cf.id(), TransactionMode::ReadWrite)
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
                 .expect("put");
             tx.commit(WriteOptions::buffered()).expect("commit");
             let mut tx = engine
-                .begin_tx(_cf.id(), TransactionMode::ReadWrite)
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             tx.put(b"key3".to_vec(), b"value3".to_vec(), None)
                 .expect("put");
@@ -444,7 +444,7 @@ fn should_recover_independent_committed_transactions_when_reopening_after_clean_
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // All independently committed writes should be visible after reopen
@@ -486,7 +486,7 @@ fn should_recover_from_wal_when_reopening_after_clean_shutdown() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write committed data without forcing an SST flush
@@ -501,7 +501,7 @@ fn should_recover_from_wal_when_reopening_after_clean_shutdown() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Recovery should still work via WAL
@@ -523,7 +523,7 @@ fn should_preserve_consistency_when_reopening_after_clean_shutdown() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write multiple batches
@@ -543,7 +543,7 @@ fn should_preserve_consistency_when_reopening_after_clean_shutdown() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // All writes should be recoverable
@@ -574,7 +574,7 @@ fn should_be_idempotent_when_reopening_multiple_times_after_clean_shutdown() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -595,11 +595,11 @@ fn should_be_idempotent_when_reopening_multiple_times_after_clean_shutdown() {
         // Act (Recovery cycles)
         {
             // First reopen cycle: open and drop again
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             drop(engine);
 
             // Second recovery: open and verify final state
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Assert - final state should be correct after multiple restarts
@@ -628,7 +628,7 @@ fn should_maintain_exactly_once_visibility_when_reopening_multiple_times_after_c
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -642,7 +642,7 @@ fn should_maintain_exactly_once_visibility_when_reopening_multiple_times_after_c
 
         // Act (Phase 2: First recovery)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx = engine
@@ -655,7 +655,7 @@ fn should_maintain_exactly_once_visibility_when_reopening_multiple_times_after_c
 
         // Assert (Phase 3: Second recovery)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Value should appear exactly once (no duplicates)
@@ -673,7 +673,7 @@ fn should_continue_sequence_numbers_when_new_writes_follow_clean_reopen() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -693,7 +693,7 @@ fn should_continue_sequence_numbers_when_new_writes_follow_clean_reopen() {
 
         // Act (Phase 2: Reopen and new writes)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Verify previously committed data is visible after reopen
@@ -723,7 +723,7 @@ fn should_continue_sequence_numbers_when_new_writes_follow_clean_reopen() {
 
         // Assert (Phase 3)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // All data including post-recovery writes should be present
@@ -761,7 +761,7 @@ fn should_replay_valid_wal_records_when_reopening_after_clean_shutdown() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write valid records
@@ -779,7 +779,7 @@ fn should_replay_valid_wal_records_when_reopening_after_clean_shutdown() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Valid committed records should be recovered on reopen

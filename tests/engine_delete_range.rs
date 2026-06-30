@@ -12,7 +12,7 @@ use std::sync::Arc;
 fn should_delete_keys_in_range_given_delete_range_when_querying() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         for (key, value) in [
@@ -69,7 +69,7 @@ fn should_delete_keys_in_range_given_delete_range_when_querying() {
 fn should_handle_empty_range_given_start_equals_end_when_delete_range() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine
@@ -103,7 +103,7 @@ fn should_handle_empty_range_given_start_equals_end_when_delete_range() {
 fn should_reject_delete_range_given_reversed_bounds_when_called() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -124,7 +124,7 @@ fn should_reject_delete_range_given_reversed_bounds_when_called() {
 fn should_delete_key_given_delete_range_with_single_key_when_matching() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine
@@ -159,7 +159,7 @@ fn should_delete_key_given_delete_range_with_single_key_when_matching() {
 fn should_allow_multiple_delete_ranges_when_called_sequentially() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..20 {
@@ -209,7 +209,7 @@ fn should_persist_keys_across_delete_range_with_restart_when_durable() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             for (key, value) in [("key1", "val1"), ("key2", "val2"), ("key3", "val3")] {
@@ -234,7 +234,7 @@ fn should_persist_keys_across_delete_range_with_restart_when_durable() {
 
         // Act
         // Assert
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
         assert!(tx.get(b"key1").expect("get1").is_none());
@@ -251,7 +251,7 @@ fn should_persist_keys_across_delete_range_with_restart_when_durable() {
 fn should_handle_concurrent_delete_ranges_when_multiple_threads() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..100 {

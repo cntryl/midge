@@ -9,6 +9,7 @@ use super::build_cloud_storage;
 use super::{CloudProviderConfig, GcsApiStyle, GcsCredentialSource};
 use crate::engine::{Engine, MemoryBudget, OpenOptions, TransactionMode, WriteOptions};
 use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
+use std::fmt::Write as _;
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -28,7 +29,7 @@ const REAL_S3_PATH_STYLE_ENV: &str = "MIDGE_REAL_S3_PATH_STYLE";
 #[test]
 fn s3_compatible_contract_against_peas() {
     let provider = CloudProviderConfig::peas_s3("midge-peas-s3");
-    run_provider_contract("s3", provider);
+    run_provider_contract("s3", &provider);
 }
 
 #[test]
@@ -39,7 +40,7 @@ fn minio_contract_against_peas() {
         PEAS_ACCESS_KEY,
         PEAS_SECRET_KEY,
     );
-    run_provider_contract("minio", provider);
+    run_provider_contract("minio", &provider);
 }
 
 #[test]
@@ -52,7 +53,7 @@ fn wasabi_contract_against_peas() {
     )
     .with_endpoint(PEAS_ENDPOINT)
     .expect("Peas Wasabi endpoint override should be supported");
-    run_provider_contract("wasabi", provider);
+    run_provider_contract("wasabi", &provider);
 }
 
 #[test]
@@ -68,19 +69,19 @@ fn oci_s3_compatible_contract_against_peas() {
     .expect("Peas OCI endpoint override should be supported")
     .with_path_style(true)
     .expect("Peas OCI path-style override should be supported");
-    run_provider_contract("oci", provider);
+    run_provider_contract("oci", &provider);
 }
 
 #[test]
 fn azure_blob_contract_against_peas() {
     let provider = CloudProviderConfig::peas_azure("midge-peas-azure");
-    run_provider_contract("azure", provider);
+    run_provider_contract("azure", &provider);
 }
 
 #[test]
 fn gcs_xml_contract_against_peas() {
     let provider = CloudProviderConfig::peas_gcs("midge-peas-gcs");
-    run_provider_contract("gcs", provider);
+    run_provider_contract("gcs", &provider);
 }
 
 #[test]
@@ -118,7 +119,7 @@ fn s3_compatible_contract_against_real_provider_if_configured() {
         return;
     };
 
-    run_provider_contract_without_namespace_setup("real-s3", provider);
+    run_provider_contract_without_namespace_setup("real-s3", &provider);
 }
 
 #[test]
@@ -136,23 +137,23 @@ fn engine_recovers_from_real_s3_after_local_cache_loss_if_configured() {
     engine_recovers_from_provider_after_local_cache_loss("real-s3-engine", provider, false);
 }
 
-fn run_provider_contract(label: &str, provider: CloudProviderConfig) {
+fn run_provider_contract(label: &str, provider: &CloudProviderConfig) {
     if !peas_available_or_skip(label) {
         return;
     }
 
-    ensure_peas_namespace(&provider).unwrap_or_else(|error| {
+    ensure_peas_namespace(provider).unwrap_or_else(|error| {
         panic!("{label}: failed to prepare Peas namespace: {error}");
     });
     run_provider_contract_body(label, provider);
 }
 
-fn run_provider_contract_without_namespace_setup(label: &str, provider: CloudProviderConfig) {
+fn run_provider_contract_without_namespace_setup(label: &str, provider: &CloudProviderConfig) {
     run_provider_contract_body(label, provider);
 }
 
-fn run_provider_contract_body(label: &str, provider: CloudProviderConfig) {
-    let backend = build_cloud_storage(&provider, "").unwrap_or_else(|error| {
+fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
+    let backend = build_cloud_storage(provider, "").unwrap_or_else(|error| {
         panic!("{label}: failed to build provider backend: {error}");
     });
     let prefix = format!("qualification/{label}/{}/", uuid::Uuid::new_v4());
@@ -256,7 +257,7 @@ fn engine_recovers_from_provider_after_local_cache_loss(
     let _ = std::fs::remove_dir_all(&cache_path);
 
     let opts = real_cloud_engine_options(cache_path.clone(), provider.clone(), prefix.clone());
-    let engine = Engine::open(&opts).expect("open provider-backed engine");
+    let engine = Engine::open(opts).expect("open provider-backed engine");
     let default_handle = default_cf(&engine);
 
     let mut tx = engine
@@ -276,7 +277,7 @@ fn engine_recovers_from_provider_after_local_cache_loss(
 
     std::fs::remove_dir_all(&cache_path).expect("delete local cache");
 
-    let reopened = Engine::open(&real_cloud_engine_options(
+    let reopened = Engine::open(real_cloud_engine_options(
         cache_path.clone(),
         provider,
         prefix,
@@ -371,8 +372,16 @@ fn ensure_peas_s3_bucket(bucket: &str) -> Result<(), String> {
     signed_s3_request("PUT", &format!("/{bucket}"), b"").map(|_| ())
 }
 
-fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+fn hmac_sha256(key: &[u8], data: &str) -> Vec<u8> {
     use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("hmac key");
+    mac.update(data.as_bytes());
+    mac.finalize().into_bytes().to_vec()
+}
+
+fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, String> {
     use sha2::{Digest, Sha256};
 
     let host = "127.0.0.1:9000";
@@ -389,8 +398,10 @@ fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, S
     headers.sort_by(|left, right| left.0.cmp(&right.0));
     let canonical_headers = headers
         .iter()
-        .map(|(name, value)| format!("{name}:{value}\n"))
-        .collect::<String>();
+        .fold(String::new(), |mut acc, (name, value)| {
+            writeln!(&mut acc, "{name}:{value}").expect("write canonical header");
+            acc
+        });
     let signed_headers = headers
         .iter()
         .map(|(name, _)| name.clone())
@@ -405,11 +416,6 @@ fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, S
         scope,
         hex::encode(Sha256::digest(canonical_request.as_bytes()))
     );
-    fn hmac_sha256(key: &[u8], data: &str) -> Vec<u8> {
-        let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("hmac key");
-        mac.update(data.as_bytes());
-        mac.finalize().into_bytes().to_vec()
-    }
     let k_date = hmac_sha256(format!("AWS4{PEAS_SECRET_KEY}").as_bytes(), &date);
     let k_region = hmac_sha256(&k_date, region);
     let k_service = hmac_sha256(&k_region, "s3");
@@ -523,6 +529,97 @@ fn ensure_peas_azure_container(container: &str) -> Result<(), String> {
     .map(|_| ())
 }
 
+fn azure_header_value(headers: &[(String, String)], name: &str) -> String {
+    headers
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default()
+}
+
+fn azure_canonical_headers(headers: &[(String, String)]) -> String {
+    let mut x_ms = headers
+        .iter()
+        .filter(|(name, _)| name.to_ascii_lowercase().starts_with("x-ms-"))
+        .map(|(name, value)| {
+            (
+                name.to_ascii_lowercase(),
+                value.split_whitespace().collect::<Vec<_>>().join(" "),
+            )
+        })
+        .collect::<Vec<_>>();
+    x_ms.sort_by(|left, right| left.0.cmp(&right.0));
+    x_ms.into_iter()
+        .fold(String::new(), |mut acc, (name, value)| {
+            writeln!(&mut acc, "{name}:{value}").expect("write canonical header");
+            acc
+        })
+}
+
+fn azure_canonical_resource(path: &str, query: &str) -> String {
+    let mut canonical_resource = format!("/{PEAS_ACCESS_KEY}{path}");
+    if !query.is_empty() {
+        let mut query_pairs = query
+            .split('&')
+            .map(|pair| {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                (key.to_ascii_lowercase(), value.to_string())
+            })
+            .collect::<Vec<_>>();
+        query_pairs.sort();
+        for (key, value) in query_pairs {
+            write!(&mut canonical_resource, "\n{key}:{value}")
+                .expect("write canonical resource query");
+        }
+    }
+    canonical_resource
+}
+
+fn azure_string_to_sign(
+    method: &str,
+    headers: &[(String, String)],
+    path: &str,
+    query: &str,
+    body: &[u8],
+) -> String {
+    let content_length = if matches!(method, "GET" | "HEAD") || body.is_empty() {
+        String::new()
+    } else {
+        body.len().to_string()
+    };
+    [
+        method.to_string(),
+        azure_header_value(headers, "Content-Encoding"),
+        azure_header_value(headers, "Content-Language"),
+        content_length,
+        azure_header_value(headers, "Content-MD5"),
+        azure_header_value(headers, "Content-Type"),
+        String::new(),
+        azure_header_value(headers, "If-Modified-Since"),
+        azure_header_value(headers, "If-Match"),
+        azure_header_value(headers, "If-None-Match"),
+        azure_header_value(headers, "If-Unmodified-Since"),
+        azure_header_value(headers, "Range"),
+        azure_canonical_headers(headers),
+        azure_canonical_resource(path, query),
+    ]
+    .join("\n")
+}
+
+fn azure_shared_key_signature(string_to_sign: &str) -> Result<String, String> {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+
+    let key = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, PEAS_SECRET_KEY)
+        .unwrap_or_else(|_| PEAS_SECRET_KEY.as_bytes().to_vec());
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key).map_err(|error| error.to_string())?;
+    mac.update(string_to_sign.as_bytes());
+    Ok(base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        mac.finalize().into_bytes(),
+    ))
+}
+
 fn signed_azure_request(
     method: &str,
     path: &str,
@@ -530,9 +627,6 @@ fn signed_azure_request(
     body: &[u8],
     extra_headers: Vec<(&str, &str)>,
 ) -> Result<Vec<u8>, String> {
-    use hmac::{Hmac, KeyInit, Mac};
-    use sha2::Sha256;
-
     let date = chrono::Utc::now()
         .format("%a, %d %b %Y %H:%M:%S GMT")
         .to_string();
@@ -545,72 +639,8 @@ fn signed_azure_request(
             .into_iter()
             .map(|(name, value)| (name.to_string(), value.to_string())),
     );
-    let header_value = |name: &str| -> String {
-        headers
-            .iter()
-            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.clone())
-            .unwrap_or_default()
-    };
-    let content_length = if matches!(method, "GET" | "HEAD") || body.is_empty() {
-        String::new()
-    } else {
-        body.len().to_string()
-    };
-    let mut x_ms = headers
-        .iter()
-        .filter(|(name, _)| name.to_ascii_lowercase().starts_with("x-ms-"))
-        .map(|(name, value)| {
-            (
-                name.to_ascii_lowercase(),
-                value.split_whitespace().collect::<Vec<_>>().join(" "),
-            )
-        })
-        .collect::<Vec<_>>();
-    x_ms.sort_by(|left, right| left.0.cmp(&right.0));
-    let canonical_headers = x_ms
-        .into_iter()
-        .map(|(name, value)| format!("{name}:{value}\n"))
-        .collect::<String>();
-    let mut canonical_resource = format!("/{PEAS_ACCESS_KEY}{path}");
-    if !query.is_empty() {
-        let mut query_pairs = query
-            .split('&')
-            .map(|pair| {
-                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-                (key.to_ascii_lowercase(), value.to_string())
-            })
-            .collect::<Vec<_>>();
-        query_pairs.sort();
-        for (key, value) in query_pairs {
-            canonical_resource.push_str(&format!("\n{key}:{value}"));
-        }
-    }
-    let string_to_sign = [
-        method.to_string(),
-        header_value("Content-Encoding"),
-        header_value("Content-Language"),
-        content_length,
-        header_value("Content-MD5"),
-        header_value("Content-Type"),
-        String::new(),
-        header_value("If-Modified-Since"),
-        header_value("If-Match"),
-        header_value("If-None-Match"),
-        header_value("If-Unmodified-Since"),
-        header_value("Range"),
-        canonical_headers,
-        canonical_resource,
-    ]
-    .join("\n");
-    let key = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, PEAS_SECRET_KEY)
-        .unwrap_or_else(|_| PEAS_SECRET_KEY.as_bytes().to_vec());
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).map_err(|error| error.to_string())?;
-    mac.update(string_to_sign.as_bytes());
-    let signature = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        mac.finalize().into_bytes(),
-    );
+    let string_to_sign = azure_string_to_sign(method, &headers, path, query, body);
+    let signature = azure_shared_key_signature(&string_to_sign)?;
     let url = if query.is_empty() {
         format!("{PEAS_ENDPOINT}{path}")
     } else {

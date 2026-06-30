@@ -12,7 +12,7 @@ use common::*;
 fn should_delete_only_keys_within_requested_range_when_delete_range_commits() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine
@@ -61,7 +61,7 @@ fn should_delete_only_keys_within_requested_range_when_delete_range_commits() {
 fn should_return_all_inserted_keys_when_scanning_unbounded_query() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine

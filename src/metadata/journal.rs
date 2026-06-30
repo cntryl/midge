@@ -692,6 +692,7 @@ mod tests {
     use crate::metadata::FileMeta;
     use crate::metadata::{Manifest, ManifestPersistence};
     use proptest::prelude::*;
+    use std::io::Write;
     use tempfile::tempdir;
 
     #[test]
@@ -749,7 +750,6 @@ mod tests {
             .append(true)
             .open(&path)
             .expect("failed to open temp journal file");
-        use std::io::Write;
 
         let fake = ManifestEdit::RemoveSst {
             name: "missing.sst".to_string(),
@@ -761,7 +761,11 @@ mod tests {
 
         let mut buf = Vec::new();
         buf.push(fake.record_type());
-        buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(payload.len())
+                .expect("payload length fits in u32")
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(&payload[..10.min(payload.len())]); // partial
                                                                   // do NOT write crc
 

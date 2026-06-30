@@ -11,7 +11,7 @@ use common::{open_with_mode, opts_for_mode};
 fn should_batch_writes_when_using_cloud_mode() {
     // Arrange
     let opts = opts_for_mode("cloud");
-    let engine = open_with_mode(opts, "cloud");
+    let engine = open_with_mode(&opts, "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 
@@ -43,7 +43,7 @@ fn should_batch_writes_when_using_cloud_mode() {
 fn should_support_cloud_strict_for_explicit_durability() {
     // Arrange
     let opts = opts_for_mode("cloud");
-    let engine = open_with_mode(opts, "cloud");
+    let engine = open_with_mode(&opts, "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 
@@ -70,7 +70,7 @@ fn should_support_cloud_strict_for_explicit_durability() {
 fn should_flush_cloud_segments_on_shutdown() {
     // Arrange
     let opts = opts_for_mode("cloud");
-    let engine = open_with_mode(opts, "cloud");
+    let engine = open_with_mode(&opts, "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 

@@ -9,7 +9,7 @@ use std::sync::Arc;
 fn should_hide_uncommitted_writes_given_uncommitted_write_when_read_different_mode() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -37,7 +37,7 @@ fn should_hide_uncommitted_writes_given_uncommitted_write_when_read_different_mo
 fn should_apply_last_committed_write_given_multiple_commits_when_last_write_wins() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -75,7 +75,7 @@ fn should_apply_last_committed_write_given_multiple_commits_when_last_write_wins
 fn should_allow_lost_update_given_concurrent_writes_when_lost_update_occurs() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut setup = engine
@@ -128,7 +128,7 @@ fn should_allow_lost_update_given_concurrent_writes_when_lost_update_occurs() {
 fn should_abort_second_commit_given_conflicting_writes_when_abort_on_write_conflict_enabled() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx1 = engine
@@ -176,7 +176,7 @@ fn should_abort_delete_range_commit_given_overlapping_recent_writes_when_abort_o
 ) {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx1 = engine
@@ -224,7 +224,7 @@ fn should_abort_point_write_commit_given_recent_overlapping_delete_range_when_ab
 ) {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx1 = engine

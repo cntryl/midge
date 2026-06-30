@@ -33,7 +33,7 @@ fn bench_compress_raw(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(16 * 1024));
 
     // Precompute a 16 KB compressible payload (repeated pattern)
-    let data: Vec<u8> = (0..16 * 1024).map(|i| (i % 64) as u8).collect();
+    let data: Vec<u8> = (0u8..64).cycle().take(16 * 1024).collect();
 
     let policies = [
         ("lz4", CompressionPolicy::Fixed(CompressionAlgo::Lz4)),
@@ -64,7 +64,7 @@ fn bench_decompress_raw(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Bytes(16 * 1024));
 
-    let data: Vec<u8> = (0..16 * 1024).map(|i| (i % 64) as u8).collect();
+    let data: Vec<u8> = (0u8..64).cycle().take(16 * 1024).collect();
 
     // Precompute compressed payloads for each algo
     let lz4_compressed =
@@ -104,7 +104,7 @@ fn bench_compress_trailer(c: &mut Criterion) {
         (16 * 1024 * TRAILER_COMPRESS_BATCH_SIZE) as u64,
     ));
 
-    let data: Vec<u8> = (0..16 * 1024).map(|i| (i % 64) as u8).collect();
+    let data: Vec<u8> = (0u8..64).cycle().take(16 * 1024).collect();
     let policy_lz4 = CompressionPolicy::Fixed(CompressionAlgo::Lz4);
     let policy_zstd3 = CompressionPolicy::Fixed(CompressionAlgo::Zstd3);
 
@@ -139,7 +139,7 @@ fn bench_decompress_trailer(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Bytes(16 * 1024));
 
-    let data: Vec<u8> = (0..16 * 1024).map(|i| (i % 64) as u8).collect();
+    let data: Vec<u8> = (0u8..64).cycle().take(16 * 1024).collect();
 
     let lz4_block =
         compress_block_with_trailer(&data, &CompressionPolicy::Fixed(CompressionAlgo::Lz4))
@@ -177,7 +177,7 @@ fn bench_wal_value_compress(c: &mut Criterion) {
     // Small value (< MIN_COMPRESS_SIZE) — no-op path
     let small_val = vec![0xABu8; 128];
     // Medium compressible value
-    let medium_val: Vec<u8> = (0..1024).map(|i| (i % 64) as u8).collect();
+    let medium_val: Vec<u8> = (0u8..64).cycle().take(1024).collect();
 
     group.throughput(Throughput::Elements(1));
 
@@ -206,7 +206,7 @@ fn bench_wal_value_decompress(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
 
     // Precompute compressed WAL values
-    let medium_val: Vec<u8> = (0..1024).map(|i| (i % 64) as u8).collect();
+    let medium_val: Vec<u8> = (0u8..64).cycle().take(1024).collect();
     let (compressed, comp_byte) = compress_wal_value(&medium_val);
 
     // Uncompressed passthrough

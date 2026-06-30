@@ -182,7 +182,7 @@ pub fn test_temp_dir() -> tempfile::TempDir {
     tempfile::TempDir::new().expect("Failed to create temp dir")
 }
 
-pub fn open_with_mode(opts: MidgeOptions, _mode: &str) -> Engine {
+pub fn open_with_mode(opts: &MidgeOptions, _mode: &str) -> Engine {
     Engine::open(opts.to_open_options()).expect("failed to open engine")
 }
 
@@ -202,29 +202,23 @@ impl Default for DurabilityTestContext {
     }
 }
 
-pub fn populate_multi_level_data(
-    _engine: &Engine,
-    _cf: &ColumnFamilyHandle,
-    _levels: usize,
-) -> MidgeResult<()> {
-    Ok(())
-}
+pub fn populate_multi_level_data(_engine: &Engine, _cf: &ColumnFamilyHandle, _levels: usize) {}
 
 pub mod test_helpers {
     use std::time::Duration;
 
-    pub fn wait_for_signal_default<T>(rx: std::sync::mpsc::Receiver<T>) -> Option<T> {
+    pub fn wait_for_signal_default<T>(rx: &std::sync::mpsc::Receiver<T>) -> Option<T> {
         rx.recv_timeout(Duration::from_secs(5)).ok()
     }
 }
 
-pub fn with_engine_restart<F1, F2>(opts: MidgeOptions, before_restart: F1, after_restart: F2)
+pub fn with_engine_restart<F1, F2>(opts: &MidgeOptions, before_restart: F1, after_restart: F2)
 where
     F1: FnOnce(&Engine),
     F2: FnOnce(&Engine),
 {
     {
-        let engine = Engine::open(opts.clone().to_open_options()).expect("open");
+        let engine = Engine::open(opts.to_open_options()).expect("open");
         before_restart(&engine);
         drop(engine);
     }

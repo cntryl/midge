@@ -30,7 +30,7 @@ fn should_preserve_flushed_values_when_reopening_after_short_upload_window() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -53,7 +53,7 @@ fn should_preserve_flushed_values_when_reopening_after_short_upload_window() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -84,7 +84,7 @@ fn should_preserve_both_flushed_batches_when_reopening_after_compaction_request(
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -114,7 +114,7 @@ fn should_preserve_both_flushed_batches_when_reopening_after_compaction_request(
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -143,7 +143,7 @@ fn should_preserve_flushed_values_when_reopening_after_background_upload_delay()
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -161,7 +161,7 @@ fn should_preserve_flushed_values_when_reopening_after_background_upload_delay()
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             thread::sleep(Duration::from_millis(200)); // Wait for background retry
 
             let cf = engine.create_column_family("test").expect("create cf");
@@ -186,7 +186,7 @@ fn should_preserve_flushed_values_when_reopening_after_background_upload_delay()
 fn should_preserve_snapshot_visibility_when_flushing_with_snapshot_open() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write data
@@ -225,7 +225,7 @@ fn should_preserve_both_generations_when_reopening_after_compaction_request() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -256,7 +256,7 @@ fn should_preserve_both_generations_when_reopening_after_compaction_request() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -286,7 +286,7 @@ fn should_preserve_values_when_reopening_after_flush_attempt() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -304,7 +304,7 @@ fn should_preserve_values_when_reopening_after_flush_attempt() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -328,7 +328,7 @@ fn should_preserve_multiple_flushed_batches_when_reopening_after_short_upload_wi
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -358,7 +358,7 @@ fn should_preserve_multiple_flushed_batches_when_reopening_after_short_upload_wi
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             thread::sleep(Duration::from_millis(300));
 
@@ -389,7 +389,7 @@ fn should_preserve_flushed_values_when_reopening_after_short_retry_window() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -408,7 +408,7 @@ fn should_preserve_flushed_values_when_reopening_after_short_retry_window() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             thread::sleep(Duration::from_millis(200));
 

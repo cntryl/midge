@@ -44,7 +44,7 @@ fn should_collect_orphaned_sst_files_after_compaction() {
         eprintln!("\n=== GC: Collect Orphaned SST Files (mode: {mode}) ===");
 
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Insert 100 keys and flush to create initial SST
@@ -98,7 +98,7 @@ fn should_not_collect_sst_files_referenced_by_manifest() {
         eprintln!("\n=== GC: Preserve Referenced SST Files (mode: {mode}) ===");
 
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write and flush to create SST referenced by manifest
@@ -138,7 +138,7 @@ fn should_run_gc_after_configurable_interval() {
         eprintln!("\n=== GC: Configurable Interval Triggering (mode: {mode}) ===");
 
         // Arrange: Set up engine with default compaction and GC timing
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write and flush batch 1
@@ -190,7 +190,7 @@ fn should_persist_gc_state_across_restart() {
         // Arrange
         // Act: Write and trigger compaction
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write batch 1
@@ -222,7 +222,7 @@ fn should_persist_gc_state_across_restart() {
 
         // Assert: Reopen and verify state
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // All data should still be present (GC didn't lose anything)
@@ -247,7 +247,7 @@ fn should_handle_gc_with_active_readers() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         eprintln!("\n=== GC: Handle Active Readers (mode: {mode}) ===");
 
-        let engine = Arc::new(open_with_mode(opts.clone(), mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Arrange: Write and flush initial data
@@ -314,7 +314,7 @@ fn should_collect_orphaned_wal_segments_after_flush() {
         eprintln!("\n=== GC: Collect Orphaned WAL Segments (mode: {mode}) ===");
 
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write to memtable (goes to WAL)
@@ -356,7 +356,7 @@ fn should_not_collect_wal_segments_still_needed_for_recovery() {
         // Arrange
         // Act: Write uncommitted data and crash
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write to memtable (committed but not flushed)
@@ -374,7 +374,7 @@ fn should_not_collect_wal_segments_still_needed_for_recovery() {
 
         // Assert: Restart and verify WAL recovery
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Data should be recovered from WAL (prove WAL wasn't garbage collected)

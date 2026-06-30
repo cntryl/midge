@@ -13,7 +13,7 @@ use common::*;
 fn should_commit_large_transaction_given_memory_budget_exceeded_when_committed() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts.memory_budget(128 * 1024), mode);
+        let engine = open_with_mode(&opts.memory_budget(128 * 1024), mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine
@@ -52,7 +52,7 @@ fn should_commit_large_transaction_given_memory_budget_exceeded_when_committed()
 fn should_preserve_values_given_two_large_transactions_within_budget_when_read() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts.memory_budget(256 * 1024), mode);
+        let engine = open_with_mode(&opts.memory_budget(256 * 1024), mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx1 = engine
@@ -106,7 +106,7 @@ fn should_preserve_values_given_two_large_transactions_within_budget_when_read()
 fn should_preserve_sample_keys_given_large_transaction_low_budget_when_committed() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts.memory_budget(64 * 1024), mode);
+        let engine = open_with_mode(&opts.memory_budget(64 * 1024), mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine

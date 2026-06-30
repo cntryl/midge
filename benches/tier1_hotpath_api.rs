@@ -61,7 +61,7 @@ fn setup_db(name: &str) -> MidgeEngine {
         cloud_runtime_policy_overrides: None,
     };
 
-    MidgeEngine::open_with_options(opts).unwrap()
+    MidgeEngine::open_with_options(&opts).unwrap()
 }
 
 /// Benchmark batch put operations (hot path for write throughput)

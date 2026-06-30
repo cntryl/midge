@@ -35,7 +35,7 @@ impl CloudOpTracker {
     }
 
     #[allow(dead_code)]
-    fn record_delete(&self, key: String) {
+    fn record_delete(&self, key: &str) {
         self.operations
             .lock()
             .unwrap()
@@ -43,7 +43,7 @@ impl CloudOpTracker {
     }
 
     #[allow(dead_code)]
-    fn record_write(&self, key: String) {
+    fn record_write(&self, key: &str) {
         self.operations.lock().unwrap().push(format!("write:{key}"));
     }
 
@@ -84,7 +84,7 @@ fn should_collect_orphaned_cloud_objects_after_compaction() {
         eprintln!("\n=== Cloud GC: Collect Orphaned Objects (mode: {mode}) ===");
 
         // Arrange: Create engine and SSTs
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Batch 1: Create SST A
@@ -137,7 +137,7 @@ fn should_not_collect_cloud_objects_referenced_by_manifest() {
         eprintln!("\n=== Cloud GC: Preserve Referenced Objects (mode: {mode}) ===");
 
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Create active SST
@@ -181,7 +181,7 @@ fn should_handle_gc_when_cloud_list_fails() {
         eprintln!("\n=== Cloud GC: Handle List Failure (mode: {mode}) ===");
 
         // Arrange: Set up engine
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Create SSTs
@@ -236,7 +236,7 @@ fn should_handle_gc_when_cloud_delete_fails() {
         eprintln!("\n=== Cloud GC: Handle Delete Failure (mode: {mode}) ===");
 
         // Arrange: Create test data
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Create initial SSTs

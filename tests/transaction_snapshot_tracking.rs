@@ -29,10 +29,10 @@ fn wait_for_active_snapshots(
 }
 
 #[test]
-fn should_register_snapshot_when_begin_tx_starts_transaction() -> MidgeResult<()> {
+fn should_register_snapshot_when_begin_tx_starts_transaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
             .expect("wait for zero active snapshots");
@@ -50,14 +50,13 @@ fn should_register_snapshot_when_begin_tx_starts_transaction() -> MidgeResult<()
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
             .expect("wait for zero active snapshots after drop");
     });
-    Ok(())
 }
 
 #[test]
-fn should_report_active_snapshot_immediately_when_begin_tx_returns() -> MidgeResult<()> {
+fn should_report_active_snapshot_immediately_when_begin_tx_returns() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -75,15 +74,13 @@ fn should_report_active_snapshot_immediately_when_begin_tx_returns() -> MidgeRes
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
             .expect("wait for zero active snapshots after drop");
     });
-
-    Ok(())
 }
 
 #[test]
-fn should_report_snapshot_retention_pressure_metrics_when_snapshot_pins_ssts() -> MidgeResult<()> {
+fn should_report_snapshot_retention_pressure_metrics_when_snapshot_pins_ssts() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut seed = engine
@@ -114,15 +111,13 @@ fn should_report_snapshot_retention_pressure_metrics_when_snapshot_pins_ssts() -
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
             .expect("wait for zero active snapshots after drop");
     });
-
-    Ok(())
 }
 
 #[test]
-fn should_unregister_snapshot_when_commit_finishes_transaction() -> MidgeResult<()> {
+fn should_unregister_snapshot_when_commit_finishes_transaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -139,14 +134,13 @@ fn should_unregister_snapshot_when_commit_finishes_transaction() -> MidgeResult<
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
             .expect("wait for zero active snapshots after commit");
     });
-    Ok(())
 }
 
 #[test]
-fn should_unregister_snapshot_when_rollback_ends_transaction() -> MidgeResult<()> {
+fn should_unregister_snapshot_when_rollback_ends_transaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -161,14 +155,13 @@ fn should_unregister_snapshot_when_rollback_ends_transaction() -> MidgeResult<()
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
             .expect("wait for zero active snapshots after rollback");
     });
-    Ok(())
 }
 
 #[test]
-fn should_unregister_snapshot_when_drop_ends_transaction() -> MidgeResult<()> {
+fn should_unregister_snapshot_when_drop_ends_transaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -183,15 +176,13 @@ fn should_unregister_snapshot_when_drop_ends_transaction() -> MidgeResult<()> {
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
             .expect("wait for zero active snapshots after drop");
     });
-    Ok(())
 }
 
 #[test]
-fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active() -> MidgeResult<()>
-{
+fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut seed = engine
@@ -241,16 +232,13 @@ fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active(
             "mode: {mode}"
         );
     });
-
-    Ok(())
 }
 
 #[test]
-fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_active(
-) -> MidgeResult<()> {
+fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_active() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut seed = engine
@@ -311,15 +299,13 @@ fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_act
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
             .expect("wait for no active snapshots");
     });
-
-    Ok(())
 }
 
 #[test]
-fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() -> MidgeResult<()> {
+fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut seed = engine
@@ -387,6 +373,4 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() ->
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
             .expect("wait for no active snapshots");
     });
-
-    Ok(())
 }

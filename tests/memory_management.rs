@@ -10,11 +10,11 @@ fn should_handle_small_memory_budget_without_unexpected_errors() {
         // Arrange: Open engine with very small memtable limit to trigger frequent flushes
         let mut opts = opts;
         opts = opts.memory_budget(64 * 1024); // 64KB
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act: Write enough data to fill immutable queue
-        let mut _write_count = 0;
+        let mut write_count = 0;
         let mut stall_encountered = false;
 
         for i in 0..1000 {
@@ -28,7 +28,7 @@ fn should_handle_small_memory_budget_without_unexpected_errors() {
 
             match tx.commit(WriteOptions::buffered()) {
                 Ok(()) => {
-                    _write_count += 1;
+                    write_count += 1;
                 }
                 Err(MidgeError::WriteStall(_)) => {
                     stall_encountered = true;
@@ -53,7 +53,7 @@ fn should_handle_small_memory_budget_without_unexpected_errors() {
             // keep up by flushing synchronously. Both are acceptable as long as it
             // keeps making progress and does not end in a degraded memory state.
             assert!(
-                stall_encountered || _write_count > 0,
+                stall_encountered || write_count > 0,
                 "Expected progress or backpressure in mode {mode}"
             );
             assert_ne!(
@@ -69,7 +69,7 @@ fn should_handle_small_memory_budget_without_unexpected_errors() {
 fn should_complete_shutdown_when_wal_writer_drops() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act: Write some data

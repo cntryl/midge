@@ -41,14 +41,14 @@ fn write_some(engine: &MidgeEngine, num_keys: usize) {
             .expect("begin");
         for i in start..end {
             let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
-            let v = vec![(i % 251) as u8; VALUE_SIZE];
+            let v = vec![u8::try_from(i % 251).expect("value byte fits in u8"); VALUE_SIZE];
             tx.put(k.to_vec(), v, None).unwrap();
         }
         tx.commit(write_opts).unwrap();
     }
 }
 
-fn run_reopen_after_flush_case(ctx: &mut StressContext, opts: MidgeOptions) {
+fn run_reopen_after_flush_case(ctx: &mut StressContext, opts: &MidgeOptions) {
     // All setup outside measurement: create flushed state
     {
         let e = setup_engine(opts.clone());
@@ -67,7 +67,7 @@ fn run_reopen_after_flush_case(ctx: &mut StressContext, opts: MidgeOptions) {
     });
 }
 
-fn run_reopen_after_compaction_case(ctx: &mut StressContext, opts: MidgeOptions) {
+fn run_reopen_after_compaction_case(ctx: &mut StressContext, opts: &MidgeOptions) {
     // All setup outside measurement: create multi-level compacted state
     {
         let e = setup_engine(opts.clone());
@@ -92,25 +92,25 @@ fn run_reopen_after_compaction_case(ctx: &mut StressContext, opts: MidgeOptions)
 #[stress_test]
 fn tier4_recovery_reopen_after_flush_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_reopen_after_flush_case(ctx, opts);
+    run_reopen_after_flush_case(ctx, &opts);
 }
 
 #[stress_test]
 fn tier4_recovery_reopen_after_flush_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_reopen_after_flush_case(ctx, opts);
+    run_reopen_after_flush_case(ctx, &opts);
 }
 
 #[stress_test]
 fn tier4_recovery_reopen_after_compaction_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_reopen_after_compaction_case(ctx, opts);
+    run_reopen_after_compaction_case(ctx, &opts);
 }
 
 #[stress_test]
 fn tier4_recovery_reopen_after_compaction_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_reopen_after_compaction_case(ctx, opts);
+    run_reopen_after_compaction_case(ctx, &opts);
 }
 
 stress_main!();

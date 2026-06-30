@@ -34,7 +34,7 @@ fn should_trigger_eviction_at_high_watermark() {
         eprintln!("\n=== Hybrid: Trigger Eviction at High Watermark (mode: {mode}) ===");
 
         // Arrange: Set tight memory budget to make eviction triggerable
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write large values to reach high watermark (~70% of budget)
@@ -85,7 +85,7 @@ fn should_block_writes_at_emergency_watermark() {
         eprintln!("\n=== Hybrid: Block Writes at Emergency (mode: {mode}) ===");
 
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act: Fill close to emergency watermark
@@ -143,7 +143,7 @@ fn should_resume_writes_after_eviction_clears_pressure() {
         eprintln!("\n=== Hybrid: Resume Writes After Eviction (mode: {mode}) ===");
 
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Fill to pressure point
@@ -195,7 +195,7 @@ fn should_prefer_local_reads_before_eviction() {
         eprintln!("\n=== Hybrid: Prefer Local Reads (mode: {mode}) ===");
 
         // Arrange: Write small data that fits comfortably in cache
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let small_value = b"cached_value";
@@ -241,7 +241,7 @@ fn should_fetch_from_cloud_after_local_eviction() {
         eprintln!("\n=== Hybrid: Fetch from Cloud After Eviction (mode: {mode}) ===");
 
         // Arrange: Write and evict to cloud
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write large batch
@@ -291,7 +291,7 @@ fn should_persist_eviction_state_across_restart() {
         // Arrange
         // Act: Write, evict, note manifest state
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let value = vec![b'E'; 128 * 1024]; // 128KB
@@ -313,7 +313,7 @@ fn should_persist_eviction_state_across_restart() {
 
         // Assert: Restart and verify eviction state
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Verify:
@@ -349,7 +349,7 @@ fn should_handle_cloud_unavailable_during_eviction() {
         eprintln!("\n=== Hybrid: Cloud Down During Eviction (mode: {mode}) ===");
 
         // Arrange: Fill cache near capacity
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let large_value = vec![b'U'; 512 * 1024]; // 512KB
@@ -403,7 +403,7 @@ fn should_not_evict_ssts_with_active_readers() {
     for_each_storage_mode(&["local"], |mode, opts| {
         eprintln!("\n=== Hybrid: Don't Evict Active Readers (mode: {mode}) ===");
 
-        let engine = Arc::new(open_with_mode(opts.clone(), mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Arrange: Write and create snapshot

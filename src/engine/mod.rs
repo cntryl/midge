@@ -364,7 +364,7 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error when engine startup fails for the derived open options.
-    pub fn open_with_options(opts: crate::testkit::MidgeOptions) -> MidgeResult<Self> {
+    pub fn open_with_options(opts: &crate::testkit::MidgeOptions) -> MidgeResult<Self> {
         let open_opts = opts.to_open_options();
         Self::open(open_opts)
     }
@@ -1245,7 +1245,7 @@ mod tests {
         };
 
         // Act
-        let engine = Engine::open_with_options(opts).expect("open memory engine");
+        let engine = Engine::open_with_options(&opts).expect("open memory engine");
         let cf = engine
             .create_column_family("test")
             .expect("create column family");

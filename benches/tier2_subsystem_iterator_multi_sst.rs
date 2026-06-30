@@ -114,7 +114,7 @@ impl<'a> MergeIterator<'a> {
                 heap.push(HeapEntry {
                     key,
                     sst_id,
-                    iter_idx: idx as u32,
+                    iter_idx: u32::try_from(idx).expect("iterator index fits in u32"),
                 });
             }
         }

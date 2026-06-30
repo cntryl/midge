@@ -464,13 +464,12 @@ fn should_fail_strict_open_when_replay_cannot_clear_intent_log() {
     let replay_scenario = fail::FailScenario::setup();
     fail::cfg("midge::intent::inject_no_space_on_save", "return")
         .expect("configure intent save no-space failpoint");
-    let error = match Engine::open(
+    let Err(error) = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Strict)
             .build(),
-    ) {
-        Ok(_) => panic!("strict open should fail when replay cannot clear intent log"),
-        Err(error) => error,
+    ) else {
+        panic!("strict open should fail when replay cannot clear intent log");
     };
     fail::remove("midge::intent::inject_no_space_on_save");
     replay_scenario.teardown();
@@ -650,13 +649,12 @@ fn should_fail_strict_open_when_replay_cannot_checkpoint_manifest() {
         "return",
     )
     .expect("configure manifest checkpoint no-space failpoint");
-    let error = match Engine::open(
+    let Err(error) = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Strict)
             .build(),
-    ) {
-        Ok(_) => panic!("strict open should fail when replay cannot checkpoint manifest"),
-        Err(error) => error,
+    ) else {
+        panic!("strict open should fail when replay cannot checkpoint manifest");
     };
     fail::remove("midge::manifest::inject_no_space_on_checkpoint_save");
     scenario.teardown();

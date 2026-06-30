@@ -17,7 +17,7 @@ use common::*;
 #[test]
 fn should_preserve_snapshot_reads_when_flushing_while_snapshot_is_open() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     for i in 0..100 {
         let key = format!("concurrent_key_{i:04}");
@@ -61,7 +61,7 @@ fn should_preserve_snapshot_reads_when_flushing_while_snapshot_is_open() {
 #[test]
 fn should_preserve_both_write_batches_after_flushing_between_batches() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     {
         let mut tx = engine
@@ -107,7 +107,7 @@ fn should_preserve_both_write_batches_after_flushing_between_batches() {
 #[test]
 fn should_preserve_range_tombstones_after_flushing_deleted_range() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     for i in 100..900 {
         let key = format!("k{i:04}");
@@ -151,7 +151,7 @@ fn should_preserve_range_tombstones_after_flushing_deleted_range() {
 #[test]
 fn should_preserve_large_values_after_flushing() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     let large_value = vec![0xAB; 100_000]; // 100KB value
 
@@ -184,7 +184,7 @@ fn should_preserve_large_values_after_flushing() {
 #[test]
 fn should_preserve_latest_overwritten_value_after_flushing() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     for version in 0..100 {
         let value = format!("v{version}");
@@ -215,7 +215,7 @@ fn should_preserve_latest_overwritten_value_after_flushing() {
 #[test]
 fn should_preserve_all_keys_after_repeated_flushes() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act
@@ -263,7 +263,7 @@ fn should_preserve_all_keys_after_repeated_flushes() {
 #[test]
 fn should_publish_compacted_ssts_in_manifest_when_compaction_completes() {
     // Arrange: Create engine and write data to trigger L0 compaction
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Write enough data to create multiple L0 files via flush
@@ -323,7 +323,7 @@ fn should_publish_compacted_ssts_in_manifest_when_compaction_completes() {
 #[test]
 fn should_cleanup_input_ssts_after_compaction_manifest_publishes() {
     // Arrange: Create 5 L0 files (5 batches Ã— 100 keys each)
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     for batch in 0..5 {
         let mut tx = engine

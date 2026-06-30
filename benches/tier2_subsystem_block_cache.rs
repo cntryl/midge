@@ -65,7 +65,7 @@ fn bench_hotset_rotation(c: &mut Criterion) {
             || {
                 let cache = create_cache(1024 * 1024); // 1MB cache
                 for i in 0..50 {
-                    cache.put(keys.get_linear(i), block.clone());
+                    cache.put(keys.get_linear(i), &block);
                 }
                 cache
             },
@@ -74,7 +74,7 @@ fn bench_hotset_rotation(c: &mut Criterion) {
                     for i in 0..50 {
                         let key = keys.get_linear((i + round) % 75);
                         if cache.get(&key).is_none() {
-                            cache.put(key, block.clone());
+                            cache.put(key, &block);
                         }
                     }
                 }
@@ -103,13 +103,13 @@ fn bench_lru_eviction_10k(c: &mut Criterion) {
             || {
                 let cache = create_cache(2 * 1024 * 1024); // 2MB holds ~500 blocks
                 for i in 0..500 {
-                    cache.put(keys.get_linear(i), block.clone());
+                    cache.put(keys.get_linear(i), &block);
                 }
                 cache
             },
             |cache| {
                 for i in 500..10_500 {
-                    cache.put(keys.get_linear(i), block.clone());
+                    cache.put(keys.get_linear(i), &block);
                 }
                 black_box(cache)
             },

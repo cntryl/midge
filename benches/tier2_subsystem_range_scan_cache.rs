@@ -55,7 +55,7 @@ impl RangeScan {
             } else {
                 // Simulate block read + cache insert
                 blocks_read += 1;
-                cache.put(key, miss_block_data.clone());
+                cache.put(key, miss_block_data);
             }
         }
 
@@ -73,7 +73,7 @@ fn populate_cache(cache: &BlockCache, sst_id: u64, start_block: usize, num_block
     let block_data = precompute_block_data();
     for block_idx in start_block..(start_block + num_blocks) {
         let key = CacheKey::for_data(sst_id, (block_idx * BLOCK_SIZE) as u64);
-        cache.put(key, block_data.clone());
+        cache.put(key, &block_data);
     }
 }
 
@@ -159,7 +159,7 @@ fn bench_range_scan_strided_access(c: &mut Criterion) {
                 for i in 0..num_accesses {
                     let block_idx = i * stride;
                     let key = CacheKey::for_data(SST_ID, (block_idx * BLOCK_SIZE) as u64);
-                    cache.put(key, block_data.clone());
+                    cache.put(key, &block_data);
                 }
 
                 b.iter(|| {
@@ -183,7 +183,7 @@ fn bench_range_scan_strided_access(c: &mut Criterion) {
                             let key = CacheKey::for_data(SST_ID, (block_idx * BLOCK_SIZE) as u64);
                             if cache.get(&key).is_none() {
                                 blocks_read += 1;
-                                cache.put(key, block_data.clone());
+                                cache.put(key, &block_data);
                             }
                         }
                         black_box(blocks_read)

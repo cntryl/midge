@@ -3151,15 +3151,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn should_retry_seal_wal_for_cloud_after_failpoint_before_rotate(
-    ) -> crate::common::MidgeResult<()> {
-        let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
-        let scenario = fail::FailScenario::setup();
-        let mut el = create_test_cloud_event_loop(
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-        )?;
-
+    fn append_cloud_async_put(el: &mut EventLoop) -> crate::common::MidgeResult<u64> {
         let ops = vec![crate::runtime::TransactionOp::Put {
             cf_id: 0,
             key: bytes::Bytes::from_static(b"strict-seal-key"),
@@ -3179,6 +3171,60 @@ mod tests {
             deferred,
             "cloud-backed transaction should defer cloud durability"
         );
+        Ok(last_sequence)
+    }
+
+    fn expect_failed_seal_response(fail_rx: &crossbeam::channel::Receiver<RuntimeResponse>) {
+        match fail_rx.recv().expect("failed strict response") {
+            RuntimeResponse::Error { error, .. } => match error {
+                crate::common::MidgeError::Internal(message) => {
+                    assert!(
+                        message.contains("cloud seal failed after WAL flush before rotate"),
+                        "unexpected strict failure: {message}"
+                    );
+                }
+                other => panic!("unexpected strict failure: {other:?}"),
+            },
+            other => panic!("unexpected strict failure response: {other:?}"),
+        }
+    }
+
+    fn complete_retry_and_ack(
+        el: &mut EventLoop,
+        last_sequence: u64,
+        retry_request_id: u64,
+        retry_rx: &crossbeam::channel::Receiver<RuntimeResponse>,
+    ) {
+        let seg_id = el
+            .durability
+            .inflight_segment_for_sequence(last_sequence)
+            .expect("inflight segment for strict retry");
+        copy_local_segment_to_remote_wal_for_test(el, seg_id);
+        el.hybrid_storage
+            .as_ref()
+            .expect("hybrid storage")
+            .verify_remote_wal_segment(seg_id, last_sequence)
+            .expect("verify retry remote WAL for test CloudAck");
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id: seg_id,
+            max_sequence: last_sequence,
+        });
+
+        match retry_rx.recv().expect("strict retry response") {
+            RuntimeResponse::Ok { request_id } => assert_eq!(request_id, retry_request_id),
+            other => panic!("unexpected strict retry response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_retry_seal_wal_for_cloud_after_failpoint_before_rotate(
+    ) -> crate::common::MidgeResult<()> {
+        let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+        let scenario = fail::FailScenario::setup();
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let last_sequence = append_cloud_async_put(&mut el)?;
 
         let fail_request_id = 401u64;
         let fail_rx = el.router.register(fail_request_id);
@@ -3198,18 +3244,7 @@ mod tests {
             &msg_rx,
         );
         assert_eq!(outcome, super::super::HandleOutcome::Continue);
-        match fail_rx.recv().expect("failed strict response") {
-            RuntimeResponse::Error { error, .. } => match error {
-                crate::common::MidgeError::Internal(message) => {
-                    assert!(
-                        message.contains("cloud seal failed after WAL flush before rotate"),
-                        "unexpected strict failure: {message}"
-                    );
-                }
-                other => panic!("unexpected strict failure: {other:?}"),
-            },
-            other => panic!("unexpected strict failure response: {other:?}"),
-        }
+        expect_failed_seal_response(&fail_rx);
         assert!(
             el.state.wal.pending_writes > 0,
             "failed strict seal must preserve buffered WAL accounting for retry"
@@ -3240,26 +3275,7 @@ mod tests {
                 .is_some(),
             "successful retry should install an inflight segment instead of falling through to a missing-cover error"
         );
-
-        let seg_id = el
-            .durability
-            .inflight_segment_for_sequence(last_sequence)
-            .expect("inflight segment for strict retry");
-        copy_local_segment_to_remote_wal_for_test(&el, seg_id);
-        el.hybrid_storage
-            .as_ref()
-            .expect("hybrid storage")
-            .verify_remote_wal_segment(seg_id, last_sequence)
-            .expect("verify retry remote WAL for test CloudAck");
-        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
-            segment_id: seg_id,
-            max_sequence: last_sequence,
-        });
-
-        match retry_rx.recv().expect("strict retry response") {
-            RuntimeResponse::Ok { request_id } => assert_eq!(request_id, retry_request_id),
-            other => panic!("unexpected strict retry response: {other:?}"),
-        }
+        complete_retry_and_ack(&mut el, last_sequence, retry_request_id, &retry_rx);
         assert_eq!(
             el.state.wal.pending_writes, 0,
             "successful strict retry should clear buffered WAL accounting"

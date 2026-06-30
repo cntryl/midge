@@ -32,7 +32,7 @@ fn run_batch_commit_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops: u
     let mut keys_vals = Vec::with_capacity(num_ops);
     for i in 0..num_ops {
         let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
-        let v = vec![(i % 251) as u8; VALUE_SIZE];
+        let v = vec![u8::try_from(i % 251).expect("value byte fits in u8"); VALUE_SIZE];
         keys_vals.push((k, v));
     }
 

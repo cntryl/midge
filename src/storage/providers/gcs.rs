@@ -1298,7 +1298,7 @@ mod tests {
         // Assert
         match cred {
             GcsCredential::BearerToken { token } => assert_eq!(token, "ya29.example"),
-            _ => panic!("Expected BearerToken credential"),
+            GcsCredential::HmacKey { .. } => panic!("Expected BearerToken credential"),
         }
     }
 
@@ -1317,7 +1317,7 @@ mod tests {
                 assert_eq!(access_id, "GOOG123");
                 assert_eq!(secret, "secret456");
             }
-            _ => panic!("Expected HmacKey credential"),
+            GcsCredential::BearerToken { .. } => panic!("Expected HmacKey credential"),
         }
     }
 

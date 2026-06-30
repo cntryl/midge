@@ -10,7 +10,7 @@ use common::*;
 #[test]
 fn should_recover_data_from_wal_after_flush() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..50 {
@@ -39,7 +39,7 @@ fn should_recover_data_from_wal_after_flush() {
 #[test]
 fn should_handle_large_values_in_wal() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     let large_value = vec![0xFF; 1_000_000];
@@ -70,7 +70,7 @@ fn should_handle_large_values_in_wal() {
 #[test]
 fn should_recover_deletes_from_wal() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..30 {
@@ -114,7 +114,7 @@ fn should_recover_deletes_from_wal() {
 #[test]
 fn should_recover_range_tombstones_from_wal() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..100 {
@@ -156,7 +156,7 @@ fn should_recover_range_tombstones_from_wal() {
 #[test]
 fn should_handle_wal_rotation_multiple_segments() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     let mut batch_count = 0;
@@ -190,7 +190,7 @@ fn should_handle_wal_rotation_multiple_segments() {
 #[test]
 fn should_recover_mixed_operations_from_wal() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     let mut tx0 = engine

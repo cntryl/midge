@@ -279,6 +279,8 @@ impl Default for ManifestActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sst::types::SST_FOOTER_MAGIC;
+    use std::io::Write;
 
     #[test]
     fn should_initialize_manifest_actor_with_zero_pending_edits() {
@@ -431,11 +433,9 @@ mod tests {
         let sst_path = state.sst_dir.join(&sst_name);
 
         // Write a minimal valid SST footer so the reader's validation accepts it
-        use crate::sst::types::SST_FOOTER_MAGIC;
         let mut f = std::fs::File::create(&sst_path)?;
         let mut buf = vec![0u8; 48];
         buf[40..48].copy_from_slice(&SST_FOOTER_MAGIC.to_le_bytes());
-        use std::io::Write;
         f.write_all(&buf)?;
         f.sync_all()?;
         assert!(

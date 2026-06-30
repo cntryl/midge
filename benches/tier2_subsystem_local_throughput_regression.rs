@@ -37,7 +37,7 @@ fn benchmark_batched_writes(c: &mut Criterion) {
                 || {
                     // Setup: create engine and column family
                     let engine =
-                        Engine::open_with_options(opts.clone()).expect("failed to open engine");
+                        Engine::open_with_options(&opts).expect("failed to open engine");
                     let cf = engine
                         .create_column_family("test")
                         .expect("failed to create column family");
@@ -86,7 +86,7 @@ fn verify_local_throughput_minimum(c: &mut Criterion) {
     group.bench_function("memory_baseline", |b| {
         b.iter_batched(
             || {
-                let engine = Engine::open_with_options(mem_opts.clone()).unwrap();
+                let engine = Engine::open_with_options(&mem_opts).unwrap();
                 let cf = engine.create_column_family("test").unwrap();
                 (engine, cf)
             },
@@ -117,7 +117,7 @@ fn verify_local_throughput_minimum(c: &mut Criterion) {
     group.bench_function("local_throughput", |b| {
         b.iter_batched(
             || {
-                let engine = Engine::open_with_options(local_opts.clone()).unwrap();
+                let engine = Engine::open_with_options(&local_opts).unwrap();
                 let cf = engine.create_column_family("test").unwrap();
                 (engine, cf)
             },

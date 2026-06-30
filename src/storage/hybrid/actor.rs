@@ -386,7 +386,8 @@ mod tests {
 
             // Every 3 flushes, simulate a compaction
             if i % 3 == 2 && i > 0 {
-                let estimated_input = 300_000 + (i as u64 * 50_000);
+                let estimated_input =
+                    300_000 + (u64::try_from(i).expect("loop index fits in u64") * 50_000);
                 actor.handle_event(StorageBudgetEvent::CompactionPlanned {
                     input_sizes: vec![estimated_input / 2, estimated_input / 2],
                 });
@@ -410,9 +411,9 @@ mod tests {
         let mut actor = StorageBudgetActor::new(policy);
 
         // Act: Create several SSTs and upload them
-        for sst_id in 1..=5 {
+        for sst_id in 1_u64..=5 {
             actor.handle_event(StorageBudgetEvent::CloudUploadCompleted {
-                sst_id: sst_id as u64,
+                sst_id,
                 actual_size: 100_000,
             });
         }
@@ -428,9 +429,9 @@ mod tests {
         }
 
         // Verify we can pop them in order
-        for expected_sst_id in 1..=5 {
+        for expected_sst_id in 1_u64..=5 {
             let (sst_id, size) = actor.next_eviction().unwrap();
-            assert_eq!(sst_id, expected_sst_id as u64);
+            assert_eq!(sst_id, expected_sst_id);
             assert_eq!(size, 100_000);
         }
 

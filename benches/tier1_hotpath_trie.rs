@@ -26,10 +26,10 @@ fn bench_trie_find_block(c: &mut Criterion) {
 
     // Build trie with 100 keys (simulates small SST)
     let mut builder = TrieBuilder::new();
-    for i in 0..100 {
+    for i in 0_u32..100 {
         // Use zero-padded format to ensure lexicographic order matches numeric order
         let key = format!("user:{i:03}:profile");
-        builder.add_key(key.as_bytes(), i as u32).unwrap();
+        builder.add_key(key.as_bytes(), i).unwrap();
     }
     let encoded = builder.finish();
     let reader = TrieReader::new(&encoded).unwrap();
@@ -71,11 +71,11 @@ fn bench_trie_prefix_range(c: &mut Criterion) {
 
     // Build trie with hierarchical keys (use zero-padded IDs for lexicographic order)
     let mut builder = TrieBuilder::new();
-    for user_id in 0..10 {
+    for user_id in 0_u32..10 {
         for resource in &["prefs", "profile", "settings"] {
             // Sorted order: prefs < profile < settings
             let key = format!("user:{user_id:02}:{resource}");
-            builder.add_key(key.as_bytes(), user_id as u32).unwrap();
+            builder.add_key(key.as_bytes(), user_id).unwrap();
         }
     }
     let encoded = builder.finish();
@@ -130,18 +130,18 @@ fn bench_trie_key_patterns(c: &mut Criterion) {
 
     // Short keys with high branching (use zero-padded for lexicographic order)
     let mut builder_short = TrieBuilder::new();
-    for i in 0..100 {
+    for i in 0_u32..100 {
         let key = format!("k{i:03}");
-        builder_short.add_key(key.as_bytes(), i as u32).unwrap();
+        builder_short.add_key(key.as_bytes(), i).unwrap();
     }
     let encoded_short = builder_short.finish();
     let reader_short = TrieReader::new(&encoded_short).unwrap();
 
     // Long keys with shared prefix
     let mut builder_long = TrieBuilder::new();
-    for i in 0..100 {
+    for i in 0_u32..100 {
         let key = format!("very_long_shared_prefix_key_{i:010}");
-        builder_long.add_key(key.as_bytes(), i as u32).unwrap();
+        builder_long.add_key(key.as_bytes(), i).unwrap();
     }
     let encoded_long = builder_long.finish();
     let reader_long = TrieReader::new(&encoded_long).unwrap();
