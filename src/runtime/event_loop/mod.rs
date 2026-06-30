@@ -316,6 +316,39 @@ impl EventLoop {
         plan
     }
 
+    fn prepare_compaction_plan_for_launch(
+        &mut self,
+        plan: crate::compaction::CompactionPlan,
+    ) -> crate::common::MidgeResult<crate::compaction::CompactionPlan> {
+        let mut plan = self.assign_compaction_output_sequence(plan);
+        plan.snapshot_horizon = self.state.oldest_active_snapshot_sequence();
+
+        if plan.output_seq == 0 {
+            return Err(crate::common::MidgeError::Internal(
+                "BUG: compaction output sequence was not assigned before actor launch".to_string(),
+            ));
+        }
+
+        Ok(plan)
+    }
+
+    fn launch_compaction(
+        &mut self,
+        plan: crate::compaction::CompactionPlan,
+    ) -> crate::common::MidgeResult<()> {
+        let plan = self.prepare_compaction_plan_for_launch(plan)?;
+
+        self.compaction_actor
+            .run_compaction(
+                &mut self.state,
+                &plan,
+                self.hybrid_storage.as_ref(),
+                self.worker_msg_tx.clone(),
+            )
+            .map(|_| ())
+            .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))
+    }
+
     fn schedule_one_background_compaction_if_needed(
         &mut self,
         operation: &str,
@@ -357,15 +390,7 @@ impl EventLoop {
             return Ok(false);
         };
 
-        let plan = self.assign_compaction_output_sequence(plan);
-        self.compaction_actor
-            .run_compaction(
-                &mut self.state,
-                &plan,
-                self.hybrid_storage.as_ref(),
-                self.worker_msg_tx.clone(),
-            )
-            .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))?;
+        self.launch_compaction(plan)?;
         Ok(true)
     }
 
@@ -1478,6 +1503,144 @@ pub(super) mod tests {
             event_loop.state.sequence, 41,
             "preassigned compaction output sequences must not consume another sequence"
         );
+    }
+
+    mod compaction_scheduling {
+        use super::*;
+
+        fn manifest_file_from_runtime(file: crate::runtime::FileMeta) -> crate::metadata::FileMeta {
+            crate::metadata::FileMeta {
+                name: file.name,
+                level: file.level,
+                size_bytes: file.size_bytes,
+                content_crc32c: file.content_crc32c,
+                cf_id: file.cf_id,
+                smallest_key: file.smallest_key,
+                largest_key: file.largest_key,
+                smallest_seq: file.smallest_seq,
+                largest_seq: file.largest_seq,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn should_assign_identity_and_snapshot_horizon_at_launch_boundary() {
+            let mut event_loop = create_test_event_loop().expect("create event loop");
+            event_loop.state.sequence = 41;
+            assert!(event_loop.state.register_snapshot(100, 37, Vec::new()));
+            let plan =
+                crate::compaction::CompactionPlan::new(3, 0, 1).with_snapshot_horizon(Some(99));
+
+            let prepared = event_loop
+                .prepare_compaction_plan_for_launch(plan)
+                .expect("prepare compaction plan");
+
+            assert_eq!(prepared.output_seq, 42);
+            assert_eq!(prepared.snapshot_horizon, Some(37));
+            assert_eq!(
+                event_loop.state.sequence, 42,
+                "compaction launch must consume one global sequence for raw plans"
+            );
+        }
+
+        #[test]
+        fn should_preserve_preassigned_identity_at_launch_boundary() {
+            let mut event_loop = create_test_event_loop().expect("create event loop");
+            event_loop.state.sequence = 41;
+            let plan = crate::compaction::CompactionPlan::new(3, 0, 1).with_output_seq(99);
+
+            let prepared = event_loop
+                .prepare_compaction_plan_for_launch(plan)
+                .expect("prepare compaction plan");
+
+            assert_eq!(prepared.output_seq, 99);
+            assert_eq!(
+                event_loop.state.sequence, 41,
+                "compaction launch must not consume a sequence for preassigned plans"
+            );
+        }
+
+        #[test]
+        fn should_assign_output_sequence_when_compaction_runs_after_end_ingest() {
+            let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+            let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
+            event_loop.worker_msg_tx = Some(worker_tx);
+            event_loop.state.set_compaction_enabled(true);
+            event_loop.state.sequence = 100;
+            event_loop
+                .state
+                .ingest_active
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+
+            for seq in 1..=4 {
+                let name = crate::sst::file_name(0, 0, seq);
+                let file = write_runtime_l0_sst_for_test(&event_loop, &name, seq);
+                event_loop
+                    .state
+                    .manifest
+                    .files
+                    .push(manifest_file_from_runtime(file));
+            }
+
+            event_loop.handle_end_ingest(77);
+
+            let msg = worker_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("EndIngest-triggered compaction should complete");
+            match msg {
+                RuntimeMsg::CompactionComplete { output_ssts, .. } => {
+                    assert!(
+                        !output_ssts.is_empty(),
+                        "EndIngest-triggered compaction should produce an output SST"
+                    );
+                    assert!(
+                        output_ssts
+                            .iter()
+                            .all(|name| !name.ends_with("00000000000000000000.sst")),
+                        "EndIngest-triggered compaction must not use sequence zero: {output_ssts:?}"
+                    );
+                }
+                other => panic!("unexpected worker message: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn should_launch_compactions_only_through_event_loop_helper() {
+            let event_loop_dir =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime/event_loop");
+            let pattern = format!(".run_{}(", "compaction");
+            let mut call_sites = Vec::new();
+
+            for entry in std::fs::read_dir(&event_loop_dir).expect("read event_loop dir") {
+                let entry = entry.expect("read event_loop entry");
+                let path = entry.path();
+                if path.extension().and_then(std::ffi::OsStr::to_str) != Some("rs") {
+                    continue;
+                }
+
+                let source = std::fs::read_to_string(&path).expect("read event_loop source file");
+                let relative = path
+                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                    .expect("strip source prefix")
+                    .display()
+                    .to_string();
+                for (line_idx, line) in source.lines().enumerate() {
+                    if line.contains(&pattern) {
+                        call_sites.push(format!("{relative}:{}:{}", line_idx + 1, line.trim()));
+                    }
+                }
+            }
+
+            assert_eq!(
+                call_sites.len(),
+                1,
+                "event-loop compaction actor launches must stay centralized: {call_sites:?}"
+            );
+            assert!(
+                call_sites[0].starts_with("src/runtime/event_loop/mod.rs:"),
+                "central compaction actor launch must live in event_loop/mod.rs: {call_sites:?}"
+            );
+        }
     }
 
     #[test]

@@ -117,6 +117,9 @@ impl ManifestCoordinator {
             .manifest_actor
             .drop_column_family(&mut event_loop.state, cf_id)
             .and_then(|()| event_loop.mirror_metadata_after_local_commit("drop column family"));
+        if result.is_ok() {
+            event_loop.publish_snapshot();
+        }
         Self::respond_result(event_loop, request_id, result);
         HandleOutcome::Continue
     }

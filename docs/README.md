@@ -6,11 +6,12 @@ Midge is an experimental embedded LSM crate with explicit durability controls an
 
 1. [development/storage-invariants.md](development/storage-invariants.md)
 2. [development/architecture.md](development/architecture.md)
-3. [user-guides/durability.md](user-guides/durability.md)
-4. [development/recovery-internals.md](development/recovery-internals.md)
-5. [development/testing.md](development/testing.md)
+3. [development/architecture-diagrams.md](development/architecture-diagrams.md)
+4. [user-guides/durability.md](user-guides/durability.md)
+5. [development/recovery-internals.md](development/recovery-internals.md)
+6. [development/testing.md](development/testing.md)
 
-These five documents define what Midge claims, how it implements those claims, and which tests back them up.
+These documents define what Midge claims, how it implements those claims, and which tests back them up.
 
 For the single-page external behavior contract, read [user-guides/transaction-durability-contract.md](user-guides/transaction-durability-contract.md).
 
@@ -29,7 +30,7 @@ For the single-page external behavior contract, read [user-guides/transaction-du
 
 ### Contributing To Storage Correctness
 
-`architecture -> recovery -> testing -> source audit order in architecture`
+`architecture -> architecture-diagrams -> recovery -> testing -> source audit order in architecture`
 
 ### General Usage
 

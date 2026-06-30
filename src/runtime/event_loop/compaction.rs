@@ -63,22 +63,14 @@ impl CompactionCoordinator {
             source_level: plan.source_level,
             target_level: plan.target_level,
             cf_id: plan.cf_id,
-            output_seq: event_loop.state.next_sequence(),
-            snapshot_horizon: event_loop.state.oldest_active_snapshot_sequence(),
+            output_seq: 0,
+            snapshot_horizon: None,
         };
 
-        let schedule_res = event_loop.compaction_actor.run_compaction(
-            &mut event_loop.state,
-            &cplan,
-            event_loop.hybrid_storage.as_ref(),
-            event_loop.worker_msg_tx.clone(),
-        );
+        let schedule_res = event_loop.launch_compaction(cplan);
         let resp = match schedule_res {
-            Ok(_) => RuntimeResponse::Ok { request_id },
-            Err(error) => RuntimeResponse::Error {
-                request_id,
-                error: crate::common::MidgeError::Internal(error.to_string()),
-            },
+            Ok(()) => RuntimeResponse::Ok { request_id },
+            Err(error) => RuntimeResponse::Error { request_id, error },
         };
 
         event_loop.respond(request_id, resp);
@@ -119,24 +111,10 @@ impl CompactionCoordinator {
             .compaction_actor
             .check_compaction(&event_loop.state)
         {
-            let plan = event_loop.assign_compaction_output_sequence(plan);
-            let schedule_res = event_loop.compaction_actor.run_compaction(
-                &mut event_loop.state,
-                &plan,
-                event_loop.hybrid_storage.as_ref(),
-                event_loop.worker_msg_tx.clone(),
-            );
-
-            match schedule_res {
-                Ok(_) => scheduled += 1,
+            match event_loop.launch_compaction(plan) {
+                Ok(()) => scheduled += 1,
                 Err(error) => {
-                    event_loop.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::Internal(error.to_string()),
-                        },
-                    );
+                    event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
                     break;
                 }
             }
@@ -389,16 +367,7 @@ impl CompactionCoordinator {
                 .compaction_actor
                 .check_compaction(&event_loop.state)
             {
-                if event_loop
-                    .compaction_actor
-                    .run_compaction(
-                        &mut event_loop.state,
-                        &plan,
-                        event_loop.hybrid_storage.as_ref(),
-                        event_loop.worker_msg_tx.clone(),
-                    )
-                    .is_ok()
-                {
+                if event_loop.launch_compaction(plan).is_ok() {
                     emergent_scheduled = true;
                     continue;
                 }

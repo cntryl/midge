@@ -1,6 +1,6 @@
 mod common;
 
-use cntryl_midge::{MidgeResult, Query, TransactionMode, WriteOptions};
+use cntryl_midge::{MidgeError, MidgeResult, Query, TransactionMode, WriteOptions};
 use common::*;
 use std::time::{Duration, Instant};
 
@@ -110,6 +110,51 @@ fn should_report_snapshot_retention_pressure_metrics_when_snapshot_pins_ssts() {
         drop(snapshot);
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
             .expect("wait for zero active snapshots after drop");
+    });
+}
+
+#[test]
+fn should_not_register_snapshot_given_dropped_cf_when_begin_tx_fails() {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(&opts, mode);
+        let cf = engine.create_column_family("dropped").expect("create cf");
+        let cf_id = cf.id();
+
+        let mut seed = engine
+            .begin_tx(cf_id, TransactionMode::ReadWrite)
+            .expect("begin seed tx");
+        seed.put(b"cached_key".to_vec(), b"cached_value".to_vec(), None)
+            .expect("seed put");
+        seed.commit(WriteOptions::buffered()).expect("seed commit");
+        engine.flush_cf(&cf).expect("flush seed data");
+
+        wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
+            .expect("wait for zero active snapshots before drop");
+        engine.drop_column_family(cf_id).expect("drop cf");
+
+        // Act and assert
+        for tx_mode in [TransactionMode::ReadOnly, TransactionMode::ReadWrite] {
+            let result = engine.begin_tx(cf_id, tx_mode);
+            match result {
+                Err(MidgeError::InvalidArgument(message)) => {
+                    assert_eq!(message, format!("column family {cf_id} does not exist"));
+                }
+                Err(error) => panic!(
+                    "expected InvalidArgument for dropped CF in {mode} with {tx_mode:?}, got {error}"
+                ),
+                Ok(_) => panic!("expected dropped CF begin_tx to fail in {mode} with {tx_mode:?}"),
+            }
+
+            let metrics = engine
+                .get_runtime_metrics()
+                .expect("get metrics after failed begin_tx");
+            assert_eq!(
+                metrics.active_snapshots, 0,
+                "mode: {mode}, tx_mode: {tx_mode:?}"
+            );
+            assert_eq!(metrics.pinned_ssts, 0, "mode: {mode}, tx_mode: {tx_mode:?}");
+        }
     });
 }
 

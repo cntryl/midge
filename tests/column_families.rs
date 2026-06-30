@@ -3,6 +3,7 @@
 //! Tests for column family lifecycle, isolation, and persistence.
 
 use bytes::Bytes;
+use cntryl_midge::MidgeError;
 mod common;
 use common::*;
 use std::sync::Arc;
@@ -166,21 +167,19 @@ fn should_invalidate_handle_given_cf_dropped_when_accessing() {
         engine.drop_column_family(cf_id).unwrap();
 
         // Act
-        let tx_result = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite);
+        let read_only_result = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly);
+        let read_write_result = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite);
 
-        // Assert - currently the engine allows operations on dropped CF handles
-        // This documents current behavior; ideal behavior would be to return error
-        // The CF handle becomes stale but operations may succeed until engine restart
-        match tx_result {
-            Ok(mut tx) => {
-                let put_result = tx.put(b"key1".to_vec(), b"value1".to_vec(), None);
-                if put_result.is_ok() {
-                    let _ = tx.commit(cntryl_midge::WriteOptions::buffered());
+        // Assert
+        for result in [read_only_result, read_write_result] {
+            match result {
+                Err(MidgeError::InvalidArgument(message)) => {
+                    assert_eq!(message, format!("column family {cf_id} does not exist"));
                 }
-                // Currently succeeds - documents actual behavior
-            }
-            Err(_e) => {
-                // Would prefer this path - CF handle should be invalid
+                Err(error) => {
+                    panic!("expected InvalidArgument for dropped CF in {mode}, got {error}")
+                }
+                Ok(_) => panic!("expected begin_tx to fail for dropped CF in {mode}"),
             }
         }
     });

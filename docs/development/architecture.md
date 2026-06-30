@@ -2,6 +2,8 @@
 
 This document is the storage-engine map for Midge as an experimental crate that is safe enough to evaluate. It focuses on the parts that control durability, crash recovery, and read correctness rather than the full runtime feature set.
 
+For visual diagrams of the module boundaries and data flows, see [architecture-diagrams.md](architecture-diagrams.md).
+
 ## Purpose
 
 Midge is an embedded LSM engine with four storage-critical subsystems:
@@ -137,6 +139,8 @@ Compaction also separates output creation from publication:
 
 If a crash happens after output creation but before manifest publication, the input SSTs stay authoritative. If the crash happens after manifest publication, recovery finalizes cleanup idempotently.
 
+Compaction workers are transient executors. They must receive plans that are already safe to publish: the event loop/`RuntimeState` scheduling boundary assigns compaction output identity and the current snapshot horizon before a worker starts. Raw plans returned by the strategy layer use `output_seq == 0` as an unpublishable placeholder and must not reach actor execution directly.
+
 ## Recovery Sequence
 
 At open, Midge reconstructs trusted state in this order:
@@ -162,9 +166,9 @@ Use this reading order if you are auditing correctness:
 4. `src/runtime/actors/flush.rs`
    memtable freeze, SST creation, flush publication staging
 5. `src/runtime/event_loop/mod.rs`
-   flush publication and runtime orchestration
+   flush publication, compaction launch identity, and runtime orchestration
 6. `src/runtime/actors/compaction.rs`
-   compaction execution and completion handling
+   transient compaction execution and completion handoff
 7. `src/metadata/manifest.rs` and `src/runtime/intent_persistence.rs`
    authoritative file-set publication and interrupted publication replay
 

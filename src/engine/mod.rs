@@ -604,29 +604,67 @@ impl Engine {
              Correct ordering: exit_ingest_mode() BEFORE begin_tx()."
         );
 
-        let txn_id = self
-            .next_snapshot_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let Some(coordinator) = self
+            .ingest_coordinators
+            .get(&cf_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return Err(MidgeError::InvalidArgument(format!(
+                "column family {cf_id} does not exist"
+            )));
+        };
+
+        let committed_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
 
         // Fast path: read snapshot from lock-free ArcSwap cache (no event loop round-trip).
         let cache_guard = self.runtime_handle.snapshot_cache.load();
-        let start_sequence = cache_guard.sequence;
-        let read_snapshot = cache_guard
+        let cached_snapshot = cache_guard
             .cf_snapshots
             .get(&cf_id)
-            .map(|data| data.snapshot.clone());
-        let pinned_sst_names = read_snapshot
-            .as_ref()
-            .map(|snapshot| {
-                snapshot
-                    .sst_files
-                    .iter()
-                    .map(|file| file.name.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        // Drop the guard ASAP to avoid holding the ArcSwap lease.
+            .map(|data| Arc::clone(&data.snapshot));
+        let cached_sequence = cache_guard.sequence;
+        let cached_snapshot = cached_snapshot.filter(|_| cached_sequence >= committed_sequence);
         drop(cache_guard);
+
+        // Fall back to the runtime if the published cache is absent or behind a
+        // commit this Engine has already observed.
+        let (start_sequence, read_snapshot) = if let Some(snapshot) = cached_snapshot {
+            (cached_sequence, snapshot)
+        } else {
+            match self
+                .runtime_handle
+                .send_and_wait(RuntimeMsg::BeginTransaction {
+                    request_id: next_request_id()?,
+                    cf_id,
+                })? {
+                RuntimeResponse::BeginTransactionResult {
+                    start_sequence,
+                    snapshot: Some(snapshot),
+                    ..
+                } => (start_sequence, snapshot),
+                RuntimeResponse::BeginTransactionResult { snapshot: None, .. } => {
+                    return Err(MidgeError::InvalidArgument(format!(
+                        "column family {cf_id} does not exist"
+                    )));
+                }
+                RuntimeResponse::Error { error, .. } => return Err(error),
+                _ => {
+                    return Err(MidgeError::Internal(
+                        "Unexpected response to BeginTransaction".to_string(),
+                    ));
+                }
+            }
+        };
+
+        let pinned_sst_names = read_snapshot
+            .sst_files
+            .iter()
+            .map(|file| file.name.clone())
+            .collect::<Vec<_>>();
+
+        let txn_id = self
+            .next_snapshot_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         match self
             .runtime_handle
@@ -645,19 +683,15 @@ impl Engine {
             }
         }
 
-        let coordinator = self.ingest_coordinators.get(&cf_id).ok_or_else(|| {
-            MidgeError::InvalidArgument(format!("column family {cf_id} does not exist"))
-        })?;
-
         Ok(api::Transaction::new(api::TransactionInit {
             runtime_handle: self.runtime_handle.clone(),
-            coordinator: coordinator.clone(),
+            coordinator,
             sequence_publisher: Arc::clone(&self.sequence),
             id: txn_id,
             cf_id,
             mode,
             start_sequence,
-            read_snapshot,
+            read_snapshot: Some(read_snapshot),
             cloud_mode: self.cloud_mode,
         }))
     }
