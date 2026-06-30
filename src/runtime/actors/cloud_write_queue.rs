@@ -202,8 +202,8 @@ impl CloudWriteQueue {
 
         while let Some(pending) = self.queue.front() {
             let gate_seq = match pending {
-                PendingCloudWrite::Single { sequence, .. } => *sequence,
-                PendingCloudWrite::DeleteRange { sequence, .. } => *sequence,
+                PendingCloudWrite::Single { sequence, .. }
+                | PendingCloudWrite::DeleteRange { sequence, .. } => *sequence,
                 PendingCloudWrite::Transaction {
                     commit_sequence, ..
                 } => *commit_sequence,

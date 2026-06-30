@@ -69,6 +69,10 @@ pub struct CloudStorageLease {
 }
 
 impl CloudStorageLease {
+    fn lease_ttl_seconds_i64(duration: Duration) -> i64 {
+        i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+    }
+
     /// Create a new cloud storage lease.
     ///
     /// `local_cache_path` must be the local staging directory for cloud storage.
@@ -369,13 +373,15 @@ impl PrimaryLease for CloudStorageLease {
         let doc = LeaseDocument {
             holder_id: inner.holder_id.clone(),
             acquired_at: now.to_rfc3339(),
-            expires_at: (now + chrono::Duration::seconds(inner.ttl.as_secs() as i64)).to_rfc3339(),
+            expires_at: (now
+                + chrono::Duration::seconds(Self::lease_ttl_seconds_i64(inner.ttl)))
+            .to_rfc3339(),
         };
         let headers = match existing_head {
             Some(metadata) if !metadata.etag.is_empty() => {
                 vec![("If-Match".to_string(), metadata.etag)]
             }
-            Some(_) => {
+            Some(_) if inner.cloud.is_some() => {
                 return Err(LeaseError::AcquisitionFailed(
                     "existing cloud lease has no ETag for conditional update".to_string(),
                 ))
@@ -383,7 +389,7 @@ impl PrimaryLease for CloudStorageLease {
             None if inner.cloud.is_some() => {
                 vec![("If-None-Match".to_string(), "*".to_string())]
             }
-            None => Vec::new(),
+            _ => Vec::new(),
         };
         inner.write_current_doc(&doc, headers)?;
 
@@ -437,7 +443,8 @@ impl PrimaryLease for CloudStorageLease {
         let doc = LeaseDocument {
             holder_id: self.holder_id.clone(),
             acquired_at: now.to_rfc3339(),
-            expires_at: (now + chrono::Duration::seconds(self.ttl.as_secs() as i64)).to_rfc3339(),
+            expires_at: (now + chrono::Duration::seconds(Self::lease_ttl_seconds_i64(self.ttl)))
+                .to_rfc3339(),
         };
         let headers = match metadata {
             Some(metadata) if !metadata.etag.is_empty() => {
@@ -448,11 +455,10 @@ impl PrimaryLease for CloudStorageLease {
                     "cloud lease has no ETag for conditional renewal".to_string(),
                 ))
             }
-            Some(_) => Vec::new(),
             None if self.cloud.is_some() => {
                 vec![("If-None-Match".to_string(), "*".to_string())]
             }
-            None => Vec::new(),
+            Some(_) | None => Vec::new(),
         };
         self.write_current_doc(&doc, headers)?;
         *self.last_renewal.lock().expect("poisoned") = Some(Instant::now());

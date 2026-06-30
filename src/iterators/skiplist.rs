@@ -220,7 +220,7 @@ impl SkipList {
     }
 
     /// Point search: find node for key, or null if absent.
-    #[inline(always)]
+    #[inline]
     fn find_node<'g>(&self, key: &[u8], guard: &'g Guard) -> Shared<'g, Node> {
         let mut pred: Shared<'g, Node> = Shared::from(&raw const *self.head);
         let mut level = self.top_level.load(AO::Relaxed);
@@ -366,33 +366,10 @@ impl SkipList {
         // Case 1: Key exists – prepend new version to the version chain.
         // SAFETY: succs[0] was populated by find() under the epoch guard.
         if let Some(curr) = unsafe { succs[0].as_ref() } {
-            if curr.key == key {
-                loop {
-                    let curr_head = curr.versions_head.load(AO::Acquire, guard);
-                    let new_ver = Owned::new(VersionNode {
-                        seq,
-                        val: value.clone(),
-                        exp,
-                        op,
-                        next: Atomic::from(curr_head),
-                    });
-
-                    match curr.versions_head.compare_exchange(
-                        curr_head,
-                        new_ver,
-                        AO::AcqRel,
-                        AO::Acquire,
-                        guard,
-                    ) {
-                        Ok(_) => return, // success
-                        Err(e) => {
-                            // CAS failed; drop newly allocated node and retry.
-                            drop(e.new);
-                            continue;
-                        }
-                    }
+            if curr.key == key
+                && Self::try_append_version(curr, seq, value.as_ref(), exp, op, guard) {
+                    return;
                 }
-            }
         }
 
         // Case 2: Key absent – insert new node at a random level.
@@ -410,32 +387,10 @@ impl SkipList {
             // If so, append to the existing node's version chain instead of inserting a new node.
             // SAFETY: succs[0] was refreshed by find() under this guard.
             if let Some(curr) = unsafe { succs[0].as_ref() } {
-                if curr.key == key {
-                    loop {
-                        let curr_head = curr.versions_head.load(AO::Acquire, guard);
-                        let new_ver = Owned::new(VersionNode {
-                            seq,
-                            val: value.clone(),
-                            exp,
-                            op,
-                            next: Atomic::from(curr_head),
-                        });
-
-                        match curr.versions_head.compare_exchange(
-                            curr_head,
-                            new_ver,
-                            AO::AcqRel,
-                            AO::Acquire,
-                            guard,
-                        ) {
-                            Ok(_) => return, // success, version appended to existing node
-                            Err(e) => {
-                                drop(e.new);
-                                continue;
-                            }
-                        }
+                if curr.key == key
+                    && Self::try_append_version(curr, seq, value.as_ref(), exp, op, guard) {
+                        return;
                     }
-                }
             }
 
             // SAFETY: preds[0] was set by find() and is a valid pinned pointer.
@@ -460,20 +415,21 @@ impl SkipList {
                 continue;
             }
 
-            match level0_pred.forward[0].compare_exchange(
+            if level0_pred
+                .forward[0]
+                .compare_exchange(
                 level0_succ,
                 new_ptr,
                 AO::AcqRel,
                 AO::Acquire,
                 guard,
-            ) {
-                Ok(_) => break new_ptr, // level 0 inserted
-                Err(_) => {
-                    // SAFETY: CAS failed so new_ptr was never published.
-                    unsafe { guard.defer_destroy(new_ptr) };
-                    continue;
-                }
+            )
+                .is_ok()
+            {
+                break new_ptr;
             }
+            // SAFETY: CAS failed so new_ptr was never published.
+            unsafe { guard.defer_destroy(new_ptr) };
         };
 
         // Stage 2: best-effort link higher levels (1..node_level-1).
@@ -497,6 +453,40 @@ impl SkipList {
                     .is_ok()
                 {
                     break; // linked this level
+                }
+            }
+        }
+    }
+
+    fn try_append_version(
+        node: &Node,
+        seq: u64,
+        value: Option<&Bytes>,
+        exp: Option<u64>,
+        op: OpType,
+        guard: &Guard,
+    ) -> bool {
+        loop {
+            let curr_head = node.versions_head.load(AO::Acquire, guard);
+            let new_ver = Owned::new(VersionNode {
+                seq,
+                val: value.cloned(),
+                exp,
+                op,
+                next: Atomic::from(curr_head),
+            });
+
+            match node.versions_head.compare_exchange(
+                curr_head,
+                new_ver,
+                AO::AcqRel,
+                AO::Acquire,
+                guard,
+            ) {
+                Ok(_) => return true, // success
+                Err(e) => {
+                    // CAS failed; drop newly allocated node and retry.
+                    drop(e.new);
                 }
             }
         }
@@ -888,7 +878,7 @@ mod tests {
                     sl_clone.upsert(
                         Bytes::from(key),
                         Some(Bytes::from(val)),
-                        (i * 100 + j) as u64,
+                        u64::try_from(i * 100 + j).expect("concurrent writer sequence fits u64"),
                     );
                 }
             });
@@ -911,7 +901,7 @@ mod tests {
             sl.upsert(
                 Bytes::from(format!("key_{i}")),
                 Some(Bytes::from(format!("val_{i}"))),
-                i as u64,
+                u64::try_from(i).expect("sequence key fits u64"),
             );
         }
 
@@ -926,7 +916,7 @@ mod tests {
                     sl_clone.upsert(
                         Bytes::from(key),
                         Some(Bytes::from(val)),
-                        (100 + i * 50 + j) as u64,
+                        u64::try_from(100 + i * 50 + j).expect("updated sequence fits u64"),
                     );
                 }
             });

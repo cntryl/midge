@@ -50,7 +50,7 @@ impl LeaderStore for FsLeaderStore {
         // Attempt to create a lock file exclusively.  `create_new` fails if the
         // file already exists, giving us cross-thread and cross-process mutual
         // exclusion for the read-increment-write cycle.
-        let _lock_file = match self.fs.open(
+        let Ok(_lock_file) = self.fs.open(
             &lock_path,
             OpenOptions {
                 mode: OpenMode::ReadWrite,
@@ -58,13 +58,10 @@ impl LeaderStore for FsLeaderStore {
                 create_new: true,
                 truncate: false,
             },
-        ) {
-            Ok(f) => f,
-            Err(_) => {
-                return Err(LeaseError::AcquisitionFailed(
-                    "another acquire is in progress (lock file exists)".to_string(),
-                ));
-            }
+        ) else {
+            return Err(LeaseError::AcquisitionFailed(
+                "another acquire is in progress (lock file exists)".to_string(),
+            ));
         };
 
         // Lock acquired — perform the read-increment-write CAS.

@@ -114,7 +114,7 @@ impl EventLoop {
         if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
             let _ = self.compaction_actor.run_compaction(
                 &mut self.state,
-                plan,
+                &plan,
                 self.hybrid_storage.as_ref(),
                 self.worker_msg_tx.clone(),
             );

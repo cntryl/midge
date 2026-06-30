@@ -134,7 +134,7 @@ impl Compactor {
                 self.level_target_size(u32::try_from(level).expect("level index fits in u32"));
 
             if level_size > target_size {
-                return self.plan_inner_level(&levels, cf_id, level);
+                return Self::plan_inner_level(&levels, cf_id, level);
             }
         }
 
@@ -197,7 +197,6 @@ impl Compactor {
 
     /// Build a compaction plan for level N → N+1.
     fn plan_inner_level(
-        &self,
         levels: &[Vec<&FileMeta>],
         cf_id: u32,
         level: usize,
@@ -547,13 +546,16 @@ mod tests {
 
         let mut files = Vec::new();
         for i in 0..=count_threshold {
+            let byte = u8::try_from(i).unwrap_or_else(|_| {
+                panic!("test fixture key index must fit in u8 for synthetic payload");
+            });
             files.push(make_file(
                 &format!("file{i}.sst"),
                 0,
                 0,
                 1000,
-                Some(vec![i as u8]),
-                Some(vec![i as u8 + 1]),
+                Some(vec![byte]),
+                Some(vec![byte.wrapping_add(1)]),
             ));
         }
 

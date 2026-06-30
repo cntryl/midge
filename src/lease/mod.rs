@@ -64,11 +64,11 @@ pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseErr
                     .as_nanos()
             ));
             // Memory mode: use MockFs for lease coordination (no disk I/O)
-            Ok(Arc::new(FileSystemLease::new(temp_path, true)?))
+            Ok(Arc::new(FileSystemLease::new(&temp_path, true)?))
         }
         Storage::Local { path } => {
             // Local storage: use filesystem lease with RealFs
-            Ok(Arc::new(FileSystemLease::new(path.clone(), false)?))
+            Ok(Arc::new(FileSystemLease::new(path.as_path(), false)?))
         }
         Storage::Cloud {
             local_cache_path,

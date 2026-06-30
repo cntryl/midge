@@ -21,7 +21,7 @@
 use super::fs_leader_store::FsLeaderStore;
 use super::traits::{LeaderStore, LeaseError, LeaseGuard, PrimaryLease};
 use crate::io::{Fs, MockFs, RealFs};
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,11 +47,11 @@ impl FileSystemLease {
     /// # Arguments
     /// * `db_path` - Path to the database directory
     /// * `use_mock_fs` - If true, uses `MockFs` (for in-memory mode); otherwise uses `RealFs`
-    pub fn new(db_path: PathBuf, use_mock_fs: bool) -> Result<Self, LeaseError> {
+    pub fn new(db_path: &Path, use_mock_fs: bool) -> Result<Self, LeaseError> {
         let fs: Arc<dyn Fs> = if use_mock_fs {
             Arc::new(MockFs::new())
         } else {
-            let realfs = RealFs::new(&db_path).map_err(|e| LeaseError::IoError(e.to_string()))?;
+            let realfs = RealFs::new(db_path).map_err(|e| LeaseError::IoError(e.to_string()))?;
             Arc::new(realfs)
         };
 
@@ -223,7 +223,7 @@ mod tests {
     fn should_acquire_release_lease_when_no_contention() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
-        let lease = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false).unwrap());
+        let lease = Arc::new(FileSystemLease::new(temp_dir.path(), false).unwrap());
 
         // Act
         let _guard = Arc::clone(&lease).try_acquire().unwrap();
@@ -242,14 +242,14 @@ mod tests {
     fn should_increment_epoch_on_reacquisition() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
-        let lease1 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false).unwrap());
+        let lease1 = Arc::new(FileSystemLease::new(temp_dir.path(), false).unwrap());
 
         // Act - acquire, release, acquire again
         let _guard1 = Arc::clone(&lease1).try_acquire().unwrap();
         let epoch1 = lease1.epoch();
         lease1.release().unwrap();
 
-        let lease2 = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false).unwrap());
+        let lease2 = Arc::new(FileSystemLease::new(temp_dir.path(), false).unwrap());
         let _guard2 = Arc::clone(&lease2).try_acquire().unwrap();
         let epoch2 = lease2.epoch();
 
@@ -264,7 +264,7 @@ mod tests {
     fn should_fail_double_acquire() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
-        let lease = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false).unwrap());
+        let lease = Arc::new(FileSystemLease::new(temp_dir.path(), false).unwrap());
         let _guard = Arc::clone(&lease).try_acquire().unwrap();
 
         // Act
@@ -278,7 +278,7 @@ mod tests {
     fn should_renew_when_epoch_current() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
-        let lease = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false).unwrap());
+        let lease = Arc::new(FileSystemLease::new(temp_dir.path(), false).unwrap());
         let _guard = Arc::clone(&lease).try_acquire().unwrap();
 
         // Act
@@ -292,7 +292,7 @@ mod tests {
     fn should_fail_renew_when_not_acquired() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
-        let lease = Arc::new(FileSystemLease::new(temp_dir.path().to_path_buf(), false).unwrap());
+        let lease = Arc::new(FileSystemLease::new(temp_dir.path(), false).unwrap());
 
         // Act
         let result = lease.renew();

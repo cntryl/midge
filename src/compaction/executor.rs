@@ -357,7 +357,13 @@ pub fn write_compaction_output_to_sst(
     crate::sst::fs::finish_writer_to_path(writer, path)?;
     let finish_ns = finish_start.elapsed().as_nanos();
 
-    tracing::info!(output = %output_filename, versions = added, add_ms = (add_ns as f64) / 1_000_000.0, finish_ms = (finish_ns as f64) / 1_000_000.0, "compaction write breakdown");
+    tracing::info!(
+        output = %output_filename,
+        versions = added,
+        add_ns = add_ns,
+        finish_ns = finish_ns,
+        "compaction write breakdown"
+    );
 
     Ok(())
 }

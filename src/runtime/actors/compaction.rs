@@ -103,194 +103,24 @@ impl CompactionActor {
     pub fn run_compaction(
         &mut self,
         state: &mut RuntimeState,
-        plan: crate::compaction::CompactionPlan,
+        plan: &crate::compaction::CompactionPlan,
         sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
         worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
     ) -> MidgeResult<Vec<String>> {
-        if self.compaction_running {
-            return Err(crate::common::MidgeError::WriteStall(
-                "compaction already in progress".to_string(),
-            ));
-        }
-
-        // Invariant: input SSTs remain authoritative until runtime publishes a
-        // replacement manifest state. Worker output alone must never make reads
-        // switch to the new file set.
-
-        self.compaction_running = true;
-
-        // Mark input files as being compacted
-        state
-            .compaction
-            .compacting_ssts
-            .extend(plan.input_files.clone());
-
-        // Calculate input sizes for SBA
-        let input_sizes: Vec<u64> = state
-            .manifest
-            .files
-            .iter()
-            .filter(|f| plan.input_files.contains(&f.name))
-            .map(|f| f.size_bytes)
-            .collect();
-
-        // Notify SBA about planned compaction
-        if let Some(hybrid) = sba {
-            hybrid.compaction_planned(input_sizes);
-        }
-
-        tracing::info!(
-            input_count = plan.input_files.len(),
-            source_level = plan.source_level,
-            target_level = plan.target_level,
-            cf_id = plan.cf_id,
-            "Compaction started"
-        );
-
-        // Increase active compaction counter so BeginIngest can wait for drain.
-        state
-            .active_compactions
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-        // Spawn background worker to perform the compaction so the event loop remains responsive.
-        // Worker will send a `RuntimeMsg::CompactionComplete` message when finished.
+        self.prepare_compaction(state, plan, sba)?;
         if let Some(tx) = worker_msg_tx {
-            let sst_factory = Arc::clone(&self.sst_factory);
-            let sst_dir = state.sst_dir.clone();
-            let input_files = plan.input_files.clone();
-            let plan_clone = plan.clone();
-            let epoch = std::sync::Arc::clone(&state.ingest_epoch);
-            // Generate a stable job_id for this compaction job (for log correlation)
-            let job_id = next_request_id()?;
-            std::thread::spawn(move || {
-                // CRITICAL: Phase 2.2 - Panic recovery wrapper
-                // Catches panics in compaction logic and ensures CompactionComplete is always sent.
-                // Without this, panics leave active_compactions incremented forever, causing deadlock
-                // in the event loop when pending_compaction_waits tries to drain.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    // Capture the epoch at start
-                    let my_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
-
-                    // Abort check closure
-                    let abort_check =
-                        || epoch.load(std::sync::atomic::Ordering::SeqCst) != my_epoch;
-
-                    // Execute compaction; allow cooperative abort via abort_check
-                    let result = crate::compaction::execute_compaction(
-                        &plan_clone,
-                        sst_factory.as_ref(),
-                        &sst_dir,
-                        Some(&abort_check),
-                    );
-
-                    let (output_ssts, succeeded) = match result {
-                        Ok(v) => (v, true),
-                        Err(e) => {
-                            // Distinguish cooperative aborts due to ingest epoch changes
-                            let s = e.to_string();
-                            if s.contains("ingest epoch change") || s.contains("compaction aborted")
-                            {
-                                // ─────────────────────────────────────────────────────────────────────
-                                // COOPERATIVE CANCELLATION LOG — emitted exactly ONCE per aborted job.
-                                // ─────────────────────────────────────────────────────────────────────
-                                let new_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
-                                tracing::info!(
-                                    component = "compaction",
-                                    invariant = "cooperative_cancellation",
-                                    job_id = job_id,
-                                    old_epoch = my_epoch,
-                                    new_epoch = new_epoch,
-                                    input_files = ?input_files,
-                                    "compaction: aborting due to ingest epoch change (job_id={}, old_epoch={}, new_epoch={})",
-                                    job_id, my_epoch, new_epoch
-                                );
-                            } else {
-                                tracing::warn!(
-                                    component = "compaction",
-                                    job_id = job_id,
-                                    error = %e,
-                                    input_files = ?input_files,
-                                    "compaction worker aborted or failed"
-                                );
-                            }
-                            (Vec::new(), false)
-                        }
-                    };
-
-                    (output_ssts, succeeded)
-                }));
-
-                // Extract output_ssts, handling panic case
-                let (output_ssts, succeeded) = match result {
-                    Ok(result) => result,
-                    Err(panic_info) => {
-                        // Compaction thread panicked; log the panic and return empty output
-                        tracing::error!(
-                            component = "compaction",
-                            job_id = job_id,
-                            input_files = ?input_files,
-                            panic_info = ?panic_info,
-                            "compaction worker thread panicked; returning empty output to unblock event loop"
-                        );
-                        (Vec::new(), false)
-                    }
-                };
-
-                // Send completion back to runtime
-                // CRITICAL: This message MUST be sent even if compaction panicked.
-                // The event loop needs this to decrement active_compactions and drain pending_compaction_waits.
-                let _ = tx.send(RuntimeMsg::CompactionComplete {
-                    request_id: next_request_id().expect("request ID in compaction worker"),
-                    input_ssts: input_files,
-                    output_ssts,
-                    cf_id: plan_clone.cf_id,
-                    target_level: plan_clone.target_level,
-                    succeeded,
-                });
-            });
-
-            // Return immediately (we scheduled it)
-            Ok(Vec::new())
-        } else {
-            // Fallback to synchronous execution if no worker channel is provided
-            let output_ssts = crate::compaction::execute_compaction(
-                &plan,
-                self.sst_factory.as_ref(),
-                &state.sst_dir,
-                None,
-            )?;
-
-            // Calculate output sizes for SBA
-            let output_sizes: Vec<u64> = output_ssts
-                .iter()
-                .filter_map(|name| {
-                    let path = state.sst_dir.join(name);
-                    std::fs::metadata(&path).ok().map(|m| m.len())
-                })
-                .collect();
-
-            // Notify SBA about completion
-            if let Some(hybrid) = sba {
-                hybrid.compaction_completed(output_sizes);
-            }
-
-            tracing::info!(
-                input_count = plan.input_files.len(),
-                output_count = output_ssts.len(),
-                "Compaction completed"
-            );
-
-            // Defer active_compactions decrement to the caller handling CompactionComplete
-            Ok(output_ssts)
+            return self.run_async_compaction(state, tx, plan);
         }
+
+        self.run_sync_compaction(state, plan, sba)
     }
 
     /// Handle compaction completion
     pub fn handle_complete(
         &mut self,
         state: &mut RuntimeState,
-        input_ssts: Vec<String>,
-        output_ssts: Vec<String>,
+        input_ssts: &[String],
+        output_ssts: &[String],
     ) {
         // Invariant: completion only clears in-memory "running" state. The
         // actual authority switch happens when manifest publication removes the
@@ -308,6 +138,166 @@ impl CompactionActor {
             output_count = output_ssts.len(),
             "Compaction completed"
         );
+    }
+
+    fn prepare_compaction(
+        &mut self,
+        state: &mut RuntimeState,
+        plan: &crate::compaction::CompactionPlan,
+        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+    ) -> MidgeResult<()> {
+        if self.compaction_running {
+            return Err(crate::common::MidgeError::WriteStall(
+                "compaction already in progress".to_string(),
+            ));
+        }
+
+        self.compaction_running = true;
+
+        state
+            .compaction
+            .compacting_ssts
+            .extend(plan.input_files.clone());
+
+        let input_sizes: Vec<u64> = state
+            .manifest
+            .files
+            .iter()
+            .filter(|f| plan.input_files.contains(&f.name))
+            .map(|f| f.size_bytes)
+            .collect();
+
+        if let Some(hybrid) = sba {
+            hybrid.compaction_planned(input_sizes);
+        }
+
+        tracing::info!(
+            input_count = plan.input_files.len(),
+            source_level = plan.source_level,
+            target_level = plan.target_level,
+            cf_id = plan.cf_id,
+            "Compaction started"
+        );
+
+        state
+            .active_compactions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        Ok(())
+    }
+
+    fn run_sync_compaction(
+        &mut self,
+        state: &RuntimeState,
+        plan: &crate::compaction::CompactionPlan,
+        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+    ) -> MidgeResult<Vec<String>> {
+        let output_ssts =
+            crate::compaction::execute_compaction(plan, self.sst_factory.as_ref(), &state.sst_dir, None)?;
+
+        let output_sizes: Vec<u64> = output_ssts
+            .iter()
+            .filter_map(|name| {
+                let path = state.sst_dir.join(name);
+                std::fs::metadata(&path).ok().map(|m| m.len())
+            })
+            .collect();
+
+        if let Some(hybrid) = sba {
+            hybrid.compaction_completed(output_sizes);
+        }
+
+        tracing::info!(
+            input_count = plan.input_files.len(),
+            output_count = output_ssts.len(),
+            "Compaction completed"
+        );
+
+        Ok(output_ssts)
+    }
+
+    fn run_async_compaction(
+        &mut self,
+        state: &RuntimeState,
+        tx: crossbeam::channel::Sender<RuntimeMsg>,
+        plan: &crate::compaction::CompactionPlan,
+    ) -> MidgeResult<Vec<String>> {
+        let sst_factory = Arc::clone(&self.sst_factory);
+        let sst_dir = state.sst_dir.clone();
+        let input_files = plan.input_files.clone();
+        let plan_clone = plan.clone();
+        let epoch = std::sync::Arc::clone(&state.ingest_epoch);
+        let job_id = next_request_id()?;
+
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let my_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
+                let abort_check =
+                    || epoch.load(std::sync::atomic::Ordering::SeqCst) != my_epoch;
+                let result = crate::compaction::execute_compaction(
+                    &plan_clone,
+                    sst_factory.as_ref(),
+                    &sst_dir,
+                    Some(&abort_check),
+                );
+
+                let (output_ssts, succeeded) = match result {
+                    Ok(v) => (v, true),
+                    Err(e) => {
+                        let s = e.to_string();
+                        if s.contains("ingest epoch change") || s.contains("compaction aborted") {
+                            let new_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
+                            tracing::info!(
+                                component = "compaction",
+                                invariant = "cooperative_cancellation",
+                                job_id = job_id,
+                                old_epoch = my_epoch,
+                                new_epoch = new_epoch,
+                                input_files = ?input_files,
+                                "compaction: aborting due to ingest epoch change (job_id={}, old_epoch={}, new_epoch={})",
+                                job_id, my_epoch, new_epoch
+                            );
+                        } else {
+                            tracing::warn!(
+                                component = "compaction",
+                                job_id = job_id,
+                                error = %e,
+                                input_files = ?input_files,
+                                "compaction worker aborted or failed"
+                            );
+                        }
+                        (Vec::new(), false)
+                    }
+                };
+
+                (output_ssts, succeeded)
+            }));
+
+            let (output_ssts, succeeded) = match result {
+                Ok(result) => result,
+                Err(panic_info) => {
+                    tracing::error!(
+                        component = "compaction",
+                        job_id = job_id,
+                        input_files = ?input_files,
+                        panic_info = ?panic_info,
+                        "compaction worker thread panicked; returning empty output to unblock event loop"
+                    );
+                    (Vec::new(), false)
+                }
+            };
+
+            let _ = tx.send(RuntimeMsg::CompactionComplete {
+                request_id: next_request_id().expect("request ID in compaction worker"),
+                input_ssts: input_files,
+                output_ssts,
+                cf_id: plan_clone.cf_id,
+                target_level: plan_clone.target_level,
+                succeeded,
+            });
+        });
+
+        Ok(Vec::new())
     }
 }
 

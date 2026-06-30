@@ -7,6 +7,8 @@ use crate::common::MidgeError;
 use crate::common::MidgeResult;
 use bytes::{BufMut, BytesMut};
 
+const MAX_VARINT32_LEN: u8 = 5;
+
 /// Encode a varint32 value into the buffer
 #[inline]
 pub fn encode_varint32(buf: &mut BytesMut, mut value: u32) {
@@ -34,7 +36,6 @@ pub fn encode_varint_with_tag(buf: &mut BytesMut, tag: u8, mut value: u32) {
     tmp[i] = value.to_le_bytes()[0];
     i += 1;
 
-    const MAX_VARINT32_LEN: u8 = 5;
     let len = match i {
         1 => 1,
         2 => 2,
