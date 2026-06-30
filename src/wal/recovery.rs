@@ -280,151 +280,243 @@ fn replay_wal_file<S: BuildHasher>(
     let mut file_apply_ns: u128 = 0;
 
     loop {
-        // Open file once per iteration and use file length to detect clean EOF.
-        let open_start = std::time::Instant::now();
-        let file = match storage.open_file(
-            file_path,
-            OpenOptions {
-                mode: OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-                append: false,
-            },
-        ) {
-            Ok(file) => file,
-            Err(e) if e.kind == StorageErrorKind::NotFound => {
-                stats.wal_read_ns = stats.wal_read_ns.saturating_add(file_read_ns);
-                stats.apply_ns = stats.apply_ns.saturating_add(file_apply_ns);
-                return Ok(());
-            }
-            Err(e) => return Err(map_storage_error(e)),
+        let Some(file) = open_wal_replay_file(storage, file_path, &mut file_read_ns)? else {
+            finalize_wal_file_replay(stats, file_path, file_read_ns, file_apply_ns);
+            return Ok(());
         };
-        file_read_ns = file_read_ns.saturating_add(open_start.elapsed().as_nanos());
 
-        let file_len = file.len().map_err(map_storage_error)?;
-        if pos == file_len {
-            break; // clean EOF
-        }
-        if pos > file_len {
-            return Err(MidgeError::Corruption(format!(
-                "WAL replay read past EOF at pos {pos} in {file_path} (file_len={file_len})"
-            )));
-        }
-        if file_len.saturating_sub(pos) < crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 {
-            return Err(MidgeError::Corruption(format!(
-                "Incomplete WAL frame header at pos {} in {} (need {} bytes, have {})",
-                pos,
-                file_path,
-                crate::wal::frame::WAL_FRAME_HEADER_LEN,
-                file_len.saturating_sub(pos)
-            )));
-        }
-
-        // Read 8-byte frame header (len + crc32c).
-        let header_read_start = std::time::Instant::now();
-        let header = file
-            .read_at(pos, crate::wal::frame::WAL_FRAME_HEADER_LEN as u64)
-            .map_err(map_storage_error)?;
-        file_read_ns = file_read_ns.saturating_add(header_read_start.elapsed().as_nanos());
-
-        let (len, expected_crc) = crate::wal::frame::decode_frame_header(&header[..])?;
-
-        let need_end = pos
-            .saturating_add(crate::wal::frame::WAL_FRAME_HEADER_LEN as u64)
-            .saturating_add(len as u64);
-        if need_end > file_len {
-            return Err(MidgeError::Corruption(format!(
-                "Incomplete WAL record at pos {pos} in {file_path} (len={len}, file_len={file_len})"
-            )));
-        }
-
-        // Read record payload
-        let payload_read_start = std::time::Instant::now();
-        let buf = file
-            .read_at(
-                pos + crate::wal::frame::WAL_FRAME_HEADER_LEN as u64,
-                len as u64,
-            )
-            .map_err(map_storage_error)?;
-        file_read_ns = file_read_ns.saturating_add(payload_read_start.elapsed().as_nanos());
-
-        if buf.len() < len {
-            return Err(MidgeError::Corruption(format!(
-                "Incomplete WAL record at pos {} in {} (len={}, got={})",
-                pos,
-                file_path,
-                len,
-                buf.len()
-            )));
-        }
-
-        crate::wal::frame::verify_frame_crc(&buf[..len], expected_crc)?;
-        let record = super::encoding::decode(&buf[..])?;
-
-        // Always count records, even if buffered/ignored.
-        stats.record(&record);
-
-        // Epoch-based fencing: track the highest epoch seen and skip
-        // records from stale writers (epoch < max_epoch_seen).  This
-        // prevents zombie writers from corrupting the recovered state.
-        if record.writer_epoch > stats.max_epoch_seen {
-            stats.max_epoch_seen = record.writer_epoch;
-        }
-        if record.writer_epoch > 0 && record.writer_epoch < stats.max_epoch_seen {
-            stats.stale_records_skipped += 1;
-            tracing::warn!(
-                epoch = record.writer_epoch,
-                max_epoch = stats.max_epoch_seen,
-                seq = record.seq,
-                op = ?record.op,
-                pos = pos,
-                file = %file_path,
-                "skipping WAL record from stale writer epoch"
-            );
-            pos += crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 + len as u64;
-            continue;
-        }
-
-        match record.op {
-            WalOpKind::TxnBegin => {
-                if let Some(txn_id) = record.txn_id {
-                    begun_txns.insert(txn_id);
-                    open_txns.entry(txn_id).or_default();
-                }
+        match read_next_wal_frame(&*file, file_path, pos, &mut file_read_ns)? {
+            NextWalFrame::Eof => break,
+            NextWalFrame::Frame(frame) => {
+                let next_pos = frame.next_pos;
+                let mut apply_ctx = WalReplayApplyContext {
+                    file_path,
+                    stats,
+                    memtables,
+                    open_txns,
+                    begun_txns,
+                    file_apply_ns: &mut file_apply_ns,
+                };
+                apply_replayed_wal_record(frame.record, pos, &mut apply_ctx)?;
+                pos = next_pos;
             }
-            WalOpKind::TxnCommit => {
-                if let Some(txn_id) = record.txn_id {
-                    if begun_txns.remove(&txn_id) {
-                        if let Some(records) = open_txns.remove(&txn_id) {
-                            for buffered in &records {
-                                let apply_start = std::time::Instant::now();
-                                apply_record(buffered, memtables)?;
-                                file_apply_ns =
-                                    file_apply_ns.saturating_add(apply_start.elapsed().as_nanos());
-                            }
+        }
+    }
+
+    finalize_wal_file_replay(stats, file_path, file_read_ns, file_apply_ns);
+    Ok(())
+}
+
+struct ReplayedWalFrame {
+    record: WalRecord,
+    next_pos: u64,
+}
+
+struct WalReplayApplyContext<'a, S: BuildHasher> {
+    file_path: &'a StoragePath,
+    stats: &'a mut RecoveryStats,
+    memtables: &'a mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
+    open_txns: &'a mut std::collections::HashMap<u64, Vec<WalRecord>>,
+    begun_txns: &'a mut std::collections::HashSet<u64>,
+    file_apply_ns: &'a mut u128,
+}
+
+enum NextWalFrame {
+    Eof,
+    Frame(ReplayedWalFrame),
+}
+
+fn open_wal_replay_file<'a>(
+    storage: &'a dyn Storage,
+    file_path: &StoragePath,
+    file_read_ns: &mut u128,
+) -> MidgeResult<Option<Box<dyn crate::storage::abstraction::StorageFile + 'a>>> {
+    let open_start = std::time::Instant::now();
+    let file = match storage.open_file(
+        file_path,
+        OpenOptions {
+            mode: OpenMode::ReadOnly,
+            create: false,
+            create_new: false,
+            truncate: false,
+            append: false,
+        },
+    ) {
+        Ok(file) => file,
+        Err(e) if e.kind == StorageErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(map_storage_error(e)),
+    };
+    *file_read_ns = file_read_ns.saturating_add(open_start.elapsed().as_nanos());
+    Ok(Some(file))
+}
+
+fn read_next_wal_frame(
+    file: &dyn crate::storage::abstraction::StorageFile,
+    file_path: &StoragePath,
+    pos: u64,
+    file_read_ns: &mut u128,
+) -> MidgeResult<NextWalFrame> {
+    let file_len = file.len().map_err(map_storage_error)?;
+    if pos == file_len {
+        return Ok(NextWalFrame::Eof);
+    }
+    if pos > file_len {
+        return Err(MidgeError::Corruption(format!(
+            "WAL replay read past EOF at pos {pos} in {file_path} (file_len={file_len})"
+        )));
+    }
+    if file_len.saturating_sub(pos) < crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 {
+        return Err(MidgeError::Corruption(format!(
+            "Incomplete WAL frame header at pos {} in {} (need {} bytes, have {})",
+            pos,
+            file_path,
+            crate::wal::frame::WAL_FRAME_HEADER_LEN,
+            file_len.saturating_sub(pos)
+        )));
+    }
+
+    let (len, expected_crc) = read_wal_frame_header(file, pos, file_read_ns)?;
+    let payload = read_wal_frame_payload(file, file_path, pos, len, file_len, file_read_ns)?;
+
+    crate::wal::frame::verify_frame_crc(&payload[..len], expected_crc)?;
+    let record = super::encoding::decode(&payload[..])?;
+
+    Ok(NextWalFrame::Frame(ReplayedWalFrame {
+        record,
+        next_pos: pos + crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 + len as u64,
+    }))
+}
+
+fn read_wal_frame_header(
+    file: &dyn crate::storage::abstraction::StorageFile,
+    pos: u64,
+    file_read_ns: &mut u128,
+) -> MidgeResult<(usize, u32)> {
+    let header_read_start = std::time::Instant::now();
+    let header = file
+        .read_at(pos, crate::wal::frame::WAL_FRAME_HEADER_LEN as u64)
+        .map_err(map_storage_error)?;
+    *file_read_ns = file_read_ns.saturating_add(header_read_start.elapsed().as_nanos());
+    crate::wal::frame::decode_frame_header(&header[..])
+}
+
+fn read_wal_frame_payload(
+    file: &dyn crate::storage::abstraction::StorageFile,
+    file_path: &StoragePath,
+    pos: u64,
+    len: usize,
+    file_len: u64,
+    file_read_ns: &mut u128,
+) -> MidgeResult<Vec<u8>> {
+    let need_end = pos
+        .saturating_add(crate::wal::frame::WAL_FRAME_HEADER_LEN as u64)
+        .saturating_add(len as u64);
+    if need_end > file_len {
+        return Err(MidgeError::Corruption(format!(
+            "Incomplete WAL record at pos {pos} in {file_path} (len={len}, file_len={file_len})"
+        )));
+    }
+
+    let payload_read_start = std::time::Instant::now();
+    let payload = file
+        .read_at(
+            pos + crate::wal::frame::WAL_FRAME_HEADER_LEN as u64,
+            len as u64,
+        )
+        .map_err(map_storage_error)?;
+    *file_read_ns = file_read_ns.saturating_add(payload_read_start.elapsed().as_nanos());
+
+    if payload.len() < len {
+        return Err(MidgeError::Corruption(format!(
+            "Incomplete WAL record at pos {} in {} (len={}, got={})",
+            pos,
+            file_path,
+            len,
+            payload.len()
+        )));
+    }
+
+    Ok(payload)
+}
+
+fn apply_replayed_wal_record<S: BuildHasher>(
+    record: WalRecord,
+    pos: u64,
+    ctx: &mut WalReplayApplyContext<'_, S>,
+) -> MidgeResult<()> {
+    ctx.stats.record(&record);
+
+    if record.writer_epoch > ctx.stats.max_epoch_seen {
+        ctx.stats.max_epoch_seen = record.writer_epoch;
+    }
+    if record.writer_epoch > 0 && record.writer_epoch < ctx.stats.max_epoch_seen {
+        ctx.stats.stale_records_skipped += 1;
+        tracing::warn!(
+            epoch = record.writer_epoch,
+            max_epoch = ctx.stats.max_epoch_seen,
+            seq = record.seq,
+            op = ?record.op,
+            pos = pos,
+            file = %ctx.file_path,
+            "skipping WAL record from stale writer epoch"
+        );
+        return Ok(());
+    }
+
+    match record.op {
+        WalOpKind::TxnBegin => {
+            if let Some(txn_id) = record.txn_id {
+                ctx.begun_txns.insert(txn_id);
+                ctx.open_txns.entry(txn_id).or_default();
+            }
+        }
+        WalOpKind::TxnCommit => {
+            if let Some(txn_id) = record.txn_id {
+                if ctx.begun_txns.remove(&txn_id) {
+                    if let Some(records) = ctx.open_txns.remove(&txn_id) {
+                        for buffered in &records {
+                            apply_wal_record_to_memtables(
+                                buffered,
+                                ctx.memtables,
+                                ctx.file_apply_ns,
+                            )?;
                         }
                     }
                 }
             }
-            _ => {
-                if let Some(txn_id) = record.txn_id {
-                    if begun_txns.contains(&txn_id) {
-                        open_txns.entry(txn_id).or_default().push(record);
-                        pos += crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 + len as u64;
-                        continue;
-                    }
-                }
-
-                let apply_start = std::time::Instant::now();
-                apply_record(&record, memtables)?;
-                file_apply_ns = file_apply_ns.saturating_add(apply_start.elapsed().as_nanos());
-            }
         }
+        _ => {
+            if let Some(txn_id) = record.txn_id {
+                if ctx.begun_txns.contains(&txn_id) {
+                    ctx.open_txns.entry(txn_id).or_default().push(record);
+                    return Ok(());
+                }
+            }
 
-        pos += crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 + len as u64;
+            apply_wal_record_to_memtables(&record, ctx.memtables, ctx.file_apply_ns)?;
+        }
     }
 
+    Ok(())
+}
+
+fn apply_wal_record_to_memtables<S: BuildHasher>(
+    record: &WalRecord,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
+    file_apply_ns: &mut u128,
+) -> MidgeResult<()> {
+    let apply_start = std::time::Instant::now();
+    apply_record(record, memtables)?;
+    *file_apply_ns = file_apply_ns.saturating_add(apply_start.elapsed().as_nanos());
+    Ok(())
+}
+
+fn finalize_wal_file_replay(
+    stats: &mut RecoveryStats,
+    file_path: &StoragePath,
+    file_read_ns: u128,
+    file_apply_ns: u128,
+) {
     stats.wal_read_ns = stats.wal_read_ns.saturating_add(file_read_ns);
     stats.apply_ns = stats.apply_ns.saturating_add(file_apply_ns);
 
@@ -436,8 +528,6 @@ fn replay_wal_file<S: BuildHasher>(
         apply_ms = std::time::Duration::from_nanos(u64::try_from(file_apply_ns).unwrap_or(u64::MAX)).as_secs_f64() * 1000.0,
         "replayed wal file"
     );
-
-    Ok(())
 }
 
 #[instrument(

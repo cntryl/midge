@@ -269,10 +269,75 @@ pub fn replay_journal(db_path: &Path) -> MidgeResult<Vec<ManifestEdit>> {
 pub fn replay_journal_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
 ) -> MidgeResult<Vec<ManifestEdit>> {
+    let Some(file) = open_journal_for_replay(fs)? else {
+        return Ok(Vec::new());
+    };
+
+    let file_len = file.len().map_err(crate::common::MidgeError::from)?;
+    let mut state = JournalReplayState::default();
+    let mut offset: u64 = 0;
+
+    while offset < file_len {
+        match read_journal_record(&*file, offset, file_len)? {
+            JournalRecordStatus::Record(record) => {
+                offset = record.next_offset;
+                if let Some(message) = validate_journal_record_crc(&record, &state) {
+                    state.fatal_prefix_error = Some(message);
+                    break;
+                }
+                if !handle_journal_record(&record, &mut state) {
+                    break;
+                }
+            }
+            JournalRecordStatus::PartialHeader { record_start } => {
+                maybe_mark_fatal_prefix(
+                    &mut state,
+                    record_start,
+                    "manifest journal has truncated header at byte 0".to_string(),
+                );
+                break;
+            }
+            JournalRecordStatus::PartialPayload { record_start } => {
+                maybe_mark_fatal_prefix(
+                    &mut state,
+                    record_start,
+                    "manifest journal has incomplete first record".to_string(),
+                );
+                break;
+            }
+        }
+    }
+
+    finalize_journal_replay(state)
+}
+
+#[derive(Default)]
+struct JournalReplayState {
+    edits: Vec<ManifestEdit>,
+    last_marker_edit_idx: Option<usize>,
+    fatal_prefix_error: Option<String>,
+}
+
+struct JournalRecord {
+    record_start: u64,
+    typ: u8,
+    payload: Vec<u8>,
+    got_crc: u32,
+    next_offset: u64,
+}
+
+enum JournalRecordStatus {
+    Record(JournalRecord),
+    PartialHeader { record_start: u64 },
+    PartialPayload { record_start: u64 },
+}
+
+fn open_journal_for_replay(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+) -> MidgeResult<Option<Box<dyn crate::io::traits::File + '_>>> {
     use crate::io::traits::FsPath;
 
-    // Open file read-only
-    let file = match fs.open(
+    match fs.open(
         &FsPath::new(JOURNAL_FILE),
         crate::io::traits::OpenOptions {
             mode: crate::io::traits::OpenMode::ReadOnly,
@@ -281,129 +346,162 @@ pub fn replay_journal_with_fs(
             truncate: false,
         },
     ) {
-        Ok(f) => f,
-        Err(e) => match e {
-            crate::io::traits::FsError::NotFound(_) => return Ok(Vec::new()),
-            _ => return Err(crate::common::MidgeError::from(e)),
-        },
-    };
+        Ok(file) => Ok(Some(file)),
+        Err(crate::io::traits::FsError::NotFound(_)) => Ok(None),
+        Err(e) => Err(crate::common::MidgeError::from(e)),
+    }
+}
 
-    let mut edits = Vec::new();
-    let mut last_marker_edit_idx: Option<usize> = None;
-    let mut fatal_prefix_error: Option<String> = None;
-
-    // Read loop using positional reads
-    let mut offset: u64 = 0;
-    let file_len = file.len().map_err(crate::common::MidgeError::from)?;
-
-    while offset < file_len {
-        let record_start = offset;
-        // Read header: type (1) + len (4)
-        if offset + 5 > file_len {
-            if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
-                fatal_prefix_error = Some("manifest journal has truncated header at byte 0".into());
-            }
-            break; // partial header
-        }
-        let typ_b = file
-            .read_at(offset, 1)
-            .map_err(crate::common::MidgeError::from)?;
-        let typ = typ_b[0];
-        offset += 1;
-
-        let len_b = file
-            .read_at(offset, 4)
-            .map_err(crate::common::MidgeError::from)?;
-        let len = u32::from_le_bytes([len_b[0], len_b[1], len_b[2], len_b[3]]) as usize;
-        offset += 4;
-
-        // Ensure payload + crc present
-        if offset + (len as u64) + 4 > file_len {
-            if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
-                fatal_prefix_error = Some("manifest journal has incomplete first record".into());
-            }
-            break; // partial payload
-        }
-
-        let payload = file
-            .read_at(offset, len as u64)
-            .map_err(crate::common::MidgeError::from)?;
-        offset += len as u64;
-
-        let crc_b = file
-            .read_at(offset, 4)
-            .map_err(crate::common::MidgeError::from)?;
-        let got_crc = u32::from_le_bytes([crc_b[0], crc_b[1], crc_b[2], crc_b[3]]);
-        offset += 4;
-
-        let mut hasher = Crc32::new();
-        hasher.update(&payload);
-        let calc = hasher.finalize();
-        if calc != got_crc {
-            tracing::warn!("journal crc mismatch, stopping at tail");
-            if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
-                fatal_prefix_error = Some("manifest journal CRC mismatch at byte 0".into());
-            }
-            break;
-        }
-
-        // Dispatch
-        if typ == FSYNC_MARKER_TYPE {
-            match journal_deserialize::<FsyncMarker>(&payload) {
-                Ok(marker) => {
-                    tracing::info!(
-                        last_seq = marker.last_persisted_sequence,
-                        ts = marker.ts_millis,
-                        "journal fsync marker encountered"
-                    );
-                    last_marker_edit_idx = Some(edits.len());
-                }
-                Err(e) => {
-                    tracing::warn!("fsync marker deserialize failed: {}", e);
-                    if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
-                        fatal_prefix_error = Some(format!(
-                            "manifest journal fsync marker deserialize failed: {e}"
-                        ));
-                    }
-                    break;
-                }
-            }
-        } else if typ == BATCH_RECORD_TYPE {
-            match journal_deserialize::<Vec<ManifestEdit>>(&payload) {
-                Ok(batch) => edits.push(ManifestEdit::Batch(batch)),
-                Err(e) => {
-                    tracing::warn!("journal batch deserialize failed: {}", e);
-                    if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
-                        fatal_prefix_error =
-                            Some(format!("manifest journal batch deserialize failed: {e}"));
-                    }
-                    break;
-                }
-            }
-        } else {
-            match journal_deserialize::<ManifestEdit>(&payload) {
-                Ok(edit) => edits.push(edit),
-                Err(e) => {
-                    tracing::warn!("journal record deserialize failed: {}", e);
-                    if edits.is_empty() && last_marker_edit_idx.is_none() && record_start == 0 {
-                        fatal_prefix_error =
-                            Some(format!("manifest journal record deserialize failed: {e}"));
-                    }
-                    break;
-                }
-            }
-        }
+fn read_journal_record(
+    file: &dyn crate::io::traits::File,
+    offset: u64,
+    file_len: u64,
+) -> MidgeResult<JournalRecordStatus> {
+    let record_start = offset;
+    if offset + 5 > file_len {
+        return Ok(JournalRecordStatus::PartialHeader { record_start });
     }
 
-    if let Some(message) = fatal_prefix_error {
+    let typ = file
+        .read_at(offset, 1)
+        .map_err(crate::common::MidgeError::from)?[0];
+    let len_offset = offset + 1;
+    let len_bytes = file
+        .read_at(len_offset, 4)
+        .map_err(crate::common::MidgeError::from)?;
+    let len = u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
+    let payload_offset = len_offset + 4;
+
+    if payload_offset + (len as u64) + 4 > file_len {
+        return Ok(JournalRecordStatus::PartialPayload { record_start });
+    }
+
+    let payload = file
+        .read_at(payload_offset, len as u64)
+        .map_err(crate::common::MidgeError::from)?;
+    let crc_offset = payload_offset + len as u64;
+    let crc_bytes = file
+        .read_at(crc_offset, 4)
+        .map_err(crate::common::MidgeError::from)?;
+    let got_crc = u32::from_le_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
+
+    Ok(JournalRecordStatus::Record(JournalRecord {
+        record_start,
+        typ,
+        payload: payload.to_vec(),
+        got_crc,
+        next_offset: crc_offset + 4,
+    }))
+}
+
+fn validate_journal_record_crc(
+    record: &JournalRecord,
+    state: &JournalReplayState,
+) -> Option<String> {
+    let mut hasher = Crc32::new();
+    hasher.update(&record.payload);
+    let calc = hasher.finalize();
+    if calc == record.got_crc {
+        return None;
+    }
+
+    tracing::warn!("journal crc mismatch, stopping at tail");
+    if is_fatal_first_journal_record(state, record.record_start) {
+        return Some("manifest journal CRC mismatch at byte 0".to_string());
+    }
+    None
+}
+
+fn handle_journal_record(record: &JournalRecord, state: &mut JournalReplayState) -> bool {
+    let typ = record.typ;
+    if typ == FSYNC_MARKER_TYPE {
+        return handle_fsync_marker_record(record, state);
+    }
+    if typ == BATCH_RECORD_TYPE {
+        return handle_batch_record(record, state);
+    }
+    handle_manifest_edit_record(record, state)
+}
+
+fn handle_fsync_marker_record(record: &JournalRecord, state: &mut JournalReplayState) -> bool {
+    match journal_deserialize::<FsyncMarker>(&record.payload) {
+        Ok(marker) => {
+            tracing::info!(
+                last_seq = marker.last_persisted_sequence,
+                ts = marker.ts_millis,
+                "journal fsync marker encountered"
+            );
+            state.last_marker_edit_idx = Some(state.edits.len());
+            true
+        }
+        Err(e) => {
+            tracing::warn!("fsync marker deserialize failed: {}", e);
+            maybe_mark_fatal_prefix(
+                state,
+                record.record_start,
+                format!("manifest journal fsync marker deserialize failed: {e}"),
+            );
+            false
+        }
+    }
+}
+
+fn handle_batch_record(record: &JournalRecord, state: &mut JournalReplayState) -> bool {
+    match journal_deserialize::<Vec<ManifestEdit>>(&record.payload) {
+        Ok(batch) => {
+            state.edits.push(ManifestEdit::Batch(batch));
+            true
+        }
+        Err(e) => {
+            tracing::warn!("journal batch deserialize failed: {}", e);
+            maybe_mark_fatal_prefix(
+                state,
+                record.record_start,
+                format!("manifest journal batch deserialize failed: {e}"),
+            );
+            false
+        }
+    }
+}
+
+fn handle_manifest_edit_record(record: &JournalRecord, state: &mut JournalReplayState) -> bool {
+    match journal_deserialize::<ManifestEdit>(&record.payload) {
+        Ok(edit) => {
+            state.edits.push(edit);
+            true
+        }
+        Err(e) => {
+            tracing::warn!("journal record deserialize failed: {}", e);
+            maybe_mark_fatal_prefix(
+                state,
+                record.record_start,
+                format!("manifest journal record deserialize failed: {e}"),
+            );
+            false
+        }
+    }
+}
+
+fn maybe_mark_fatal_prefix(state: &mut JournalReplayState, record_start: u64, message: String) {
+    if is_fatal_first_journal_record(state, record_start) {
+        state.fatal_prefix_error = Some(message);
+    }
+}
+
+fn is_fatal_first_journal_record(state: &JournalReplayState, record_start: u64) -> bool {
+    state.edits.is_empty() && state.last_marker_edit_idx.is_none() && record_start == 0
+}
+
+fn finalize_journal_replay(mut state: JournalReplayState) -> MidgeResult<Vec<ManifestEdit>> {
+    if let Some(message) = state.fatal_prefix_error {
         return Err(crate::common::MidgeError::Corruption(message));
     }
 
-    if let Some(idx) = last_marker_edit_idx {
-        edits.truncate(idx);
+    if let Some(idx) = state.last_marker_edit_idx {
+        state.edits.truncate(idx);
     }
 
-    Ok(edits)
+    Ok(state.edits)
 }
 
 /// Append a batch of edits as a single TLV record using the provided Fs (preferred).

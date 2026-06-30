@@ -104,68 +104,11 @@ impl WriterRunner {
         let mut file_opt = self.open_file_handle().ok();
 
         loop {
-            // Wait for work (queue data, sync request, or shutdown).
-            // Lock order: always queue then sync_state (briefly); never the reverse.
-            let batch: Vec<QueuedWrite>;
-            {
-                let mut q = self.config.queue.lock();
-                // Wait until: queue has data OR a sync/flush is requested OR shutdown requested.
-                //
-                // IMPORTANT: `WalWriter::sync()` must work even when the queue is empty. The writer
-                // thread performs I/O asynchronously, so an fsync request may arrive with no queued
-                // buffers. If we only wake on queued data, callers can deadlock forever.
-                while q.is_empty()
-                    && !self
-                        .config
-                        .shutdown
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    let has_pending_sync = {
-                        let s = self.config.sync_state.lock();
-                        (s.pending_fsyncs > s.completed_fsyncs)
-                            || (s.pending_flushes > s.completed_flushes)
-                    };
+            let Some(batch) = self.wait_for_batch_or_pending_sync() else {
+                break;
+            };
 
-                    if has_pending_sync {
-                        break;
-                    }
-
-                    // Safety-net periodic wake to re-check shutdown/sync flags.
-                    // All enqueue and sync-request paths notify the condvar, so this
-                    // timeout only guards against missed notifications (unlikely).
-                    // 500ms keeps idle CPU near zero while bounding worst-case latency.
-                    self.config
-                        .queue_cond
-                        .wait_for(&mut q, std::time::Duration::from_millis(500));
-                }
-
-                // Check for shutdown (but still allow pending fsync/flush requests to complete)
-                if self
-                    .config
-                    .shutdown
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                    && q.is_empty()
-                {
-                    let has_pending_sync = {
-                        let s = self.config.sync_state.lock();
-                        (s.pending_fsyncs > s.completed_fsyncs)
-                            || (s.pending_flushes > s.completed_flushes)
-                    };
-                    if !has_pending_sync {
-                        break;
-                    }
-                }
-
-                // Drain queue
-                batch = std::mem::take(&mut *q);
-            }
-
-            // If any entry has exceeded max retry attempts, fail the writer and notify waiters
-            // instead of silently dropping data (which would cause recovery to miss it).
-            if batch
-                .iter()
-                .any(|entry| entry.attempts >= MAX_WRITE_ATTEMPTS)
-            {
+            if Self::has_exhausted_write_attempts(&batch) {
                 let msg =
                     "WAL write batch exceeded max retries; failing writer to preserve ordering"
                         .to_string();
@@ -174,136 +117,216 @@ impl WriterRunner {
                 return;
             }
 
-            // Process any queued data
             if !batch.is_empty() {
-                // Coalesce
-                let total: usize = batch.iter().map(|entry| entry.data.len()).sum();
-                let mut big = Vec::with_capacity(total);
-                for entry in &batch {
-                    big.extend_from_slice(&entry.data);
-                }
-
-                // Write
-                let big_bytes = bytes::Bytes::from(big);
-                let write_start = Instant::now();
-                let write_result: Option<u64>;
-
-                // Ensure a handle exists if possible
-                if file_opt.is_none() {
-                    file_opt = self.open_file_handle().ok();
-                }
-
-                // Attempt append; if it fails, reopen and retry once.
-                if let Some(ref mut file) = file_opt {
-                    match file.append(big_bytes.clone()) {
-                        Ok(pos) => write_result = Some(pos),
-                        Err(e1) => {
-                            tracing::warn!(error = ?e1, "wal writer append failed; reopening and retrying");
-                            file_opt = self.open_file_handle().ok();
-                            if let Some(ref mut file2) = file_opt {
-                                match file2.append(big_bytes.clone()) {
-                                    Ok(pos) => write_result = Some(pos),
-                                    Err(e2) => {
-                                        tracing::error!(error = ?e2, "wal writer append failed after retry");
-                                        self.fail_writes(
-                                            &batch,
-                                            format!("wal writer append failed after retry: {e2}"),
-                                        );
-                                        return;
-                                    }
-                                }
-                            } else {
-                                let msg =
-                                    "wal writer could not reopen file handle after append failure"
-                                        .to_string();
-                                tracing::error!("{msg}");
-                                self.fail_writes(&batch, msg);
-                                return;
-                            }
-                        }
+                let batch_len = batch.iter().map(|entry| entry.data.len()).sum::<usize>() as u64;
+                let start_pos = match self.write_batch(&mut file_opt, &batch) {
+                    Ok(start_pos) => start_pos,
+                    Err(message) => {
+                        self.fail_writes(&batch, message);
+                        return;
                     }
-                } else {
-                    let msg = "wal writer has no file handle".to_string();
-                    tracing::error!("{msg}");
-                    self.fail_writes(&batch, msg);
-                    return;
-                }
-
-                if let Some(start_pos) = write_result {
-                    let write_elapsed = write_start.elapsed();
-                    if let Some(t) = crate::telemetry::Telemetry::global() {
-                        t.metrics().record_wal_write_syscall(
-                            u64::try_from(write_elapsed.as_nanos()).unwrap_or(u64::MAX),
-                        );
-                    }
-                    // `append()` returns the starting offset; expose end offset as "current_pos".
-                    let end_pos = start_pos.saturating_add(big_bytes.len() as u64);
-                    self.config
-                        .current_pos
-                        .store(end_pos, std::sync::atomic::Ordering::SeqCst);
-                    Self::ack_batch_success(&batch, start_pos);
-
-                    // Mark completed flushes (barrier for "writes before flush() have been written")
-                    {
-                        let mut s = self.config.sync_state.lock();
-                        s.completed_flushes = s.pending_flushes;
-                        self.config.sync_cond.notify_all();
-                    }
-                }
-
+                };
+                self.complete_flushes_after_write(start_pos, batch_len, &batch);
                 self.recycle_batch(batch);
             }
 
-            // If a flush was requested but there was no data batch, still complete it.
-            // This makes `WalWriter::flush()` a reliable barrier even when the queue was
-            // empty at the time of the call.
-            let need_flush = {
-                let s = self.config.sync_state.lock();
-                s.pending_flushes > s.completed_flushes
-            };
-            if need_flush {
-                let mut s = self.config.sync_state.lock();
-                s.completed_flushes = s.pending_flushes;
-                self.config.sync_cond.notify_all();
-            }
-
-            // Handle pending fsyncs
-            let need_sync = {
-                let s = self.config.sync_state.lock();
-                s.pending_fsyncs > s.completed_fsyncs
-            };
-
-            if need_sync {
-                if file_opt.is_none() {
-                    file_opt = self.open_file_handle().ok();
-                }
-                if let Some(ref mut file) = file_opt {
-                    let sync_start = Instant::now();
-                    let sync_result = file.sync(Durability::Durable);
-                    if let Err(e) = sync_result {
-                        tracing::error!(error = ?e, "WAL fsync failed - marking sync as failed");
-                        let mut s = self.config.sync_state.lock();
-                        s.sync_failed = true;
-                        s.last_sync_error = Some(e.to_string());
-                        // Do NOT increment completed_fsyncs - leave waiters to check failure
-                        self.config.sync_cond.notify_all();
-                        self.config.queue_cond.notify_all();
-                        return; // Exit run loop - writer thread terminates on fsync failure
-                    }
-                    let sync_elapsed = sync_start.elapsed();
-                    if let Some(t) = crate::telemetry::Telemetry::global() {
-                        t.metrics().record_wal_fsync_ns(
-                            u64::try_from(sync_elapsed.as_nanos()).unwrap_or(u64::MAX),
-                        );
-                        t.metrics().record_wal_fsync_count();
-                    }
-                }
-
-                let mut s = self.config.sync_state.lock();
-                s.completed_fsyncs = s.pending_fsyncs;
-                self.config.sync_cond.notify_all();
+            self.complete_pending_flushes();
+            if self.complete_pending_fsyncs(&mut file_opt).is_err() {
+                return;
             }
         }
+    }
+
+    fn wait_for_batch_or_pending_sync(&self) -> Option<Vec<QueuedWrite>> {
+        let mut q = self.config.queue.lock();
+        while q.is_empty()
+            && !self
+                .config
+                .shutdown
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            if self.has_pending_sync_or_flush() {
+                break;
+            }
+
+            self.config
+                .queue_cond
+                .wait_for(&mut q, std::time::Duration::from_millis(500));
+        }
+
+        if self.should_exit_on_shutdown(&q) {
+            return None;
+        }
+
+        Some(std::mem::take(&mut *q))
+    }
+
+    fn has_pending_sync_or_flush(&self) -> bool {
+        let s = self.config.sync_state.lock();
+        (s.pending_fsyncs > s.completed_fsyncs) || (s.pending_flushes > s.completed_flushes)
+    }
+
+    fn should_exit_on_shutdown(
+        &self,
+        queue: &parking_lot::MutexGuard<'_, Vec<QueuedWrite>>,
+    ) -> bool {
+        self.config
+            .shutdown
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && queue.is_empty()
+            && !self.has_pending_sync_or_flush()
+    }
+
+    fn has_exhausted_write_attempts(batch: &[QueuedWrite]) -> bool {
+        batch
+            .iter()
+            .any(|entry| entry.attempts >= MAX_WRITE_ATTEMPTS)
+    }
+
+    fn write_batch<'a>(
+        &'a self,
+        file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
+        batch: &[QueuedWrite],
+    ) -> Result<u64, String> {
+        let big_bytes = bytes::Bytes::from(Self::coalesce_batch(batch));
+        let write_start = Instant::now();
+        let start_pos = self.append_with_retry(file_opt, big_bytes.clone())?;
+        let write_elapsed = write_start.elapsed();
+
+        if let Some(t) = crate::telemetry::Telemetry::global() {
+            t.metrics().record_wal_write_syscall(
+                u64::try_from(write_elapsed.as_nanos()).unwrap_or(u64::MAX),
+            );
+        }
+
+        self.config.current_pos.store(
+            start_pos.saturating_add(big_bytes.len() as u64),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        Ok(start_pos)
+    }
+
+    fn coalesce_batch(batch: &[QueuedWrite]) -> Vec<u8> {
+        let total: usize = batch.iter().map(|entry| entry.data.len()).sum();
+        let mut big = Vec::with_capacity(total);
+        for entry in batch {
+            big.extend_from_slice(&entry.data);
+        }
+        big
+    }
+
+    fn append_with_retry<'a>(
+        &'a self,
+        file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
+        big_bytes: bytes::Bytes,
+    ) -> Result<u64, String> {
+        self.ensure_file_handle(file_opt)?;
+
+        if let Some(file) = file_opt.as_mut() {
+            match file.append(big_bytes.clone()) {
+                Ok(pos) => return Ok(pos),
+                Err(e1) => {
+                    tracing::warn!(error = ?e1, "wal writer append failed; reopening and retrying");
+                }
+            }
+        }
+
+        *file_opt = self.open_file_handle().ok();
+        if let Some(file) = file_opt.as_mut() {
+            return file.append(big_bytes).map_err(|e| {
+                tracing::error!(error = ?e, "wal writer append failed after retry");
+                format!("wal writer append failed after retry: {e}")
+            });
+        }
+
+        Err("wal writer could not reopen file handle after append failure".to_string())
+    }
+
+    fn ensure_file_handle<'a>(
+        &'a self,
+        file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
+    ) -> Result<(), String> {
+        if file_opt.is_none() {
+            *file_opt = self.open_file_handle().ok();
+        }
+        if file_opt.is_some() {
+            Ok(())
+        } else {
+            Err("wal writer has no file handle".to_string())
+        }
+    }
+
+    fn complete_flushes_after_write(&self, start_pos: u64, batch_len: u64, batch: &[QueuedWrite]) {
+        Self::ack_batch_success(batch, start_pos);
+        self.config.current_pos.store(
+            start_pos.saturating_add(batch_len),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+
+        let mut s = self.config.sync_state.lock();
+        s.completed_flushes = s.pending_flushes;
+        self.config.sync_cond.notify_all();
+    }
+
+    fn complete_pending_flushes(&self) {
+        if !self.has_pending_flushes() {
+            return;
+        }
+
+        let mut s = self.config.sync_state.lock();
+        s.completed_flushes = s.pending_flushes;
+        self.config.sync_cond.notify_all();
+    }
+
+    fn has_pending_flushes(&self) -> bool {
+        let s = self.config.sync_state.lock();
+        s.pending_flushes > s.completed_flushes
+    }
+
+    fn complete_pending_fsyncs<'a>(
+        &'a self,
+        file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
+    ) -> Result<(), ()> {
+        if !self.has_pending_fsyncs() {
+            return Ok(());
+        }
+
+        if file_opt.is_none() {
+            *file_opt = self.open_file_handle().ok();
+        }
+        if let Some(file) = file_opt.as_mut() {
+            let sync_start = Instant::now();
+            if let Err(e) = file.sync(Durability::Durable) {
+                tracing::error!(error = ?e, "WAL fsync failed - marking sync as failed");
+                self.mark_sync_failure(e.to_string());
+                return Err(());
+            }
+            let sync_elapsed = sync_start.elapsed();
+            if let Some(t) = crate::telemetry::Telemetry::global() {
+                t.metrics().record_wal_fsync_ns(
+                    u64::try_from(sync_elapsed.as_nanos()).unwrap_or(u64::MAX),
+                );
+                t.metrics().record_wal_fsync_count();
+            }
+        }
+
+        let mut s = self.config.sync_state.lock();
+        s.completed_fsyncs = s.pending_fsyncs;
+        self.config.sync_cond.notify_all();
+        Ok(())
+    }
+
+    fn has_pending_fsyncs(&self) -> bool {
+        let s = self.config.sync_state.lock();
+        s.pending_fsyncs > s.completed_fsyncs
+    }
+
+    fn mark_sync_failure(&self, message: String) {
+        let mut s = self.config.sync_state.lock();
+        s.sync_failed = true;
+        s.last_sync_error = Some(message);
+        self.config.sync_cond.notify_all();
+        self.config.queue_cond.notify_all();
     }
 
     fn ack_batch_success(batch: &[QueuedWrite], batch_start_pos: u64) {
