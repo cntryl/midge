@@ -27,6 +27,14 @@ const MAX_BATCH_OPS: usize = 1024;
 /// Maximum bytes per batch before forcing a commit
 const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024; // 4MB
 
+struct BatchMetrics<'a> {
+    cf_id: crate::engine::ColumnFamilyId,
+    batch_count: &'a mut u64,
+    total_batch_size: &'a mut u64,
+    max_batch_size: &'a mut usize,
+    loop_start: &'a Instant,
+}
+
 /// Maximum time to wait before forcing a batch commit
 const MAX_BATCH_DELAY: Duration = Duration::from_micros(500);
 
@@ -290,7 +298,7 @@ impl IngestCoordinator {
         let thread_handle = thread::Builder::new()
             .name(format!("midge-ingest-cf{cf_id}"))
             .spawn(move || {
-                Self::ingest_loop(cf_id, runtime, write_rx, stop_rx, stall_flag_clone);
+                Self::ingest_loop(&cf_id, &runtime, write_rx, stop_rx, stall_flag_clone);
             })
             .map_err(|e| {
                 crate::common::MidgeError::Internal(format!(
@@ -684,8 +692,8 @@ impl IngestCoordinator {
 
     /// Ingest loop: batches writes and commits them
     fn ingest_loop(
-        cf_id: crate::engine::ColumnFamilyId,
-        runtime: RuntimeHandle,
+        cf_id: &crate::engine::ColumnFamilyId,
+        runtime: &RuntimeHandle,
         write_rx: Receiver<IngestWrite>,
         stop_rx: Receiver<()>,
         stall_flag: Arc<AtomicBool>,
@@ -718,7 +726,7 @@ impl IngestCoordinator {
                             batch.add(intent);
                         }
                         if !batch.is_empty() {
-                            Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
+                            Self::commit_batch(runtime, *cf_id, &mut batch, &stall_flag);
                         }
                         break;
                     },
@@ -733,7 +741,7 @@ impl IngestCoordinator {
                         true
                     } else {
                         // write channel disconnected — flush & exit
-                        Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
+                        Self::commit_batch(runtime, *cf_id, &mut batch, &stall_flag);
                         break;
                     },
                     recv(stop_rx) -> _ => {
@@ -741,13 +749,13 @@ impl IngestCoordinator {
                             batch.add(intent);
                         }
                         if !batch.is_empty() {
-                            Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
+                            Self::commit_batch(runtime, *cf_id, &mut batch, &stall_flag);
                         }
                         break;
                     },
                     default(remaining) => {
                         // Batch deadline expired — commit what we have
-                        Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
+                        Self::commit_batch(runtime, *cf_id, &mut batch, &stall_flag);
                         false
                     },
                 }
@@ -769,40 +777,77 @@ impl IngestCoordinator {
                     let batch_len = batch.len();
                     let batch_bytes = batch.total_bytes;
                     let commit_start = Instant::now();
-                    Self::commit_batch(&runtime, cf_id, &mut batch, &stall_flag);
+                    Self::commit_batch(runtime, *cf_id, &mut batch, &stall_flag);
                     let commit_time_us = commit_start.elapsed().as_micros() as u64;
 
-                    // Track batch metrics
-                    batch_count += 1;
-                    total_batch_size += batch_len as u64;
-                    max_batch_size = max_batch_size.max(batch_len);
-
-                    tracing::debug!(
-                        cf_id = cf_id,
+                    let mut metrics = BatchMetrics {
+                        cf_id: *cf_id,
+                        batch_count: &mut batch_count,
+                        total_batch_size: &mut total_batch_size,
+                        max_batch_size: &mut max_batch_size,
+                        loop_start: &loop_start,
+                    };
+                    Self::record_batch_metrics(
+                        &mut metrics,
                         batch_len,
                         batch_bytes,
                         commit_time_us,
-                        "Committed ingest batch"
                     );
-
-                    // Log periodic metrics every 100 batches or 5 seconds
-                    if batch_count.is_multiple_of(100)
-                        || loop_start.elapsed().as_secs().is_multiple_of(5)
-                    {
-                        let avg_size = total_batch_size.checked_div(batch_count).unwrap_or(0);
-                        tracing::info!(
-                            cf_id = cf_id,
-                            batch_count,
-                            avg_batch_size = avg_size,
-                            max_batch_size,
-                            last_commit_time_us = commit_time_us,
-                            "Ingest batching stats"
-                        );
-                    }
                 }
             }
         }
 
+        Self::log_summary(
+            *cf_id,
+            batch_count,
+            total_batch_size,
+            max_batch_size,
+            loop_start,
+        );
+    }
+
+    fn record_batch_metrics(
+        metrics: &mut BatchMetrics<'_>,
+        batch_len: usize,
+        batch_bytes: usize,
+        commit_time_us: u64,
+    ) {
+        *metrics.batch_count += 1;
+        *metrics.total_batch_size += batch_len as u64;
+        *metrics.max_batch_size = (*metrics.max_batch_size).max(batch_len);
+
+        tracing::debug!(
+            cf_id = metrics.cf_id,
+            batch_len,
+            batch_bytes,
+            commit_time_us,
+            "Committed ingest batch"
+        );
+
+        if (*metrics.batch_count).is_multiple_of(100)
+            || metrics.loop_start.elapsed().as_secs().is_multiple_of(5)
+        {
+            let avg_size = (*metrics.total_batch_size)
+                .checked_div(*metrics.batch_count)
+                .unwrap_or(0);
+            tracing::info!(
+                cf_id = metrics.cf_id,
+                batch_count = *metrics.batch_count,
+                avg_batch_size = avg_size,
+                max_batch_size = *metrics.max_batch_size,
+                last_commit_time_us = commit_time_us,
+                "Ingest batching stats"
+            );
+        }
+    }
+
+    fn log_summary(
+        cf_id: crate::engine::ColumnFamilyId,
+        batch_count: u64,
+        total_batch_size: u64,
+        max_batch_size: usize,
+        loop_start: Instant,
+    ) {
         let total_elapsed = loop_start.elapsed();
         let avg_batch_size = total_batch_size.checked_div(batch_count).unwrap_or(0);
         let batches_per_sec = batch_count as f64 / total_elapsed.as_secs_f64();

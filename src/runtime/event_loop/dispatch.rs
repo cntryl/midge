@@ -117,7 +117,9 @@ impl RuntimeDispatcher {
             RuntimeMsg::ManifestAddSst { .. }
             | RuntimeMsg::ManifestCompactionComplete { .. }
             | RuntimeMsg::ManifestCreateColumnFamily { .. }
-            | RuntimeMsg::ManifestDropColumnFamily { .. } => Self::dispatch_manifest(event_loop, msg_rx, msg),
+            | RuntimeMsg::ManifestDropColumnFamily { .. } => {
+                Self::dispatch_manifest(event_loop, msg_rx, msg)
+            }
             RuntimeMsg::Read { .. } | RuntimeMsg::RangeScan { .. } => {
                 Self::dispatch_read(event_loop, msg)
             }
@@ -252,7 +254,9 @@ impl RuntimeDispatcher {
                 cf_id,
                 sst_name,
                 sequence,
-            } => FlushCoordinator::flush_complete(event_loop, request_id, cf_id, &sst_name, sequence),
+            } => {
+                FlushCoordinator::flush_complete(event_loop, request_id, cf_id, &sst_name, sequence)
+            }
             _ => unreachable!(),
         }
     }

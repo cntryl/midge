@@ -179,8 +179,8 @@ fn tier4_mvcc_snapshot_isolation_under_concurrency_4threads(ctx: &mut StressCont
     }
 
     ctx.tag("isolation_violations", format!("{violations}").as_str());
-    assert!(
-        violations <= 0,
+    assert_eq!(
+        violations, 0,
         "MVCC isolation violation detected: {violations} dirty reads"
     );
 

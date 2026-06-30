@@ -295,7 +295,11 @@ impl RangeTombstone {
 #[must_use]
 pub fn encode_range_tombstones(tombstones: &[RangeTombstone]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.extend_from_slice(&u32::try_from(tombstones.len()).unwrap_or(u32::MAX).to_le_bytes());
+    buf.extend_from_slice(
+        &u32::try_from(tombstones.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
 
     for tombstone in tombstones {
         buf.extend_from_slice(

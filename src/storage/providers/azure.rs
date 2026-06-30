@@ -18,6 +18,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::Method;
 use sha2::Sha256;
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -104,7 +105,7 @@ impl AzureProvider {
     pub fn with_shared_key(
         account_name: String,
         container: String,
-        account_key: String,
+        account_key: &str,
     ) -> MidgeResult<Self> {
         Self::with_shared_key_and_endpoint(account_name, container, account_key, None)
     }
@@ -116,7 +117,7 @@ impl AzureProvider {
     pub fn with_shared_key_and_endpoint(
         account_name: String,
         container: String,
-        account_key: String,
+        account_key: &str,
         endpoint: Option<String>,
     ) -> MidgeResult<Self> {
         Self::with_shared_key_and_azure_endpoint(
@@ -130,11 +131,11 @@ impl AzureProvider {
     fn with_shared_key_and_azure_endpoint(
         account_name: String,
         container: String,
-        account_key: String,
+        account_key: &str,
         endpoint: Option<AzureEndpoint>,
     ) -> MidgeResult<Self> {
         let credential = AzureCredential::SharedKey {
-            account_key: account_key.clone(),
+            account_key: account_key.to_string(),
         };
         let signer = SharedKeySigner::new_with_emulator_compat(
             account_name.clone(),
@@ -142,7 +143,7 @@ impl AzureProvider {
             endpoint
                 .as_ref()
                 .is_some_and(AzureEndpoint::emulator_compat),
-        )?;
+        );
         let executor = CloudExecutor::new(Some(Arc::new(signer)))?;
         let backend = Arc::new(AzureBackend::new(
             account_name.clone(),
@@ -163,7 +164,7 @@ impl AzureProvider {
     pub fn with_sas_token(
         account_name: String,
         container: String,
-        sas_token: String,
+        sas_token: &str,
     ) -> MidgeResult<Self> {
         Self::with_sas_token_and_endpoint(account_name, container, sas_token, None)
     }
@@ -172,7 +173,7 @@ impl AzureProvider {
     pub fn with_sas_token_and_endpoint(
         account_name: String,
         container: String,
-        sas_token: String,
+        sas_token: &str,
         endpoint: Option<String>,
     ) -> MidgeResult<Self> {
         Self::with_sas_token_and_azure_endpoint(
@@ -186,14 +187,11 @@ impl AzureProvider {
     fn with_sas_token_and_azure_endpoint(
         account_name: String,
         container: String,
-        sas_token: String,
+        sas_token: &str,
         endpoint: Option<AzureEndpoint>,
     ) -> MidgeResult<Self> {
         // Normalise: strip leading '?' if present.
-        let token = sas_token
-            .strip_prefix('?')
-            .unwrap_or(&sas_token)
-            .to_string();
+        let token = sas_token.strip_prefix('?').unwrap_or(sas_token).to_string();
         let credential = AzureCredential::SasToken {
             token: token.clone(),
         };
@@ -242,10 +240,8 @@ impl AzureProvider {
             client_id: effective_client_id.clone(),
         };
 
-        let signer: Arc<dyn CloudSigner> = Arc::new(ManagedIdentitySigner::new(
-            account_name.clone(),
-            effective_client_id,
-        )?);
+        let signer: Arc<dyn CloudSigner> =
+            Arc::new(ManagedIdentitySigner::new(effective_client_id));
 
         let executor = CloudExecutor::new(Some(signer))?;
         let backend = Arc::new(AzureBackend::new(
@@ -267,7 +263,7 @@ impl AzureProvider {
     /// Legacy constructor — defaults to shared key with an empty key.
     /// Callers should prefer `with_shared_key` or `with_sas_token`.
     pub fn new(account_name: String, container: String) -> MidgeResult<Self> {
-        Self::with_shared_key(account_name, container, String::new())
+        Self::with_shared_key(account_name, container, "")
     }
 
     /// Create provider with automatic credential discovery from environment.
@@ -294,17 +290,17 @@ impl AzureProvider {
     ) -> MidgeResult<Self> {
         // Try connection string first
         if let Ok(conn_str) = std::env::var("AZURE_STORAGE_CONNECTION_STRING") {
-            return Self::from_connection_string_and_endpoint(conn_str, container, endpoint);
+            return Self::from_connection_string_and_endpoint(&conn_str, container, endpoint);
         }
 
         // Try explicit storage key
         if let Ok(key) = std::env::var("AZURE_STORAGE_KEY") {
-            return Self::with_shared_key_and_endpoint(account_name, container, key, endpoint);
+            return Self::with_shared_key_and_endpoint(account_name, container, &key, endpoint);
         }
 
         // Try SAS token
         if let Ok(sas) = std::env::var("AZURE_STORAGE_SAS_TOKEN") {
-            return Self::with_sas_token_and_endpoint(account_name, container, sas, endpoint);
+            return Self::with_sas_token_and_endpoint(account_name, container, &sas, endpoint);
         }
 
         if endpoint.is_some() {
@@ -323,11 +319,11 @@ impl AzureProvider {
     /// Parses connection strings in the format:
     /// `DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=...`
     pub fn from_connection_string_and_endpoint(
-        conn_str: String,
+        conn_str: &str,
         container: String,
         endpoint: Option<String>,
     ) -> MidgeResult<Self> {
-        let parts = AzureConnectionString::parse(&conn_str);
+        let parts = AzureConnectionString::parse(conn_str);
 
         let account = parts
             .account_name
@@ -344,7 +340,7 @@ impl AzureProvider {
             return Self::with_shared_key_and_azure_endpoint(
                 account,
                 container,
-                key,
+                &key,
                 resolved_endpoint,
             );
         }
@@ -353,7 +349,7 @@ impl AzureProvider {
             return Self::with_sas_token_and_azure_endpoint(
                 account,
                 container,
-                sas,
+                &sas,
                 resolved_endpoint,
             );
         }
@@ -613,7 +609,7 @@ impl AzureBackend {
         }
     }
 
-    fn canonical_key(&self, key: &str) -> String {
+    fn canonical_key(key: &str) -> String {
         key.split('/')
             .map(|seg| utf8_percent_encode(seg, ENCODE_SET).to_string())
             .collect::<Vec<_>>()
@@ -622,7 +618,7 @@ impl AzureBackend {
 
     /// Object URL, with optional SAS token.
     fn object_url(&self, key: &str) -> String {
-        let base = format!("{}/{}", self.base_url(), self.canonical_key(key));
+        let base = format!("{}/{}", self.base_url(), Self::canonical_key(key));
         match &self.sas_token {
             Some(tok) => format!("{base}?{tok}"),
             None => base,
@@ -884,23 +880,23 @@ struct SharedKeySigner {
 }
 
 impl SharedKeySigner {
-    fn new(account_name: String, account_key_base64: String) -> MidgeResult<Self> {
+    fn new(account_name: String, account_key_base64: &str) -> Self {
         Self::new_with_emulator_compat(account_name, account_key_base64, false)
     }
 
     fn new_with_emulator_compat(
         account_name: String,
-        account_key_base64: String,
+        account_key_base64: &str,
         emulator_compat: bool,
-    ) -> MidgeResult<Self> {
+    ) -> Self {
         let decoded_key = BASE64
-            .decode(&account_key_base64)
+            .decode(account_key_base64)
             .unwrap_or_else(|_| account_key_base64.as_bytes().to_vec());
-        Ok(Self {
+        Self {
             account_name,
             decoded_key,
             emulator_compat,
-        })
+        }
     }
 
     /// Build the string-to-sign per Azure Shared Key for Blob/Queue.
@@ -951,7 +947,10 @@ impl SharedKeySigner {
             .map(|(n, v)| (n.to_lowercase(), v.trim().to_string()))
             .collect();
         x_ms.sort_by(|a, b| a.0.cmp(&b.0));
-        let canonical_headers: String = x_ms.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
+        let canonical_headers = x_ms.iter().fold(String::new(), |mut output, (k, v)| {
+            let _ = writeln!(output, "{k}:{v}");
+            output
+        });
 
         // Canonicalized resource: /{account}/{path}?{sorted-query-params}
         let path = url.path();
@@ -962,7 +961,7 @@ impl SharedKeySigner {
             .collect();
         query_pairs.sort();
         for (k, v) in &query_pairs {
-            canonical_resource.push_str(&format!("\n{k}:{v}"));
+            let _ = write!(canonical_resource, "\n{k}:{v}");
         }
 
         if self.emulator_compat {
@@ -1316,7 +1315,6 @@ fn decode_xml_entities(value: &str) -> String {
 /// - Multiple IMDS endpoints (VM, App Service, Container Apps)
 /// - Token caching and automatic refresh
 struct ManagedIdentitySigner {
-    account_name: String,
     client_id: Option<String>,
     /// Cached token with expiry tracking
     token_cache: Arc<Mutex<Option<CachedToken>>>,
@@ -1325,18 +1323,17 @@ struct ManagedIdentitySigner {
 }
 
 impl ManagedIdentitySigner {
-    fn new(account_name: String, client_id: Option<String>) -> MidgeResult<Self> {
+    fn new(client_id: Option<String>) -> Self {
         // Determine IMDS endpoint from environment
         let imds_endpoint = std::env::var("IDENTITY_ENDPOINT")
             .or_else(|_| std::env::var("MSI_ENDPOINT"))
             .unwrap_or_else(|_| "http://169.254.169.254/metadata/identity/oauth2/token".into());
 
-        Ok(Self {
-            account_name,
+        Self {
             client_id,
             token_cache: Arc::new(Mutex::new(None)),
             imds_endpoint,
-        })
+        }
     }
 
     /// Fetch a fresh OAuth token from Azure IMDS.
@@ -1349,7 +1346,7 @@ impl ManagedIdentitySigner {
 
         // Add client_id for user-assigned identity
         if let Some(ref client_id) = self.client_id {
-            url.push_str(&format!("&client_id={client_id}"));
+            let _ = write!(url, "&client_id={client_id}");
         }
 
         // Make synchronous HTTP request to IMDS
@@ -1559,7 +1556,7 @@ mod tests {
         let key = "YWNjb3VudGtleTEyMw==";
 
         // Act
-        let provider = AzureProvider::with_shared_key(account.into(), container.into(), key.into())
+        let provider = AzureProvider::with_shared_key(account.into(), container.into(), key)
             .expect("should create provider with shared key");
 
         // Assert
@@ -1579,9 +1576,8 @@ mod tests {
         let sas_token = "sv=2021-06-08&ss=b&srt=sco";
 
         // Act
-        let provider =
-            AzureProvider::with_sas_token(account.into(), container.into(), sas_token.into())
-                .expect("should create provider with sas token");
+        let provider = AzureProvider::with_sas_token(account.into(), container.into(), sas_token)
+            .expect("should create provider with sas token");
 
         // Assert
         assert_eq!(provider.account_name(), "myaccount");
@@ -1598,7 +1594,7 @@ mod tests {
 
         // Act
         let provider =
-            AzureProvider::with_sas_token("account".into(), "container".into(), sas_token.into())
+            AzureProvider::with_sas_token("account".into(), "container".into(), sas_token)
                 .expect("should create provider with normalized sas token");
 
         // Assert
@@ -1618,7 +1614,7 @@ mod tests {
 
         // Act
         let provider =
-            AzureProvider::with_sas_token("account".into(), "container".into(), sas_token.into())
+            AzureProvider::with_sas_token("account".into(), "container".into(), sas_token)
                 .expect("should create provider with sas token without question mark");
 
         // Assert
@@ -1697,8 +1693,8 @@ mod tests {
         let (a2, c2, k2) = ("a2", "c2", "YTIta2V5");
 
         // Act
-        let p1 = AzureProvider::with_shared_key(a1.into(), c1.into(), k1.into());
-        let p2 = AzureProvider::with_shared_key(a2.into(), c2.into(), k2.into());
+        let p1 = AzureProvider::with_shared_key(a1.into(), c1.into(), k1);
+        let p2 = AzureProvider::with_shared_key(a2.into(), c2.into(), k2);
         let p1 = p1.expect("should create first provider");
         let p2 = p2.expect("should create second provider");
 
@@ -1857,8 +1853,7 @@ mod tests {
     #[test]
     fn should_parse_blob_endpoint_connection_string() {
         let provider = AzureProvider::from_connection_string_and_endpoint(
-            "AccountName=myaccount;AccountKey=dGVzdA==;BlobEndpoint=https://myaccount.blob.core.usgovcloudapi.net"
-                .to_string(),
+            "AccountName=myaccount;AccountKey=dGVzdA==;BlobEndpoint=https://myaccount.blob.core.usgovcloudapi.net",
             "container".to_string(),
             None,
         )
@@ -1992,8 +1987,8 @@ mod tests {
         // Arrange
         let signer = SharedKeySigner::new(
             "devstoreaccount1".into(),
-            "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==".into(),
-        ).expect("Failed to create signer");
+            "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==",
+        );
         let mut request = CloudRequest::new(
             Method::PUT,
             "https://devstoreaccount1.blob.core.windows.net/mycontainer/myblob".into(),
@@ -2014,8 +2009,7 @@ mod tests {
     #[test]
     fn should_include_xms_date_header_when_signing() {
         // Arrange
-        let signer = SharedKeySigner::new("acct".into(), "dGVzdA==".into())
-            .expect("Failed to create signer");
+        let signer = SharedKeySigner::new("acct".into(), "dGVzdA==");
         let mut request = CloudRequest::new(
             Method::GET,
             "https://acct.blob.core.windows.net/ctr/blob".into(),
@@ -2032,8 +2026,7 @@ mod tests {
     #[test]
     fn should_include_xms_version_header_when_signing() {
         // Arrange
-        let signer = SharedKeySigner::new("acct".into(), "dGVzdA==".into())
-            .expect("Failed to create signer");
+        let signer = SharedKeySigner::new("acct".into(), "dGVzdA==");
         let mut request = CloudRequest::new(
             Method::GET,
             "https://acct.blob.core.windows.net/ctr/blob".into(),

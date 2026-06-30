@@ -32,7 +32,7 @@ fn resolve_azure(provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn CloudBac
             super::azure::AzureProvider::with_shared_key_and_endpoint(
                 account.clone(),
                 container.clone(),
-                account_key.clone(),
+                account_key,
                 endpoint.clone(),
             )?
         }
@@ -40,13 +40,13 @@ fn resolve_azure(provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn CloudBac
             super::azure::AzureProvider::with_sas_token_and_endpoint(
                 account.clone(),
                 container.clone(),
-                token.clone(),
+                token,
                 endpoint.clone(),
             )?
         }
         AzureCredentialSource::ConnectionString { connection_string } => {
             super::azure::AzureProvider::from_connection_string_and_endpoint(
-                connection_string.clone(),
+                connection_string,
                 container.clone(),
                 endpoint.clone(),
             )?

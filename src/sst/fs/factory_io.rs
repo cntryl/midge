@@ -115,9 +115,8 @@ impl InMemorySstWriter {
     fn serialize_index(index_entries: &[(Vec<u8>, BlockHandle)]) -> Vec<u8> {
         let mut index_bytes = Vec::new();
         for (key, handle) in index_entries {
-            index_bytes.extend_from_slice(
-                &u32::try_from(key.len()).unwrap_or(u32::MAX).to_le_bytes(),
-            );
+            index_bytes
+                .extend_from_slice(&u32::try_from(key.len()).unwrap_or(u32::MAX).to_le_bytes());
             index_bytes.extend_from_slice(key);
             index_bytes.extend_from_slice(&handle.offset.to_le_bytes());
             index_bytes.extend_from_slice(&handle.size.to_le_bytes());
