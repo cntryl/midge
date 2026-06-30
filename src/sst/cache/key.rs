@@ -11,6 +11,7 @@
 //! - Data blocks: Admission control, evictable
 
 use std::hash::{Hash, Hasher};
+use std::convert::TryFrom;
 
 /// Type of cached block
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -67,13 +68,12 @@ impl CacheKey {
     }
 
     /// Get the shard index for this key (`0..num_shards`)
-    #[inline(always)]
     #[must_use]
     pub fn shard_index(&self, num_shards: usize) -> usize {
         // Use XOR combination of both fields for better distribution
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.hash(&mut hasher);
-        (hasher.finish() as usize) % num_shards
+        usize::try_from(hasher.finish()).unwrap_or(0) % num_shards
     }
 }
 

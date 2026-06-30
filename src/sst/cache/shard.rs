@@ -8,6 +8,7 @@ use crate::sst::cache::value::CacheValue;
 use bytes::Bytes;
 use crossbeam_channel::{bounded, Sender};
 use dashmap::DashMap;
+use std::convert::TryFrom;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(test)]
@@ -151,7 +152,7 @@ impl CacheShard {
             if let Some(t) = crate::telemetry::Telemetry::global() {
                 t.metrics().record_cache_inline_fallback();
             }
-            self.put_inline(key, value);
+            self.put_inline(key, &value);
             return true;
         }
 
@@ -168,7 +169,7 @@ impl CacheShard {
         }) {
             // If channel is unavailable/disconnected, fall back to inline admission
             self.admission_inline.store(true, Ordering::Relaxed);
-            self.put_inline(key, value);
+            self.put_inline(key, &value);
         }
         true
     }
@@ -178,7 +179,7 @@ impl CacheShard {
     /// Optimized for constrained environments where background worker thread
     /// cannot spawn. Uses fast capacity check and adaptive eviction to minimize
     /// lock contention on the critical path.
-    fn put_inline(&self, key: CacheKey, value: Bytes) {
+    fn put_inline(&self, key: CacheKey, value: &Bytes) {
         // Track access for admission control
         self.record_access_for_admission(&key);
 
@@ -189,7 +190,7 @@ impl CacheShard {
 
         // Wrap in CacheValue
         let cache_value = CacheValue::new(value.clone());
-        let new_size = value.len() as u64;
+        let new_size = u64::try_from(value.len()).unwrap_or(u64::MAX);
 
         // Fast capacity check: if we have plenty of space, skip eviction logic
         let current_size = self.metrics.memory_bytes();
@@ -258,14 +259,12 @@ impl CacheShard {
     }
 
     /// Record access for admission control
-    #[inline(always)]
     fn record_access_for_admission(&self, key: &CacheKey) {
         self.admission
             .record_access(key.sst_id.to_le_bytes().as_ref());
     }
 
     /// Check if a key should be admitted based on type-aware policy
-    #[inline(always)]
     fn should_admit(&self, key: &CacheKey) -> bool {
         self.admission.should_admit(key)
     }
@@ -310,11 +309,11 @@ impl CacheShard {
 
             // Try to evict data blocks first (protect index/filter)
             if let Some(evicted) = self.try_evict_victim(&[BlockType::Index, BlockType::Filter]) {
-                self.update_metrics_after_eviction(evicted);
+                self.update_metrics_after_eviction(&evicted);
             } else if self.is_severely_over_capacity() {
                 // Emergency: Cache is severely over capacity, evict anything
                 if let Some(evicted) = self.try_evict_victim(&[]) {
-                    self.update_metrics_after_eviction(evicted);
+                    self.update_metrics_after_eviction(&evicted);
                 } else {
                     break; // Can't evict more
                 }
@@ -372,15 +371,17 @@ impl CacheShard {
     }
 
     /// Update metrics after eviction
-    fn update_metrics_after_eviction(&self, evicted: CacheValue) {
-        self.metrics.remove_memory(evicted.size_bytes() as u64);
+    fn update_metrics_after_eviction(&self, evicted: &CacheValue) {
+        self.metrics
+            .remove_memory(u64::try_from(evicted.size_bytes()).unwrap_or(u64::MAX));
         self.metrics.record_eviction();
     }
 
     /// Remove a key from the cache
     pub fn remove(&self, key: &CacheKey) -> Option<CacheValue> {
         if let Some((_, value)) = self.entries.remove(key) {
-            self.metrics.remove_memory(value.size_bytes() as u64);
+            self.metrics
+                .remove_memory(u64::try_from(value.size_bytes()).unwrap_or(u64::MAX));
             self.policy.on_remove(*key);
             Some(value)
         } else {

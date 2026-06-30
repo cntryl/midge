@@ -3,6 +3,7 @@
 use bytes::Bytes;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::convert::TryFrom;
 
 /// A cached block value with metadata
 #[derive(Clone, Debug)]
@@ -18,12 +19,14 @@ pub struct CacheValue {
 impl CacheValue {
     /// Create a new cached value
     pub fn new(data: Bytes) -> Self {
+        let inserted_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let inserted_at = u64::try_from(inserted_at).unwrap_or(u64::MAX);
         Self {
             data: Arc::new(data),
-            inserted_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64,
+            inserted_at,
             access_count: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -35,7 +38,6 @@ impl CacheValue {
     }
 
     /// Increment access count and return the new value
-    #[inline(always)]
     #[must_use]
     pub fn increment_access(&self) -> u64 {
         self.access_count

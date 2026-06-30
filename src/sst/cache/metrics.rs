@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::convert::TryFrom;
 
 /// Cache performance metrics
 #[derive(Debug, Clone)]
@@ -81,11 +82,13 @@ impl CacheMetrics {
     /// Calculate hit rate as percentage (0.0-100.0)
     #[must_use]
     pub fn hit_rate(&self) -> f64 {
-        let hits = self.hit_count() as f64;
-        let total = (self.hit_count() + self.miss_count()) as f64;
-        if total == 0.0 {
+        let hits = self.hit_count();
+        let total = hits + self.miss_count();
+        if total == 0 {
             0.0
         } else {
+            let hits = f64::from(u32::try_from(hits).unwrap_or(u32::MAX));
+            let total = f64::from(u32::try_from(total).unwrap_or(u32::MAX));
             (hits / total) * 100.0
         }
     }
@@ -183,7 +186,7 @@ mod tests {
         let hit_rate = metrics.hit_rate();
 
         // Assert
-        assert_eq!(hit_rate, 0.0);
+        assert!(hit_rate.abs() < f64::EPSILON);
     }
 
     #[test]
@@ -197,7 +200,7 @@ mod tests {
         metrics.record_hit();
 
         // Assert
-        assert_eq!(metrics.hit_rate(), 100.0);
+        assert!((metrics.hit_rate() - 100.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -210,7 +213,7 @@ mod tests {
         metrics.record_miss();
 
         // Assert
-        assert_eq!(metrics.hit_rate(), 0.0);
+        assert!(metrics.hit_rate().abs() < f64::EPSILON);
     }
 
     #[test]

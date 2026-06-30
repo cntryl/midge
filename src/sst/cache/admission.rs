@@ -5,6 +5,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::convert::TryFrom;
 
 /// Probabilistic frequency counter for admission control
 ///
@@ -35,7 +36,6 @@ impl AdmissionCounter {
     }
 
     /// Hash a byte key to a cell index
-    #[inline(always)]
     fn hash_key(key: &[u8]) -> u64 {
         let mut h = 5381u64;
         for &b in key {
@@ -48,7 +48,8 @@ impl AdmissionCounter {
     ///
     /// Returns true if the key has been seen before (or randomly with threshold probability)
     pub fn estimate(&self, key: &[u8]) -> bool {
-        let cell_idx = (Self::hash_key(key) as usize) % self.cells.len();
+        let hash = Self::hash_key(key);
+        let cell_idx = usize::try_from(hash).unwrap_or(0) % self.cells.len();
         let counter = self.cells[cell_idx].load(Ordering::Relaxed);
 
         // Admit if counter is non-zero (key has been seen before)
@@ -75,7 +76,8 @@ impl AdmissionCounter {
 
     /// Record an access to a key
     pub fn record_access(&self, key: &[u8]) {
-        let cell_idx = (Self::hash_key(key) as usize) % self.cells.len();
+        let hash = Self::hash_key(key);
+        let cell_idx = usize::try_from(hash).unwrap_or(0) % self.cells.len();
         let old_count = self.cells[cell_idx].fetch_add(1, Ordering::Relaxed);
 
         // Periodically reset to avoid saturation

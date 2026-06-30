@@ -58,14 +58,12 @@ impl BlockCache {
     }
 
     /// Get the shard for a key
-    #[inline(always)]
     fn get_shard(&self, key: &CacheKey) -> &Arc<CacheShard> {
         let shard_idx = key.shard_index(self.num_shards);
         &self.shards[shard_idx]
     }
 
     /// Get a cached block
-    #[inline(always)]
     #[must_use]
     pub fn get(&self, key: &CacheKey) -> Option<CacheValue> {
         self.get_shard(key).get(key)
