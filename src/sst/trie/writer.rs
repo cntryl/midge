@@ -308,7 +308,9 @@ mod tests {
         // Act
         for i in 0..100 {
             let key = format!("key_{i:04}").into_bytes();
-            writer.add_block_key(&key, i as u32).unwrap();
+            writer
+                .add_block_key(&key, u32::try_from(i).unwrap_or(u32::MAX))
+                .unwrap();
         }
         let result = writer.finish();
 
@@ -319,7 +321,10 @@ mod tests {
         let reader = TrieReader::new(&data).unwrap();
         for i in 0..100 {
             let key = format!("key_{i:04}").into_bytes();
-            assert_eq!(reader.find_block(&key), Some(i as u32));
+            assert_eq!(
+                reader.find_block(&key),
+                Some(u32::try_from(i).unwrap_or(u32::MAX))
+            );
         }
     }
 

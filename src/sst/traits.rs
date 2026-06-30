@@ -263,9 +263,9 @@ mod tests {
             // Mock serialization: just concatenate all data
             let mut result = Vec::new();
             for (k, v) in self.data {
-                result.extend_from_slice(&[k.len() as u8]);
+                result.extend_from_slice(&[u8::try_from(k.len()).unwrap_or(u8::MAX)]);
                 result.extend_from_slice(&k);
-                result.extend_from_slice(&[v.len() as u8]);
+                result.extend_from_slice(&[u8::try_from(v.len()).unwrap_or(u8::MAX)]);
                 result.extend_from_slice(&v);
             }
             Ok(result)

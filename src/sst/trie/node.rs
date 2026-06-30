@@ -237,7 +237,7 @@ mod tests {
 
         // Act
         for (i, &b) in bytes.iter().enumerate() {
-            node.add_child(TrieEdge::new(b, i as u32));
+            node.add_child(TrieEdge::new(b, u32::try_from(i).unwrap_or(u32::MAX)));
         }
 
         // Assert

@@ -397,10 +397,10 @@ impl std::fmt::Debug for ReadSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReadSnapshot")
             .field("cf_id", &self.cf_id)
-            .field("memtable_present", &true)
+            .field("memtable", &"<memtable>")
             .field("immutable_memtables_len", &self.immutable_memtables.len())
             .field("sst_files_len", &self.sst_files.len())
-            .field("sst_fs_present", &true)
+            .field("sst_fs", &"<dyn Fs>")
             .field("sst_path_prefix", &self.sst_path_prefix)
             .field("memory_mode", &self.memory_mode)
             .finish()

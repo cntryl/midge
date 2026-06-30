@@ -8,6 +8,7 @@
 //! This reduces false positives by 40-60% vs uniform 1% everywhere.
 
 use std::fmt;
+use std::convert::TryFrom;
 
 /// Configuration for tiered bloom filters across LSM levels
 #[derive(Debug, Clone, Copy)]
@@ -99,7 +100,8 @@ impl TieredBloomConfig {
             let ln_p = fpr.ln();
             let ln_2_sq = 2.0_f64.ln().powi(2);
             let m = -(n as f64) * ln_p / ln_2_sq;
-            u64::try_from(m.ceil() as i128).unwrap_or(u64::MAX) as usize
+            usize::try_from(u64::try_from(m.ceil() as i128).unwrap_or(u64::MAX))
+                .unwrap_or(usize::MAX)
         };
 
         let uniform_total = calc_bits(l0_keys, uniform_fpr)
@@ -112,7 +114,9 @@ impl TieredBloomConfig {
         let saved = uniform_total.saturating_sub(tiered_total);
 
         let pct_saved = if uniform_total > 0 {
-            (saved as f64 / uniform_total as f64) * 100.0
+            (f64::from(u32::try_from(saved).unwrap_or(u32::MAX))
+                / f64::from(u32::try_from(uniform_total).unwrap_or(u32::MAX)))
+                * 100.0
         } else {
             0.0
         };
@@ -207,8 +211,8 @@ mod tests {
         let config = TieredBloomConfig::uniform(0.02);
 
         // Assert
-        assert_eq!(config.l0_fpr, 0.02);
-        assert_eq!(config.l1_fpr, 0.02);
-        assert_eq!(config.l2_plus_fpr, 0.02);
+        assert!((config.l0_fpr - 0.02).abs() < f64::EPSILON);
+        assert!((config.l1_fpr - 0.02).abs() < f64::EPSILON);
+        assert!((config.l2_plus_fpr - 0.02).abs() < f64::EPSILON);
     }
 }

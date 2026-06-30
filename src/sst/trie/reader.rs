@@ -339,7 +339,9 @@ mod tests {
         let mut builder = TrieBuilder::new();
         for i in 0..100 {
             let key = format!("key_{i:04}").into_bytes();
-            builder.add_key(&key, i as u32).unwrap();
+            builder
+                .add_key(&key, u32::try_from(i).unwrap_or(u32::MAX))
+                .unwrap();
         }
         builder.finish()
     }

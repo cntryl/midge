@@ -23,6 +23,7 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use bytes::{BufMut, BytesMut};
+use std::convert::TryFrom;
 
 /// Restart point interval for block building
 ///
@@ -98,9 +99,9 @@ fn encode_into(
     entry_type: EntryType,
 ) {
     let shared = shared_len;
-    let key_len = key_delta.len() as u16;
+    let key_len = u16::try_from(key_delta.len()).unwrap_or(u16::MAX);
     let val = value.unwrap_or(&[]);
-    let val_len = val.len() as u32;
+    let val_len = u32::try_from(val.len()).unwrap_or(u32::MAX);
 
     buf.put_u16_le(shared);
     buf.put_u16_le(key_len);
@@ -132,11 +133,19 @@ pub struct EntryView<'a> {
 /// Decode a single entry starting at `offset`.
 ///
 /// This is allocation-free and returns a borrowed view.
+///
+/// # Errors
+///
+/// Returns an error if the entry is truncated or malformed.
 pub fn decode(data: &[u8], offset: usize) -> MidgeResult<(EntryView<'_>, usize)> {
     decode_with_format(data, offset, crate::sst::types::SST_FORMAT_V1)
 }
 
 /// Decode a single entry using the SST format version.
+///
+/// # Errors
+///
+/// Returns an error if the entry is truncated, malformed, or the format version is unsupported.
 pub fn decode_with_format(
     data: &[u8],
     offset: usize,
@@ -341,10 +350,10 @@ pub fn encode_v2(
 
     let mut buf = BytesMut::with_capacity(cap);
     let val = value.unwrap_or(&[]);
-    let val_len = val.len() as u32;
+    let val_len = u32::try_from(val.len()).unwrap_or(u32::MAX);
 
     buf.put_u16_le(shared_len);
-    buf.put_u16_le(key_delta.len() as u16);
+    buf.put_u16_le(u16::try_from(key_delta.len()).unwrap_or(u16::MAX));
     buf.put_u32_le(val_len);
     buf.put_u64_le(seq);
     buf.put_u8(entry_type as u8);

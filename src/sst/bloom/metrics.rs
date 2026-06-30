@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::convert::TryFrom;
 
 /// Bloom filter effectiveness metrics
 #[derive(Debug, Clone)]
@@ -80,7 +81,8 @@ impl BloomMetrics {
             return 0.0;
         }
         let fps = self.false_positives();
-        fps as f64 / total as f64
+        f64::from(u32::try_from(fps).unwrap_or(u32::MAX))
+            / f64::from(u32::try_from(total).unwrap_or(u32::MAX))
     }
 
     /// Calculate negative rate (blocks avoided / total checks)
@@ -91,7 +93,8 @@ impl BloomMetrics {
             return 0.0;
         }
         let negs = self.negatives();
-        negs as f64 / total as f64
+        f64::from(u32::try_from(negs).unwrap_or(u32::MAX))
+            / f64::from(u32::try_from(total).unwrap_or(u32::MAX))
     }
 }
 
