@@ -146,13 +146,7 @@ pub trait CloudBackend: Send + Sync + 'static {
         callback: CloudCallback,
     );
     fn submit_get(&self, key: &str, callback: CloudCallback);
-    fn submit_get_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: Option<u64>,
-        callback: CloudCallback,
-    );
+    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback);
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback);
     fn submit_list(&self, prefix: &str, callback: CloudCallback);
     fn submit_head(&self, key: &str, callback: CloudCallback);
@@ -288,21 +282,15 @@ impl CloudBackend for MockCloudBackend {
         let _ = callback.send(event);
     }
 
-    fn submit_get_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: Option<u64>,
-        callback: CloudCallback,
-    ) {
+    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let key = key.to_string();
         let result = self
             .storage
             .lock()
             .get(&key)
             .map(|data| {
-                let end_idx = usize::try_from(end.unwrap_or(usize_to_u64(data.len())))
-                    .unwrap_or(usize::MAX);
+                let end_idx =
+                    usize::try_from(end.unwrap_or(usize_to_u64(data.len()))).unwrap_or(usize::MAX);
                 let start_idx = usize::try_from(start).unwrap_or(usize::MAX);
                 data[start_idx..end_idx].to_vec()
             })
@@ -485,8 +473,7 @@ impl CloudStorage {
         callback: CloudCallback,
     ) {
         let full_key = self.full_path(key);
-        self.backend
-            .submit_delete(&full_key, headers, callback);
+        self.backend.submit_delete(&full_key, headers, callback);
     }
 
     pub fn submit_list(&self, prefix: &str, callback: CloudCallback) {

@@ -1,9 +1,9 @@
 //! Cached block value with metadata
 
 use bytes::Bytes;
+use std::convert::TryFrom;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::convert::TryFrom;
 
 /// A cached block value with metadata
 #[derive(Clone, Debug)]

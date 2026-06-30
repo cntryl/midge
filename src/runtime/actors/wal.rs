@@ -490,7 +490,14 @@ impl WalActor {
         self.pending_sync_count += 1;
         self.bytes_since_sync += record_size;
 
-        self.apply_append_policy(state, sequence, cf_id, &key, value.as_ref(), record.expiration)?;
+        self.apply_append_policy(
+            state,
+            sequence,
+            cf_id,
+            &key,
+            value.as_ref(),
+            record.expiration,
+        )?;
 
         tracing::trace!(cf_id = cf_id, sequence, policy = ?self.durability_policy, "WAL append");
 
@@ -811,7 +818,9 @@ impl WalActor {
                 state.wal.local_durable_seq = last_sequence;
                 fail::fail_point!("midge::wal::txn_after_sync_before_ack");
             }
-            DurabilityPolicy::Batched | DurabilityPolicy::CloudAsync | DurabilityPolicy::BestEffort => {}
+            DurabilityPolicy::Batched
+            | DurabilityPolicy::CloudAsync
+            | DurabilityPolicy::BestEffort => {}
         }
 
         let apply_op_count = apply_ops.len();
@@ -1225,11 +1234,7 @@ impl WalActor {
     }
 
     /// Checks current in-memory view (active + immutable memtables) for existence
-    fn key_exists(
-        state: &RuntimeState,
-        cf_id: crate::types::ColumnFamilyId,
-        key: &[u8],
-    ) -> bool {
+    fn key_exists(state: &RuntimeState, cf_id: crate::types::ColumnFamilyId, key: &[u8]) -> bool {
         if let Some(cf_state) = state.column_families.get(&cf_id) {
             if let Ok(Some(_)) = cf_state.memtable.get(key) {
                 return true;

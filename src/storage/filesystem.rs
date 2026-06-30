@@ -649,11 +649,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_delete_with_headers(
-            "conditional.txt",
-            vec![("If-Match".into(), etag)],
-            tx,
-        );
+        fs.submit_delete_with_headers("conditional.txt", vec![("If-Match".into(), etag)], tx);
         let event = rx.recv().unwrap();
 
         // Assert

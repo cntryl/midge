@@ -143,9 +143,12 @@ impl EventLoop {
             self.wal_actor.set_durability(policy, batch_cfg);
         }
 
-        self.respond(update.request_id, RuntimeResponse::Ok {
-            request_id: update.request_id,
-        });
+        self.respond(
+            update.request_id,
+            RuntimeResponse::Ok {
+                request_id: update.request_id,
+            },
+        );
         HandleOutcome::Continue
     }
 

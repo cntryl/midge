@@ -735,13 +735,7 @@ impl CloudBackend for AzureBackend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    fn submit_get_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: Option<u64>,
-        callback: CloudCallback,
-    ) {
+    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let key = key.to_string();
         let url = self.object_url(&key);
         let range = match end {
@@ -772,12 +766,7 @@ impl CloudBackend for AzureBackend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
-    fn submit_delete(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: CloudCallback,
-    ) {
+    fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         let key = key.to_string();
         let url = self.object_url(&key);
         let mut request = CloudRequest::new(Method::DELETE, url);

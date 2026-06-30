@@ -219,16 +219,16 @@ impl EventLoop {
                 self.state.confirm_sequences(request_id);
             }
 
-                    match result {
-                        WriteResult::WalAppend { sequence, .. } => {
-                            self.respond(
-                                request_id,
-                                RuntimeResponse::WalAppended {
-                                    request_id,
-                                    sequence: *sequence,
-                                },
-                            );
-                        }
+            match result {
+                WriteResult::WalAppend { sequence, .. } => {
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::WalAppended {
+                            request_id,
+                            sequence: *sequence,
+                        },
+                    );
+                }
                 WriteResult::TransactionApplied {
                     last_sequence,
                     op_count,

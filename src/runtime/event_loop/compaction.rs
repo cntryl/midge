@@ -287,11 +287,9 @@ impl CompactionCoordinator {
         fail::fail_point!("slice6::after_manifest_persist_before_sst_gc");
 
         let hybrid_storage = event_loop.hybrid_storage.clone();
-        event_loop.gc_actor.delete_ssts(
-            &mut event_loop.state,
-            input_ssts,
-            hybrid_storage,
-        );
+        event_loop
+            .gc_actor
+            .delete_ssts(&mut event_loop.state, input_ssts, hybrid_storage);
         tracing::info!(
             removed_count = input_ssts.len(),
             "Submitted compaction input SSTs for GC"
@@ -370,13 +368,13 @@ impl CompactionCoordinator {
                 .check_compaction(&event_loop.state)
             {
                 if event_loop
-                        .compaction_actor
-                        .run_compaction(
-                            &mut event_loop.state,
+                    .compaction_actor
+                    .run_compaction(
+                        &mut event_loop.state,
                         &plan,
-                            event_loop.hybrid_storage.as_ref(),
-                            event_loop.worker_msg_tx.clone(),
-                        )
+                        event_loop.hybrid_storage.as_ref(),
+                        event_loop.worker_msg_tx.clone(),
+                    )
                     .is_ok()
                 {
                     emergent_scheduled = true;

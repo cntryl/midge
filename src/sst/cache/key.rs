@@ -10,8 +10,8 @@
 //! - Filter blocks: Always admitted, protected from eviction
 //! - Data blocks: Admission control, evictable
 
-use std::hash::{Hash, Hasher};
 use std::convert::TryFrom;
+use std::hash::{Hash, Hasher};
 
 /// Type of cached block
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]

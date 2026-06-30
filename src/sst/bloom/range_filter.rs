@@ -67,9 +67,17 @@ impl RangeFilter {
     #[must_use]
     pub fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
-        result.extend_from_slice(&u32::try_from(self.min_key.len()).unwrap_or(u32::MAX).to_le_bytes());
+        result.extend_from_slice(
+            &u32::try_from(self.min_key.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         result.extend_from_slice(&self.min_key);
-        result.extend_from_slice(&u32::try_from(self.max_key.len()).unwrap_or(u32::MAX).to_le_bytes());
+        result.extend_from_slice(
+            &u32::try_from(self.max_key.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         result.extend_from_slice(&self.max_key);
         result
     }

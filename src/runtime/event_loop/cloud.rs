@@ -23,7 +23,9 @@ impl CloudCoordinator {
         request_id: u64,
         segment_id: u64,
     ) -> HandleOutcome {
-        event_loop.cloud_actor.upload_wal(&mut event_loop.state, segment_id);
+        event_loop
+            .cloud_actor
+            .upload_wal(&mut event_loop.state, segment_id);
         event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
         HandleOutcome::Continue
     }

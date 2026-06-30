@@ -39,15 +39,15 @@ impl GcActor {
                     entry
                         .ok()
                         .and_then(|e| e.file_name().into_string().ok())
-                    .filter(|name| {
-                        let path = std::path::Path::new(&name);
-                        path.extension()
-                            .is_some_and(|ext| ext.eq_ignore_ascii_case("sst"))
-                            || path
-                                .file_name()
-                                .and_then(|file_name| file_name.to_str())
-                                .is_some_and(|file_name| file_name.ends_with(".sst.tmp"))
-                    })
+                        .filter(|name| {
+                            let path = std::path::Path::new(&name);
+                            path.extension()
+                                .is_some_and(|ext| ext.eq_ignore_ascii_case("sst"))
+                                || path
+                                    .file_name()
+                                    .and_then(|file_name| file_name.to_str())
+                                    .is_some_and(|file_name| file_name.ends_with(".sst.tmp"))
+                        })
                 })
                 .collect::<HashSet<_>>(),
             Err(e) => {
@@ -174,7 +174,6 @@ impl GcActor {
                 "GC deletion batch complete"
             );
         }
-
     }
 
     /// Get timestamp of last GC run

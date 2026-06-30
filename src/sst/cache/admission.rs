@@ -3,9 +3,9 @@
 //! Admission control uses a probabilistic counter to track the frequency
 //! of keys. Keys that fail the admission check are not added to the cache.
 
+use std::convert::TryFrom;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::convert::TryFrom;
 
 /// Probabilistic frequency counter for admission control
 ///

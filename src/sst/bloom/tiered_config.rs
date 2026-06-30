@@ -7,8 +7,8 @@
 //!
 //! This reduces false positives by 40-60% vs uniform 1% everywhere.
 
-use std::fmt;
 use std::convert::TryFrom;
+use std::fmt;
 
 /// Configuration for tiered bloom filters across LSM levels
 #[derive(Debug, Clone, Copy)]

@@ -37,8 +37,8 @@ impl ReadSnapshot {
     fn current_time_millis() -> u64 {
         u64::try_from(
             std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis()),
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
         )
         .unwrap_or(u64::MAX)
     }

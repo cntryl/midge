@@ -421,9 +421,13 @@ pub fn append_edit_batch_with_fs(
     // Layout: [type:u8][len:u32LE][payload][crc:u32LE]
     let mut buf = Vec::with_capacity(1 + 4 + payload.len() + 4);
     buf.push(BATCH_RECORD_TYPE);
-    buf.extend_from_slice(&u32::try_from(payload.len())
-        .map_err(|_| crate::common::MidgeError::Internal("journal payload too large".to_string()))?
-        .to_le_bytes());
+    buf.extend_from_slice(
+        &u32::try_from(payload.len())
+            .map_err(|_| {
+                crate::common::MidgeError::Internal("journal payload too large".to_string())
+            })?
+            .to_le_bytes(),
+    );
     buf.extend_from_slice(&payload);
     buf.extend_from_slice(&crc.to_le_bytes());
 

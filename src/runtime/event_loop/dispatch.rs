@@ -7,8 +7,7 @@ use super::{
     manifest::ManifestCoordinator,
     snapshot::SnapshotCoordinator,
     wal::{AppendRequest, ApplyTransactionRequest, WalCoordinator},
-    EventLoop,
-    HandleOutcome,
+    EventLoop, HandleOutcome,
 };
 use crate::runtime::RuntimeMsg;
 use crossbeam::channel::Receiver;

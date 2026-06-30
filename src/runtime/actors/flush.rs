@@ -288,13 +288,13 @@ impl FlushActor {
         let finish_ns = finish_start.elapsed().as_nanos();
 
         let add_duration_ms =
-            std::time::Duration::from_nanos(u64::try_from(add_ns).unwrap_or(u64::MAX)).as_secs_f64()
+            std::time::Duration::from_nanos(u64::try_from(add_ns).unwrap_or(u64::MAX))
+                .as_secs_f64()
                 * 1000.0;
-        let finish_duration_ms = std::time::Duration::from_nanos(
-            u64::try_from(finish_ns).unwrap_or(u64::MAX),
-        )
-        .as_secs_f64()
-            * 1000.0;
+        let finish_duration_ms =
+            std::time::Duration::from_nanos(u64::try_from(finish_ns).unwrap_or(u64::MAX))
+                .as_secs_f64()
+                * 1000.0;
         tracing::info!(path = ?path, added = added_count, add_duration_ms, finish_duration_ms, "memtable -> sst flush breakdown");
 
         let sst_bytes = std::fs::read(path)?;

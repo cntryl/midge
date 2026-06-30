@@ -1,8 +1,8 @@
 //! Bloom filter observability metrics
 
+use std::convert::TryFrom;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::convert::TryFrom;
 
 /// Bloom filter effectiveness metrics
 #[derive(Debug, Clone)]

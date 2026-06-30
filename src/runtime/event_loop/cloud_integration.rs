@@ -133,11 +133,7 @@ impl EventLoop {
         }
     }
 
-    fn handle_storage_event_cloud_ack(
-        &mut self,
-        segment_id: u64,
-        max_sequence: u64,
-    ) {
+    fn handle_storage_event_cloud_ack(&mut self, segment_id: u64, max_sequence: u64) {
         if let Err(error) = self.verify_remote_wal_segment_before_ack(segment_id, max_sequence) {
             self.handle_cloud_upload_failure(
                 segment_id,
@@ -166,7 +162,8 @@ impl EventLoop {
             }
         };
 
-        let Some((durable_segment_id, durable_max_sequence)) = ready_segments.last().copied() else {
+        let Some((durable_segment_id, durable_max_sequence)) = ready_segments.last().copied()
+        else {
             tracing::debug!(
                 segment_id,
                 max_sequence,
@@ -175,10 +172,11 @@ impl EventLoop {
             return;
         };
 
-        match self
-            .wal_actor
-            .handle_cloud_upload_complete(&mut self.state, durable_segment_id, durable_max_sequence)
-        {
+        match self.wal_actor.handle_cloud_upload_complete(
+            &mut self.state,
+            durable_segment_id,
+            durable_max_sequence,
+        ) {
             Ok(()) => {
                 for (ready_segment_id, _) in &ready_segments {
                     self.remove_cloud_durable_local_wal_segment(*ready_segment_id);
@@ -251,8 +249,7 @@ impl EventLoop {
         let failed_max_seq = self.durability.take_cloud_segment_max_sequence(segment_id);
 
         // Let WAL actor handle its internal failure handling and drop pending writes.
-        self.wal_actor
-            .handle_cloud_upload_failed(segment_id, error);
+        self.wal_actor.handle_cloud_upload_failed(segment_id, error);
 
         // If we know the max_sequence for the failed segment, invalidate idempotency
         // allocations up to that sequence so retries will allocate fresh sequences.
@@ -1124,51 +1121,51 @@ mod tests {
         }
     }
 
-impl crate::storage::cloud::CloudBackend for AdvanceManifestBeforeHeadBackend {
-    fn submit_put(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.inner.submit_put(key, data, headers, callback);
-    }
-
-    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_get(key, callback);
-    }
-
-    fn submit_get_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: Option<u64>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.inner.submit_get_range(key, start, end, callback);
+    impl crate::storage::cloud::CloudBackend for AdvanceManifestBeforeHeadBackend {
+        fn submit_put(
+            &self,
+            key: &str,
+            data: Vec<u8>,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            self.inner.submit_put(key, data, headers, callback);
         }
 
-    fn submit_delete(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.inner.submit_delete(key, headers, callback);
-    }
+        fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+            self.inner.submit_get(key, callback);
+        }
 
-    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_list(prefix, callback);
-    }
+        fn submit_get_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: Option<u64>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            self.inner.submit_get_range(key, start, end, callback);
+        }
 
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        if key.ends_with("metadata/manifest.json")
-            && !self.advanced.swap(true, Ordering::SeqCst)
-        {
-            let (tx, rx) = std::sync::mpsc::channel();
-            self.inner
-                .submit_put(key, self.advanced_manifest.clone(), vec![], tx);
+        fn submit_delete(
+            &self,
+            key: &str,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            self.inner.submit_delete(key, headers, callback);
+        }
+
+        fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+            self.inner.submit_list(prefix, callback);
+        }
+
+        fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+            if key.ends_with("metadata/manifest.json")
+                && !self.advanced.swap(true, Ordering::SeqCst)
+            {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.inner
+                    .submit_put(key, self.advanced_manifest.clone(), vec![], tx);
                 match rx.recv_timeout(Duration::from_secs(1)) {
                     Ok(crate::storage::cloud::CloudEvent::Put {
                         result: crate::storage::cloud::CloudOutcome::Ok(()),

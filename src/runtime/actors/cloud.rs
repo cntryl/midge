@@ -64,7 +64,6 @@ impl CloudActor {
         } else {
             tracing::debug!(sst_name, "No hybrid storage available for SST upload");
         }
-
     }
 
     /// Upload a WAL segment to cloud storage
@@ -104,7 +103,6 @@ impl CloudActor {
             cloud_key = %cloud_key,
             "Cloud WAL upload started"
         );
-
     }
 
     /// Handle upload completion

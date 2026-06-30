@@ -625,7 +625,9 @@ impl EventLoop {
             if sequence > self.state.manifest.last_persisted_sequence {
                 self.state.manifest.last_persisted_sequence = sequence;
             }
-            let manifest_persisted = match crate::runtime::actors::ManifestActor::persist(&self.state) {
+            let manifest_persisted = match crate::runtime::actors::ManifestActor::persist(
+                &self.state,
+            ) {
                 Ok(()) => true,
                 Err(error) => {
                     self.state.mark_persistence_anomaly();
@@ -1244,7 +1246,6 @@ pub(super) mod tests {
             0,
             "disabled post-flush scheduling should not start compaction during ingest"
         );
-
     }
 
     #[test]

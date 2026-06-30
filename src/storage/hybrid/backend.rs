@@ -574,7 +574,8 @@ impl HybridStorage {
     }
 
     fn log_wal_upload_start(upload: &UploadState, with_worker: bool) {
-        if std::env::var_os("MIDGE_TRACE_CLOUD_ASYNC").is_some() && upload.segment_id.is_multiple_of(1000)
+        if std::env::var_os("MIDGE_TRACE_CLOUD_ASYNC").is_some()
+            && upload.segment_id.is_multiple_of(1000)
         {
             if with_worker {
                 eprintln!(
@@ -602,9 +603,8 @@ impl HybridStorage {
     }
 
     fn read_wal_file(upload: &UploadState) -> Result<Vec<u8>, String> {
-        std::fs::read(&upload.local_path).map_err(|error| {
-            format!("read {}: {}", upload.local_path.display(), error)
-        })
+        std::fs::read(&upload.local_path)
+            .map_err(|error| format!("read {}: {}", upload.local_path.display(), error))
     }
 
     fn emit_wal_upload_failure(
@@ -693,7 +693,12 @@ impl HybridStorage {
                 Self::emit_wal_upload_failure(upload, error, event_queue, external_event_tx);
             }
             _ => {
-                Self::emit_wal_upload_failure(upload, "Channel error".to_string(), event_queue, external_event_tx);
+                Self::emit_wal_upload_failure(
+                    upload,
+                    "Channel error".to_string(),
+                    event_queue,
+                    external_event_tx,
+                );
             }
         }
     }
@@ -866,9 +871,9 @@ impl HybridStorage {
         if let Err(error) = std::thread::Builder::new()
             .name("midge-sst-cache-gc".to_string())
             .spawn(move || {
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    local.submit_delete(&key, tx);
-                    match rx.recv_timeout(Duration::from_secs(30)) {
+                let (tx, rx) = std::sync::mpsc::channel();
+                local.submit_delete(&key, tx);
+                match rx.recv_timeout(Duration::from_secs(30)) {
                     Ok(StorageEvent::DeleteComplete {
                         result: StorageOutcome::Ok(()),
                         ..
@@ -1465,12 +1470,8 @@ impl HybridStorage {
                     &guard,
                 ) {
                     Ok(()) => {
-                let (tx, rx) = std::sync::mpsc::channel();
-                            cloud.submit_delete_with_headers(
-                            &key,
-                            vec![("If-Match".into(), etag)],
-                            tx,
-                        );
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        cloud.submit_delete_with_headers(&key, vec![("If-Match".into(), etag)], tx);
 
                         match rx.recv_timeout(Duration::from_secs(30)) {
                             Ok(StorageEvent::DeleteComplete { result, .. }) => result,

@@ -75,7 +75,6 @@ impl EvictionActor {
 
         // Note: The disk state in SBA would be updated separately via LocalSSTPurged event
         // when the actual file deletion is confirmed at the filesystem level
-
     }
 
     /// Get the number of evictions processed

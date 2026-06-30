@@ -192,8 +192,12 @@ impl CompactionActor {
         plan: &crate::compaction::CompactionPlan,
         sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<Vec<String>> {
-        let output_ssts =
-            crate::compaction::execute_compaction(plan, self.sst_factory.as_ref(), &state.sst_dir, None)?;
+        let output_ssts = crate::compaction::execute_compaction(
+            plan,
+            self.sst_factory.as_ref(),
+            &state.sst_dir,
+            None,
+        )?;
 
         let output_sizes: Vec<u64> = output_ssts
             .iter()
@@ -232,8 +236,7 @@ impl CompactionActor {
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let my_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
-                let abort_check =
-                    || epoch.load(std::sync::atomic::Ordering::SeqCst) != my_epoch;
+                let abort_check = || epoch.load(std::sync::atomic::Ordering::SeqCst) != my_epoch;
                 let result = crate::compaction::execute_compaction(
                     &plan_clone,
                     sst_factory.as_ref(),

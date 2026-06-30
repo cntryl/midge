@@ -367,9 +367,10 @@ impl SkipList {
         // SAFETY: succs[0] was populated by find() under the epoch guard.
         if let Some(curr) = unsafe { succs[0].as_ref() } {
             if curr.key == key
-                && Self::try_append_version(curr, seq, value.as_ref(), exp, op, guard) {
-                    return;
-                }
+                && Self::try_append_version(curr, seq, value.as_ref(), exp, op, guard)
+            {
+                return;
+            }
         }
 
         // Case 2: Key absent – insert new node at a random level.
@@ -388,9 +389,10 @@ impl SkipList {
             // SAFETY: succs[0] was refreshed by find() under this guard.
             if let Some(curr) = unsafe { succs[0].as_ref() } {
                 if curr.key == key
-                    && Self::try_append_version(curr, seq, value.as_ref(), exp, op, guard) {
-                        return;
-                    }
+                    && Self::try_append_version(curr, seq, value.as_ref(), exp, op, guard)
+                {
+                    return;
+                }
             }
 
             // SAFETY: preds[0] was set by find() and is a valid pinned pointer.
@@ -415,15 +417,8 @@ impl SkipList {
                 continue;
             }
 
-            if level0_pred
-                .forward[0]
-                .compare_exchange(
-                level0_succ,
-                new_ptr,
-                AO::AcqRel,
-                AO::Acquire,
-                guard,
-            )
+            if level0_pred.forward[0]
+                .compare_exchange(level0_succ, new_ptr, AO::AcqRel, AO::Acquire, guard)
                 .is_ok()
             {
                 break new_ptr;

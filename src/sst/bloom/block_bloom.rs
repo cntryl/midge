@@ -52,7 +52,11 @@ impl BlockBloomFilter {
         let mut result = Vec::new();
 
         // Write header: [num_blocks: u32]
-        result.extend_from_slice(&u32::try_from(self.num_blocks).unwrap_or(u32::MAX).to_le_bytes());
+        result.extend_from_slice(
+            &u32::try_from(self.num_blocks)
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
 
         // Write offsets array: [offset0, offset1, ..., offsetN]
         for &offset in &self.offsets {

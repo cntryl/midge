@@ -40,11 +40,8 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     {
         let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
         let cf_id = cf.id();
-        let _warmup_ops = ycsb::run_multi_client_for_duration(
-            &engine,
-            clients,
-            WARMUP,
-            |client_id, stop| {
+        let _warmup_ops =
+            ycsb::run_multi_client_for_duration(&engine, clients, WARMUP, |client_id, stop| {
                 let zipf = Arc::clone(&zipf);
                 move |e, _cf, op_index| {
                     let mut draw: u64 = 0;
@@ -68,8 +65,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                     })
                     .expect("commit");
                 }
-            },
-        );
+            });
     }
 
     // Flush to ensure warmup data is durable before measured phase
@@ -79,38 +75,33 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
         let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
         let write_opts = cntryl_midge::WriteOptions::buffered(); // Back to buffered for measured phase
-        ycsb::run_multi_client_for_duration(
-            &engine,
-            clients,
-            MEASURED,
-            |client_id, stop| {
-                let zipf = Arc::clone(&zipf);
-                move |e, cf, op_index| {
-                    let cf_id = cf.id();
-                    let mut draw: u64 = 0;
-                    let key_idx = zipf.next_from_u64(&mut || {
-                        let r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, draw);
-                        draw = draw.wrapping_add(1);
-                        r
-                    }) as u64;
-                    let k = ycsb::make_key(key_idx);
-                    let tx = e
-                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+        ycsb::run_multi_client_for_duration(&engine, clients, MEASURED, |client_id, stop| {
+            let zipf = Arc::clone(&zipf);
+            move |e, cf, op_index| {
+                let cf_id = cf.id();
+                let mut draw: u64 = 0;
+                let key_idx = zipf.next_from_u64(&mut || {
+                    let r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, draw);
+                    draw = draw.wrapping_add(1);
+                    r
+                }) as u64;
+                let k = ycsb::make_key(key_idx);
+                let tx = e
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                    .expect("measured begin");
+                let _old = tx.get(&k[..]).expect("measured get");
+                drop(tx);
+                let v = ycsb::make_value((op_index % 251) as u8);
+                ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
+                    let mut tx = e
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                         .expect("measured begin");
-                    let _old = tx.get(&k[..]).expect("measured get");
-                    drop(tx);
-                    let v = ycsb::make_value((op_index % 251) as u8);
-                    ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
-                        let mut tx = e
-                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                            .expect("measured begin");
-                        tx.put(k.to_vec(), v.clone(), None).expect("measured put");
-                        tx.commit(write_opts)
-                    })
-                    .expect("measured commit");
-                }
-            },
-        )
+                    tx.put(k.to_vec(), v.clone(), None).expect("measured put");
+                    tx.commit(write_opts)
+                })
+                .expect("measured commit");
+            }
+        })
     });
 
     ctx.set_elements(measured_ops);

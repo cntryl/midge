@@ -373,9 +373,8 @@ impl PrimaryLease for CloudStorageLease {
         let doc = LeaseDocument {
             holder_id: inner.holder_id.clone(),
             acquired_at: now.to_rfc3339(),
-            expires_at: (now
-                + chrono::Duration::seconds(Self::lease_ttl_seconds_i64(inner.ttl)))
-            .to_rfc3339(),
+            expires_at: (now + chrono::Duration::seconds(Self::lease_ttl_seconds_i64(inner.ttl)))
+                .to_rfc3339(),
         };
         let headers = match existing_head {
             Some(metadata) if !metadata.etag.is_empty() => {
