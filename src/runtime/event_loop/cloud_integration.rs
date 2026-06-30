@@ -24,7 +24,7 @@ impl EventLoop {
                 "CloudAsync requires HybridStorage".to_string(),
             ));
         };
-        if self.state.memory_mode || self.state.wal.pending_writes == 0 {
+        if self.state.is_memory_mode() || self.state.wal.pending_writes == 0 {
             return Ok(None);
         }
 
@@ -119,12 +119,12 @@ impl EventLoop {
             }
             crate::storage::StorageEvent::BackpressureOn => {
                 tracing::warn!("storage backpressure activated — pausing flushes");
-                self.state.write_stalled = true;
+                self.state.set_write_stalled(true);
             }
             crate::storage::StorageEvent::BackpressureOff => {
                 tracing::info!("storage backpressure released — resuming normal operation");
-                if self.state.write_stalled {
-                    self.state.write_stalled = false;
+                if self.state.write_stalled() {
+                    self.state.set_write_stalled(false);
                 }
                 self.wake_write_stall_waiters();
                 self.drain_auto_flush_memtables();
@@ -297,7 +297,7 @@ impl EventLoop {
             return;
         }
 
-        if self.state.memory_mode {
+        if self.state.is_memory_mode() {
             return;
         }
 
@@ -338,7 +338,7 @@ impl EventLoop {
     }
 
     pub(super) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
-        if !self.wal_actor.is_cloud_async() || self.state.memory_mode {
+        if !self.wal_actor.is_cloud_async() || self.state.is_memory_mode() {
             return;
         }
 
@@ -586,7 +586,7 @@ impl EventLoop {
     }
 
     fn remove_cloud_durable_local_wal_segment(&mut self, segment_id: u64) {
-        if self.state.memory_mode {
+        if self.state.is_memory_mode() {
             return;
         }
 
@@ -1615,7 +1615,7 @@ mod tests {
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
-        el.state.enable_compaction = false;
+        el.state.set_compaction_enabled(false);
 
         let input_sst = "compaction-input.sst";
         add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
@@ -1679,7 +1679,7 @@ mod tests {
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
-        el.state.enable_compaction = false;
+        el.state.set_compaction_enabled(false);
 
         let input_sst = "mirror-fail-input.sst";
         add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
@@ -1765,7 +1765,7 @@ mod tests {
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
-        el.state.enable_compaction = false;
+        el.state.set_compaction_enabled(false);
 
         let input_sst = "cloud-gc-input.sst";
         let input_bytes = valid_sst_bytes_for_test(b"obsolete", b"value", 10);
@@ -2731,7 +2731,7 @@ mod tests {
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
-        el.state.write_stalled = true;
+        el.state.set_write_stalled(true);
         el.state.memtable_flush_threshold = 1024;
         el.state.memtable_size_limit = 1024 * 1024;
         el.state.sequence = 1;
@@ -2750,7 +2750,7 @@ mod tests {
 
         el.handle_storage_event(crate::storage::StorageEvent::BackpressureOff);
 
-        assert!(!el.state.write_stalled);
+        assert!(!el.state.write_stalled());
         assert!(
             el.state.manifest.files.iter().any(|file| file.cf_id == 0),
             "backpressure release should retry the pending auto-flush"

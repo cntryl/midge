@@ -197,7 +197,7 @@ impl Metrics {
             idempotency_cache_hits: Arc::new(AtomicU64::new(0)),
             event_loop_wakes: Arc::new(AtomicU64::new(0)),
             event_loop_batch_total: Arc::new(AtomicU64::new(0)),
-            enabled: config.enabled && config.enable_metrics,
+            enabled: config.enabled && config.features.enable_metrics,
         }
     }
 

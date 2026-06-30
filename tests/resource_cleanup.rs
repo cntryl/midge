@@ -51,7 +51,7 @@ fn should_cleanup_cache_with_active_operations() {
         for i in 0..100 {
             let key = CacheKey::for_data(i, 0);
             let data = bytes::Bytes::from(vec![0u8; 100]);
-            let _ = cache_clone.put(key, data);
+            let _ = cache_clone.put(key, &data);
         }
     });
 

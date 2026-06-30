@@ -121,7 +121,7 @@ impl EventLoop {
             self.state.memtable_flush_threshold = th;
         }
         if let Some(ec) = update.enable_compaction {
-            self.state.enable_compaction = ec;
+            self.state.set_compaction_enabled(ec);
         }
         if let Some(trigger) = update.l0_compaction_trigger {
             self.compaction_actor.set_l0_file_count_threshold(trigger);
@@ -159,7 +159,7 @@ impl EventLoop {
                 request_id,
                 memtable_size_limit: self.state.memtable_size_limit,
                 memtable_flush_threshold: self.state.memtable_flush_threshold,
-                enable_compaction: self.state.enable_compaction,
+                enable_compaction: self.state.compaction_enabled(),
                 l0_compaction_trigger: self.compaction_actor.l0_file_count_threshold(),
                 wal_durability_policy: self.wal_actor.durability_policy(),
                 wal_batch_config: self.wal_actor.batch_config(),

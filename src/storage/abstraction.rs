@@ -160,11 +160,21 @@ impl std::error::Error for StorageError {
 /// This struct is `#[non_exhaustive]` so we can add fields without breaking callers.
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
+pub enum DirectorySupport {
+    #[default]
+    None,
+    ListOnly,
+    Syncable,
+}
+
+/// Capability discovery for `Storage`.
+///
+/// This struct is `#[non_exhaustive]` so we can add fields without breaking callers.
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct StorageCapabilities {
     /// Directory operations exist as distinct primitives.
-    pub supports_directories: bool,
-    /// `sync_dir()` is supported.
-    pub supports_dir_sync: bool,
+    pub directory_support: DirectorySupport,
     /// Backend can guarantee atomic rename within some scope (see `rename()` docs).
     pub supports_atomic_rename: bool,
     /// Backend supports an append primitive.
@@ -174,10 +184,17 @@ pub struct StorageCapabilities {
 /// Capability discovery for `StorageFile`.
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
+pub struct VectoredIoCapabilities {
+    pub read: bool,
+    pub write: bool,
+    pub append: bool,
+}
+
+/// Capability discovery for `StorageFile`.
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct FileCapabilities {
-    pub supports_readv_at: bool,
-    pub supports_writev_at: bool,
-    pub supports_appendv: bool,
+    pub vectored_io: VectoredIoCapabilities,
     pub supports_read_ranges: bool,
 }
 
@@ -192,11 +209,19 @@ pub enum OpenMode {
 /// Options for opening a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+pub enum OpenDisposition {
+    OpenExisting,
+    CreateIfMissing,
+    CreateNew,
+    TruncateExisting,
+}
+
+/// Options for opening a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OpenOptions {
     pub mode: OpenMode,
-    pub create: bool,
-    pub create_new: bool,
-    pub truncate: bool,
+    pub disposition: OpenDisposition,
     /// If true, open intends to use append operations.
     pub append: bool,
 }
@@ -205,9 +230,7 @@ impl Default for OpenOptions {
     fn default() -> Self {
         Self {
             mode: OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
+            disposition: OpenDisposition::OpenExisting,
             append: false,
         }
     }

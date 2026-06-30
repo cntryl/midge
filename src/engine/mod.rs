@@ -313,8 +313,8 @@ impl Engine {
     ///
     /// Returns an error when the engine cannot initialize its storage, runtime,
     /// manifest, or recovery state.
-    pub fn open(opts: &OpenOptions) -> MidgeResult<Self> {
-        startup::EngineStartup::open(opts)
+    pub fn open(opts: OpenOptions) -> MidgeResult<Self> {
+        startup::EngineStartup::open_owned(opts)
     }
 
     /// Get an existing column family by name.
@@ -364,9 +364,9 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error when engine startup fails for the derived open options.
-    pub fn open_with_options(opts: &crate::testkit::MidgeOptions) -> MidgeResult<Self> {
+    pub fn open_with_options(opts: crate::testkit::MidgeOptions) -> MidgeResult<Self> {
         let open_opts = opts.to_open_options();
-        Self::open(&open_opts)
+        Self::open(open_opts)
     }
 
     /// Fetch the current runtime configuration snapshot for diagnostics or restoration.
@@ -1116,7 +1116,7 @@ mod tests {
             .build();
         let expected_trigger = opts.l0_compaction_trigger();
 
-        let engine = Engine::open(&opts).expect("open engine");
+        let engine = Engine::open(opts).expect("open engine");
         let runtime_config = engine
             .get_runtime_config()
             .expect("read runtime configuration");
@@ -1245,7 +1245,7 @@ mod tests {
         };
 
         // Act
-        let engine = Engine::open_with_options(&opts).expect("open memory engine");
+        let engine = Engine::open_with_options(opts).expect("open memory engine");
         let cf = engine
             .create_column_family("test")
             .expect("create column family");
@@ -1935,7 +1935,7 @@ mod tests {
             "valid local SST cache must remain intact"
         );
         assert!(
-            state.persistence_anomaly_detected,
+            state.persistence_anomaly_detected(),
             "salvage should still surface the invalid cloud copy as a persistence anomaly"
         );
     }

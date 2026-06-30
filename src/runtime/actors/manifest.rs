@@ -24,7 +24,7 @@ impl ManifestActor {
     /// Add a new SST file to the manifest
     pub fn add_sst(&mut self, state: &mut RuntimeState, file_meta: FileMeta) -> MidgeResult<()> {
         // Validate SST file exists and is readable (defensive: avoid manifest pointing at corrupt file)
-        if !state.memory_mode {
+        if !state.is_memory_mode() {
             let sst_path = state.sst_dir.join(&file_meta.name);
             if !sst_path.exists() {
                 return Err(crate::common::MidgeError::Internal(format!(
@@ -43,7 +43,7 @@ impl ManifestActor {
         }
 
         // Append to manifest journal (durable edit log) - skip in memory mode
-        if !state.memory_mode {
+        if !state.is_memory_mode() {
             let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
                 name: file_meta.name.clone(),
                 level: file_meta.level,
@@ -165,7 +165,7 @@ impl ManifestActor {
     /// Persist manifest to disk
     pub fn persist(state: &RuntimeState) -> MidgeResult<()> {
         // Skip persistence in memory mode
-        if state.memory_mode {
+        if state.is_memory_mode() {
             tracing::debug!("Manifest: skipping persistence in memory mode");
             return Ok(());
         }
@@ -214,7 +214,7 @@ impl ManifestActor {
         let cf_id = state.manifest.create_column_family(name.clone());
 
         // Append create CF to journal (skip in memory mode)
-        if !state.memory_mode {
+        if !state.is_memory_mode() {
             let edit = crate::metadata::ManifestEdit::CreateColumnFamily {
                 id: cf_id,
                 name: name.clone(),
@@ -254,7 +254,7 @@ impl ManifestActor {
         }
 
         // Append drop CF edit to journal (skip in memory mode)
-        if !state.memory_mode {
+        if !state.is_memory_mode() {
             let edit = crate::metadata::ManifestEdit::DropColumnFamily { id: cf_id };
             crate::metadata::append_edit(&state.db_path, &edit)?;
         }

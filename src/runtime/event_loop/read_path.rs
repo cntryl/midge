@@ -38,7 +38,7 @@ impl EventLoop {
             sst_files,
             std::sync::Arc::clone(&self.state.fs),
             sst_path_prefix,
-            self.state.memory_mode,
+            self.state.is_memory_mode(),
         );
         snapshot.cf_id = cf_id;
         Some(snapshot)

@@ -125,7 +125,7 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<Self> {
         let wal_dir = state.wal_dir.clone();
         let sst_dir = state.sst_dir.clone();
-        let memory_mode = state.memory_mode;
+        let memory_mode = state.is_memory_mode();
         let initial_segment_id = state.wal.current_segment_id;
 
         let sst_factory = if memory_mode {
@@ -272,7 +272,7 @@ impl EventLoop {
                         cf_files,
                         Arc::clone(&self.state.fs),
                         sst_path_prefix,
-                        self.state.memory_mode,
+                        self.state.is_memory_mode(),
                     )),
                 },
             );
@@ -370,7 +370,7 @@ impl EventLoop {
     }
 
     fn schedule_compaction_after_flush_publication(&mut self, sst_name: &str) {
-        if !self.state.enable_compaction {
+        if !self.state.compaction_enabled() {
             return;
         }
 
@@ -592,7 +592,9 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<()> {
         match self.mirror_metadata_to_authoritative_cloud() {
             Ok(()) => Ok(()),
-            Err(error) if self.state.recovery_policy == crate::config::RecoveryPolicy::Salvage => {
+            Err(error)
+                if self.state.recovery_policy() == crate::config::RecoveryPolicy::Salvage =>
+            {
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(%error, context, "cloud metadata mirror failed during salvage-capable operation");
                 Ok(())
@@ -616,7 +618,7 @@ impl EventLoop {
         };
 
         let mut cloud_manifest_published = false;
-        if !self.state.memory_mode {
+        if !self.state.is_memory_mode() {
             self.manifest_actor.add_sst(&mut self.state, file_meta)?;
             self.state.transition_flush_publication_intent(
                 sst_name,
@@ -654,7 +656,7 @@ impl EventLoop {
     }
 
     fn drain_auto_flush_memtables(&mut self) -> usize {
-        if self.state.memory_mode {
+        if self.state.is_memory_mode() {
             return 0;
         }
 
@@ -1108,7 +1110,7 @@ pub(super) mod tests {
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
         event_loop.worker_msg_tx = Some(worker_tx);
-        event_loop.state.enable_compaction = true;
+        event_loop.state.set_compaction_enabled(true);
         event_loop
             .state
             .manifest
@@ -1150,7 +1152,7 @@ pub(super) mod tests {
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
         event_loop.worker_msg_tx = Some(worker_tx);
-        event_loop.state.enable_compaction = false;
+        event_loop.state.set_compaction_enabled(false);
         event_loop
             .state
             .manifest
@@ -1207,7 +1209,7 @@ pub(super) mod tests {
         }
 
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-        event_loop.state.enable_compaction = false;
+        event_loop.state.set_compaction_enabled(false);
         event_loop
             .state
             .ingest_active

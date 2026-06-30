@@ -22,62 +22,20 @@ impl RuntimeDispatcher {
     ) -> HandleOutcome {
         match msg {
             RuntimeMsg::Shutdown => event_loop.handle_shutdown(),
-            RuntimeMsg::Noop { request_id } => {
-                event_loop.handle_noop(request_id);
-                HandleOutcome::Continue
-            }
-            RuntimeMsg::StartupPing { request_id } => {
-                event_loop.handle_startup_ping(request_id);
-                HandleOutcome::Continue
-            }
-            RuntimeMsg::CheckWriteStall { request_id, cf_id } => {
-                event_loop.handle_check_write_stall(request_id, cf_id);
-                HandleOutcome::Continue
-            }
-            RuntimeMsg::WaitForWriteStallClear { request_id, cf_id } => {
-                event_loop.handle_wait_for_write_stall_clear(request_id, cf_id);
-                HandleOutcome::Continue
-            }
-            RuntimeMsg::CancelWaitForWriteStallClear { wait_request_id } => {
-                event_loop.handle_cancel_wait_for_write_stall_clear(wait_request_id);
-                HandleOutcome::Continue
-            }
-            RuntimeMsg::GetReadAmpMetrics { request_id } => {
-                event_loop.handle_get_read_amp_metrics(request_id);
-                HandleOutcome::Continue
-            }
-            RuntimeMsg::GetRecoveryMetrics { request_id } => {
-                event_loop.handle_get_recovery_metrics(request_id);
-                HandleOutcome::Continue
-            }
-            RuntimeMsg::GetRuntimeMetrics { request_id } => {
-                event_loop.handle_get_runtime_metrics(request_id);
-                HandleOutcome::Continue
-            }
-            RuntimeMsg::GetStorageLayout { request_id } => {
-                event_loop.handle_get_storage_layout(request_id);
-                HandleOutcome::Continue
-            }
-            RuntimeMsg::GetRuntimeConfig { request_id } => {
-                event_loop.handle_get_runtime_config(request_id);
-                HandleOutcome::Continue
-            }
-            RuntimeMsg::GetIngestState { request_id } => {
-                event_loop.handle_get_ingest_state(request_id);
-                HandleOutcome::Continue
-            }
-            RuntimeMsg::BeginIngest { request_id } => {
-                event_loop.handle_begin_ingest(request_id);
-                HandleOutcome::Continue
-            }
-            RuntimeMsg::EndIngest { request_id } => {
-                event_loop.handle_end_ingest(request_id);
-                HandleOutcome::Continue
-            }
-            RuntimeMsg::GetCurrentSequence { request_id } => {
-                event_loop.handle_get_current_sequence(request_id);
-                HandleOutcome::Continue
-            }
+            RuntimeMsg::Noop { .. }
+            | RuntimeMsg::StartupPing { .. }
+            | RuntimeMsg::CheckWriteStall { .. }
+            | RuntimeMsg::WaitForWriteStallClear { .. }
+            | RuntimeMsg::CancelWaitForWriteStallClear { .. }
+            | RuntimeMsg::GetReadAmpMetrics { .. }
+            | RuntimeMsg::GetRecoveryMetrics { .. }
+            | RuntimeMsg::GetRuntimeMetrics { .. }
+            | RuntimeMsg::GetStorageLayout { .. }
+            | RuntimeMsg::GetRuntimeConfig { .. }
+            | RuntimeMsg::GetIngestState { .. }
+            | RuntimeMsg::BeginIngest { .. }
+            | RuntimeMsg::EndIngest { .. }
+            | RuntimeMsg::GetCurrentSequence { .. } => Self::dispatch_runtime(event_loop, &msg),
             RuntimeMsg::WalSync { request_id } => WalCoordinator::sync(event_loop, request_id),
             RuntimeMsg::WalRotate { request_id } => WalCoordinator::rotate(event_loop, request_id),
             RuntimeMsg::SealWalForCloud {
@@ -124,6 +82,47 @@ impl RuntimeDispatcher {
                 Self::dispatch_read(event_loop, msg)
             }
         }
+    }
+
+    fn dispatch_runtime(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> HandleOutcome {
+        match msg {
+            RuntimeMsg::Noop { request_id } => event_loop.handle_noop(*request_id),
+            RuntimeMsg::StartupPing { request_id } => event_loop.handle_startup_ping(*request_id),
+            RuntimeMsg::CheckWriteStall { request_id, cf_id } => {
+                event_loop.handle_check_write_stall(*request_id, *cf_id);
+            }
+            RuntimeMsg::WaitForWriteStallClear { request_id, cf_id } => {
+                event_loop.handle_wait_for_write_stall_clear(*request_id, *cf_id);
+            }
+            RuntimeMsg::CancelWaitForWriteStallClear { wait_request_id } => {
+                event_loop.handle_cancel_wait_for_write_stall_clear(*wait_request_id);
+            }
+            RuntimeMsg::GetReadAmpMetrics { request_id } => {
+                event_loop.handle_get_read_amp_metrics(*request_id);
+            }
+            RuntimeMsg::GetRecoveryMetrics { request_id } => {
+                event_loop.handle_get_recovery_metrics(*request_id);
+            }
+            RuntimeMsg::GetRuntimeMetrics { request_id } => {
+                event_loop.handle_get_runtime_metrics(*request_id);
+            }
+            RuntimeMsg::GetStorageLayout { request_id } => {
+                event_loop.handle_get_storage_layout(*request_id);
+            }
+            RuntimeMsg::GetRuntimeConfig { request_id } => {
+                event_loop.handle_get_runtime_config(*request_id);
+            }
+            RuntimeMsg::GetIngestState { request_id } => {
+                event_loop.handle_get_ingest_state(*request_id);
+            }
+            RuntimeMsg::BeginIngest { request_id } => event_loop.handle_begin_ingest(*request_id),
+            RuntimeMsg::EndIngest { request_id } => event_loop.handle_end_ingest(*request_id),
+            RuntimeMsg::GetCurrentSequence { request_id } => {
+                event_loop.handle_get_current_sequence(*request_id);
+            }
+            _ => unreachable!(),
+        }
+        HandleOutcome::Continue
     }
 
     fn dispatch_config(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> HandleOutcome {

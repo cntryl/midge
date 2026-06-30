@@ -37,7 +37,7 @@ impl EventLoop {
                     if pending < last_pending {
                         last_pending = pending;
                         stagnant_rounds = 0;
-                    } else if self.state.persistence_anomaly_detected {
+                    } else if self.state.persistence_anomaly_detected() {
                         stagnant_rounds = stagnant_rounds.saturating_add(1);
                         if stagnant_rounds >= 25 {
                             tracing::warn!(

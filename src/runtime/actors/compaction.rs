@@ -59,7 +59,7 @@ impl CompactionActor {
         state: &RuntimeState,
     ) -> Option<crate::compaction::CompactionPlan> {
         // If compaction is disabled via runtime configuration, skip checks
-        if !state.enable_compaction {
+        if !state.compaction_enabled() {
             tracing::debug!("compaction disabled in runtime state");
             return None;
         }
@@ -435,7 +435,7 @@ mod tests {
             ..LeveledCompactionConfig::default()
         });
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
-        state.enable_compaction = true;
+        state.set_compaction_enabled(true);
         state.manifest.files.extend([
             make_l0_file("cf0_0001.sst", 0, b"a00", b"a99"),
             make_l0_file("cf0_0002.sst", 0, b"b00", b"b99"),
@@ -455,7 +455,7 @@ mod tests {
         // Arrange
         let mut actor = create_test_compaction_actor();
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
-        state.enable_compaction = true;
+        state.set_compaction_enabled(true);
         let cf_id = state
             .create_cf("tenant_cf".to_string())
             .expect("create non-default cf");
@@ -484,7 +484,7 @@ mod tests {
         // Arrange
         let mut actor = create_test_compaction_actor();
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
-        state.enable_compaction = true;
+        state.set_compaction_enabled(true);
         let cf1_id = state.create_cf("cf1".to_string()).expect("create cf1");
         let cf2_id = state.create_cf("cf2".to_string()).expect("create cf2");
 

@@ -336,9 +336,7 @@ fn open_wal_replay_file<'a>(
         file_path,
         OpenOptions {
             mode: OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
+            disposition: crate::storage::abstraction::OpenDisposition::OpenExisting,
             append: false,
         },
     ) {

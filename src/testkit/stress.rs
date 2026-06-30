@@ -11,7 +11,7 @@ pub const KEY_SIZE: usize = 16;
 /// Panics if the engine cannot be opened with compaction disabled.
 pub fn open_engine_no_compaction(mut opts: MidgeOptions) -> Engine {
     opts.enable_compaction = false;
-    Engine::open_with_options(&opts).expect("open_engine_no_compaction: open engine")
+    Engine::open_with_options(opts).expect("open_engine_no_compaction: open engine")
 }
 
 #[must_use]

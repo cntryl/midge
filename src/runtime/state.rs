@@ -117,6 +117,40 @@ pub(crate) struct FlushCandidate {
     pub reason: FlushReason,
 }
 
+pub struct RuntimeMode {
+    pub read_only: bool,
+    pub memory_mode: bool,
+}
+
+pub struct RecoveryStatus {
+    pub policy: crate::config::RecoveryPolicy,
+    pub opened_in_salvage_mode: bool,
+    pub persistence_anomaly_detected: bool,
+}
+
+pub struct CompactionConfig {
+    pub enabled: bool,
+}
+
+pub struct WritePressureState {
+    pub stalled: bool,
+}
+
+struct RecoveryLoadState {
+    opened_in_salvage_mode: bool,
+    manifest: Manifest,
+    intent_log: Vec<IntentLogEntry>,
+}
+
+struct WalRecoveryState {
+    column_families: HashMap<u32, ColumnFamilyState>,
+    recovered_sequence: u64,
+    next_segment_id: u64,
+    records_replayed: u64,
+    bytes_replayed: u64,
+    opened_in_salvage_mode: bool,
+}
+
 impl RuntimeState {
     pub fn memtable_flush_trigger_bytes(&self) -> usize {
         self.memtable_size_limit
@@ -139,7 +173,7 @@ impl RuntimeState {
     /// This intentionally excludes active memtable size: active memtable pressure
     /// should trigger flush, not block the flush that would relieve it.
     pub fn should_hard_stall_writes(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
-        if self.write_stalled {
+        if self.write_pressure.stalled {
             return true;
         }
         if self.is_immutable_memtable_queue_full(cf_id) {
@@ -149,7 +183,7 @@ impl RuntimeState {
     }
 
     pub fn has_any_hard_write_stall(&self) -> bool {
-        if self.write_stalled || self.is_total_memtable_hard_limit_exceeded() {
+        if self.write_pressure.stalled || self.is_total_memtable_hard_limit_exceeded() {
             return true;
         }
         self.column_families
@@ -160,6 +194,54 @@ impl RuntimeState {
     /// Compatibility wrapper for write-admission callsites.
     pub fn should_stall_writes(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
         self.should_hard_stall_writes(cf_id)
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.mode.read_only
+    }
+
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.mode.read_only = read_only;
+    }
+
+    pub fn is_memory_mode(&self) -> bool {
+        self.mode.memory_mode
+    }
+
+    pub fn recovery_policy(&self) -> crate::config::RecoveryPolicy {
+        self.recovery.policy
+    }
+
+    pub fn opened_in_salvage_mode(&self) -> bool {
+        self.recovery.opened_in_salvage_mode
+    }
+
+    pub fn mark_opened_in_salvage_mode(&mut self) {
+        self.recovery.opened_in_salvage_mode = true;
+    }
+
+    pub fn persistence_anomaly_detected(&self) -> bool {
+        self.recovery.persistence_anomaly_detected
+    }
+
+    pub fn mark_persistence_anomaly(&mut self) {
+        self.recovery.persistence_anomaly_detected = true;
+    }
+
+    pub fn compaction_enabled(&self) -> bool {
+        self.compaction_config.enabled
+    }
+
+    pub fn set_compaction_enabled(&mut self, enabled: bool) {
+        self.compaction_config.enabled = enabled;
+    }
+
+    pub fn write_stalled(&self) -> bool {
+        self.write_pressure.stalled
+    }
+
+    pub fn set_write_stalled(&mut self, stalled: bool) {
+        self.write_pressure.stalled = stalled;
     }
 
     pub fn memtable_needs_flush(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
@@ -316,17 +398,9 @@ pub struct RuntimeState {
 
     // === Configuration ===
     pub memtable_size_limit: usize,
-    pub read_only: bool,
-    /// If true, never touch filesystem (pure in-memory mode)
-    pub memory_mode: bool,
-    /// Recovery policy selected at engine open.
-    pub recovery_policy: crate::config::RecoveryPolicy,
-    /// True if startup had to salvage around metadata or WAL issues.
-    pub opened_in_salvage_mode: bool,
-    /// True when runtime detected non-fatal persistence anomalies that operators should investigate.
-    pub persistence_anomaly_detected: bool,
-    /// Whether background compaction is enabled
-    pub enable_compaction: bool,
+    pub mode: RuntimeMode,
+    pub recovery: RecoveryStatus,
+    pub compaction_config: CompactionConfig,
 
     // === Intent Log & Determinism ===
     /// Deterministic intent log for recovery and replay
@@ -335,8 +409,7 @@ pub struct RuntimeState {
     pub memtable_flush_threshold: usize,
     /// Cloud-only runtime heuristic: flush active memtables after enough WAL segment churn.
     pub cloud_eventual_flush_segment_gap: u64,
-    /// Write stall active flag
-    pub write_stalled: bool,
+    pub write_pressure: WritePressureState,
     /// Total size of all memtables (in-memory)
     pub total_memtable_bytes: usize,
     /// Maximum number of immutable memtables per CF before write stall
@@ -435,263 +508,38 @@ impl RuntimeState {
         recovery_policy: crate::config::RecoveryPolicy,
     ) -> MidgeResult<Self> {
         let (wal_dir, sst_dir) = Self::ensure_directories(&db_path, memory_mode);
-        let mut opened_in_salvage_mode = false;
-
-        if !memory_mode {
-            crate::metadata::ensure_or_create_format_marker(&db_path)?;
-        }
-
-        // Initialize filesystem abstraction (use MockFs in memory mode)
-        let fs: std::sync::Arc<dyn Fs> = if memory_mode {
-            std::sync::Arc::new(crate::io::MockFs::new())
-        } else {
-            std::sync::Arc::new(crate::io::real::RealFs::new(&db_path).map_err(|e| {
-                MidgeError::RecoveryFailed(format!("failed to initialize filesystem: {e}"))
-            })?)
-        };
-
-        // Load manifest (prefer snapshot + journal replay) — only if not in memory mode
-        let manifest = if memory_mode {
-            Manifest::default()
-        } else {
-            let strict_manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
-                &fs,
-                crate::config::RecoveryPolicy::Strict,
-            );
-            match strict_manifest {
-                Ok(m) => {
-                    tracing::info!("manifest loaded from disk");
-                    m
-                }
-                Err(e) => {
-                    if recovery_policy == crate::config::RecoveryPolicy::Strict {
-                        return Err(MidgeError::RecoveryFailed(format!(
-                            "failed to load manifest: {e}"
-                        )));
-                    }
-                    opened_in_salvage_mode = true;
-                    tracing::warn!(
-                        "failed to load manifest strictly, retrying in salvage mode: {}",
-                        e
-                    );
-                    crate::metadata::ManifestPersistence::load_with_fs_and_policy(
-                        &fs,
-                        crate::config::RecoveryPolicy::Salvage,
-                    )
-                    .unwrap_or_else(|salvage_error| {
-                        tracing::warn!(
-                            "failed to load manifest in salvage mode, using default: {}",
-                            salvage_error
-                        );
-                        Manifest::default()
-                    })
-                }
-            }
-        };
-
-        // Load intent log if present (using FS via persistence helpers)
-        let intent_log = if memory_mode {
-            Vec::new()
-        } else {
-            let strict_intent = crate::runtime::IntentPersistence::load_with_fs_and_policy(
-                &fs,
-                crate::config::RecoveryPolicy::Strict,
-            );
-            match strict_intent {
-                Ok(v) => v,
-                Err(e) => {
-                    if recovery_policy == crate::config::RecoveryPolicy::Strict {
-                        return Err(MidgeError::RecoveryFailed(format!(
-                            "failed to load intent log: {e}"
-                        )));
-                    }
-                    opened_in_salvage_mode = true;
-                    tracing::warn!(
-                        error = %e,
-                        "failed to load intent log strictly, retrying in salvage mode"
-                    );
-                    crate::runtime::IntentPersistence::load_with_fs_and_policy(
-                        &fs,
-                        crate::config::RecoveryPolicy::Salvage,
-                    )
-                    .unwrap_or_else(|salvage_error| {
-                        tracing::warn!(
-                            error = %salvage_error,
-                            "failed to load intent log in salvage mode, starting empty"
-                        );
-                        Vec::new()
-                    })
-                }
-            }
-        };
-
-        // Default: allow up to 10 immutable memtables before stall
-        let max_immutable_memtables = 10;
-        let _ = max_immutable_memtables;
-
-        let mut column_families = HashMap::new();
-        column_families.insert(0, ColumnFamilyState::new(0, "default".into()));
-
-        for cf_meta in &manifest.column_families {
-            // Skip deleted column families and default CF (already added)
-            if cf_meta.id != 0 && cf_meta.deleted_at.is_none() {
-                column_families.insert(
-                    cf_meta.id,
-                    ColumnFamilyState::new(cf_meta.id, cf_meta.name.clone()),
-                );
-            }
-        }
-
-        // WAL recovery (skip in memory mode)
-        let replay_dir = recovery_wal_dir.map_or(wal_dir.as_path(), |path| path.as_path());
-        let mut wal_recovery_records_replayed = 0_u64;
-        let mut wal_recovery_bytes_replayed = 0_u64;
-        let wal_recovered_sequence = if !memory_mode && replay_dir.exists() {
-            let mut recovery_memtables = HashMap::new();
-            match crate::storage::LocalFsStorage::new(replay_dir) {
-                Ok(storage) => match crate::wal::recovery::replay_wal_with_policy(
-                    &storage,
-                    &crate::storage::abstraction::StoragePath::new(""),
-                    &mut recovery_memtables,
-                    match recovery_policy {
-                        crate::config::RecoveryPolicy::Strict => {
-                            crate::wal::recovery::ReplayPolicy::Strict
-                        }
-                        crate::config::RecoveryPolicy::Salvage => {
-                            crate::wal::recovery::ReplayPolicy::SalvageValidPrefix
-                        }
-                    },
-                ) {
-                    Ok(stats) => {
-                        if let Some(t) = crate::telemetry::Telemetry::global() {
-                            t.metrics()
-                                .record_wal_recovery(stats.record_count, stats.bytes);
-                        }
-                        wal_recovery_records_replayed =
-                            wal_recovery_records_replayed.saturating_add(stats.record_count);
-                        wal_recovery_bytes_replayed =
-                            wal_recovery_bytes_replayed.saturating_add(stats.bytes);
-
-                        tracing::info!(
-                            records_recovered = stats.record_count,
-                            bytes_recovered = stats.bytes,
-                            max_sequence = ?stats.max_sequence,
-                            replay_dir = ?replay_dir,
-                            replay_ms = std::time::Duration::from_nanos(
-                                u64::try_from(stats.total_replay_ns).unwrap_or(u64::MAX),
-                            )
-                            .as_secs_f64()
-                                * 1_000.0,
-                            wal_read_ms = std::time::Duration::from_nanos(
-                                u64::try_from(stats.wal_read_ns).unwrap_or(u64::MAX),
-                            )
-                            .as_secs_f64()
-                                * 1_000.0,
-                            apply_ms = std::time::Duration::from_nanos(
-                                u64::try_from(stats.apply_ns).unwrap_or(u64::MAX),
-                            )
-                            .as_secs_f64()
-                                * 1_000.0,
-                            "WAL recovery completed successfully"
-                        );
-                        if stats.had_corruption {
-                            opened_in_salvage_mode = true;
-                            tracing::warn!(
-                                replay_dir = ?replay_dir,
-                                "WAL recovery salvaged a valid prefix after corruption"
-                            );
-                        }
-                        for (cf_id, recovered_memtable) in recovery_memtables {
-                            if let Some(cf_state) = column_families.get_mut(&cf_id) {
-                                cf_state.memtable = recovered_memtable;
-                            } else {
-                                let name = format!("cf_{cf_id}");
-                                let mut cf_state = ColumnFamilyState::new(cf_id, name);
-                                cf_state.memtable = recovered_memtable;
-                                column_families.insert(cf_id, cf_state);
-                            }
-                        }
-                        // Restore sequence counter from recovery
-                        stats.max_sequence.unwrap_or(0)
-                    }
-                    Err(e) => {
-                        if recovery_policy == crate::config::RecoveryPolicy::Strict {
-                            return Err(MidgeError::RecoveryFailed(format!(
-                                "WAL recovery failed: {e}"
-                            )));
-                        }
-                        opened_in_salvage_mode = true;
-                        tracing::error!(error = %e, "WAL recovery failed, continuing without recovered state in salvage mode");
-                        0
-                    }
-                },
-                Err(e) => {
-                    if recovery_policy == crate::config::RecoveryPolicy::Strict {
-                        return Err(MidgeError::RecoveryFailed(format!(
-                            "failed to initialize WAL recovery storage: {e}"
-                        )));
-                    }
-                    opened_in_salvage_mode = true;
-                    tracing::error!(error = %e, "failed to initialize WAL recovery storage in salvage mode");
-                    0
-                }
-            }
-        } else {
-            0
-        };
-        let recovered_sequence =
-            wal_recovered_sequence.max(Self::manifest_visible_sequence_floor(&manifest));
-
-        // WAL segment id recovery:
-        // On restart, we must continue segment ids beyond the highest existing rotated segment
-        // to avoid overwriting previously-uploaded cloud WAL segments (CloudAsync) or local
-        // WAL segments (LocalDisk). The source of truth is the replay directory.
-        let recovered_next_segment_id = if !memory_mode && replay_dir.exists() {
-            let mut max_segment_id: u64 = 0;
-
-            if let Ok(entries) = std::fs::read_dir(replay_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("wal") {
-                        continue;
-                    }
-                    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                        continue;
-                    };
-
-                    // Skip the active WAL file name if it happens to match the extension.
-                    if stem.eq_ignore_ascii_case("wal") {
-                        continue;
-                    }
-
-                    if let Ok(id) = stem.parse::<u64>() {
-                        max_segment_id = max_segment_id.max(id);
-                    }
-                }
-            }
-
-            // Segment ids start at 1.
-            max_segment_id.saturating_add(1).max(1)
-        } else {
-            1
-        };
+        let fs = Self::initialize_fs(&db_path, memory_mode)?;
+        let RecoveryLoadState {
+            opened_in_salvage_mode,
+            manifest,
+            intent_log,
+        } = Self::load_recovery_state(&db_path, memory_mode, recovery_policy, &fs)?;
+        let column_families = Self::bootstrap_column_families(&manifest);
+        let wal_recovery = Self::recover_wal_state(
+            memory_mode,
+            &wal_dir,
+            recovery_wal_dir,
+            recovery_policy,
+            &manifest,
+            column_families,
+        )?;
 
         let mut state = Self {
             db_path,
             wal_dir,
             sst_dir,
-            sequence: recovered_sequence,
+            sequence: wal_recovery.recovered_sequence,
             next_txn_id: 0,
             pending_txn_min_seq: None,
             pending_txn_start_time: None,
             sequence_idempotency_cache: HashMap::new(),
-            column_families,
+            column_families: wal_recovery.column_families,
             manifest,
             fs: fs.clone(),
             wal: WalState {
-                current_segment_id: recovered_next_segment_id,
-                local_durable_seq: recovered_sequence,
-                cloud_durable_seq: recovered_sequence,
+                current_segment_id: wal_recovery.next_segment_id,
+                local_durable_seq: wal_recovery.recovered_sequence,
+                cloud_durable_seq: wal_recovery.recovered_sequence,
                 ..WalState::default()
             },
             compaction: CompactionState::default(),
@@ -702,22 +550,29 @@ impl RuntimeState {
             },
             recent_delete_ranges: Vec::new(),
             memtable_size_limit: 64 * 1024 * 1024, // 64MB
-            read_only: false,
-            memory_mode,
-            recovery_policy,
-            opened_in_salvage_mode,
-            persistence_anomaly_detected: false,
+            mode: RuntimeMode {
+                read_only: false,
+                memory_mode,
+            },
+            recovery: RecoveryStatus {
+                policy: recovery_policy,
+                opened_in_salvage_mode: opened_in_salvage_mode
+                    || wal_recovery.opened_in_salvage_mode,
+                persistence_anomaly_detected: false,
+            },
+            compaction_config: CompactionConfig {
+                enabled: !memory_mode,
+            },
             intent_log,
             memtable_flush_threshold: 64 * 1024 * 1024, // 64MB
             cloud_eventual_flush_segment_gap: crate::runtime::CloudRuntimePolicy::default()
                 .eventual_flush_segment_gap,
             max_immutable_memtables: 10, // Hard limit on immutable memtable queue
-            write_stalled: false,
+            write_pressure: WritePressureState { stalled: false },
             total_memtable_bytes: 0,
-            enable_compaction: !memory_mode,
             read_amp_metrics: ReadAmpMetrics::new(),
-            wal_recovery_records_replayed,
-            wal_recovery_bytes_replayed,
+            wal_recovery_records_replayed: wal_recovery.records_replayed,
+            wal_recovery_bytes_replayed: wal_recovery.bytes_replayed,
             intent_log_replay_runs: 0,
             intent_log_entries_replayed: 0,
             ingest_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -733,12 +588,334 @@ impl RuntimeState {
         Ok(state)
     }
 
+    fn initialize_fs(db_path: &std::path::Path, memory_mode: bool) -> MidgeResult<Arc<dyn Fs>> {
+        if !memory_mode {
+            crate::metadata::ensure_or_create_format_marker(db_path)?;
+        }
+        if memory_mode {
+            Ok(Arc::new(crate::io::MockFs::new()))
+        } else {
+            Ok(Arc::new(crate::io::real::RealFs::new(db_path).map_err(
+                |error| {
+                    MidgeError::RecoveryFailed(format!("failed to initialize filesystem: {error}"))
+                },
+            )?))
+        }
+    }
+
+    fn load_recovery_state(
+        db_path: &std::path::Path,
+        memory_mode: bool,
+        recovery_policy: crate::config::RecoveryPolicy,
+        fs: &Arc<dyn Fs>,
+    ) -> MidgeResult<RecoveryLoadState> {
+        let mut opened_in_salvage_mode = false;
+        let manifest = Self::load_manifest(
+            db_path,
+            memory_mode,
+            recovery_policy,
+            fs,
+            &mut opened_in_salvage_mode,
+        )?;
+        let intent_log = Self::load_intent_log(
+            memory_mode,
+            recovery_policy,
+            fs,
+            &mut opened_in_salvage_mode,
+        )?;
+        Ok(RecoveryLoadState {
+            opened_in_salvage_mode,
+            manifest,
+            intent_log,
+        })
+    }
+
+    fn load_manifest(
+        _db_path: &std::path::Path,
+        memory_mode: bool,
+        recovery_policy: crate::config::RecoveryPolicy,
+        fs: &Arc<dyn Fs>,
+        opened_in_salvage_mode: &mut bool,
+    ) -> MidgeResult<Manifest> {
+        if memory_mode {
+            return Ok(Manifest::default());
+        }
+        match crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+            fs,
+            crate::config::RecoveryPolicy::Strict,
+        ) {
+            Ok(manifest) => {
+                tracing::info!("manifest loaded from disk");
+                Ok(manifest)
+            }
+            Err(error) => {
+                if recovery_policy == crate::config::RecoveryPolicy::Strict {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "failed to load manifest: {error}"
+                    )));
+                }
+                *opened_in_salvage_mode = true;
+                tracing::warn!(
+                    "failed to load manifest strictly, retrying in salvage mode: {}",
+                    error
+                );
+                Ok(
+                    crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+                        fs,
+                        crate::config::RecoveryPolicy::Salvage,
+                    )
+                    .unwrap_or_else(|salvage_error| {
+                        tracing::warn!(
+                            "failed to load manifest in salvage mode, using default: {}",
+                            salvage_error
+                        );
+                        Manifest::default()
+                    }),
+                )
+            }
+        }
+    }
+
+    fn load_intent_log(
+        memory_mode: bool,
+        recovery_policy: crate::config::RecoveryPolicy,
+        fs: &Arc<dyn Fs>,
+        opened_in_salvage_mode: &mut bool,
+    ) -> MidgeResult<Vec<IntentLogEntry>> {
+        if memory_mode {
+            return Ok(Vec::new());
+        }
+        match crate::runtime::IntentPersistence::load_with_fs_and_policy(
+            fs,
+            crate::config::RecoveryPolicy::Strict,
+        ) {
+            Ok(intent_log) => Ok(intent_log),
+            Err(error) => {
+                if recovery_policy == crate::config::RecoveryPolicy::Strict {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "failed to load intent log: {error}"
+                    )));
+                }
+                *opened_in_salvage_mode = true;
+                tracing::warn!(
+                    error = %error,
+                    "failed to load intent log strictly, retrying in salvage mode"
+                );
+                Ok(crate::runtime::IntentPersistence::load_with_fs_and_policy(
+                    fs,
+                    crate::config::RecoveryPolicy::Salvage,
+                )
+                .unwrap_or_else(|salvage_error| {
+                    tracing::warn!(
+                        error = %salvage_error,
+                        "failed to load intent log in salvage mode, starting empty"
+                    );
+                    Vec::new()
+                }))
+            }
+        }
+    }
+
+    fn bootstrap_column_families(manifest: &Manifest) -> HashMap<u32, ColumnFamilyState> {
+        let mut column_families = HashMap::new();
+        column_families.insert(0, ColumnFamilyState::new(0, "default".into()));
+        for cf_meta in &manifest.column_families {
+            if cf_meta.id != 0 && cf_meta.deleted_at.is_none() {
+                column_families.insert(
+                    cf_meta.id,
+                    ColumnFamilyState::new(cf_meta.id, cf_meta.name.clone()),
+                );
+            }
+        }
+        column_families
+    }
+
+    fn recover_wal_state(
+        memory_mode: bool,
+        wal_dir: &std::path::Path,
+        recovery_wal_dir: Option<&PathBuf>,
+        recovery_policy: crate::config::RecoveryPolicy,
+        manifest: &Manifest,
+        column_families: HashMap<u32, ColumnFamilyState>,
+    ) -> MidgeResult<WalRecoveryState> {
+        let replay_dir = recovery_wal_dir.map_or(wal_dir, PathBuf::as_path);
+        let mut wal_recovery =
+            Self::replay_wal(memory_mode, replay_dir, recovery_policy, column_families)?;
+        wal_recovery.recovered_sequence = wal_recovery
+            .recovered_sequence
+            .max(Self::manifest_visible_sequence_floor(manifest));
+        wal_recovery.next_segment_id = Self::recover_next_segment_id(memory_mode, replay_dir);
+        Ok(wal_recovery)
+    }
+
+    fn replay_wal(
+        memory_mode: bool,
+        replay_dir: &std::path::Path,
+        recovery_policy: crate::config::RecoveryPolicy,
+        mut column_families: HashMap<u32, ColumnFamilyState>,
+    ) -> MidgeResult<WalRecoveryState> {
+        if memory_mode || !replay_dir.exists() {
+            return Ok(WalRecoveryState {
+                column_families,
+                recovered_sequence: 0,
+                next_segment_id: 1,
+                records_replayed: 0,
+                bytes_replayed: 0,
+                opened_in_salvage_mode: false,
+            });
+        }
+
+        let mut recovery_memtables = HashMap::new();
+        let storage = match crate::storage::LocalFsStorage::new(replay_dir) {
+            Ok(storage) => storage,
+            Err(error) => {
+                return Self::handle_wal_recovery_failure(
+                    recovery_policy,
+                    format!("failed to initialize WAL recovery storage: {error}"),
+                    column_families,
+                );
+            }
+        };
+        let replay_policy = match recovery_policy {
+            crate::config::RecoveryPolicy::Strict => crate::wal::recovery::ReplayPolicy::Strict,
+            crate::config::RecoveryPolicy::Salvage => {
+                crate::wal::recovery::ReplayPolicy::SalvageValidPrefix
+            }
+        };
+        let stats = match crate::wal::recovery::replay_wal_with_policy(
+            &storage,
+            &crate::storage::abstraction::StoragePath::new(""),
+            &mut recovery_memtables,
+            replay_policy,
+        ) {
+            Ok(stats) => stats,
+            Err(error) => {
+                return Self::handle_wal_recovery_failure(
+                    recovery_policy,
+                    format!("WAL recovery failed: {error}"),
+                    column_families,
+                );
+            }
+        };
+
+        Self::record_wal_recovery_stats(replay_dir, &stats);
+        let opened_in_salvage_mode = stats.had_corruption;
+        if opened_in_salvage_mode {
+            tracing::warn!(
+                replay_dir = ?replay_dir,
+                "WAL recovery salvaged a valid prefix after corruption"
+            );
+        }
+        Self::apply_recovered_memtables(&mut column_families, recovery_memtables);
+        Ok(WalRecoveryState {
+            column_families,
+            recovered_sequence: stats.max_sequence.unwrap_or(0),
+            next_segment_id: 1,
+            records_replayed: stats.record_count,
+            bytes_replayed: stats.bytes,
+            opened_in_salvage_mode,
+        })
+    }
+
+    fn handle_wal_recovery_failure(
+        recovery_policy: crate::config::RecoveryPolicy,
+        message: String,
+        column_families: HashMap<u32, ColumnFamilyState>,
+    ) -> MidgeResult<WalRecoveryState> {
+        if recovery_policy == crate::config::RecoveryPolicy::Strict {
+            return Err(MidgeError::RecoveryFailed(message));
+        }
+        tracing::error!("{message}, continuing without recovered state in salvage mode");
+        Ok(WalRecoveryState {
+            column_families,
+            recovered_sequence: 0,
+            next_segment_id: 1,
+            records_replayed: 0,
+            bytes_replayed: 0,
+            opened_in_salvage_mode: true,
+        })
+    }
+
+    fn record_wal_recovery_stats(
+        replay_dir: &std::path::Path,
+        stats: &crate::wal::recovery::RecoveryStats,
+    ) {
+        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+            telemetry
+                .metrics()
+                .record_wal_recovery(stats.record_count, stats.bytes);
+        }
+        tracing::info!(
+            records_recovered = stats.record_count,
+            bytes_recovered = stats.bytes,
+            max_sequence = ?stats.max_sequence,
+            replay_dir = ?replay_dir,
+            replay_ms = std::time::Duration::from_nanos(
+                u64::try_from(stats.total_replay_ns).unwrap_or(u64::MAX),
+            )
+            .as_secs_f64()
+                * 1_000.0,
+            wal_read_ms = std::time::Duration::from_nanos(
+                u64::try_from(stats.wal_read_ns).unwrap_or(u64::MAX),
+            )
+            .as_secs_f64()
+                * 1_000.0,
+            apply_ms = std::time::Duration::from_nanos(
+                u64::try_from(stats.apply_ns).unwrap_or(u64::MAX),
+            )
+            .as_secs_f64()
+                * 1_000.0,
+            "WAL recovery completed successfully"
+        );
+    }
+
+    fn apply_recovered_memtables(
+        column_families: &mut HashMap<u32, ColumnFamilyState>,
+        recovery_memtables: HashMap<u32, Arc<SkipListMemtable>>,
+    ) {
+        for (cf_id, recovered_memtable) in recovery_memtables {
+            if let Some(cf_state) = column_families.get_mut(&cf_id) {
+                cf_state.memtable = recovered_memtable;
+            } else {
+                let name = format!("cf_{cf_id}");
+                let mut cf_state = ColumnFamilyState::new(cf_id, name);
+                cf_state.memtable = recovered_memtable;
+                column_families.insert(cf_id, cf_state);
+            }
+        }
+    }
+
+    fn recover_next_segment_id(memory_mode: bool, replay_dir: &std::path::Path) -> u64 {
+        if memory_mode || !replay_dir.exists() {
+            return 1;
+        }
+        let mut max_segment_id: u64 = 0;
+        if let Ok(entries) = std::fs::read_dir(replay_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("wal") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if stem.eq_ignore_ascii_case("wal") {
+                    continue;
+                }
+                if let Ok(id) = stem.parse::<u64>() {
+                    max_segment_id = max_segment_id.max(id);
+                }
+            }
+        }
+        max_segment_id.saturating_add(1).max(1)
+    }
+
     pub fn health(&self) -> crate::config::EngineHealth {
         let residue = self.storage_residue_assessment();
         crate::storage::residue::classify_engine_health(crate::storage::residue::HealthInputs {
-            opened_in_salvage_mode: self.opened_in_salvage_mode,
+            opened_in_salvage_mode: self.opened_in_salvage_mode(),
             write_stalled: self.has_any_hard_write_stall(),
-            persistence_anomaly_detected: self.persistence_anomaly_detected,
+            persistence_anomaly_detected: self.persistence_anomaly_detected(),
             pending_intents: self.intent_log.len(),
             orphan_ssts: residue.orphan_ssts.len(),
         })
@@ -796,7 +973,7 @@ impl RuntimeState {
             oldest_snapshot_age_seconds,
             sst_count,
             sst_bytes,
-            salvage_mode_opens: u64::from(self.opened_in_salvage_mode),
+            salvage_mode_opens: u64::from(self.opened_in_salvage_mode()),
             no_space_events: telemetry.as_ref().map_or(0, |m| m.no_space_events),
             compactions_run: telemetry.as_ref().map_or(0, |m| m.compactions_run),
             compaction_bytes_rewritten: telemetry
@@ -890,12 +1067,8 @@ impl RuntimeState {
         }
     }
 
-    pub fn mark_persistence_anomaly(&mut self) {
-        self.persistence_anomaly_detected = true;
-    }
-
     fn storage_residue_assessment(&self) -> crate::storage::residue::StorageResidueAssessment {
-        if self.memory_mode {
+        if self.is_memory_mode() {
             return crate::storage::residue::StorageResidueAssessment::default();
         }
 
@@ -906,7 +1079,7 @@ impl RuntimeState {
     }
 
     pub fn cleanup_storage_residue(&mut self) {
-        if self.memory_mode {
+        if self.is_memory_mode() {
             return;
         }
 
@@ -937,7 +1110,7 @@ impl RuntimeState {
                 })
                 .unwrap_or(false);
             if injected_delete_failure {
-                self.persistence_anomaly_detected = true;
+                self.mark_persistence_anomaly();
                 tracing::warn!(
                     path = %path.0.as_str(),
                     "failed to delete orphan SST residue during startup cleanup"
@@ -950,7 +1123,7 @@ impl RuntimeState {
                 }
                 Err(FsError::NotFound(_)) => {}
                 Err(error) => {
-                    self.persistence_anomaly_detected = true;
+                    self.mark_persistence_anomaly();
                     tracing::warn!(
                         path = %path.0.as_str(),
                         error = %error,
@@ -1240,7 +1413,7 @@ impl RuntimeState {
     pub fn append_intent(&mut self, entry: crate::runtime::IntentLogEntry) -> MidgeResult<()> {
         self.intent_log.push(entry);
         // Persist intent log unless running in memory mode
-        if !self.memory_mode {
+        if !self.is_memory_mode() {
             crate::runtime::IntentPersistence::save(&self.db_path, &self.intent_log)
                 .map_err(crate::common::MidgeError::Internal)?;
         }
@@ -1256,7 +1429,7 @@ impl RuntimeState {
 
     /// Persist the intent log to disk (call after batched `append_intent_deferred` calls).
     pub fn persist_intent_log(&self) -> MidgeResult<()> {
-        if !self.memory_mode {
+        if !self.is_memory_mode() {
             crate::runtime::IntentPersistence::save(&self.db_path, &self.intent_log)
                 .map_err(crate::common::MidgeError::Internal)?;
         }
@@ -1431,7 +1604,7 @@ impl RuntimeState {
     }
 
     fn append_manifest_add_sst(&self, file_meta: &crate::runtime::FileMeta) -> MidgeResult<()> {
-        if self.memory_mode {
+        if self.is_memory_mode() {
             return Ok(());
         }
 
@@ -1457,7 +1630,7 @@ impl RuntimeState {
         removed: &[String],
         added: &[crate::runtime::FileMeta],
     ) -> MidgeResult<()> {
-        if self.memory_mode {
+        if self.is_memory_mode() {
             return Ok(());
         }
 
@@ -1490,7 +1663,7 @@ impl RuntimeState {
     }
 
     fn persist_manifest_checkpoint(&self) -> MidgeResult<()> {
-        if self.memory_mode {
+        if self.is_memory_mode() {
             return Ok(());
         }
 
@@ -1499,12 +1672,12 @@ impl RuntimeState {
     }
 
     fn handle_recovery_issue(&mut self, message: String) -> MidgeResult<bool> {
-        if self.recovery_policy == crate::config::RecoveryPolicy::Strict {
+        if self.recovery_policy() == crate::config::RecoveryPolicy::Strict {
             return Err(MidgeError::RecoveryFailed(message));
         }
 
-        self.opened_in_salvage_mode = true;
-        self.persistence_anomaly_detected = true;
+        self.mark_opened_in_salvage_mode();
+        self.mark_persistence_anomaly();
         tracing::warn!("{}", message);
         Ok(false)
     }
@@ -1531,13 +1704,13 @@ impl RuntimeState {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => {
-                if self.recovery_policy == crate::config::RecoveryPolicy::Strict {
+                if self.recovery_policy() == crate::config::RecoveryPolicy::Strict {
                     Err(MidgeError::RecoveryFailed(format!(
                         "failed to delete SST '{sst_name}' during recovery: {error}"
                     )))
                 } else {
-                    self.opened_in_salvage_mode = true;
-                    self.persistence_anomaly_detected = true;
+                    self.mark_opened_in_salvage_mode();
+                    self.mark_persistence_anomaly();
                     tracing::warn!(
                         sst_name,
                         error = %error,
@@ -1703,7 +1876,7 @@ impl RuntimeState {
         // Clear the intent log after successful replay
         // New intents will be written during normal operation
         self.intent_log.clear();
-        if !self.memory_mode {
+        if !self.is_memory_mode() {
             if let Err(error) =
                 crate::runtime::IntentPersistence::save(&self.db_path, &self.intent_log)
             {
@@ -2156,7 +2329,7 @@ mod tests {
     #[test]
     fn should_hard_stall_when_external_backpressure_sets_write_stalled() {
         let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
-        state.write_stalled = true;
+        state.set_write_stalled(true);
 
         assert!(state.should_hard_stall_writes(0));
         assert!(state.has_any_hard_write_stall());
@@ -2289,7 +2462,7 @@ mod tests {
         let state = RuntimeState::new("/tmp/test_midge".into(), true);
 
         // Assert
-        assert!(state.memory_mode);
+        assert!(state.is_memory_mode());
         assert_eq!(state.sequence, 0);
         assert_eq!(state.next_txn_id, 0);
         assert!(state.column_families.contains_key(&0)); // Default CF
@@ -2594,13 +2767,13 @@ mod tests {
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
 
         // Assert - Initially not read-only
-        assert!(!state.read_only);
+        assert!(!state.is_read_only());
 
         // Act - Set read-only
-        state.read_only = true;
+        state.set_read_only(true);
 
         // Assert
-        assert!(state.read_only);
+        assert!(state.is_read_only());
     }
 
     #[test]

@@ -211,79 +211,77 @@ impl CompactionCoordinator {
         cf_id: crate::types::ColumnFamilyId,
         target_level: u32,
     ) -> bool {
-        let added: Result<Vec<_>, _> = output_ssts
-            .iter()
-            .map(|name| event_loop.build_sst_file_meta(cf_id, target_level, name))
-            .collect();
-
-        if let Err(error) = added.and_then(|added| {
-            event_loop.mirror_ssts_to_authoritative_cloud(output_ssts)?;
-            event_loop.state.record_compaction_publication_intent(
-                cf_id,
-                input_ssts.to_vec(),
-                added.clone(),
-            )?;
-
-            fail::fail_point!("slice7::after_compaction_output_durable_before_manifest_publish");
-
-            event_loop.manifest_actor.compaction_complete(
-                &mut event_loop.state,
-                input_ssts,
-                &added,
-            )?;
-            event_loop.state.transition_compaction_publication_intent(
-                output_ssts,
-                crate::runtime::PublicationPhase::ManifestPublished,
-            )
-        }) {
-            Self::record_compaction_failure(event_loop);
-            tracing::error!(error = ?error, "failed to apply compaction to manifest");
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::Internal(format!(
-                        "failed to apply compaction to manifest: {error}"
-                    )),
-                },
-            );
-            return false;
-        }
-
-        fail::fail_point!("slice6::after_compaction_update_before_manifest_persist");
-
-        if let Err(error) = crate::runtime::actors::ManifestActor::persist(&event_loop.state) {
-            Self::record_compaction_failure(event_loop);
-            tracing::error!(error = ?error, "failed to persist manifest after compaction");
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::Internal(format!(
-                        "failed to persist manifest after compaction: {error}"
-                    )),
-                },
-            );
-            return false;
-        }
+        let added = match Self::build_output_metadata(event_loop, cf_id, target_level, output_ssts)
+        {
+            Ok(added) => added,
+            Err(error) => return Self::respond_publish_failure(event_loop, request_id, &error),
+        };
 
         if let Err(error) =
-            event_loop.mirror_metadata_after_local_commit("compaction manifest publish")
+            Self::publish_compaction_manifest(event_loop, input_ssts, output_ssts, cf_id, &added)
         {
-            Self::record_compaction_failure(event_loop);
-            tracing::error!(error = ?error, "failed to mirror manifest after compaction");
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::Internal(format!(
-                        "failed to mirror manifest after compaction: {error}"
-                    )),
-                },
-            );
-            return false;
+            return Self::respond_publish_failure(event_loop, request_id, &error);
         }
 
+        if let Err(error) = Self::persist_published_compaction(event_loop) {
+            return Self::respond_publish_failure(event_loop, request_id, &error);
+        }
+
+        Self::finalize_published_compaction(event_loop, request_id, input_ssts, output_ssts);
+        true
+    }
+
+    fn build_output_metadata(
+        event_loop: &mut EventLoop,
+        cf_id: crate::types::ColumnFamilyId,
+        target_level: u32,
+        output_ssts: &[String],
+    ) -> Result<Vec<crate::runtime::FileMeta>, crate::common::MidgeError> {
+        output_ssts
+            .iter()
+            .map(|name| event_loop.build_sst_file_meta(cf_id, target_level, name))
+            .collect()
+    }
+
+    fn publish_compaction_manifest(
+        event_loop: &mut EventLoop,
+        input_ssts: &[String],
+        output_ssts: &[String],
+        cf_id: crate::types::ColumnFamilyId,
+        added: &[crate::runtime::FileMeta],
+    ) -> Result<(), crate::common::MidgeError> {
+        event_loop.mirror_ssts_to_authoritative_cloud(output_ssts)?;
+        event_loop.state.record_compaction_publication_intent(
+            cf_id,
+            input_ssts.to_vec(),
+            added.to_vec(),
+        )?;
+
+        fail::fail_point!("slice7::after_compaction_output_durable_before_manifest_publish");
+
+        event_loop
+            .manifest_actor
+            .compaction_complete(&mut event_loop.state, input_ssts, added)?;
+        event_loop.state.transition_compaction_publication_intent(
+            output_ssts,
+            crate::runtime::PublicationPhase::ManifestPublished,
+        )
+    }
+
+    fn persist_published_compaction(
+        event_loop: &mut EventLoop,
+    ) -> Result<(), crate::common::MidgeError> {
+        fail::fail_point!("slice6::after_compaction_update_before_manifest_persist");
+        crate::runtime::actors::ManifestActor::persist(&event_loop.state)?;
+        event_loop.mirror_metadata_after_local_commit("compaction manifest publish")
+    }
+
+    fn finalize_published_compaction(
+        event_loop: &mut EventLoop,
+        request_id: u64,
+        input_ssts: &[String],
+        output_ssts: &[String],
+    ) {
         fail::fail_point!("slice6::after_manifest_persist_before_sst_gc");
 
         let hybrid_storage = event_loop.hybrid_storage.clone();
@@ -295,7 +293,30 @@ impl CompactionCoordinator {
             "Submitted compaction input SSTs for GC"
         );
 
-        let cleared_intent_mirror_error = match event_loop
+        if let Some(error) = Self::clear_published_compaction_intent(event_loop, output_ssts) {
+            event_loop.publish_snapshot();
+            event_loop.respond(
+                request_id,
+                RuntimeResponse::Error {
+                    request_id,
+                    error: crate::common::MidgeError::Internal(format!(
+                        "failed to mirror cleared compaction publication intent: {error}"
+                    )),
+                },
+            );
+            return;
+        }
+
+        Self::record_compaction_metrics(event_loop, output_ssts);
+        event_loop.publish_snapshot();
+        event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
+    }
+
+    fn clear_published_compaction_intent(
+        event_loop: &mut EventLoop,
+        output_ssts: &[String],
+    ) -> Option<crate::common::MidgeError> {
+        match event_loop
             .state
             .clear_compaction_publication_intent(output_ssts)
         {
@@ -314,28 +335,13 @@ impl CompactionCoordinator {
             },
             Err(error) => {
                 event_loop.state.mark_persistence_anomaly();
-                tracing::warn!(
-                    %error,
-                    "failed to clear compaction publication intent after GC"
-                );
+                tracing::warn!(%error, "failed to clear compaction publication intent after GC");
                 None
             }
-        };
-
-        if let Some(error) = cleared_intent_mirror_error {
-            event_loop.publish_snapshot();
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::Internal(format!(
-                        "failed to mirror cleared compaction publication intent: {error}"
-                    )),
-                },
-            );
-            return false;
         }
+    }
 
+    fn record_compaction_metrics(event_loop: &mut EventLoop, output_ssts: &[String]) {
         if let Some(telemetry) = crate::telemetry::Telemetry::global() {
             let bytes_rewritten: u64 = event_loop
                 .state
@@ -347,9 +353,25 @@ impl CompactionCoordinator {
                 .sum();
             telemetry.metrics().record_compaction(bytes_rewritten);
         }
-        event_loop.publish_snapshot();
-        event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
-        true
+    }
+
+    fn respond_publish_failure(
+        event_loop: &mut EventLoop,
+        request_id: u64,
+        error: &crate::common::MidgeError,
+    ) -> bool {
+        Self::record_compaction_failure(event_loop);
+        tracing::error!(error = ?error, "failed to apply compaction to manifest");
+        event_loop.respond(
+            request_id,
+            RuntimeResponse::Error {
+                request_id,
+                error: crate::common::MidgeError::Internal(format!(
+                    "failed to apply compaction to manifest: {error}"
+                )),
+            },
+        );
+        false
     }
 
     fn complete_pending_waits(event_loop: &mut EventLoop, allow_emergent_followup: bool) {

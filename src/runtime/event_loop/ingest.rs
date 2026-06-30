@@ -41,7 +41,7 @@ impl EventLoop {
             active
         );
 
-        self.state.enable_compaction = false;
+        self.state.set_compaction_enabled(false);
         self.state
             .ingest_active
             .store(true, std::sync::atomic::Ordering::SeqCst);

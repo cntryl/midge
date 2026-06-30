@@ -38,6 +38,20 @@ use bytes::Bytes;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+struct TxnSequencePlan {
+    txn_id: u64,
+    begin_seq: u64,
+    first_op_seq: u64,
+    commit_seq: u64,
+}
+
+struct TxnWalBatch {
+    wal_records: Vec<WalRecord>,
+    commit_record: Option<WalRecord>,
+    total_wal_bytes: usize,
+    skip_wal: bool,
+}
 use std::time::{Duration, Instant};
 
 /// Parameters for WAL append operation
@@ -648,6 +662,52 @@ impl WalActor {
             return Ok((state.sequence, 0, false));
         }
 
+        self.validate_transaction_preconditions(state, &ops, start_sequence, isolation_policy)?;
+        let effective_durability = durability_policy.unwrap_or(self.durability_policy);
+        let sequence_plan = Self::allocate_transaction_sequences(state, ops.len());
+        let (apply_ops, wal_batch) =
+            self.build_transaction_wal_batch(state, ops, &sequence_plan, effective_durability);
+        let last_sequence = sequence_plan.commit_seq;
+        let apply_op_count = apply_ops.len();
+
+        self.append_transaction_begin_and_ops(state, &wal_batch)?;
+        self.append_transaction_commit(state, wal_batch.commit_record.as_ref())?;
+        self.apply_transaction_durability(
+            state,
+            effective_durability,
+            last_sequence,
+            sequence_plan.begin_seq,
+        )?;
+        self.apply_transaction_ops(
+            state,
+            apply_ops,
+            effective_durability,
+            last_sequence,
+            apply_op_count,
+        )?;
+
+        tracing::trace!(
+            txn_id = sequence_plan.txn_id,
+            last_sequence,
+            apply_op_count,
+            "WAL transaction apply"
+        );
+
+        // Return deferred=true if using group commit (Batched or CloudAsync modes)
+        let deferred = matches!(
+            effective_durability,
+            DurabilityPolicy::Batched | DurabilityPolicy::CloudAsync
+        );
+        Ok((last_sequence, apply_op_count, deferred))
+    }
+
+    fn validate_transaction_preconditions(
+        &self,
+        state: &RuntimeState,
+        ops: &[crate::runtime::TransactionOp],
+        start_sequence: Option<u64>,
+        isolation_policy: crate::runtime::TransactionIsolationPolicy,
+    ) -> MidgeResult<()> {
         if matches!(
             isolation_policy,
             crate::runtime::TransactionIsolationPolicy::AbortOnWriteConflict
@@ -657,12 +717,10 @@ impl WalActor {
                     "AbortOnWriteConflict requires transaction start_sequence".to_string(),
                 )
             })?;
-
-            Self::ensure_no_write_conflicts(state, &ops, start_sequence)?;
+            Self::ensure_no_write_conflicts(state, ops, start_sequence)?;
         }
 
-        // Preflight insert-only operations so we can fail without writing any WAL records.
-        for op in &ops {
+        for op in ops {
             if let crate::runtime::TransactionOp::Put {
                 cf_id,
                 key,
@@ -677,140 +735,178 @@ impl WalActor {
                 }
             }
         }
+        Ok(())
+    }
 
-        let txn_id = state.next_txn_id();
-
-        // Marker key is unused by semantics but required by the record format.
-        let marker_key = Bytes::from_static(b"txn");
-
-        // Preallocate sequence range for batch: begin, per-op, commit.
-        let ops_count = ops.len();
+    fn allocate_transaction_sequences(
+        state: &mut RuntimeState,
+        ops_count: usize,
+    ) -> TxnSequencePlan {
         debug_assert!(
             ops_count > 0,
             "append_transaction requires at least one operation"
         );
         let ops_count_u64 = u64::try_from(ops_count).unwrap_or(u64::MAX);
-        // sequences: begin_seq, op_seqs[0..ops_count-1], commit_seq
         let begin_seq = state.sequence + 1;
         let first_op_seq = begin_seq + 1;
         let commit_seq = begin_seq + 1 + ops_count_u64;
-
-        // Advance global sequence to commit_seq
         state.sequence = commit_seq;
+        TxnSequencePlan {
+            txn_id: state.next_txn_id(),
+            begin_seq,
+            first_op_seq,
+            commit_seq,
+        }
+    }
 
-        // Determine effective durability policy: use provided one, or fall back to actor's default
-        let effective_durability = durability_policy.unwrap_or(self.durability_policy);
-
-        // For BestEffort mode, skip WAL entirely - only update memtable
+    fn build_transaction_wal_batch(
+        &mut self,
+        state: &mut RuntimeState,
+        ops: Vec<crate::runtime::TransactionOp>,
+        sequence_plan: &TxnSequencePlan,
+        effective_durability: DurabilityPolicy,
+    ) -> (Vec<TransactionApplyOp>, TxnWalBatch) {
         let skip_wal = matches!(effective_durability, DurabilityPolicy::BestEffort);
-        let mut total_wal_bytes: usize = 0;
+        let mut wal_records = self.begin_transaction_records(sequence_plan, ops.len(), skip_wal);
+        let apply_ops = self.build_apply_ops(
+            ops,
+            sequence_plan.first_op_seq,
+            sequence_plan.txn_id,
+            state,
+            skip_wal,
+            &mut wal_records,
+        );
+        let commit_record = self.build_transaction_commit_record(sequence_plan, skip_wal);
+        let total_wal_bytes = wal_records.iter().map(WalRecord::estimated_size).sum();
+        (
+            apply_ops,
+            TxnWalBatch {
+                wal_records,
+                commit_record,
+                total_wal_bytes,
+                skip_wal,
+            },
+        )
+    }
 
-        // Build begin + op records first. The commit marker is appended only at the
-        // end of the transaction path so recovery cannot observe a "committed"
-        // transaction if the process crashes before append_transaction returns.
-        let mut wal_records: Vec<WalRecord> = if skip_wal {
-            Vec::new() // Don't allocate WAL records for BestEffort
-        } else {
-            let mut records = Vec::with_capacity(ops_count + 1);
+    fn begin_transaction_records(
+        &self,
+        sequence_plan: &TxnSequencePlan,
+        ops_count: usize,
+        skip_wal: bool,
+    ) -> Vec<WalRecord> {
+        if skip_wal {
+            return Vec::new();
+        }
+        let mut begin_record = WalRecord::new_cf(
+            0,
+            WalOpKind::TxnBegin,
+            Bytes::from_static(b"txn"),
+            None,
+            sequence_plan.begin_seq,
+            self.current_epoch,
+        );
+        begin_record.txn_id = Some(sequence_plan.txn_id);
+        let mut records = Vec::with_capacity(ops_count + 1);
+        records.push(begin_record);
+        records
+    }
 
-            // Create and write begin record
-            let mut begin_record = WalRecord::new_cf(
-                0,
-                WalOpKind::TxnBegin,
-                marker_key.clone(),
-                None,
-                begin_seq,
-                self.current_epoch,
+    fn build_transaction_commit_record(
+        &self,
+        sequence_plan: &TxnSequencePlan,
+        skip_wal: bool,
+    ) -> Option<WalRecord> {
+        if skip_wal {
+            return None;
+        }
+        let mut record = WalRecord::new_cf(
+            0,
+            WalOpKind::TxnCommit,
+            Bytes::from_static(b"txn"),
+            None,
+            sequence_plan.commit_seq,
+            self.current_epoch,
+        );
+        record.txn_id = Some(sequence_plan.txn_id);
+        Some(record)
+    }
+
+    fn append_transaction_begin_and_ops(
+        &mut self,
+        state: &mut RuntimeState,
+        wal_batch: &TxnWalBatch,
+    ) -> MidgeResult<()> {
+        if wal_batch.skip_wal {
+            return Ok(());
+        }
+        if let Some(writer) = &mut self.writer {
+            fail::fail_point!("midge::wal::inject_no_space_on_txn_append_batch", |_| Err(
+                MidgeError::NoSpace("failpoint: no space on transaction batch append".to_string())
+            ));
+            let append_start = Instant::now();
+            if let Err(error) = writer.append_batch(&wal_batch.wal_records) {
+                if matches!(error, MidgeError::NoSpace(_)) {
+                    Self::record_no_space_event();
+                }
+                return Err(error);
+            }
+            self.finish_append_instrumentation(
+                wal_batch.total_wal_bytes as u64,
+                append_start.elapsed(),
             );
-            begin_record.txn_id = Some(txn_id);
-            records.push(begin_record);
-            records
+            if let Some(max_sequence) = wal_batch.wal_records.iter().map(|record| record.seq).max()
+            {
+                self.record_segment_sequence(max_sequence);
+            }
+            fail::fail_point!("midge::wal::after_append_batch_before_sync");
+        }
+        let record_count = wal_batch.wal_records.len();
+        state.wal.pending_writes += record_count;
+        self.pending_sync_count += record_count;
+        self.bytes_since_sync += wal_batch.total_wal_bytes;
+        Ok(())
+    }
+
+    fn append_transaction_commit(
+        &mut self,
+        state: &mut RuntimeState,
+        commit_record: Option<&WalRecord>,
+    ) -> MidgeResult<()> {
+        let Some(commit_record) = commit_record else {
+            return Ok(());
         };
-
-        let apply_ops =
-            self.build_apply_ops(ops, first_op_seq, txn_id, state, skip_wal, &mut wal_records);
-
-        let mut commit_record = None;
-        if !skip_wal {
-            let mut record = WalRecord::new_cf(
-                0,
-                WalOpKind::TxnCommit,
-                marker_key,
-                None,
-                commit_seq,
-                self.current_epoch,
+        fail::fail_point!("midge::wal::txn_after_ops_append_before_commit");
+        if let Some(writer) = &mut self.writer {
+            fail::fail_point!("midge::wal::inject_no_space_on_txn_commit_append", |_| Err(
+                MidgeError::NoSpace("failpoint: no space on transaction commit append".to_string())
+            ));
+            let append_start = Instant::now();
+            if let Err(error) = writer.append_record(commit_record) {
+                if matches!(error, MidgeError::NoSpace(_)) {
+                    Self::record_no_space_event();
+                }
+                return Err(error);
+            }
+            self.finish_append_instrumentation(
+                commit_record.estimated_size() as u64,
+                append_start.elapsed(),
             );
-            record.txn_id = Some(txn_id);
-            commit_record = Some(record);
-
-            for r in &wal_records {
-                total_wal_bytes += r.estimated_size();
-            }
+            self.record_segment_sequence(commit_record.seq);
         }
+        state.wal.pending_writes += 1;
+        self.pending_sync_count += 1;
+        self.bytes_since_sync += commit_record.estimated_size();
+        Ok(())
+    }
 
-        // Write begin + op records first. The commit marker is appended separately so we
-        // can inject crash/failure points around the exact transaction publication seam.
-        if !skip_wal {
-            if let Some(writer) = &mut self.writer {
-                fail::fail_point!("midge::wal::inject_no_space_on_txn_append_batch", |_| Err(
-                    MidgeError::NoSpace(
-                        "failpoint: no space on transaction batch append".to_string()
-                    )
-                ));
-                let a_start = Instant::now();
-                if let Err(error) = writer.append_batch(&wal_records) {
-                    if matches!(error, MidgeError::NoSpace(_)) {
-                        Self::record_no_space_event();
-                    }
-                    return Err(error);
-                }
-                self.finish_append_instrumentation(total_wal_bytes as u64, a_start.elapsed());
-                if let Some(max_sequence) = wal_records.iter().map(|record| record.seq).max() {
-                    self.record_segment_sequence(max_sequence);
-                }
-                fail::fail_point!("midge::wal::after_append_batch_before_sync");
-            }
-
-            // Update bookkeeping (single update for entire batch)
-            let record_count = wal_records.len();
-            state.wal.pending_writes += record_count;
-            self.pending_sync_count += record_count;
-            self.bytes_since_sync += total_wal_bytes;
-        }
-
-        let last_sequence = commit_seq;
-
-        if let Some(commit_record) = commit_record {
-            fail::fail_point!("midge::wal::txn_after_ops_append_before_commit");
-
-            if let Some(writer) = &mut self.writer {
-                fail::fail_point!("midge::wal::inject_no_space_on_txn_commit_append", |_| Err(
-                    MidgeError::NoSpace(
-                        "failpoint: no space on transaction commit append".to_string()
-                    )
-                ));
-                let a_start = Instant::now();
-                if let Err(error) = writer.append_record(&commit_record) {
-                    if matches!(error, MidgeError::NoSpace(_)) {
-                        Self::record_no_space_event();
-                    }
-                    return Err(error);
-                }
-                self.finish_append_instrumentation(
-                    commit_record.estimated_size() as u64,
-                    a_start.elapsed(),
-                );
-                self.record_segment_sequence(commit_record.seq);
-            }
-
-            state.wal.pending_writes += 1;
-            self.pending_sync_count += 1;
-            self.bytes_since_sync += commit_record.estimated_size();
-        }
-
-        // Apply durability policy (single sync for the whole batch, where relevant).
-        // Use effective_durability which may be per-request BestEffort.
-        // For strict durability, the sync happens only after the commit marker is appended.
+    fn apply_transaction_durability(
+        &mut self,
+        state: &mut RuntimeState,
+        effective_durability: DurabilityPolicy,
+        last_sequence: u64,
+        begin_seq: u64,
+    ) -> MidgeResult<()> {
         match effective_durability {
             DurabilityPolicy::Strict | DurabilityPolicy::CloudMirrored => {
                 fail::fail_point!("midge::wal::txn_after_commit_append_before_sync");
@@ -818,124 +914,94 @@ impl WalActor {
                 state.wal.local_durable_seq = last_sequence;
                 fail::fail_point!("midge::wal::txn_after_sync_before_ack");
             }
-            DurabilityPolicy::Batched
-            | DurabilityPolicy::CloudAsync
-            | DurabilityPolicy::BestEffort => {}
-        }
-
-        let apply_op_count = apply_ops.len();
-
-        // For batched mode, mark the sequence range as pending atomicity
-        // Reads at sequences >= begin_seq must wait for the batch to become durable
-        if matches!(effective_durability, DurabilityPolicy::Batched) {
-            state.pending_txn_min_seq = Some(begin_seq);
-            state.pending_txn_start_time = Some(Instant::now());
-
-            // Record metric
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_pending_txn_started();
-            }
-        }
-
-        if matches!(effective_durability, DurabilityPolicy::CloudAsync) {
-            // === CRITICAL: Check backpressure before queueing batch ===
-            if self.should_apply_backpressure() {
-                if let Some(t) = crate::telemetry::Telemetry::global() {
-                    t.metrics().record_write_stall_cloud();
-                }
-                tracing::warn!(
-                    apply_op_count,
-                    pending_count = self.cloud_write_queue.len(),
-                    pending_bytes = self.cloud_write_queue.pending_bytes(),
-                    "CloudAsync batch stall: pending queue at capacity"
-                );
-                return Err(MidgeError::WriteStall(
-                    "CloudAsync pending queue at capacity; cloud upload too slow".to_string(),
-                ));
-            }
-
-            // Check for timed-out writes
-            let timed_out = self.count_timed_out_writes();
-            if timed_out > 0 {
-                tracing::error!(
-                    timed_out_count = timed_out,
-                    timeout_secs = CLOUD_UPLOAD_TIMEOUT.as_secs(),
-                    "CloudAsync batch timeout: pending writes not acknowledged by cloud"
-                );
-                return Err(MidgeError::Internal(format!(
-                    "{timed_out} pending writes exceeded cloud upload timeout"
-                )));
-            }
-
-            // CRITICAL: Apply to memtable immediately for CloudAsync.
-            // Cloud upload runs asynchronously; data must be visible for reads
-            // without waiting for upload completion. This matches append() behavior.
-            // We consume apply_ops here (same as non-CloudAsync path) to avoid cloning.
-            for apply_op in apply_ops {
-                match apply_op {
-                    TransactionApplyOp::Put {
-                        cf_id,
-                        key,
-                        value,
-                        expiration,
-                        sequence,
-                    } => {
-                        Self::apply_to_memtable(
-                            state,
-                            sequence,
-                            cf_id,
-                            key,
-                            Some(value),
-                            expiration,
-                        )?;
-                    }
-                    TransactionApplyOp::Delete {
-                        cf_id,
-                        key,
-                        sequence,
-                    } => {
-                        Self::apply_to_memtable(state, sequence, cf_id, key, None, None)?;
-                    }
-                    TransactionApplyOp::DeleteRange {
-                        cf_id,
-                        start_key,
-                        end_key,
-                        sequence,
-                    } => {
-                        Self::apply_delete_range_to_memtable(
-                            state, sequence, cf_id, &start_key, &end_key,
-                        )?;
-                    }
+            DurabilityPolicy::Batched => {
+                state.pending_txn_min_seq = Some(begin_seq);
+                state.pending_txn_start_time = Some(Instant::now());
+                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                    telemetry.metrics().record_pending_txn_started();
                 }
             }
-
-            // Note: We no longer queue to cloud_write_queue for batched transactions
-            // since memtable apply already happened. Cloud WAL upload is handled
-            // separately via segment rotation. The queue is primarily for single-write
-            // CloudAsync tracking which still uses append() -> enqueue_write().
-
-            tracing::trace!(
-                commit_sequence = last_sequence,
-                apply_op_count,
-                "Applied batch to memtable (CloudAsync)"
-            );
-        } else {
-            Self::apply_ops_to_memtables(state, apply_ops)?;
+            DurabilityPolicy::CloudAsync | DurabilityPolicy::BestEffort => {}
         }
+        Ok(())
+    }
 
+    fn apply_transaction_ops(
+        &mut self,
+        state: &mut RuntimeState,
+        apply_ops: Vec<TransactionApplyOp>,
+        effective_durability: DurabilityPolicy,
+        last_sequence: u64,
+        apply_op_count: usize,
+    ) -> MidgeResult<()> {
+        if !matches!(effective_durability, DurabilityPolicy::CloudAsync) {
+            return Self::apply_ops_to_memtables(state, apply_ops);
+        }
+        self.validate_cloud_async_transaction_queue(apply_op_count)?;
+        for apply_op in apply_ops {
+            Self::apply_transaction_op_to_memtable(state, apply_op)?;
+        }
         tracing::trace!(
-            txn_id,
-            last_sequence,
+            commit_sequence = last_sequence,
             apply_op_count,
-            "WAL transaction apply"
+            "Applied batch to memtable (CloudAsync)"
         );
+        Ok(())
+    }
 
-        // Return deferred=true if using group commit (Batched or CloudAsync modes)
-        let deferred = matches!(
-            effective_durability,
-            DurabilityPolicy::Batched | DurabilityPolicy::CloudAsync
-        );
-        Ok((last_sequence, apply_op_count, deferred))
+    fn validate_cloud_async_transaction_queue(&self, apply_op_count: usize) -> MidgeResult<()> {
+        if self.should_apply_backpressure() {
+            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                telemetry.metrics().record_write_stall_cloud();
+            }
+            tracing::warn!(
+                apply_op_count,
+                pending_count = self.cloud_write_queue.len(),
+                pending_bytes = self.cloud_write_queue.pending_bytes(),
+                "CloudAsync batch stall: pending queue at capacity"
+            );
+            return Err(MidgeError::WriteStall(
+                "CloudAsync pending queue at capacity; cloud upload too slow".to_string(),
+            ));
+        }
+        let timed_out = self.count_timed_out_writes();
+        if timed_out > 0 {
+            tracing::error!(
+                timed_out_count = timed_out,
+                timeout_secs = CLOUD_UPLOAD_TIMEOUT.as_secs(),
+                "CloudAsync batch timeout: pending writes not acknowledged by cloud"
+            );
+            return Err(MidgeError::Internal(format!(
+                "{timed_out} pending writes exceeded cloud upload timeout"
+            )));
+        }
+        Ok(())
+    }
+
+    fn apply_transaction_op_to_memtable(
+        state: &mut RuntimeState,
+        apply_op: TransactionApplyOp,
+    ) -> MidgeResult<()> {
+        match apply_op {
+            TransactionApplyOp::Put {
+                cf_id,
+                key,
+                value,
+                expiration,
+                sequence,
+            } => Self::apply_to_memtable(state, sequence, cf_id, key, Some(value), expiration),
+            TransactionApplyOp::Delete {
+                cf_id,
+                key,
+                sequence,
+            } => Self::apply_to_memtable(state, sequence, cf_id, key, None, None),
+            TransactionApplyOp::DeleteRange {
+                cf_id,
+                start_key,
+                end_key,
+                sequence,
+            } => Self::apply_delete_range_to_memtable(state, sequence, cf_id, &start_key, &end_key),
+        }
     }
 
     fn ensure_no_write_conflicts(
@@ -1043,7 +1109,7 @@ impl WalActor {
             sst_files,
             Arc::clone(&state.fs),
             sst_path_prefix,
-            state.memory_mode,
+            state.is_memory_mode(),
         );
         snapshot.cf_id = cf_id;
         snapshot.latest_state_sequence(key)
@@ -1076,7 +1142,7 @@ impl WalActor {
             sst_files,
             Arc::clone(&state.fs),
             sst_path_prefix,
-            state.memory_mode,
+            state.is_memory_mode(),
         );
         snapshot.cf_id = cf_id;
         snapshot.latest_sequence_in_range(start_key, end_key)

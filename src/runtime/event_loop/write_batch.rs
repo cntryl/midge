@@ -82,114 +82,9 @@ impl EventLoop {
         let mut drained = 0usize;
 
         while drained < max {
-            match msg_rx.try_recv() {
-                Ok(RuntimeMsg::WalAppend {
-                    request_id,
-                    cf_id,
-                    key,
-                    value,
-                    ttl_seconds,
-                    insert_only,
-                }) => {
-                    let result = self.wal_actor.append(
-                        &mut self.state,
-                        crate::runtime::actors::wal::AppendParams {
-                            request_id,
-                            cf_id,
-                            key: bytes::Bytes::from(key),
-                            value: value.map(bytes::Bytes::from),
-                            insert_only,
-                            ttl_seconds,
-                        },
-                    );
-
-                    match result {
-                        Ok((seq, deferred)) => {
-                            self.handle_write_success(
-                                request_id,
-                                &WriteResult::WalAppend {
-                                    sequence: seq,
-                                    deferred,
-                                },
-                            );
-                        }
-                        Err(e) => self.handle_write_error(request_id, e),
-                    }
-
-                    drained += 1;
-                }
-                Ok(RuntimeMsg::WalAppendDeleteRange {
-                    request_id,
-                    cf_id,
-                    start_key,
-                    end_key,
-                    durability_policy,
-                }) => {
-                    let result = self.wal_actor.append_delete_range(
-                        &mut self.state,
-                        request_id,
-                        cf_id,
-                        bytes::Bytes::from(start_key),
-                        bytes::Bytes::from(end_key),
-                        durability_policy,
-                    );
-
-                    match result {
-                        Ok((seq, deferred)) => {
-                            self.handle_write_success(
-                                request_id,
-                                &WriteResult::WalAppend {
-                                    sequence: seq,
-                                    deferred,
-                                },
-                            );
-                        }
-                        Err(e) => self.handle_write_error(request_id, e),
-                    }
-
-                    drained += 1;
-                }
-
-                Ok(RuntimeMsg::ApplyTransaction {
-                    request_id,
-                    ops,
-                    durability_policy,
-                    start_sequence,
-                    isolation_policy,
-                }) => {
-                    match self.wal_actor.append_transaction(
-                        &mut self.state,
-                        request_id,
-                        ops,
-                        durability_policy,
-                        start_sequence,
-                        isolation_policy,
-                    ) {
-                        Ok((last_sequence, op_count, deferred)) => {
-                            self.handle_write_success(
-                                request_id,
-                                &WriteResult::TransactionApplied {
-                                    last_sequence,
-                                    op_count,
-                                    deferred,
-                                },
-                            );
-                        }
-                        Err(e) => self.handle_write_error(request_id, e),
-                    }
-
-                    drained += 1;
-                }
-
-                Ok(other) => {
-                    // Preserve FIFO ordering: stash the first non-write and stop draining.
-                    if self.pending_msg.is_none() {
-                        self.pending_msg = Some(other);
-                    }
-                    break;
-                }
-
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            match self.drain_one_pending_write(msg_rx) {
+                DrainOutcome::WriteHandled => drained += 1,
+                DrainOutcome::StashedNonWrite | DrainOutcome::ChannelEmpty => break,
             }
         }
 
@@ -202,6 +97,104 @@ impl EventLoop {
         }
 
         drained
+    }
+
+    fn drain_one_pending_write(&mut self, msg_rx: &Receiver<RuntimeMsg>) -> DrainOutcome {
+        match msg_rx.try_recv() {
+            Ok(RuntimeMsg::WalAppend {
+                request_id,
+                cf_id,
+                key,
+                value,
+                ttl_seconds,
+                insert_only,
+            }) => {
+                let result = self.wal_actor.append(
+                    &mut self.state,
+                    crate::runtime::actors::wal::AppendParams {
+                        request_id,
+                        cf_id,
+                        key: bytes::Bytes::from(key),
+                        value: value.map(bytes::Bytes::from),
+                        insert_only,
+                        ttl_seconds,
+                    },
+                );
+                self.finish_drained_write(
+                    request_id,
+                    result
+                        .map(|(sequence, deferred)| WriteResult::WalAppend { sequence, deferred }),
+                );
+                DrainOutcome::WriteHandled
+            }
+            Ok(RuntimeMsg::WalAppendDeleteRange {
+                request_id,
+                cf_id,
+                start_key,
+                end_key,
+                durability_policy,
+            }) => {
+                let result = self.wal_actor.append_delete_range(
+                    &mut self.state,
+                    request_id,
+                    cf_id,
+                    bytes::Bytes::from(start_key),
+                    bytes::Bytes::from(end_key),
+                    durability_policy,
+                );
+                self.finish_drained_write(
+                    request_id,
+                    result
+                        .map(|(sequence, deferred)| WriteResult::WalAppend { sequence, deferred }),
+                );
+                DrainOutcome::WriteHandled
+            }
+            Ok(RuntimeMsg::ApplyTransaction {
+                request_id,
+                ops,
+                durability_policy,
+                start_sequence,
+                isolation_policy,
+            }) => {
+                let result = self
+                    .wal_actor
+                    .append_transaction(
+                        &mut self.state,
+                        request_id,
+                        ops,
+                        durability_policy,
+                        start_sequence,
+                        isolation_policy,
+                    )
+                    .map(
+                        |(last_sequence, op_count, deferred)| WriteResult::TransactionApplied {
+                            last_sequence,
+                            op_count,
+                            deferred,
+                        },
+                    );
+                self.finish_drained_write(request_id, result);
+                DrainOutcome::WriteHandled
+            }
+            Ok(other) => {
+                if self.pending_msg.is_none() {
+                    self.pending_msg = Some(other);
+                }
+                DrainOutcome::StashedNonWrite
+            }
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => DrainOutcome::ChannelEmpty,
+        }
+    }
+
+    fn finish_drained_write(
+        &mut self,
+        request_id: u64,
+        result: Result<WriteResult, crate::common::MidgeError>,
+    ) {
+        match result {
+            Ok(result) => self.handle_write_success(request_id, &result),
+            Err(error) => self.handle_write_error(request_id, error),
+        }
     }
 
     fn handle_write_success(&mut self, request_id: u64, result: &WriteResult) {
@@ -272,4 +265,10 @@ impl EventLoop {
     fn handle_write_error(&mut self, request_id: u64, error: crate::common::MidgeError) {
         self.respond(request_id, RuntimeResponse::Error { request_id, error });
     }
+}
+
+enum DrainOutcome {
+    WriteHandled,
+    StashedNonWrite,
+    ChannelEmpty,
 }
