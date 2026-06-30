@@ -1530,7 +1530,7 @@ impl EngineStartup {
 
         let startup_lease = StartupLease::acquire(&opts.storage)?;
         let materialized =
-            RuntimeStorageMaterialization::materialize(&opts, &storage_path, &startup_lease)?;
+            RuntimeStorageMaterialization::materialize(opts, &storage_path, &startup_lease)?;
         let recovered = RuntimeRecoveryMaterialization::replay_and_repair(
             materialized,
             &storage_path.db_path,

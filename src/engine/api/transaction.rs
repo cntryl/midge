@@ -172,6 +172,11 @@ pub struct Transaction {
     snapshot_registered: bool,
 }
 
+enum WriteSetLookup {
+    Present(Vec<u8>),
+    Deleted,
+}
+
 pub(crate) struct TransactionInit {
     pub(crate) runtime_handle: RuntimeHandle,
     pub(crate) coordinator: Arc<IngestCoordinator>,
@@ -454,8 +459,11 @@ impl Transaction {
     /// Returns an error when the transaction snapshot is unavailable.
     pub fn get(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
         // Check transaction's write set first (read-your-own-writes)
-        if let Some(value_opt) = self.get_from_write_set(key) {
-            return Ok(value_opt.map(bytes::Bytes::from));
+        if let Some(value) = self.get_from_write_set(key) {
+            return Ok(match value {
+                WriteSetLookup::Present(bytes) => Some(bytes::Bytes::from(bytes)),
+                WriteSetLookup::Deleted => None,
+            });
         }
 
         // Execute directly against snapshot (bypasses event loop)
@@ -553,19 +561,23 @@ impl Transaction {
         Ok(iter)
     }
 
-    fn get_from_write_set(&self, key: &[u8]) -> Option<Option<Vec<u8>>> {
+    fn get_from_write_set(&self, key: &[u8]) -> Option<WriteSetLookup> {
         for intent in self.write_set.iter().rev() {
             match intent {
                 WriteIntent::Put { key: k, value, .. }
                 | WriteIntent::Insert { key: k, value, .. }
                     if k.as_slice() == key =>
                 {
-                    return Some(Some(value.clone()));
+                    return Some(WriteSetLookup::Present(value.clone()));
                 }
-                WriteIntent::Delete { key: k, .. } if k.as_slice() == key => return Some(None),
+                WriteIntent::Delete { key: k, .. } if k.as_slice() == key => {
+                    return Some(WriteSetLookup::Deleted);
+                }
                 WriteIntent::DeleteRange {
                     start_key, end_key, ..
-                } if key >= start_key.as_slice() && key < end_key.as_slice() => return Some(None),
+                } if key >= start_key.as_slice() && key < end_key.as_slice() => {
+                    return Some(WriteSetLookup::Deleted);
+                }
                 _ => {}
             }
         }

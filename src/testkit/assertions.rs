@@ -3,6 +3,11 @@
 use crate::engine::{api::TransactionMode, ColumnFamilyHandle};
 
 /// Assert that a key has the expected value.
+///
+/// # Panics
+///
+/// Panics if the read transaction cannot be created, the read fails, or the
+/// value does not match.
 pub fn assert_get_equals(
     engine: &crate::MidgeEngine,
     cf: &ColumnFamilyHandle,
@@ -20,6 +25,11 @@ pub fn assert_get_equals(
 }
 
 /// Assert that a key is absent (returns None).
+///
+/// # Panics
+///
+/// Panics if the read transaction cannot be created, the read fails, or the
+/// key is present.
 pub fn assert_key_absent(engine: &crate::MidgeEngine, cf: &ColumnFamilyHandle, key: &[u8]) {
     let tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -32,6 +42,10 @@ pub fn assert_key_absent(engine: &crate::MidgeEngine, cf: &ColumnFamilyHandle, k
 }
 
 /// Bulk insert keys for testing.
+///
+/// # Errors
+///
+/// Returns an error if any transaction step fails.
 pub fn bulk_put(
     engine: &crate::MidgeEngine,
     cf: &ColumnFamilyHandle,

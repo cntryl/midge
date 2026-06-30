@@ -296,6 +296,10 @@ where
 
 /// Create a temporary directory for tests.
 #[must_use]
+///
+/// # Panics
+///
+/// Panics if the temporary directory cannot be created.
 pub fn test_temp_dir() -> tempfile::TempDir {
     tempfile::TempDir::new().expect("Failed to create temp dir")
 }

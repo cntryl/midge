@@ -16,6 +16,7 @@ use crate::storage::abstraction::{
     OpenMode, OpenOptions, Storage, StorageError, StorageErrorKind, StoragePath,
 };
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::sync::Arc;
 use tracing::instrument;
 
@@ -125,19 +126,28 @@ impl RecoveryStats {
 /// Returns aggregated recovery statistics. Caller is responsible for attaching
 /// the recovered memtables to the runtime state.
 #[instrument(level = "info", skip(storage, memtables), fields(wal_dir = ?wal_dir))]
-pub fn replay_wal(
+///
+/// # Errors
+///
+/// Returns an error if WAL enumeration, decoding, or record application fails.
+pub fn replay_wal<S: BuildHasher>(
     storage: &dyn Storage,
     wal_dir: &StoragePath,
-    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
 ) -> MidgeResult<RecoveryStats> {
     replay_wal_with_policy(storage, wal_dir, memtables, ReplayPolicy::Strict)
 }
 
 #[instrument(level = "info", skip(storage, memtables), fields(wal_dir = ?wal_dir, replay_policy = ?replay_policy))]
-pub fn replay_wal_with_policy(
+///
+/// # Errors
+///
+/// Returns an error if WAL enumeration, decoding, or record application fails
+/// according to the selected replay policy.
+pub fn replay_wal_with_policy<S: BuildHasher>(
     storage: &dyn Storage,
     wal_dir: &StoragePath,
-    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     replay_policy: ReplayPolicy,
 ) -> MidgeResult<RecoveryStats> {
     // Invariant: recovery may keep only a verified prefix of the WAL, but it
@@ -257,11 +267,11 @@ pub fn replay_wal_with_policy(
     }
 }
 
-fn replay_wal_file(
+fn replay_wal_file<S: BuildHasher>(
     storage: &dyn Storage,
     file_path: &StoragePath,
     stats: &mut RecoveryStats,
-    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     open_txns: &mut std::collections::HashMap<u64, Vec<WalRecord>>,
     begun_txns: &mut std::collections::HashSet<u64>,
 ) -> MidgeResult<()> {
@@ -422,8 +432,8 @@ fn replay_wal_file(
         path = %file_path,
         records = stats.record_count,
         bytes = stats.bytes,
-        wal_read_ms = (file_read_ns as f64) / 1_000_000.0,
-        apply_ms = (file_apply_ns as f64) / 1_000_000.0,
+        wal_read_ms = std::time::Duration::from_nanos(u64::try_from(file_read_ns).unwrap_or(u64::MAX)).as_secs_f64() * 1000.0,
+        apply_ms = std::time::Duration::from_nanos(u64::try_from(file_apply_ns).unwrap_or(u64::MAX)).as_secs_f64() * 1000.0,
         "replayed wal file"
     );
 
@@ -435,9 +445,9 @@ fn replay_wal_file(
     skip(memtables, record),
     fields(cf_id = record.cf_id, seq = record.seq, op = ?record.op)
 )]
-fn apply_record(
+fn apply_record<S: BuildHasher>(
     record: &WalRecord,
-    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
 ) -> MidgeResult<()> {
     // Invariant: memtable reconstruction must match the durable WAL prefix
     // exactly. Expired or incomplete state may be dropped, but visible durable
@@ -452,7 +462,7 @@ fn apply_record(
             if let Some(exp) = record.expiration {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis() as u64);
+                    .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
                 if exp <= now {
                     return Ok(());
                 }

@@ -6,6 +6,9 @@ use crate::Engine;
 pub const KEY_SIZE: usize = 16;
 
 #[must_use]
+/// # Panics
+///
+/// Panics if the engine cannot be opened with compaction disabled.
 pub fn open_engine_no_compaction(mut opts: MidgeOptions) -> Engine {
     opts.enable_compaction = false;
     Engine::open_with_options(&opts).expect("open_engine_no_compaction: open engine")
@@ -42,7 +45,10 @@ pub fn precompute_kv16_u64_be(
 
     for i in 0..num_keys {
         keys.push(key16_u64_be(i as u64));
-        values.push(vec![(i as u8) % value_mod; value_size]);
+        values.push(vec![
+            u8::try_from(i).unwrap_or(u8::MAX) % value_mod;
+            value_size
+        ]);
     }
 
     (keys, values)

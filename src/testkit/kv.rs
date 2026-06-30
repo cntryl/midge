@@ -19,7 +19,7 @@ pub fn make_key(i: usize) -> Bytes {
 
     let mut n = i;
     for j in (4..KEY_SIZE).rev() {
-        key[j] = b'0' + (n % 10) as u8;
+        key[j] = b'0' + u8::try_from(n % 10).unwrap_or(0);
         n /= 10;
     }
 
@@ -59,7 +59,7 @@ pub fn precompute_read_indices(n: usize, count: usize, seed: u64) -> Vec<usize> 
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1);
-        indices.push((state as usize) % n);
+        indices.push(usize::try_from(state).unwrap_or(usize::MAX) % n);
     }
 
     indices
