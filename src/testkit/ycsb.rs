@@ -98,7 +98,7 @@ pub fn open_tier4_engine(mut opts: MidgeOptions) -> Engine {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0);
 
-    Engine::open_with_options(opts).expect("open tier4 engine")
+    Engine::open_with_options(&opts).expect("open tier4 engine")
 }
 
 /// # Panics

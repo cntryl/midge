@@ -43,6 +43,10 @@ impl WalOpKind {
 
     /// Parse operation from wire format (TLV encoding).
     #[inline]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the byte does not map to a known WAL operation kind.
     pub fn from_wire_format(byte: u8) -> MidgeResult<Self> {
         match byte {
             0 => Ok(WalOpKind::Put),
@@ -158,7 +162,7 @@ impl WalRecord {
         let expiration = if ttl_seconds > 0 {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as u64);
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
             Some(now + (ttl_seconds * 1000))
         } else {
             None
@@ -183,7 +187,7 @@ impl WalRecord {
         if let Some(exp_time) = self.expiration {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as u64);
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
             now > exp_time
         } else {
             false

@@ -41,7 +41,7 @@ impl CloudSstRecoveryProof {
         }
     }
 
-    pub(super) fn merge_from(&mut self, other: Self) {
+    pub(super) fn merge_from(&mut self, other: &Self) {
         if self.expected_size_bytes.is_none() {
             self.expected_size_bytes = other.expected_size_bytes;
         }
@@ -1070,7 +1070,7 @@ impl CloudStartupRecovery {
         for file in &state.manifest.files {
             proofs
                 .entry(file.name.clone())
-                .and_modify(|proof| proof.merge_from(CloudSstRecoveryProof::from_manifest(file)))
+                .and_modify(|proof| proof.merge_from(&CloudSstRecoveryProof::from_manifest(file)))
                 .or_insert_with(|| CloudSstRecoveryProof::from_manifest(file));
         }
         for intent in &state.intent_log {
@@ -1080,7 +1080,7 @@ impl CloudStartupRecovery {
                     proofs
                         .entry(file_meta.name.clone())
                         .and_modify(|proof| {
-                            proof.merge_from(CloudSstRecoveryProof::from_runtime(file_meta));
+                            proof.merge_from(&CloudSstRecoveryProof::from_runtime(file_meta));
                         })
                         .or_insert_with(|| CloudSstRecoveryProof::from_runtime(file_meta));
                 }
@@ -1090,7 +1090,7 @@ impl CloudStartupRecovery {
                         proofs
                             .entry(file_meta.name.clone())
                             .and_modify(|proof| {
-                                proof.merge_from(CloudSstRecoveryProof::from_runtime(file_meta));
+                                proof.merge_from(&CloudSstRecoveryProof::from_runtime(file_meta));
                             })
                             .or_insert_with(|| CloudSstRecoveryProof::from_runtime(file_meta));
                     }
@@ -1459,7 +1459,7 @@ struct FacadeAssembly;
 
 impl FacadeAssembly {
     fn assemble(
-        opts: OpenOptions,
+        opts: &OpenOptions,
         storage_path: StartupStoragePath,
         startup_lease: StartupLease,
         started: StartedRuntime,
@@ -1523,7 +1523,7 @@ impl FacadeAssembly {
 pub(super) struct EngineStartup;
 
 impl EngineStartup {
-    pub(super) fn open(opts: OpenOptions) -> MidgeResult<Engine> {
+    pub(super) fn open(opts: &OpenOptions) -> MidgeResult<Engine> {
         let start = std::time::Instant::now();
         let storage_path = StartupStoragePath::resolve(&opts.storage);
         storage_path.prepare();
@@ -1536,7 +1536,7 @@ impl EngineStartup {
             &storage_path.db_path,
             opts.recovery_policy,
         )?;
-        let started = StartedRuntime::start(&opts, recovered)?;
+        let started = StartedRuntime::start(opts, recovered)?;
 
         FacadeAssembly::assemble(opts, storage_path, startup_lease, started, start)
     }

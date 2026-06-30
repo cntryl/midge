@@ -400,7 +400,7 @@ pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> Engine {
     }
 
     let opts = config.build_midge_options(Some(path));
-    Engine::open_with_options(opts).expect("failed to open engine")
+    Engine::open_with_options(&opts).expect("failed to open engine")
 }
 
 /// Setup engine with storage mode (convenience wrapper with defaults).
@@ -435,7 +435,7 @@ pub fn reopen_engine_at_path(path: &Path, config: &BenchEngineConfig) -> Engine 
     }
 
     let opts = config.build_midge_options(Some(path.to_path_buf()));
-    Engine::open_with_options(opts).expect("failed to open engine")
+    Engine::open_with_options(&opts).expect("failed to open engine")
 }
 
 /// Setup Arc-wrapped engine for concurrent benchmarks.

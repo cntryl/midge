@@ -298,7 +298,7 @@ impl IngestCoordinator {
         let thread_handle = thread::Builder::new()
             .name(format!("midge-ingest-cf{cf_id}"))
             .spawn(move || {
-                Self::ingest_loop(&cf_id, &runtime, write_rx, stop_rx, stall_flag_clone);
+                Self::ingest_loop(&cf_id, &runtime, &write_rx, &stop_rx, &stall_flag_clone);
             })
             .map_err(|e| {
                 crate::common::MidgeError::Internal(format!(
@@ -694,9 +694,9 @@ impl IngestCoordinator {
     fn ingest_loop(
         cf_id: &crate::engine::ColumnFamilyId,
         runtime: &RuntimeHandle,
-        write_rx: Receiver<IngestWrite>,
-        stop_rx: Receiver<()>,
-        stall_flag: Arc<AtomicBool>,
+        write_rx: &Receiver<IngestWrite>,
+        stop_rx: &Receiver<()>,
+        stall_flag: &Arc<AtomicBool>,
     ) {
         let mut batch = WriteBatch::new();
         let mut batch_count = 0u64;
@@ -726,7 +726,7 @@ impl IngestCoordinator {
                             batch.add(intent);
                         }
                         if !batch.is_empty() {
-                            Self::commit_batch(runtime, *cf_id, &mut batch, &stall_flag);
+                            Self::commit_batch(runtime, *cf_id, &mut batch, stall_flag);
                         }
                         break;
                     },
@@ -741,7 +741,7 @@ impl IngestCoordinator {
                         true
                     } else {
                         // write channel disconnected — flush & exit
-                        Self::commit_batch(runtime, *cf_id, &mut batch, &stall_flag);
+                        Self::commit_batch(runtime, *cf_id, &mut batch, stall_flag);
                         break;
                     },
                     recv(stop_rx) -> _ => {
@@ -749,13 +749,13 @@ impl IngestCoordinator {
                             batch.add(intent);
                         }
                         if !batch.is_empty() {
-                            Self::commit_batch(runtime, *cf_id, &mut batch, &stall_flag);
+                            Self::commit_batch(runtime, *cf_id, &mut batch, stall_flag);
                         }
                         break;
                     },
                     default(remaining) => {
                         // Batch deadline expired — commit what we have
-                        Self::commit_batch(runtime, *cf_id, &mut batch, &stall_flag);
+                        Self::commit_batch(runtime, *cf_id, &mut batch, stall_flag);
                         false
                     },
                 }
@@ -766,8 +766,7 @@ impl IngestCoordinator {
                 while batch.len() < MAX_BATCH_OPS && batch.total_bytes < MAX_BATCH_BYTES {
                     match write_rx.try_recv() {
                         Ok(intent) => batch.add(intent),
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => break,
+                        Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                     }
                 }
 
@@ -777,8 +776,9 @@ impl IngestCoordinator {
                     let batch_len = batch.len();
                     let batch_bytes = batch.total_bytes;
                     let commit_start = Instant::now();
-                    Self::commit_batch(runtime, *cf_id, &mut batch, &stall_flag);
-                    let commit_time_us = commit_start.elapsed().as_micros() as u64;
+                    Self::commit_batch(runtime, *cf_id, &mut batch, stall_flag);
+                    let commit_time_us =
+                        u64::try_from(commit_start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
                     let mut metrics = BatchMetrics {
                         cf_id: *cf_id,
@@ -850,7 +850,8 @@ impl IngestCoordinator {
     ) {
         let total_elapsed = loop_start.elapsed();
         let avg_batch_size = total_batch_size.checked_div(batch_count).unwrap_or(0);
-        let batches_per_sec = batch_count as f64 / total_elapsed.as_secs_f64();
+        let batches_per_sec =
+            f64::from(u32::try_from(batch_count).unwrap_or(u32::MAX)) / total_elapsed.as_secs_f64();
         tracing::info!(
             cf_id = cf_id,
             batch_count,
@@ -958,7 +959,8 @@ impl Drop for IngestCoordinator {
     fn drop(&mut self) {
         let (leader_runs, batches_grouped, final_timeout_us) = self.write_group_coord.metrics();
         if leader_runs > 0 {
-            let avg_group_size = batches_grouped as f64 / leader_runs as f64;
+            let avg_group_size = f64::from(u32::try_from(batches_grouped).unwrap_or(u32::MAX))
+                / f64::from(u32::try_from(leader_runs).unwrap_or(u32::MAX));
             tracing::debug!(
                 cf_id = self.cf_id,
                 leader_runs,

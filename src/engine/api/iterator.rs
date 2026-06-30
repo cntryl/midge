@@ -120,9 +120,8 @@ impl Iterator {
     /// Returns `true` if new results were loaded, `false` if source is
     /// exhausted or no lazy source is configured.
     fn try_load_next_batch(&mut self) -> bool {
-        let source = match self.lazy_source.as_mut() {
-            Some(s) => s,
-            None => return false,
+        let Some(source) = self.lazy_source.as_mut() else {
+            return false;
         };
 
         // Determine resume key from the last element in the current batch

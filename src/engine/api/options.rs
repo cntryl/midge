@@ -438,14 +438,14 @@ impl OpenOptions {
         };
 
         // Allocate remaining memory to block cache
-        let cache_ratio = match self.workload {
-            WorkloadProfile::ReadMostly => 0.7, // 70% to cache
-            WorkloadProfile::WriteHeavy => 0.2, // 20% to cache
-            _ => 0.5,                           // 50% to cache
+        let cache_ratio_percent: usize = match self.workload {
+            WorkloadProfile::ReadMostly => 70,
+            WorkloadProfile::WriteHeavy => 20,
+            _ => 50,
         };
 
         let usable_memory = total_memory.saturating_sub(self.memtable_size_limit * 2); // 2 memtables
-        self.block_cache_size = ((usable_memory as f64) * cache_ratio) as usize;
+        self.block_cache_size = usable_memory.saturating_mul(cache_ratio_percent) / 100;
 
         // Cap cache size for Economy goal to minimize resource usage
         if self.goal == Goal::Economy {
