@@ -232,15 +232,16 @@ impl WriterRunner {
                 if let Some(start_pos) = write_result {
                     let write_elapsed = write_start.elapsed();
                     if let Some(t) = crate::telemetry::Telemetry::global() {
-                        t.metrics()
-                            .record_wal_write_syscall(write_elapsed.as_nanos() as u64);
+                        t.metrics().record_wal_write_syscall(
+                            u64::try_from(write_elapsed.as_nanos()).unwrap_or(u64::MAX),
+                        );
                     }
                     // `append()` returns the starting offset; expose end offset as "current_pos".
                     let end_pos = start_pos.saturating_add(big_bytes.len() as u64);
                     self.config
                         .current_pos
                         .store(end_pos, std::sync::atomic::Ordering::SeqCst);
-                    self.ack_batch_success(&batch, start_pos);
+                    Self::ack_batch_success(&batch, start_pos);
 
                     // Mark completed flushes (barrier for "writes before flush() have been written")
                     {
@@ -291,8 +292,9 @@ impl WriterRunner {
                     }
                     let sync_elapsed = sync_start.elapsed();
                     if let Some(t) = crate::telemetry::Telemetry::global() {
-                        t.metrics()
-                            .record_wal_fsync_ns(sync_elapsed.as_nanos() as u64);
+                        t.metrics().record_wal_fsync_ns(
+                            u64::try_from(sync_elapsed.as_nanos()).unwrap_or(u64::MAX),
+                        );
                         t.metrics().record_wal_fsync_count();
                     }
                 }
@@ -304,7 +306,7 @@ impl WriterRunner {
         }
     }
 
-    fn ack_batch_success(&self, batch: &[QueuedWrite], batch_start_pos: u64) {
+    fn ack_batch_success(batch: &[QueuedWrite], batch_start_pos: u64) {
         let mut next_pos = batch_start_pos;
         for entry in batch {
             let entry_pos = next_pos;

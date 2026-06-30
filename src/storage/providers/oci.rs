@@ -35,22 +35,22 @@ impl OciProvider {
     /// * `secret_key` - OCI user's API signing key
     pub fn s3_compat(
         bucket: String,
-        namespace: String,
-        region: String,
+        namespace: &str,
+        region: &str,
         access_key: String,
         secret_key: String,
     ) -> MidgeResult<Self> {
-        let config = S3Config::oci_s3_compat(bucket, &namespace, &region);
+        let config = S3Config::oci_s3_compat(bucket, namespace, region);
         S3Provider::custom(config, access_key, secret_key).map(|inner| Self { inner })
     }
 
     /// Create OCI provider (using S3-compatible API)
     ///
     /// Convenience constructor equivalent to `s3_compat()`.
-    pub fn new(namespace: String, bucket: String, region: String) -> MidgeResult<Self> {
+    pub fn new(namespace: &str, bucket: String, region: &str) -> MidgeResult<Self> {
         // Note: This is a stub constructor that creates a provider with the namespace/bucket/region
         // but no credentials. Real usage should call `s3_compat()` with full credentials.
-        let config = S3Config::oci_s3_compat(bucket, &namespace, &region);
+        let config = S3Config::oci_s3_compat(bucket, namespace, region);
         S3Provider::custom(config, String::new(), String::new()).map(|inner| Self { inner })
     }
 
@@ -77,8 +77,8 @@ mod tests {
         // Act
         let provider = OciProvider::s3_compat(
             "my-bucket".into(),
-            "mynamespace".into(),
-            "us-phoenix-1".into(),
+            "mynamespace",
+            "us-phoenix-1",
             "oci-access-key".into(),
             "oci-secret-key".into(),
         )
@@ -95,12 +95,8 @@ mod tests {
         // Arrange
 
         // Act
-        let provider = OciProvider::new(
-            "mynamespace".to_string(),
-            "mybucket".to_string(),
-            "us-phoenix-1".to_string(),
-        )
-        .expect("should create oci provider");
+        let provider = OciProvider::new("mynamespace", "mybucket".to_string(), "us-phoenix-1")
+            .expect("should create oci provider");
 
         let backend = provider.inner().backend();
 

@@ -32,7 +32,8 @@ pub fn append_frame(dst: &mut Vec<u8>, payload: &[u8]) -> MidgeResult<()> {
     let crc = crc32c::crc32c(payload);
 
     dst.reserve(frame_len);
-    let payload_len = u32::try_from(payload.len()).expect("validated payload length fits u32");
+    let payload_len = u32::try_from(payload.len())
+        .map_err(|_| MidgeError::InvalidArgument("WAL record length exceeds u32::MAX".into()))?;
     dst.extend_from_slice(&payload_len.to_le_bytes());
     dst.extend_from_slice(&crc.to_le_bytes());
     dst.extend_from_slice(payload);

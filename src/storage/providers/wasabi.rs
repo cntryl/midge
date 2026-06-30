@@ -32,11 +32,11 @@ impl WasabiProvider {
     /// * `secret_key` - Wasabi secret key
     pub fn new(
         bucket: String,
-        region: String,
+        region: &str,
         access_key: String,
         secret_key: String,
     ) -> MidgeResult<Self> {
-        let config = S3Config::wasabi(bucket, &region);
+        let config = S3Config::wasabi(bucket, region);
         S3Provider::custom(config, access_key, secret_key).map(|inner| Self { inner })
     }
 
@@ -63,7 +63,7 @@ mod tests {
         // Act
         let provider = WasabiProvider::new(
             "my-bucket".into(),
-            "us-east-1".into(),
+            "us-east-1",
             "wasabi-access-key".into(),
             "wasabi-secret-key".into(),
         )
@@ -84,13 +84,9 @@ mod tests {
         let backend_ref_counts: Vec<usize> = regions
             .iter()
             .map(|region| {
-                let provider = WasabiProvider::new(
-                    "bucket".into(),
-                    (*region).into(),
-                    "key".into(),
-                    "secret".into(),
-                )
-                .expect("should create wasabi provider for region");
+                let provider =
+                    WasabiProvider::new("bucket".into(), region, "key".into(), "secret".into())
+                        .expect("should create wasabi provider for region");
                 let backend = provider.inner().backend();
                 Arc::strong_count(&backend)
             })

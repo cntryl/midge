@@ -686,7 +686,7 @@ impl crate::sst::SstReader for SstFileIo {
                     cached_value.data.as_ref().clone()
                 } else {
                     let bytes = self.read_block(&handle)?;
-                    cache.put(cache_key, bytes.clone());
+                    cache.put(cache_key, &bytes);
                     bytes
                 }
             } else {

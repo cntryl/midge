@@ -24,6 +24,10 @@ use std::sync::Arc;
 
 use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 
+const MAX_BACKOFF_MS: u64 = 100;
+const MAX_WAIT_ATTEMPTS: u32 = 50;
+const JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Filesystem-backed WAL writer using `io::Fs`.
 ///
 /// This struct is responsible ONLY for writing bytes to `wal.log`.
@@ -118,12 +122,13 @@ impl FsWalWriterIo {
         Ok(writer)
     }
 
-    fn encode_record_frame(&self, record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
+    fn encode_record_frame(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
         let e_start = std::time::Instant::now();
         let encoded = encoding::encode(record)?;
         let e_elapsed = e_start.elapsed();
         if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics().record_wal_encode(e_elapsed.as_nanos() as u64);
+            t.metrics()
+                .record_wal_encode(u64::try_from(e_elapsed.as_nanos()).unwrap_or(u64::MAX));
         }
         crate::wal::frame::append_frame(buf, &encoded)
     }
@@ -157,9 +162,6 @@ impl FsWalWriterIo {
 
         // Enqueue with backpressure: if queue is full, wait for it to drain.
         let mut backoff_ms = 1u64;
-        const MAX_BACKOFF_MS: u64 = 100;
-        const MAX_WAIT_ATTEMPTS: u32 = 50;
-
         for attempt in 0..MAX_WAIT_ATTEMPTS {
             if let Some(err) = self.writer_failure() {
                 return Err(err);
@@ -224,7 +226,7 @@ impl WalWriter for FsWalWriterIo {
         // writer thread has appended the bytes to the local WAL file.
         let mut buf = self.take_buffer();
         buf.clear();
-        self.encode_record_frame(record, &mut buf)?;
+        Self::encode_record_frame(record, &mut buf)?;
         self.enqueue_encoded(buf)
     }
 
@@ -253,7 +255,7 @@ impl WalWriter for FsWalWriterIo {
             if index + 1 == records.len() {
                 last_record_offset = buf.len() as u64;
             }
-            self.encode_record_frame(record, &mut buf)?;
+            Self::encode_record_frame(record, &mut buf)?;
         }
 
         let batch_start = self.enqueue_encoded(buf)?;
@@ -325,7 +327,8 @@ impl WalWriter for FsWalWriterIo {
         }
         let elapsed = sync_start.elapsed();
         if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics().record_wal_fsync_ns(elapsed.as_nanos() as u64);
+            t.metrics()
+                .record_wal_fsync_ns(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX));
             t.metrics().record_wal_fsync_count();
         }
         Ok(())
@@ -345,8 +348,6 @@ impl WalWriter for FsWalWriterIo {
         // === Phase 1.3: Join with timeout to prevent indefinite hangs ===
         // If writer thread is stuck in fsync (NFS hang, disk failure), we timeout
         // after 30s and detach the thread rather than blocking forever.
-        const JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
         if let Some(handle) = self.writer_thread.lock().take() {
             let start = std::time::Instant::now();
             loop {

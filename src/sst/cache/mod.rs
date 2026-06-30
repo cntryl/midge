@@ -72,7 +72,7 @@ impl BlockCache {
     /// Insert a block into the cache
     ///
     /// Returns true if inserted, false if rejected by admission control
-    pub fn put(&self, key: CacheKey, value: Bytes) -> bool {
+    pub fn put(&self, key: CacheKey, value: &Bytes) -> bool {
         self.get_shard(&key).put(key, value)
     }
 

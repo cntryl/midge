@@ -126,7 +126,6 @@ impl CacheShard {
     }
 
     /// Get a cached value (lock-free)
-    #[inline(always)]
     pub fn get(&self, key: &CacheKey) -> Option<CacheValue> {
         if let Some(value_ref) = self.entries.get(key) {
             let value = value_ref.value().clone();
@@ -146,13 +145,13 @@ impl CacheShard {
     /// without blocking on eviction or admission checks.
     ///
     /// Returns true if request was queued, false if channel is disconnected.
-    pub fn put(&self, key: CacheKey, value: Bytes) -> bool {
+    pub fn put(&self, key: CacheKey, value: &Bytes) -> bool {
         if self.admission_inline.load(Ordering::Relaxed) {
             // Track inline fallback usage
             if let Some(t) = crate::telemetry::Telemetry::global() {
                 t.metrics().record_cache_inline_fallback();
             }
-            self.put_inline(key, &value);
+            self.put_inline(key, value);
             return true;
         }
 
@@ -169,7 +168,7 @@ impl CacheShard {
         }) {
             // If channel is unavailable/disconnected, fall back to inline admission
             self.admission_inline.store(true, Ordering::Relaxed);
-            self.put_inline(key, &value);
+            self.put_inline(key, value);
         }
         true
     }
@@ -763,7 +762,7 @@ mod tests {
         let key = CacheKey::for_data(42, 0);
 
         // Act
-        shard.put(key, Bytes::from_static(TEST_BLOCKING_VALUE));
+        shard.put(key, &Bytes::from_static(TEST_BLOCKING_VALUE));
 
         let mut attempts = 0;
         while !TEST_WORKER_BLOCKED.load(Ordering::SeqCst) && attempts < 1000 {
@@ -807,7 +806,7 @@ mod tests {
         let key = CacheKey::for_data(43, 0);
 
         // Act
-        shard.put(key, Bytes::from_static(TEST_BLOCKING_VALUE));
+        shard.put(key, &Bytes::from_static(TEST_BLOCKING_VALUE));
 
         let mut attempts = 0;
         while !TEST_WORKER_BLOCKED.load(Ordering::SeqCst) && attempts < 1000 {

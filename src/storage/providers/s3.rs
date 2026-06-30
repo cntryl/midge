@@ -721,12 +721,12 @@ impl S3Provider {
     /// Create provider for OCI S3 compatibility
     pub fn oci_s3_compat(
         bucket: String,
-        namespace: String,
+        namespace: &str,
         region: String,
         access_key: String,
         secret_key: String,
     ) -> MidgeResult<Self> {
-        let config = S3Config::oci_s3_compat(bucket, &namespace, &region);
+        let config = S3Config::oci_s3_compat(bucket, namespace, &region);
         let creds = AwsCredentials {
             access_key,
             secret_key,
