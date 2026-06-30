@@ -69,7 +69,7 @@ impl CompactionCoordinator {
 
         let schedule_res = event_loop.compaction_actor.run_compaction(
             &mut event_loop.state,
-            cplan,
+            &cplan,
             event_loop.hybrid_storage.as_ref(),
             event_loop.worker_msg_tx.clone(),
         );
@@ -122,7 +122,7 @@ impl CompactionCoordinator {
             let plan = event_loop.assign_compaction_output_sequence(plan);
             let schedule_res = event_loop.compaction_actor.run_compaction(
                 &mut event_loop.state,
-                plan,
+                &plan,
                 event_loop.hybrid_storage.as_ref(),
                 event_loop.worker_msg_tx.clone(),
             );
@@ -173,8 +173,8 @@ impl CompactionCoordinator {
 
         event_loop.compaction_actor.handle_complete(
             &mut event_loop.state,
-            input_ssts.clone(),
-            output_ssts.clone(),
+            &input_ssts,
+            &output_ssts,
         );
 
         if !succeeded {
@@ -228,8 +228,8 @@ impl CompactionCoordinator {
 
             event_loop.manifest_actor.compaction_complete(
                 &mut event_loop.state,
-                input_ssts.to_vec(),
-                added,
+                input_ssts,
+                &added,
             )?;
             event_loop.state.transition_compaction_publication_intent(
                 output_ssts,
@@ -252,7 +252,7 @@ impl CompactionCoordinator {
 
         fail::fail_point!("slice6::after_compaction_update_before_manifest_persist");
 
-        if let Err(error) = event_loop.manifest_actor.persist(&event_loop.state) {
+        if let Err(error) = crate::runtime::actors::ManifestActor::persist(&event_loop.state) {
             Self::record_compaction_failure(event_loop);
             tracing::error!(error = ?error, "failed to persist manifest after compaction");
             event_loop.respond(
@@ -287,22 +287,15 @@ impl CompactionCoordinator {
         fail::fail_point!("slice6::after_manifest_persist_before_sst_gc");
 
         let hybrid_storage = event_loop.hybrid_storage.clone();
-        if let Err(error) =
-            event_loop
-                .gc_actor
-                .delete_ssts(&mut event_loop.state, input_ssts, hybrid_storage)
-        {
-            event_loop.state.mark_persistence_anomaly();
-            tracing::warn!(
-                error = ?error,
-                "GC deletion of compaction input SSTs failed (non-fatal)"
-            );
-        } else {
-            tracing::info!(
-                removed_count = input_ssts.len(),
-                "Submitted compaction input SSTs for GC"
-            );
-        }
+        event_loop.gc_actor.delete_ssts(
+            &mut event_loop.state,
+            input_ssts,
+            hybrid_storage,
+        );
+        tracing::info!(
+            removed_count = input_ssts.len(),
+            "Submitted compaction input SSTs for GC"
+        );
 
         let cleared_intent_mirror_error = match event_loop
             .state
@@ -377,13 +370,13 @@ impl CompactionCoordinator {
                 .check_compaction(&event_loop.state)
             {
                 if event_loop
-                    .compaction_actor
-                    .run_compaction(
-                        &mut event_loop.state,
-                        plan,
-                        event_loop.hybrid_storage.as_ref(),
-                        event_loop.worker_msg_tx.clone(),
-                    )
+                        .compaction_actor
+                        .run_compaction(
+                            &mut event_loop.state,
+                        &plan,
+                            event_loop.hybrid_storage.as_ref(),
+                            event_loop.worker_msg_tx.clone(),
+                        )
                     .is_ok()
                 {
                     emergent_scheduled = true;

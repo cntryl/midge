@@ -96,15 +96,15 @@ impl ManifestActor {
     pub fn compaction_complete(
         &mut self,
         state: &mut RuntimeState,
-        removed: Vec<String>,
-        added: Vec<FileMeta>,
+        removed: &[String],
+        added: &[FileMeta],
     ) -> MidgeResult<()> {
         // Append compaction edits to manifest journal as a single batch (reduces fixed overhead)
         let mut edits = Vec::with_capacity(removed.len() + added.len());
-        for n in &removed {
+        for n in removed {
             edits.push(crate::metadata::ManifestEdit::RemoveSst { name: n.clone() });
         }
-        for f in &added {
+        for f in added {
             edits.push(crate::metadata::ManifestEdit::AddSst(
                 crate::metadata::FileMeta {
                     name: f.name.clone(),
@@ -135,7 +135,7 @@ impl ManifestActor {
         state.manifest.files.retain(|f| !removed.contains(&f.name));
 
         // Add new files
-        for file_meta in &added {
+        for file_meta in added {
             let manifest_meta = crate::metadata::FileMeta {
                 name: file_meta.name.clone(),
                 level: file_meta.level,
@@ -163,7 +163,7 @@ impl ManifestActor {
     }
 
     /// Persist manifest to disk
-    pub fn persist(&self, state: &RuntimeState) -> MidgeResult<()> {
+    pub fn persist(state: &RuntimeState) -> MidgeResult<()> {
         // Skip persistence in memory mode
         if state.memory_mode {
             tracing::debug!("Manifest: skipping persistence in memory mode");
@@ -189,23 +189,27 @@ impl ManifestActor {
     pub fn create_column_family(
         &mut self,
         state: &mut RuntimeState,
-        name: String,
+        name: &str,
     ) -> MidgeResult<u32> {
         // If the CF already exists and is active, return its id (idempotent CF creation).
-        if let Some(existing) = state.manifest.get_column_family_by_name(&name) {
+        if let Some(existing) = state.manifest.get_column_family_by_name(name) {
             let cf_id = existing.id;
             // Ensure runtime state has a ColumnFamilyState for it (recovery path)
             state.column_families.entry(cf_id).or_insert_with(|| {
-                crate::runtime::state::ColumnFamilyState::new(cf_id, name.clone())
+                crate::runtime::state::ColumnFamilyState::new(cf_id, name.to_string())
             });
             tracing::info!(cf_id = cf_id, cf_name = %name, "Manifest: column family already exists, returning existing id");
             return Ok(cf_id);
         }
 
+        let name = name.to_string();
+
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis() as u64;
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
 
         let cf_id = state.manifest.create_column_family(name.clone());
 

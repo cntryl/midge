@@ -39,7 +39,7 @@ impl BlockBloomFilter {
     /// Add a bloom filter for a data block
     pub fn add_block_bloom(&mut self, bloom: &BloomWriter) {
         let serialized = bloom.serialize();
-        let offset = self.bloom_data.len() as u32;
+        let offset = u32::try_from(self.bloom_data.len()).unwrap_or(u32::MAX);
 
         self.offsets.push(offset);
         self.bloom_data.extend_from_slice(&serialized);
@@ -52,7 +52,7 @@ impl BlockBloomFilter {
         let mut result = Vec::new();
 
         // Write header: [num_blocks: u32]
-        result.extend_from_slice(&(self.num_blocks as u32).to_le_bytes());
+        result.extend_from_slice(&u32::try_from(self.num_blocks).unwrap_or(u32::MAX).to_le_bytes());
 
         // Write offsets array: [offset0, offset1, ..., offsetN]
         for &offset in &self.offsets {
@@ -66,6 +66,10 @@ impl BlockBloomFilter {
     }
 
     /// Deserialize from bytes
+    ///
+    /// # Errors
+    ///
+    /// Returns `Corruption` if the serialized data is truncated or malformed.
     pub fn deserialize(data: &[u8]) -> MidgeResult<Self> {
         if data.len() < 4 {
             return Err(crate::common::MidgeError::Corruption(
@@ -73,7 +77,8 @@ impl BlockBloomFilter {
             ));
         }
 
-        let num_blocks = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let num_blocks = usize::try_from(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+            .unwrap_or(usize::MAX);
         let expected_header_size = 4 + (num_blocks * 4);
 
         if data.len() < expected_header_size {

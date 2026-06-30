@@ -21,6 +21,10 @@ pub struct RangeFilter {
 
 impl RangeFilter {
     /// Create a range filter from min and max keys
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` if `min_key` is greater than `max_key`.
     pub fn new(min_key: Vec<u8>, max_key: Vec<u8>) -> MidgeResult<Self> {
         if min_key > max_key {
             return Err(crate::common::MidgeError::InvalidArgument(
@@ -63,14 +67,18 @@ impl RangeFilter {
     #[must_use]
     pub fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
-        result.extend_from_slice(&(self.min_key.len() as u32).to_le_bytes());
+        result.extend_from_slice(&u32::try_from(self.min_key.len()).unwrap_or(u32::MAX).to_le_bytes());
         result.extend_from_slice(&self.min_key);
-        result.extend_from_slice(&(self.max_key.len() as u32).to_le_bytes());
+        result.extend_from_slice(&u32::try_from(self.max_key.len()).unwrap_or(u32::MAX).to_le_bytes());
         result.extend_from_slice(&self.max_key);
         result
     }
 
     /// Deserialize a range filter
+    ///
+    /// # Errors
+    ///
+    /// Returns `Corruption` if the encoded payload is truncated or malformed.
     pub fn deserialize(data: &[u8]) -> MidgeResult<Self> {
         if data.len() < 8 {
             return Err(crate::common::MidgeError::Corruption(

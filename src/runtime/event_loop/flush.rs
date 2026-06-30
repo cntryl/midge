@@ -43,10 +43,10 @@ impl FlushCoordinator {
         event_loop: &mut EventLoop,
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
-        sst_name: String,
+        sst_name: &str,
         sequence: u64,
     ) -> HandleOutcome {
-        let resp = match event_loop.publish_flushed_sst(cf_id, &sst_name, sequence, None) {
+        let resp = match event_loop.publish_flushed_sst(cf_id, sst_name, sequence, None) {
             Ok(()) => {
                 event_loop.wake_write_stall_waiters();
                 RuntimeResponse::Ok { request_id }

@@ -12,6 +12,21 @@ fn journal_deserialize<T: serde::de::DeserializeOwned>(payload: &[u8]) -> MidgeR
     serde_json::from_slice(payload).map_err(|e| crate::common::MidgeError::Internal(e.to_string()))
 }
 
+fn millis_since_epoch() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+fn payload_len_u32(payload: &[u8]) -> MidgeResult<u32> {
+    u32::try_from(payload.len())
+        .map_err(|_| crate::common::MidgeError::Internal("journal payload too large".to_string()))
+}
+
 /// TLV-encoded manifest edit record
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ManifestEdit {
@@ -156,7 +171,7 @@ pub fn append_edit_with_fs(
     // Layout: [type:u8][len:u32LE][payload][crc:u32LE]
     let mut buf = Vec::with_capacity(1 + 4 + payload.len() + 4);
     buf.push(edit.record_type());
-    buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&payload_len_u32(&payload)?.to_le_bytes());
     buf.extend_from_slice(&payload);
     buf.extend_from_slice(&crc.to_le_bytes());
 
@@ -406,7 +421,9 @@ pub fn append_edit_batch_with_fs(
     // Layout: [type:u8][len:u32LE][payload][crc:u32LE]
     let mut buf = Vec::with_capacity(1 + 4 + payload.len() + 4);
     buf.push(BATCH_RECORD_TYPE);
-    buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&u32::try_from(payload.len())
+        .map_err(|_| crate::common::MidgeError::Internal("journal payload too large".to_string()))?
+        .to_le_bytes());
     buf.extend_from_slice(&payload);
     buf.extend_from_slice(&crc.to_le_bytes());
 
@@ -501,10 +518,7 @@ pub fn append_fsync_marker_with_fs(
 
     let marker = FsyncMarker {
         last_persisted_sequence: last_seq,
-        ts_millis: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64,
+        ts_millis: millis_since_epoch(),
     };
     let payload = journal_serialize(&marker)?;
     let mut hasher = Crc32::new();
@@ -513,7 +527,7 @@ pub fn append_fsync_marker_with_fs(
 
     let mut buf = Vec::with_capacity(1 + 4 + payload.len() + 4);
     buf.push(FSYNC_MARKER_TYPE);
-    buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&payload_len_u32(&payload)?.to_le_bytes());
     buf.extend_from_slice(&payload);
     buf.extend_from_slice(&crc.to_le_bytes());
 

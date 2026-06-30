@@ -194,7 +194,7 @@ impl RuntimeDispatcher {
                 sst_name,
                 sequence,
             } => {
-                FlushCoordinator::flush_complete(event_loop, request_id, cf_id, sst_name, sequence)
+                FlushCoordinator::flush_complete(event_loop, request_id, cf_id, &sst_name, sequence)
             }
 
             RuntimeMsg::CheckCompaction { request_id } => {
@@ -242,7 +242,7 @@ impl RuntimeDispatcher {
             RuntimeMsg::DeleteObsoleteSsts {
                 request_id,
                 sst_names,
-            } => GcCoordinator::delete_obsolete_ssts(event_loop, request_id, sst_names),
+            } => GcCoordinator::delete_obsolete_ssts(event_loop, request_id, &sst_names),
 
             RuntimeMsg::ManifestAddSst {
                 request_id,
@@ -252,12 +252,12 @@ impl RuntimeDispatcher {
                 request_id,
                 removed,
                 added,
-            } => ManifestCoordinator::compaction_complete(event_loop, request_id, removed, added),
+            } => ManifestCoordinator::compaction_complete(event_loop, request_id, &removed, &added),
             RuntimeMsg::ManifestPersist { request_id } => {
                 ManifestCoordinator::persist(event_loop, request_id)
             }
             RuntimeMsg::ManifestCreateColumnFamily { request_id, name } => {
-                ManifestCoordinator::create_column_family(event_loop, msg_rx, request_id, name)
+                ManifestCoordinator::create_column_family(event_loop, msg_rx, request_id, &name)
             }
             RuntimeMsg::ManifestDropColumnFamily { request_id, cf_id } => {
                 ManifestCoordinator::drop_column_family(event_loop, msg_rx, request_id, cf_id)

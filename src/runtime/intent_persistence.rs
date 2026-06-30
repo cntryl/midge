@@ -130,10 +130,8 @@ impl IntentPersistence {
 
         let p = FsPath::new(Self::INTENT_FILE);
         let temp = FsPath::new(Self::INTENT_FILE_TEMP);
-        match fs.exists(&p) {
-            Ok(false) => {}
-            Err(e) => return Err(format!("fs exists error: {e:?}")),
-            Ok(true) => {}
+        if let Err(e) = fs.exists(&p) {
+            return Err(format!("fs exists error: {e:?}"));
         }
 
         if fs

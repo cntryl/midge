@@ -99,7 +99,7 @@ impl TieredBloomConfig {
             let ln_p = fpr.ln();
             let ln_2_sq = 2.0_f64.ln().powi(2);
             let m = -(n as f64) * ln_p / ln_2_sq;
-            (m.ceil() as usize).max(64)
+            u64::try_from(m.ceil() as i128).unwrap_or(u64::MAX) as usize
         };
 
         let uniform_total = calc_bits(l0_keys, uniform_fpr)
@@ -151,9 +151,9 @@ mod tests {
         let config = TieredBloomConfig::balanced();
 
         // Assert
-        assert_eq!(config.l0_fpr, 0.001);
-        assert_eq!(config.l1_fpr, 0.01);
-        assert_eq!(config.l2_plus_fpr, 0.05);
+        assert!((config.l0_fpr - 0.001).abs() < f64::EPSILON);
+        assert!((config.l1_fpr - 0.01).abs() < f64::EPSILON);
+        assert!((config.l2_plus_fpr - 0.05).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -164,10 +164,10 @@ mod tests {
         let config = TieredBloomConfig::balanced();
 
         // Assert
-        assert_eq!(config.fpr_for_level(0), 0.001);
-        assert_eq!(config.fpr_for_level(1), 0.01);
-        assert_eq!(config.fpr_for_level(2), 0.05);
-        assert_eq!(config.fpr_for_level(99), 0.05);
+        assert!((config.fpr_for_level(0) - 0.001).abs() < f64::EPSILON);
+        assert!((config.fpr_for_level(1) - 0.01).abs() < f64::EPSILON);
+        assert!((config.fpr_for_level(2) - 0.05).abs() < f64::EPSILON);
+        assert!((config.fpr_for_level(99) - 0.05).abs() < f64::EPSILON);
     }
 
     #[test]

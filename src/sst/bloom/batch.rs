@@ -54,7 +54,6 @@ impl BatchBloomResults {
             return BloomTestResult::MightBePresent;
         }
         match self.results[idx] {
-            0 => BloomTestResult::MightBePresent,
             1 => BloomTestResult::DefinitelyNotPresent,
             _ => BloomTestResult::MightBePresent,
         }
@@ -86,7 +85,9 @@ impl BatchBloomResults {
         if self.results.is_empty() {
             return 0.0;
         }
-        self.positive_count as f64 / self.results.len() as f64
+        let positives = f64::from(u32::try_from(self.positive_count).unwrap_or(u32::MAX));
+        let total = f64::from(u32::try_from(self.results.len()).unwrap_or(u32::MAX));
+        positives / total
     }
 }
 

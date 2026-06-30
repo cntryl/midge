@@ -569,9 +569,7 @@ impl RuntimeMsg {
             | CheckWriteStall { request_id, .. }
             | WaitForWriteStallClear { request_id, .. } => Some(*request_id),
 
-            CancelWaitForWriteStallClear { .. } | UnregisterSnapshot { .. } => None,
-
-            Shutdown => None,
+            CancelWaitForWriteStallClear { .. } | UnregisterSnapshot { .. } | Shutdown => None,
         }
     }
 
@@ -1094,7 +1092,7 @@ impl Runtime {
                         event_loop.set_snapshot_cache(snapshot_cache);
                         // Signal successful initialization
                         let _ = init_tx.send(Ok(()));
-                        event_loop.run(msg_rx);
+                        event_loop.run(&msg_rx);
                     }
                     Err(e) => {
                         let msg = format!("Failed to create event loop: {e}");

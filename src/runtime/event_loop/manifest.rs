@@ -21,8 +21,8 @@ impl ManifestCoordinator {
     pub(super) fn compaction_complete(
         event_loop: &mut EventLoop,
         request_id: u64,
-        removed: Vec<String>,
-        added: Vec<FileMeta>,
+        removed: &[String],
+        added: &[FileMeta],
     ) -> HandleOutcome {
         let result = event_loop
             .manifest_actor
@@ -35,9 +35,7 @@ impl ManifestCoordinator {
     }
 
     pub(super) fn persist(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
-        let result = event_loop
-            .manifest_actor
-            .persist(&event_loop.state)
+        let result = crate::runtime::actors::ManifestActor::persist(&event_loop.state)
             .and_then(|()| event_loop.mirror_metadata_after_local_commit("manifest persist"));
         Self::respond_result(event_loop, request_id, result);
         HandleOutcome::Continue
@@ -47,7 +45,7 @@ impl ManifestCoordinator {
         event_loop: &mut EventLoop,
         msg_rx: &Receiver<RuntimeMsg>,
         request_id: u64,
-        name: String,
+        name: &str,
     ) -> HandleOutcome {
         if event_loop
             .state

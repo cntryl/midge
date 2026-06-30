@@ -50,6 +50,16 @@ fn default_next_wal_seq() -> u64 {
     1
 }
 
+fn millis_since_epoch() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
 /// Cloud checkpoint for WAL coordination
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloudCheckpoint {
@@ -158,10 +168,7 @@ impl Manifest {
     /// Create a new column family
     pub fn create_column_family(&mut self, name: String) -> u32 {
         let id = self.next_cf_id();
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let created_at = millis_since_epoch();
 
         self.column_families.push(ColumnFamilyMeta {
             id,
@@ -202,12 +209,7 @@ impl Manifest {
             .iter_mut()
             .find(|cf| cf.id == cf_id && cf.deleted_at.is_none())
         {
-            cf.deleted_at = Some(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-            );
+            cf.deleted_at = Some(millis_since_epoch());
             true
         } else {
             false

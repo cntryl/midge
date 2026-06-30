@@ -14,6 +14,10 @@ pub trait BloomFilterFactory: Send + Sync {
     }
 
     /// Deserialize a filter from bytes
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the serialized bloom filter is invalid.
     fn deserialize(&self, data: &[u8]) -> MidgeResult<BloomReader>;
 }
 

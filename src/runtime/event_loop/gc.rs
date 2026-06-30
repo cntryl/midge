@@ -10,7 +10,7 @@ impl GcCoordinator {
             tracing::warn!(evicted, "Evicted timed-out snapshots before GC check");
         }
 
-        event_loop.gc_actor.check(&event_loop.state);
+        crate::runtime::actors::GcActor::check(&event_loop.state);
         event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
         HandleOutcome::Continue
     }
@@ -18,21 +18,13 @@ impl GcCoordinator {
     pub(super) fn delete_obsolete_ssts(
         event_loop: &mut EventLoop,
         request_id: u64,
-        sst_names: Vec<String>,
+        sst_names: &[String],
     ) -> HandleOutcome {
         let hybrid_storage = event_loop.hybrid_storage.clone();
-        let result =
-            event_loop
-                .gc_actor
-                .delete_ssts(&mut event_loop.state, &sst_names, hybrid_storage);
-        let resp = result.map_or_else(
-            |error| RuntimeResponse::Error {
-                request_id,
-                error: crate::common::MidgeError::Internal(error.to_string()),
-            },
-            |()| RuntimeResponse::Ok { request_id },
-        );
-        event_loop.respond(request_id, resp);
+        event_loop
+            .gc_actor
+            .delete_ssts(&mut event_loop.state, sst_names, hybrid_storage);
+        event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
         HandleOutcome::Continue
     }
 }

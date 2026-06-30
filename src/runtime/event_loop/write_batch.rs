@@ -23,8 +23,8 @@ enum WriteResult {
 impl WriteResult {
     fn deferred(&self) -> bool {
         match self {
-            WriteResult::WalAppend { deferred, .. } => *deferred,
-            WriteResult::TransactionApplied { deferred, .. } => *deferred,
+            WriteResult::WalAppend { deferred, .. }
+            | WriteResult::TransactionApplied { deferred, .. } => *deferred,
         }
     }
 }
@@ -189,8 +189,7 @@ impl EventLoop {
                     break;
                 }
 
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
 

@@ -361,7 +361,7 @@ impl EventLoop {
         self.compaction_actor
             .run_compaction(
                 &mut self.state,
-                plan,
+                &plan,
                 self.hybrid_storage.as_ref(),
                 self.worker_msg_tx.clone(),
             )
@@ -501,11 +501,11 @@ impl EventLoop {
     fn submit_conditional_metadata_put(
         cloud: &crate::storage::cloud::CloudStorage,
         file_name: &str,
-        key: String,
+        key: &str,
         data: Vec<u8>,
         local_manifest_sequence: u64,
     ) -> crate::common::MidgeResult<()> {
-        let headers = match Self::cloud_metadata_head_optional(cloud, &key)
+        let headers = match Self::cloud_metadata_head_optional(cloud, key)
             .map_err(crate::common::MidgeError::Internal)?
         {
             Some(metadata) => {
@@ -515,7 +515,7 @@ impl EventLoop {
                         "cloud metadata '{key}' cannot be conditionally updated without an etag"
                     )));
                 }
-                let current = Self::cloud_metadata_get_optional(cloud, &key)
+                let current = Self::cloud_metadata_get_optional(cloud, key)
                     .map_err(crate::common::MidgeError::Internal)?
                     .ok_or_else(|| {
                         crate::common::MidgeError::Internal(format!(
@@ -538,7 +538,7 @@ impl EventLoop {
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_put(&key, data, headers, tx);
+        cloud.submit_put(key, data, headers, tx);
 
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(crate::storage::cloud::CloudEvent::Put { result, .. }) => match result {
@@ -577,7 +577,7 @@ impl EventLoop {
             Self::submit_conditional_metadata_put(
                 cloud,
                 file_name,
-                key,
+                &key,
                 data,
                 local_manifest_sequence,
             )?;
@@ -625,7 +625,7 @@ impl EventLoop {
             if sequence > self.state.manifest.last_persisted_sequence {
                 self.state.manifest.last_persisted_sequence = sequence;
             }
-            let manifest_persisted = match self.manifest_actor.persist(&self.state) {
+            let manifest_persisted = match crate::runtime::actors::ManifestActor::persist(&self.state) {
                 Ok(()) => true,
                 Err(error) => {
                     self.state.mark_persistence_anomaly();
@@ -790,7 +790,16 @@ impl EventLoop {
             self.loop_debug_batch_total += batch as u64;
 
             if self.loop_debug_wakes.is_multiple_of(LOOP_DEBUG_EVERY) {
-                let avg_batch = self.loop_debug_batch_total as f64 / self.loop_debug_wakes as f64;
+                let avg_batch = self
+                    .loop_debug_batch_total
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(0.0)
+                    / self
+                        .loop_debug_wakes
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(1.0);
                 eprintln!(
                     "[midge] loop_stats wakes={} avg_batch={:.2}",
                     self.loop_debug_wakes, avg_batch
@@ -835,13 +844,13 @@ impl EventLoop {
     }
 
     /// Main event loop — runs until Shutdown message or channel close.
-    pub fn run(&mut self, msg_rx: Receiver<RuntimeMsg>) {
+    pub fn run(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
         const MAX_DRAIN_WRITES_ON_WAKE: usize = 4096;
         const ACTIONABLE_IDLE_BACKOFF: Duration = Duration::from_micros(50);
 
         loop {
             if let Some(pending) = self.pending_msg.take() {
-                let outcome = self.process_one(pending, &msg_rx);
+                let outcome = self.process_one(pending, msg_rx);
                 if outcome == HandleOutcome::Break {
                     break;
                 }
@@ -851,7 +860,7 @@ impl EventLoop {
             if self.has_actionable_work() {
                 match msg_rx.try_recv() {
                     Ok(msg) => {
-                        let outcome = self.process_wake_msg(msg, &msg_rx, MAX_DRAIN_WRITES_ON_WAKE);
+                        let outcome = self.process_wake_msg(msg, msg_rx, MAX_DRAIN_WRITES_ON_WAKE);
                         if outcome == HandleOutcome::Break {
                             break;
                         }
@@ -867,12 +876,11 @@ impl EventLoop {
                             self.handle_storage_event(event);
                             continue;
                         }
-                        Err(TryRecvError::Disconnected) => {}
-                        Err(TryRecvError::Empty) => {}
+                        Err(TryRecvError::Disconnected | TryRecvError::Empty) => {}
                     }
                 }
 
-                self.progress_pass(&msg_rx);
+                self.progress_pass(msg_rx);
                 std::thread::sleep(ACTIONABLE_IDLE_BACKOFF);
                 continue;
             }
@@ -900,7 +908,7 @@ impl EventLoop {
                 break;
             };
 
-            let outcome = self.process_wake_msg(msg, &msg_rx, MAX_DRAIN_WRITES_ON_WAKE);
+            let outcome = self.process_wake_msg(msg, msg_rx, MAX_DRAIN_WRITES_ON_WAKE);
             if outcome == HandleOutcome::Break {
                 break;
             }

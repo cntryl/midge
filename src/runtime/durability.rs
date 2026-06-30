@@ -104,7 +104,6 @@ impl DurabilityCoordinator {
     /// Special case: `u64::MAX` (latest available) always returns true and bypasses durability checks.
     #[inline]
     pub fn is_durable(
-        &self,
         sequence: u64,
         requested_durability: ReadDurability,
         local_durable_seq: u64,
@@ -270,7 +269,7 @@ impl DurabilityCoordinator {
 
     /// Get reference to waiters for inspection (internal use only).
     #[allow(dead_code)]
-    pub(super) fn waiters(&self) -> &Option<KeyedGroupCommit<u64, DurabilityWaiter>> {
-        &self.waiters
+    pub(super) fn waiters(&self) -> Option<&KeyedGroupCommit<u64, DurabilityWaiter>> {
+        self.waiters.as_ref()
     }
 }

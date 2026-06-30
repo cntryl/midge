@@ -5,7 +5,6 @@
 
 use super::durability_sync::CompletionSource;
 use super::EventLoop;
-use crossbeam::channel::TryRecvError;
 use std::convert::TryFrom;
 use std::time::Instant;
 
@@ -99,11 +98,8 @@ impl EventLoop {
 
         let rx = rx.clone();
 
-        loop {
-            match rx.try_recv() {
-                Ok(event) => self.handle_storage_event(event),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-            }
+        while let Ok(event) = rx.try_recv() {
+            self.handle_storage_event(event);
         }
     }
 

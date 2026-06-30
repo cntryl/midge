@@ -52,7 +52,7 @@ impl EventLoop {
         sequence: u64,
         requested_durability: crate::types::ReadDurability,
     ) -> bool {
-        self.durability.is_durable(
+        crate::runtime::durability::DurabilityCoordinator::is_durable(
             sequence,
             requested_durability,
             self.state.wal.local_durable_seq,

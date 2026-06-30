@@ -35,9 +35,12 @@ pub struct ReadSnapshot {
 
 impl ReadSnapshot {
     fn current_time_millis() -> u64 {
-        std::time::SystemTime::now()
+        u64::try_from(
+            std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64)
+            .map_or(0, |d| d.as_millis()),
+        )
+        .unwrap_or(u64::MAX)
     }
 
     fn is_expired(expiration: Option<u64>) -> bool {
@@ -47,8 +50,7 @@ impl ReadSnapshot {
     fn state_sequence(state: &KeyState) -> Option<u64> {
         match state {
             KeyState::Absent => None,
-            KeyState::Tombstone(seq) => Some(*seq),
-            KeyState::Value(_, seq, _, _) => Some(*seq),
+            KeyState::Tombstone(seq) | KeyState::Value(_, seq, _, _) => Some(*seq),
         }
     }
 

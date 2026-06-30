@@ -183,19 +183,25 @@ mod tests {
     #[test]
     fn should_record_insertion_timestamp() {
         // Arrange
-        let before_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
+        let before_time = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )
+        .unwrap_or(u64::MAX);
 
         // Act
         let data = Bytes::from(&b"test"[..]);
         let value = CacheValue::new(data);
 
-        let after_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
+        let after_time = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )
+        .unwrap_or(u64::MAX);
 
         // Assert
         assert!(value.inserted_at >= before_time);

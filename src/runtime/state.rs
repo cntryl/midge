@@ -959,7 +959,10 @@ impl RuntimeState {
                         if entry.name == "cloud_recovery" {
                             staging_dirs.push(entry.name);
                         }
-                    } else if entry.name.ends_with(".tmp") {
+                    } else if std::path::Path::new(&entry.name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"))
+                    {
                         temp_files.push(entry.name);
                     }
                 }
@@ -1208,7 +1211,7 @@ impl RuntimeState {
     /// Clear pending transaction barrier and record duration metrics (Phase 3)
     pub fn clear_pending_transaction_barrier(&mut self) {
         if let Some(start_time) = self.pending_txn_start_time {
-            let duration_ms = start_time.elapsed().as_millis() as u64;
+            let duration_ms = u64::try_from(start_time.elapsed().as_millis()).unwrap_or(u64::MAX);
             if let Some(t) = crate::telemetry::Telemetry::global() {
                 t.metrics().record_pending_txn_duration_ms(duration_ms);
             }
@@ -1897,7 +1900,9 @@ impl RuntimeState {
     }
 
     pub fn create_cf(&mut self, name: String) -> MidgeResult<u32> {
-        let id = self.column_families.len() as u32;
+        let id = u32::try_from(self.column_families.len()).map_err(|_| {
+            crate::common::MidgeError::Internal("too many column families".to_string())
+        })?;
         self.column_families
             .insert(id, ColumnFamilyState::new(id, name));
         Ok(id)
