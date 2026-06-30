@@ -95,7 +95,7 @@ impl RuntimeDispatcher {
                 ManifestCoordinator::persist(event_loop, request_id)
             }
             RuntimeMsg::CheckGc { request_id } => GcCoordinator::check(event_loop, request_id),
-            RuntimeMsg::SetRuntimeConfig { .. } => Self::dispatch_config(event_loop, msg),
+            RuntimeMsg::SetRuntimeConfig { .. } => Self::dispatch_config(event_loop, &msg),
             RuntimeMsg::CaptureReadSnapshot { .. }
             | RuntimeMsg::BeginTransaction { .. }
             | RuntimeMsg::RegisterSnapshot { .. }
@@ -124,7 +124,7 @@ impl RuntimeDispatcher {
         }
     }
 
-    fn dispatch_config(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
+    fn dispatch_config(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> HandleOutcome {
         if let RuntimeMsg::SetRuntimeConfig {
             request_id,
             memtable_size_limit,
@@ -136,13 +136,13 @@ impl RuntimeDispatcher {
         } = msg
         {
             return event_loop.handle_set_runtime_config(&RuntimeConfigUpdate {
-                request_id,
-                memtable_size_limit,
-                memtable_flush_threshold,
-                enable_compaction,
-                l0_compaction_trigger,
-                wal_durability_policy,
-                wal_batch_config,
+                request_id: *request_id,
+                memtable_size_limit: *memtable_size_limit,
+                memtable_flush_threshold: *memtable_flush_threshold,
+                enable_compaction: *enable_compaction,
+                l0_compaction_trigger: *l0_compaction_trigger,
+                wal_durability_policy: *wal_durability_policy,
+                wal_batch_config: *wal_batch_config,
             });
         }
         unreachable!()

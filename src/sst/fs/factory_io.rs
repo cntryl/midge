@@ -46,6 +46,10 @@ impl FsSstFactoryIo {
     }
 
     /// Open an SST file using the `io::Fs` backend
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened or parsed as an SST reader.
     pub fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         let path_str = path.to_str().unwrap_or("").to_string();
         let start = std::time::Instant::now();
@@ -99,7 +103,11 @@ impl InMemorySstWriter {
         let compressed = compression::compress_block_with_trailer(block_bytes, compression_policy)?;
         let offset = file_bytes.len() as u64;
         let size = 4 + compressed.len() as u64;
-        file_bytes.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        file_bytes.extend_from_slice(
+            &u32::try_from(compressed.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         file_bytes.extend_from_slice(&compressed);
         Ok(BlockHandle::new(offset, size))
     }
@@ -107,7 +115,9 @@ impl InMemorySstWriter {
     fn serialize_index(index_entries: &[(Vec<u8>, BlockHandle)]) -> Vec<u8> {
         let mut index_bytes = Vec::new();
         for (key, handle) in index_entries {
-            index_bytes.extend_from_slice(&(key.len() as u32).to_le_bytes());
+            index_bytes.extend_from_slice(
+                &u32::try_from(key.len()).unwrap_or(u32::MAX).to_le_bytes(),
+            );
             index_bytes.extend_from_slice(key);
             index_bytes.extend_from_slice(&handle.offset.to_le_bytes());
             index_bytes.extend_from_slice(&handle.size.to_le_bytes());
@@ -121,7 +131,7 @@ impl InMemorySstWriter {
             .zip(key.iter())
             .take_while(|(left, right)| left == right)
             .count();
-        shared.min(u16::MAX as usize) as u16
+        u16::try_from(shared.min(u16::MAX as usize)).unwrap_or(u16::MAX)
     }
 }
 

@@ -16,6 +16,10 @@ pub use factory_io::FsSstFactoryIo;
 pub use reader_io::{SstFileIo, SstFileSummary};
 
 /// Finalize an SST writer and atomically persist the resulting bytes to a path.
+///
+/// # Errors
+///
+/// Returns an error if finalizing the writer, writing the temp file, syncing, or renaming fails.
 pub fn finish_writer_to_path(writer: Box<dyn DynSstWriter>, path: &Path) -> MidgeResult<()> {
     let finish_start = std::time::Instant::now();
     let bytes = writer.finish_bytes()?;
@@ -66,9 +70,17 @@ pub fn finish_writer_to_path(writer: Box<dyn DynSstWriter>, path: &Path) -> Midg
         path = ?path,
         bytes = write_bytes,
         finish_total_ms = finish_start.elapsed().as_secs_f64() * 1000.0,
-        write_ms = (write_ns as f64) / 1_000_000.0,
-        rename_ms = (rename_ns as f64) / 1_000_000.0,
-        dir_fsync_ms = (dir_fsync_ns as f64) / 1_000_000.0,
+        write_ms = std::time::Duration::from_nanos(u64::try_from(write_ns).unwrap_or(u64::MAX))
+            .as_secs_f64()
+            * 1000.0,
+        rename_ms = std::time::Duration::from_nanos(u64::try_from(rename_ns).unwrap_or(u64::MAX))
+            .as_secs_f64()
+            * 1000.0,
+        dir_fsync_ms = std::time::Duration::from_nanos(
+            u64::try_from(dir_fsync_ns).unwrap_or(u64::MAX),
+        )
+        .as_secs_f64()
+            * 1000.0,
         "sst finished to path"
     );
 
