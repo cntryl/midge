@@ -388,8 +388,7 @@ impl SkipListMemtable {
                     Some(bytes.to_vec())
                 }
             }
-            Some(None) => None,
-            None => None,
+            Some(None) | None => None,
         })
     }
 
@@ -452,8 +451,7 @@ impl SkipListMemtable {
                     Some(bytes)
                 }
             }
-            Some(None) => None,
-            None => None,
+            Some(None) | None => None,
         })
     }
 
@@ -474,8 +472,7 @@ impl SkipListMemtable {
                     Some(bytes)
                 }
             }
-            Some(None) => None,
-            None => None,
+            Some(None) | None => None,
         })
     }
 
@@ -657,8 +654,7 @@ impl Memtable for SkipListMemtable {
                     Some(bytes.to_vec())
                 }
             }
-            Some(None) => None,
-            None => None,
+            Some(None) | None => None,
         })
     }
 

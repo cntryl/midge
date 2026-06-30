@@ -22,7 +22,6 @@ impl RuntimeDispatcher {
     ) -> HandleOutcome {
         match msg {
             RuntimeMsg::Shutdown => event_loop.handle_shutdown(),
-
             RuntimeMsg::Noop { request_id } => {
                 event_loop.handle_noop(request_id);
                 HandleOutcome::Continue
@@ -59,23 +58,6 @@ impl RuntimeDispatcher {
                 event_loop.handle_get_storage_layout(request_id);
                 HandleOutcome::Continue
             }
-            RuntimeMsg::SetRuntimeConfig {
-                request_id,
-                memtable_size_limit,
-                memtable_flush_threshold,
-                enable_compaction,
-                l0_compaction_trigger,
-                wal_durability_policy,
-                wal_batch_config,
-            } => event_loop.handle_set_runtime_config(&RuntimeConfigUpdate {
-                request_id,
-                memtable_size_limit,
-                memtable_flush_threshold,
-                enable_compaction,
-                l0_compaction_trigger,
-                wal_durability_policy,
-                wal_batch_config,
-            }),
             RuntimeMsg::GetRuntimeConfig { request_id } => {
                 event_loop.handle_get_runtime_config(request_id);
                 HandleOutcome::Continue
@@ -96,7 +78,78 @@ impl RuntimeDispatcher {
                 event_loop.handle_get_current_sequence(request_id);
                 HandleOutcome::Continue
             }
+            RuntimeMsg::WalSync { request_id } => WalCoordinator::sync(event_loop, request_id),
+            RuntimeMsg::WalRotate { request_id } => WalCoordinator::rotate(event_loop, request_id),
+            RuntimeMsg::SealWalForCloud {
+                request_id,
+                sequence,
+                wait_for_ack,
+            } => WalCoordinator::seal_for_cloud(event_loop, request_id, sequence, wait_for_ack),
+            RuntimeMsg::CheckCompaction { request_id } => {
+                CompactionCoordinator::check(event_loop, request_id)
+            }
+            RuntimeMsg::CompactAll { request_id } => {
+                CompactionCoordinator::compact_all(event_loop, request_id)
+            }
+            RuntimeMsg::ManifestPersist { request_id } => {
+                ManifestCoordinator::persist(event_loop, request_id)
+            }
+            RuntimeMsg::CheckGc { request_id } => GcCoordinator::check(event_loop, request_id),
+            RuntimeMsg::SetRuntimeConfig { .. } => Self::dispatch_config(event_loop, msg),
+            RuntimeMsg::CaptureReadSnapshot { .. }
+            | RuntimeMsg::BeginTransaction { .. }
+            | RuntimeMsg::RegisterSnapshot { .. }
+            | RuntimeMsg::UnregisterSnapshot { .. } => Self::dispatch_snapshot(event_loop, msg),
+            RuntimeMsg::ApplyTransaction { .. }
+            | RuntimeMsg::WalAppend { .. }
+            | RuntimeMsg::WalAppendDeleteRange { .. }
+            | RuntimeMsg::WalSyncComplete { .. } => Self::dispatch_wal(event_loop, msg, msg_rx),
+            RuntimeMsg::FlushMemtable { .. } | RuntimeMsg::FlushComplete { .. } => {
+                Self::dispatch_flush(event_loop, msg)
+            }
+            RuntimeMsg::RunCompaction { .. } | RuntimeMsg::CompactionComplete { .. } => {
+                Self::dispatch_compaction(event_loop, msg)
+            }
+            RuntimeMsg::CloudUploadSst { .. }
+            | RuntimeMsg::CloudUploadWal { .. }
+            | RuntimeMsg::CloudUploadComplete { .. } => Self::dispatch_cloud(event_loop, msg),
+            RuntimeMsg::DeleteObsoleteSsts { .. } => Self::dispatch_gc(event_loop, msg),
+            RuntimeMsg::ManifestAddSst { .. }
+            | RuntimeMsg::ManifestCompactionComplete { .. }
+            | RuntimeMsg::ManifestCreateColumnFamily { .. }
+            | RuntimeMsg::ManifestDropColumnFamily { .. } => Self::dispatch_manifest(event_loop, msg_rx, msg),
+            RuntimeMsg::Read { .. } | RuntimeMsg::RangeScan { .. } => {
+                Self::dispatch_read(event_loop, msg)
+            }
+        }
+    }
 
+    fn dispatch_config(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
+        if let RuntimeMsg::SetRuntimeConfig {
+            request_id,
+            memtable_size_limit,
+            memtable_flush_threshold,
+            enable_compaction,
+            l0_compaction_trigger,
+            wal_durability_policy,
+            wal_batch_config,
+        } = msg
+        {
+            return event_loop.handle_set_runtime_config(&RuntimeConfigUpdate {
+                request_id,
+                memtable_size_limit,
+                memtable_flush_threshold,
+                enable_compaction,
+                l0_compaction_trigger,
+                wal_durability_policy,
+                wal_batch_config,
+            });
+        }
+        unreachable!()
+    }
+
+    fn dispatch_snapshot(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
+        match msg {
             RuntimeMsg::CaptureReadSnapshot {
                 request_id,
                 cf_id,
@@ -120,7 +173,16 @@ impl RuntimeDispatcher {
             RuntimeMsg::UnregisterSnapshot { snapshot_id } => {
                 SnapshotCoordinator::unregister(event_loop, snapshot_id)
             }
+            _ => unreachable!(),
+        }
+    }
 
+    fn dispatch_wal(
+        event_loop: &mut EventLoop,
+        msg: RuntimeMsg,
+        msg_rx: &Receiver<RuntimeMsg>,
+    ) -> HandleOutcome {
+        match msg {
             RuntimeMsg::ApplyTransaction {
                 request_id,
                 ops,
@@ -172,18 +234,16 @@ impl RuntimeDispatcher {
                 end_key,
                 durability_policy,
             ),
-            RuntimeMsg::WalSync { request_id } => WalCoordinator::sync(event_loop, request_id),
-            RuntimeMsg::WalRotate { request_id } => WalCoordinator::rotate(event_loop, request_id),
-            RuntimeMsg::SealWalForCloud {
-                request_id,
-                sequence,
-                wait_for_ack,
-            } => WalCoordinator::seal_for_cloud(event_loop, request_id, sequence, wait_for_ack),
             RuntimeMsg::WalSyncComplete {
                 request_id,
                 segment_id,
             } => WalCoordinator::sync_complete(event_loop, request_id, segment_id),
+            _ => unreachable!(),
+        }
+    }
 
+    fn dispatch_flush(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
+        match msg {
             RuntimeMsg::FlushMemtable { request_id, cf_id } => {
                 FlushCoordinator::flush_memtable(event_loop, request_id, cf_id)
             }
@@ -192,18 +252,15 @@ impl RuntimeDispatcher {
                 cf_id,
                 sst_name,
                 sequence,
-            } => {
-                FlushCoordinator::flush_complete(event_loop, request_id, cf_id, &sst_name, sequence)
-            }
+            } => FlushCoordinator::flush_complete(event_loop, request_id, cf_id, &sst_name, sequence),
+            _ => unreachable!(),
+        }
+    }
 
-            RuntimeMsg::CheckCompaction { request_id } => {
-                CompactionCoordinator::check(event_loop, request_id)
-            }
+    fn dispatch_compaction(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
+        match msg {
             RuntimeMsg::RunCompaction { request_id, plan } => {
                 CompactionCoordinator::run(event_loop, request_id, plan)
-            }
-            RuntimeMsg::CompactAll { request_id } => {
-                CompactionCoordinator::compact_all(event_loop, request_id)
             }
             RuntimeMsg::CompactionComplete {
                 request_id,
@@ -223,7 +280,12 @@ impl RuntimeDispatcher {
                     succeeded,
                 },
             ),
+            _ => unreachable!(),
+        }
+    }
 
+    fn dispatch_cloud(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
+        match msg {
             RuntimeMsg::CloudUploadSst {
                 request_id,
                 sst_name,
@@ -236,13 +298,27 @@ impl RuntimeDispatcher {
                 request_id,
                 resource,
             } => CloudCoordinator::upload_complete(event_loop, request_id, &resource),
+            _ => unreachable!(),
+        }
+    }
 
-            RuntimeMsg::CheckGc { request_id } => GcCoordinator::check(event_loop, request_id),
-            RuntimeMsg::DeleteObsoleteSsts {
-                request_id,
-                sst_names,
-            } => GcCoordinator::delete_obsolete_ssts(event_loop, request_id, &sst_names),
+    fn dispatch_gc(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
+        if let RuntimeMsg::DeleteObsoleteSsts {
+            request_id,
+            sst_names,
+        } = msg
+        {
+            return GcCoordinator::delete_obsolete_ssts(event_loop, request_id, &sst_names);
+        }
+        unreachable!()
+    }
 
+    fn dispatch_manifest(
+        event_loop: &mut EventLoop,
+        msg_rx: &Receiver<RuntimeMsg>,
+        msg: RuntimeMsg,
+    ) -> HandleOutcome {
+        match msg {
             RuntimeMsg::ManifestAddSst {
                 request_id,
                 file_meta,
@@ -252,16 +328,18 @@ impl RuntimeDispatcher {
                 removed,
                 added,
             } => ManifestCoordinator::compaction_complete(event_loop, request_id, &removed, &added),
-            RuntimeMsg::ManifestPersist { request_id } => {
-                ManifestCoordinator::persist(event_loop, request_id)
-            }
             RuntimeMsg::ManifestCreateColumnFamily { request_id, name } => {
                 ManifestCoordinator::create_column_family(event_loop, msg_rx, request_id, &name)
             }
             RuntimeMsg::ManifestDropColumnFamily { request_id, cf_id } => {
                 ManifestCoordinator::drop_column_family(event_loop, msg_rx, request_id, cf_id)
             }
+            _ => unreachable!(),
+        }
+    }
 
+    fn dispatch_read(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
+        match msg {
             RuntimeMsg::Read {
                 request_id,
                 cf_id,
@@ -290,6 +368,7 @@ impl RuntimeDispatcher {
                 );
                 HandleOutcome::Continue
             }
+            _ => unreachable!(),
         }
     }
 }

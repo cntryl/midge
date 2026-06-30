@@ -42,10 +42,7 @@ impl LocalFsStorage {
         for component in Path::new(rel.as_str()).components() {
             match component {
                 Component::Normal(part) => out.push(part),
-                Component::CurDir => {}
-                Component::ParentDir => {}
-                Component::RootDir => {}
-                Component::Prefix(_) => {}
+                Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_) => {}
             }
         }
         out

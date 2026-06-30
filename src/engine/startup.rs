@@ -1264,7 +1264,7 @@ impl RuntimeStorageMaterialization {
         let state = RuntimeState::try_new_with_recovery_dir(
             storage_path.db_path.clone(),
             storage_path.memory_mode,
-            Some(cloud.recovery_cloud_wal_dir.clone()),
+            Some(&cloud.recovery_cloud_wal_dir),
             opts.recovery_policy,
         )?;
 
@@ -1323,7 +1323,7 @@ impl RuntimeStorageMaterialization {
         let state = RuntimeState::try_new_with_recovery_dir(
             storage_path.db_path.clone(),
             storage_path.memory_mode,
-            Some(recovery_wal_dir),
+            Some(&recovery_wal_dir),
             opts.recovery_policy,
         )?;
 
@@ -1440,7 +1440,7 @@ impl StartedRuntime {
     fn start(opts: &OpenOptions, recovered: RuntimeRecoveryMaterialization) -> MidgeResult<Self> {
         let recovered_sequence = recovered.recovered_sequence;
         let recovered_cf_metas = recovered.recovered_cf_metas;
-        let (runtime_inst, _) = Runtime::new()?;
+        let (runtime_inst, _) = Runtime::new();
         let (runtime, runtime_handle) =
             runtime_inst.start_with_config(recovered.state, recovered.runtime_config)?;
 

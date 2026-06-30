@@ -411,7 +411,7 @@ impl RuntimeState {
     pub fn new_with_recovery_dir(
         db_path: PathBuf,
         memory_mode: bool,
-        recovery_wal_dir: Option<PathBuf>,
+        recovery_wal_dir: Option<&PathBuf>,
     ) -> Self {
         Self::try_new_with_recovery_dir(
             db_path,
@@ -424,10 +424,14 @@ impl RuntimeState {
 
     /// Create new runtime state with an optional override for WAL recovery and
     /// an explicit recovery policy.
+    /// # Errors
+    ///
+    /// Returns an error if recovery cannot initialize the filesystem, load the manifest,
+    /// replay the intent log, or replay WAL state.
     pub fn try_new_with_recovery_dir(
         db_path: PathBuf,
         memory_mode: bool,
-        recovery_wal_dir: Option<PathBuf>,
+        recovery_wal_dir: Option<&PathBuf>,
         recovery_policy: crate::config::RecoveryPolicy,
     ) -> MidgeResult<Self> {
         let (wal_dir, sst_dir) = Self::ensure_directories(&db_path, memory_mode);
@@ -539,7 +543,7 @@ impl RuntimeState {
         }
 
         // WAL recovery (skip in memory mode)
-        let replay_dir = recovery_wal_dir.as_deref().unwrap_or(&wal_dir);
+        let replay_dir = recovery_wal_dir.map_or(wal_dir.as_path(), |path| path.as_path());
         let mut wal_recovery_records_replayed = 0_u64;
         let mut wal_recovery_bytes_replayed = 0_u64;
         let wal_recovered_sequence = if !memory_mode && replay_dir.exists() {

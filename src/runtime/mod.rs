@@ -1024,7 +1024,7 @@ pub struct Runtime {
 
 impl Runtime {
     /// Create a new runtime and a corresponding handle for submitting work.
-    pub fn new() -> MidgeResult<(Self, RuntimeHandle)> {
+    pub fn new() -> (Self, RuntimeHandle) {
         let (msg_tx, msg_rx) = channel::bounded(1000);
         let router = Arc::new(ResponseRouter::new());
 
@@ -1047,7 +1047,7 @@ impl Runtime {
             router,
         };
 
-        Ok((runtime, handle))
+        (runtime, handle)
     }
 
     /// Start the runtime event loop in a background thread.
@@ -1305,7 +1305,7 @@ mod tests {
         assert!(RuntimeMsg::CompactAll { request_id: 8 }.kind_name() == "CompactAll");
 
         // Verify that CompactAll responds correctly when runtime is healthy
-        let (runtime, _handle) = Runtime::new().expect("create runtime");
+        let (runtime, _handle) = Runtime::new();
         let state = RuntimeState::new("/tmp/test_compact_all".into(), true);
         let (_runtime, h) = runtime
             .start_with_config(state, RuntimeConfig::default())
@@ -1497,7 +1497,7 @@ mod tests {
         // (no setup)
 
         // Act
-        let (runtime, handle) = Runtime::new().expect("Should create runtime");
+        let (runtime, handle) = Runtime::new();
 
         // Assert
         // Handle should be cloneable
@@ -1509,7 +1509,7 @@ mod tests {
     #[test]
     fn should_handle_send_noop_message() {
         // Arrange
-        let (runtime, handle) = Runtime::new().expect("Should create runtime");
+        let (runtime, handle) = Runtime::new();
         let msg = RuntimeMsg::Noop { request_id: 1 };
 
         // Act
@@ -1523,7 +1523,7 @@ mod tests {
     #[test]
     fn should_detect_closed_channel_on_send() {
         // Arrange
-        let (runtime, handle) = Runtime::new().expect("Should create runtime");
+        let (runtime, handle) = Runtime::new();
 
         // Act - Drop runtime to close channel
         drop(runtime);
@@ -1539,7 +1539,7 @@ mod tests {
     #[test]
     fn should_require_request_id_for_send_wait() {
         // Arrange
-        let (runtime, handle) = Runtime::new().expect("Should create runtime");
+        let (runtime, handle) = Runtime::new();
         let msg = RuntimeMsg::Shutdown;
 
         // Act
@@ -1558,11 +1558,9 @@ mod tests {
         // (no setup)
 
         // Act
-        let result = Runtime::new();
+        let (runtime, _handle) = Runtime::new();
 
         // Assert
-        assert!(result.is_ok());
-        let (runtime, _handle) = result.unwrap();
         drop(runtime);
     }
 
@@ -1572,7 +1570,7 @@ mod tests {
         // (no setup)
 
         // Act
-        let (_runtime, _handle) = Runtime::new().expect("Should create runtime");
+        let (_runtime, _handle) = Runtime::new();
 
         // Assert - Default should have tracing disabled
         // (Verified by not panicking)
@@ -1581,7 +1579,7 @@ mod tests {
     #[test]
     fn should_shutdown_runtime() {
         // Arrange
-        let (runtime, _handle) = Runtime::new().expect("Should create runtime");
+        let (runtime, _handle) = Runtime::new();
 
         // Act - Shutdown should not panic
         runtime.shutdown();
