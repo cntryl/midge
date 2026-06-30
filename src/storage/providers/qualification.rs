@@ -256,7 +256,7 @@ fn engine_recovers_from_provider_after_local_cache_loss(
     let _ = std::fs::remove_dir_all(&cache_path);
 
     let opts = real_cloud_engine_options(cache_path.clone(), provider.clone(), prefix.clone());
-    let engine = Engine::open(opts).expect("open provider-backed engine");
+    let engine = Engine::open(&opts).expect("open provider-backed engine");
     let default_handle = default_cf(&engine);
 
     let mut tx = engine
@@ -276,7 +276,7 @@ fn engine_recovers_from_provider_after_local_cache_loss(
 
     std::fs::remove_dir_all(&cache_path).expect("delete local cache");
 
-    let reopened = Engine::open(real_cloud_engine_options(
+    let reopened = Engine::open(&real_cloud_engine_options(
         cache_path.clone(),
         provider,
         prefix,
