@@ -23,6 +23,10 @@ impl TrieWriter {
     ///
     /// Only call this for the first key of each block.
     /// Keys must be added in sorted order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the key order is invalid or trie encoding fails.
     pub fn add_block_key(&mut self, key: &[u8], block_id: u32) -> MidgeResult<()> {
         if !self.enabled {
             return Ok(());

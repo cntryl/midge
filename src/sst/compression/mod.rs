@@ -302,7 +302,12 @@ pub fn compress_block(
             min_savings_bytes,
             min_ratio,
             check_algorithms,
-        } => compress_adaptive(data, *min_savings_bytes, *min_ratio, check_algorithms),
+        } => Ok(compress_adaptive(
+            data,
+            *min_savings_bytes,
+            *min_ratio,
+            check_algorithms,
+        )),
     }
 }
 
@@ -343,10 +348,12 @@ fn compress_adaptive(
     min_savings: usize,
     min_ratio: f32,
     algos: &[CompressionAlgo],
-) -> MidgeResult<(Bytes, CompressionAlgo)> {
+) -> (Bytes, CompressionAlgo) {
     let mut best_compressed = Bytes::copy_from_slice(data);
     let mut best_algo = CompressionAlgo::None;
     let mut best_size = data.len();
+    let min_ratio = f64::from(min_ratio);
+    let data_len = f64::from(u32::try_from(data.len()).unwrap_or(u32::MAX));
 
     for &algo in algos {
         if algo == CompressionAlgo::None {
@@ -356,7 +363,7 @@ fn compress_adaptive(
         // Try compression
         if let Ok((compressed, _)) = compress_with_algo(data, algo) {
             let compressed_size = compressed.len();
-            let ratio = compressed_size as f32 / data.len() as f32;
+            let ratio = f64::from(u32::try_from(compressed_size).unwrap_or(u32::MAX)) / data_len;
             let savings = data.len().saturating_sub(compressed_size);
 
             // Check if this is better
@@ -368,7 +375,7 @@ fn compress_adaptive(
         }
     }
 
-    Ok((best_compressed, best_algo))
+    (best_compressed, best_algo)
 }
 
 /// Decompress block data based on compression type.

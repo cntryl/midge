@@ -4,6 +4,7 @@
 //! allowing for swappable implementations (Real, Mock, Chaos) for testing.
 
 use bytes::Bytes;
+use std::convert::TryFrom;
 use std::sync::Arc;
 
 use crate::common::{MidgeError, MidgeResult};
@@ -348,7 +349,7 @@ impl SstFileIo {
         }
 
         let raw = &buffer[4..4 + len];
-        Self::decompress_raw_block(raw)
+        Ok(Self::decompress_raw_block(raw))
     }
 
     /// Decompress a raw block payload, stripping the block trailer if present.
@@ -356,20 +357,20 @@ impl SstFileIo {
     /// Blocks with a valid trailer (`[data][algo:u8][crc32c:u32]`) are verified
     /// and decompressed.  Legacy blocks without a trailer (pre-v1.0.0) are
     /// returned as-is for backward compatibility.
-    fn decompress_raw_block(raw: &[u8]) -> MidgeResult<bytes::Bytes> {
+    fn decompress_raw_block(raw: &[u8]) -> bytes::Bytes {
         use crate::sst::compression;
 
         // A block must be at least BLOCK_TRAILER_SIZE bytes to contain a
         // trailer.  Shorter payloads are legacy / uncompressed.
         if raw.len() < compression::BLOCK_TRAILER_SIZE {
-            return Ok(bytes::Bytes::copy_from_slice(raw));
+            return bytes::Bytes::copy_from_slice(raw);
         }
 
         // Attempt trailer-based decompression.  If the CRC check fails this
         // may be a legacy block without a trailer so fall back to raw bytes.
         match compression::decompress_block_with_trailer(raw) {
-            Ok(decompressed) => Ok(decompressed),
-            Err(_) => Ok(bytes::Bytes::copy_from_slice(raw)),
+            Ok(decompressed) => decompressed,
+            Err(_) => bytes::Bytes::copy_from_slice(raw),
         }
     }
 
@@ -421,8 +422,13 @@ impl SstFileIo {
         let mut result = Vec::with_capacity(handles.len());
         for handle in handles {
             // Compute offset within the buffer
-            let buf_offset = (handle.offset - read_start) as usize;
-            let buf_end = buf_offset + handle.size as usize;
+            let buf_offset = usize::try_from(handle.offset - read_start).map_err(|_| {
+                MidgeError::Corruption("Block offset exceeds addressable memory".into())
+            })?;
+            let handle_size = usize::try_from(handle.size).map_err(|_| {
+                MidgeError::Corruption("Block size exceeds addressable memory".into())
+            })?;
+            let buf_end = buf_offset + handle_size;
 
             if buf_end > buffer.len() {
                 return Err(MidgeError::Corruption(
@@ -449,7 +455,7 @@ impl SstFileIo {
             }
 
             let raw = &block_slice[4..4 + len];
-            result.push(Self::decompress_raw_block(raw)?);
+            result.push(Self::decompress_raw_block(raw));
         }
 
         Ok(result)
@@ -794,7 +800,7 @@ impl crate::sst::SstStateReader for SstFileIo {
 
         let now_millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
 
         Ok(match best_match {
             Some(entry) if entry.is_tombstone() => KeyState::Tombstone(entry.sequence),

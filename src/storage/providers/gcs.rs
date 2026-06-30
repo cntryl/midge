@@ -642,7 +642,7 @@ fn parse_impersonated_access_token_json(body: &str) -> MidgeResult<CachedGcsToke
         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
         .map_or_else(
             || current_unix_secs().saturating_add(3600),
-            |datetime| datetime.timestamp().max(0) as u64,
+            |datetime| u64::try_from(datetime.timestamp().max(0)).unwrap_or(0),
         );
     Ok(CachedGcsToken::expiring(access_token, expires_at))
 }
@@ -700,7 +700,7 @@ impl GcsBackend {
         }
     }
 
-    fn canonical_key(&self, key: &str) -> String {
+    fn canonical_key(key: &str) -> String {
         key.split('/')
             .map(|seg| utf8_percent_encode(seg, ENCODE_SET).to_string())
             .collect::<Vec<_>>()
@@ -720,7 +720,7 @@ impl GcsBackend {
                 "{}/{}/{}",
                 self.endpoint.trim_end_matches('/'),
                 self.bucket,
-                self.canonical_key(key)
+                Self::canonical_key(key)
             ),
         }
     }
@@ -732,7 +732,7 @@ impl GcsBackend {
                 "{}/storage/v1/b/{}/o/{}?alt=media",
                 self.endpoint.trim_end_matches('/'),
                 self.bucket,
-                self.canonical_key(key)
+                Self::canonical_key(key)
             ),
             GcsBackendMode::Xml => self.upload_url(key),
         }
@@ -745,7 +745,7 @@ impl GcsBackend {
                 "{}/storage/v1/b/{}/o/{}",
                 self.endpoint.trim_end_matches('/'),
                 self.bucket,
-                self.canonical_key(key)
+                Self::canonical_key(key)
             ),
             GcsBackendMode::Xml => self.upload_url(key),
         }

@@ -71,7 +71,7 @@ impl StorageBudgetActor {
     pub fn handle_event(&mut self, event: StorageBudgetEvent) -> Option<ReservationResult> {
         match event {
             StorageBudgetEvent::ReserveForFlush { est_size } => {
-                self.try_reserve_for_flush(est_size)
+                Some(self.try_reserve_for_flush(est_size))
             }
             StorageBudgetEvent::FlushCompleted { actual_size } => {
                 self.complete_flush(actual_size);
@@ -96,19 +96,19 @@ impl StorageBudgetActor {
     }
 
     /// Try to reserve space for a flush
-    fn try_reserve_for_flush(&mut self, est_size: u64) -> Option<ReservationResult> {
+    fn try_reserve_for_flush(&mut self, est_size: u64) -> ReservationResult {
         let usage_percent = self.disk_state.usage_percent(self.policy.max_local_bytes);
 
         // Emergency: reject all new writes
         if self.policy.is_emergency_watermark(usage_percent) {
             tracing::warn!("Emergency watermark hit; rejecting flush");
-            return Some(ReservationResult::RejectNoSpace);
+            return ReservationResult::RejectNoSpace;
         }
 
         // Critical: wait for cloud uploads
         if self.policy.is_critical_watermark(usage_percent) {
             tracing::warn!("Critical watermark hit; requesting cloud uploads");
-            return Some(ReservationResult::WaitForCloudUpload);
+            return ReservationResult::WaitForCloudUpload;
         }
 
         // High: may need to wait for compaction
@@ -116,7 +116,7 @@ impl StorageBudgetActor {
             let free = self.disk_state.free_bytes(self.policy.max_local_bytes);
             if free < est_size {
                 tracing::info!("High watermark; waiting for compaction to free space");
-                return Some(ReservationResult::WaitForCompaction);
+                return ReservationResult::WaitForCompaction;
             }
         }
 
@@ -124,7 +124,7 @@ impl StorageBudgetActor {
         self.disk_state.new_sst_reserve = self.disk_state.new_sst_reserve.saturating_add(est_size);
         self.check_watermarks();
 
-        Some(ReservationResult::Ok)
+        ReservationResult::Ok
     }
 
     /// Complete a flush, converting reserve to actual SST bytes
@@ -147,7 +147,7 @@ impl StorageBudgetActor {
     fn plan_compaction(&mut self, input_sizes: &[u64]) {
         let total_input: u64 = input_sizes.iter().sum();
         // Estimate output as ~90% of input (conservative)
-        let estimated_output = (total_input as f64 * 0.9) as u64;
+        let estimated_output = total_input.saturating_mul(9) / 10;
         self.disk_state.compaction_reserve = estimated_output;
         tracing::info!(
             input_bytes = total_input,

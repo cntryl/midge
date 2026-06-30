@@ -37,7 +37,12 @@ impl StorageResidueAssessment {
                     continue;
                 };
 
-                if name.ends_with(".sst.tmp") || name.ends_with(".tmp") {
+                let is_tmp = name.ends_with(".sst.tmp")
+                    || path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"));
+                if is_tmp {
                     sst_temp_files.push(name.to_string());
                     continue;
                 }

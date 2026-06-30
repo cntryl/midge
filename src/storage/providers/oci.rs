@@ -40,7 +40,7 @@ impl OciProvider {
         access_key: String,
         secret_key: String,
     ) -> MidgeResult<Self> {
-        let config = S3Config::oci_s3_compat(bucket, namespace, region);
+        let config = S3Config::oci_s3_compat(bucket, &namespace, &region);
         S3Provider::custom(config, access_key, secret_key).map(|inner| Self { inner })
     }
 
@@ -50,7 +50,7 @@ impl OciProvider {
     pub fn new(namespace: String, bucket: String, region: String) -> MidgeResult<Self> {
         // Note: This is a stub constructor that creates a provider with the namespace/bucket/region
         // but no credentials. Real usage should call `s3_compat()` with full credentials.
-        let config = S3Config::oci_s3_compat(bucket, namespace, region.clone());
+        let config = S3Config::oci_s3_compat(bucket, &namespace, &region);
         S3Provider::custom(config, String::new(), String::new()).map(|inner| Self { inner })
     }
 

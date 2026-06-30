@@ -77,7 +77,7 @@ fn resolve_s3_family(provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn Clou
                     endpoint.clone(),
                     true,
                 ),
-                None => super::s3::S3Config::wasabi(bucket.clone(), region.clone()),
+                None => super::s3::S3Config::wasabi(bucket.clone(), region),
             };
             let provider = super::s3::S3Provider::custom_with_credentials(config, creds)?;
             Ok(provider.backend())
@@ -98,11 +98,7 @@ fn resolve_s3_family(provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn Clou
                     endpoint.clone(),
                     *path_style,
                 ),
-                None => super::s3::S3Config::oci_s3_compat(
-                    bucket.clone(),
-                    namespace.clone(),
-                    region.clone(),
-                ),
+                None => super::s3::S3Config::oci_s3_compat(bucket.clone(), namespace, region),
             };
             let provider = super::s3::S3Provider::custom_with_credentials(config, creds)?;
             Ok(provider.backend())

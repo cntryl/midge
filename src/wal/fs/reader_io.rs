@@ -32,6 +32,10 @@ pub struct FsWalReaderIo {
 
 impl FsWalReaderIo {
     /// Open `wal.log` in read-only mode using the provided filesystem.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WAL reader cannot be initialized.
     pub fn new(path_str: &str, fs: Arc<dyn Fs>) -> MidgeResult<Self> {
         Ok(Self {
             path: FsPath::new(path_str),
@@ -41,11 +45,18 @@ impl FsWalReaderIo {
     }
 
     /// Open and verify the WAL file exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WAL file is missing or unreadable.
     pub fn open(path_str: &str, fs: Arc<dyn Fs>) -> MidgeResult<Self> {
-        let reader = Self::new(path_str, fs.clone())?;
-        // Verify file exists by attempting to get metadata
-        fs.metadata(&reader.path)?;
-        Ok(reader)
+        let path = FsPath::new(path_str);
+        fs.metadata(&path)?;
+        Ok(Self {
+            path,
+            fs,
+            current_pos: 0,
+        })
     }
 }
 

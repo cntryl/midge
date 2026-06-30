@@ -108,7 +108,10 @@ impl StorageFile for LocalFsFile {
         file.seek(SeekFrom::Start(offset))
             .map_err(|e| LocalFsStorage::map_fs_err(e, "seek"))?;
 
-        let mut buf = vec![0u8; len as usize];
+        let len = usize::try_from(len).map_err(|_| {
+            StorageError::new(StorageErrorKind::InvalidInput, "read length exceeds usize")
+        })?;
+        let mut buf = vec![0u8; len];
         let mut filled = 0usize;
         while filled < buf.len() {
             let n = file

@@ -587,7 +587,7 @@ fn parse_ini_section(
 fn parse_rfc3339_epoch(value: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
-        .map(|dt| dt.timestamp().max(0) as u64)
+        .map(|dt| u64::try_from(dt.timestamp().max(0)).unwrap_or(0))
 }
 
 fn current_unix_secs() -> u64 {
@@ -618,10 +618,10 @@ impl S3Config {
     }
 
     /// Create config for Wasabi
-    pub fn wasabi(bucket: String, region: String) -> Self {
+    pub fn wasabi(bucket: String, region: &str) -> Self {
         Self {
             bucket,
-            region: region.clone(),
+            region: region.to_string(),
             endpoint: Some(format!("https://s3.{region}.wasabisys.com")),
             path_style: false,
         }
@@ -638,10 +638,10 @@ impl S3Config {
     }
 
     /// Create config for OCI S3 compatibility
-    pub fn oci_s3_compat(bucket: String, namespace: String, region: String) -> Self {
+    pub fn oci_s3_compat(bucket: String, namespace: &str, region: &str) -> Self {
         Self {
             bucket,
-            region: region.clone(),
+            region: region.to_string(),
             endpoint: Some(format!(
                 "https://{namespace}.compat.objectstorage.{region}.oraclecloud.com"
             )),
@@ -691,7 +691,7 @@ impl S3Provider {
         access_key: String,
         secret_key: String,
     ) -> MidgeResult<Self> {
-        let config = S3Config::wasabi(bucket, region.clone());
+        let config = S3Config::wasabi(bucket, &region);
         let creds = AwsCredentials {
             access_key,
             secret_key,
@@ -726,7 +726,7 @@ impl S3Provider {
         access_key: String,
         secret_key: String,
     ) -> MidgeResult<Self> {
-        let config = S3Config::oci_s3_compat(bucket, namespace, region.clone());
+        let config = S3Config::oci_s3_compat(bucket, &namespace, &region);
         let creds = AwsCredentials {
             access_key,
             secret_key,
@@ -792,7 +792,7 @@ impl S3Backend {
         Self { config, executor }
     }
 
-    fn canonical_key(&self, key: &str) -> String {
+    fn canonical_key(key: &str) -> String {
         key.split('/')
             .map(|segment| utf8_percent_encode(segment, ENCODE_SET).to_string())
             .collect::<Vec<_>>()
@@ -829,7 +829,7 @@ impl S3Backend {
     }
 
     fn object_url(&self, key: &str) -> String {
-        format!("{}/{}", self.base_url(), self.canonical_key(key))
+        format!("{}/{}", self.base_url(), Self::canonical_key(key))
     }
 
     fn list_url(&self, prefix: &str, continuation_token: Option<&str>) -> String {
@@ -1115,10 +1115,14 @@ impl CloudSigner for SigV4Signer {
             .map(|(name, _)| name.clone())
             .collect::<Vec<_>>()
             .join(";");
-        let canonical_headers = header_pairs
-            .iter()
-            .map(|(name, value)| format!("{name}:{value}\n"))
-            .collect::<String>();
+        let canonical_headers =
+            header_pairs
+                .iter()
+                .fold(String::new(), |mut headers, (name, value)| {
+                    use std::fmt::Write as _;
+                    let _ = writeln!(headers, "{name}:{value}");
+                    headers
+                });
 
         let path = if url.path().is_empty() {
             "/"

@@ -422,10 +422,10 @@ impl HybridStorage {
             .spawn(move || {
                 while let Ok(upload) = wal_upload_rx.recv() {
                     Self::process_wal_upload(
-                        upload,
+                        &upload,
                         &cloud,
                         &event_queue,
-                        &external_event_tx,
+                        external_event_tx.as_ref(),
                         &verified_wal_segments,
                     );
                 }
@@ -444,10 +444,10 @@ impl HybridStorage {
     }
 
     fn process_wal_upload(
-        upload: UploadState,
+        upload: &UploadState,
         cloud: &Arc<dyn StorageBackend>,
         event_queue: &Arc<Mutex<VecDeque<StorageEvent>>>,
-        external_event_tx: &Option<cb::Sender<StorageEvent>>,
+        external_event_tx: Option<&cb::Sender<StorageEvent>>,
         verified_wal_segments: &Arc<Mutex<HashMap<u64, VerifiedWalSegment>>>,
     ) {
         let upload_start = Instant::now();
@@ -455,11 +455,11 @@ impl HybridStorage {
             telemetry.metrics().record_cloud_async_wal_upload_started();
         }
 
-        Self::log_wal_upload_start(&upload, true);
-        let data = match Self::read_wal_file(&upload) {
+        Self::log_wal_upload_start(upload, true);
+        let data = match Self::read_wal_file(upload) {
             Ok(data) => data,
             Err(error) => {
-                Self::emit_wal_upload_failure(&upload, error, event_queue, external_event_tx);
+                Self::emit_wal_upload_failure(upload, &error, event_queue, external_event_tx);
                 return;
             }
         };
@@ -470,8 +470,8 @@ impl HybridStorage {
                 telemetry.metrics().record_cloud_async_wal_upload_failed();
             }
             Self::emit_wal_upload_failure(
-                &upload,
-                "failpoint: cloud WAL upload failed".to_string(),
+                upload,
+                "failpoint: cloud WAL upload failed",
                 event_queue,
                 external_event_tx,
             );
@@ -488,11 +488,11 @@ impl HybridStorage {
         );
 
         Self::handle_wal_upload_result(
-            &upload,
+            upload,
             upload_start,
             event_queue,
             external_event_tx,
-            rx,
+            &rx,
             |segment_id, max_sequence| {
                 Self::verify_remote_wal_segment_with_backend(
                     cloud,
@@ -532,9 +532,9 @@ impl HybridStorage {
             Err(error) => {
                 Self::emit_wal_upload_failure(
                     upload,
-                    error,
+                    &error,
                     &self.event_queue,
-                    &self.external_event_tx,
+                    self.external_event_tx.as_ref(),
                 );
                 return;
             }
@@ -547,9 +547,9 @@ impl HybridStorage {
             }
             Self::emit_wal_upload_failure(
                 upload,
-                "failpoint: cloud WAL upload failed".to_string(),
+                "failpoint: cloud WAL upload failed",
                 &self.event_queue,
-                &self.external_event_tx,
+                self.external_event_tx.as_ref(),
             );
             return;
         }
@@ -567,8 +567,8 @@ impl HybridStorage {
             upload,
             upload_start,
             &self.event_queue,
-            &self.external_event_tx,
-            rx,
+            self.external_event_tx.as_ref(),
+            &rx,
             |segment_id, max_sequence| self.verify_remote_wal_segment(segment_id, max_sequence),
         );
     }
@@ -596,7 +596,7 @@ impl HybridStorage {
     }
 
     fn record_wal_bytes(data: &[u8]) {
-        let bytes = data.len() as u64;
+        let bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);
         if let Some(telemetry) = crate::telemetry::Telemetry::global() {
             telemetry.metrics().record_cloud_upload(bytes);
         }
@@ -609,17 +609,17 @@ impl HybridStorage {
 
     fn emit_wal_upload_failure(
         upload: &UploadState,
-        error: String,
+        error: &str,
         event_queue: &Arc<Mutex<VecDeque<StorageEvent>>>,
-        external_event_tx: &Option<cb::Sender<StorageEvent>>,
+        external_event_tx: Option<&cb::Sender<StorageEvent>>,
     ) {
         let fail = StorageEvent::CloudFail {
             segment_id: upload.segment_id,
-            error: error.clone(),
+            error: error.to_string(),
         };
         let mut events = event_queue.lock();
         events.push_back(fail.clone());
-        if let Some(tx) = external_event_tx.as_ref() {
+        if let Some(tx) = external_event_tx {
             let _ = tx.send(fail);
         }
     }
@@ -638,7 +638,7 @@ impl HybridStorage {
     fn emit_wal_upload_ack(
         upload: &UploadState,
         event_queue: &Arc<Mutex<VecDeque<StorageEvent>>>,
-        external_event_tx: &Option<cb::Sender<StorageEvent>>,
+        external_event_tx: Option<&cb::Sender<StorageEvent>>,
     ) {
         let mut events = event_queue.lock();
         let ack = StorageEvent::CloudAck {
@@ -646,7 +646,7 @@ impl HybridStorage {
             max_sequence: upload.max_sequence,
         };
         events.push_back(ack.clone());
-        if let Some(tx) = external_event_tx.as_ref() {
+        if let Some(tx) = external_event_tx {
             let _ = tx.send(ack);
         }
     }
@@ -655,8 +655,8 @@ impl HybridStorage {
         upload: &UploadState,
         upload_start: Instant,
         event_queue: &Arc<Mutex<VecDeque<StorageEvent>>>,
-        external_event_tx: &Option<cb::Sender<StorageEvent>>,
-        rx: std::sync::mpsc::Receiver<StorageEvent>,
+        external_event_tx: Option<&cb::Sender<StorageEvent>>,
+        rx: &std::sync::mpsc::Receiver<StorageEvent>,
         mut verify_remote: impl FnMut(u64, u64) -> Result<(), String>,
     ) {
         match rx.recv() {
@@ -667,7 +667,7 @@ impl HybridStorage {
                     }
                     Self::emit_wal_upload_failure(
                         upload,
-                        format!("remote WAL readback validation failed: {error}"),
+                        &format!("remote WAL readback validation failed: {error}"),
                         event_queue,
                         external_event_tx,
                     );
@@ -690,12 +690,12 @@ impl HybridStorage {
                     StorageOutcome::Err(e) => e,
                     StorageOutcome::Ok(()) => "Unknown error".to_string(),
                 };
-                Self::emit_wal_upload_failure(upload, error, event_queue, external_event_tx);
+                Self::emit_wal_upload_failure(upload, &error, event_queue, external_event_tx);
             }
             _ => {
                 Self::emit_wal_upload_failure(
                     upload,
-                    "Channel error".to_string(),
+                    "Channel error",
                     event_queue,
                     external_event_tx,
                 );

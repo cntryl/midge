@@ -15,6 +15,10 @@ pub struct TrieReader {
 
 impl TrieReader {
     /// Create a new trie reader from serialized data
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the serialized trie cannot be decoded or is empty.
     pub fn new(data: &[u8]) -> MidgeResult<Self> {
         let nodes = encoding::decode_trie(data)?;
 

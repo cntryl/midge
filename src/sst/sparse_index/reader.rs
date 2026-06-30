@@ -14,6 +14,10 @@ pub struct SparseIndexReader {
 
 impl SparseIndexReader {
     /// Create a reader from index entries
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if future validation is added during reader construction.
     pub fn new(entries: Vec<IndexEntry>) -> MidgeResult<Self> {
         // Ensure entries are sorted by key
         let mut sorted = entries;

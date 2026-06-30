@@ -36,7 +36,7 @@ impl WasabiProvider {
         access_key: String,
         secret_key: String,
     ) -> MidgeResult<Self> {
-        let config = S3Config::wasabi(bucket, region);
+        let config = S3Config::wasabi(bucket, &region);
         S3Provider::custom(config, access_key, secret_key).map(|inner| Self { inner })
     }
 

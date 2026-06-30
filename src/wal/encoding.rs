@@ -71,7 +71,7 @@ fn corruption(msg: impl Into<String>) -> MidgeError {
 #[inline]
 fn put_tlv(buf: &mut BytesMut, tag: u8, val: &[u8]) {
     buf.put_u8(tag);
-    buf.put_u32_le(val.len() as u32);
+    buf.put_u32_le(u32::try_from(val.len()).expect("TLV value length exceeds u32::MAX"));
     buf.extend_from_slice(val);
 }
 
@@ -323,14 +323,14 @@ pub fn decode_view(data: &[u8]) -> MidgeResult<WalRecordView<'_>> {
 /// # Errors
 ///
 /// Returns an error when the payload is malformed or value decompression fails.
-pub fn decode(bytes: impl Buf) -> MidgeResult<WalRecord> {
+pub fn decode(mut bytes: impl Buf) -> MidgeResult<WalRecord> {
     // WAL frames must be contiguous; enforce this.
     let data = bytes.chunk();
     if data.len() != bytes.remaining() {
         return Err(corruption("non-contiguous WAL buffer"));
     }
-
-    let view = decode_view(data)?;
+    let owned = bytes.copy_to_bytes(bytes.remaining());
+    let view = decode_view(owned.as_ref())?;
 
     // Decompress value if a compression tag is present
     let value = match view.value {

@@ -99,9 +99,13 @@ impl TieredBloomConfig {
             }
             let ln_p = fpr.ln();
             let ln_2_sq = 2.0_f64.ln().powi(2);
-            let m = -(n as f64) * ln_p / ln_2_sq;
-            usize::try_from(u64::try_from(m.ceil() as i128).unwrap_or(u64::MAX))
-                .unwrap_or(usize::MAX)
+            let n_f64 = f64::from(u32::try_from(n).unwrap_or(u32::MAX));
+            let m = -n_f64 * ln_p / ln_2_sq;
+            if !m.is_finite() || m <= 0.0 {
+                return 0;
+            }
+
+            format!("{:.0}", m.ceil()).parse().unwrap_or(usize::MAX)
         };
 
         let uniform_total = calc_bits(l0_keys, uniform_fpr)

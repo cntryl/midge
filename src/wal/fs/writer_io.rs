@@ -59,6 +59,10 @@ pub struct FsWalWriterIo {
 }
 impl FsWalWriterIo {
     /// Create a new WAL writer targeting `wal.log` using the provided filesystem.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WAL file cannot be created or opened.
     pub fn new(path_str: &str, fs: Arc<dyn Fs>) -> MidgeResult<Self> {
         let path = FsPath::new(path_str);
 
@@ -81,7 +85,7 @@ impl FsWalWriterIo {
 
         let writer = Self {
             path: path.clone(),
-            fs: Arc::clone(&fs),
+            fs,
             current_pos: Arc::new(std::sync::atomic::AtomicU64::new(current_pos)),
             queue: Arc::new(Mutex::new(Vec::new())),
             queue_cond: Arc::new(Condvar::new()),
@@ -94,7 +98,7 @@ impl FsWalWriterIo {
 
         // Spawn background writer thread
         let config = WriterConfig {
-            fs: Arc::clone(&fs),
+            fs: Arc::clone(&writer.fs),
             path,
             queue: writer.queue.clone(),
             queue_cond: writer.queue_cond.clone(),

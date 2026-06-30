@@ -134,13 +134,11 @@ impl CloudExecutor {
 
         let client = self.client.clone();
 
-        let cb = callback.clone();
-
         self.rt.spawn(async move {
             let result = Self::execute_request(client, request).await;
 
-            let event = mapper(context.clone(), result);
-            let _ = cb.send(event);
+            let event = mapper(context, result);
+            let _ = callback.send(event);
         });
     }
 
@@ -160,7 +158,6 @@ impl CloudExecutor {
     {
         let client = self.client.clone();
         let signer = self.signer.clone();
-        let cb = callback.clone();
 
         self.rt.spawn(async move {
             let mut state = initial_state;
@@ -182,14 +179,14 @@ impl CloudExecutor {
                 };
 
                 match step(&mut state, response) {
-                    Ok(true) => continue,
+                    Ok(true) => {}
                     Ok(false) => break Ok(state),
                     Err(error) => break Err(error),
                 }
             };
 
             let event = finish(context, result);
-            let _ = cb.send(event);
+            let _ = callback.send(event);
         });
     }
 
