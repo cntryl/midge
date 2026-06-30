@@ -107,7 +107,7 @@ impl EventLoop {
                         Ok((seq, deferred)) => {
                             self.handle_write_success(
                                 request_id,
-                                WriteResult::WalAppend {
+                                &WriteResult::WalAppend {
                                     sequence: seq,
                                     deferred,
                                 },
@@ -138,7 +138,7 @@ impl EventLoop {
                         Ok((seq, deferred)) => {
                             self.handle_write_success(
                                 request_id,
-                                WriteResult::WalAppend {
+                                &WriteResult::WalAppend {
                                     sequence: seq,
                                     deferred,
                                 },
@@ -168,7 +168,7 @@ impl EventLoop {
                         Ok((last_sequence, op_count, deferred)) => {
                             self.handle_write_success(
                                 request_id,
-                                WriteResult::TransactionApplied {
+                                &WriteResult::TransactionApplied {
                                     last_sequence,
                                     op_count,
                                     deferred,
@@ -204,7 +204,7 @@ impl EventLoop {
         drained
     }
 
-    fn handle_write_success(&mut self, request_id: u64, result: WriteResult) {
+    fn handle_write_success(&mut self, request_id: u64, result: &WriteResult) {
         self.publish_snapshot();
 
         let is_transaction = matches!(result, WriteResult::TransactionApplied { .. });
@@ -219,16 +219,16 @@ impl EventLoop {
                 self.state.confirm_sequences(request_id);
             }
 
-            match result {
-                WriteResult::WalAppend { sequence, .. } => {
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::WalAppended {
-                            request_id,
-                            sequence,
-                        },
-                    );
-                }
+                    match result {
+                        WriteResult::WalAppend { sequence, .. } => {
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::WalAppended {
+                                    request_id,
+                                    sequence: *sequence,
+                                },
+                            );
+                        }
                 WriteResult::TransactionApplied {
                     last_sequence,
                     op_count,
@@ -238,8 +238,8 @@ impl EventLoop {
                         request_id,
                         RuntimeResponse::TransactionApplied {
                             request_id,
-                            last_sequence,
-                            op_count,
+                            last_sequence: *last_sequence,
+                            op_count: *op_count,
                             write_stall_hint: self.state.should_stall_writes(0),
                         },
                     );
@@ -250,7 +250,7 @@ impl EventLoop {
                 WriteResult::WalAppend { sequence, .. } => {
                     self.durability.queue_waiter(DurabilityWaiter::WalAppend {
                         request_id,
-                        sequence,
+                        sequence: *sequence,
                     });
                 }
                 WriteResult::TransactionApplied {
@@ -261,8 +261,8 @@ impl EventLoop {
                     self.durability
                         .queue_waiter(DurabilityWaiter::TransactionApply {
                             request_id,
-                            last_sequence,
-                            op_count,
+                            last_sequence: *last_sequence,
+                            op_count: *op_count,
                         });
                 }
             }

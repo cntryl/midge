@@ -1176,8 +1176,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn should_skip_post_flush_compaction_check_during_ingest_when_compaction_disabled(
-    ) -> crate::common::MidgeResult<()> {
+    fn should_skip_post_flush_compaction_check_during_ingest_when_compaction_disabled() {
         #[derive(Clone)]
         struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
 
@@ -1246,7 +1245,6 @@ pub(super) mod tests {
             "disabled post-flush scheduling should not start compaction during ingest"
         );
 
-        Ok(())
     }
 
     #[test]

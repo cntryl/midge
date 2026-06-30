@@ -197,6 +197,8 @@ impl EventLoop {
     /// Sync batched WAL if threshold exceeded or if there are pending writes.
     /// In group commit mode, this completes all waiters for the sealed generation.
     pub(super) fn sync_batched_wal_if_needed(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
+        const MAX_DRAIN_WRITES_BEFORE_SYNC: usize = 4096;
+
         if self.wal_actor.is_cloud_async() {
             return; // CloudAsync has separate logic
         }
@@ -227,7 +229,6 @@ impl EventLoop {
         // 🔑 CRITICAL INVARIANT: If we have pending waiters, we MUST seal a generation.
         // Even with zero bytes, the durability guarantee requires advancing the generation.
         // Drain any available writes to maximize group commit.
-        const MAX_DRAIN_WRITES_BEFORE_SYNC: usize = 4096;
         let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN_WRITES_BEFORE_SYNC);
 
         // Always call sync - it advances the generation even with zero bytes
@@ -265,12 +266,13 @@ impl EventLoop {
     /// Required before CF metadata mutations to guarantee durability fences.
     /// CRITICAL: Must drain pending writes first so they are included in the sync.
     pub(super) fn force_wal_sync(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
+        const MAX_DRAIN: usize = 4096;
+
         if self.wal_actor.is_cloud_async() {
             return; // CloudAsync has separate logic
         }
 
         // 🔑 Drain any pending writes so they are included in this sync
-        const MAX_DRAIN: usize = 4096;
         let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN);
 
         // Always sync to establish durability barrier
