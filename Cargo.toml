@@ -12,6 +12,9 @@ readme = "README.md"
 keywords = ["database", "kv", "lsm", "embedded", "storage"]
 categories = ["database-implementations"]
 
+[workspace.lints.clippy]
+pedantic = "warn"
+
 [lib]
 name = "cntryl_midge"
 path = "src/lib.rs"
