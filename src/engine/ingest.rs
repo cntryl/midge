@@ -65,6 +65,9 @@ const WRITE_GROUP_APPLY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum time a waiter will block waiting for a leader response
 const WRITE_GROUP_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Interval at which a follower checks whether it must rescue orphaned queued work.
+const WRITE_GROUP_RESCUE_INTERVAL: Duration = Duration::from_micros(50);
+
 #[derive(Clone, Copy)]
 struct ApplyTransactionOptions {
     start_sequence: Option<u64>,
@@ -413,7 +416,12 @@ impl IngestCoordinator {
         }
 
         if self.write_group_coord.try_acquire_leader() {
-            self.drain_as_leader(runtime, ops, durability_policy)
+            self.drain_as_leader(runtime, Some(ops), durability_policy)
+                .unwrap_or_else(|| {
+                    Err(MidgeError::Internal(
+                        "Write group leader completed with no result".to_string(),
+                    ))
+                })
         } else {
             self.submit_as_follower(runtime, ops, durability_policy)
         }
@@ -422,16 +430,16 @@ impl IngestCoordinator {
     fn drain_as_leader(
         &self,
         runtime: &RuntimeHandle,
-        initial_ops: Vec<TransactionOp>,
+        initial_ops: Option<Vec<TransactionOp>>,
         durability_policy: Option<crate::wal::DurabilityPolicy>,
-    ) -> MidgeResult<u64> {
+    ) -> Option<MidgeResult<u64>> {
         let _leader_guard = LeaderGuard::new(Arc::clone(&self.write_group_coord));
 
         self.write_group_coord
             .leader_runs
             .fetch_add(1, Ordering::Relaxed);
 
-        let mut initial_ops = Some(initial_ops);
+        let mut initial_ops = initial_ops;
         let mut initial_result: Option<MidgeResult<u64>> = None;
 
         loop {
@@ -458,10 +466,10 @@ impl IngestCoordinator {
                 break;
             }
 
-            let batch_size = pending_requests.len() + 1;
+            let batch_size = pending_requests.len() + usize::from(is_initial_batch);
             self.write_group_coord
                 .batches_grouped
-                .fetch_add(pending_requests.len() as u64 + 1, Ordering::Relaxed);
+                .fetch_add(batch_size as u64, Ordering::Relaxed);
 
             let result = self.apply_transaction(runtime, all_ops, batch_durability);
 
@@ -474,11 +482,7 @@ impl IngestCoordinator {
             self.write_group_coord.adjust_timeout(batch_size);
         }
 
-        initial_result.unwrap_or_else(|| {
-            Err(MidgeError::Internal(
-                "Write group leader completed with no result".to_string(),
-            ))
-        })
+        initial_result
     }
 
     fn drain_pending_queue(
@@ -583,10 +587,7 @@ impl IngestCoordinator {
         };
 
         match self.write_group_coord.pending_queue.0.try_send(pending) {
-            Ok(()) => result_rx
-                .recv_timeout(WRITE_GROUP_WAIT_TIMEOUT)
-                .map_err(|_| MidgeError::Internal("Write grouping leader timed out".to_string()))
-                .and_then(|result| result),
+            Ok(()) => self.wait_for_grouped_result(runtime, &result_rx),
             Err(crossbeam::channel::TrySendError::Full(pending)) => self.submit_direct(
                 runtime,
                 pending.ops,
@@ -597,6 +598,39 @@ impl IngestCoordinator {
             Err(crossbeam::channel::TrySendError::Disconnected(_)) => Err(MidgeError::Internal(
                 "Write grouping coordinator disconnected".to_string(),
             )),
+        }
+    }
+
+    fn wait_for_grouped_result(
+        &self,
+        runtime: &RuntimeHandle,
+        result_rx: &crossbeam::channel::Receiver<MidgeResult<u64>>,
+    ) -> MidgeResult<u64> {
+        let started_at = Instant::now();
+
+        loop {
+            let elapsed = started_at.elapsed();
+            if elapsed >= WRITE_GROUP_WAIT_TIMEOUT {
+                return Err(MidgeError::Internal(
+                    "Write grouping leader timed out".to_string(),
+                ));
+            }
+
+            let remaining = WRITE_GROUP_WAIT_TIMEOUT.saturating_sub(elapsed);
+            let wait_for = remaining.min(WRITE_GROUP_RESCUE_INTERVAL);
+            match result_rx.recv_timeout(wait_for) {
+                Ok(result) => return result,
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                    if self.write_group_coord.try_acquire_leader() {
+                        let _ = self.drain_as_leader(runtime, None, None);
+                    }
+                }
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                    return Err(MidgeError::Internal(
+                        "Write grouping leader disconnected".to_string(),
+                    ));
+                }
+            }
         }
     }
 
@@ -981,5 +1015,64 @@ impl Drop for IngestCoordinator {
         if let Some(handle) = self.thread_handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::state::RuntimeState;
+    use crate::runtime::{Runtime, RuntimeConfig};
+    use crate::wal::DurabilityPolicy;
+    use bytes::Bytes;
+
+    #[test]
+    fn should_drain_queued_follower_when_rescue_leader_has_no_initial_ops(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+        let (runtime, _handle) = Runtime::new();
+        let state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+        let (runtime, runtime_handle) = runtime.start_with_config(
+            state,
+            RuntimeConfig {
+                wal_durability_policy: DurabilityPolicy::Batched,
+                ..RuntimeConfig::default()
+            },
+        )?;
+        let coordinator = IngestCoordinator::new(0, runtime_handle.clone())?;
+        let (result_tx, result_rx) = crossbeam::channel::bounded(1);
+        let pending = PendingBatchRequest {
+            ops: vec![TransactionOp::Put {
+                cf_id: 0,
+                key: Bytes::from_static(b"rescue-key"),
+                value: Bytes::from_static(b"rescue-value"),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            durability_policy: Some(DurabilityPolicy::Batched),
+            result_tx,
+        };
+        assert!(coordinator.write_group_coord.try_acquire_leader());
+        coordinator
+            .write_group_coord
+            .pending_queue
+            .0
+            .try_send(pending)
+            .expect("queue pending request");
+
+        // Act
+        let initial_result = coordinator.drain_as_leader(&runtime_handle, None, None);
+
+        // Assert
+        assert!(initial_result.is_none());
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("rescue leader should notify queued follower");
+        assert!(result.is_ok());
+
+        coordinator.shutdown();
+        runtime.shutdown();
+        Ok(())
     }
 }
