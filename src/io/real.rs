@@ -356,16 +356,19 @@ impl File for RealFile {
             use std::os::windows::io::AsRawHandle;
             use winapi::um::fileapi::LockFileEx;
 
+            const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x0000_0002;
+            const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x0000_0001;
+
             let handle = self.file.as_raw_handle();
             let mut overlapped: winapi::um::minwinbase::OVERLAPPED = unsafe { std::mem::zeroed() };
             let result = unsafe {
                 LockFileEx(
-                    handle as _,
-                    0x00000002 | 0x00000001, // LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY
+                    handle.cast(),
+                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
                     0,
                     !0,
                     !0,
-                    &mut overlapped,
+                    std::ptr::addr_of_mut!(overlapped),
                 )
             };
             if result == 0 {
@@ -402,7 +405,9 @@ impl File for RealFile {
 
             let handle = self.file.as_raw_handle();
             let mut overlapped: winapi::um::minwinbase::OVERLAPPED = unsafe { std::mem::zeroed() };
-            let result = unsafe { UnlockFileEx(handle as _, 0, !0, !0, &mut overlapped) };
+            let result = unsafe {
+                UnlockFileEx(handle.cast(), 0, !0, !0, std::ptr::addr_of_mut!(overlapped))
+            };
             if result == 0 {
                 return Err(FsError::Io("unlock failed".to_string()));
             }
