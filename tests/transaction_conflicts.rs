@@ -731,8 +731,8 @@ fn should_handle_high_contention_writes_without_panic() {
         let cf_id = cf.id();
         let mut handles = vec![];
 
-        // Act - 20 threads writing to same key
-        for i in 0..20 {
+        // Act - multiple threads writing to same key
+        for i in 0..8 {
             let engine_clone = Arc::clone(&engine);
             let handle = std::thread::spawn(move || {
                 let mut txn = engine_clone

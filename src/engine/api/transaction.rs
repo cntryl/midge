@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Transaction mode controls read/write capabilities
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +178,54 @@ enum WriteSetLookup {
     Deleted,
 }
 
+struct CommitTiming {
+    started_at: Instant,
+    sample: crate::diagnostics::TransactionCommitTimingSample,
+}
+
+impl CommitTiming {
+    fn maybe_start() -> Option<Self> {
+        crate::diagnostics::transaction_commit_timing_enabled().then(|| Self {
+            started_at: Instant::now(),
+            sample: crate::diagnostics::TransactionCommitTimingSample::default(),
+        })
+    }
+
+    fn phase_start(timing: Option<&Self>) -> Option<Instant> {
+        timing.map(|_| Instant::now())
+    }
+
+    fn record_submit(timing: &mut Option<Self>, started_at: Option<Instant>) {
+        if let (Some(timing), Some(started_at)) = (timing.as_mut(), started_at) {
+            timing.sample.submit_apply_transaction_ns = duration_as_nanos(started_at.elapsed());
+        }
+    }
+
+    fn record_durability(timing: &mut Option<Self>, started_at: Option<Instant>) {
+        if let (Some(timing), Some(started_at)) = (timing.as_mut(), started_at) {
+            timing.sample.durability_finalize_ns = duration_as_nanos(started_at.elapsed());
+        }
+    }
+
+    fn record_unregister(timing: &mut Option<Self>, started_at: Option<Instant>) {
+        if let (Some(timing), Some(started_at)) = (timing.as_mut(), started_at) {
+            timing.sample.unregister_snapshot_ns = duration_as_nanos(started_at.elapsed());
+        }
+    }
+
+    fn finish(timing: Option<Self>, succeeded: bool) {
+        if let Some(mut timing) = timing {
+            timing.sample.commit_total_ns = duration_as_nanos(timing.started_at.elapsed());
+            timing.sample.succeeded = succeeded;
+            crate::diagnostics::record_transaction_commit_timing(timing.sample);
+        }
+    }
+}
+
+fn duration_as_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
 pub(crate) struct TransactionInit {
     pub(crate) runtime_handle: RuntimeHandle,
     pub(crate) coordinator: Arc<IngestCoordinator>,
@@ -320,14 +369,24 @@ impl Transaction {
     /// Returns an error when commit coordination, WAL durability, or cloud durability
     /// confirmation fails.
     pub fn commit(mut self, opts: crate::engine::api::WriteOptions) -> MidgeResult<()> {
+        let mut timing = CommitTiming::maybe_start();
+
         if self.is_read_only() {
+            let unregister_started_at = CommitTiming::phase_start(timing.as_ref());
             self.unregister_snapshot();
+            CommitTiming::record_unregister(&mut timing, unregister_started_at);
+            CommitTiming::finish(timing, true);
             return Ok(());
         }
 
         if !self.has_writes() {
+            let durability_started_at = CommitTiming::phase_start(timing.as_ref());
             let sync_result = if opts.is_sync() { self.sync() } else { Ok(()) };
+            CommitTiming::record_durability(&mut timing, durability_started_at);
+            let unregister_started_at = CommitTiming::phase_start(timing.as_ref());
             self.unregister_snapshot();
+            CommitTiming::record_unregister(&mut timing, unregister_started_at);
+            CommitTiming::finish(timing, sync_result.is_ok());
             return sync_result;
         }
 
@@ -342,6 +401,7 @@ impl Transaction {
         };
 
         let durability_policy = Some(effective_wal_durability_policy(self.cloud_mode, opts)?);
+        let submit_started_at = CommitTiming::phase_start(timing.as_ref());
         let commit_result = self.coordinator.submit_ops(
             &self.runtime_handle,
             runtime_ops,
@@ -349,16 +409,23 @@ impl Transaction {
             Some(self.start_sequence()),
             isolation_policy,
         );
+        CommitTiming::record_submit(&mut timing, submit_started_at);
 
         let result = match commit_result {
             Ok(sequence) => {
                 self.sequence_publisher.store(sequence, Ordering::SeqCst);
-                self.finalize_write_durability(sequence, opts)
+                let durability_started_at = CommitTiming::phase_start(timing.as_ref());
+                let result = self.finalize_write_durability(sequence, opts);
+                CommitTiming::record_durability(&mut timing, durability_started_at);
+                result
             }
             Err(error) => Err(error),
         };
 
+        let unregister_started_at = CommitTiming::phase_start(timing.as_ref());
         self.unregister_snapshot();
+        CommitTiming::record_unregister(&mut timing, unregister_started_at);
+        CommitTiming::finish(timing, result.is_ok());
         result
     }
 

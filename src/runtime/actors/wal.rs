@@ -37,7 +37,16 @@ use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalOpKind, WalRecord, WalWrit
 use bytes::Bytes;
 use std::collections::HashSet;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+#[cfg(test)]
+const TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_DISABLED_REQUEST_ID: u64 = u64::MAX;
+
+#[cfg(test)]
+static TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_REQUEST_ID: AtomicU64 =
+    AtomicU64::new(TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_DISABLED_REQUEST_ID);
 
 struct TxnSequencePlan {
     txn_id: u64,
@@ -79,6 +88,14 @@ pub(crate) struct TransactionAppendResult {
     pub deferred: bool,
 }
 use std::time::{Duration, Instant};
+
+#[cfg(test)]
+pub(crate) fn set_txn_append_batch_no_space_failpoint_request_id(request_id: Option<u64>) {
+    TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_REQUEST_ID.store(
+        request_id.unwrap_or(TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_DISABLED_REQUEST_ID),
+        Ordering::SeqCst,
+    );
+}
 
 /// Parameters for WAL append operation
 pub struct AppendParams {
@@ -1019,9 +1036,13 @@ impl WalActor {
         }
 
         if let Some(writer) = &mut self.writer {
-            fail::fail_point!("midge::wal::inject_no_space_on_txn_append_batch", |_| Err(
-                MidgeError::NoSpace("failpoint: no space on transaction batch append".to_string())
-            ));
+            fail::fail_point!(
+                "midge::wal::inject_no_space_on_txn_append_batch",
+                Self::should_inject_txn_append_batch_no_space(prepared_transactions),
+                |_| Err(MidgeError::NoSpace(
+                    "failpoint: no space on transaction batch append".to_string()
+                ))
+            );
             fail::fail_point!("midge::wal::inject_no_space_on_txn_commit_append", |_| Err(
                 MidgeError::NoSpace("failpoint: no space on transaction batch append".to_string())
             ));
@@ -1044,6 +1065,25 @@ impl WalActor {
         self.pending_sync_count += pending_wal_records;
         self.bytes_since_sync += total_wal_bytes;
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn should_inject_txn_append_batch_no_space(
+        prepared_transactions: &[PreparedTransactionAppend],
+    ) -> bool {
+        let target_request_id =
+            TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_REQUEST_ID.load(Ordering::SeqCst);
+        target_request_id != TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_DISABLED_REQUEST_ID
+            && prepared_transactions
+                .iter()
+                .any(|prepared| prepared.request_id == target_request_id)
+    }
+
+    #[cfg(not(test))]
+    fn should_inject_txn_append_batch_no_space(
+        _prepared_transactions: &[PreparedTransactionAppend],
+    ) -> bool {
+        true
     }
 
     fn apply_transaction_durability(
@@ -1865,6 +1905,24 @@ mod tests {
         FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    struct TxnAppendBatchNoSpaceFailpointGuard;
+
+    impl TxnAppendBatchNoSpaceFailpointGuard {
+        fn setup(request_id: u64) -> Self {
+            set_txn_append_batch_no_space_failpoint_request_id(Some(request_id));
+            fail::cfg("midge::wal::inject_no_space_on_txn_append_batch", "return")
+                .expect("configure txn append batch no-space failpoint");
+            Self
+        }
+    }
+
+    impl Drop for TxnAppendBatchNoSpaceFailpointGuard {
+        fn drop(&mut self) {
+            fail::remove("midge::wal::inject_no_space_on_txn_append_batch");
+            set_txn_append_batch_no_space_failpoint_request_id(None);
+        }
+    }
+
     #[test]
     fn should_apply_wal_sequence_to_memtable() -> MidgeResult<()> {
         // Arrange: start with a large sequence so memtable's local seq would differ
@@ -2049,8 +2107,7 @@ mod tests {
     }
 
     #[test]
-    fn should_fail_all_prepared_transactions_when_coalesced_append_hits_no_space() -> MidgeResult<()>
-    {
+    fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> MidgeResult<()> {
         // Arrange
         let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
         let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
@@ -2099,34 +2156,35 @@ mod tests {
             "preparation should preserve existing sequence allocation behavior"
         );
 
-        let scenario = fail::FailScenario::setup();
-        fail::cfg("midge::wal::inject_no_space_on_txn_append_batch", "return")
-            .expect("configure coalesced txn append no-space failpoint");
+        {
+            let scenario = fail::FailScenario::setup();
+            let failpoint_guard = TxnAppendBatchNoSpaceFailpointGuard::setup(20);
 
-        // Act
-        let result = wal_actor.append_prepared_transactions(&mut state, vec![first, second]);
+            // Act
+            let result = wal_actor.append_prepared_transactions(&mut state, vec![first, second]);
 
-        // Assert
-        assert!(result.is_err(), "coalesced append should fail");
-        let error = result.err().expect("coalesced append error");
-        assert!(matches!(error, MidgeError::NoSpace(_)));
-        assert_eq!(wal_actor.append_calls(), 0);
-        assert_eq!(state.wal.pending_writes, 0);
-        assert_eq!(wal_actor.pending_sync_count(), 0);
-        assert_eq!(wal_actor.bytes_since_sync(), 0);
-        assert_eq!(state.pending_txn_min_seq, None);
-        assert!(
-            state
-                .get_cf(0)
-                .expect("cf exists")
-                .memtable
-                .iter_all(u64::MAX)
-                .is_empty(),
-            "failed coalesced append must not publish partial memtable state"
-        );
+            // Assert
+            assert!(result.is_err(), "coalesced append should fail");
+            let error = result.err().expect("coalesced append error");
+            assert!(matches!(error, MidgeError::NoSpace(_)));
+            assert_eq!(wal_actor.append_calls(), 0);
+            assert_eq!(state.wal.pending_writes, 0);
+            assert_eq!(wal_actor.pending_sync_count(), 0);
+            assert_eq!(wal_actor.bytes_since_sync(), 0);
+            assert_eq!(state.pending_txn_min_seq, None);
+            assert!(
+                state
+                    .get_cf(0)
+                    .expect("cf exists")
+                    .memtable
+                    .iter_all(u64::MAX)
+                    .is_empty(),
+                "failed coalesced append must not publish partial memtable state"
+            );
 
-        fail::remove("midge::wal::inject_no_space_on_txn_append_batch");
-        scenario.teardown();
+            drop(failpoint_guard);
+            scenario.teardown();
+        }
 
         let recovery = wal_actor.prepare_transaction_append(
             &mut state,

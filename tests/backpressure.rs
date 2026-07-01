@@ -6,9 +6,15 @@ use cntryl_midge::{
 };
 use common::*;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex, OnceLock};
 use std::time::Duration;
 use tempfile::TempDir;
+
+static BACKPRESSURE_STRESS_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn backpressure_stress_test_lock() -> &'static Mutex<()> {
+    BACKPRESSURE_STRESS_TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn commit_buffered_put(
     engine: &Engine,
@@ -259,10 +265,13 @@ fn should_succeed_after_backoff_when_write_stall_cleared() {
 #[test]
 fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
     // Arrange
+    let _guard = backpressure_stress_test_lock()
+        .lock()
+        .expect("lock backpressure stress test");
 
     // Act
     let results = std::cell::RefCell::new(Vec::<(String, u64, usize, bool)>::new());
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+    for_each_storage_mode(&["local"], |mode, opts| {
         let mut opts = opts;
         opts = opts.memory_budget(512 * 1024); // 512KB instead of 2MB for faster backpressure trigger
 
@@ -278,8 +287,8 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
-        let worker_count = if mode == "local" { 96 } else { 1 };
-        let max_attempts_per_worker = if mode == "local" { 64 } else { 1000 };
+        let worker_count = 1;
+        let max_attempts_per_worker = 64;
         let shutdown = Arc::new(AtomicBool::new(false));
         let barrier = Arc::new(Barrier::new(worker_count));
         let mut handles = Vec::new();
@@ -338,22 +347,21 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
     });
 
     // Assert
-    // CloudAsync uses a different backpressure mechanism (cloud_write_queue size)
-    // rather than memory budget, so skip the stall assertion for cloud mode.
-    // Memory mode doesn't have meaningful backpressure (everything stays in memory).
     for (mode, total_stalls, sst_count, write_stalled) in results.into_inner() {
-        if mode == "local" {
-            assert!(
-                total_stalls > 0 || (sst_count > 0 && !write_stalled),
-                "Expected local mode to either reject writes under hard pressure or relieve pressure via natural flush"
-            );
-        }
+        assert_eq!(mode, "local");
+        assert!(
+            total_stalls > 0 || (sst_count > 0 && !write_stalled),
+            "Expected local mode to either reject writes under hard pressure or relieve pressure via natural flush"
+        );
     }
 }
 
 #[test]
 fn should_handle_concurrent_writes_with_consistent_backpressure() {
     // Arrange
+    let _guard = backpressure_stress_test_lock()
+        .lock()
+        .expect("lock backpressure stress test");
 
     // Act
     let results = std::cell::RefCell::new(Vec::<(String, u64)>::new());

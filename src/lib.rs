@@ -33,6 +33,7 @@ pub mod types;
 // no external crate references them. They are exercised by unit tests within each module.
 #[allow(dead_code)]
 mod compaction;
+mod diagnostics;
 pub mod handler;
 #[cfg(test)]
 pub mod io;

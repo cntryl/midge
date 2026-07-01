@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+pub use crate::diagnostics::{TransactionCommitTimingGuard, TransactionCommitTimingSample};
+
 pub const DEFAULT_MEMTABLE_SWEEP_SIZE_BYTES: [usize; 5] = [
     128 * 1024,
     512 * 1024,

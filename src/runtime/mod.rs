@@ -111,6 +111,8 @@ impl Default for RuntimeConfig {
 /// Global request ID counter for routing responses to correct requesters.
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
+const WRITE_STALL_STATUS_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// Allocate a new, globally unique request ID.
 ///
 /// Callers should always use this when constructing `RuntimeMsg` values
@@ -999,20 +1001,27 @@ impl RuntimeHandle {
     /// Returns `true` if memory budget is exceeded (immutable memtable queue full
     /// or total memtable memory over threshold).
     ///
+    /// This probe is an advisory preflight. If the runtime cannot answer promptly,
+    /// report stalled instead of letting a client commit block indefinitely.
+    ///
     /// Used by `Engine::commit()` to expose backpressure to clients before
     /// accepting new write transactions.
     pub fn check_write_stall(&self, cf_id: crate::types::ColumnFamilyId) -> MidgeResult<bool> {
-        let response = self.send_and_wait(RuntimeMsg::CheckWriteStall {
-            request_id: next_request_id()?,
-            cf_id,
-        })?;
+        let response = self.send_and_wait_timeout(
+            RuntimeMsg::CheckWriteStall {
+                request_id: next_request_id()?,
+                cf_id,
+            },
+            WRITE_STALL_STATUS_TIMEOUT,
+        )?;
 
         match response {
-            RuntimeResponse::WriteStallStatus { is_stalled, .. } => Ok(is_stalled),
-            RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(MidgeError::Internal(
+            Some(RuntimeResponse::WriteStallStatus { is_stalled, .. }) => Ok(is_stalled),
+            Some(RuntimeResponse::Error { error, .. }) => Err(error),
+            Some(_) => Err(MidgeError::Internal(
                 "Unexpected response to CheckWriteStall".to_string(),
             )),
+            None => Ok(true),
         }
     }
 }

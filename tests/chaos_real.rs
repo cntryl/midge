@@ -230,7 +230,7 @@ fn should_recover_all_sync_commits_when_manifest_file_is_zeroed_after_crash() {
 }
 
 #[test]
-fn should_expose_only_successful_commits_when_random_wal_append_crash_interrupts_concurrent_buffered_writes(
+fn should_recover_only_committed_or_single_inflight_write_when_random_wal_append_crash_interrupts_buffered_writes(
 ) {
     // WHAT THIS TEST DOES:
     // Runs four child threads that each attempt one hundred buffered commits under a start barrier,
@@ -238,9 +238,11 @@ fn should_expose_only_successful_commits_when_random_wal_append_crash_interrupts
     // FAILURE INJECTED:
     // Real subprocess abort via midge::wal::after_append_batch_before_sync.
     // EXPECTED INVARIANT:
-    // Every visible key after recovery must match a commit that actually returned Ok in the child.
+    // Every successful commit is visible after recovery. At most one additional visible key may
+    // appear: the WAL-appended transaction interrupted before the child could record commit success.
     // WHY THIS IS HONEST:
-    // The process dies inside the real WAL append path while concurrent client threads are actively writing.
+    // The process dies after physical WAL append and before the client-visible ack. The child
+    // serializes commit attempts, so that boundary can expose at most one unacknowledged write.
     // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
@@ -255,6 +257,8 @@ fn should_expose_only_successful_commits_when_random_wal_append_crash_interrupts
     );
     let engine = open_local_engine(db_path);
     let default_cf = default_cf(&engine);
+    let mut unacknowledged_visible = 0usize;
+
     for thread_id in 0..4 {
         for index in 0..100 {
             let key = concurrent_key(thread_id, index);
@@ -262,18 +266,34 @@ fn should_expose_only_successful_commits_when_random_wal_append_crash_interrupts
                 .begin_tx(default_cf.id(), TransactionMode::ReadOnly)
                 .expect("begin read tx");
             let actual = tx.get(key.as_bytes()).expect("get concurrent key");
-            if let Some(value) = actual {
-                let expected = committed
-                    .get(key.as_bytes())
-                    .unwrap_or_else(|| panic!("visible key {key:?} never committed"));
-                assert_eq!(
-                    value.as_ref(),
-                    expected.as_slice(),
-                    "visible key {key} must match the exact value returned by a successful commit"
-                );
+
+            match (actual, committed.get(key.as_bytes())) {
+                (Some(value), Some(expected)) => {
+                    assert_eq!(
+                        value.as_ref(),
+                        expected.as_slice(),
+                        "visible key {key} must match the exact value returned by a successful commit"
+                    );
+                }
+                (Some(value), None) => {
+                    unacknowledged_visible += 1;
+                    let expected = concurrent_value(thread_id, index);
+                    assert_eq!(
+                        value.as_ref(),
+                        expected.as_bytes(),
+                        "visible unacknowledged key {key} must match its deterministic WAL value"
+                    );
+                }
+                (None, Some(_)) => panic!("committed key {key} was not recovered"),
+                (None, None) => {}
             }
         }
     }
+
+    assert!(
+        unacknowledged_visible <= 1,
+        "serialized child writes can leave at most one WAL-appended transaction without a child commit record, found {unacknowledged_visible}"
+    );
 }
 
 #[test]

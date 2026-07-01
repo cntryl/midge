@@ -539,12 +539,13 @@ fn should_handle_high_concurrency_readers_given_many_transactions_when_active() 
         // Arrange
         let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
+        let cf_id = cf.id();
 
         for i in 0..10 {
             let key = format!("key{i}");
             let value = format!("value{i}");
             let mut tx = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                 .unwrap();
@@ -557,23 +558,14 @@ fn should_handle_high_concurrency_readers_given_many_transactions_when_active() 
         for _ in 0..50 {
             let engine_clone = Arc::clone(&engine);
             let handle = std::thread::spawn(move || {
-                let cf = engine_clone
-                    .create_column_family("test")
-                    .expect("create cf");
-                let txn = engine_clone
-                    .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-                    .unwrap();
-
                 // Read all keys
                 for i in 0..10 {
                     let key = format!("key{i}");
                     let read_tx = engine_clone
-                        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
                         .unwrap();
                     let _value = read_tx.get(key.as_bytes()).unwrap();
                 }
-
-                drop(txn);
             });
             handles.push(handle);
         }
@@ -590,6 +582,8 @@ fn should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(&opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let cf_id = cf.id();
         let mut writer_handles = vec![];
         let mut reader_handles = vec![];
 
@@ -597,11 +591,8 @@ fn should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent() {
         for i in 0..10 {
             let engine_clone = Arc::clone(&engine);
             let handle = std::thread::spawn(move || {
-                let cf = engine_clone
-                    .create_column_family("test")
-                    .expect("create cf");
                 let mut txn = engine_clone
-                    .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                     .unwrap();
                 let key = format!("key{i}");
                 let value = format!("value{i}");
@@ -616,18 +607,11 @@ fn should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent() {
         for _ in 0..20 {
             let engine_clone = Arc::clone(&engine);
             let handle = std::thread::spawn(move || {
-                let cf = engine_clone
-                    .create_column_family("test")
-                    .expect("create cf");
-                let _txn = engine_clone
-                    .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-                    .unwrap();
-
                 // Read random keys
                 for i in 0..5 {
                     let key = format!("key{i}");
                     let read_tx = engine_clone
-                        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
                         .unwrap();
                     let _value = read_tx.get(key.as_bytes()).unwrap();
                 }
