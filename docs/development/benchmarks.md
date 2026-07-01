@@ -590,7 +590,7 @@ cargo bench --bench tier1_hotpath_api -- --baseline before --verbose
 
 ### Stress Tests (Tier 3-4): Multi-Run Regression Detection
 
-**Problem:** Stress tests run 1-3 times by default. With high variance (10-15%), single runs can't reliably detect real regressions.
+**Problem:** Stress tests run 1-3 times by default. With high variance, single runs can't reliably detect real regressions.
 
 **Solution:**
 
@@ -604,7 +604,7 @@ cargo bench --bench tier1_hotpath_api -- --baseline before --verbose
    - Compute statistical significance (e.g., >2σ change is likely real)
 
 3. **Set thresholds based on metric type:**
-   - **Throughput:** Flag if >10-15% drop sustained across ≥2 runs
+   - **Throughput:** Flag if >15% drop sustained across repeated runs
    - **p99 Latency:** Flag if >20% increase (tail latencies have higher variance)
    - **Correctness:** Flag if any isolation violations detected
 

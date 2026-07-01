@@ -25,11 +25,11 @@
 /// 3. Set explicit thresholds:
 ///    - Hotpath (ns-µs): Flag if >5% regression
 ///    - Subsystem (µs-ms): Flag if >8-10% regression
-///    - Stress (ms+): Flag if >10-15% regression AND sustained across runs
+///    - Stress (ms+): Flag if >15% throughput regression OR >20% p99 latency regression, sustained across runs
 /// 4. For MVCC/concurrent tests, measure fairness: writer latency under snapshot contention
 /// 5. For cloud tests, measure recovery correctness (not just throughput)
 ///
-/// See: `BENCHMARK_AUDIT.md` → Part 2 for detailed signal quality analysis
+/// See: `docs/development/performance-targets.md` for current guardrail policy.
 #[allow(dead_code)]
 pub struct BenchConfig {
     pub runs: usize,
