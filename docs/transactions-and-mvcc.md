@@ -17,7 +17,7 @@ Midge uses MVCC so that reads do not block writes and writes do not block reads.
 
 - **Non-blocking reads.** A `ReadOnly` transaction captures a snapshot at start time and executes against it without acquiring any lock or coordinating with the write path.
 - **Atomic multi-key writes.** A `ReadWrite` transaction buffers writes client-side until commit, after which all writes are applied atomically via a single WAL append and a single sequence-number range.
-- **Idempotent crash recovery.** Each committed transaction is bounded by `TxnBegin` / `TxnCommit` records in the WAL, so partial commits are discarded on replay.
+- **Idempotent crash recovery.** Each committed transaction is encoded as one atomic `TxnBatch` WAL frame, so torn or partial commits are discarded on replay.
 - **TTL and range-delete support.** MVCC sequence numbers propagate into SST files, enabling correct TTL expiry and range tombstone application across the read path.
 
 ---
@@ -241,27 +241,25 @@ Compaction reads `state.oldest_active_snapshot_sequence()` and applies that hori
 
 ### WAL replay and MVCC state
 
-WAL records carry four fields relevant to MVCC: `seq`, `txn_id`, `writer_epoch`, and `op_kind` (which includes `TxnBegin` and `TxnCommit`).
+WAL records carry four fields relevant to MVCC: `seq`, `txn_id`, `writer_epoch`, and `op_kind` (which includes `TxnBatch` for committed transactions).
 
 Recovery (`src/wal/recovery.rs`) reconstructs state as follows:
 
 1. Scan WAL records in order.
-2. On `TxnBegin`: open a buffer for `txn_id`.
-3. On a transactional op: append to the buffer for `txn_id`.
-4. On `TxnCommit`: apply all buffered ops for `txn_id` to the recovered memtable with their original sequence numbers.
-5. If the scan ends without a `TxnCommit` for an open `txn_id` (crash mid-transaction): the buffer is silently discarded. The transaction is rolled back.
+2. On `TxnBatch`: validate the nested payload, then apply every enclosed op atomically with its original sequence numbers.
+3. Legacy split-marker transactions are still understood by recovery for internal coverage, but released format v2 writes `TxnBatch` by default.
 
 ### Partially committed transactions
 
-A transaction is either fully committed (all ops including `TxnCommit` present in the WAL) or fully absent (anything without a `TxnCommit` is discarded). There is no state in which a subset of a transaction's ops are visible after recovery.
+A transaction is either fully committed (the `TxnBatch` frame and nested payload are intact) or fully absent (a truncated or malformed transaction frame is discarded). There is no state in which a subset of a transaction's ops are visible after recovery.
 
 The WAL actor includes fail-point annotations at:
-- `midge::wal::txn_after_ops_append_before_commit` — crash here → ops in WAL but no commit → all ops discarded on replay.
-- `midge::wal::txn_after_commit_append_before_sync` — crash here → commit written but not synced → same discard behavior if the commit record is lost.
+- `midge::wal::txn_after_ops_append_before_commit` — crash here before the transaction frame append → transaction absent on replay.
+- `midge::wal::txn_after_commit_append_before_sync` — crash here after the `TxnBatch` frame append but before sync → strict durability depends on whether the frame reached stable storage.
 
 ### Atomicity preservation
 
-Atomicity is preserved by the WAL's `TxnBegin`/`TxnCommit` bracketing combined with recovery's all-or-nothing application. The sequence number range for a transaction is allocated atomically by the single-threaded event loop; no partial allocation is possible.
+Atomicity is preserved by the WAL's single-frame `TxnBatch` encoding combined with recovery's all-or-nothing application. The sequence number range for a transaction is allocated atomically by the single-threaded event loop; no partial allocation is possible.
 
 The `writer_epoch` field on each WAL record prevents zombie writes from stale leaders: recovery skips records from any epoch lower than the maximum epoch seen in the log.
 

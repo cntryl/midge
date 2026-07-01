@@ -40,50 +40,68 @@ impl WalCoordinator {
             return HandleOutcome::Continue;
         }
 
-        match event_loop.wal_actor.append_transaction(
-            &mut event_loop.state,
-            request_id,
-            ops,
-            durability_policy,
-            start_sequence,
-            isolation_policy,
-        ) {
-            Ok((last_sequence, op_count, deferred)) => {
-                event_loop.publish_snapshot();
+        if event_loop
+            .wal_actor
+            .can_coalesce_transaction_append(durability_policy)
+        {
+            const MAX_COALESCED_TRANSACTIONS_AFTER_WAKE: usize = 1024;
+            let _ = event_loop.apply_transaction_with_coalescing(
+                msg_rx,
+                ApplyTransactionRequest {
+                    request_id,
+                    ops,
+                    durability_policy,
+                    start_sequence,
+                    isolation_policy,
+                },
+                MAX_COALESCED_TRANSACTIONS_AFTER_WAKE,
+            );
+        } else {
+            match event_loop.wal_actor.append_transaction(
+                &mut event_loop.state,
+                request_id,
+                ops,
+                durability_policy,
+                start_sequence,
+                isolation_policy,
+            ) {
+                Ok((last_sequence, op_count, deferred)) => {
+                    event_loop.publish_snapshot();
 
-                if event_loop.should_ack_immediately(deferred) {
-                    if event_loop.wal_actor.is_cloud_async() {
+                    if event_loop.should_ack_immediately(deferred) {
+                        if event_loop.wal_actor.is_cloud_async() {
+                            event_loop.durability.queue_waiter(
+                                DurabilityWaiter::ConfirmTransactionApply { request_id },
+                            );
+                        } else if deferred {
+                            event_loop.maybe_queue_confirm_only_waiter(deferred, request_id, true);
+                        } else {
+                            event_loop.state.clear_pending_transaction_barrier();
+                            event_loop.state.confirm_sequences(request_id);
+                        }
+
+                        event_loop.respond(
+                            request_id,
+                            RuntimeResponse::TransactionApplied {
+                                request_id,
+                                last_sequence,
+                                op_count,
+                                write_stall_hint: event_loop.state.should_stall_writes(0),
+                            },
+                        );
+                    } else {
                         event_loop
                             .durability
-                            .queue_waiter(DurabilityWaiter::ConfirmTransactionApply { request_id });
-                    } else if deferred {
-                        event_loop.maybe_queue_confirm_only_waiter(deferred, request_id, true);
-                    } else {
-                        event_loop.state.clear_pending_transaction_barrier();
-                        event_loop.state.confirm_sequences(request_id);
+                            .queue_waiter(DurabilityWaiter::TransactionApply {
+                                request_id,
+                                last_sequence,
+                                op_count,
+                            });
                     }
-
-                    event_loop.respond(
-                        request_id,
-                        RuntimeResponse::TransactionApplied {
-                            request_id,
-                            last_sequence,
-                            op_count,
-                            write_stall_hint: event_loop.state.should_stall_writes(0),
-                        },
-                    );
-                } else {
-                    event_loop
-                        .durability
-                        .queue_waiter(DurabilityWaiter::TransactionApply {
-                            request_id,
-                            last_sequence,
-                            op_count,
-                        });
                 }
-            }
-            Err(error) => {
-                event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+                Err(error) => {
+                    event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+                }
             }
         }
 

@@ -2152,6 +2152,11 @@ impl RuntimeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn isolated_test_db_path() -> PathBuf {
+        tempfile::tempdir().expect("temp dir").keep()
+    }
 
     fn grow_active_memtable(
         state: &mut RuntimeState,
@@ -2218,7 +2223,7 @@ mod tests {
 
     #[test]
     fn should_select_size_threshold_flush_candidate_before_cloud_gap_candidate() {
-        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.memtable_flush_threshold = 4 * 1024;
         state.memtable_size_limit = 1024 * 1024;
         state.wal.current_segment_id = state.cloud_eventual_flush_segment_gap + 50;
@@ -2249,7 +2254,7 @@ mod tests {
 
     #[test]
     fn should_select_cloud_gap_flush_candidate_when_cloud_mode_and_gap_exceeded() {
-        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.memtable_flush_threshold = 1024 * 1024;
         state.memtable_size_limit = 1024 * 1024;
         state.wal.current_segment_id = state.cloud_eventual_flush_segment_gap + 1;
@@ -2275,7 +2280,7 @@ mod tests {
 
     #[test]
     fn should_not_select_cloud_gap_flush_candidate_when_gap_mode_disabled() {
-        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.memtable_flush_threshold = 1024 * 1024;
         state.memtable_size_limit = 1024 * 1024;
         state.wal.current_segment_id = state.cloud_eventual_flush_segment_gap + 10;
@@ -2297,7 +2302,7 @@ mod tests {
 
     #[test]
     fn should_report_max_memtable_wal_segment_gap_for_non_empty_memtables() {
-        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.wal.current_segment_id = state.cloud_eventual_flush_segment_gap + 20;
 
         {
@@ -2333,7 +2338,7 @@ mod tests {
 
     #[test]
     fn should_flush_but_not_hard_stall_when_active_memtable_exceeds_flush_threshold() {
-        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.memtable_size_limit = 1024 * 1024;
         state.memtable_flush_threshold = 4 * 1024;
         state.total_memtable_bytes = 0;
@@ -2348,7 +2353,7 @@ mod tests {
 
     #[test]
     fn should_hard_stall_when_immutable_memtable_queue_is_full() {
-        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.max_immutable_memtables = 1;
         state
             .get_cf_mut(0)
@@ -2363,7 +2368,7 @@ mod tests {
 
     #[test]
     fn should_hard_stall_when_total_memtable_memory_exceeds_limit() {
-        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.memtable_flush_threshold = 1024;
         state.total_memtable_bytes = 2 * 1024;
 
@@ -2374,7 +2379,7 @@ mod tests {
 
     #[test]
     fn should_hard_stall_when_external_backpressure_sets_write_stalled() {
-        let mut state = RuntimeState::new("/tmp/test_midge".into(), false);
+        let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.set_write_stalled(true);
 
         assert!(state.should_hard_stall_writes(0));

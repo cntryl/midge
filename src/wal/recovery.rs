@@ -157,9 +157,8 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
 
     // Transaction buffering for atomic recovery.
     //
-    // Legacy records (without txn_id) are applied immediately.
-    // Records tagged with txn_id are only applied if we observe a TxnCommit
-    // for that txn_id after a TxnBegin.
+    // Legacy split-marker transactions are buffered until TxnCommit.
+    // Current TxnBatch records apply atomically from a single validated frame.
     let mut open_txns: std::collections::HashMap<u64, Vec<WalRecord>> =
         std::collections::HashMap::new();
     let mut begun_txns: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -462,6 +461,27 @@ fn apply_replayed_wal_record<S: BuildHasher>(
     }
 
     match record.op {
+        WalOpKind::TxnBatch => {
+            let payload = record.value.as_ref().ok_or_else(|| {
+                MidgeError::Corruption("transaction batch record missing payload".into())
+            })?;
+            let batch = super::encoding::decode_txn_batch_payload(&record, payload)?;
+            for buffered in batch.records {
+                let replay_record = WalRecord {
+                    cf_id: buffered.cf_id,
+                    op: buffered.op,
+                    key: buffered.key,
+                    value: buffered.value,
+                    seq: buffered.seq,
+                    expiration: buffered.expiration,
+                    range_end: buffered.range_end,
+                    txn_id: Some(batch.txn_id),
+                    writer_epoch: batch.writer_epoch,
+                    compression: None,
+                };
+                apply_wal_record_to_memtables(&replay_record, ctx.memtables, ctx.file_apply_ns)?;
+            }
+        }
         WalOpKind::TxnBegin => {
             if let Some(txn_id) = record.txn_id {
                 ctx.begun_txns.insert(txn_id);
@@ -578,7 +598,7 @@ fn apply_record<S: BuildHasher>(
                 )?;
             }
         }
-        WalOpKind::TxnBegin | WalOpKind::TxnCommit => {
+        WalOpKind::TxnBegin | WalOpKind::TxnCommit | WalOpKind::TxnBatch => {
             // Transaction markers carry no direct memtable mutation.
         }
     }
@@ -1293,6 +1313,56 @@ mod tests {
     }
 
     #[test]
+    fn should_apply_txn_batch_atomically_during_recovery() {
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = LocalFsStorage::new(dir.path()).unwrap();
+        let wal_dir = StoragePath::new("wal");
+
+        {
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
+
+            let mut put_record = WalRecord::new_cf(
+                0,
+                WalOpKind::Put,
+                Bytes::from_static(b"batch-key"),
+                Some(Bytes::from_static(b"batch-value")),
+                2,
+                7,
+            );
+            put_record.txn_id = Some(11);
+
+            let payload =
+                crate::wal::encoding::encode_txn_batch_payload(11, 1, 3, 7, &[put_record]).unwrap();
+            let mut batch_record = WalRecord::new_cf(
+                0,
+                WalOpKind::TxnBatch,
+                Bytes::from_static(b"txn"),
+                Some(payload),
+                3,
+                7,
+            );
+            batch_record.txn_id = Some(11);
+
+            writer.append_record(&batch_record).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+
+        assert_eq!(stats.record_count, 1);
+        let recovered_memtable = &memtables[&0];
+        assert_eq!(
+            recovered_memtable.get(b"batch-key").unwrap(),
+            Some(b"batch-value".to_vec())
+        );
+        assert_eq!(stats.max_sequence, Some(3));
+    }
+
+    #[test]
     fn should_not_apply_transaction_ops_without_commit_marker_during_recovery() {
         // Arrange
         let dir = TempDir::new().unwrap();
@@ -1333,6 +1403,73 @@ mod tests {
             !memtables.contains_key(&0),
             "incomplete transactions must not materialize a recovered memtable entry"
         );
+    }
+
+    #[test]
+    fn should_salvage_valid_prefix_when_txn_batch_frame_is_truncated() {
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = LocalFsStorage::new(dir.path()).unwrap();
+        let wal_dir = StoragePath::new("wal");
+        let wal_path = wal_subdir.join("wal.log");
+
+        {
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
+            let prefix = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"prefix"),
+                Some(Bytes::from_static(b"value")),
+                1,
+                1,
+            );
+            writer.append_record(&prefix).unwrap();
+
+            let mut batched_put = WalRecord::new_cf(
+                0,
+                WalOpKind::Put,
+                Bytes::from_static(b"truncated"),
+                Some(Bytes::from_static(b"should-not-appear")),
+                3,
+                1,
+            );
+            batched_put.txn_id = Some(90);
+            let payload =
+                crate::wal::encoding::encode_txn_batch_payload(90, 2, 4, 1, &[batched_put])
+                    .unwrap();
+            let mut batch_record = WalRecord::new_cf(
+                0,
+                WalOpKind::TxnBatch,
+                Bytes::from_static(b"txn"),
+                Some(payload),
+                4,
+                1,
+            );
+            batch_record.txn_id = Some(90);
+            writer.append_record(&batch_record).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let bytes = std::fs::read(&wal_path).unwrap();
+        std::fs::write(&wal_path, &bytes[..bytes.len() - 3]).unwrap();
+
+        let mut memtables = HashMap::new();
+        let stats = replay_wal_with_policy(
+            &storage,
+            &wal_dir,
+            &mut memtables,
+            ReplayPolicy::SalvageValidPrefix,
+        )
+        .unwrap();
+
+        assert!(stats.had_corruption || stats.record_count >= 1);
+        let recovered_memtable = &memtables[&0];
+        assert_eq!(
+            recovered_memtable.get(b"prefix").unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert_eq!(recovered_memtable.get(b"truncated").unwrap(), None);
     }
 
     #[test]

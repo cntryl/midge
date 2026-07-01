@@ -24,6 +24,8 @@ pub enum WalOpKind {
     TxnBegin,
     /// Commit a transaction
     TxnCommit,
+    /// Atomic transaction batch encoded in a single physical WAL frame.
+    TxnBatch,
 }
 
 impl WalOpKind {
@@ -38,6 +40,7 @@ impl WalOpKind {
             WalOpKind::DeleteRange => 3,
             WalOpKind::TxnBegin => 4,
             WalOpKind::TxnCommit => 5,
+            WalOpKind::TxnBatch => 6,
         }
     }
 
@@ -55,6 +58,7 @@ impl WalOpKind {
             3 => Ok(WalOpKind::DeleteRange),
             4 => Ok(WalOpKind::TxnBegin),
             5 => Ok(WalOpKind::TxnCommit),
+            6 => Ok(WalOpKind::TxnBatch),
             _ => Err(crate::common::MidgeError::Corruption(format!(
                 "Invalid WAL operation type: {byte}"
             ))),
@@ -69,7 +73,7 @@ pub struct WalRecord {
     #[serde(default)]
     pub cf_id: ColumnFamilyId,
 
-    /// Operation type (Put, Insert, Delete, `DeleteRange`, `TxnBegin`, `TxnCommit`)
+    /// Operation type (Put, Insert, Delete, `DeleteRange`, `TxnBegin`, `TxnCommit`, `TxnBatch`)
     pub op: WalOpKind,
 
     /// Key for the operation (or range start for `DeleteRange`)
@@ -325,6 +329,7 @@ mod tests {
         let delete_range = WalOpKind::DeleteRange.to_wire_format();
         let txn_begin = WalOpKind::TxnBegin.to_wire_format();
         let txn_commit = WalOpKind::TxnCommit.to_wire_format();
+        let txn_batch = WalOpKind::TxnBatch.to_wire_format();
 
         // Assert
         assert_eq!(put, 0);
@@ -333,6 +338,7 @@ mod tests {
         assert_eq!(delete_range, 3);
         assert_eq!(txn_begin, 4);
         assert_eq!(txn_commit, 5);
+        assert_eq!(txn_batch, 6);
     }
 
     #[test]
@@ -346,6 +352,7 @@ mod tests {
         let delete_range = WalOpKind::from_wire_format(3).unwrap();
         let txn_begin = WalOpKind::from_wire_format(4).unwrap();
         let txn_commit = WalOpKind::from_wire_format(5).unwrap();
+        let txn_batch = WalOpKind::from_wire_format(6).unwrap();
 
         // Assert
         assert_eq!(put, WalOpKind::Put);
@@ -354,6 +361,7 @@ mod tests {
         assert_eq!(delete_range, WalOpKind::DeleteRange);
         assert_eq!(txn_begin, WalOpKind::TxnBegin);
         assert_eq!(txn_commit, WalOpKind::TxnCommit);
+        assert_eq!(txn_batch, WalOpKind::TxnBatch);
     }
 
     #[test]

@@ -50,6 +50,7 @@ pub enum PendingCloudWrite {
 #[derive(Debug)]
 pub enum TransactionApplyOp {
     Put {
+        op: crate::wal::WalOpKind,
         cf_id: crate::types::ColumnFamilyId,
         key: bytes::Bytes,
         value: bytes::Bytes,

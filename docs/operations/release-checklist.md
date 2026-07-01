@@ -18,7 +18,7 @@ Use this checklist before publishing a release candidate or stable release.
       `docs/development/release-policy.md`,
       `docs/operations/production-runbook.md`,
       `docs/operations/release-checklist.md`
-- [ ] `cargo run --bin midge -- verify --json tests/fixtures/compatibility/v1_empty_db` validated where applicable
+- [ ] `cargo run --bin midge -- verify --json tests/fixtures/compatibility/v2_empty_db` validated where applicable
 - [ ] changelog updated
 - [ ] migration guide updated
 - [ ] rollback statement added to release notes

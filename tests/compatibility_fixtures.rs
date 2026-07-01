@@ -50,9 +50,9 @@ fn assert_compatibility_error(error: MidgeError) {
 }
 
 #[test]
-fn should_verify_release_v1_fixture_given_supported_format_when_reopening() {
+fn should_verify_release_v2_fixture_given_supported_format_when_reopening() {
     // Arrange
-    let temp = copy_fixture_dir("v1_empty_db");
+    let temp = copy_fixture_dir("v2_empty_db");
 
     // Act
     let report = Engine::verify_path(temp.path()).expect("verify release fixture");
@@ -77,7 +77,7 @@ fn should_verify_release_v1_fixture_given_supported_format_when_reopening() {
 #[test]
 fn should_reject_future_format_fixture_given_unsupported_version_when_reopening() {
     // Arrange
-    let temp = copy_fixture_dir("future_v2");
+    let temp = copy_fixture_dir("future_v3");
 
     // Act
     let verify_error =

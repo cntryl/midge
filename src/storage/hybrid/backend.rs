@@ -1007,9 +1007,28 @@ impl HybridStorage {
             let record = crate::wal::encoding::decode(payload)
                 .map_err(|error| format!("cloud WAL segment '{key}' record decode: {error}"))?;
             observed_max_sequence = observed_max_sequence.max(record.seq);
-            if !matches!(
+            if matches!(record.op, crate::wal::WalOpKind::TxnBatch) {
+                let payload = record.value.as_ref().ok_or_else(|| {
+                    format!("cloud WAL segment '{key}' txn batch missing payload")
+                })?;
+                let batch = crate::wal::encoding::decode_txn_batch_payload(&record, payload)
+                    .map_err(|error| {
+                        format!("cloud WAL segment '{key}' txn batch decode: {error}")
+                    })?;
+                for batch_record in batch.records {
+                    data_records.push(WalDataCoverageRecord {
+                        cf_id: batch_record.cf_id,
+                        op: batch_record.op,
+                        key: batch_record.key.to_vec(),
+                        range_end: batch_record.range_end.map(|range_end| range_end.to_vec()),
+                        seq: batch_record.seq,
+                    });
+                }
+            } else if !matches!(
                 record.op,
-                crate::wal::WalOpKind::TxnBegin | crate::wal::WalOpKind::TxnCommit
+                crate::wal::WalOpKind::TxnBegin
+                    | crate::wal::WalOpKind::TxnCommit
+                    | crate::wal::WalOpKind::TxnBatch
             ) {
                 data_records.push(WalDataCoverageRecord {
                     cf_id: record.cf_id,
@@ -1174,7 +1193,9 @@ impl HybridStorage {
                         && range_end.as_slice() <= largest_key.as_slice()
                 })
             }
-            crate::wal::WalOpKind::TxnBegin | crate::wal::WalOpKind::TxnCommit => true,
+            crate::wal::WalOpKind::TxnBegin
+            | crate::wal::WalOpKind::TxnCommit
+            | crate::wal::WalOpKind::TxnBatch => true,
         }
     }
 
