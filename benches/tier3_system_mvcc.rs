@@ -89,11 +89,7 @@ fn run_read_old_version_case(ctx: &mut StressContext, opts: MidgeOptions, num_ke
     ctx.measure_ref(&snap_tx, |s| {
         let v = s.get(&keys[0][..]).unwrap();
         if let Some(bytes) = v {
-            if bytes.as_ref() == vec![1u8; VALUE_SIZE].as_slice() {
-                1
-            } else {
-                0
-            }
+            i32::from(bytes.as_ref() == vec![1u8; VALUE_SIZE].as_slice())
         } else {
             0
         }

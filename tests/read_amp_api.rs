@@ -11,12 +11,12 @@ use common::{open_with_mode, opts_for_mode};
 #[test]
 fn should_expose_read_amp_metrics_through_api() -> MidgeResult<()> {
     // Arrange: Create engine and perform operations
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Write data
     for i in 0..20 {
-        let key = format!("key{:03}", i);
+        let key = format!("key{i:03}");
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None)?;
         tx.commit(WriteOptions::buffered())?;
@@ -34,7 +34,7 @@ fn should_expose_read_amp_metrics_through_api() -> MidgeResult<()> {
 
     // Act: Perform reads and get metrics
     for i in 0..5 {
-        let key = format!("key{:03}", i);
+        let key = format!("key{i:03}");
         let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
         let _ = read_tx.get(key.as_bytes())?;
     }
@@ -72,14 +72,14 @@ fn should_expose_read_amp_metrics_through_api() -> MidgeResult<()> {
 #[test]
 fn should_track_l0_overlap_in_metrics() -> MidgeResult<()> {
     // Arrange: Create multiple L0 files with overlapping ranges
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Create 3 overlapping L0 files
     for batch in 0..3 {
         for i in 0..5 {
-            let key = format!("key{:03}", i); // Same key range
-            let value = format!("value_batch{}", batch);
+            let key = format!("key{i:03}"); // Same key range
+            let value = format!("value_batch{batch}");
             let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)?;
             tx.commit(WriteOptions::buffered())?;
@@ -111,7 +111,7 @@ fn should_track_l0_overlap_in_metrics() -> MidgeResult<()> {
 #[test]
 fn should_show_zero_metrics_for_fresh_engine() -> MidgeResult<()> {
     // Arrange: Fresh engine with no operations
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
 
     // Act: Get metrics before any reads
     let metrics = engine.get_read_amp_metrics()?;
@@ -121,9 +121,9 @@ fn should_show_zero_metrics_for_fresh_engine() -> MidgeResult<()> {
     assert_eq!(metrics.ssts_touched_total, 0);
     assert_eq!(metrics.l0_ssts_touched_total, 0);
     assert_eq!(metrics.blocks_read_total, 0);
-    assert_eq!(metrics.avg_ssts_per_read, 0.0);
-    assert_eq!(metrics.avg_blocks_per_read, 0.0);
-    assert_eq!(metrics.l0_overlap_rate, 0.0);
+    assert!(metrics.avg_ssts_per_read.abs() <= f64::EPSILON);
+    assert!(metrics.avg_blocks_per_read.abs() <= f64::EPSILON);
+    assert!(metrics.l0_overlap_rate.abs() <= f64::EPSILON);
 
     println!("Fresh engine metrics confirmed as zero");
 
@@ -133,11 +133,11 @@ fn should_show_zero_metrics_for_fresh_engine() -> MidgeResult<()> {
 #[test]
 fn should_accumulate_metrics_over_multiple_reads() -> MidgeResult<()> {
     // Arrange: Create SST with data
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..10 {
-        let key = format!("key{:03}", i);
+        let key = format!("key{i:03}");
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)?;
         tx.commit(WriteOptions::buffered())?;
@@ -147,7 +147,7 @@ fn should_accumulate_metrics_over_multiple_reads() -> MidgeResult<()> {
 
     // Act: Perform multiple reads
     for i in 0..10 {
-        let key = format!("key{:03}", i);
+        let key = format!("key{i:03}");
         let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
         let _ = read_tx.get(key.as_bytes())?;
     }
@@ -173,12 +173,12 @@ fn should_accumulate_metrics_over_multiple_reads() -> MidgeResult<()> {
 #[test]
 fn should_report_budget_violations_when_exceeded() -> MidgeResult<()> {
     // Arrange: Create many small overlapping L0 files to force budget violations
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Create 10 L0 files all with same key (extreme overlap)
     for batch in 0..10 {
-        let value = format!("value{}", batch);
+        let value = format!("value{batch}");
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(b"hotkey".to_vec(), value.as_bytes().to_vec(), None)?;
         tx.commit(WriteOptions::buffered())?;

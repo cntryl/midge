@@ -12,15 +12,15 @@ use common::*;
 fn should_delete_only_keys_within_requested_range_when_delete_range_commits() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin seed transaction");
         for i in 1..=10 {
-            let key = format!("key{:02}", i);
-            let value = format!("val{:02}", i);
+            let key = format!("key{i:02}");
+            let value = format!("val{i:02}");
             tx.put(key.into_bytes(), value.into_bytes(), None)
                 .expect("seed key");
         }
@@ -41,18 +41,16 @@ fn should_delete_only_keys_within_requested_range_when_delete_range_commits() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin read transaction");
         for i in 1..=10 {
-            let key = format!("key{:02}", i);
+            let key = format!("key{i:02}");
             let value = tx.get(key.as_bytes()).expect("read key after delete_range");
             if (2..8).contains(&i) {
-                assert_eq!(value, None, "mode: {} key: {}", mode, key);
+                assert_eq!(value, None, "mode: {mode} key: {key}");
             } else {
-                let expected = format!("val{:02}", i);
+                let expected = format!("val{i:02}");
                 assert_eq!(
                     value,
                     Some(Bytes::copy_from_slice(expected.as_bytes())),
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
         }
@@ -63,7 +61,7 @@ fn should_delete_only_keys_within_requested_range_when_delete_range_commits() {
 fn should_return_all_inserted_keys_when_scanning_unbounded_query() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine
@@ -88,7 +86,7 @@ fn should_return_all_inserted_keys_when_scanning_unbounded_query() {
         let results: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
 
         // Assert
-        assert_eq!(results.len(), 4, "mode: {}", mode);
+        assert_eq!(results.len(), 4, "mode: {mode}");
         assert_eq!(results[0].0, Bytes::from_static(b"a"));
         assert_eq!(results[1].0, Bytes::from_static(b"b"));
         assert_eq!(results[2].0, Bytes::from_static(b"c"));

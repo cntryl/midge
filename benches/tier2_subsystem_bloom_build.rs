@@ -18,7 +18,7 @@ use std::hint::black_box;
 /// Pre-generate keys as raw bytes (no Bytes wrapper overhead in benchmark)
 fn make_test_keys(count: usize) -> Vec<Vec<u8>> {
     (0..count)
-        .map(|i| format!("key_{:010}", i).into_bytes())
+        .map(|i| format!("key_{i:010}").into_bytes())
         .collect()
 }
 
@@ -37,7 +37,7 @@ fn bench_bloom_build_10k_keys(c: &mut Criterion) {
                 builder.insert(key);
             }
             black_box(builder.finish())
-        })
+        });
     });
 
     group.finish();
@@ -59,7 +59,7 @@ fn bench_bloom_build_100k_keys(c: &mut Criterion) {
                 builder.insert(key);
             }
             black_box(builder.finish())
-        })
+        });
     });
 
     group.finish();
@@ -81,7 +81,7 @@ fn bench_bloom_build_1m_keys(c: &mut Criterion) {
                 builder.insert(key);
             }
             black_box(builder.finish())
-        })
+        });
     });
 
     group.finish();

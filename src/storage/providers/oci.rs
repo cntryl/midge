@@ -1,9 +1,9 @@
 //! Oracle Cloud Infrastructure (OCI) Object Storage Provider
 //!
 //! Two modes of operation:
-//! 1. **S3-compatible mode** (recommended): Uses OCI's S3-compatible API via S3Provider
+//! 1. **S3-compatible mode** (recommended): Uses OCI's S3-compatible API via `S3Provider`
 //!    - Standard access key / secret key authentication
-//!    - Full CloudBackend support via S3Provider
+//!    - Full `CloudBackend` support via `S3Provider`
 //!
 //! 2. **Native OCI API** (future): Direct REST API with OCI signature-based auth
 //!    - Would use OCI's proprietary authentication headers
@@ -15,7 +15,7 @@ use crate::common::MidgeResult;
 /// Oracle Cloud Infrastructure Object Storage provider
 ///
 /// Supports both:
-/// - **S3-compatible API**: Leverages generic S3Provider for easy integration
+/// - **S3-compatible API**: Leverages generic `S3Provider` for easy integration
 /// - **Native OCI API**: (future) Direct REST API with OCI signature-based auth
 pub struct OciProvider {
     inner: S3Provider,
@@ -35,8 +35,8 @@ impl OciProvider {
     /// * `secret_key` - OCI user's API signing key
     pub fn s3_compat(
         bucket: String,
-        namespace: String,
-        region: String,
+        namespace: &str,
+        region: &str,
         access_key: String,
         secret_key: String,
     ) -> MidgeResult<Self> {
@@ -47,19 +47,19 @@ impl OciProvider {
     /// Create OCI provider (using S3-compatible API)
     ///
     /// Convenience constructor equivalent to `s3_compat()`.
-    pub fn new(namespace: String, bucket: String, region: String) -> MidgeResult<Self> {
+    pub fn new(namespace: &str, bucket: String, region: &str) -> MidgeResult<Self> {
         // Note: This is a stub constructor that creates a provider with the namespace/bucket/region
         // but no credentials. Real usage should call `s3_compat()` with full credentials.
-        let config = S3Config::oci_s3_compat(bucket, namespace, region.clone());
+        let config = S3Config::oci_s3_compat(bucket, namespace, region);
         S3Provider::custom(config, String::new(), String::new()).map(|inner| Self { inner })
     }
 
-    /// Access the underlying S3Provider for lower-level operations
+    /// Access the underlying `S3Provider` for lower-level operations
     pub fn inner(&self) -> &S3Provider {
         &self.inner
     }
 
-    /// Convert into the underlying S3Provider
+    /// Convert into the underlying `S3Provider`
     pub fn into_inner(self) -> S3Provider {
         self.inner
     }
@@ -77,8 +77,8 @@ mod tests {
         // Act
         let provider = OciProvider::s3_compat(
             "my-bucket".into(),
-            "mynamespace".into(),
-            "us-phoenix-1".into(),
+            "mynamespace",
+            "us-phoenix-1",
             "oci-access-key".into(),
             "oci-secret-key".into(),
         )
@@ -95,12 +95,8 @@ mod tests {
         // Arrange
 
         // Act
-        let provider = OciProvider::new(
-            "mynamespace".to_string(),
-            "mybucket".to_string(),
-            "us-phoenix-1".to_string(),
-        )
-        .expect("should create oci provider");
+        let provider = OciProvider::new("mynamespace", "mybucket".to_string(), "us-phoenix-1")
+            .expect("should create oci provider");
 
         let backend = provider.inner().backend();
 

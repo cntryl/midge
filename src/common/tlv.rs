@@ -7,14 +7,16 @@ use crate::common::MidgeError;
 use crate::common::MidgeResult;
 use bytes::{BufMut, BytesMut};
 
+const MAX_VARINT32_LEN: u8 = 5;
+
 /// Encode a varint32 value into the buffer
 #[inline]
 pub fn encode_varint32(buf: &mut BytesMut, mut value: u32) {
     while value >= 0x80 {
-        buf.put_u8((value & 0x7f) as u8 | 0x80);
+        buf.put_u8((value.to_le_bytes()[0] & 0x7f) | 0x80);
         value >>= 7;
     }
-    buf.put_u8(value as u8);
+    buf.put_u8(value.to_le_bytes()[0]);
 }
 
 /// Encode a varint32 with a tag and length prefix (single-pass, zero-allocation)
@@ -24,22 +26,34 @@ pub fn encode_varint_with_tag(buf: &mut BytesMut, tag: u8, mut value: u32) {
 
     // Max 5 bytes for u32 varint
     let mut tmp = [0u8; 5];
-    let mut i = 0;
+    let mut i = 0usize;
 
     while value >= 0x80 {
-        tmp[i] = ((value & 0x7f) as u8) | 0x80;
+        tmp[i] = (value.to_le_bytes()[0] & 0x7f) | 0x80;
         value >>= 7;
         i += 1;
     }
-    tmp[i] = value as u8;
+    tmp[i] = value.to_le_bytes()[0];
     i += 1;
 
-    buf.put_u8(i as u8);
+    let len = match i {
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        4 => 4,
+        5 => MAX_VARINT32_LEN,
+        _ => unreachable!("u32 varint length never exceeds 5 bytes"),
+    };
+    buf.put_u8(len);
     buf.put_slice(&tmp[..i]);
 }
 
 /// Encode arbitrary bytes with a tag and length prefix
 #[inline]
+///
+/// # Errors
+///
+/// Returns `MidgeError::InvalidArgument` when `data.len()` exceeds `u32::MAX`.
 pub fn encode_bytes_with_tag(buf: &mut BytesMut, tag: u8, data: &[u8]) -> MidgeResult<()> {
     // Validate length FIRST before writing anything to avoid partial buffer mutation on error
     let len32 = u32::try_from(data.len()).map_err(|_| {
@@ -70,7 +84,12 @@ pub fn encode_u8_with_tag(buf: &mut BytesMut, tag: u8, value: u8) {
 }
 
 /// Decode a varint32 from a data slice
-#[inline(always)]
+///
+/// # Errors
+///
+/// Returns `MidgeError::Corruption` when the byte slice is truncated or
+/// encodes a value wider than a 32-bit varint.
+#[inline]
 pub fn decode_varint32(data: &[u8]) -> MidgeResult<u32> {
     if data.is_empty() {
         return Err(MidgeError::Corruption("varint32 incomplete".into()));
@@ -78,10 +97,10 @@ pub fn decode_varint32(data: &[u8]) -> MidgeResult<u32> {
 
     let b0 = data[0];
     if b0 < 0x80 {
-        return Ok(b0 as u32);
+        return Ok(u32::from(b0));
     }
 
-    let mut result = (b0 & 0x7f) as u32;
+    let mut result = u32::from(b0 & 0x7f);
     let mut shift = 7;
 
     for (i, &byte) in data.iter().enumerate().skip(1) {
@@ -89,7 +108,7 @@ pub fn decode_varint32(data: &[u8]) -> MidgeResult<u32> {
             return Err(MidgeError::Corruption("varint32 overflow".into()));
         }
 
-        result |= ((byte & 0x7f) as u32) << shift;
+        result |= u32::from(byte & 0x7f) << shift;
         if byte < 0x80 {
             return Ok(result);
         }
@@ -107,10 +126,10 @@ fn decode_varint32_with_len(data: &[u8]) -> MidgeResult<(u32, usize)> {
 
     let b0 = data[0];
     if b0 < 0x80 {
-        return Ok((b0 as u32, 1));
+        return Ok((u32::from(b0), 1));
     }
 
-    let mut result = (b0 & 0x7f) as u32;
+    let mut result = u32::from(b0 & 0x7f);
     let mut shift = 7;
 
     for (i, &byte) in data.iter().enumerate().skip(1) {
@@ -118,7 +137,7 @@ fn decode_varint32_with_len(data: &[u8]) -> MidgeResult<(u32, usize)> {
             return Err(MidgeError::Corruption("varint32 overflow".into()));
         }
 
-        result |= ((byte & 0x7f) as u32) << shift;
+        result |= u32::from(byte & 0x7f) << shift;
         if byte < 0x80 {
             return Ok((result, i + 1));
         }
@@ -129,8 +148,13 @@ fn decode_varint32_with_len(data: &[u8]) -> MidgeResult<(u32, usize)> {
 }
 
 /// Decode a single TLV field from data
-/// Returns (tag, value_data, bytes_consumed)
-#[inline(always)]
+/// Returns (tag, `value_data`, `bytes_consumed`)
+///
+/// # Errors
+///
+/// Returns `MidgeError::Corruption` when the TLV header is truncated or the
+/// declared value length extends past the input slice.
+#[inline]
 pub fn decode_tlv_field(data: &[u8]) -> MidgeResult<(u8, &[u8], usize)> {
     if data.is_empty() {
         return Ok((0, &[], 0));
@@ -146,7 +170,8 @@ pub fn decode_tlv_field(data: &[u8]) -> MidgeResult<(u8, &[u8], usize)> {
     }
 
     let (len, len_bytes) = decode_varint32_with_len(&data[1..])?;
-    let len = len as usize;
+    let len = usize::try_from(len)
+        .map_err(|_| MidgeError::Corruption("TLV field length does not fit usize".into()))?;
     let header_len = 1 + len_bytes;
 
     if data.len() < header_len + len {
@@ -242,7 +267,7 @@ mod tests {
     fn should_encode_decode_u64_with_tag() {
         // Arrange
         let mut buf = BytesMut::new();
-        let value = 0x0102030405060708u64;
+        let value = 0x0102_0304_0506_0708_u64;
 
         // Act
         encode_u64_with_tag(&mut buf, 10, value);

@@ -117,7 +117,7 @@
 //!
 //! - **[`providers`]**: Cloud provider implementations
 //!   - Generic S3 (base implementation)
-//!   - AWS S3, Wasabi, MinIO (S3-compatible wrappers)
+//!   - AWS S3, Wasabi, `MinIO` (S3-compatible wrappers)
 //!   - Azure Blob Storage, Google Cloud Storage, OCI stubs
 //!
 //! - **[`local_fs_storage`]**: Legacy `Storage` trait implementation
@@ -152,7 +152,7 @@
 //!
 //! 1. **No futures in engine thread**: All async work happens in `CloudExecutor`'s embedded tokio runtime
 //! 2. **Callback-driven hot path**: No blocking or waiting; results sent via mpsc channels
-//! 3. **WAL ordering**: Local write → memtable visibility → cloud upload → CloudAck
+//! 3. **WAL ordering**: Local write → memtable visibility → cloud upload → `CloudAck`
 //! 4. **Deterministic testing**: `MockCloudBackend` for synchronous test execution
 
 pub(crate) mod cloud;
@@ -241,7 +241,7 @@ impl StorageObjectMetadata {
 
 /// Storage events sent back to the runtime after async I/O.
 ///
-/// These events are sent via StorageCallback channels when operations complete.
+/// These events are sent via `StorageCallback` channels when operations complete.
 /// This unified event type works for both filesystem and cloud backends.
 #[derive(Debug, Clone)]
 pub enum StorageEvent {
@@ -283,7 +283,7 @@ pub enum StorageEvent {
         result: StorageOutcome<()>,
     },
     /// Backpressure activated - disk watermark exceeded
-    /// Runtime should pause flushes until BackpressureOff
+    /// Runtime should pause flushes until `BackpressureOff`
     BackpressureOn,
     /// Backpressure released - disk usage below threshold
     /// Runtime can resume normal operations
@@ -292,7 +292,7 @@ pub enum StorageEvent {
 
 /// Serializable result type for storage operations.
 ///
-/// Can be converted to/from MidgeResult for compatibility.
+/// Can be converted to/from `MidgeResult` for compatibility.
 #[derive(Debug, Clone)]
 pub enum StorageOutcome<T: Clone> {
     Ok(T),
@@ -311,7 +311,7 @@ impl<T: Clone> StorageOutcome<T> {
     }
 }
 
-/// Callback type: a sync channel to send StorageEvent back to runtime
+/// Callback type: a sync channel to send `StorageEvent` back to runtime
 pub type StorageCallback = std::sync::mpsc::Sender<StorageEvent>;
 
 /// NEW async-compatible storage backend trait.
@@ -319,7 +319,7 @@ pub type StorageCallback = std::sync::mpsc::Sender<StorageEvent>;
 /// CRITICAL DESIGN:
 /// - All operations return immediately (non-blocking)
 /// - Real I/O happens asynchronously (in thread pools or tokio tasks)
-/// - Results are reported back via StorageCallback
+/// - Results are reported back via `StorageCallback`
 /// - Same trait for both filesystem and cloud backends
 ///
 /// This allows:
@@ -330,16 +330,16 @@ pub type StorageCallback = std::sync::mpsc::Sender<StorageEvent>;
 /// - Ready for batching and pipelining
 pub trait StorageBackend: Send + Sync + 'static {
     /// Submit a read operation. Returns immediately.
-    fn submit_read(&self, key: String, callback: StorageCallback);
+    fn submit_read(&self, key: &str, callback: StorageCallback);
 
     /// Submit a write operation. Returns immediately.
-    fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback);
+    fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback);
 
     /// Submit a conditional write operation. Backends that cannot enforce the
     /// supplied preconditions must fail closed rather than writing.
     fn submit_write_with_headers(
         &self,
-        key: String,
+        key: &str,
         data: Vec<u8>,
         headers: Vec<(String, String)>,
         callback: StorageCallback,
@@ -350,7 +350,7 @@ pub trait StorageBackend: Send + Sync + 'static {
         }
 
         let _ = callback.send(StorageEvent::WriteComplete {
-            key,
+            key: key.to_string(),
             result: StorageOutcome::Err(
                 "conditional write is not supported by this storage backend".to_string(),
             ),
@@ -358,13 +358,13 @@ pub trait StorageBackend: Send + Sync + 'static {
     }
 
     /// Submit a delete operation. Returns immediately.
-    fn submit_delete(&self, key: String, callback: StorageCallback);
+    fn submit_delete(&self, key: &str, callback: StorageCallback);
 
     /// Submit a conditional delete operation. Backends that cannot enforce the
     /// supplied preconditions must fail closed rather than deleting.
     fn submit_delete_with_headers(
         &self,
-        key: String,
+        key: &str,
         headers: Vec<(String, String)>,
         callback: StorageCallback,
     ) {
@@ -374,7 +374,7 @@ pub trait StorageBackend: Send + Sync + 'static {
         }
 
         let _ = callback.send(StorageEvent::DeleteComplete {
-            key,
+            key: key.to_string(),
             result: StorageOutcome::Err(
                 "conditional delete is not supported by this storage backend".to_string(),
             ),
@@ -382,14 +382,14 @@ pub trait StorageBackend: Send + Sync + 'static {
     }
 
     /// Submit a prefix list operation. Returns immediately.
-    fn submit_list(&self, prefix: String, callback: StorageCallback);
+    fn submit_list(&self, prefix: &str, callback: StorageCallback);
 
     /// Submit an object metadata lookup. Implementations with native HEAD
     /// support should override this. The fallback reads the object and returns
     /// a content fingerprint, which is conservative but may be more expensive.
-    fn submit_head(&self, key: String, callback: StorageCallback) {
+    fn submit_head(&self, key: &str, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_read(key.clone(), tx);
+        self.submit_read(key, tx);
         let result = match rx.recv() {
             Ok(StorageEvent::ReadComplete {
                 result: StorageOutcome::Ok(data),
@@ -406,6 +406,9 @@ pub trait StorageBackend: Send + Sync + 'static {
                 "storage HEAD fallback channel closed for '{key}': {error}"
             )),
         };
-        let _ = callback.send(StorageEvent::HeadComplete { key, result });
+        let _ = callback.send(StorageEvent::HeadComplete {
+            key: key.to_string(),
+            result,
+        });
     }
 }

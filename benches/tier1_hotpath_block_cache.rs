@@ -4,7 +4,7 @@
 //! **Run Frequency:** Every PR (CI gate)
 //!
 //! Covers critical block cache hot paths:
-//! - Single hot key lookups (get_hot)
+//! - Single hot key lookups (`get_hot`)
 //! - Batch lookups for hits and misses
 //! - Insert operations (single and batch)
 //! - Eviction under memory pressure
@@ -72,14 +72,14 @@ fn bench_get_hot_single(c: &mut Criterion) {
     for i in 0..1000 {
         let key = make_cache_key(i * 4096);
         let block = make_block_data(4096);
-        cache.put(key, block);
+        cache.put(key, &block);
     }
 
     // Precompute hot key (no allocation in hot path)
     let hot_key = make_cache_key(42 * 4096);
 
     group.bench_function("4k_block", |b| {
-        b.iter(|| black_box(cache.get(black_box(&hot_key))))
+        b.iter(|| black_box(cache.get(black_box(&hot_key))));
     });
 
     group.finish();
@@ -97,13 +97,13 @@ fn bench_insert_single(c: &mut Criterion) {
     for i in 0..100 {
         let key = make_cache_key(i * 4096);
         let block = make_block_data(4096);
-        cache.put(key, block);
+        cache.put(key, &block);
     }
 
     // Rotate through a bounded keyset so the benchmark stays below cache
     // capacity and does not drift into eviction-heavy behavior mid-run.
-    let insert_keys: Vec<CacheKey> = (0..4096)
-        .map(|i| make_cache_key((1000 + i as u64) * 4096))
+    let insert_keys: Vec<CacheKey> = (0u64..4096)
+        .map(|i| make_cache_key((1000 + i) * 4096))
         .collect();
     let block_data = make_block_data(4096);
     let mut key_index = 0usize;
@@ -112,8 +112,8 @@ fn bench_insert_single(c: &mut Criterion) {
         b.iter(|| {
             let key = insert_keys[key_index % insert_keys.len()];
             key_index = key_index.wrapping_add(1);
-            cache.put(black_box(key), black_box(block_data.clone()));
-        })
+            cache.put(black_box(key), black_box(&block_data));
+        });
     });
 
     group.finish();
@@ -136,7 +136,7 @@ fn bench_get_batch_hit(c: &mut Criterion) {
     // Pre-populate cache
     let cache = create_cache(cache_size);
     for i in 0..num_blocks {
-        cache.put(keys[i], blocks[i].clone());
+        cache.put(keys[i], &blocks[i]);
     }
 
     group.bench_function("1000_lookups", |b| {
@@ -148,7 +148,7 @@ fn bench_get_batch_hit(c: &mut Criterion) {
                 }
             }
             black_box(count)
-        })
+        });
     });
 
     group.finish();
@@ -169,7 +169,7 @@ fn bench_get_batch_miss(c: &mut Criterion) {
     // Pre-populate cache with keys in SST range 0-9
     let cache = create_cache(cache_size);
     for i in 0..num_blocks {
-        cache.put(keys[i], blocks[i].clone());
+        cache.put(keys[i], &blocks[i]);
     }
 
     // Create miss keys in different SST range (100-199)
@@ -188,7 +188,7 @@ fn bench_get_batch_miss(c: &mut Criterion) {
                 }
             }
             black_box(count)
-        })
+        });
     });
 
     group.finish();
@@ -218,13 +218,13 @@ fn bench_insert_batch(c: &mut Criterion) {
                     for round in 0..INSERT_BATCH_ROUNDS {
                         for i in 0..n {
                             let idx = (i + round) % n;
-                            cache.put(keys[idx], blocks[idx].clone());
+                            cache.put(keys[idx], &blocks[idx]);
                         }
                     }
                     black_box(());
                 },
                 BatchSize::SmallInput,
-            )
+            );
         },
     );
 

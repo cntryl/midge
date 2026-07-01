@@ -18,17 +18,20 @@ pub enum WalOpKind {
     Put,
     Insert,
     Delete,
-    /// Delete all keys in range [key, range_end)
+    /// Delete all keys in range [key, `range_end`)
     DeleteRange,
     /// Begin a transaction
     TxnBegin,
     /// Commit a transaction
     TxnCommit,
+    /// Atomic transaction batch encoded in a single physical WAL frame.
+    TxnBatch,
 }
 
 impl WalOpKind {
     /// Convert operation to wire format (TLV encoding).
     #[inline]
+    #[must_use]
     pub fn to_wire_format(self) -> u8 {
         match self {
             WalOpKind::Put => 0,
@@ -37,11 +40,16 @@ impl WalOpKind {
             WalOpKind::DeleteRange => 3,
             WalOpKind::TxnBegin => 4,
             WalOpKind::TxnCommit => 5,
+            WalOpKind::TxnBatch => 6,
         }
     }
 
     /// Parse operation from wire format (TLV encoding).
     #[inline]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the byte does not map to a known WAL operation kind.
     pub fn from_wire_format(byte: u8) -> MidgeResult<Self> {
         match byte {
             0 => Ok(WalOpKind::Put),
@@ -50,9 +58,9 @@ impl WalOpKind {
             3 => Ok(WalOpKind::DeleteRange),
             4 => Ok(WalOpKind::TxnBegin),
             5 => Ok(WalOpKind::TxnCommit),
+            6 => Ok(WalOpKind::TxnBatch),
             _ => Err(crate::common::MidgeError::Corruption(format!(
-                "Invalid WAL operation type: {}",
-                byte
+                "Invalid WAL operation type: {byte}"
             ))),
         }
     }
@@ -65,10 +73,10 @@ pub struct WalRecord {
     #[serde(default)]
     pub cf_id: ColumnFamilyId,
 
-    /// Operation type (Put, Insert, Delete, DeleteRange, TxnBegin, TxnCommit)
+    /// Operation type (Put, Insert, Delete, `DeleteRange`, `TxnBegin`, `TxnCommit`, `TxnBatch`)
     pub op: WalOpKind,
 
-    /// Key for the operation (or range start for DeleteRange)
+    /// Key for the operation (or range start for `DeleteRange`)
     pub key: Bytes,
 
     /// Value for Put/Insert operations, None for Delete/DeleteRange
@@ -81,7 +89,7 @@ pub struct WalRecord {
     #[serde(default)]
     pub expiration: Option<u64>,
 
-    /// Optional range end for DeleteRange operations (exclusive).
+    /// Optional range end for `DeleteRange` operations (exclusive).
     #[serde(default)]
     pub range_end: Option<Bytes>,
 
@@ -158,8 +166,7 @@ impl WalRecord {
         let expiration = if ttl_seconds > 0 {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
             Some(now + (ttl_seconds * 1000))
         } else {
             None
@@ -184,8 +191,7 @@ impl WalRecord {
         if let Some(exp_time) = self.expiration {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
             now > exp_time
         } else {
             false
@@ -195,8 +201,8 @@ impl WalRecord {
     /// Get the size in bytes of this record when serialized
     pub fn estimated_size(&self) -> usize {
         let key_size = self.key.len();
-        let value_size = self.value.as_ref().map(|v| v.len()).unwrap_or(0);
-        let range_end_size = self.range_end.as_ref().map(|r| r.len()).unwrap_or(0);
+        let value_size = self.value.as_ref().map_or(0, bytes::Bytes::len);
+        let range_end_size = self.range_end.as_ref().map_or(0, bytes::Bytes::len);
         4 + 1 + 8 + 4 + key_size + 4 + value_size + range_end_size + 20 + 8
     }
 }
@@ -323,6 +329,7 @@ mod tests {
         let delete_range = WalOpKind::DeleteRange.to_wire_format();
         let txn_begin = WalOpKind::TxnBegin.to_wire_format();
         let txn_commit = WalOpKind::TxnCommit.to_wire_format();
+        let txn_batch = WalOpKind::TxnBatch.to_wire_format();
 
         // Assert
         assert_eq!(put, 0);
@@ -331,6 +338,7 @@ mod tests {
         assert_eq!(delete_range, 3);
         assert_eq!(txn_begin, 4);
         assert_eq!(txn_commit, 5);
+        assert_eq!(txn_batch, 6);
     }
 
     #[test]
@@ -344,6 +352,7 @@ mod tests {
         let delete_range = WalOpKind::from_wire_format(3).unwrap();
         let txn_begin = WalOpKind::from_wire_format(4).unwrap();
         let txn_commit = WalOpKind::from_wire_format(5).unwrap();
+        let txn_batch = WalOpKind::from_wire_format(6).unwrap();
 
         // Assert
         assert_eq!(put, WalOpKind::Put);
@@ -352,6 +361,7 @@ mod tests {
         assert_eq!(delete_range, WalOpKind::DeleteRange);
         assert_eq!(txn_begin, WalOpKind::TxnBegin);
         assert_eq!(txn_commit, WalOpKind::TxnCommit);
+        assert_eq!(txn_batch, WalOpKind::TxnBatch);
     }
 
     #[test]

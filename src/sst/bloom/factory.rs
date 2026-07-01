@@ -14,6 +14,10 @@ pub trait BloomFilterFactory: Send + Sync {
     }
 
     /// Deserialize a filter from bytes
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the serialized bloom filter is invalid.
     fn deserialize(&self, data: &[u8]) -> MidgeResult<BloomReader>;
 }
 
@@ -22,6 +26,7 @@ pub trait BloomFilterFactory: Send + Sync {
 pub struct BloomFactory;
 
 impl BloomFactory {
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
@@ -193,7 +198,7 @@ mod tests {
         let factory = BloomFactory::new();
         let mut writer = factory.create_writer(100, 0.01);
         for i in 0..50 {
-            writer.insert(format!("key{}", i).as_bytes());
+            writer.insert(format!("key{i}").as_bytes());
         }
 
         // Act
@@ -204,7 +209,7 @@ mod tests {
         assert_eq!(reader.key_count(), 50);
         for i in 0..50 {
             assert_eq!(
-                reader.contains(format!("key{}", i).as_bytes()),
+                reader.contains(format!("key{i}").as_bytes()),
                 BloomTestResult::MightBePresent
             );
         }

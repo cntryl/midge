@@ -14,8 +14,8 @@ fn should_group_concurrent_batch_submissions_when_multiple_threads_submit() {
     let cf = engine.create_column_family("test_cf").expect("create CF");
     let cf_id = cf.id();
 
-    let num_threads = 8;
-    let batches_per_thread = 100;
+    let num_threads = 8_u64;
+    let batches_per_thread = 100_u64;
 
     // Act
     let start = Instant::now();
@@ -24,8 +24,8 @@ fn should_group_concurrent_batch_submissions_when_multiple_threads_submit() {
             let engine_clone = Arc::clone(&engine);
             thread::spawn(move || {
                 for batch_num in 0..batches_per_thread {
-                    let key = format!("key_{}_{}", thread_id, batch_num);
-                    let value = format!("value_{}", thread_id);
+                    let key = format!("key_{thread_id}_{batch_num}");
+                    let value = format!("value_{thread_id}");
 
                     // Each thread submits a small batch
                     let mut tx = engine_clone
@@ -46,8 +46,10 @@ fn should_group_concurrent_batch_submissions_when_multiple_threads_submit() {
     }
 
     let elapsed = start.elapsed();
-    let total_ops = (batches_per_thread * num_threads) as f64;
-    let throughput = total_ops / elapsed.as_secs_f64();
+    let total_ops = batches_per_thread * num_threads;
+    let total_ops_f64 =
+        f64::from(u32::try_from(total_ops).expect("test operation count fits in u32"));
+    let throughput = total_ops_f64 / elapsed.as_secs_f64();
 
     // Assert: Verify that operations completed successfully and measure throughput
     for thread_id in 0..num_threads {
@@ -61,7 +63,7 @@ fn should_group_concurrent_batch_submissions_when_multiple_threads_submit() {
 
     println!(
         "âœ“ Write grouping: {} ops from {} threads in {:.3}s, {:.0} ops/sec",
-        total_ops as u64,
+        total_ops,
         num_threads,
         elapsed.as_secs_f64(),
         throughput
@@ -77,8 +79,8 @@ fn should_handle_concurrent_writes_correctly_with_write_grouping() {
     let cf = engine.create_column_family("test_cf2").expect("create CF");
     let cf_id = cf.id();
 
-    let num_threads = 4;
-    let ops_per_thread = 50;
+    let num_threads = 4_u64;
+    let ops_per_thread = 50_u64;
 
     // Act
     let start = Instant::now();
@@ -87,7 +89,7 @@ fn should_handle_concurrent_writes_correctly_with_write_grouping() {
             let engine_clone = Arc::clone(&engine);
             thread::spawn(move || {
                 for op_num in 0..ops_per_thread {
-                    let key = format!("key_{}_{}", thread_id, op_num);
+                    let key = format!("key_{thread_id}_{op_num}");
                     let value = "x".repeat(100); // 100 bytes value
 
                     let mut tx = engine_clone
@@ -115,11 +117,12 @@ fn should_handle_concurrent_writes_correctly_with_write_grouping() {
     let result = read_tx.get(key.as_bytes());
     assert!(result.is_ok(), "Should be able to read back values");
 
-    let total_ops = (ops_per_thread * num_threads) as f64;
-    let throughput = total_ops / elapsed.as_secs_f64();
+    let total_ops = ops_per_thread * num_threads;
+    let total_ops_f64 =
+        f64::from(u32::try_from(total_ops).expect("test operation count fits in u32"));
+    let throughput = total_ops_f64 / elapsed.as_secs_f64();
     println!(
-        "âœ“ Write grouping with backpressure: {} ops from {} threads, {:.0} ops/sec",
-        total_ops as u64, num_threads, throughput
+        "âœ“ Write grouping with backpressure: {total_ops} ops from {num_threads} threads, {throughput:.0} ops/sec"
     );
 }
 
@@ -133,7 +136,7 @@ fn should_maintain_ordering_with_write_grouping() {
         .expect("create CF");
     let cf_id = cf.id();
 
-    let num_sequential_ops = 100;
+    let num_sequential_ops = 100_u64;
 
     // Act: Insert sequential values for the same key via concurrent transactions
     for i in 0..num_sequential_ops {
@@ -163,13 +166,10 @@ fn should_maintain_ordering_with_write_grouping() {
         // The final value should be the last one we wrote
         assert_eq!(
             final_val,
-            (num_sequential_ops - 1) as u64,
+            num_sequential_ops - 1,
             "Final value should match last written value"
         );
     }
 
-    println!(
-        "âœ“ Ordering maintained across {} sequential operations",
-        num_sequential_ops
-    );
+    println!("âœ“ Ordering maintained across {num_sequential_ops} sequential operations");
 }

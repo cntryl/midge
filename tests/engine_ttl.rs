@@ -17,7 +17,7 @@ use common::*;
 fn should_return_value_given_ttl_not_elapsed_when_reading() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -39,7 +39,7 @@ fn should_return_value_given_ttl_not_elapsed_when_reading() {
 fn should_return_none_given_ttl_elapsed_when_reading() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -62,7 +62,7 @@ fn should_return_none_given_ttl_elapsed_when_reading() {
 fn should_not_expire_key_given_zero_ttl_when_zero_means_infinite() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -91,7 +91,7 @@ fn should_persist_ttl_metadata_given_restart_when_reopening() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -104,7 +104,7 @@ fn should_persist_ttl_metadata_given_restart_when_reopening() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
             let result = read_tx.get(b"key1").unwrap();
@@ -118,7 +118,7 @@ fn should_persist_ttl_metadata_given_flush_and_restart_when_reopening() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -131,7 +131,7 @@ fn should_persist_ttl_metadata_given_flush_and_restart_when_reopening() {
 
         // Act
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine
                 .get_column_family("test")
                 .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
@@ -150,7 +150,7 @@ fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening(
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine
                 .get_column_family("test")
                 .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
@@ -166,7 +166,7 @@ fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening(
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine
                 .get_column_family("test")
                 .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
@@ -185,7 +185,7 @@ fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening(
 fn should_remove_expired_entries_given_compaction_when_ttl_exceeded() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -209,7 +209,7 @@ fn should_remove_expired_entries_given_compaction_when_ttl_exceeded() {
 fn should_preserve_non_expired_entries_given_compaction_when_ttl_not_exceeded() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -236,7 +236,7 @@ fn should_preserve_non_expired_entries_given_compaction_when_ttl_not_exceeded() 
 fn should_handle_mixed_ttl_keys_given_some_expire_when_reading() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx1 = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -281,7 +281,7 @@ fn should_handle_mixed_ttl_keys_given_some_expire_when_reading() {
 fn should_update_ttl_given_overwrite_with_new_ttl_when_writing() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx1 = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -314,13 +314,10 @@ fn should_update_ttl_given_overwrite_with_new_ttl_when_writing() {
 #[test]
 fn should_expire_keys_covered_by_range_tombstone_during_compaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!(
-            "\n=== TTL: Expire Keys Covered by Range Tombstone (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== TTL: Expire Keys Covered by Range Tombstone (mode: {mode}) ===");
 
         // Arrange: Write keys with TTL in range [k3, k8)
-        let engine = Arc::new(open_with_mode(opts.clone(), mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write keys k1..k10 with 1 second TTL
@@ -328,7 +325,7 @@ fn should_expire_keys_covered_by_range_tombstone_during_compaction() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         for i in 1..=10 {
-            let key = format!("k{}", i);
+            let key = format!("k{i}");
             tx.put(key.as_bytes().to_vec(), b"ttl_value".to_vec(), Some(1))
                 .unwrap();
         }
@@ -374,13 +371,10 @@ fn should_expire_keys_covered_by_range_tombstone_during_compaction() {
 #[test]
 fn should_handle_ttl_expiry_during_multi_level_compaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!(
-            "\n=== TTL: Multi-Level Compaction with Expiry (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== TTL: Multi-Level Compaction with Expiry (mode: {mode}) ===");
 
         // Arrange: Build multi-level LSM with different TTLs
-        let engine = Arc::new(open_with_mode(opts.clone(), mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // L0: Write keys with 1-second TTL
@@ -388,7 +382,7 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         for i in 0..50 {
-            let key = format!("level0_key_{:04}", i);
+            let key = format!("level0_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"l0_value".to_vec(), Some(1))
                 .unwrap();
         }
@@ -400,7 +394,7 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         for i in 50..100 {
-            let key = format!("level1_key_{:04}", i);
+            let key = format!("level1_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"l1_value".to_vec(), Some(3600))
                 .unwrap();
         }
@@ -419,7 +413,7 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
         // L0 keys should be gone (expired)
         let l0_found = (0..50)
             .filter(|i| {
-                let key = format!("level0_key_{:04}", i);
+                let key = format!("level0_key_{i:04}");
                 tx.get(key.as_bytes()).ok().flatten().is_some()
             })
             .count();
@@ -428,26 +422,23 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
         // L1 keys should remain (not expired)
         let l1_found = (50..100)
             .filter(|i| {
-                let key = format!("level1_key_{:04}", i);
+                let key = format!("level1_key_{i:04}");
                 tx.get(key.as_bytes()).ok().flatten().is_some()
             })
             .count();
         assert!(l1_found >= 40, "L1 keys should remain");
 
-        eprintln!(
-            "âœ“ Multi-level compaction handled TTL correctly; L1 retained: {}",
-            l1_found
-        );
+        eprintln!("âœ“ Multi-level compaction handled TTL correctly; L1 retained: {l1_found}");
     });
 }
 
 #[test]
 fn should_not_expose_ttl_expired_key_covered_by_range_tombstone() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!("\n=== TTL: Don't Expose TTL+Tombstone (mode: {}) ===", mode);
+        eprintln!("\n=== TTL: Don't Expose TTL+Tombstone (mode: {mode}) ===");
 
         // Arrange: Create scenario with both TTL and tombstone covering same key
-        let engine = Arc::new(open_with_mode(opts.clone(), mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write k5 with 1-second TTL (not flushed)

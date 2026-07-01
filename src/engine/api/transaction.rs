@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Transaction mode controls read/write capabilities
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,7 +157,7 @@ pub struct Transaction {
     id: u64,
     /// Column family this transaction is bound to
     cf_id: ColumnFamilyId,
-    /// Transaction mode (ReadOnly or ReadWrite)
+    /// Transaction mode (`ReadOnly` or `ReadWrite`)
     mode: TransactionMode,
     /// Isolation behavior used during commit conflict handling.
     isolation_level: IsolationLevel,
@@ -170,6 +171,66 @@ pub struct Transaction {
     cloud_mode: bool,
     /// Whether this transaction is currently registered as an active snapshot.
     snapshot_registered: bool,
+}
+
+enum WriteSetLookup {
+    Present(Vec<u8>),
+    Deleted,
+}
+
+struct CommitTiming {
+    started_at: Instant,
+    sample: crate::diagnostics::TransactionCommitTimingSample,
+}
+
+impl CommitTiming {
+    fn maybe_start() -> Option<Self> {
+        crate::diagnostics::transaction_commit_timing_enabled().then(|| {
+            crate::diagnostics::clear_current_transaction_submit_timing();
+            Self {
+                started_at: Instant::now(),
+                sample: crate::diagnostics::TransactionCommitTimingSample::default(),
+            }
+        })
+    }
+
+    fn phase_start(timing: Option<&Self>) -> Option<Instant> {
+        timing.map(|_| Instant::now())
+    }
+
+    fn record_submit(timing: &mut Option<Self>, started_at: Option<Instant>) {
+        if let (Some(timing), Some(started_at)) = (timing.as_mut(), started_at) {
+            let submit_timing = crate::diagnostics::take_current_transaction_submit_timing();
+            timing.sample.submit_apply_transaction_ns = duration_as_nanos(started_at.elapsed());
+            timing.sample.write_group_leader_collect_ns = submit_timing.leader_collect;
+            timing.sample.write_group_runtime_apply_ns = submit_timing.runtime_apply;
+            timing.sample.write_group_follower_wait_ns = submit_timing.follower_wait;
+        }
+    }
+
+    fn record_durability(timing: &mut Option<Self>, started_at: Option<Instant>) {
+        if let (Some(timing), Some(started_at)) = (timing.as_mut(), started_at) {
+            timing.sample.durability_finalize_ns = duration_as_nanos(started_at.elapsed());
+        }
+    }
+
+    fn record_unregister(timing: &mut Option<Self>, started_at: Option<Instant>) {
+        if let (Some(timing), Some(started_at)) = (timing.as_mut(), started_at) {
+            timing.sample.unregister_snapshot_ns = duration_as_nanos(started_at.elapsed());
+        }
+    }
+
+    fn finish(timing: Option<Self>, succeeded: bool) {
+        if let Some(mut timing) = timing {
+            timing.sample.commit_total_ns = duration_as_nanos(timing.started_at.elapsed());
+            timing.sample.succeeded = succeeded;
+            crate::diagnostics::record_transaction_commit_timing(timing.sample);
+        }
+    }
+}
+
+fn duration_as_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 pub(crate) struct TransactionInit {
@@ -204,6 +265,10 @@ impl Transaction {
     }
 
     /// Add a put (upsert) to the transaction's write set
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when called on a read-only transaction.
     pub fn put(
         &mut self,
         key: Vec<u8>,
@@ -221,6 +286,10 @@ impl Transaction {
     }
 
     /// Add an insert (error if exists) to the transaction's write set
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when called on a read-only transaction.
     pub fn insert(
         &mut self,
         key: Vec<u8>,
@@ -238,6 +307,10 @@ impl Transaction {
     }
 
     /// Add a delete to the transaction's write set
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when called on a read-only transaction.
     pub fn delete(&mut self, key: Vec<u8>) -> MidgeResult<()> {
         if self.is_read_only() {
             return Err(MidgeError::InvalidArgument(
@@ -250,8 +323,13 @@ impl Transaction {
 
     /// Add a delete range (atomic tombstone) to the transaction's write set
     ///
-    /// Deletes all keys in the range [start_key, end_key) atomically as part of
+    /// Deletes all keys in the range [`start_key`, `end_key`) atomically as part of
     /// the transaction commit. This is atomic with any puts/deletes in the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when called on a read-only transaction
+    /// or when `start_key > end_key`.
     pub fn delete_range(&mut self, start_key: Vec<u8>, end_key: Vec<u8>) -> MidgeResult<()> {
         if self.is_read_only() {
             return Err(MidgeError::InvalidArgument(
@@ -282,6 +360,7 @@ impl Transaction {
         self.cf_id
     }
 
+    #[must_use]
     pub fn isolation_level(&self) -> IsolationLevel {
         self.isolation_level
     }
@@ -290,19 +369,35 @@ impl Transaction {
         self.isolation_level = isolation_level;
     }
 
+    /// Commit this transaction with the provided durability options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when commit coordination, WAL durability, or cloud durability
+    /// confirmation fails.
     pub fn commit(mut self, opts: crate::engine::api::WriteOptions) -> MidgeResult<()> {
+        let mut timing = CommitTiming::maybe_start();
+
         if self.is_read_only() {
+            let unregister_started_at = CommitTiming::phase_start(timing.as_ref());
             self.unregister_snapshot();
+            CommitTiming::record_unregister(&mut timing, unregister_started_at);
+            CommitTiming::finish(timing, true);
             return Ok(());
         }
 
         if !self.has_writes() {
+            let durability_started_at = CommitTiming::phase_start(timing.as_ref());
             let sync_result = if opts.is_sync() { self.sync() } else { Ok(()) };
+            CommitTiming::record_durability(&mut timing, durability_started_at);
+            let unregister_started_at = CommitTiming::phase_start(timing.as_ref());
             self.unregister_snapshot();
+            CommitTiming::record_unregister(&mut timing, unregister_started_at);
+            CommitTiming::finish(timing, sync_result.is_ok());
             return sync_result;
         }
 
-        let ops = self.take_runtime_ops();
+        let runtime_ops = self.take_runtime_ops();
         let isolation_policy = match self.isolation_level() {
             IsolationLevel::LastWriteWins => {
                 crate::runtime::TransactionIsolationPolicy::LastWriteWins
@@ -313,26 +408,41 @@ impl Transaction {
         };
 
         let durability_policy = Some(effective_wal_durability_policy(self.cloud_mode, opts)?);
+        let submit_started_at = CommitTiming::phase_start(timing.as_ref());
+        let collect_submit_timing = timing.is_some();
         let commit_result = self.coordinator.submit_ops(
             &self.runtime_handle,
-            ops,
+            runtime_ops,
             durability_policy,
             Some(self.start_sequence()),
             isolation_policy,
+            collect_submit_timing,
         );
+        CommitTiming::record_submit(&mut timing, submit_started_at);
 
         let result = match commit_result {
             Ok(sequence) => {
                 self.sequence_publisher.store(sequence, Ordering::SeqCst);
-                self.finalize_write_durability(sequence, opts)
+                let durability_started_at = CommitTiming::phase_start(timing.as_ref());
+                let result = self.finalize_write_durability(sequence, opts);
+                CommitTiming::record_durability(&mut timing, durability_started_at);
+                result
             }
             Err(error) => Err(error),
         };
 
+        let unregister_started_at = CommitTiming::phase_start(timing.as_ref());
         self.unregister_snapshot();
+        CommitTiming::record_unregister(&mut timing, unregister_started_at);
+        CommitTiming::finish(timing, result.is_ok());
         result
     }
 
+    /// Roll back this transaction and unregister its snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if snapshot cleanup fails.
     pub fn rollback(mut self) -> MidgeResult<()> {
         self.unregister_snapshot();
         Ok(())
@@ -358,6 +468,7 @@ impl Transaction {
         self.snapshot_registered = false;
     }
 
+    #[must_use]
     pub fn start_sequence(&self) -> u64 {
         self.start_sequence
     }
@@ -418,10 +529,17 @@ impl Transaction {
     /// then falls back to the engine state at the transaction's snapshot sequence.
     ///
     /// Executes directly against the immutable snapshot (no message passing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transaction snapshot is unavailable.
     pub fn get(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
         // Check transaction's write set first (read-your-own-writes)
-        if let Some(value_opt) = self.get_from_write_set(key) {
-            return Ok(value_opt.map(bytes::Bytes::from));
+        if let Some(value) = self.get_from_write_set(key) {
+            return Ok(match value {
+                WriteSetLookup::Present(bytes) => Some(bytes::Bytes::from(bytes)),
+                WriteSetLookup::Deleted => None,
+            });
         }
 
         // Execute directly against snapshot (bypasses event loop)
@@ -439,6 +557,10 @@ impl Transaction {
     ///
     /// Query must explicitly specify all scan parameters (start, end, direction, limit).
     /// Executes directly against the immutable snapshot (no message passing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transaction snapshot is unavailable.
     pub fn scan(&self, query: &super::query::Query) -> MidgeResult<super::iterator::Iterator> {
         let start = query.effective_start().unwrap_or(&[]);
         let end_vec = query.effective_end().unwrap_or_default();
@@ -464,7 +586,7 @@ impl Transaction {
             merged.insert(key.to_vec(), Some(value));
         }
 
-        for intent in self.write_set.iter() {
+        for intent in &self.write_set {
             match intent {
                 WriteIntent::Put { key, value, .. } | WriteIntent::Insert { key, value, .. } => {
                     merged.insert(key.clone(), Some(bytes::Bytes::from(value.clone())));
@@ -515,19 +637,23 @@ impl Transaction {
         Ok(iter)
     }
 
-    fn get_from_write_set(&self, key: &[u8]) -> Option<Option<Vec<u8>>> {
+    fn get_from_write_set(&self, key: &[u8]) -> Option<WriteSetLookup> {
         for intent in self.write_set.iter().rev() {
             match intent {
                 WriteIntent::Put { key: k, value, .. }
                 | WriteIntent::Insert { key: k, value, .. }
                     if k.as_slice() == key =>
                 {
-                    return Some(Some(value.clone()));
+                    return Some(WriteSetLookup::Present(value.clone()));
                 }
-                WriteIntent::Delete { key: k, .. } if k.as_slice() == key => return Some(None),
+                WriteIntent::Delete { key: k, .. } if k.as_slice() == key => {
+                    return Some(WriteSetLookup::Deleted);
+                }
                 WriteIntent::DeleteRange {
                     start_key, end_key, ..
-                } if key >= start_key.as_slice() && key < end_key.as_slice() => return Some(None),
+                } if key >= start_key.as_slice() && key < end_key.as_slice() => {
+                    return Some(WriteSetLookup::Deleted);
+                }
                 _ => {}
             }
         }

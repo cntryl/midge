@@ -99,7 +99,7 @@ impl CloudExecutor {
             .enable_all()
             .build()
             .map_err(|e| {
-                MidgeError::Internal(format!("Failed to build cloud tokio runtime: {}", e))
+                MidgeError::Internal(format!("Failed to build cloud tokio runtime: {e}"))
             })?;
 
         Ok(Self {
@@ -134,13 +134,11 @@ impl CloudExecutor {
 
         let client = self.client.clone();
 
-        let cb = callback.clone();
-
         self.rt.spawn(async move {
             let result = Self::execute_request(client, request).await;
 
-            let event = mapper(context.clone(), result);
-            let _ = cb.send(event);
+            let event = mapper(context, result);
+            let _ = callback.send(event);
         });
     }
 
@@ -160,7 +158,6 @@ impl CloudExecutor {
     {
         let client = self.client.clone();
         let signer = self.signer.clone();
-        let cb = callback.clone();
 
         self.rt.spawn(async move {
             let mut state = initial_state;
@@ -182,20 +179,20 @@ impl CloudExecutor {
                 };
 
                 match step(&mut state, response) {
-                    Ok(true) => continue,
+                    Ok(true) => {}
                     Ok(false) => break Ok(state),
                     Err(error) => break Err(error),
                 }
             };
 
             let event = finish(context, result);
-            let _ = cb.send(event);
+            let _ = callback.send(event);
         });
     }
 
     async fn execute_request(client: Client, request: CloudRequest) -> MidgeResult<CloudResponse> {
         let mut builder = client.request(request.method.clone(), &request.url);
-        for (k, v) in request.headers.iter() {
+        for (k, v) in &request.headers {
             builder = builder.header(k, v);
         }
         if let Some(body) = request.body {

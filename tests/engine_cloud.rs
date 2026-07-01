@@ -8,7 +8,7 @@ use common::*;
 #[test]
 fn should_create_column_family_given_cloud_mode_when_requested() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
+    let engine = open_with_mode(&opts_for_mode("cloud"), "cloud");
 
     // Act
     let cf = engine.create_column_family("test").expect("create cf");
@@ -23,7 +23,7 @@ fn should_create_column_family_given_cloud_mode_when_requested() {
 #[test]
 fn should_read_written_value_given_cloud_mode_when_written_and_read() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
+    let engine = open_with_mode(&opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act
@@ -48,7 +48,7 @@ fn should_read_written_value_given_cloud_mode_when_written_and_read() {
 #[test]
 fn should_read_committed_transaction_value_given_cloud_mode_when_committed() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
+    let engine = open_with_mode(&opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act
@@ -73,11 +73,11 @@ fn should_read_committed_transaction_value_given_cloud_mode_when_committed() {
 #[test]
 fn should_scan_inserted_keys_given_cloud_mode_when_range_scanned() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
+    let engine = open_with_mode(&opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..20 {
-        let key = format!("cloud_scan_{:02}", i);
+        let key = format!("cloud_scan_{i:02}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin scan seed transaction");
@@ -101,7 +101,7 @@ fn should_scan_inserted_keys_given_cloud_mode_when_range_scanned() {
 #[test]
 fn should_preserve_snapshot_value_given_cloud_mode_when_overwritten_after_snapshot() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
+    let engine = open_with_mode(&opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
 
     let mut tx = engine
@@ -142,7 +142,7 @@ fn should_preserve_snapshot_value_given_cloud_mode_when_overwritten_after_snapsh
 #[test]
 fn should_hide_deleted_key_given_cloud_mode_when_deleted() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
+    let engine = open_with_mode(&opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
 
     let mut tx = engine
@@ -171,7 +171,7 @@ fn should_hide_deleted_key_given_cloud_mode_when_deleted() {
 #[test]
 fn should_apply_last_write_wins_given_cloud_mode_when_multiple_writes() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
+    let engine = open_with_mode(&opts_for_mode("cloud"), "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act

@@ -1,10 +1,10 @@
 //! Event loop — central message dispatcher
 //!
-//! Receives messages from RuntimeHandle and routes them to the correct actor.
+//! Receives messages from `RuntimeHandle` and routes them to the correct actor.
 //!
 //! Copilot note:
-//! - Per-request routing is done exclusively via `router.complete()`.
-//! - EventLoop never touches pending_responses directly.
+//! - Per-request routing flows through `respond()`.
+//! - `EventLoop` never touches `pending_responses` directly.
 //! - All read paths are local (memtables → SST later).
 //! - All actor responses flow through `respond()`.
 //!
@@ -14,15 +14,27 @@
 //!
 //! - `read_path` — point reads, range scans, durability-aware message handlers
 //! - `durability_sync` — WAL sync, group commit, durability waiter completion
-//! - `cloud_integration` — CloudAsync WAL flush, cloud ack/fail handling
+//! - `cloud_integration` — `CloudAsync` WAL flush, cloud ack/fail handling
 //! - `write_batch` — group commit write draining, backpressure / write stall
 
+mod cloud;
 mod cloud_integration;
+mod compaction;
+mod control;
+mod dispatch;
 mod durability_sync;
+mod flush;
+mod gc;
+mod ingest;
+mod manifest;
 mod read_path;
+mod shutdown;
+mod snapshot;
+mod wal;
 mod write_batch;
 
-use crossbeam::channel::{Receiver, TryRecvError};
+use crossbeam::channel::{Receiver, Sender, TryRecvError};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +42,8 @@ use std::time::Duration;
 use super::actors::{
     CloudActor, CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor, WalActor,
 };
-use super::durability::{DurabilityCoordinator, DurabilityWaiter};
+use super::durability::DurabilityCoordinator;
+use super::read_resources::ReadResources;
 use super::read_snapshot::ReadSnapshot;
 use super::snapshot_cache::{CfSnapshotData, PublishedSnapshot, SnapshotCache};
 use super::state::RuntimeState;
@@ -75,6 +88,8 @@ pub struct EventLoop {
 
     /// Per-request router (oneshot channels)
     pub(super) router: Arc<ResponseRouter>,
+    /// Direct response channels for hot runtime-internal requests.
+    pub(super) inline_responses: RefCell<HashMap<u64, Sender<RuntimeResponse>>>,
 
     /// One buffered message we pulled from the channel while draining writes.
     ///
@@ -86,12 +101,14 @@ pub struct EventLoop {
     /// (compaction threads will use this to report completion).
     pub(super) worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
 
-    /// Waiters blocked on write stall clearing (request_id -> cf_id).
-    pub(super) write_stall_waiters: HashMap<u64, crate::engine::ColumnFamilyId>,
+    /// Waiters blocked on write stall clearing (`request_id` -> `cf_id`).
+    pub(super) write_stall_waiters: HashMap<u64, crate::types::ColumnFamilyId>,
     /// FIFO queues of waiters per CF.
-    pub(super) write_stall_waiter_queues: HashMap<crate::engine::ColumnFamilyId, VecDeque<u64>>,
+    pub(super) write_stall_waiter_queues: HashMap<crate::types::ColumnFamilyId, VecDeque<u64>>,
     /// Lock-free snapshot cache shared with Engine for read-path bypass.
     pub(super) snapshot_cache: Option<Arc<SnapshotCache>>,
+    /// Shared SST readers and block cache used by runtime read snapshots.
+    pub(super) read_resources: Option<Arc<ReadResources>>,
 
     /// Shared flag from the lease heartbeat. When `false`, the event loop
     /// rejects new write operations with `MidgeError::Fenced`.
@@ -99,7 +116,7 @@ pub struct EventLoop {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HandleOutcome {
+pub(super) enum HandleOutcome {
     Continue,
     Break,
 }
@@ -114,7 +131,7 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<Self> {
         let wal_dir = state.wal_dir.clone();
         let sst_dir = state.sst_dir.clone();
-        let memory_mode = state.memory_mode;
+        let memory_mode = state.is_memory_mode();
         let initial_segment_id = state.wal.current_segment_id;
 
         let sst_factory = if memory_mode {
@@ -130,6 +147,19 @@ impl EventLoop {
                 crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
                     .with_compression_policy(config.compression_policy.clone()),
             )
+        };
+        let read_resources = if memory_mode {
+            None
+        } else {
+            let sst_path_prefix = sst_dir
+                .strip_prefix(&state.db_path)
+                .unwrap_or_else(|_| std::path::Path::new("sst"))
+                .to_path_buf();
+            Some(Arc::new(ReadResources::new(
+                Arc::clone(&state.fs),
+                sst_path_prefix,
+                config.block_cache_size,
+            )))
         };
 
         // Create actors - they handle memory_mode internally
@@ -186,12 +216,14 @@ impl EventLoop {
                 config.cloud_runtime_policy.clone(),
             ),
             router,
+            inline_responses: RefCell::new(HashMap::new()),
             pending_msg: None,
             worker_msg_tx,
 
             write_stall_waiters: HashMap::new(),
             write_stall_waiter_queues: HashMap::new(),
             snapshot_cache: None,
+            read_resources,
             lease_healthy: config.lease_healthy.clone(),
         };
 
@@ -255,13 +287,14 @@ impl EventLoop {
             cf_snapshots.insert(
                 cf_id,
                 CfSnapshotData {
-                    snapshot: Arc::new(ReadSnapshot::new(
+                    snapshot: Arc::new(ReadSnapshot::new_with_resources(
                         cf_state.memtable.clone(),
                         cf_state.immutable_memtables.clone(),
                         cf_files,
                         Arc::clone(&self.state.fs),
                         sst_path_prefix,
-                        self.state.memory_mode,
+                        self.state.is_memory_mode(),
+                        self.read_resources.clone(),
                     )),
                 },
             );
@@ -271,11 +304,22 @@ impl EventLoop {
             sequence: self.state.sequence,
             cf_snapshots,
         });
+
+        if let Some(read_resources) = &self.read_resources {
+            let live_names = self
+                .state
+                .manifest
+                .files
+                .iter()
+                .map(|file| file.name.clone())
+                .collect();
+            read_resources.prune_to_live_ssts(&live_names);
+        }
     }
 
     fn build_sst_file_meta(
         &self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         level: u32,
         sst_name: &str,
     ) -> crate::common::MidgeResult<crate::runtime::FileMeta> {
@@ -303,6 +347,39 @@ impl EventLoop {
             plan.output_seq = self.state.next_sequence();
         }
         plan
+    }
+
+    fn prepare_compaction_plan_for_launch(
+        &mut self,
+        plan: crate::compaction::CompactionPlan,
+    ) -> crate::common::MidgeResult<crate::compaction::CompactionPlan> {
+        let mut plan = self.assign_compaction_output_sequence(plan);
+        plan.snapshot_horizon = self.state.oldest_active_snapshot_sequence();
+
+        if plan.output_seq == 0 {
+            return Err(crate::common::MidgeError::Internal(
+                "BUG: compaction output sequence was not assigned before actor launch".to_string(),
+            ));
+        }
+
+        Ok(plan)
+    }
+
+    fn launch_compaction(
+        &mut self,
+        plan: crate::compaction::CompactionPlan,
+    ) -> crate::common::MidgeResult<()> {
+        let plan = self.prepare_compaction_plan_for_launch(plan)?;
+
+        self.compaction_actor
+            .run_compaction(
+                &mut self.state,
+                &plan,
+                self.hybrid_storage.as_ref(),
+                self.worker_msg_tx.clone(),
+            )
+            .map(|_| ())
+            .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))
     }
 
     fn schedule_one_background_compaction_if_needed(
@@ -346,20 +423,12 @@ impl EventLoop {
             return Ok(false);
         };
 
-        let plan = self.assign_compaction_output_sequence(plan);
-        self.compaction_actor
-            .run_compaction(
-                &mut self.state,
-                plan,
-                self.hybrid_storage.as_ref(),
-                self.worker_msg_tx.clone(),
-            )
-            .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))?;
+        self.launch_compaction(plan)?;
         Ok(true)
     }
 
     fn schedule_compaction_after_flush_publication(&mut self, sst_name: &str) {
-        if !self.state.enable_compaction {
+        if !self.state.compaction_enabled() {
             return;
         }
 
@@ -399,17 +468,17 @@ impl EventLoop {
         key: &str,
     ) -> Result<Option<Vec<u8>>, String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_get(key.to_string(), tx);
+        cloud.submit_get(key, tx);
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+            Ok(crate::storage::cloud::CloudEvent::Get {
                 result: crate::storage::cloud::CloudOutcome::Ok(data),
                 ..
             }) => Ok(Some(data)),
-            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+            Ok(crate::storage::cloud::CloudEvent::Get {
                 result: crate::storage::cloud::CloudOutcome::Err(error),
                 ..
             }) if crate::storage::cloud::is_not_found_error(&error) => Ok(None),
-            Ok(crate::storage::cloud::CloudEvent::GetComplete {
+            Ok(crate::storage::cloud::CloudEvent::Get {
                 result: crate::storage::cloud::CloudOutcome::Err(error),
                 ..
             }) => Err(format!("cloud metadata get '{key}' failed: {error}")),
@@ -425,17 +494,17 @@ impl EventLoop {
         key: &str,
     ) -> Result<Option<crate::storage::cloud::ObjectMetadata>, String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_head(key.to_string(), tx);
+        cloud.submit_head(key, tx);
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+            Ok(crate::storage::cloud::CloudEvent::Head {
                 result: crate::storage::cloud::CloudOutcome::Ok(metadata),
                 ..
             }) => Ok(Some(metadata)),
-            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+            Ok(crate::storage::cloud::CloudEvent::Head {
                 result: crate::storage::cloud::CloudOutcome::Err(error),
                 ..
             }) if crate::storage::cloud::is_not_found_error(&error) => Ok(None),
-            Ok(crate::storage::cloud::CloudEvent::HeadComplete {
+            Ok(crate::storage::cloud::CloudEvent::Head {
                 result: crate::storage::cloud::CloudOutcome::Err(error),
                 ..
             }) => Err(format!("cloud metadata head '{key}' failed: {error}")),
@@ -490,11 +559,11 @@ impl EventLoop {
     fn submit_conditional_metadata_put(
         cloud: &crate::storage::cloud::CloudStorage,
         file_name: &str,
-        key: String,
+        key: &str,
         data: Vec<u8>,
         local_manifest_sequence: u64,
     ) -> crate::common::MidgeResult<()> {
-        let headers = match Self::cloud_metadata_head_optional(cloud, &key)
+        let headers = match Self::cloud_metadata_head_optional(cloud, key)
             .map_err(crate::common::MidgeError::Internal)?
         {
             Some(metadata) => {
@@ -504,7 +573,7 @@ impl EventLoop {
                         "cloud metadata '{key}' cannot be conditionally updated without an etag"
                     )));
                 }
-                let current = Self::cloud_metadata_get_optional(cloud, &key)
+                let current = Self::cloud_metadata_get_optional(cloud, key)
                     .map_err(crate::common::MidgeError::Internal)?
                     .ok_or_else(|| {
                         crate::common::MidgeError::Internal(format!(
@@ -527,10 +596,10 @@ impl EventLoop {
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_put(key.clone(), data, headers, tx);
+        cloud.submit_put(key, data, headers, tx);
 
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(crate::storage::cloud::CloudEvent::PutComplete { result, .. }) => match result {
+            Ok(crate::storage::cloud::CloudEvent::Put { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(()) => Ok(()),
                 crate::storage::cloud::CloudOutcome::Err(error) => {
                     Err(crate::common::MidgeError::Internal(format!(
@@ -566,7 +635,7 @@ impl EventLoop {
             Self::submit_conditional_metadata_put(
                 cloud,
                 file_name,
-                key,
+                &key,
                 data,
                 local_manifest_sequence,
             )?;
@@ -581,7 +650,9 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<()> {
         match self.mirror_metadata_to_authoritative_cloud() {
             Ok(()) => Ok(()),
-            Err(error) if self.state.recovery_policy == crate::engine::RecoveryPolicy::Salvage => {
+            Err(error)
+                if self.state.recovery_policy() == crate::config::RecoveryPolicy::Salvage =>
+            {
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(%error, context, "cloud metadata mirror failed during salvage-capable operation");
                 Ok(())
@@ -592,7 +663,7 @@ impl EventLoop {
 
     fn publish_flushed_sst(
         &mut self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         sst_name: &str,
         sequence: u64,
         file_meta: Option<crate::runtime::FileMeta>,
@@ -605,7 +676,7 @@ impl EventLoop {
         };
 
         let mut cloud_manifest_published = false;
-        if !self.state.memory_mode {
+        if !self.state.is_memory_mode() {
             self.manifest_actor.add_sst(&mut self.state, file_meta)?;
             self.state.transition_flush_publication_intent(
                 sst_name,
@@ -614,7 +685,9 @@ impl EventLoop {
             if sequence > self.state.manifest.last_persisted_sequence {
                 self.state.manifest.last_persisted_sequence = sequence;
             }
-            let manifest_persisted = match self.manifest_actor.persist(&self.state) {
+            let manifest_persisted = match crate::runtime::actors::ManifestActor::persist(
+                &self.state,
+            ) {
                 Ok(()) => true,
                 Err(error) => {
                     self.state.mark_persistence_anomaly();
@@ -641,7 +714,7 @@ impl EventLoop {
     }
 
     fn drain_auto_flush_memtables(&mut self) -> usize {
-        if self.state.memory_mode {
+        if self.state.is_memory_mode() {
             return 0;
         }
 
@@ -714,10 +787,25 @@ impl EventLoop {
         }
     }
 
-    /// Helper: deliver a RuntimeResponse to the requester via the router.
+    pub(super) fn register_inline_response(
+        &self,
+        request_id: u64,
+        response_tx: Sender<RuntimeResponse>,
+    ) {
+        self.inline_responses
+            .borrow_mut()
+            .insert(request_id, response_tx);
+    }
+
+    /// Helper: deliver a `RuntimeResponse` to the requester.
     #[inline]
     pub(super) fn respond(&self, request_id: u64, resp: RuntimeResponse) {
-        self.router.complete(resp);
+        let inline_tx = self.inline_responses.borrow_mut().remove(&request_id);
+        if let Some(response_tx) = inline_tx {
+            let _ = response_tx.send(resp);
+        } else {
+            self.router.complete(resp);
+        }
 
         // Optional trace
         if self.trace_enabled {
@@ -730,14 +818,11 @@ impl EventLoop {
             return true;
         }
 
-        if self.wal_actor.should_sync_batch()
-            || self.wal_actor.has_pending_data()
-            || self.wal_actor.has_pending_cloud_writes()
-        {
+        if self.wal_actor.should_sync_batch() || self.wal_actor.has_pending_cloud_writes() {
             return true;
         }
 
-        if self.durability.has_pending_waiters() {
+        if self.durability.cloud_seal_retry_needed() && self.state.wal.pending_writes > 0 {
             return true;
         }
 
@@ -760,6 +845,10 @@ impl EventLoop {
         false
     }
 
+    fn idle_progress_timeout(&self) -> Option<Duration> {
+        self.wal_actor.sync_deadline_timeout()
+    }
+
     fn progress_pass(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
         self.sync_batched_wal_if_needed(msg_rx);
         self.maybe_flush_cloud_async_wal();
@@ -779,7 +868,16 @@ impl EventLoop {
             self.loop_debug_batch_total += batch as u64;
 
             if self.loop_debug_wakes.is_multiple_of(LOOP_DEBUG_EVERY) {
-                let avg_batch = self.loop_debug_batch_total as f64 / self.loop_debug_wakes as f64;
+                let avg_batch = self
+                    .loop_debug_batch_total
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(0.0)
+                    / self
+                        .loop_debug_wakes
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(1.0);
                 eprintln!(
                     "[midge] loop_stats wakes={} avg_batch={:.2}",
                     self.loop_debug_wakes, avg_batch
@@ -793,6 +891,14 @@ impl EventLoop {
         self.tick_hybrid_storage();
         self.drain_hybrid_storage_events();
         self.handle_runtime_msg(msg, msg_rx)
+    }
+
+    pub(super) fn handle_runtime_msg(
+        &mut self,
+        msg: RuntimeMsg,
+        msg_rx: &Receiver<RuntimeMsg>,
+    ) -> HandleOutcome {
+        dispatch::RuntimeDispatcher::handle(self, msg, msg_rx)
     }
 
     fn process_wake_msg(
@@ -816,13 +922,13 @@ impl EventLoop {
     }
 
     /// Main event loop — runs until Shutdown message or channel close.
-    pub fn run(&mut self, msg_rx: Receiver<RuntimeMsg>) {
+    pub fn run(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
         const MAX_DRAIN_WRITES_ON_WAKE: usize = 4096;
         const ACTIONABLE_IDLE_BACKOFF: Duration = Duration::from_micros(50);
 
         loop {
             if let Some(pending) = self.pending_msg.take() {
-                let outcome = self.process_one(pending, &msg_rx);
+                let outcome = self.process_one(pending, msg_rx);
                 if outcome == HandleOutcome::Break {
                     break;
                 }
@@ -832,7 +938,7 @@ impl EventLoop {
             if self.has_actionable_work() {
                 match msg_rx.try_recv() {
                     Ok(msg) => {
-                        let outcome = self.process_wake_msg(msg, &msg_rx, MAX_DRAIN_WRITES_ON_WAKE);
+                        let outcome = self.process_wake_msg(msg, msg_rx, MAX_DRAIN_WRITES_ON_WAKE);
                         if outcome == HandleOutcome::Break {
                             break;
                         }
@@ -848,30 +954,60 @@ impl EventLoop {
                             self.handle_storage_event(event);
                             continue;
                         }
-                        Err(TryRecvError::Disconnected) => {}
-                        Err(TryRecvError::Empty) => {}
+                        Err(TryRecvError::Disconnected | TryRecvError::Empty) => {}
                     }
                 }
 
-                self.progress_pass(&msg_rx);
+                self.progress_pass(msg_rx);
                 std::thread::sleep(ACTIONABLE_IDLE_BACKOFF);
                 continue;
             }
 
+            let idle_timeout = self.idle_progress_timeout();
             let msg = if let Some(storage_rx) = self.hybrid_storage_events.clone() {
-                crossbeam::channel::select! {
-                    recv(msg_rx) -> msg => msg.ok(),
-                    recv(storage_rx) -> ev => {
-                        match ev {
-                            Ok(ev) => {
-                                self.handle_storage_event(ev);
+                if let Some(timeout) = idle_timeout {
+                    crossbeam::channel::select! {
+                        recv(msg_rx) -> msg => msg.ok(),
+                        recv(storage_rx) -> ev => {
+                            match ev {
+                                Ok(ev) => {
+                                    self.handle_storage_event(ev);
+                                }
+                                Err(_) => {
+                                    self.hybrid_storage_events = None;
+                                }
                             }
-                            Err(_) => {
-                                self.hybrid_storage_events = None;
-                            }
+                            continue;
                         }
+                        default(timeout) => {
+                            self.progress_pass(msg_rx);
+                            continue;
+                        }
+                    }
+                } else {
+                    crossbeam::channel::select! {
+                        recv(msg_rx) -> msg => msg.ok(),
+                        recv(storage_rx) -> ev => {
+                            match ev {
+                                Ok(ev) => {
+                                    self.handle_storage_event(ev);
+                                }
+                                Err(_) => {
+                                    self.hybrid_storage_events = None;
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
+            } else if let Some(timeout) = idle_timeout {
+                match msg_rx.recv_timeout(timeout) {
+                    Ok(msg) => Some(msg),
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                        self.progress_pass(msg_rx);
                         continue;
                     }
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => None,
                 }
             } else {
                 msg_rx.recv().ok()
@@ -881,1555 +1017,13 @@ impl EventLoop {
                 break;
             };
 
-            let outcome = self.process_wake_msg(msg, &msg_rx, MAX_DRAIN_WRITES_ON_WAKE);
+            let outcome = self.process_wake_msg(msg, msg_rx, MAX_DRAIN_WRITES_ON_WAKE);
             if outcome == HandleOutcome::Break {
                 break;
             }
         }
 
         tracing::debug!("Runtime message channel closed — exiting event loop");
-    }
-
-    fn handle_runtime_msg(
-        &mut self,
-        msg: RuntimeMsg,
-        msg_rx: &Receiver<RuntimeMsg>,
-    ) -> HandleOutcome {
-        match msg {
-            RuntimeMsg::Shutdown => {
-                tracing::info!("Runtime shutting down");
-
-                // CRITICAL: Flush and wait for pending CloudAsync segments before shutdown.
-                // This ensures all writes are cloud-durable for recovery.
-                if self.wal_actor.is_cloud_async() && self.state.wal.pending_writes > 0 {
-                    match self.seal_current_cloud_segment() {
-                        Ok(Some((segment_id, _max_sequence))) => {
-                            tracing::info!(
-                                segment_id,
-                                "Enqueued final CloudAsync segment on shutdown"
-                            );
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                "Failed to seal CloudAsync segment during shutdown"
-                            );
-                        }
-                    }
-                }
-
-                // Wait for pending uploads to complete (with timeout)
-                if self.wal_actor.is_cloud_async() {
-                    if let Some(storage) = &self.hybrid_storage {
-                        let storage_arc = storage.clone();
-                        let shutdown_start = std::time::Instant::now();
-                        let shutdown_timeout = std::time::Duration::from_secs(30);
-                        let mut last_pending = usize::MAX;
-                        let mut stagnant_rounds = 0usize;
-                        while storage_arc.pending_upload_count() > 0
-                            && shutdown_start.elapsed() < shutdown_timeout
-                        {
-                            // Process uploads
-                            self.tick_hybrid_storage();
-                            self.drain_hybrid_storage_events();
-
-                            let pending = storage_arc.pending_upload_count();
-                            if pending < last_pending {
-                                last_pending = pending;
-                                stagnant_rounds = 0;
-                            } else if self.state.persistence_anomaly_detected {
-                                stagnant_rounds = stagnant_rounds.saturating_add(1);
-                                if stagnant_rounds >= 25 {
-                                    tracing::warn!(
-                                        pending,
-                                        "aborting cloud shutdown wait after repeated failed upload progress"
-                                    );
-                                    break;
-                                }
-                            }
-
-                            // Small sleep to avoid busy-waiting
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                        }
-
-                        if storage_arc.pending_upload_count() > 0 {
-                            tracing::warn!(
-                                pending = storage_arc.pending_upload_count(),
-                                "Shutdown timeout: {} pending CloudAsync uploads not completed",
-                                storage_arc.pending_upload_count()
-                            );
-                        } else {
-                            tracing::info!("All CloudAsync uploads completed on shutdown");
-                        }
-                    }
-                }
-
-                return HandleOutcome::Break;
-            }
-
-            RuntimeMsg::Noop { request_id } => {
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
-            }
-
-            RuntimeMsg::StartupPing { request_id } => {
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
-            }
-
-            RuntimeMsg::CheckWriteStall { request_id, cf_id } => {
-                let is_stalled = self.state.should_stall_writes(cf_id);
-                self.respond(
-                    request_id,
-                    RuntimeResponse::WriteStallStatus {
-                        request_id,
-                        is_stalled,
-                    },
-                );
-            }
-
-            RuntimeMsg::WaitForWriteStallClear { request_id, cf_id } => {
-                if !self.state.should_stall_writes(cf_id) {
-                    self.respond(request_id, RuntimeResponse::Ok { request_id });
-                } else {
-                    self.write_stall_waiters.insert(request_id, cf_id);
-                    self.write_stall_waiter_queues
-                        .entry(cf_id)
-                        .or_default()
-                        .push_back(request_id);
-                }
-
-                self.drain_auto_flush_memtables();
-            }
-
-            RuntimeMsg::CancelWaitForWriteStallClear { wait_request_id } => {
-                let _ = self.write_stall_waiters.remove(&wait_request_id);
-            }
-
-            RuntimeMsg::GetReadAmpMetrics { request_id } => {
-                let metrics = &self.state.read_amp_metrics;
-                self.respond(
-                    request_id,
-                    RuntimeResponse::ReadAmpMetricsSnapshot {
-                        request_id,
-                        reads_total: metrics.reads_total(),
-                        ssts_touched_total: metrics.ssts_touched_total(),
-                        l0_ssts_touched_total: metrics.l0_ssts_touched_total(),
-                        blocks_read_total: metrics.blocks_read_total(),
-                        avg_ssts_per_read: metrics.avg_ssts_per_read(),
-                        avg_l0_ssts_per_read: metrics.avg_l0_ssts_per_read(),
-                        avg_blocks_per_read: metrics.avg_blocks_per_read(),
-                        l0_overlap_rate: metrics.l0_overlap_rate(),
-                        sst_budget_violation_rate: metrics.sst_budget_violation_rate(),
-                        block_budget_violation_rate: metrics.block_budget_violation_rate(),
-                    },
-                );
-            }
-
-            RuntimeMsg::GetRecoveryMetrics { request_id } => {
-                self.respond(
-                    request_id,
-                    RuntimeResponse::RecoveryMetricsSnapshot {
-                        request_id,
-                        wal_recovery_records_replayed: self.state.wal_recovery_records_replayed,
-                        wal_recovery_bytes_replayed: self.state.wal_recovery_bytes_replayed,
-                        intent_log_replay_runs: self.state.intent_log_replay_runs,
-                        intent_log_entries_replayed: self.state.intent_log_entries_replayed,
-                    },
-                );
-            }
-
-            RuntimeMsg::GetRuntimeMetrics { request_id } => {
-                self.respond(
-                    request_id,
-                    RuntimeResponse::RuntimeMetricsSnapshot {
-                        request_id,
-                        snapshot: Box::new(self.state.runtime_metrics_snapshot()),
-                    },
-                );
-            }
-
-            RuntimeMsg::GetStorageLayout { request_id } => {
-                self.respond(
-                    request_id,
-                    RuntimeResponse::StorageLayoutSnapshot {
-                        request_id,
-                        snapshot: self.state.storage_layout_snapshot(),
-                    },
-                );
-            }
-
-            RuntimeMsg::SetRuntimeConfig {
-                request_id,
-                memtable_size_limit,
-                memtable_flush_threshold,
-                enable_compaction,
-                l0_compaction_trigger,
-                wal_durability_policy,
-                wal_batch_config,
-            } => {
-                if let Some(ms) = memtable_size_limit {
-                    self.state.memtable_size_limit = ms;
-                }
-                if let Some(th) = memtable_flush_threshold {
-                    self.state.memtable_flush_threshold = th;
-                }
-                if let Some(ec) = enable_compaction {
-                    self.state.enable_compaction = ec;
-                }
-                if let Some(trigger) = l0_compaction_trigger {
-                    self.compaction_actor.set_l0_file_count_threshold(trigger);
-                }
-
-                self.wake_write_stall_waiters();
-
-                // Apply WAL changes to the wal actor if requested
-                if wal_durability_policy.is_some() || wal_batch_config.is_some() {
-                    let policy =
-                        wal_durability_policy.unwrap_or(self.wal_actor.durability_policy());
-                    let batch_cfg = wal_batch_config.unwrap_or(self.wal_actor.batch_config());
-                    if let Err(e) = self.wal_actor.set_durability(policy, batch_cfg) {
-                        self.respond(
-                            request_id,
-                            RuntimeResponse::Error {
-                                request_id,
-                                error: crate::common::MidgeError::Internal(e.to_string()),
-                            },
-                        );
-                        return HandleOutcome::Continue;
-                    }
-                }
-
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
-            }
-
-            RuntimeMsg::GetRuntimeConfig { request_id } => {
-                self.respond(
-                    request_id,
-                    RuntimeResponse::RuntimeConfigSnapshot {
-                        request_id,
-                        memtable_size_limit: self.state.memtable_size_limit,
-                        memtable_flush_threshold: self.state.memtable_flush_threshold,
-                        enable_compaction: self.state.enable_compaction,
-                        l0_compaction_trigger: self.compaction_actor.l0_file_count_threshold(),
-                        wal_durability_policy: self.wal_actor.durability_policy(),
-                        wal_batch_config: self.wal_actor.batch_config(),
-                    },
-                );
-            }
-
-            RuntimeMsg::GetIngestState { request_id } => {
-                let active = self
-                    .state
-                    .ingest_active
-                    .load(std::sync::atomic::Ordering::SeqCst);
-                self.respond(
-                    request_id,
-                    RuntimeResponse::IngestState {
-                        request_id,
-                        ingest_active: active,
-                    },
-                );
-            }
-
-            RuntimeMsg::BeginIngest { request_id } => {
-                // ─────────────────────────────────────────────────────────────────────
-                // INGEST BARRIER — scope: active_compactions ONLY
-                //
-                // We wait ONLY for active compaction jobs to drain. We do NOT wait for:
-                //   - WAL sync (batched writes flush on their own schedule)
-                //   - memtable flush (handled separately on EndIngest)
-                //   - stats, maintenance, or background monitoring
-                //
-                // The invariant: once begin_ingest returns, no compaction work is
-                // running or can be scheduled until end_ingest is called.
-                // ─────────────────────────────────────────────────────────────────────
-
-                let active = self
-                    .state
-                    .active_compactions
-                    .load(std::sync::atomic::Ordering::SeqCst);
-                let current_epoch = self
-                    .state
-                    .ingest_epoch
-                    .load(std::sync::atomic::Ordering::SeqCst);
-
-                tracing::info!(
-                    component = "ingest",
-                    invariant = "begin_ingest_barrier",
-                    ingest_epoch = current_epoch,
-                    "ingest: begin_ingest requested"
-                );
-                tracing::info!(
-                    component = "ingest",
-                    invariant = "begin_ingest_barrier",
-                    active_compactions = active,
-                    ingest_epoch = current_epoch,
-                    "ingest: active_compactions={} (will wait for drain)",
-                    active
-                );
-
-                // Prevent new compactions and mark ingest active
-                self.state.enable_compaction = false;
-                self.state
-                    .ingest_active
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-
-                // Bump epoch so in-flight compactions will see the change and abort cooperatively
-                let new_epoch = self
-                    .state
-                    .ingest_epoch
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                    + 1;
-
-                // Check if active compactions are already zero
-                let active = self
-                    .state
-                    .active_compactions
-                    .load(std::sync::atomic::Ordering::SeqCst);
-
-                if active == 0 {
-                    // No active compactions; can proceed immediately
-                    tracing::info!(
-                        component = "ingest",
-                        invariant = "begin_ingest_barrier",
-                        ingest_epoch = new_epoch,
-                        "ingest: ingestion barrier enabled — no active compactions to drain"
-                    );
-                    self.respond(request_id, RuntimeResponse::Ok { request_id });
-                } else {
-                    // Queue request to be completed when active_compactions reaches 0.
-                    // Don't block the event loop — check completion in CompactionComplete handler.
-                    let mut pending = self.state.pending_compaction_waits.lock();
-                    pending.insert(request_id, format!("BeginIngest(epoch={})", new_epoch));
-                    tracing::debug!(
-                        component = "ingest",
-                        "begin_ingest queued; waiting for {} active compactions to drain (epoch={})",
-                        active,
-                        new_epoch
-                    );
-                }
-            }
-
-            RuntimeMsg::EndIngest { request_id } => {
-                tracing::info!("EndIngest: flushing memtables and restoring scheduling");
-
-                // Trigger flush for each column family to ensure memtables are persisted
-                let cf_ids: Vec<u32> = self.state.column_families.keys().cloned().collect();
-                for cf_id in cf_ids {
-                    // Flush and complete bookkeeping
-                    if let Ok(sst_name) = self.flush_actor.handle_flush(
-                        &mut self.state,
-                        cf_id,
-                        self.hybrid_storage.as_ref(),
-                    ) {
-                        let sequence = self.state.sequence;
-                        let _ = self.publish_flushed_sst(
-                            cf_id,
-                            &sst_name.sst_name,
-                            sequence,
-                            sst_name.file_meta,
-                        );
-                    }
-                }
-                self.wake_write_stall_waiters();
-
-                // Bump epoch again to invalidate any in-flight compactions that missed the earlier epoch
-                let new_epoch = self
-                    .state
-                    .ingest_epoch
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                    + 1;
-                tracing::info!(
-                    ingest_epoch = new_epoch,
-                    "EndIngest: ingestion barrier lifted"
-                );
-
-                // Clear ingest active before resuming compaction scheduling
-                self.state
-                    .ingest_active
-                    .store(false, std::sync::atomic::Ordering::SeqCst);
-
-                // Optionally kick compaction checks once so background compaction resumes
-                if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
-                    let _ = self.compaction_actor.run_compaction(
-                        &mut self.state,
-                        plan,
-                        self.hybrid_storage.as_ref(),
-                        self.worker_msg_tx.clone(),
-                    );
-                }
-
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
-            }
-
-            RuntimeMsg::GetCurrentSequence { request_id } => {
-                self.respond(
-                    request_id,
-                    RuntimeResponse::CurrentSequence {
-                        request_id,
-                        sequence: self.state.sequence,
-                    },
-                );
-            }
-
-            RuntimeMsg::CaptureReadSnapshot {
-                request_id,
-                cf_id,
-                sequence: _,
-            } => {
-                if let Some(snapshot) = self.create_read_snapshot(cf_id) {
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::ReadSnapshot {
-                            request_id,
-                            snapshot: Arc::new(snapshot),
-                        },
-                    );
-                } else {
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::Internal(format!(
-                                "Column family {} not found",
-                                cf_id
-                            )),
-                        },
-                    );
-                }
-            }
-
-            RuntimeMsg::BeginTransaction { request_id, cf_id } => {
-                let start_sequence = self.state.sequence;
-                let snapshot = self.create_read_snapshot(cf_id).map(Arc::new);
-                self.respond(
-                    request_id,
-                    RuntimeResponse::BeginTransactionResult {
-                        request_id,
-                        start_sequence,
-                        snapshot,
-                    },
-                );
-            }
-
-            RuntimeMsg::RegisterSnapshot {
-                request_id,
-                snapshot_id,
-                sequence,
-                pinned_sst_names,
-            } => {
-                let inserted =
-                    self.state
-                        .register_snapshot(snapshot_id, sequence, pinned_sst_names);
-                if inserted {
-                    self.respond(request_id, RuntimeResponse::Ok { request_id });
-                } else {
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::InvalidArgument(format!(
-                                "snapshot {} is already registered",
-                                snapshot_id
-                            )),
-                        },
-                    );
-                }
-            }
-
-            RuntimeMsg::UnregisterSnapshot { snapshot_id } => {
-                self.state.unregister_snapshot(snapshot_id);
-            }
-
-            RuntimeMsg::ApplyTransaction {
-                request_id,
-                ops,
-                durability_policy,
-                start_sequence,
-                isolation_policy,
-            } => {
-                // Fencing gate: reject writes if lease is lost
-                if let Err(e) = self.check_lease_health() {
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: e,
-                        },
-                    );
-                    return HandleOutcome::Continue;
-                }
-
-                if self.wal_actor.is_cloud_async() && self.hybrid_storage.is_none() {
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::Internal(
-                                "CloudAsync requires HybridStorage".to_string(),
-                            ),
-                        },
-                    );
-                } else {
-                    match self.wal_actor.append_transaction(
-                        &mut self.state,
-                        request_id,
-                        ops,
-                        durability_policy,
-                        start_sequence,
-                        isolation_policy,
-                    ) {
-                        Ok((last_sequence, op_count, deferred)) => {
-                            // Publish snapshot BEFORE responding so that
-                            // the caller's next begin_tx sees the write.
-                            self.publish_snapshot();
-
-                            if self.should_ack_immediately(deferred) {
-                                if self.wal_actor.is_cloud_async() {
-                                    // Accepted but not yet cloud-durable; confirm later on CloudAck.
-                                    self.durability.queue_waiter(
-                                        DurabilityWaiter::ConfirmTransactionApply { request_id },
-                                    );
-                                } else if deferred {
-                                    self.maybe_queue_confirm_only_waiter(
-                                        deferred, request_id, true,
-                                    );
-                                } else {
-                                    self.state.clear_pending_transaction_barrier();
-                                    self.state.confirm_sequences(request_id);
-                                }
-
-                                self.respond(
-                                    request_id,
-                                    RuntimeResponse::TransactionApplied {
-                                        request_id,
-                                        last_sequence,
-                                        op_count,
-                                        write_stall_hint: self.state.should_stall_writes(0),
-                                    },
-                                );
-                            } else {
-                                self.durability
-                                    .queue_waiter(DurabilityWaiter::TransactionApply {
-                                        request_id,
-                                        last_sequence,
-                                        op_count,
-                                    });
-                            }
-                        }
-                        Err(e) => {
-                            self.respond(
-                                request_id,
-                                RuntimeResponse::Error {
-                                    request_id,
-                                    error: e,
-                                },
-                            );
-                        }
-                    }
-                }
-                // Auto-sync batched writes if needed (group commit completes all waiters).
-                // Do this for local durability mode; CloudAsync uses rotate/upload logic.
-                if !self.wal_actor.is_cloud_async() {
-                    const MAX_DRAIN_WRITES_AFTER_BATCH: usize = 1024;
-                    let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN_WRITES_AFTER_BATCH);
-                    self.sync_batched_wal_if_needed(msg_rx);
-                }
-
-                self.maybe_flush_cloud_async_wal();
-                self.drain_auto_flush_memtables();
-            }
-
-            // =============================================================
-            // Flush
-            // =============================================================
-            RuntimeMsg::FlushMemtable { request_id, cf_id } => {
-                let resp = match self.flush_actor.handle_flush(
-                    &mut self.state,
-                    cf_id,
-                    self.hybrid_storage.as_ref(),
-                ) {
-                    Ok(flush_output) => {
-                        let sequence = self.state.sequence;
-                        match self.publish_flushed_sst(
-                            cf_id,
-                            &flush_output.sst_name,
-                            sequence,
-                            flush_output.file_meta,
-                        ) {
-                            Ok(()) => {
-                                self.wake_write_stall_waiters();
-                                RuntimeResponse::FlushComplete {
-                                    request_id,
-                                    sst_name: flush_output.sst_name,
-                                }
-                            }
-                            Err(error) => RuntimeResponse::Error { request_id, error },
-                        }
-                    }
-                    Err(e) => RuntimeResponse::Error {
-                        request_id,
-                        error: e,
-                    },
-                };
-
-                self.respond(request_id, resp);
-            }
-
-            RuntimeMsg::FlushComplete {
-                request_id,
-                cf_id,
-                sst_name,
-                sequence,
-            } => {
-                let resp = match self.publish_flushed_sst(cf_id, &sst_name, sequence, None) {
-                    Ok(()) => {
-                        self.wake_write_stall_waiters();
-                        RuntimeResponse::Ok { request_id }
-                    }
-                    Err(error) => RuntimeResponse::Error { request_id, error },
-                };
-                self.respond(request_id, resp);
-            }
-
-            // =============================================================
-            // Compaction
-            // =============================================================
-            RuntimeMsg::CheckCompaction { request_id } => {
-                match self.schedule_one_background_compaction_if_needed("CheckCompaction") {
-                    Ok(_) => self.respond(request_id, RuntimeResponse::Ok { request_id }),
-                    Err(error) => {
-                        self.respond(request_id, RuntimeResponse::Error { request_id, error })
-                    }
-                }
-            }
-
-            RuntimeMsg::RunCompaction { request_id, plan } => {
-                // ─────────────────────────────────────────────────────────────────────
-                // HARD INVARIANT: No compaction execution while ingest is active.
-                // ─────────────────────────────────────────────────────────────────────
-                if self
-                    .state
-                    .ingest_active
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    let epoch = self
-                        .state
-                        .ingest_epoch
-                        .load(std::sync::atomic::Ordering::SeqCst);
-                    tracing::error!(
-                        component = "compaction",
-                        invariant = "no_compaction_during_ingest",
-                        ingest_epoch = epoch,
-                        input_files = ?plan.input_files,
-                        "BUG: RunCompaction called while ingest mode is active. \
-                         Violated invariant: compaction must not run during ingest. \
-                         Correct ordering: complete all compactions BEFORE begin_ingest."
-                    );
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::Internal("BUG: compaction execution attempted during ingest mode — violated invariant".to_string()),
-                        },
-                    );
-                    return HandleOutcome::Continue;
-                }
-
-                let cplan = crate::compaction::CompactionPlan {
-                    input_files: plan.input_files,
-                    output_files: Vec::new(),
-                    source_level: plan.source_level,
-                    target_level: plan.target_level,
-                    cf_id: plan.cf_id,
-                    output_seq: self.state.next_sequence(),
-                    snapshot_horizon: self.state.oldest_active_snapshot_sequence(),
-                };
-
-                let schedule_res = self.compaction_actor.run_compaction(
-                    &mut self.state,
-                    cplan,
-                    self.hybrid_storage.as_ref(),
-                    self.worker_msg_tx.clone(),
-                );
-                let resp = match schedule_res {
-                    Ok(_) => RuntimeResponse::Ok { request_id },
-                    Err(e) => RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Internal(e.to_string()),
-                    },
-                };
-
-                self.respond(request_id, resp);
-            }
-
-            RuntimeMsg::CompactAll { request_id } => {
-                // Do not allow explicit compaction while ingest barrier is active
-                if self
-                    .state
-                    .ingest_active
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    let epoch = self
-                        .state
-                        .ingest_epoch
-                        .load(std::sync::atomic::Ordering::SeqCst);
-                    tracing::error!(
-                        component = "compaction",
-                        invariant = "no_compaction_during_ingest",
-                        ingest_epoch = epoch,
-                        "BUG: CompactAll called while ingest mode is active."
-                    );
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::Internal("BUG: compact_all attempted during ingest mode — violated invariant".to_string()),
-                        },
-                    );
-                    return HandleOutcome::Continue;
-                }
-
-                // Schedule as many compactions as CheckCompaction suggests
-                let mut scheduled = 0usize;
-                loop {
-                    if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
-                        let plan = self.assign_compaction_output_sequence(plan);
-                        let schedule_res = self.compaction_actor.run_compaction(
-                            &mut self.state,
-                            plan,
-                            self.hybrid_storage.as_ref(),
-                            self.worker_msg_tx.clone(),
-                        );
-
-                        match schedule_res {
-                            Ok(_) => scheduled += 1,
-                            Err(e) => {
-                                self.respond(
-                                    request_id,
-                                    RuntimeResponse::Error {
-                                        request_id,
-                                        error: crate::common::MidgeError::Internal(e.to_string()),
-                                    },
-                                );
-                                break;
-                            }
-                        }
-
-                        // Continue trying to pick more plans
-                        continue;
-                    }
-
-                    // No more plans to schedule right now
-                    break;
-                }
-
-                if scheduled == 0 {
-                    // Nothing to do
-                    self.respond(request_id, RuntimeResponse::Ok { request_id });
-                    return HandleOutcome::Continue;
-                }
-
-                // Queue request to be completed when active_compactions reaches 0.
-                // Don't block the event loop — instead, continue processing messages and
-                // check completion in CompactionComplete handler.
-                {
-                    let mut pending = self.state.pending_compaction_waits.lock();
-                    pending.insert(request_id, "CompactAll".to_string());
-                }
-            }
-
-            RuntimeMsg::CompactionComplete {
-                request_id,
-                input_ssts,
-                output_ssts,
-                cf_id,
-                target_level,
-                succeeded,
-            } => {
-                let mut allow_emergent_followup = false;
-
-                // Decrement active compactions
-                let _prev = self
-                    .state
-                    .active_compactions
-                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-
-                // Handle the compaction completion (clean local state)
-                self.compaction_actor.handle_complete(
-                    &mut self.state,
-                    input_ssts.clone(),
-                    output_ssts.clone(),
-                );
-
-                if !succeeded {
-                    if let Some(t) = crate::telemetry::Telemetry::global() {
-                        t.metrics().record_compaction_failure();
-                    }
-                    tracing::warn!(
-                        input_count = input_ssts.len(),
-                        output_count = output_ssts.len(),
-                        "compaction worker failed or aborted; leaving manifest unchanged"
-                    );
-                    self.respond(request_id, RuntimeResponse::Ok { request_id });
-                } else {
-                    let added: Result<Vec<_>, _> = output_ssts
-                        .iter()
-                        .map(|name| self.build_sst_file_meta(cf_id, target_level, name))
-                        .collect();
-
-                    // Publish compaction changes to manifest (update and persist)
-                    if let Err(e) = added.and_then(|added| {
-                        self.mirror_ssts_to_authoritative_cloud(&output_ssts)?;
-                        self.state.record_compaction_publication_intent(
-                            cf_id,
-                            input_ssts.clone(),
-                            added.clone(),
-                        )?;
-
-                        fail::fail_point!(
-                            "slice7::after_compaction_output_durable_before_manifest_publish"
-                        );
-
-                        self.manifest_actor.compaction_complete(
-                            &mut self.state,
-                            input_ssts.clone(),
-                            added,
-                        )?;
-                        self.state.transition_compaction_publication_intent(
-                            &output_ssts,
-                            crate::runtime::PublicationPhase::ManifestPublished,
-                        )
-                    }) {
-                        if let Some(t) = crate::telemetry::Telemetry::global() {
-                            t.metrics().record_compaction_failure();
-                        }
-                        self.state.mark_persistence_anomaly();
-                        tracing::error!(error = ?e, "failed to apply compaction to manifest");
-                        self.respond(
-                            request_id,
-                            RuntimeResponse::Error {
-                                request_id,
-                                error: crate::common::MidgeError::Internal(format!(
-                                    "failed to apply compaction to manifest: {}",
-                                    e
-                                )),
-                            },
-                        );
-                    } else {
-                        // 🔑 CRITICAL Slice 6: Manifest publication succeeded.
-                        // Now persist the manifest to make changes durable.
-                        fail::fail_point!(
-                            "slice6::after_compaction_update_before_manifest_persist"
-                        );
-
-                        if let Err(e) = self.manifest_actor.persist(&self.state) {
-                            if let Some(t) = crate::telemetry::Telemetry::global() {
-                                t.metrics().record_compaction_failure();
-                            }
-                            self.state.mark_persistence_anomaly();
-                            tracing::error!(error = ?e, "failed to persist manifest after compaction");
-                            self.respond(
-                                request_id,
-                                RuntimeResponse::Error {
-                                    request_id,
-                                    error: crate::common::MidgeError::Internal(format!(
-                                        "failed to persist manifest after compaction: {}",
-                                        e
-                                    )),
-                                },
-                            );
-                        } else {
-                            if let Err(e) = self
-                                .mirror_metadata_after_local_commit("compaction manifest publish")
-                            {
-                                if let Some(t) = crate::telemetry::Telemetry::global() {
-                                    t.metrics().record_compaction_failure();
-                                }
-                                self.state.mark_persistence_anomaly();
-                                tracing::error!(
-                                    error = ?e,
-                                    "failed to mirror manifest after compaction"
-                                );
-                                self.respond(
-                                    request_id,
-                                    RuntimeResponse::Error {
-                                        request_id,
-                                        error: crate::common::MidgeError::Internal(format!(
-                                            "failed to mirror manifest after compaction: {}",
-                                            e
-                                        )),
-                                    },
-                                );
-                                return HandleOutcome::Continue;
-                            }
-
-                            // 🔑 CRITICAL Slice 6: Manifest is now durable.
-                            // Safe to delete input SSTs (they are now orphaned from manifest).
-                            fail::fail_point!("slice6::after_manifest_persist_before_sst_gc");
-
-                            // Queue GC deletion of input SSTs
-                            let hybrid_storage = self.hybrid_storage.clone();
-                            if let Err(e) = self.gc_actor.delete_ssts(
-                                &mut self.state,
-                                &input_ssts,
-                                hybrid_storage,
-                            ) {
-                                self.state.mark_persistence_anomaly();
-                                tracing::warn!(
-                                    error = ?e,
-                                    "GC deletion of compaction input SSTs failed (non-fatal)"
-                                );
-                            } else {
-                                tracing::info!(
-                                    removed_count = input_ssts.len(),
-                                    "Submitted compaction input SSTs for GC"
-                                );
-                            }
-
-                            let cleared_intent_mirror_error = match self
-                                .state
-                                .clear_compaction_publication_intent(&output_ssts)
-                            {
-                                Ok(()) => {
-                                    match self.mirror_metadata_after_local_commit(
-                                        "compaction publication intent clear",
-                                    ) {
-                                        Ok(()) => None,
-                                        Err(e) => {
-                                            if let Some(t) = crate::telemetry::Telemetry::global() {
-                                                t.metrics().record_compaction_failure();
-                                            }
-                                            self.state.mark_persistence_anomaly();
-                                            tracing::error!(
-                                                error = ?e,
-                                                "failed to mirror cleared compaction publication intent"
-                                            );
-                                            Some(e)
-                                        }
-                                    }
-                                }
-                                Err(error) => {
-                                    self.state.mark_persistence_anomaly();
-                                    tracing::warn!(
-                                        %error,
-                                        "failed to clear compaction publication intent after GC"
-                                    );
-                                    None
-                                }
-                            };
-
-                            if let Some(error) = cleared_intent_mirror_error {
-                                self.publish_snapshot();
-                                self.respond(
-                                    request_id,
-                                    RuntimeResponse::Error {
-                                        request_id,
-                                        error: crate::common::MidgeError::Internal(format!(
-                                            "failed to mirror cleared compaction publication intent: {}",
-                                            error
-                                        )),
-                                    },
-                                );
-                            } else {
-                                if let Some(t) = crate::telemetry::Telemetry::global() {
-                                    let bytes_rewritten: u64 = self
-                                        .state
-                                        .manifest
-                                        .files
-                                        .iter()
-                                        .filter(|file| output_ssts.contains(&file.name))
-                                        .map(|file| file.size_bytes)
-                                        .sum();
-                                    t.metrics().record_compaction(bytes_rewritten);
-                                }
-                                allow_emergent_followup = true;
-                                self.publish_snapshot();
-                                self.respond(request_id, RuntimeResponse::Ok { request_id });
-                            }
-                        }
-                    }
-                }
-
-                // Check if any pending CompactAll/BeginIngest requests can be completed now
-                let active = self
-                    .state
-                    .active_compactions
-                    .load(std::sync::atomic::Ordering::SeqCst);
-                if active == 0 {
-                    let mut emergent_scheduled = false;
-
-                    // Only chain more compactions after a successful completion.
-                    // If the just-finished compaction failed, the manifest is unchanged and
-                    // blindly rescheduling here can spin forever on the same failing plan.
-                    if allow_emergent_followup {
-                        while let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
-                            if self
-                                .compaction_actor
-                                .run_compaction(
-                                    &mut self.state,
-                                    plan,
-                                    self.hybrid_storage.as_ref(),
-                                    self.worker_msg_tx.clone(),
-                                )
-                                .is_ok()
-                            {
-                                emergent_scheduled = true;
-                                continue;
-                            }
-
-                            break;
-                        }
-                    }
-
-                    // Send responses to pending requests only when no active compactions remain.
-                    let active_now = self
-                        .state
-                        .active_compactions
-                        .load(std::sync::atomic::Ordering::SeqCst);
-                    if active_now == 0 {
-                        let mut pending = self.state.pending_compaction_waits.lock();
-                        for (req_id, condition) in pending.drain() {
-                            tracing::debug!(
-                                "responding to pending {:?} request (request_id={})",
-                                condition,
-                                req_id
-                            );
-                            self.router
-                                .complete(RuntimeResponse::Ok { request_id: req_id });
-                        }
-                    } else if emergent_scheduled {
-                        let pending = self.state.pending_compaction_waits.lock();
-                        tracing::debug!(
-                            "emergent compactions scheduled; {} requests still waiting",
-                            pending.len()
-                        );
-                    }
-                }
-
-                self.drain_auto_flush_memtables();
-            }
-
-            // WAL
-            RuntimeMsg::WalAppend {
-                request_id,
-                cf_id,
-                key,
-                value,
-                ttl_seconds,
-                insert_only,
-            } => {
-                // Fencing gate: reject writes if lease is lost
-                if let Err(e) = self.check_lease_health() {
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: e,
-                        },
-                    );
-                    return HandleOutcome::Continue;
-                }
-
-                if self.wal_actor.is_cloud_async() && self.hybrid_storage.is_none() {
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::Internal(
-                                "CloudAsync requires HybridStorage".to_string(),
-                            ),
-                        },
-                    );
-                    return HandleOutcome::Continue;
-                }
-
-                let result = self.wal_actor.append(
-                    &mut self.state,
-                    crate::runtime::actors::wal::AppendParams {
-                        request_id,
-                        cf_id,
-                        key: bytes::Bytes::from(key),
-                        value: value.map(bytes::Bytes::from),
-                        insert_only,
-                        ttl_seconds,
-                    },
-                );
-                match result {
-                    Ok((seq, deferred)) => {
-                        // Publish snapshot BEFORE responding.
-                        self.publish_snapshot();
-
-                        if self.should_ack_immediately(deferred) {
-                            if self.wal_actor.is_cloud_async() {
-                                // Background CloudAsync: confirm sequences immediately after local WAL write.
-                                // Cloud upload runs asynchronously; no need to queue waiters since we
-                                // respond immediately and make data visible for reads.
-                                self.state.confirm_sequences(request_id);
-                            } else if deferred {
-                                self.maybe_queue_confirm_only_waiter(deferred, request_id, false);
-                            } else {
-                                self.state.confirm_sequences(request_id);
-                            }
-
-                            self.respond(
-                                request_id,
-                                RuntimeResponse::WalAppended {
-                                    request_id,
-                                    sequence: seq,
-                                },
-                            );
-                        } else {
-                            self.durability.queue_waiter(DurabilityWaiter::WalAppend {
-                                request_id,
-                                sequence: seq,
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        self.respond(
-                            request_id,
-                            RuntimeResponse::Error {
-                                request_id,
-                                error: crate::common::MidgeError::Internal(e.to_string()),
-                            },
-                        );
-                    }
-                }
-
-                // Auto-sync batched writes if needed (group commit completes all waiters)
-                self.sync_batched_wal_if_needed(msg_rx);
-
-                self.maybe_flush_cloud_async_wal();
-                self.drain_auto_flush_memtables();
-            }
-
-            RuntimeMsg::WalAppendDeleteRange {
-                request_id,
-                cf_id,
-                start_key,
-                end_key,
-                durability_policy,
-            } => {
-                // Fencing gate: reject writes if lease is lost
-                if let Err(e) = self.check_lease_health() {
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: e,
-                        },
-                    );
-                    return HandleOutcome::Continue;
-                }
-
-                if self.wal_actor.is_cloud_async() && self.hybrid_storage.is_none() {
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::Internal(
-                                "CloudAsync requires HybridStorage".to_string(),
-                            ),
-                        },
-                    );
-                    return HandleOutcome::Continue;
-                }
-
-                let result = self.wal_actor.append_delete_range(
-                    &mut self.state,
-                    request_id,
-                    cf_id,
-                    bytes::Bytes::from(start_key),
-                    bytes::Bytes::from(end_key),
-                    durability_policy,
-                );
-                match result {
-                    Ok((seq, deferred)) => {
-                        // Publish snapshot BEFORE responding.
-                        self.publish_snapshot();
-
-                        if self.should_ack_immediately(deferred) {
-                            if self.wal_actor.is_cloud_async() {
-                                // Background CloudAsync: confirm sequences immediately after local WAL write.
-                                self.state.confirm_sequences(request_id);
-                            } else if deferred {
-                                self.maybe_queue_confirm_only_waiter(deferred, request_id, false);
-                            } else {
-                                self.state.confirm_sequences(request_id);
-                            }
-
-                            self.respond(
-                                request_id,
-                                RuntimeResponse::WalAppended {
-                                    request_id,
-                                    sequence: seq,
-                                },
-                            );
-                        } else {
-                            self.durability.queue_waiter(DurabilityWaiter::WalAppend {
-                                request_id,
-                                sequence: seq,
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        self.respond(
-                            request_id,
-                            RuntimeResponse::Error {
-                                request_id,
-                                error: crate::common::MidgeError::Internal(e.to_string()),
-                            },
-                        );
-                    }
-                }
-
-                self.sync_batched_wal_if_needed(msg_rx);
-                self.maybe_flush_cloud_async_wal();
-                self.drain_auto_flush_memtables();
-            }
-
-            RuntimeMsg::WalSync { request_id } => {
-                let result = self.wal_actor.sync(&mut self.state);
-                let resp = result
-                    .map(|_| RuntimeResponse::Ok { request_id })
-                    .unwrap_or_else(|e| RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Internal(e.to_string()),
-                    });
-                self.respond(request_id, resp);
-            }
-
-            RuntimeMsg::WalRotate { request_id } => {
-                let result = self.wal_actor.rotate(&mut self.state);
-                let resp = result
-                    .map(|_| RuntimeResponse::Ok { request_id })
-                    .unwrap_or_else(|e| RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Internal(e.to_string()),
-                    });
-                self.respond(request_id, resp);
-            }
-
-            RuntimeMsg::SealWalForCloud {
-                request_id,
-                sequence,
-                wait_for_ack,
-            } => {
-                if !self.wal_actor.is_cloud_async() {
-                    let resp = if self.state.wal.local_durable_seq >= sequence {
-                        RuntimeResponse::Ok { request_id }
-                    } else {
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::InvalidArgument(
-                                "cloud durability requested outside cloud-backed mode".to_string(),
-                            ),
-                        }
-                    };
-                    self.respond(request_id, resp);
-                    return HandleOutcome::Continue;
-                }
-
-                if let Err(error) = self.check_lease_health() {
-                    self.respond(request_id, RuntimeResponse::Error { request_id, error });
-                    return HandleOutcome::Continue;
-                }
-
-                if self.state.wal.cloud_durable_seq >= sequence {
-                    self.respond(request_id, RuntimeResponse::Ok { request_id });
-                    return HandleOutcome::Continue;
-                }
-
-                let mut inflight_segment = self.durability.inflight_segment_for_sequence(sequence);
-                if inflight_segment.is_none()
-                    && (self.state.wal.pending_writes > 0
-                        || self.state.wal.local_durable_seq < sequence)
-                {
-                    match self.seal_current_cloud_segment() {
-                        Ok(Some((segment_id, max_sequence))) => {
-                            if max_sequence < sequence {
-                                self.respond(
-                                    request_id,
-                                    RuntimeResponse::Error {
-                                        request_id,
-                                        error: crate::common::MidgeError::Internal(format!(
-                                            "sealed WAL segment up to sequence {max_sequence}, but requested cloud durability for {sequence}"
-                                        )),
-                                    },
-                                );
-                                return HandleOutcome::Continue;
-                            }
-                            inflight_segment = Some(segment_id);
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            self.respond(request_id, RuntimeResponse::Error { request_id, error });
-                            return HandleOutcome::Continue;
-                        }
-                    }
-                }
-
-                if !wait_for_ack || self.state.wal.cloud_durable_seq >= sequence {
-                    self.drain_auto_flush_memtables();
-                    self.respond(request_id, RuntimeResponse::Ok { request_id });
-                } else if let Some(segment_id) = inflight_segment {
-                    self.drain_auto_flush_memtables();
-                    self.durability.queue_waiter_for_key(
-                        segment_id,
-                        DurabilityWaiter::CloudDurability { request_id },
-                    );
-                } else {
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::Internal(format!(
-                                "no inflight cloud upload covers sequence {sequence}"
-                            )),
-                        },
-                    );
-                }
-            }
-
-            RuntimeMsg::WalSyncComplete {
-                request_id,
-                segment_id,
-            } => {
-                self.wal_actor
-                    .handle_sync_complete(&mut self.state, segment_id);
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
-            }
-
-            // Cloud
-            RuntimeMsg::CloudUploadSst {
-                request_id,
-                sst_name,
-            } => {
-                let result = self.cloud_actor.upload_sst(
-                    &mut self.state,
-                    &sst_name,
-                    self.hybrid_storage.as_ref(),
-                );
-                let resp = result
-                    .map(|_| RuntimeResponse::Ok { request_id })
-                    .unwrap_or_else(|e| RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Internal(e.to_string()),
-                    });
-                self.respond(request_id, resp);
-            }
-
-            RuntimeMsg::CloudUploadWal {
-                request_id,
-                segment_id,
-            } => {
-                let result = self.cloud_actor.upload_wal(&mut self.state, segment_id);
-                let resp = result
-                    .map(|_| RuntimeResponse::Ok { request_id })
-                    .unwrap_or_else(|e| RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Internal(e.to_string()),
-                    });
-                self.respond(request_id, resp);
-            }
-
-            RuntimeMsg::CloudUploadComplete {
-                request_id,
-                resource,
-            } => {
-                self.cloud_actor
-                    .handle_upload_complete(&mut self.state, &resource);
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
-            }
-
-            // GC
-            RuntimeMsg::CheckGc { request_id } => {
-                let evicted = self.state.evict_timed_out_snapshots();
-                if evicted > 0 {
-                    tracing::warn!(evicted, "Evicted timed-out snapshots before GC check");
-                }
-
-                self.gc_actor.check(&self.state);
-                self.respond(request_id, RuntimeResponse::Ok { request_id });
-            }
-
-            RuntimeMsg::DeleteObsoleteSsts {
-                request_id,
-                sst_names,
-            } => {
-                let hybrid_storage = self.hybrid_storage.clone();
-                let result = self
-                    .gc_actor
-                    .delete_ssts(&mut self.state, &sst_names, hybrid_storage);
-                let resp = result
-                    .map(|_| RuntimeResponse::Ok { request_id })
-                    .unwrap_or_else(|e| RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Internal(e.to_string()),
-                    });
-                self.respond(request_id, resp);
-            }
-
-            // Manifest
-            RuntimeMsg::ManifestAddSst {
-                request_id,
-                file_meta,
-            } => {
-                let result = self
-                    .manifest_actor
-                    .add_sst(&mut self.state, file_meta)
-                    .and_then(|_| self.mirror_metadata_after_local_commit("manifest add sst"));
-                let resp = result
-                    .map(|_| RuntimeResponse::Ok { request_id })
-                    .unwrap_or_else(|e| RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Internal(e.to_string()),
-                    });
-                self.respond(request_id, resp);
-            }
-
-            RuntimeMsg::ManifestCompactionComplete {
-                request_id,
-                removed,
-                added,
-            } => {
-                let result = self
-                    .manifest_actor
-                    .compaction_complete(&mut self.state, removed, added)
-                    .and_then(|_| {
-                        self.mirror_metadata_after_local_commit("manifest compaction complete")
-                    });
-                let resp = result
-                    .map(|_| RuntimeResponse::Ok { request_id })
-                    .unwrap_or_else(|e| RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Internal(e.to_string()),
-                    });
-                self.respond(request_id, resp);
-            }
-
-            RuntimeMsg::ManifestPersist { request_id } => {
-                let result = self
-                    .manifest_actor
-                    .persist(&self.state)
-                    .and_then(|_| self.mirror_metadata_after_local_commit("manifest persist"));
-                let resp = result
-                    .map(|_| RuntimeResponse::Ok { request_id })
-                    .unwrap_or_else(|e| RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Internal(e.to_string()),
-                    });
-                self.respond(request_id, resp);
-            }
-
-            RuntimeMsg::ManifestCreateColumnFamily { request_id, name } => {
-                // Block DDL while ingest active
-                if self
-                    .state
-                    .ingest_active
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    tracing::error!("ingest: attempted DDL (create CF) during ingest mode");
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::Internal(
-                                "ingest: DDL forbidden during ingest mode".to_string(),
-                            ),
-                        },
-                    );
-                    return HandleOutcome::Continue;
-                }
-
-                // DDL durability barrier: ensure WAL is durable before CF creation
-                self.force_wal_sync(msg_rx);
-
-                let result = self
-                    .manifest_actor
-                    .create_column_family(&mut self.state, name.clone())
-                    .and_then(|cf_id| {
-                        self.mirror_metadata_after_local_commit("create column family")
-                            .map(|_| cf_id)
-                    });
-                let resp = result
-                    .map(|cf_id| RuntimeResponse::ColumnFamilyCreated { request_id, cf_id })
-                    .unwrap_or_else(|e| RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Internal(e.to_string()),
-                    });
-                self.publish_snapshot();
-                self.respond(request_id, resp);
-            }
-
-            RuntimeMsg::ManifestDropColumnFamily { request_id, cf_id } => {
-                // Block DDL while ingest active
-                if self
-                    .state
-                    .ingest_active
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    tracing::error!("ingest: attempted DDL (drop CF) during ingest mode");
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::Error {
-                            request_id,
-                            error: crate::common::MidgeError::Internal(
-                                "ingest: DDL forbidden during ingest mode".to_string(),
-                            ),
-                        },
-                    );
-                    return HandleOutcome::Continue;
-                }
-
-                // DDL durability barrier: ensure WAL is durable before CF drop
-                self.force_wal_sync(msg_rx);
-
-                let result = self
-                    .manifest_actor
-                    .drop_column_family(&mut self.state, cf_id)
-                    .and_then(|_| self.mirror_metadata_after_local_commit("drop column family"));
-                let resp = result
-                    .map(|_| RuntimeResponse::Ok { request_id })
-                    .unwrap_or_else(|e| RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Internal(e.to_string()),
-                    });
-                self.respond(request_id, resp);
-            }
-
-            // Read path: local memtable lookup
-            RuntimeMsg::Read {
-                request_id,
-                cf_id,
-                key,
-                sequence,
-                requested_durability,
-            } => {
-                self.handle_msg_read(request_id, cf_id, key, sequence, requested_durability);
-            }
-
-            RuntimeMsg::RangeScan {
-                request_id,
-                cf_id,
-                start,
-                end,
-                sequence,
-                requested_durability,
-            } => {
-                self.handle_msg_range_scan(
-                    request_id,
-                    cf_id,
-                    start,
-                    end,
-                    sequence,
-                    requested_durability,
-                );
-            }
-        }
-
-        HandleOutcome::Continue
     }
 }
 
@@ -2446,8 +1040,7 @@ pub(super) mod tests {
     fn unique_test_db_path(prefix: &str) -> std::path::PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
             "{prefix}_{}_{}_{}",
@@ -2622,7 +1215,7 @@ pub(super) mod tests {
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
         event_loop.worker_msg_tx = Some(worker_tx);
-        event_loop.state.enable_compaction = true;
+        event_loop.state.set_compaction_enabled(true);
         event_loop
             .state
             .manifest
@@ -2664,7 +1257,7 @@ pub(super) mod tests {
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
         event_loop.worker_msg_tx = Some(worker_tx);
-        event_loop.state.enable_compaction = false;
+        event_loop.state.set_compaction_enabled(false);
         event_loop
             .state
             .manifest
@@ -2692,8 +1285,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn should_skip_post_flush_compaction_check_during_ingest_when_compaction_disabled(
-    ) -> crate::common::MidgeResult<()> {
+    fn should_skip_post_flush_compaction_check_during_ingest_when_compaction_disabled() {
         #[derive(Clone)]
         struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
 
@@ -2722,7 +1314,7 @@ pub(super) mod tests {
         }
 
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-        event_loop.state.enable_compaction = false;
+        event_loop.state.set_compaction_enabled(false);
         event_loop
             .state
             .ingest_active
@@ -2761,8 +1353,6 @@ pub(super) mod tests {
             0,
             "disabled post-flush scheduling should not start compaction during ingest"
         );
-
-        Ok(())
     }
 
     #[test]
@@ -2993,6 +1583,144 @@ pub(super) mod tests {
             event_loop.state.sequence, 41,
             "preassigned compaction output sequences must not consume another sequence"
         );
+    }
+
+    mod compaction_scheduling {
+        use super::*;
+
+        fn manifest_file_from_runtime(file: crate::runtime::FileMeta) -> crate::metadata::FileMeta {
+            crate::metadata::FileMeta {
+                name: file.name,
+                level: file.level,
+                size_bytes: file.size_bytes,
+                content_crc32c: file.content_crc32c,
+                cf_id: file.cf_id,
+                smallest_key: file.smallest_key,
+                largest_key: file.largest_key,
+                smallest_seq: file.smallest_seq,
+                largest_seq: file.largest_seq,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn should_assign_identity_and_snapshot_horizon_at_launch_boundary() {
+            let mut event_loop = create_test_event_loop().expect("create event loop");
+            event_loop.state.sequence = 41;
+            assert!(event_loop.state.register_snapshot(100, 37, Vec::new()));
+            let plan =
+                crate::compaction::CompactionPlan::new(3, 0, 1).with_snapshot_horizon(Some(99));
+
+            let prepared = event_loop
+                .prepare_compaction_plan_for_launch(plan)
+                .expect("prepare compaction plan");
+
+            assert_eq!(prepared.output_seq, 42);
+            assert_eq!(prepared.snapshot_horizon, Some(37));
+            assert_eq!(
+                event_loop.state.sequence, 42,
+                "compaction launch must consume one global sequence for raw plans"
+            );
+        }
+
+        #[test]
+        fn should_preserve_preassigned_identity_at_launch_boundary() {
+            let mut event_loop = create_test_event_loop().expect("create event loop");
+            event_loop.state.sequence = 41;
+            let plan = crate::compaction::CompactionPlan::new(3, 0, 1).with_output_seq(99);
+
+            let prepared = event_loop
+                .prepare_compaction_plan_for_launch(plan)
+                .expect("prepare compaction plan");
+
+            assert_eq!(prepared.output_seq, 99);
+            assert_eq!(
+                event_loop.state.sequence, 41,
+                "compaction launch must not consume a sequence for preassigned plans"
+            );
+        }
+
+        #[test]
+        fn should_assign_output_sequence_when_compaction_runs_after_end_ingest() {
+            let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+            let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
+            event_loop.worker_msg_tx = Some(worker_tx);
+            event_loop.state.set_compaction_enabled(true);
+            event_loop.state.sequence = 100;
+            event_loop
+                .state
+                .ingest_active
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+
+            for seq in 1..=4 {
+                let name = crate::sst::file_name(0, 0, seq);
+                let file = write_runtime_l0_sst_for_test(&event_loop, &name, seq);
+                event_loop
+                    .state
+                    .manifest
+                    .files
+                    .push(manifest_file_from_runtime(file));
+            }
+
+            event_loop.handle_end_ingest(77);
+
+            let msg = worker_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("EndIngest-triggered compaction should complete");
+            match msg {
+                RuntimeMsg::CompactionComplete { output_ssts, .. } => {
+                    assert!(
+                        !output_ssts.is_empty(),
+                        "EndIngest-triggered compaction should produce an output SST"
+                    );
+                    assert!(
+                        output_ssts
+                            .iter()
+                            .all(|name| !name.ends_with("00000000000000000000.sst")),
+                        "EndIngest-triggered compaction must not use sequence zero: {output_ssts:?}"
+                    );
+                }
+                other => panic!("unexpected worker message: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn should_launch_compactions_only_through_event_loop_helper() {
+            let event_loop_dir =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime/event_loop");
+            let pattern = format!(".run_{}(", "compaction");
+            let mut call_sites = Vec::new();
+
+            for entry in std::fs::read_dir(&event_loop_dir).expect("read event_loop dir") {
+                let entry = entry.expect("read event_loop entry");
+                let path = entry.path();
+                if path.extension().and_then(std::ffi::OsStr::to_str) != Some("rs") {
+                    continue;
+                }
+
+                let source = std::fs::read_to_string(&path).expect("read event_loop source file");
+                let relative = path
+                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                    .expect("strip source prefix")
+                    .display()
+                    .to_string();
+                for (line_idx, line) in source.lines().enumerate() {
+                    if line.contains(&pattern) {
+                        call_sites.push(format!("{relative}:{}:{}", line_idx + 1, line.trim()));
+                    }
+                }
+            }
+
+            assert_eq!(
+                call_sites.len(),
+                1,
+                "event-loop compaction actor launches must stay centralized: {call_sites:?}"
+            );
+            assert!(
+                call_sites[0].starts_with("src/runtime/event_loop/mod.rs:"),
+                "central compaction actor launch must live in event_loop/mod.rs: {call_sites:?}"
+            );
+        }
     }
 
     #[test]

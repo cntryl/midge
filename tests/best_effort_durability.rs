@@ -1,6 +1,6 @@
-//! Test BestEffort durability mode - verifies WAL is skipped but data is in memtable
+//! Test `BestEffort` durability mode - verifies WAL is skipped but data is in memtable
 //!
-//! BestEffort mode should:
+//! `BestEffort` mode should:
 //! 1. Skip WAL writes entirely (no I/O overhead)
 //! 2. Update memtable immediately (data visible for reads)
 //! 3. Allow flush to SST (data becomes durably restart-safe after flush)
@@ -45,8 +45,8 @@ fn should_persist_best_effort_data_when_flushed() -> cntryl_midge::MidgeResult<(
     let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite)?;
     for i in 0..100 {
         tx.put(
-            format!("key{}", i).into_bytes(),
-            format!("value{}", i).into_bytes(),
+            format!("key{i}").into_bytes(),
+            format!("value{i}").into_bytes(),
             None,
         )?;
     }
@@ -127,8 +127,8 @@ fn should_handle_large_batches_with_best_effort() -> cntryl_midge::MidgeResult<(
     let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
     for i in 0..50_000 {
         tx.put(
-            format!("key{:08}", i).into_bytes(),
-            format!("value{:08}", i).into_bytes(),
+            format!("key{i:08}").into_bytes(),
+            format!("value{i:08}").into_bytes(),
             None,
         )?;
     }

@@ -18,7 +18,8 @@ use super::MidgeOptions;
 ///
 /// # Panics
 /// Panics if the engine fails to open.
-pub fn open_with_mode(opts: MidgeOptions, _mode: &str) -> crate::Engine {
+#[must_use]
+pub fn open_with_mode(opts: &MidgeOptions, _mode: &str) -> crate::Engine {
     crate::Engine::open_with_options(opts).expect("failed to open engine")
 }
 
@@ -28,6 +29,7 @@ pub struct DurabilityTestContext {
 }
 
 impl DurabilityTestContext {
+    #[must_use]
     pub fn new() -> Self {
         Self { _private: () }
     }
@@ -42,6 +44,10 @@ impl Default for DurabilityTestContext {
 /// Populate multi-level data for compaction tests.
 ///
 /// NOTE: Currently a stub retained for compatibility.
+///
+/// # Errors
+///
+/// Returns an error if future compatibility behavior needs to fail.
 pub fn populate_multi_level_data(
     _engine: &crate::Engine,
     _cf: &crate::ColumnFamilyHandle,
@@ -55,19 +61,24 @@ pub mod test_helpers {
     use std::time::Duration;
 
     /// Wait for a signal with default timeout.
-    pub fn wait_for_signal_default<T>(rx: std::sync::mpsc::Receiver<T>) -> Option<T> {
+    #[must_use]
+    pub fn wait_for_signal_default<T>(rx: &std::sync::mpsc::Receiver<T>) -> Option<T> {
         rx.recv_timeout(Duration::from_secs(5)).ok()
     }
 }
 
 /// Helper for testing engine restart scenarios.
-pub fn with_engine_restart<F1, F2>(opts: MidgeOptions, before_restart: F1, after_restart: F2)
+///
+/// # Panics
+///
+/// Panics if the engine cannot be opened before or after restart.
+pub fn with_engine_restart<F1, F2>(opts: &MidgeOptions, before_restart: F1, after_restart: F2)
 where
     F1: FnOnce(&crate::Engine),
     F2: FnOnce(&crate::Engine),
 {
     {
-        let engine = crate::Engine::open_with_options(opts.clone()).expect("open");
+        let engine = crate::Engine::open_with_options(opts).expect("open");
         before_restart(&engine);
         drop(engine);
     }

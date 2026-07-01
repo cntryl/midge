@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn should_handle_large_sequence_numbers_when_formatting() {
         // Arrange
-        let plan = CompactionPlan::new(0, 0, 1).with_output_seq(999999999);
+        let plan = CompactionPlan::new(0, 0, 1).with_output_seq(999_999_999);
         let cf_dir = Path::new("cf_01");
 
         // Act
@@ -378,7 +378,7 @@ mod tests {
         let mut input_writer = factory.create()?;
         input_writer.add_with_meta(b"alpha", None, 11, 2, None)?;
         input_writer.add_range_tombstone(b"cat", b"cow", 7)?;
-        input_writer.finish_to_path(&temp_dir.path().join("input.sst"))?;
+        crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
 
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(42);
         plan.input_files.push("input.sst".to_string());
@@ -415,7 +415,7 @@ mod tests {
         let mut input_writer = factory.create()?;
         input_writer.add_with_meta(b"alpha", Some(b"older"), 5, 0, None)?;
         input_writer.add_with_meta(b"alpha", None, 11, 2, None)?;
-        input_writer.finish_to_path(&temp_dir.path().join("input.sst"))?;
+        crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
 
         let mut plan = CompactionPlan::new(0, 0, 1)
             .with_output_seq(43)

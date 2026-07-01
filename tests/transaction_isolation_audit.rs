@@ -11,7 +11,7 @@ use std::sync::Arc;
 #[test]
 fn should_hide_uncommitted_writes_when_reading_from_other_transaction() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act
@@ -33,7 +33,7 @@ fn should_hide_uncommitted_writes_when_reading_from_other_transaction() {
 #[test]
 fn should_apply_last_committed_value_when_two_transactions_write_same_key() {
     // Arrange
-    let engine = Arc::new(open_with_mode(opts_for_mode("memory"), "memory"));
+    let engine = Arc::new(open_with_mode(&opts_for_mode("memory"), "memory"));
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act
@@ -72,7 +72,7 @@ fn should_apply_last_committed_value_when_two_transactions_write_same_key() {
 #[test]
 fn should_allow_lost_update_when_two_transactions_increment_same_counter() {
     // Arrange
-    let engine = Arc::new(open_with_mode(opts_for_mode("memory"), "memory"));
+    let engine = Arc::new(open_with_mode(&opts_for_mode("memory"), "memory"));
     let cf = engine.create_column_family("test").expect("create cf");
 
     let mut setup = engine
@@ -142,7 +142,7 @@ fn should_allow_lost_update_when_two_transactions_increment_same_counter() {
 #[test]
 fn should_allow_disjoint_writes_after_shared_read_when_transactions_both_commit() {
     // Arrange
-    let engine = Arc::new(open_with_mode(opts_for_mode("memory"), "memory"));
+    let engine = Arc::new(open_with_mode(&opts_for_mode("memory"), "memory"));
     let cf = engine.create_column_family("test").expect("create cf");
 
     let mut setup = engine

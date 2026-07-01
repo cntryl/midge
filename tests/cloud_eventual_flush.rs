@@ -10,12 +10,12 @@ fn buffered_cloud_policy() -> CloudRuntimePolicyOverrides {
     CloudRuntimePolicyOverrides {
         eventual_flush_segment_gap: Some(BUFFERED_TEST_GAP),
         wal_seal_min_segment_bytes: Some(usize::MAX),
-        wal_seal_max_flush_delay: Some(Duration::from_secs(3600)),
+        wal_seal_max_flush_delay: Some(Duration::from_hours(1)),
         wal_seal_max_pending_writes: Some(1),
     }
 }
 
-fn open_large_cloud_engine(opts: MidgeOptions) -> Engine {
+fn open_large_cloud_engine(opts: &MidgeOptions) -> Engine {
     Engine::open(
         opts.to_open_options()
             .with_memtable_size_limit(LARGE_MEMTABLE_BYTES)
@@ -74,7 +74,7 @@ where
 #[test]
 fn should_eventually_publish_sst_given_many_cloud_strict_writes_when_memtable_never_reaches_size_threshold(
 ) {
-    let engine = open_large_cloud_engine(opts_for_mode("cloud"));
+    let engine = open_large_cloud_engine(&opts_for_mode("cloud"));
     let cf = default_cf(&engine);
 
     for i in 0..160 {
@@ -125,7 +125,7 @@ fn should_eventually_publish_sst_given_many_cloud_strict_writes_when_memtable_ne
 fn should_eventually_publish_sst_given_many_cloud_buffered_writes_when_memtable_never_reaches_size_threshold(
 ) {
     let opts = opts_for_mode("cloud").with_cloud_runtime_policy_overrides(buffered_cloud_policy());
-    let engine = open_large_cloud_engine(opts);
+    let engine = open_large_cloud_engine(&opts);
     let cf = default_cf(&engine);
 
     for i in 0..(BUFFERED_TEST_GAP - 1) {
@@ -177,7 +177,7 @@ fn should_eventually_publish_sst_given_many_cloud_buffered_writes_when_memtable_
 fn should_publish_lightly_written_column_family_given_busy_neighbor_when_cloud_segment_gap_flush_runs(
 ) {
     let opts = opts_for_mode("cloud").with_cloud_runtime_policy_overrides(buffered_cloud_policy());
-    let engine = open_large_cloud_engine(opts);
+    let engine = open_large_cloud_engine(&opts);
     let light_cf = engine
         .create_column_family("light")
         .expect("create light cf");
@@ -244,12 +244,12 @@ fn should_reset_memtable_wal_gap_after_reopen_before_new_segment_churn() {
         opts_for_mode("cloud").with_cloud_runtime_policy_overrides(CloudRuntimePolicyOverrides {
             eventual_flush_segment_gap: None,
             wal_seal_min_segment_bytes: Some(usize::MAX),
-            wal_seal_max_flush_delay: Some(Duration::from_secs(3600)),
+            wal_seal_max_flush_delay: Some(Duration::from_hours(1)),
             wal_seal_max_pending_writes: Some(1),
         });
 
     {
-        let engine = open_large_cloud_engine(opts.clone());
+        let engine = open_large_cloud_engine(&opts);
         let cf = default_cf(&engine);
         for i in 0..16 {
             let key = format!("reopen-gap-key-{i:04}");
@@ -276,7 +276,7 @@ fn should_reset_memtable_wal_gap_after_reopen_before_new_segment_churn() {
         );
     }
 
-    let reopened = open_large_cloud_engine(opts);
+    let reopened = open_large_cloud_engine(&opts);
     let reopened_metrics = reopened
         .get_runtime_metrics()
         .expect("runtime metrics after reopen");

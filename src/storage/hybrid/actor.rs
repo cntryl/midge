@@ -71,7 +71,7 @@ impl StorageBudgetActor {
     pub fn handle_event(&mut self, event: StorageBudgetEvent) -> Option<ReservationResult> {
         match event {
             StorageBudgetEvent::ReserveForFlush { est_size } => {
-                self.try_reserve_for_flush(est_size)
+                Some(self.try_reserve_for_flush(est_size))
             }
             StorageBudgetEvent::FlushCompleted { actual_size } => {
                 self.complete_flush(actual_size);
@@ -96,19 +96,19 @@ impl StorageBudgetActor {
     }
 
     /// Try to reserve space for a flush
-    fn try_reserve_for_flush(&mut self, est_size: u64) -> Option<ReservationResult> {
+    fn try_reserve_for_flush(&mut self, est_size: u64) -> ReservationResult {
         let usage_percent = self.disk_state.usage_percent(self.policy.max_local_bytes);
 
         // Emergency: reject all new writes
         if self.policy.is_emergency_watermark(usage_percent) {
             tracing::warn!("Emergency watermark hit; rejecting flush");
-            return Some(ReservationResult::RejectNoSpace);
+            return ReservationResult::RejectNoSpace;
         }
 
         // Critical: wait for cloud uploads
         if self.policy.is_critical_watermark(usage_percent) {
             tracing::warn!("Critical watermark hit; requesting cloud uploads");
-            return Some(ReservationResult::WaitForCloudUpload);
+            return ReservationResult::WaitForCloudUpload;
         }
 
         // High: may need to wait for compaction
@@ -116,7 +116,7 @@ impl StorageBudgetActor {
             let free = self.disk_state.free_bytes(self.policy.max_local_bytes);
             if free < est_size {
                 tracing::info!("High watermark; waiting for compaction to free space");
-                return Some(ReservationResult::WaitForCompaction);
+                return ReservationResult::WaitForCompaction;
             }
         }
 
@@ -124,7 +124,7 @@ impl StorageBudgetActor {
         self.disk_state.new_sst_reserve = self.disk_state.new_sst_reserve.saturating_add(est_size);
         self.check_watermarks();
 
-        Some(ReservationResult::Ok)
+        ReservationResult::Ok
     }
 
     /// Complete a flush, converting reserve to actual SST bytes
@@ -136,10 +136,10 @@ impl StorageBudgetActor {
     }
 
     /// Complete a cloud upload
-    fn complete_cloud_upload(&mut self, _sst_id: u64, _actual_size: u64) {
+    fn complete_cloud_upload(&mut self, sst_id: u64, actual_size: u64) {
         // When cloud upload completes, the SST is stable in cloud.
         // We can now consider it for local eviction.
-        self.pending_evictions.push_back((_sst_id, _actual_size));
+        self.pending_evictions.push_back((sst_id, actual_size));
         tracing::info!("Cloud upload completed; SST marked for potential eviction");
     }
 
@@ -147,7 +147,7 @@ impl StorageBudgetActor {
     fn plan_compaction(&mut self, input_sizes: &[u64]) {
         let total_input: u64 = input_sizes.iter().sum();
         // Estimate output as ~90% of input (conservative)
-        let estimated_output = (total_input as f64 * 0.9) as u64;
+        let estimated_output = total_input.saturating_mul(9) / 10;
         self.disk_state.compaction_reserve = estimated_output;
         tracing::info!(
             input_bytes = total_input,
@@ -190,6 +190,10 @@ impl StorageBudgetActor {
     /// Get current disk state (snapshot)
     pub fn disk_state(&self) -> DiskState {
         self.disk_state.clone()
+    }
+
+    pub fn max_local_bytes(&self) -> u64 {
+        self.policy.max_local_bytes
     }
 
     /// Get pending eviction queue
@@ -386,7 +390,8 @@ mod tests {
 
             // Every 3 flushes, simulate a compaction
             if i % 3 == 2 && i > 0 {
-                let estimated_input = 300_000 + (i as u64 * 50_000);
+                let estimated_input =
+                    300_000 + (u64::try_from(i).expect("loop index fits in u64") * 50_000);
                 actor.handle_event(StorageBudgetEvent::CompactionPlanned {
                     input_sizes: vec![estimated_input / 2, estimated_input / 2],
                 });
@@ -410,9 +415,9 @@ mod tests {
         let mut actor = StorageBudgetActor::new(policy);
 
         // Act: Create several SSTs and upload them
-        for sst_id in 1..=5 {
+        for sst_id in 1_u64..=5 {
             actor.handle_event(StorageBudgetEvent::CloudUploadCompleted {
-                sst_id: sst_id as u64,
+                sst_id,
                 actual_size: 100_000,
             });
         }
@@ -428,9 +433,9 @@ mod tests {
         }
 
         // Verify we can pop them in order
-        for expected_sst_id in 1..=5 {
+        for expected_sst_id in 1_u64..=5 {
             let (sst_id, size) = actor.next_eviction().unwrap();
-            assert_eq!(sst_id, expected_sst_id as u64);
+            assert_eq!(sst_id, expected_sst_id);
             assert_eq!(size, 100_000);
         }
 

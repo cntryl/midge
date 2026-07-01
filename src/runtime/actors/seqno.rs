@@ -26,7 +26,7 @@ impl SeqnoAllocActor {
     /// Returns a new unique seqno and logs it in the intent log.
     pub fn alloc_seqno(
         state: &mut RuntimeState,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     ) -> MidgeResult<(u64, RuntimeResponse)> {
         if state.should_hard_stall_writes(cf_id) {
             if let Some(t) = crate::telemetry::Telemetry::global() {

@@ -21,7 +21,7 @@ use std::sync::Arc;
 /// 20 is a common choice in production LSM engines (e.g., similar to Pebble).
 const MAX_LEVEL: usize = 20;
 
-/// Entry metadata tuple: (key, value_opt, sequence, is_tombstone)
+/// Entry metadata tuple: (key, `value_opt`, sequence, `is_tombstone`)
 pub type SkipListEntry = (Bytes, Option<Bytes>, u64, bool);
 
 /// Extended entry metadata including optional expiration (Unix millis) and op type.
@@ -35,13 +35,23 @@ pub enum OpType {
 }
 
 impl OpType {
-    /// Convert OpType to u8 for SST encoding (0=Put, 2=Delete)
+    /// Convert `OpType` to u8 for SST encoding (0=Put, 2=Delete)
+    #[must_use]
     pub fn as_u8(&self) -> u8 {
         match self {
             OpType::Put => 0,
             OpType::Delete => 2,
         }
     }
+}
+
+/// Visible skiplist entry metadata at a snapshot sequence.
+pub struct SkipListVisibleEntry {
+    pub value: Option<Bytes>,
+    pub seq: u64,
+    pub is_tombstone: bool,
+    pub expiration: Option<u64>,
+    pub op: OpType,
 }
 
 /// A version node in the lock-free version chain (newest-first).
@@ -113,8 +123,17 @@ pub struct SkipList {
     top_level: AtomicUsize,
 }
 
+struct UpsertVersion {
+    key: Bytes,
+    value: Option<Bytes>,
+    seq: u64,
+    exp: Option<u64>,
+    op: OpType,
+}
+
 impl SkipList {
     /// Create a new lock-free skiplist.
+    #[must_use]
     pub fn new() -> Self {
         let head = Arc::new(Node::sentinel());
         SkipList {
@@ -176,7 +195,7 @@ impl SkipList {
         succs: &mut [Shared<'g, Node>; MAX_LEVEL],
     ) {
         // Start from head sentinel.
-        let mut pred: Shared<'g, Node> = Shared::from(&*self.head as *const Node);
+        let mut pred: Shared<'g, Node> = Shared::from(&raw const *self.head);
 
         // Approximate top level is enough for search.
         let mut level = self.top_level.load(AO::Relaxed);
@@ -210,9 +229,9 @@ impl SkipList {
     }
 
     /// Point search: find node for key, or null if absent.
-    #[inline(always)]
+    #[inline]
     fn find_node<'g>(&self, key: &[u8], guard: &'g Guard) -> Shared<'g, Node> {
-        let mut pred: Shared<'g, Node> = Shared::from(&*self.head as *const Node);
+        let mut pred: Shared<'g, Node> = Shared::from(&raw const *self.head);
         let mut level = self.top_level.load(AO::Relaxed);
 
         while level > 0 {
@@ -243,10 +262,10 @@ impl SkipList {
         Shared::null()
     }
 
-    /// Internal helper: find first visible version at or before snapshot_seq.
+    /// Internal helper: find first visible version at or before `snapshot_seq`.
     ///
     /// LSM snapshot semantics:
-    ///   - visible if vn.seq <= snapshot_seq.
+    ///   - visible if vn.seq <= `snapshot_seq`.
     #[inline]
     fn visible_version<'g>(
         versions_head: &Atomic<VersionNode>,
@@ -266,7 +285,7 @@ impl SkipList {
         None
     }
 
-    /// Get the visible value at or before snapshot_seq.
+    /// Get the visible value at or before `snapshot_seq`.
     ///
     /// Returns `Some(value)` if a visible non-tombstone version exists,
     /// otherwise `None`.
@@ -287,7 +306,7 @@ impl SkipList {
         None
     }
 
-    /// Get visible value with expiration at or before snapshot_seq.
+    /// Get visible value with expiration at or before `snapshot_seq`.
     ///
     /// Returns:
     ///   - None           → key not visible at this snapshot
@@ -313,7 +332,38 @@ impl SkipList {
         None
     }
 
-    /// Upsert with optional expiration and OpType (lock-free, linearizable).
+    /// Get visible value metadata at or before `snapshot_seq`.
+    ///
+    /// Returns `(value, seq, is_tombstone, expiration, op_type)` for the
+    /// newest visible version of `key`.
+    #[inline]
+    pub fn get_visible_entry_with_exp(
+        &self,
+        key: &[u8],
+        snapshot_seq: u64,
+    ) -> Option<SkipListVisibleEntry> {
+        let guard = &epoch::pin();
+        let node_ptr = self.find_node(key, guard);
+
+        // SAFETY: node_ptr was returned by find_node under the epoch guard.
+        if let Some(node) = unsafe { node_ptr.as_ref() } {
+            if node.key.as_ref() == key {
+                if let Some(vn) = Self::visible_version(&node.versions_head, snapshot_seq, guard) {
+                    return Some(SkipListVisibleEntry {
+                        value: vn.val.clone(),
+                        seq: vn.seq,
+                        is_tombstone: vn.val.is_none(),
+                        expiration: vn.exp,
+                        op: vn.op,
+                    });
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Upsert with optional expiration and `OpType` (lock-free, linearizable).
     pub fn upsert_exp(
         &self,
         key: Bytes,
@@ -323,23 +373,30 @@ impl SkipList {
         op: OpType,
     ) {
         let guard = &epoch::pin();
-        self.upsert_exp_internal(key, value, seq, exp, op, guard);
+        self.upsert_exp_internal(
+            UpsertVersion {
+                key,
+                value,
+                seq,
+                exp,
+                op,
+            },
+            guard,
+        );
     }
 
     /// Internal upsert implementation.
     ///
     /// - If the key exists, prepend a new version to the version chain.
     /// - If the key is absent, insert a new node at a random level.
-    #[allow(clippy::too_many_arguments)]
-    fn upsert_exp_internal(
-        &self,
-        key: Bytes,
-        value: Option<Bytes>,
-        seq: u64,
-        exp: Option<u64>,
-        op: OpType,
-        guard: &Guard,
-    ) {
+    fn upsert_exp_internal(&self, version: UpsertVersion, guard: &Guard) {
+        let UpsertVersion {
+            key,
+            value,
+            seq,
+            exp,
+            op,
+        } = version;
         let mut preds: [Shared<Node>; MAX_LEVEL] = [Shared::null(); MAX_LEVEL];
         let mut succs: [Shared<Node>; MAX_LEVEL] = [Shared::null(); MAX_LEVEL];
 
@@ -349,32 +406,10 @@ impl SkipList {
         // Case 1: Key exists – prepend new version to the version chain.
         // SAFETY: succs[0] was populated by find() under the epoch guard.
         if let Some(curr) = unsafe { succs[0].as_ref() } {
-            if curr.key == key {
-                loop {
-                    let curr_head = curr.versions_head.load(AO::Acquire, guard);
-                    let new_ver = Owned::new(VersionNode {
-                        seq,
-                        val: value.clone(),
-                        exp,
-                        op,
-                        next: Atomic::from(curr_head),
-                    });
-
-                    match curr.versions_head.compare_exchange(
-                        curr_head,
-                        new_ver,
-                        AO::AcqRel,
-                        AO::Acquire,
-                        guard,
-                    ) {
-                        Ok(_) => return, // success
-                        Err(e) => {
-                            // CAS failed; drop newly allocated node and retry.
-                            drop(e.new);
-                            continue;
-                        }
-                    }
-                }
+            if curr.key == key
+                && Self::try_append_version(curr, seq, value.as_ref(), exp, op, guard)
+            {
+                return;
             }
         }
 
@@ -393,37 +428,16 @@ impl SkipList {
             // If so, append to the existing node's version chain instead of inserting a new node.
             // SAFETY: succs[0] was refreshed by find() under this guard.
             if let Some(curr) = unsafe { succs[0].as_ref() } {
-                if curr.key == key {
-                    loop {
-                        let curr_head = curr.versions_head.load(AO::Acquire, guard);
-                        let new_ver = Owned::new(VersionNode {
-                            seq,
-                            val: value.clone(),
-                            exp,
-                            op,
-                            next: Atomic::from(curr_head),
-                        });
-
-                        match curr.versions_head.compare_exchange(
-                            curr_head,
-                            new_ver,
-                            AO::AcqRel,
-                            AO::Acquire,
-                            guard,
-                        ) {
-                            Ok(_) => return, // success, version appended to existing node
-                            Err(e) => {
-                                drop(e.new);
-                                continue;
-                            }
-                        }
-                    }
+                if curr.key == key
+                    && Self::try_append_version(curr, seq, value.as_ref(), exp, op, guard)
+                {
+                    return;
                 }
             }
 
             // SAFETY: preds[0] was set by find() and is a valid pinned pointer.
-            let pred0 = unsafe { preds[0].deref() };
-            let succ0 = succs[0];
+            let level0_pred = unsafe { preds[0].deref() };
+            let level0_succ = succs[0];
 
             // Build new node with first version.
             let first_ver = Owned::new(VersionNode::new(seq, value.clone(), exp, op));
@@ -432,26 +446,25 @@ impl SkipList {
 
             // SAFETY: new_ptr was just created via into_shared with this guard;
             // it is valid and exclusively owned until the CAS publishes it.
-            unsafe { new_ptr.deref() }.forward[0].store(succ0, AO::Relaxed);
+            unsafe { new_ptr.deref() }.forward[0].store(level0_succ, AO::Relaxed);
 
             // Validate window and splice at level 0.
-            let pred_next0 = pred0.forward[0].load(AO::Acquire, guard);
-            if pred_next0 != succ0 {
+            let pred_next0 = level0_pred.forward[0].load(AO::Acquire, guard);
+            if pred_next0 != level0_succ {
                 // SAFETY: new_ptr is not yet published; we are the sole owner.
                 // defer_destroy schedules reclamation after all pinned guards unpin.
                 unsafe { guard.defer_destroy(new_ptr) };
                 continue;
             }
 
-            match pred0.forward[0].compare_exchange(succ0, new_ptr, AO::AcqRel, AO::Acquire, guard)
+            if level0_pred.forward[0]
+                .compare_exchange(level0_succ, new_ptr, AO::AcqRel, AO::Acquire, guard)
+                .is_ok()
             {
-                Ok(_) => break new_ptr, // level 0 inserted
-                Err(_) => {
-                    // SAFETY: CAS failed so new_ptr was never published.
-                    unsafe { guard.defer_destroy(new_ptr) };
-                    continue;
-                }
+                break new_ptr;
             }
+            // SAFETY: CAS failed so new_ptr was never published.
+            unsafe { guard.defer_destroy(new_ptr) };
         };
 
         // Stage 2: best-effort link higher levels (1..node_level-1).
@@ -480,6 +493,40 @@ impl SkipList {
         }
     }
 
+    fn try_append_version(
+        node: &Node,
+        seq: u64,
+        value: Option<&Bytes>,
+        exp: Option<u64>,
+        op: OpType,
+        guard: &Guard,
+    ) -> bool {
+        loop {
+            let curr_head = node.versions_head.load(AO::Acquire, guard);
+            let new_ver = Owned::new(VersionNode {
+                seq,
+                val: value.cloned(),
+                exp,
+                op,
+                next: Atomic::from(curr_head),
+            });
+
+            match node.versions_head.compare_exchange(
+                curr_head,
+                new_ver,
+                AO::AcqRel,
+                AO::Acquire,
+                guard,
+            ) {
+                Ok(_) => return true, // success
+                Err(e) => {
+                    // CAS failed; drop newly allocated node and retry.
+                    drop(e.new);
+                }
+            }
+        }
+    }
+
     /// Insert or update with sequence number (Put).
     #[inline]
     pub fn upsert(&self, key: Bytes, value: Option<Bytes>, seq: u64) {
@@ -492,7 +539,7 @@ impl SkipList {
         self.upsert_exp(key, None, seq, None, OpType::Delete);
     }
 
-    /// Range scan returning visible entries at snapshot_seq.
+    /// Range scan returning visible entries at `snapshot_seq`.
     ///
     /// Returns newest visible non-tombstone value for each key in [start, end).
     pub fn range_visible(
@@ -537,7 +584,7 @@ impl SkipList {
         out
     }
 
-    /// Get all tombstoned keys in range visible at snapshot_seq.
+    /// Get all tombstoned keys in range visible at `snapshot_seq`.
     pub fn tombstones_range_visible(
         &self,
         start: Option<&[u8]>,
@@ -866,7 +913,7 @@ mod tests {
                     sl_clone.upsert(
                         Bytes::from(key),
                         Some(Bytes::from(val)),
-                        (i * 100 + j) as u64,
+                        u64::try_from(i * 100 + j).expect("concurrent writer sequence fits u64"),
                     );
                 }
             });
@@ -887,9 +934,9 @@ mod tests {
         let sl = Arc::new(SkipList::new());
         for i in 0..100 {
             sl.upsert(
-                Bytes::from(format!("key_{}", i)),
-                Some(Bytes::from(format!("val_{}", i))),
-                i as u64,
+                Bytes::from(format!("key_{i}")),
+                Some(Bytes::from(format!("val_{i}"))),
+                u64::try_from(i).expect("sequence key fits u64"),
             );
         }
 
@@ -904,7 +951,7 @@ mod tests {
                     sl_clone.upsert(
                         Bytes::from(key),
                         Some(Bytes::from(val)),
-                        (100 + i * 50 + j) as u64,
+                        u64::try_from(100 + i * 50 + j).expect("updated sequence fits u64"),
                     );
                 }
             });
@@ -914,7 +961,7 @@ mod tests {
             let sl_clone = Arc::clone(&sl);
             let handle = thread::spawn(move || {
                 for i in 0..100 {
-                    let key = format!("key_{}", i);
+                    let key = format!("key_{i}");
                     let _ = sl_clone.get(key.as_bytes(), u64::MAX);
                 }
             });
@@ -1323,8 +1370,8 @@ mod tests {
         let sl = SkipList::new();
         for i in 0..10 {
             sl.upsert(
-                Bytes::from(format!("key_{}", i)),
-                Some(Bytes::from(format!("val_{}", i))),
+                Bytes::from(format!("key_{i}")),
+                Some(Bytes::from(format!("val_{i}"))),
                 1,
             );
         }
@@ -1397,13 +1444,16 @@ mod tests {
             Bytes::from_static(b"k"),
             Some(Bytes::from_static(b"v")),
             1,
-            Some(123456),
+            Some(123_456),
             OpType::Put,
         );
 
         // Assert
         let result = sl.get_visible_with_exp(b"k", u64::MAX);
-        assert_eq!(result, Some(Some((Bytes::from_static(b"v"), Some(123456)))));
+        assert_eq!(
+            result,
+            Some(Some((Bytes::from_static(b"v"), Some(123_456))))
+        );
     }
 
     #[test]

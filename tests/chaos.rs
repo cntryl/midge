@@ -27,12 +27,12 @@ use std::time::Duration;
 #[test]
 fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Reopen After WAL Writes (mode: {}) ===", mode);
+        eprintln!("\n=== Reopen After WAL Writes (mode: {mode}) ===");
 
         // Arrange
         // Act (Phase 1): Commit WAL-backed writes, then drop the engine
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write data (goes to WAL)
@@ -40,7 +40,7 @@ fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..100 {
-                let key = format!("wal_fail_key_{:04}", i);
+                let key = format!("wal_fail_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"wal_value".to_vec(), None)
                     .expect("put");
             }
@@ -51,7 +51,7 @@ fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 100..150 {
-                let key = format!("wal_fail_key_{:04}", i);
+                let key = format!("wal_fail_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"wal_value_2".to_vec(), None)
                     .expect("put");
             }
@@ -60,7 +60,7 @@ fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
 
         // Assert (Phase 2): Reopen and validate recovery
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx = engine
@@ -68,7 +68,7 @@ fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
                 .expect("begin_tx");
 
             for i in 0..150 {
-                let key = format!("wal_fail_key_{:04}", i);
+                let key = format!("wal_fail_key_{i:04}");
                 let expected = if i < 100 {
                     b"wal_value".as_slice()
                 } else {
@@ -77,9 +77,7 @@ fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get"),
                     Some(expected.into()),
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
 
@@ -91,12 +89,12 @@ fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
 #[test]
 fn should_recover_committed_writes_when_reopening_after_flush_and_clean_shutdown() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Reopen After Flush (mode: {}) ===", mode);
+        eprintln!("\n=== Reopen After Flush (mode: {mode}) ===");
 
         // Arrange
         // Act (Phase 1): Commit writes, flush, then drop the engine
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Load memtable with many keys
@@ -104,7 +102,7 @@ fn should_recover_committed_writes_when_reopening_after_flush_and_clean_shutdown
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..200 {
-                let key = format!("flush_fail_key_{:04}", i);
+                let key = format!("flush_fail_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"flush_data".to_vec(), None)
                     .expect("put");
             }
@@ -116,7 +114,7 @@ fn should_recover_committed_writes_when_reopening_after_flush_and_clean_shutdown
 
         // Assert (Phase 2): Reopen and verify all flushed data
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx = engine
@@ -124,13 +122,11 @@ fn should_recover_committed_writes_when_reopening_after_flush_and_clean_shutdown
                 .expect("begin_tx");
 
             for i in 0..200 {
-                let key = format!("flush_fail_key_{:04}", i);
+                let key = format!("flush_fail_key_{i:04}");
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get"),
                     Some(b"flush_data".as_slice().into()),
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
 
@@ -142,12 +138,12 @@ fn should_recover_committed_writes_when_reopening_after_flush_and_clean_shutdown
 #[test]
 fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shutdown() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Reopen After Compaction (mode: {}) ===", mode);
+        eprintln!("\n=== Reopen After Compaction (mode: {mode}) ===");
 
         // Arrange
         // Act (Phase 1): Create multiple SSTs, compact, then drop the engine
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Create SST A
@@ -155,7 +151,7 @@ fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shu
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..100 {
-                let key = format!("compact_fail_key_{:04}", i);
+                let key = format!("compact_fail_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"gen_a".to_vec(), None)
                     .expect("put");
             }
@@ -167,7 +163,7 @@ fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shu
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 100..200 {
-                let key = format!("compact_fail_key_{:04}", i);
+                let key = format!("compact_fail_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"gen_b".to_vec(), None)
                     .expect("put");
             }
@@ -180,7 +176,7 @@ fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shu
 
         // Assert (Phase 2): Reopen and verify all committed data
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx = engine
@@ -188,7 +184,7 @@ fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shu
                 .expect("begin_tx");
 
             for i in 0..200 {
-                let key = format!("compact_fail_key_{:04}", i);
+                let key = format!("compact_fail_key_{i:04}");
                 let expected = if i < 100 {
                     b"gen_a".as_slice()
                 } else {
@@ -197,9 +193,7 @@ fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shu
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get"),
                     Some(expected.into()),
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
 
@@ -211,12 +205,12 @@ fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shu
 #[test]
 fn should_preserve_readability_when_reopening_after_manifest_updates_and_clean_shutdown() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Reopen After Manifest Updates (mode: {}) ===", mode);
+        eprintln!("\n=== Reopen After Manifest Updates (mode: {mode}) ===");
 
         // Arrange
         // Act (Phase 1): Flush data, run compaction-related work, then drop the engine
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write and flush (updates manifest)
@@ -224,7 +218,7 @@ fn should_preserve_readability_when_reopening_after_manifest_updates_and_clean_s
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..150 {
-                let key = format!("manifest_io_key_{:04}", i);
+                let key = format!("manifest_io_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
             }
@@ -237,20 +231,18 @@ fn should_preserve_readability_when_reopening_after_manifest_updates_and_clean_s
 
         // Assert (Phase 2): Reopen and verify readability
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
             for i in 0..150 {
-                let key = format!("manifest_io_key_{:04}", i);
+                let key = format!("manifest_io_key_{i:04}");
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get"),
                     Some(b"value".as_slice().into()),
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
 
@@ -262,12 +254,12 @@ fn should_preserve_readability_when_reopening_after_manifest_updates_and_clean_s
 #[test]
 fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdown() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Reopen After SST Flush (mode: {}) ===", mode);
+        eprintln!("\n=== Reopen After SST Flush (mode: {mode}) ===");
 
         // Arrange
         // Act (Phase 1): Write, flush, add more writes, then drop the engine
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write batch 1
@@ -275,7 +267,7 @@ fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdo
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..100 {
-                let key = format!("sst_corrupt_key_{:04}", i);
+                let key = format!("sst_corrupt_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"uncorrupted_value".to_vec(), None)
                     .expect("put");
             }
@@ -289,7 +281,7 @@ fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdo
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 100..150 {
-                let key = format!("sst_corrupt_key_{:04}", i);
+                let key = format!("sst_corrupt_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"clean_value".to_vec(), None)
                     .expect("put");
             }
@@ -298,7 +290,7 @@ fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdo
 
         // Assert (Phase 2): Reopen and verify exact values
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx = engine
@@ -306,7 +298,7 @@ fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdo
                 .expect("begin_tx");
 
             for i in 0..100 {
-                let key = format!("sst_corrupt_key_{:04}", i);
+                let key = format!("sst_corrupt_key_{i:04}");
                 let val = tx
                     .get(key.as_bytes())
                     .expect("get")
@@ -314,19 +306,15 @@ fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdo
                 assert_eq!(
                     val.as_ref(),
                     b"uncorrupted_value",
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
             for i in 100..150 {
-                let key = format!("sst_corrupt_key_{:04}", i);
+                let key = format!("sst_corrupt_key_{i:04}");
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get"),
                     Some(b"clean_value".as_slice().into()),
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
 
@@ -338,12 +326,12 @@ fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdo
 #[test]
 fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Reopen After WAL-Backed Writes (mode: {}) ===", mode);
+        eprintln!("\n=== Reopen After WAL-Backed Writes (mode: {mode}) ===");
 
         // Arrange
         // Act (Phase 1): Commit two WAL-backed write batches, then drop the engine
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write batch 1 (committed to WAL)
@@ -351,7 +339,7 @@ fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..50 {
-                let key = format!("wal_corrupt_key_{:04}", i);
+                let key = format!("wal_corrupt_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"wal_clean".to_vec(), None)
                     .expect("put");
             }
@@ -362,7 +350,7 @@ fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 50..100 {
-                let key = format!("wal_corrupt_key_{:04}", i);
+                let key = format!("wal_corrupt_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"wal_second".to_vec(), None)
                     .expect("put");
             }
@@ -371,7 +359,7 @@ fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
 
         // Assert (Phase 2): Reopen with WAL replay
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx = engine
@@ -379,7 +367,7 @@ fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
                 .expect("begin_tx");
 
             for i in 0..100 {
-                let key = format!("wal_corrupt_key_{:04}", i);
+                let key = format!("wal_corrupt_key_{i:04}");
                 let expected = if i < 50 {
                     b"wal_clean".as_slice()
                 } else {
@@ -388,9 +376,7 @@ fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
                 assert_eq!(
                     tx.get(key.as_bytes()).expect("get"),
                     Some(expected.into()),
-                    "mode: {} key: {}",
-                    mode,
-                    key
+                    "mode: {mode} key: {key}"
                 );
             }
 
@@ -402,10 +388,10 @@ fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
 #[test]
 fn should_handle_concurrent_best_effort_writes_under_load_without_invalid_values() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Concurrent Best-Effort Load (mode: {}) ===", mode);
+        eprintln!("\n=== Concurrent Best-Effort Load (mode: {mode}) ===");
 
         // Arrange: High-concurrency best-effort write load
-        let engine = std::sync::Arc::new(open_with_mode(opts.clone(), mode));
+        let engine = std::sync::Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut handles = vec![];
@@ -422,7 +408,7 @@ fn should_handle_concurrent_best_effort_writes_under_load_without_invalid_values
 
                     if let Some(mut t) = tx {
                         for i in 0..50 {
-                            let key = format!("chaos_load_t{}_b{}_k{:03}", tid, batch, i);
+                            let key = format!("chaos_load_t{tid}_b{batch}_k{i:03}");
                             t.put(key.as_bytes().to_vec(), b"chaos_value".to_vec(), None)
                                 .ok();
                         }
@@ -456,9 +442,9 @@ fn should_handle_concurrent_best_effort_writes_under_load_without_invalid_values
         let mut sampled_present = 0;
         for tid in 0..5 {
             for batch in 0..20 {
-                let key = format!("chaos_load_t{}_b{}_k000", tid, batch);
+                let key = format!("chaos_load_t{tid}_b{batch}_k000");
                 if let Some(val) = tx.get(key.as_bytes()).expect("get") {
-                    assert_eq!(val.as_ref(), b"chaos_value", "mode: {} key: {}", mode, key);
+                    assert_eq!(val.as_ref(), b"chaos_value", "mode: {mode} key: {key}");
                     sampled_present += 1;
                 }
             }
@@ -466,13 +452,11 @@ fn should_handle_concurrent_best_effort_writes_under_load_without_invalid_values
 
         assert!(
             sampled_present > 0,
-            "expected at least one sampled key to be present in mode: {}",
-            mode
+            "expected at least one sampled key to be present in mode: {mode}"
         );
 
         eprintln!(
-            "âœ“ Best-effort load remained readable with {} sampled keys present",
-            sampled_present
+            "âœ“ Best-effort load remained readable with {sampled_present} sampled keys present"
         );
     });
 }

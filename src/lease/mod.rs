@@ -37,7 +37,7 @@ pub use heartbeat::LeaseHeartbeat;
 pub use traits::{format_leader_record, parse_leader_record, LeaderRecord};
 pub use traits::{LeaderStore, LeaseError, LeaseGuard, PrimaryLease};
 
-use crate::engine::api::Storage;
+use crate::config::Storage;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -64,11 +64,11 @@ pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseErr
                     .as_nanos()
             ));
             // Memory mode: use MockFs for lease coordination (no disk I/O)
-            Ok(Arc::new(FileSystemLease::new(temp_path, true)?))
+            Ok(Arc::new(FileSystemLease::new(&temp_path, true)?))
         }
         Storage::Local { path } => {
             // Local storage: use filesystem lease with RealFs
-            Ok(Arc::new(FileSystemLease::new(path.clone(), false)?))
+            Ok(Arc::new(FileSystemLease::new(path.as_path(), false)?))
         }
         Storage::Cloud {
             local_cache_path,
@@ -83,7 +83,7 @@ pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseErr
                 region: None,
             };
             let cloud = crate::storage::providers::build_cloud_storage(provider, prefix)
-                .map_err(|error| LeaseError::IoError(format!("cloud lease backend: {}", error)))?;
+                .map_err(|error| LeaseError::IoError(format!("cloud lease backend: {error}")))?;
             Ok(Arc::new(CloudStorageLease::new_provider_backed(
                 config,
                 local_cache_path.clone(),

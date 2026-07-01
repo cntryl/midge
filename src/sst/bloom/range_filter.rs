@@ -21,6 +21,10 @@ pub struct RangeFilter {
 
 impl RangeFilter {
     /// Create a range filter from min and max keys
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` if `min_key` is greater than `max_key`.
     pub fn new(min_key: Vec<u8>, max_key: Vec<u8>) -> MidgeResult<Self> {
         if min_key > max_key {
             return Err(crate::common::MidgeError::InvalidArgument(
@@ -32,11 +36,13 @@ impl RangeFilter {
     }
 
     /// Get the minimum key
+    #[must_use]
     pub fn min_key(&self) -> &[u8] {
         &self.min_key
     }
 
     /// Get the maximum key
+    #[must_use]
     pub fn max_key(&self) -> &[u8] {
         &self.max_key
     }
@@ -44,28 +50,43 @@ impl RangeFilter {
     /// Check if a query range overlaps with this filter's range
     ///
     /// Ranges [a, b] and [c, d] overlap if NOT (b < c OR d < a)
+    #[must_use]
     pub fn overlaps_with(&self, query_min: &[u8], query_max: &[u8]) -> bool {
         !(self.max_key.as_slice() < query_min || query_max < self.min_key.as_slice())
     }
 
     /// Check if a point key is within the filter's range
+    #[must_use]
     pub fn contains_point(&self, key: &[u8]) -> bool {
         key >= self.min_key.as_slice() && key <= self.max_key.as_slice()
     }
 
     /// Serialize the range filter
     ///
-    /// Format: \[min_len: u32\]\[min_key...\]\[max_len: u32\]\[max_key...\]
+    /// Format: \[`min_len`: u32\]\[`min_key`...\]\[`max_len`: u32\]\[`max_key`...\]
+    #[must_use]
     pub fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
-        result.extend_from_slice(&(self.min_key.len() as u32).to_le_bytes());
+        result.extend_from_slice(
+            &u32::try_from(self.min_key.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         result.extend_from_slice(&self.min_key);
-        result.extend_from_slice(&(self.max_key.len() as u32).to_le_bytes());
+        result.extend_from_slice(
+            &u32::try_from(self.max_key.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         result.extend_from_slice(&self.max_key);
         result
     }
 
     /// Deserialize a range filter
+    ///
+    /// # Errors
+    ///
+    /// Returns `Corruption` if the encoded payload is truncated or malformed.
     pub fn deserialize(data: &[u8]) -> MidgeResult<Self> {
         if data.len() < 8 {
             return Err(crate::common::MidgeError::Corruption(

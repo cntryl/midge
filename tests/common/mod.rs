@@ -115,8 +115,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
         "local" => {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
+                .map_or(0, |d| d.as_nanos());
             let test_dir = PathBuf::from(format!(
                 "target/tmp/midge_test_local_{}_{}_{}",
                 std::process::id(),
@@ -137,8 +136,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
         "cloud" => {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
+                .map_or(0, |d| d.as_nanos());
             let test_dir = PathBuf::from(format!(
                 "target/tmp/midge_test_cloud_{}_{}_{}",
                 std::process::id(),
@@ -158,7 +156,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 memory_budget: None,
             }
         }
-        _ => panic!("unknown storage mode: {}", mode),
+        _ => panic!("unknown storage mode: {mode}"),
     }
 }
 
@@ -184,7 +182,7 @@ pub fn test_temp_dir() -> tempfile::TempDir {
     tempfile::TempDir::new().expect("Failed to create temp dir")
 }
 
-pub fn open_with_mode(opts: MidgeOptions, _mode: &str) -> Engine {
+pub fn open_with_mode(opts: &MidgeOptions, _mode: &str) -> Engine {
     Engine::open(opts.to_open_options()).expect("failed to open engine")
 }
 
@@ -204,29 +202,23 @@ impl Default for DurabilityTestContext {
     }
 }
 
-pub fn populate_multi_level_data(
-    _engine: &Engine,
-    _cf: &ColumnFamilyHandle,
-    _levels: usize,
-) -> MidgeResult<()> {
-    Ok(())
-}
+pub fn populate_multi_level_data(_engine: &Engine, _cf: &ColumnFamilyHandle, _levels: usize) {}
 
 pub mod test_helpers {
     use std::time::Duration;
 
-    pub fn wait_for_signal_default<T>(rx: std::sync::mpsc::Receiver<T>) -> Option<T> {
+    pub fn wait_for_signal_default<T>(rx: &std::sync::mpsc::Receiver<T>) -> Option<T> {
         rx.recv_timeout(Duration::from_secs(5)).ok()
     }
 }
 
-pub fn with_engine_restart<F1, F2>(opts: MidgeOptions, before_restart: F1, after_restart: F2)
+pub fn with_engine_restart<F1, F2>(opts: &MidgeOptions, before_restart: F1, after_restart: F2)
 where
     F1: FnOnce(&Engine),
     F2: FnOnce(&Engine),
 {
     {
-        let engine = Engine::open(opts.clone().to_open_options()).expect("open");
+        let engine = Engine::open(opts.to_open_options()).expect("open");
         before_restart(&engine);
         drop(engine);
     }
@@ -247,7 +239,10 @@ pub fn assert_get_equals(
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin_tx failed");
     let result = tx.get(key).expect("get failed");
-    assert_eq!(result.as_ref().map(|b| b.as_ref()), Some(expected));
+    assert_eq!(
+        result.as_ref().map(std::convert::AsRef::as_ref),
+        Some(expected)
+    );
 }
 
 pub fn assert_key_absent(engine: &MidgeEngine, cf: &ColumnFamilyHandle, key: &[u8]) {

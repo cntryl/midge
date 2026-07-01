@@ -1,5 +1,6 @@
 //! Cache metrics for observability
 
+use std::convert::TryFrom;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -14,6 +15,7 @@ pub struct CacheMetrics {
 
 impl CacheMetrics {
     /// Create a new metrics instance
+    #[must_use]
     pub fn new() -> Self {
         Self {
             hits: Arc::new(AtomicU64::new(0)),
@@ -54,32 +56,39 @@ impl CacheMetrics {
     }
 
     /// Get hit count
+    #[must_use]
     pub fn hit_count(&self) -> u64 {
         self.hits.load(Ordering::Relaxed)
     }
 
     /// Get miss count
+    #[must_use]
     pub fn miss_count(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
     }
 
     /// Get eviction count
+    #[must_use]
     pub fn eviction_count(&self) -> u64 {
         self.evictions.load(Ordering::Relaxed)
     }
 
     /// Get total memory bytes
+    #[must_use]
     pub fn memory_bytes(&self) -> u64 {
         self.memory_bytes.load(Ordering::Relaxed)
     }
 
     /// Calculate hit rate as percentage (0.0-100.0)
+    #[must_use]
     pub fn hit_rate(&self) -> f64 {
-        let hits = self.hit_count() as f64;
-        let total = (self.hit_count() + self.miss_count()) as f64;
-        if total == 0.0 {
+        let hits = self.hit_count();
+        let total = hits + self.miss_count();
+        if total == 0 {
             0.0
         } else {
+            let hits = f64::from(u32::try_from(hits).unwrap_or(u32::MAX));
+            let total = f64::from(u32::try_from(total).unwrap_or(u32::MAX));
             (hits / total) * 100.0
         }
     }
@@ -177,7 +186,7 @@ mod tests {
         let hit_rate = metrics.hit_rate();
 
         // Assert
-        assert_eq!(hit_rate, 0.0);
+        assert!(hit_rate.abs() < f64::EPSILON);
     }
 
     #[test]
@@ -191,7 +200,7 @@ mod tests {
         metrics.record_hit();
 
         // Assert
-        assert_eq!(metrics.hit_rate(), 100.0);
+        assert!((metrics.hit_rate() - 100.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -204,7 +213,7 @@ mod tests {
         metrics.record_miss();
 
         // Assert
-        assert_eq!(metrics.hit_rate(), 0.0);
+        assert!(metrics.hit_rate().abs() < f64::EPSILON);
     }
 
     #[test]

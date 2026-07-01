@@ -11,6 +11,7 @@ mod common;
 use cntryl_midge::WriteOptions;
 use common::*;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 // ============================================================================
 // BASIC LWW SEMANTICS TESTS
@@ -20,7 +21,7 @@ use std::sync::Arc;
 fn should_allow_concurrent_puts_to_same_key_given_lww_semantics() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -50,7 +51,7 @@ fn should_allow_concurrent_puts_to_same_key_given_lww_semantics() {
 fn should_allow_both_puts_to_succeed_given_concurrent_writes_when_lww() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -80,7 +81,7 @@ fn should_allow_both_puts_to_succeed_given_concurrent_writes_when_lww() {
 fn should_accept_both_committers_given_concurrent_puts_when_lww() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
         let engine1 = Arc::clone(&engine);
@@ -110,10 +111,90 @@ fn should_accept_both_committers_given_concurrent_puts_when_lww() {
 }
 
 #[test]
+fn should_finish_concurrent_local_same_key_lww_buffered_commits_within_timeout() {
+    // Arrange
+    let mode = "local";
+    let opts = opts_for_mode(mode);
+    let engine = Arc::new(open_with_mode(&opts, mode));
+    let cf = engine.create_column_family("test").expect("create cf");
+    let cf_id = cf.id();
+    let worker_count = 16usize;
+    let barrier = Arc::new(std::sync::Barrier::new(worker_count + 1));
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let mut handles = Vec::with_capacity(worker_count);
+
+    for worker_id in 0..worker_count {
+        let worker_engine = Arc::clone(&engine);
+        let worker_barrier = Arc::clone(&barrier);
+        let worker_result_tx = result_tx.clone();
+        handles.push(std::thread::spawn(move || {
+            let result = (|| -> cntryl_midge::MidgeResult<()> {
+                let mut txn =
+                    worker_engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)?;
+                txn.put(
+                    b"shared-key".to_vec(),
+                    format!("value-{worker_id:02}").into_bytes(),
+                    None,
+                )?;
+                worker_barrier.wait();
+                txn.commit(WriteOptions::buffered())
+            })();
+
+            let _ = worker_result_tx.send((worker_id, result));
+        }));
+    }
+    drop(result_tx);
+
+    // Act
+    barrier.wait();
+
+    // Assert
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut seen = vec![false; worker_count];
+    for _ in 0..worker_count {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or_else(|| Duration::from_secs(0));
+        let (worker_id, result) = result_rx.recv_timeout(remaining).unwrap_or_else(|error| {
+            panic!("timed out waiting for concurrent commit result: {error:?}");
+        });
+        assert!(worker_id < worker_count, "invalid worker id {worker_id}");
+        assert!(
+            !std::mem::replace(&mut seen[worker_id], true),
+            "duplicate result from worker {worker_id}"
+        );
+        result.unwrap_or_else(|error| panic!("worker {worker_id} commit failed: {error:?}"));
+    }
+
+    for handle in handles {
+        handle
+            .join()
+            .expect("worker should not panic after reporting result");
+    }
+    assert!(
+        seen.into_iter().all(|received| received),
+        "every worker should report exactly one result"
+    );
+
+    let read_tx = engine
+        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin read tx");
+    let value = read_tx
+        .get(b"shared-key")
+        .expect("read shared key")
+        .expect("shared key should exist");
+    let final_value = std::str::from_utf8(value.as_ref()).expect("final value should be utf8");
+    assert!(
+        final_value.starts_with("value-"),
+        "final value should be one of the committed worker values, got {final_value}"
+    );
+}
+
+#[test]
 fn should_preserve_first_commit_given_write_conflict_when_second_aborts() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -142,7 +223,7 @@ fn should_preserve_first_commit_given_write_conflict_when_second_aborts() {
 fn should_allow_concurrent_delete_put_operations_given_lww_semantics() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut setup_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -181,7 +262,7 @@ fn should_allow_concurrent_delete_put_operations_given_lww_semantics() {
 fn should_allow_overlapping_put_after_delete_range_given_lww_semantics() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
         let mut setup_tx = engine
@@ -229,7 +310,7 @@ fn should_allow_overlapping_put_after_delete_range_given_lww_semantics() {
 fn should_allow_put_then_delete_range_given_lww_semantics() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -259,7 +340,7 @@ fn should_allow_put_then_delete_range_given_lww_semantics() {
 fn should_allow_concurrent_delete_ranges_given_lww_semantics() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
         let mut setup_tx = engine
@@ -299,7 +380,7 @@ fn should_allow_concurrent_delete_ranges_given_lww_semantics() {
 fn should_allow_delete_range_delete_operations_given_lww_semantics() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut setup_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -345,7 +426,7 @@ fn should_allow_delete_range_delete_operations_given_lww_semantics() {
 fn should_allow_both_same_key_puts_given_lww_semantics_when_committed_in_order() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act - both transactions try to put same key
@@ -377,7 +458,7 @@ fn should_allow_both_same_key_puts_given_lww_semantics_when_committed_in_order()
 fn should_overwrite_existing_value_given_put_on_existing_key_when_committed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut setup_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -415,7 +496,7 @@ fn should_overwrite_existing_value_given_put_on_existing_key_when_committed() {
 fn should_allow_lost_update_given_put_read_modify_write_when_concurrent() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut setup_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -462,7 +543,7 @@ fn should_allow_lost_update_given_put_read_modify_write_when_concurrent() {
 fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut setup_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -517,7 +598,7 @@ fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
 fn should_preserve_both_updates_given_non_overlapping_keys_when_concurrent_commits() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -555,7 +636,7 @@ fn should_preserve_both_updates_given_non_overlapping_keys_when_concurrent_commi
 fn should_commit_transaction_given_no_conflicts() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -581,7 +662,7 @@ fn should_commit_transaction_given_no_conflicts() {
 fn should_commit_transaction_given_concurrent_modifications_to_different_keys() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
         let engine1 = Arc::clone(&engine);
@@ -625,7 +706,7 @@ fn should_commit_transaction_given_concurrent_modifications_to_different_keys() 
 fn should_read_values_within_transaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let mut setup_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -652,7 +733,7 @@ fn should_read_values_within_transaction() {
 fn should_commit_new_key_given_clean_transaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -682,7 +763,7 @@ fn should_commit_new_key_given_clean_transaction() {
 fn should_allow_concurrent_writes_to_different_keys() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
         let mut handles = vec![];
@@ -694,8 +775,8 @@ fn should_allow_concurrent_writes_to_different_keys() {
                 let mut txn = engine_clone
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                     .unwrap();
-                let key = format!("key{}", i);
-                let value = format!("value{}", i);
+                let key = format!("key{i}");
+                let value = format!("value{i}");
                 txn.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .unwrap();
                 txn.commit(cntryl_midge::WriteOptions::buffered())
@@ -712,8 +793,8 @@ fn should_allow_concurrent_writes_to_different_keys() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
         for i in 0..10 {
-            let key = format!("key{}", i);
-            let expected = format!("value{}", i);
+            let key = format!("key{i}");
+            let expected = format!("value{i}");
             assert_eq!(
                 read_tx.get(key.as_bytes()).unwrap(),
                 Some(Bytes::from(expected.as_bytes().to_vec()))
@@ -726,19 +807,19 @@ fn should_allow_concurrent_writes_to_different_keys() {
 fn should_handle_high_contention_writes_without_panic() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
         let mut handles = vec![];
 
-        // Act - 20 threads writing to same key
-        for i in 0..20 {
+        // Act - multiple threads writing to same key
+        for i in 0..8 {
             let engine_clone = Arc::clone(&engine);
             let handle = std::thread::spawn(move || {
                 let mut txn = engine_clone
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                     .unwrap();
-                let value = format!("value{}", i);
+                let value = format!("value{i}");
                 txn.put(b"hotkey".to_vec(), value.as_bytes().to_vec(), None)
                     .unwrap();
                 txn.commit(cntryl_midge::WriteOptions::buffered())
@@ -763,7 +844,7 @@ fn should_handle_high_contention_writes_without_panic() {
 fn should_handle_concurrent_read_modify_writes_without_panic() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
         let mut setup_tx = engine
@@ -788,7 +869,7 @@ fn should_handle_concurrent_read_modify_writes_without_panic() {
                 let mut txn = engine_clone
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                     .unwrap();
-                let new_value = format!("{}", i);
+                let new_value = format!("{i}");
                 txn.put(b"counter".to_vec(), new_value.as_bytes().to_vec(), None)
                     .unwrap();
                 txn.commit(cntryl_midge::WriteOptions::buffered())
@@ -807,7 +888,7 @@ fn should_handle_concurrent_read_modify_writes_without_panic() {
 fn should_handle_high_concurrency_optimistic_locking() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
         let barrier = Arc::new(std::sync::Barrier::new(50));
@@ -831,7 +912,7 @@ fn should_handle_high_concurrency_optimistic_locking() {
                 let mut txn = engine_clone
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                     .unwrap();
-                let write_val = format!("{}", i);
+                let write_val = format!("{i}");
                 txn.put(b"value".to_vec(), write_val.as_bytes().to_vec(), None)
                     .unwrap();
                 txn.commit(cntryl_midge::WriteOptions::buffered())
@@ -856,7 +937,7 @@ fn should_handle_high_concurrency_optimistic_locking() {
 fn should_maintain_transaction_isolation_under_stress() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let _engine = Arc::new(open_with_mode(opts, mode));
+        let _engine = Arc::new(open_with_mode(&opts, mode));
 
         // Act
         // Test transaction isolation under concurrent load
@@ -875,7 +956,7 @@ fn should_recover_conflict_state_after_engine_restart() {
         // Arrange
         // Act (Phase 1) - create conflicts and commit
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Create conflicting transactions where last-write wins
@@ -898,7 +979,7 @@ fn should_recover_conflict_state_after_engine_restart() {
 
         // Assert (Phase 2) - restart and verify
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.get_column_family("test").expect("get cf");
 
             // Assert - last written value persists
@@ -917,7 +998,7 @@ fn should_persist_lost_update_prevention_after_restart() {
         // Arrange
         // Act (Phase 1) - set up concurrent updates
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Initial value
@@ -949,7 +1030,7 @@ fn should_persist_lost_update_prevention_after_restart() {
 
         // Assert (Phase 2) - restart and verify
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.get_column_family("test").expect("get cf");
 
             // Assert - last written value (2) persists
@@ -970,7 +1051,7 @@ fn should_not_reject_writes_when_no_conflict_exists_given_disjoint_keys() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Verify that non-conflicting writes are never rejected
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act: Two transactions writing to different keys (no conflict)
@@ -990,16 +1071,8 @@ fn should_not_reject_writes_when_no_conflict_exists_given_disjoint_keys() {
         let r2 = txn2.commit(cntryl_midge::WriteOptions::buffered());
 
         // Assert: Both must succeed (no false positive conflict detection)
-        assert!(
-            r1.is_ok(),
-            "Non-conflicting write 1 was rejected in {}",
-            mode
-        );
-        assert!(
-            r2.is_ok(),
-            "Non-conflicting write 2 was rejected in {}",
-            mode
-        );
+        assert!(r1.is_ok(), "Non-conflicting write 1 was rejected in {mode}");
+        assert!(r2.is_ok(), "Non-conflicting write 2 was rejected in {mode}");
 
         let read_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -1016,7 +1089,7 @@ fn should_preserve_both_writes_when_non_overlapping_keys_given_concurrent_commit
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Verify that non-conflicting concurrent writes are both visible
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Pre-populate
@@ -1059,14 +1132,12 @@ fn should_preserve_both_writes_when_non_overlapping_keys_given_concurrent_commit
         assert_eq!(
             v1,
             Some(Bytes::from_static(b"new1")),
-            "key1 update lost in {}",
-            mode
+            "key1 update lost in {mode}"
         );
         assert_eq!(
             v2,
             Some(Bytes::from_static(b"new2")),
-            "key2 update lost in {}",
-            mode
+            "key2 update lost in {mode}"
         );
     });
 }

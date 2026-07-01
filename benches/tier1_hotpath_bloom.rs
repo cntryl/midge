@@ -28,7 +28,7 @@ fn bench_bloom_maybe_contains(c: &mut Criterion) {
     // Build filter once outside benchmark loop
     let mut builder = BloomWriter::with_defaults(100);
     let keys: Vec<Bytes> = (0..100)
-        .map(|i| Bytes::from(format!("key_{:010}", i)))
+        .map(|i| Bytes::from(format!("key_{i:010}")))
         .collect();
     for key in &keys {
         builder.insert(key);
@@ -47,7 +47,7 @@ fn bench_bloom_maybe_contains(c: &mut Criterion) {
                 matches += usize::from(result.might_be_present());
             }
             black_box(matches)
-        })
+        });
     });
 
     group.bench_function("maybe_contains_miss", |b| {
@@ -58,7 +58,7 @@ fn bench_bloom_maybe_contains(c: &mut Criterion) {
                 misses += usize::from(result.definitely_not_present());
             }
             black_box(misses)
-        })
+        });
     });
 
     group.finish();
@@ -73,7 +73,7 @@ fn bench_bloom_batch_lookups(c: &mut Criterion) {
     // Build a larger filter
     let mut builder = BloomWriter::with_defaults(1000);
     let keys: Vec<Bytes> = (0..1000)
-        .map(|i| Bytes::from(format!("key_{:010}", i)))
+        .map(|i| Bytes::from(format!("key_{i:010}")))
         .collect();
     for key in &keys {
         builder.insert(key);
@@ -86,7 +86,7 @@ fn bench_bloom_batch_lookups(c: &mut Criterion) {
             if i % 2 == 0 {
                 (true, keys[i * 5].to_vec()) // hit
             } else {
-                (false, format!("miss_{:010}", i).into_bytes()) // miss
+                (false, format!("miss_{i:010}").into_bytes()) // miss
             }
         })
         .collect();
@@ -102,7 +102,7 @@ fn bench_bloom_batch_lookups(c: &mut Criterion) {
                 }
             }
             black_box(count)
-        })
+        });
     });
 
     group.finish();
@@ -117,7 +117,7 @@ fn bench_bloom_compute_hashes(c: &mut Criterion) {
 
     let mut builder = BloomWriter::with_defaults(100);
     let keys: Vec<Bytes> = (0..100)
-        .map(|i| Bytes::from(format!("key_{:010}", i)))
+        .map(|i| Bytes::from(format!("key_{i:010}")))
         .collect();
     for key in &keys {
         builder.insert(key);
@@ -131,7 +131,7 @@ fn bench_bloom_compute_hashes(c: &mut Criterion) {
         b.iter(|| {
             let result = filter.contains(black_box(miss_key));
             black_box(result.definitely_not_present())
-        })
+        });
     });
 
     group.finish();

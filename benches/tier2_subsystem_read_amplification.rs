@@ -27,10 +27,16 @@ const LOOKUPS_PER_ITER: usize = 1000;
 const MIXED_GETS_PER_ITER: usize = 700;
 const MIXED_SCANS_PER_ITER: usize = 30;
 const SCAN_WIDTH: usize = 10;
+const LCG_SEED: u64 = 0xDEAD_BEEF_CAFE_BABE_u64;
+const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
+
+fn usize_to_f64(value: usize) -> f64 {
+    f64::from(u32::try_from(value).expect("value fits in u32"))
+}
 
 #[inline]
 fn key_from_index(idx: usize) -> Bytes {
-    Bytes::from(format!("key:{:010}", idx))
+    Bytes::from(format!("key:{idx:010}"))
 }
 
 fn precompute_zipf_keys(count: usize, max_key: usize, alpha: f64) -> Vec<Bytes> {
@@ -39,11 +45,13 @@ fn precompute_zipf_keys(count: usize, max_key: usize, alpha: f64) -> Vec<Bytes> 
 }
 
 fn precompute_uniform_keys(count: usize, max_key: usize) -> Vec<Bytes> {
-    let mut seed = 0xDEADBEEFCAFEBABEu64;
+    let mut seed = LCG_SEED;
+    let max_key_u64 = u64::try_from(max_key).expect("max_key fits in u64");
     (0..count)
         .map(|_| {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            key_from_index((seed as usize) % max_key)
+            seed = seed.wrapping_mul(LCG_MULTIPLIER).wrapping_add(1);
+            let idx = usize::try_from(seed % max_key_u64).expect("modulo result fits in usize");
+            key_from_index(idx)
         })
         .collect()
 }
@@ -63,10 +71,10 @@ struct SstSimulator {
 }
 
 impl SstSimulator {
-    /// Create SST with keys in range [start_key, start_key+num_keys)
+    /// Create SST with keys in range [`start_key`, `start_key+num_keys`)
     fn new(sst_id: u64, start_key: usize, num_keys: usize) -> Self {
         let keys: Vec<Bytes> = (start_key..start_key + num_keys)
-            .map(|i| Bytes::from(format!("key:{:010}", i)))
+            .map(|i| Bytes::from(format!("key:{i:010}")))
             .collect();
 
         let num_blocks = num_keys.div_ceil(KEYS_PER_BLOCK);
@@ -125,7 +133,7 @@ impl SstSimulator {
 struct LsmSimulator {
     /// Level -> Vec of SSTs
     levels: Vec<Vec<SstSimulator>>,
-    /// Cache: (sst_id, block_idx) -> bool
+    /// Cache: (`sst_id`, `block_idx`) -> bool
     cache: std::collections::HashMap<(u64, usize), bool>,
     cache_capacity: usize,
 }
@@ -139,21 +147,33 @@ impl LsmSimulator {
         let mut levels = Vec::new();
 
         // Level 0: 1 fresh SST
-        let level0 = vec![SstSimulator::new(0, 0, 10_000)];
+        let l0_ssts = vec![SstSimulator::new(0, 0, 10_000)];
 
         // Level 1: 4 SSTs with non-overlapping ranges
-        let level1 = (0..4)
-            .map(|i| SstSimulator::new(100 + i as u64, i * 10_000, 10_000))
+        let l1_ssts = (0_u64..4)
+            .map(|i| {
+                SstSimulator::new(
+                    100 + i,
+                    usize::try_from(i).expect("loop index fits in usize") * 10_000,
+                    10_000,
+                )
+            })
             .collect();
 
         // Level 2: 8 SSTs with non-overlapping ranges (more spread out)
-        let level2 = (0..8)
-            .map(|i| SstSimulator::new(200 + i as u64, i * 5_000, 5_000))
+        let l2_ssts = (0_u64..8)
+            .map(|i| {
+                SstSimulator::new(
+                    200 + i,
+                    usize::try_from(i).expect("loop index fits in usize") * 5_000,
+                    5_000,
+                )
+            })
             .collect();
 
-        levels.push(level0);
-        levels.push(level1);
-        levels.push(level2);
+        levels.push(l0_ssts);
+        levels.push(l1_ssts);
+        levels.push(l2_ssts);
 
         Self {
             levels,
@@ -183,7 +203,7 @@ impl LsmSimulator {
                             // Add to cache (with simple LRU eviction)
                             if self.cache.len() >= self.cache_capacity {
                                 // Evict first entry (simple FIFO for now)
-                                if let Some(k) = self.cache.keys().next().cloned() {
+                                if let Some(k) = self.cache.keys().next().copied() {
                                     self.cache.remove(&k);
                                 }
                             }
@@ -202,15 +222,15 @@ impl LsmSimulator {
         (blocks_read, cache_hits, found)
     }
 
-    /// Range scan across keys [start_key, start_key+num_keys)
-    /// Returns (total_blocks_read, cache_hits, keys_found)
+    /// Range scan across keys [`start_key`, `start_key+num_keys`)
+    /// Returns (`total_blocks_read`, `cache_hits`, `keys_found`)
     fn scan(&mut self, start_key: usize, num_keys: usize) -> (u32, u32, u32) {
         let mut blocks_read = 0u32;
         let mut cache_hits = 0u32;
         let mut keys_found = 0u32;
 
         let keys: Vec<Bytes> = (start_key..start_key + num_keys)
-            .map(|i| Bytes::from(format!("key:{:010}", i)))
+            .map(|i| Bytes::from(format!("key:{i:010}")))
             .collect();
 
         for key in &keys {
@@ -227,12 +247,12 @@ impl LsmSimulator {
 
     #[allow(dead_code)]
     fn cache_hit_rate(&self) -> f64 {
-        self.cache.len() as f64 / self.cache_capacity as f64
+        usize_to_f64(self.cache.len()) / usize_to_f64(self.cache_capacity)
     }
 }
 
 /// Zipfian key distribution generator
-/// Returns keys with frequency distribution: P(key_i) ∝ 1 / (i+1)^alpha
+/// Returns keys with frequency distribution: `P(key_i)` ∝ 1 / (i+1)^alpha
 struct ZipfianDistribution {
     seed: u64,
     alpha: f64,
@@ -242,7 +262,7 @@ struct ZipfianDistribution {
 impl ZipfianDistribution {
     fn new(max_key: usize, alpha: f64) -> Self {
         Self {
-            seed: 0xDEADBEEFCAFEBABE,
+            seed: LCG_SEED,
             alpha,
             max_key,
         }
@@ -251,8 +271,9 @@ impl ZipfianDistribution {
     /// Generate next zipfian-distributed key index
     fn next(&mut self) -> usize {
         // Simple LCG for determinism
-        self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-        let u = ((self.seed >> 32) as f64) / (u32::MAX as f64); // [0, 1)
+        self.seed = self.seed.wrapping_mul(LCG_MULTIPLIER).wrapping_add(1);
+        let u = f64::from(u32::try_from(self.seed >> 32).expect("upper 32 bits fit in u32"))
+            / f64::from(u32::MAX); // [0, 1)
 
         // Inverse transform sampling for Zipfian
         let zeta = 1.6; // Approximate zeta(2, 1.5) for alpha=1.5
@@ -262,8 +283,15 @@ impl ZipfianDistribution {
         } else if uz < (1.0 + 0.5_f64.powf(self.alpha)) {
             1
         } else {
-            ((self.max_key as f64) * (uz - 1.0).powf(-1.0 / self.alpha))
-                .min(self.max_key as f64 - 1.0) as usize
+            let target = (uz - 1.0).powf(-1.0 / self.alpha);
+            let mut idx = 0usize;
+            let max_key_f64 = usize_to_f64(self.max_key);
+
+            while idx + 1 < self.max_key && usize_to_f64(idx + 1) / max_key_f64 < target {
+                idx += 1;
+            }
+
+            idx
         }
     }
 }
@@ -297,7 +325,7 @@ fn bench_read_amp_point_lookups_zipfian(c: &mut Criterion) {
             }
 
             black_box((total_blocks_read, total_cache_hits, total_found))
-        })
+        });
     });
 
     group.finish();
@@ -341,7 +369,7 @@ fn bench_read_amp_mixed_get_scan(c: &mut Criterion) {
             }
 
             black_box((total_blocks_read, total_cache_hits, total_found))
-        })
+        });
     });
 
     group.finish();
@@ -374,7 +402,7 @@ fn bench_read_amp_uniform_distribution(c: &mut Criterion) {
             }
 
             black_box((total_blocks_read, total_cache_hits, total_found))
-        })
+        });
     });
 
     group.finish();

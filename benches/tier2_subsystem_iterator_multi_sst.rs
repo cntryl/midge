@@ -37,7 +37,7 @@ impl MockSst {
     /// Create SST with keys in range [start, start+count)
     fn new(id: u64, start: usize, count: usize) -> Self {
         let keys = (start..(start + count))
-            .map(|i| Bytes::from(format!("key:{:010}", i)))
+            .map(|i| Bytes::from(format!("key:{i:010}")))
             .collect();
 
         Self { id, keys }
@@ -60,7 +60,7 @@ struct SstIterator<'a> {
     current: usize,
 }
 
-impl<'a> SstIterator<'a> {
+impl SstIterator<'_> {
     fn next(&mut self) -> Option<(Bytes, u64)> {
         if self.current < self.keys.len() {
             let key = self.keys[self.current].clone();
@@ -114,7 +114,7 @@ impl<'a> MergeIterator<'a> {
                 heap.push(HeapEntry {
                     key,
                     sst_id,
-                    iter_idx: idx as u32,
+                    iter_idx: u32::try_from(idx).expect("iterator index fits in u32"),
                 });
             }
         }
@@ -156,7 +156,7 @@ impl<'a> MergeIterator<'a> {
 /// Benchmark merging 2-5 SSTs with disjoint key ranges (no overlap)
 fn bench_iterator_disjoint_ssts(c: &mut Criterion) {
     for &num_ssts in &[2, 3, 5] {
-        let mut group = c.benchmark_group(format!("iterator_multi_sst_disjoint_{}_ssts", num_ssts));
+        let mut group = c.benchmark_group(format!("iterator_multi_sst_disjoint_{num_ssts}_ssts"));
         group.sampling_mode(SamplingMode::Flat);
         group.throughput(Throughput::Elements((num_ssts * KEYS_PER_SST) as u64));
 
@@ -176,7 +176,7 @@ fn bench_iterator_disjoint_ssts(c: &mut Criterion) {
                 }
 
                 black_box((count, merge.keys_compared()))
-            })
+            });
         });
 
         group.finish();
@@ -189,7 +189,7 @@ fn bench_iterator_disjoint_ssts(c: &mut Criterion) {
 fn bench_iterator_overlapping_ssts(c: &mut Criterion) {
     for &num_ssts in &[2, 3, 5] {
         let mut group =
-            c.benchmark_group(format!("iterator_multi_sst_overlapping_{}_ssts", num_ssts));
+            c.benchmark_group(format!("iterator_multi_sst_overlapping_{num_ssts}_ssts"));
         group.sampling_mode(SamplingMode::Flat);
         group.measurement_time(std::time::Duration::from_secs(6));
         group.throughput(Throughput::Elements((num_ssts * KEYS_PER_SST) as u64));
@@ -216,7 +216,7 @@ fn bench_iterator_overlapping_ssts(c: &mut Criterion) {
                 }
 
                 black_box((count, merge.keys_compared()))
-            })
+            });
         });
 
         group.finish();
@@ -228,7 +228,7 @@ fn bench_iterator_overlapping_ssts(c: &mut Criterion) {
 /// Benchmark merging SSTs with 50% overlap (realistic LSM scenario)
 fn bench_iterator_partial_overlap_ssts(c: &mut Criterion) {
     for &num_ssts in &[2, 3, 5] {
-        let mut group = c.benchmark_group(format!("iterator_multi_sst_partial_{}_ssts", num_ssts));
+        let mut group = c.benchmark_group(format!("iterator_multi_sst_partial_{num_ssts}_ssts"));
         group.sampling_mode(SamplingMode::Flat);
         group.measurement_time(std::time::Duration::from_secs(6));
         group.throughput(Throughput::Elements((num_ssts * KEYS_PER_SST) as u64));
@@ -258,7 +258,7 @@ fn bench_iterator_partial_overlap_ssts(c: &mut Criterion) {
                 }
 
                 black_box((count, merge.keys_compared()))
-            })
+            });
         });
 
         group.finish();
@@ -302,7 +302,7 @@ fn bench_iterator_multi_sst_comparison(c: &mut Criterion) {
                         }
 
                         black_box((count, merge.keys_compared()))
-                    })
+                    });
                 } else {
                     let ssts: Vec<MockSst> = (0..num_ssts)
                         .map(|i| MockSst::new(i as u64, 0, KEYS_PER_SST))
@@ -324,7 +324,7 @@ fn bench_iterator_multi_sst_comparison(c: &mut Criterion) {
                         }
 
                         black_box((count, merge.keys_compared()))
-                    })
+                    });
                 }
             },
         );

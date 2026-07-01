@@ -2,7 +2,9 @@
 //!
 //! Wraps any `Fs` implementation and injects failures for testing resilience.
 
-use super::traits::*;
+use super::traits::{
+    DirEntry, Durability, File, FileCaps, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -185,7 +187,7 @@ pub struct ChaosFile<'a> {
     chaos: &'a ChaosFs,
 }
 
-impl<'a> File for ChaosFile<'a> {
+impl File for ChaosFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<bytes::Bytes> {
         if self.chaos.should_fail_read() {
             return Err(FsError::Unavailable("chaos: read failed".into()));
@@ -232,9 +234,10 @@ impl<'a> File for ChaosFile<'a> {
 mod tests {
     use super::*;
     use crate::io::mock::MockFs;
+    use crate::io::OpenMode;
 
     #[test]
-    fn should_inject_open_failure() -> FsResult<()> {
+    fn should_inject_open_failure() {
         // Arrange
         let inner = Arc::new(MockFs::new());
         let chaos = ChaosFs::new(inner, 1); // fail every 1st operation
@@ -254,11 +257,10 @@ mod tests {
 
         // Assert
         assert!(result.is_err());
-        Ok(())
     }
 
     #[test]
-    fn should_pass_through_when_no_fail() -> FsResult<()> {
+    fn should_pass_through_when_no_fail() {
         // Arrange
         let inner = Arc::new(MockFs::new());
         let chaos = ChaosFs::new(inner, 0); // never fail
@@ -278,6 +280,5 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        Ok(())
     }
 }

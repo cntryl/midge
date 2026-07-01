@@ -7,7 +7,7 @@ This matrix defines what Midge supports today and what must be true before a cap
 | Capability | Current status | Production target |
 |---|---|---|
 | Local single-process embedded mode | Evaluation-ready | Production-ready first |
-| Cloud-backed mode | Supported 0.x path | Promote only after parity, lease, upload, and qualification gates pass |
+| Cloud-backed mode | Supported 0.x path | Promote only after durability/recovery, lease, upload, and qualification gates pass |
 | `WriteOptions::sync()` | Supported | Freeze semantics at 1.0 |
 | `WriteOptions::buffered()` | Supported | Freeze semantics at 1.0 |
 | `WriteOptions::best_effort()` | Supported with explicit caveats | Supported only for documented reloadable-data workflows |

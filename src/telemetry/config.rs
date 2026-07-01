@@ -5,16 +5,13 @@ use serde::{Deserialize, Serialize};
 /// OTLP exporter configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OtlpConfig {
-    /// OTLP collector endpoint (e.g., "http://localhost:4317")
+    /// OTLP collector endpoint (e.g., "<http://localhost:4317>")
     pub endpoint: String,
 }
 
 /// Telemetry configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TelemetryConfig {
-    /// Enable/disable all telemetry
-    pub enabled: bool,
-
+pub struct TelemetryFeatures {
     /// Enable structured logging
     pub enable_logging: bool,
 
@@ -23,6 +20,16 @@ pub struct TelemetryConfig {
 
     /// Enable metrics collection
     pub enable_metrics: bool,
+}
+
+/// Telemetry configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    /// Enable/disable all telemetry
+    pub enabled: bool,
+
+    #[serde(flatten)]
+    pub features: TelemetryFeatures,
 
     /// Sampling rate for traces (0.0..=1.0)
     pub trace_sample_rate: f64,
@@ -38,9 +45,11 @@ impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
             enabled: cfg!(debug_assertions), // Only enable in dev by default
-            enable_logging: true,
-            enable_tracing: true,
-            enable_metrics: true,
+            features: TelemetryFeatures {
+                enable_logging: true,
+                enable_tracing: true,
+                enable_metrics: true,
+            },
             trace_sample_rate: 1.0,
             service_name: "midge".to_string(),
             otlp_config: None,
@@ -83,19 +92,19 @@ impl TelemetryConfig {
 
     /// Enable/disable logging
     pub fn with_logging(mut self, enabled: bool) -> Self {
-        self.enable_logging = enabled;
+        self.features.enable_logging = enabled;
         self
     }
 
     /// Enable/disable tracing
     pub fn with_tracing(mut self, enabled: bool) -> Self {
-        self.enable_tracing = enabled;
+        self.features.enable_tracing = enabled;
         self
     }
 
     /// Enable/disable metrics
     pub fn with_metrics(mut self, enabled: bool) -> Self {
-        self.enable_metrics = enabled;
+        self.features.enable_metrics = enabled;
         self
     }
 }
@@ -107,7 +116,7 @@ mod tests {
     #[test]
     fn should_create_default_config() {
         let config = TelemetryConfig::default();
-        assert_eq!(config.trace_sample_rate, 1.0);
+        assert!((config.trace_sample_rate - 1.0).abs() <= f64::EPSILON);
         assert_eq!(config.service_name, "midge");
     }
 
@@ -120,8 +129,8 @@ mod tests {
         let low = TelemetryConfig::new().with_sample_rate(-0.5);
 
         // Assert
-        assert_eq!(high.trace_sample_rate, 1.0);
-        assert_eq!(low.trace_sample_rate, 0.0);
+        assert!((high.trace_sample_rate - 1.0).abs() <= f64::EPSILON);
+        assert!(low.trace_sample_rate.abs() <= f64::EPSILON);
     }
 
     #[test]

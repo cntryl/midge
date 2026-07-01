@@ -249,8 +249,7 @@ mod tests {
         // Assert
         assert!(
             renewal_count >= 3,
-            "expected at least 3 renewals within timeout, got {}",
-            renewal_count
+            "expected at least 3 renewals within timeout, got {renewal_count}"
         );
         assert!(is_healthy);
     }

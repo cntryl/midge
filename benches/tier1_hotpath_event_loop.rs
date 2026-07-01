@@ -24,9 +24,9 @@ const DIRECT_INNER_LOOPS: u64 = 1_000_000;
 #[inline]
 fn dispatch_message(kind: MessageKind, counter: &mut u64) {
     match kind {
-        MessageKind::Noop => handle(counter),
-        MessageKind::StartupPing => handle(counter),
-        MessageKind::GetRuntimeConfig => handle(counter),
+        MessageKind::Noop | MessageKind::StartupPing | MessageKind::GetRuntimeConfig => {
+            handle(counter);
+        }
     }
 }
 
@@ -49,7 +49,8 @@ fn record_ops(
     ops: u64,
     dur: std::time::Duration,
 ) {
-    let ops_per_sec = ops as f64 / dur.as_secs_f64();
+    let ops_per_sec = f64::from(u32::try_from(ops).expect("bench operation count fits in u32"))
+        / dur.as_secs_f64();
     results.borrow_mut().insert(name, ops_per_sec);
 }
 
@@ -63,7 +64,7 @@ fn print_table(results: &RefCell<HashMap<&'static str, f64>>) {
     for name in ["direct_call", "dispatch_only", "mailbox_vecdeque"] {
         if let Some(&ops) = results.get(name) {
             let relative = ops / baseline;
-            println!("{name} | {:.0} | {:.2}x", ops, relative);
+            println!("{name} | {ops:.0} | {relative:.2}x");
         }
     }
 }
@@ -92,14 +93,15 @@ fn bench_tier1(c: &mut Criterion) {
             black_box(counter);
             record_ops(&results, "direct_call", ops, duration);
             duration
-        })
+        });
     });
 
     group.bench_function("dispatch_only", |b| {
         b.iter_custom(|iters| {
             let iters = iters.max(1);
             let ops = iters.saturating_mul(INNER_LOOPS);
-            let messages = build_messages(ops as usize);
+            let messages =
+                build_messages(usize::try_from(ops).expect("bench operation count fits in usize"));
             let mut counter = 0u64;
             let start = Instant::now();
             for kind in messages {
@@ -109,14 +111,15 @@ fn bench_tier1(c: &mut Criterion) {
             black_box(counter);
             record_ops(&results, "dispatch_only", ops, duration);
             duration
-        })
+        });
     });
 
     group.bench_function("mailbox_vecdeque", |b| {
         b.iter_custom(|iters| {
             let iters = iters.max(1);
             let ops = iters.saturating_mul(INNER_LOOPS);
-            let messages = build_messages(ops as usize);
+            let messages =
+                build_messages(usize::try_from(ops).expect("bench operation count fits in usize"));
             let mut queue = VecDeque::with_capacity(messages.len());
             for kind in messages {
                 queue.push_back(kind);
@@ -131,7 +134,7 @@ fn bench_tier1(c: &mut Criterion) {
             black_box(counter);
             record_ops(&results, "mailbox_vecdeque", ops, duration);
             duration
-        })
+        });
     });
 
     group.finish();

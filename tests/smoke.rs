@@ -18,7 +18,7 @@ use common::*;
 #[test]
 fn should_read_written_value_given_memory_mode_when_written() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act
@@ -41,7 +41,7 @@ fn should_read_written_value_given_memory_mode_when_written() {
 #[test]
 fn should_read_written_value_given_flushed_value_when_read() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act
@@ -66,7 +66,7 @@ fn should_read_written_value_given_flushed_value_when_read() {
 #[test]
 fn should_hide_value_given_deleted_key_when_read() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act
@@ -95,7 +95,7 @@ fn should_hide_value_given_deleted_key_when_read() {
 #[test]
 fn should_preserve_tombstone_given_flushed_tombstone_when_read() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act
@@ -130,7 +130,7 @@ fn should_persist_data_given_write_when_restarted() {
 
     // Act - Write and restart
     {
-        let engine = open_with_mode(opts.clone(), "local");
+        let engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -145,7 +145,7 @@ fn should_persist_data_given_write_when_restarted() {
     }
 
     // Reopen engine
-    let engine = open_with_mode(opts, "local");
+    let engine = open_with_mode(&opts, "local");
     let cf = engine.create_column_family("test").expect("create cf");
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -167,7 +167,7 @@ fn should_persist_tombstone_given_delete_when_restarted() {
 
     // Act - Delete and restart
     {
-        let engine = open_with_mode(opts.clone(), "local");
+        let engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -184,7 +184,7 @@ fn should_persist_tombstone_given_delete_when_restarted() {
     }
 
     // Reopen engine
-    let engine = open_with_mode(opts, "local");
+    let engine = open_with_mode(&opts, "local");
     let cf = engine.create_column_family("test").expect("create cf");
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -198,7 +198,7 @@ fn should_persist_tombstone_given_delete_when_restarted() {
 #[test]
 fn should_allow_read_only_snapshot_given_committed_value_when_snapshot_reads() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act
@@ -234,7 +234,7 @@ fn should_allow_read_only_snapshot_given_committed_value_when_snapshot_reads() {
 #[test]
 fn should_preserve_latest_version_given_repeated_flushes_when_read() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act
@@ -268,7 +268,7 @@ fn should_preserve_latest_version_given_repeated_flushes_when_read() {
 #[test]
 fn should_respect_visibility_rules_given_range_scan_when_scanning() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act
@@ -311,7 +311,7 @@ fn should_respect_visibility_rules_given_range_scan_when_scanning() {
 #[test]
 fn should_preserve_all_committed_values_given_multiple_writes_when_written() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act
@@ -319,7 +319,7 @@ fn should_preserve_all_committed_values_given_multiple_writes_when_written() {
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
-        tx.put(format!("key{}", i).into_bytes(), b"val".to_vec(), None)
+        tx.put(format!("key{i}").into_bytes(), b"val".to_vec(), None)
             .expect("put");
         tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     }
@@ -330,7 +330,7 @@ fn should_preserve_all_committed_values_given_multiple_writes_when_written() {
         .unwrap();
     for i in 0..10 {
         assert_eq!(
-            tx.get(format!("key{}", i).as_bytes())
+            tx.get(format!("key{i}").as_bytes())
                 .expect("get committed key"),
             Some(Bytes::from_static(b"val"))
         );
@@ -344,7 +344,7 @@ fn should_reopen_committed_values_given_engine_dropped_without_close_when_reopen
 
     // Act
     {
-        let engine = open_with_mode(opts.clone(), "local");
+        let engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -358,7 +358,7 @@ fn should_reopen_committed_values_given_engine_dropped_without_close_when_reopen
     }
 
     // Reopen and verify state
-    let engine = open_with_mode(opts, "local");
+    let engine = open_with_mode(&opts, "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Assert

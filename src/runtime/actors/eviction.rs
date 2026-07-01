@@ -38,24 +38,21 @@ impl EvictionActor {
     }
 
     /// Handle an eviction event
-    pub fn handle_event(&mut self, event: EvictionEvent) -> Result<(), String> {
+    pub fn handle_event(&mut self, event: &EvictionEvent) {
         match event {
             EvictionEvent::ProcessNext => self.process_next_eviction(),
             EvictionEvent::Complete {
                 sst_id,
                 freed_bytes,
-            } => self.mark_eviction_complete(sst_id, freed_bytes),
+            } => self.mark_eviction_complete(*sst_id, *freed_bytes),
         }
     }
 
     /// Process the next eviction from the queue
-    fn process_next_eviction(&mut self) -> Result<(), String> {
+    fn process_next_eviction(&mut self) {
         // Get next eviction from SBA
         let next_eviction = {
-            let mut actor = self
-                .hybrid_storage
-                .budget_actor()
-                .map_err(|e| format!("Failed to lock SBA: {}", e))?;
+            let mut actor = self.hybrid_storage.budget_actor();
             actor.next_eviction()
         };
 
@@ -66,22 +63,18 @@ impl EvictionActor {
             // 3. Handle errors gracefully
             //
             // For now, we track that we processed it and mark as complete
-            self.mark_eviction_complete(sst_id, size)?;
+            self.mark_eviction_complete(sst_id, size);
         }
-
-        Ok(())
     }
 
     /// Mark an eviction as complete and update disk state
-    fn mark_eviction_complete(&mut self, _sst_id: u64, freed_bytes: u64) -> Result<(), String> {
+    fn mark_eviction_complete(&mut self, _sst_id: u64, freed_bytes: u64) {
         // Update counters
         self.evictions_processed += 1;
         self.total_freed += freed_bytes;
 
         // Note: The disk state in SBA would be updated separately via LocalSSTPurged event
         // when the actual file deletion is confirmed at the filesystem level
-
-        Ok(())
     }
 
     /// Get the number of evictions processed
@@ -132,10 +125,9 @@ mod tests {
         let (mut actor, _hybrid) = create_test_eviction_actor();
 
         // Act
-        let result = actor.mark_eviction_complete(1, 1024);
+        actor.mark_eviction_complete(1, 1024);
 
         // Assert
-        assert!(result.is_ok());
         assert_eq!(actor.evictions_processed(), 1);
     }
 
@@ -145,9 +137,9 @@ mod tests {
         let (mut actor, _hybrid) = create_test_eviction_actor();
 
         // Act
-        let _ = actor.mark_eviction_complete(1, 1024);
-        let _ = actor.mark_eviction_complete(2, 2048);
-        let _ = actor.mark_eviction_complete(3, 4096);
+        actor.mark_eviction_complete(1, 1024);
+        actor.mark_eviction_complete(2, 2048);
+        actor.mark_eviction_complete(3, 4096);
 
         // Assert
         assert_eq!(actor.evictions_processed(), 3);
@@ -160,13 +152,13 @@ mod tests {
         let (mut actor, _hybrid) = create_test_eviction_actor();
 
         // Act
-        actor.mark_eviction_complete(1, 100).unwrap();
+        actor.mark_eviction_complete(1, 100);
         let count1 = actor.evictions_processed();
 
-        actor.mark_eviction_complete(2, 200).unwrap();
+        actor.mark_eviction_complete(2, 200);
         let count2 = actor.evictions_processed();
 
-        actor.mark_eviction_complete(3, 300).unwrap();
+        actor.mark_eviction_complete(3, 300);
         let count3 = actor.evictions_processed();
 
         // Assert: counts only increase
@@ -181,13 +173,13 @@ mod tests {
         let (mut actor, _hybrid) = create_test_eviction_actor();
 
         // Act
-        actor.mark_eviction_complete(1, 1000).unwrap();
+        actor.mark_eviction_complete(1, 1000);
         let freed1 = actor.total_freed();
 
-        actor.mark_eviction_complete(2, 500).unwrap();
+        actor.mark_eviction_complete(2, 500);
         let freed2 = actor.total_freed();
 
-        actor.mark_eviction_complete(3, 200).unwrap();
+        actor.mark_eviction_complete(3, 200);
         let freed3 = actor.total_freed();
 
         // Assert: freed bytes only increase
@@ -202,10 +194,9 @@ mod tests {
         let (mut actor, _hybrid) = create_test_eviction_actor();
 
         // Act
-        let result = actor.mark_eviction_complete(1, 0);
+        actor.mark_eviction_complete(1, 0);
 
         // Assert
-        assert!(result.is_ok());
         assert_eq!(actor.evictions_processed(), 1);
         assert_eq!(actor.total_freed(), 0);
     }
@@ -216,8 +207,8 @@ mod tests {
         let (mut actor, _hybrid) = create_test_eviction_actor();
 
         // Act: Mark same SST as complete multiple times (edge case)
-        actor.mark_eviction_complete(1, 1000).unwrap();
-        actor.mark_eviction_complete(1, 500).unwrap();
+        actor.mark_eviction_complete(1, 1000);
+        actor.mark_eviction_complete(1, 500);
 
         // Assert: Counter still increments even with same SST ID
         assert_eq!(actor.evictions_processed(), 2);

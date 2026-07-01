@@ -12,7 +12,7 @@ impl EventLoop {
     /// Create an immutable read snapshot for a column family
     pub(super) fn create_read_snapshot(
         &self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     ) -> Option<super::super::ReadSnapshot> {
         let cf_state = self.state.column_families.get(&cf_id)?;
 
@@ -32,27 +32,28 @@ impl EventLoop {
             .strip_prefix(&self.state.db_path)
             .unwrap_or_else(|_| std::path::Path::new("sst"))
             .to_path_buf();
-        let mut snapshot = super::super::ReadSnapshot::new(
+        let mut snapshot = super::super::ReadSnapshot::new_with_resources(
             cf_state.memtable.clone(),
             cf_state.immutable_memtables.clone(),
             sst_files,
             std::sync::Arc::clone(&self.state.fs),
             sst_path_prefix,
-            self.state.memory_mode,
+            self.state.is_memory_mode(),
+            self.read_resources.clone(),
         );
         snapshot.cf_id = cf_id;
         Some(snapshot)
     }
 
     /// Check if a sequence number is durable at the requested level.
-    /// Special case: u64::MAX (latest available) always returns true and bypasses durability checks.
+    /// Special case: `u64::MAX` (latest available) always returns true and bypasses durability checks.
     #[inline]
     pub(super) fn is_sequence_durable(
         &self,
         sequence: u64,
-        requested_durability: crate::engine::api::Durability,
+        requested_durability: crate::types::ReadDurability,
     ) -> bool {
-        self.durability.is_durable(
+        crate::runtime::durability::DurabilityCoordinator::is_durable(
             sequence,
             requested_durability,
             self.state.wal.local_durable_seq,
@@ -61,14 +62,14 @@ impl EventLoop {
     }
 
     /// Handle a Read message: check durability frontier or queue for later.
-    /// NOTE: This is a fallback path - transactions now execute reads directly against their stored ReadSnapshot.
+    /// NOTE: This is a fallback path - transactions now execute reads directly against their stored `ReadSnapshot`.
     pub(super) fn handle_msg_read(
         &self,
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Vec<u8>,
         sequence: u64,
-        requested_durability: crate::engine::api::Durability,
+        requested_durability: crate::types::ReadDurability,
     ) {
         let visible_up_to = sequence;
 
@@ -106,16 +107,16 @@ impl EventLoop {
         }
     }
 
-    /// Handle a RangeScan message: check durability frontier or queue for later.
-    /// NOTE: This is a fallback path - transactions now execute scans directly against their stored ReadSnapshot.
+    /// Handle a `RangeScan` message: check durability frontier or queue for later.
+    /// NOTE: This is a fallback path - transactions now execute scans directly against their stored `ReadSnapshot`.
     pub(super) fn handle_msg_range_scan(
         &self,
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start: Vec<u8>,
         end: Vec<u8>,
         sequence: u64,
-        requested_durability: crate::engine::api::Durability,
+        requested_durability: crate::types::ReadDurability,
     ) {
         let visible_up_to = sequence;
 
@@ -164,7 +165,7 @@ impl EventLoop {
     /// Local read path: memtable → immutable memtables → SST
     pub(super) fn handle_read(
         &self,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
         seq: u64,
     ) -> Option<Vec<u8>> {
@@ -191,7 +192,130 @@ mod tests {
     use super::super::tests::create_test_event_loop;
     use super::super::EventLoop;
     use crate::runtime::{state::RuntimeState, ResponseRouter};
+    use crate::sst::traits::SstFactory;
     use std::sync::Arc;
+
+    struct FakeReader;
+
+    impl crate::sst::traits::SstReader for FakeReader {
+        fn get(&self, key: &[u8]) -> crate::common::MidgeResult<Option<bytes::Bytes>> {
+            if key == b"a" {
+                Ok(Some(bytes::Bytes::copy_from_slice(b"va")))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn scan_range(
+            &self,
+            start: Option<&[u8]>,
+            end: Option<&[u8]>,
+        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+            let s = start.unwrap_or(&[]);
+            let e = end.unwrap_or(&[255u8]);
+            if s <= &b"a"[..] && &b"a"[..] < e {
+                Ok(vec![(
+                    bytes::Bytes::copy_from_slice(b"a"),
+                    bytes::Bytes::copy_from_slice(b"va"),
+                )])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    impl crate::sst::traits::SstStateReader for FakeReader {
+        fn get_state(&self, key: &[u8]) -> crate::common::MidgeResult<crate::sst::types::KeyState> {
+            Ok(if key == b"a" {
+                crate::sst::types::KeyState::Value(
+                    bytes::Bytes::copy_from_slice(b"va"),
+                    10,
+                    None,
+                    0,
+                )
+            } else {
+                crate::sst::types::KeyState::Absent
+            })
+        }
+
+        fn scan_range_state(
+            &self,
+            start: Option<&[u8]>,
+            end: Option<&[u8]>,
+        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::sst::types::KeyState)>> {
+            let s = start.unwrap_or(&[]);
+            let e = end.unwrap_or(&[255u8]);
+            if s <= &b"a"[..] && &b"a"[..] < e {
+                Ok(vec![(
+                    bytes::Bytes::copy_from_slice(b"a"),
+                    crate::sst::types::KeyState::Value(
+                        bytes::Bytes::copy_from_slice(b"va"),
+                        10,
+                        None,
+                        0,
+                    ),
+                )])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    struct TestFactory;
+
+    impl crate::sst::traits::SstFactory for TestFactory {
+        fn create(&self) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+            Err(crate::common::MidgeError::NotSupported(
+                "create not supported in test".into(),
+            ))
+        }
+
+        fn open(
+            &self,
+            _path: &std::path::Path,
+        ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+            Ok(Box::new(FakeReader))
+        }
+    }
+
+    fn create_event_loop_with_test_sst(
+    ) -> crate::common::MidgeResult<(tempfile::TempDir, EventLoop, std::path::PathBuf)> {
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let state = RuntimeState::new(tmp.path().to_path_buf(), false);
+        std::fs::create_dir_all(&state.sst_dir)?;
+
+        let router = Arc::new(ResponseRouter::new());
+        let mut el = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            None,
+        )?;
+
+        let sst_name = "00000001.sst".to_string();
+        let sst_path = el.state.sst_dir.join(&sst_name);
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(&el.state.sst_dir)?);
+        let factory = std::sync::Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"a", Some(b"va".as_ref()), 10, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(writer, &sst_path)?;
+
+        el.state.manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name,
+            level: 0,
+            size_bytes: std::fs::metadata(&sst_path)?.len(),
+            cf_id: 0,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"a".to_vec()),
+            smallest_seq: Some(10),
+            largest_seq: Some(10),
+            ..Default::default()
+        });
+        el.compaction_actor =
+            crate::runtime::actors::CompactionActor::new(std::sync::Arc::new(TestFactory));
+        Ok((tmp, el, sst_path))
+    }
 
     #[test]
     fn should_have_handle_read_method() {
@@ -218,148 +342,15 @@ mod tests {
 
     #[test]
     fn should_range_scan_include_keys_from_ssts() -> crate::common::MidgeResult<()> {
-        use crate::sst::traits::SstFactory;
-
-        // Arrange: create real filesystem-backed state (not memory mode)
-        let tmp = tempfile::tempdir().expect("create tmpdir");
-        let state = RuntimeState::new(tmp.path().to_path_buf(), false);
-        // Ensure sst dir exists
-        std::fs::create_dir_all(&state.sst_dir)?;
-
-        let router = Arc::new(ResponseRouter::new());
-        let mut el = EventLoop::new(
-            state,
-            false,
-            router,
-            crate::runtime::RuntimeConfig::default(),
-            None,
-        )?;
-
-        // Create an SST file with one key using the FsSstFactory
-        let sst_name = "00000001.sst".to_string();
-        let sst_path = el.state.sst_dir.join(&sst_name);
-
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(&el.state.sst_dir)?);
-        let factory = std::sync::Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
-        let mut writer = factory.create()?;
-        writer.add_with_meta(b"a", Some(b"va".as_ref()), 10, 0, None)?;
-        Box::new(writer).finish_to_path(&sst_path)?;
-
-        // Add manifest entry pointing to the SST we just wrote
-        let file_meta = crate::metadata::FileMeta {
-            name: sst_name.clone(),
-            level: 0,
-            size_bytes: std::fs::metadata(&sst_path)?.len(),
-            cf_id: 0,
-            smallest_key: Some(b"a".to_vec()),
-            largest_key: Some(b"a".to_vec()),
-            smallest_seq: Some(10),
-            largest_seq: Some(10),
-            ..Default::default()
-        };
-        el.state.manifest.files.push(file_meta);
-
-        // Replace compaction actor factory with a TestFactory that returns a fake reader
-        // so we don't need to create a valid on-disk SST file in this unit test.
-        struct TestFactory;
-        impl crate::sst::traits::SstFactory for TestFactory {
-            fn create(
-                &self,
-            ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
-                Err(crate::common::MidgeError::NotSupported(
-                    "create not supported in test".into(),
-                ))
-            }
-            fn open(
-                &self,
-                _path: &std::path::Path,
-            ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
-                struct FakeReader;
-                impl crate::sst::traits::SstReader for FakeReader {
-                    fn get(&self, key: &[u8]) -> crate::common::MidgeResult<Option<bytes::Bytes>> {
-                        if key == b"a" {
-                            Ok(Some(bytes::Bytes::copy_from_slice(b"va")))
-                        } else {
-                            Ok(None)
-                        }
-                    }
-                    fn scan_range(
-                        &self,
-                        start: Option<&[u8]>,
-                        end: Option<&[u8]>,
-                    ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>>
-                    {
-                        let s = start.unwrap_or(&[]);
-                        let e = end.unwrap_or(&[255u8]);
-                        if s <= &b"a"[..] && &b"a"[..] < e {
-                            Ok(vec![(
-                                bytes::Bytes::copy_from_slice(b"a"),
-                                bytes::Bytes::copy_from_slice(b"va"),
-                            )])
-                        } else {
-                            Ok(Vec::new())
-                        }
-                    }
-                }
-                impl crate::sst::traits::SstStateReader for FakeReader {
-                    fn get_state(
-                        &self,
-                        key: &[u8],
-                    ) -> crate::common::MidgeResult<crate::sst::types::KeyState>
-                    {
-                        Ok(if key == b"a" {
-                            crate::sst::types::KeyState::Value(
-                                bytes::Bytes::copy_from_slice(b"va"),
-                                10,
-                                None,
-                                0,
-                            )
-                        } else {
-                            crate::sst::types::KeyState::Absent
-                        })
-                    }
-
-                    fn scan_range_state(
-                        &self,
-                        start: Option<&[u8]>,
-                        end: Option<&[u8]>,
-                    ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::sst::types::KeyState)>>
-                    {
-                        let s = start.unwrap_or(&[]);
-                        let e = end.unwrap_or(&[255u8]);
-                        if s <= &b"a"[..] && &b"a"[..] < e {
-                            Ok(vec![(
-                                bytes::Bytes::copy_from_slice(b"a"),
-                                crate::sst::types::KeyState::Value(
-                                    bytes::Bytes::copy_from_slice(b"va"),
-                                    10,
-                                    None,
-                                    0,
-                                ),
-                            )])
-                        } else {
-                            Ok(Vec::new())
-                        }
-                    }
-                }
-                Ok(Box::new(FakeReader))
-            }
-        }
-
-        el.compaction_actor =
-            crate::runtime::actors::CompactionActor::new(std::sync::Arc::new(TestFactory));
-
-        // Quick sanity-check: ensure the fake reader returns the key we expect
+        let (_tmp, el, sst_path) = create_event_loop_with_test_sst()?;
         let reader = el.compaction_actor.open_sst_reader(&sst_path)?;
         let sst_pairs = reader.scan_range(Some(b"a"), Some(b"b"))?;
         assert!(sst_pairs
             .iter()
             .any(|(k, v)| k.as_ref() == b"a" && v.as_ref() == b"va"));
 
-        // Act: perform a range scan ["a","b") at sequence u64::MAX
         let results = el.handle_range_scan(0, b"a", b"b", u64::MAX);
 
-        // Assert: We expect to see the key in SST; current implementation does NOT consult SSTs and this test should fail until fixed.
         assert!(results
             .iter()
             .any(|(k, v)| k.as_slice() == b"a" && v.as_slice() == b"va"));

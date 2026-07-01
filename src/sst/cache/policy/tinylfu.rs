@@ -1,11 +1,11 @@
-//! TinyLFU (Frequency + Recency) eviction policy
+//! `TinyLFU` (Frequency + Recency) eviction policy
 
 use super::CachePolicy;
 use crate::sst::cache::key::CacheKey;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 
-/// TinyLFU eviction policy
+/// `TinyLFU` eviction policy
 ///
 /// Combines frequency and recency for better cache hit rates than pure LRU.
 /// Tracks recent accesses and counts frequencies.
@@ -19,7 +19,8 @@ pub struct TinyLfuPolicy {
 }
 
 impl TinyLfuPolicy {
-    /// Create a new TinyLFU policy
+    /// Create a new `TinyLFU` policy
+    #[must_use]
     pub fn new() -> Self {
         Self {
             recent: Mutex::new(VecDeque::new()),

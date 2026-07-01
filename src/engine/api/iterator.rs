@@ -120,9 +120,8 @@ impl Iterator {
     /// Returns `true` if new results were loaded, `false` if source is
     /// exhausted or no lazy source is configured.
     fn try_load_next_batch(&mut self) -> bool {
-        let source = match self.lazy_source.as_mut() {
-            Some(s) => s,
-            None => return false,
+        let Some(source) = self.lazy_source.as_mut() else {
+            return false;
         };
 
         // Determine resume key from the last element in the current batch
@@ -144,6 +143,7 @@ impl Iterator {
     }
 
     /// Get the current key-value pair without advancing
+    #[must_use]
     pub fn current(&self) -> Option<(&[u8], &[u8])> {
         if self.exhausted || self.position >= self.results.len() {
             return None;
@@ -152,32 +152,14 @@ impl Iterator {
         Some((k.as_slice(), v.as_slice()))
     }
 
-    /// Move to the next key-value pair
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
-        if self.exhausted {
-            return None;
-        }
-
-        if self.position >= self.results.len() {
-            // Try lazy loading
-            if !self.try_load_next_batch() {
-                self.exhausted = true;
-                return None;
-            }
-        }
-
-        let pair = self.results[self.position].clone();
-        self.position += 1;
-        Some(pair)
-    }
-
     /// Check if iteration is complete
+    #[must_use]
     pub fn exhausted(&self) -> bool {
         self.exhausted || (self.position >= self.results.len() && self.lazy_source.is_none())
     }
 
     /// Get the direction of this iterator
+    #[must_use]
     pub fn direction(&self) -> Direction {
         self.direction
     }
@@ -186,6 +168,7 @@ impl Iterator {
     ///
     /// For lazy iterators this only reflects the current batch, not
     /// the total remaining in the underlying data source.
+    #[must_use]
     pub fn remaining(&self) -> usize {
         if self.exhausted {
             0
@@ -196,11 +179,26 @@ impl Iterator {
 
     /// Collect all remaining pairs into a vector
     pub fn collect_all(&mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let mut collected = Vec::new();
-        while let Some(pair) = self.next() {
-            collected.push(pair);
+        self.by_ref().collect()
+    }
+}
+
+impl std::iter::Iterator for Iterator {
+    type Item = (Vec<u8>, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.exhausted {
+            return None;
         }
-        collected
+
+        if self.position >= self.results.len() && !self.try_load_next_batch() {
+            self.exhausted = true;
+            return None;
+        }
+
+        let pair = self.results[self.position].clone();
+        self.position += 1;
+        Some(pair)
     }
 }
 
@@ -524,14 +522,14 @@ mod tests {
         iter.next(); // Exhaust
 
         // Act
-        let result1 = iter.next();
-        let result2 = iter.next();
-        let result3 = iter.next();
+        let first_after_exhausted = iter.next();
+        let second_after_exhausted = iter.next();
+        let third_after_exhausted = iter.next();
 
         // Assert
-        assert_eq!(result1, None);
-        assert_eq!(result2, None);
-        assert_eq!(result3, None);
+        assert_eq!(first_after_exhausted, None);
+        assert_eq!(second_after_exhausted, None);
+        assert_eq!(third_after_exhausted, None);
     }
 
     // ========== Iterator Current() Behavior Tests ==========

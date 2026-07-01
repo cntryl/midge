@@ -1,6 +1,6 @@
 //! Trie builder for constructing trie during SST writing
 
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 use crate::sst::trie::node::{TrieEdge, TrieNode};
 use crate::sst::trie::{encoding, lcp};
 
@@ -18,6 +18,7 @@ pub struct TrieBuilder {
 
 impl TrieBuilder {
     /// Create a new trie builder
+    #[must_use]
     pub fn new() -> Self {
         // Create root node with empty key
         let root = TrieNode::new(0, Vec::new(), None);
@@ -33,6 +34,11 @@ impl TrieBuilder {
     ///
     /// Keys MUST be added in sorted order (enforced by SST writer).
     /// Only add keys at block boundaries (first key of each block).
+    ///
+    /// # Errors
+    /// Returns `MidgeError::InvalidArgument` when keys arrive out of sorted
+    /// order, the reserved block id is used, a key prefix exceeds `u16`, or the
+    /// trie would exceed `u32` addressable nodes.
     pub fn add_key(&mut self, key: &[u8], block_id: u32) -> MidgeResult<()> {
         if key.is_empty() {
             return Ok(()); // Skip empty keys
@@ -56,7 +62,7 @@ impl TrieBuilder {
         }
 
         // Insert key into trie
-        self.insert_key(key, block_id);
+        self.insert_key(key, block_id)?;
 
         // Update last key
         self.last_key = key.to_vec();
@@ -64,7 +70,7 @@ impl TrieBuilder {
         Ok(())
     }
 
-    fn insert_key(&mut self, key: &[u8], block_id: u32) {
+    fn insert_key(&mut self, key: &[u8], block_id: u32) -> MidgeResult<()> {
         let mut current_index = self.root_index;
         let mut matched_len = 0;
 
@@ -75,7 +81,9 @@ impl TrieBuilder {
 
             // Try to find matching child
             if let Some(edge) = node.find_child(remaining[0]) {
-                let child_index = edge.child_index as usize;
+                let child_index = usize::try_from(edge.child_index).map_err(|_| {
+                    MidgeError::InvalidArgument("Trie child index exceeds usize".into())
+                })?;
                 let child = &self.nodes[child_index];
 
                 // Calculate how much of child's key_delta matches
@@ -87,28 +95,39 @@ impl TrieBuilder {
                     current_index = child_index;
                 } else {
                     // Partial match, need to split the child node
-                    self.split_node(child_index, child_match_len, remaining, block_id);
-                    return;
+                    self.split_node(child_index, child_match_len, remaining, block_id)?;
+                    return Ok(());
                 }
             } else {
                 // No matching child, create new leaf
-                let new_node =
-                    TrieNode::new(matched_len as u16, remaining.to_vec(), Some(block_id));
-                let new_index = self.nodes.len() as u32;
+                let prefix_len = u16::try_from(matched_len).map_err(|_| {
+                    MidgeError::InvalidArgument("Trie prefix length exceeds u16".into())
+                })?;
+                let new_node = TrieNode::new(prefix_len, remaining.to_vec(), Some(block_id));
+                let new_index = u32::try_from(self.nodes.len()).map_err(|_| {
+                    MidgeError::InvalidArgument("Trie node count exceeds u32".into())
+                })?;
                 self.nodes.push(new_node);
 
                 // Add edge from current node to new node
                 let edge = TrieEdge::new(remaining[0], new_index);
                 self.nodes[current_index].add_child(edge);
-                return;
+                return Ok(());
             }
         }
 
         // Key fully matched existing path, update block_id
         self.nodes[current_index].block_id = Some(block_id);
+        Ok(())
     }
 
-    fn split_node(&mut self, node_index: usize, split_pos: usize, remaining: &[u8], block_id: u32) {
+    fn split_node(
+        &mut self,
+        node_index: usize,
+        split_pos: usize,
+        remaining: &[u8],
+        block_id: u32,
+    ) -> MidgeResult<()> {
         // Clone the node data we need (to avoid borrow checker issues)
         let old_key_delta = self.nodes[node_index].key_delta.clone();
         let old_block_id = self.nodes[node_index].block_id;
@@ -120,38 +139,45 @@ impl TrieBuilder {
 
         // Create node for remainder of old key
         let old_suffix = old_key_delta[split_pos..].to_vec();
+        let split_prefix_len = u16::try_from(split_pos)
+            .map_err(|_| MidgeError::InvalidArgument("Trie split position exceeds u16".into()))?;
         let old_remainder = TrieNode {
-            prefix_len: split_pos as u16,
+            prefix_len: split_prefix_len,
             key_delta: old_suffix.clone(),
             block_id: old_block_id,
             children: old_children,
         };
-        let old_remainder_index = self.nodes.len() as u32;
+        let old_remainder_index = u32::try_from(self.nodes.len())
+            .map_err(|_| MidgeError::InvalidArgument("Trie node count exceeds u32".into()))?;
         self.nodes.push(old_remainder);
         intermediate.add_child(TrieEdge::new(old_suffix[0], old_remainder_index));
 
         // Create node for new key
         let new_suffix = remaining[split_pos..].to_vec();
-        if !new_suffix.is_empty() {
-            let new_node = TrieNode::new(split_pos as u16, new_suffix.clone(), Some(block_id));
-            let new_node_index = self.nodes.len() as u32;
-            self.nodes.push(new_node);
-            intermediate.add_child(TrieEdge::new(new_suffix[0], new_node_index));
-        } else {
+        if new_suffix.is_empty() {
             // New key ends at split point
             intermediate.block_id = Some(block_id);
+        } else {
+            let new_node = TrieNode::new(split_prefix_len, new_suffix.clone(), Some(block_id));
+            let new_node_index = u32::try_from(self.nodes.len())
+                .map_err(|_| MidgeError::InvalidArgument("Trie node count exceeds u32".into()))?;
+            self.nodes.push(new_node);
+            intermediate.add_child(TrieEdge::new(new_suffix[0], new_node_index));
         }
 
         // Replace original node with intermediate
         self.nodes[node_index] = intermediate;
+        Ok(())
     }
 
     /// Finish building and return serialized trie
+    #[must_use]
     pub fn finish(self) -> Vec<u8> {
         encoding::encode_trie(&self.nodes)
     }
 
     /// Get number of nodes in trie
+    #[must_use]
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
@@ -320,8 +346,8 @@ mod tests {
 
         // Act
         for i in 0..100 {
-            let key = format!("key_{:04}", i).into_bytes();
-            builder.add_key(&key, i as u32).unwrap();
+            let key = format!("key_{i:04}").into_bytes();
+            builder.add_key(&key, u32::try_from(i).unwrap()).unwrap();
         }
 
         // Assert

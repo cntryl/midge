@@ -8,10 +8,18 @@ use crate::common::MidgeResult;
 /// Reader contract for SST implementations
 pub trait SstReader: Send + Sync {
     /// Get the value for a specific key, if present
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be read or decoded.
     fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>>;
 
     /// Scan a key range [start, end) where either bound may be None
     /// Returns list of (key, value) pairs
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be scanned or decoded.
     fn scan_range(
         &self,
         start: Option<&[u8]>,
@@ -22,16 +30,28 @@ pub trait SstReader: Send + Sync {
 /// Stateful reader contract exposing tombstones and metadata
 pub trait SstStateReader: Send + Sync {
     /// Get presence state (value/tombstone/absent) for a specific key
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be read or decoded.
     fn get_state(&self, key: &[u8]) -> MidgeResult<super::types::KeyState>;
 
     /// Scan a key range returning presence state for each key
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be scanned or decoded.
     fn scan_range_state(
         &self,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
     ) -> MidgeResult<Vec<(Bytes, super::types::KeyState)>>;
 
-    /// Snapshot-aware point lookup (entries with seq > snapshot_seq are ignored)
+    /// Snapshot-aware point lookup (entries with seq > `snapshot_seq` are ignored)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be read or decoded.
     fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<super::types::KeyState> {
         let state = self.get_state(key)?;
         match state {
@@ -61,19 +81,35 @@ pub trait SstWriter: Send {
     type Reader: SstReaderExt;
 
     /// Add a key-value entry to the SST
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the key-value pair cannot be appended to the SST.
     fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()>;
 
     /// Finalize and produce a reader instance
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be finalized.
     fn finish(self) -> MidgeResult<Self::Reader>;
 }
 
 /// Object-safe SST writer for polymorphic use
 pub trait DynSstWriter: Send {
     /// Add a simple key-value entry
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the key-value pair cannot be appended to the SST.
     fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()>;
 
     /// Add an entry with metadata
-    /// op_type: 0=Put, 1=Insert, 2=Delete
+    /// `op_type`: 0=Put, 1=Insert, 2=Delete
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the entry cannot be appended to the SST.
     fn add_with_meta(
         &mut self,
         key: &[u8],
@@ -89,91 +125,37 @@ pub trait DynSstWriter: Send {
     }
 
     /// Add a range tombstone
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the range tombstone cannot be appended to the SST.
     fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()> {
         let _ = (start, end, seq);
         Ok(())
     }
 
     /// Finalize and get SST bytes
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be finalized.
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>>;
-
-    /// Finalize and write SST directly to path
-    fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
-        use std::io::Write;
-
-        // Finish bytes first and record write time
-        let finish_start = std::time::Instant::now();
-        let bytes = self.finish_bytes()?;
-        let write_bytes = bytes.len() as u64;
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-
-        // Write to a temp file first
-        let tmp = path.with_extension("tmp");
-        fail::fail_point!("midge::sst::inject_no_space_on_finish_to_path", |_| Err(
-            crate::common::MidgeError::NoSpace(
-                "failpoint: no space while finalizing SST".to_string()
-            )
-        ));
-        let write_start = std::time::Instant::now();
-        {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp)
-                .map_err(crate::common::MidgeError::Io)?;
-            f.write_all(&bytes).map_err(crate::common::MidgeError::Io)?;
-            // Ensure data is on disk
-            let sync_start = std::time::Instant::now();
-            f.sync_all().map_err(crate::common::MidgeError::Io)?;
-            let sync_ns = sync_start.elapsed().as_nanos();
-
-            tracing::debug!(path = ?tmp, write_bytes, sync_ns, "sst temp file written and fsynced");
-        }
-        let write_ns = write_start.elapsed().as_nanos();
-
-        // Atomically rename into place
-        let rename_start = std::time::Instant::now();
-        std::fs::rename(&tmp, path).map_err(crate::common::MidgeError::Io)?;
-        let rename_ns = rename_start.elapsed().as_nanos();
-
-        // Fsync parent directory to persist the rename. On some platforms (Windows)
-        // opening a directory for fsync can return PermissionDenied — treat dir fsync
-        // as best-effort and do not fail the whole operation if it isn't supported.
-        let dir_fsync_start = std::time::Instant::now();
-        match std::fs::File::open(parent) {
-            Ok(dir_f) => {
-                if let Err(e) = dir_f.sync_all() {
-                    // Best-effort: log and continue
-                    tracing::debug!("failed to fsync parent dir for sst: {}", e);
-                }
-            }
-            Err(e) => {
-                tracing::debug!("failed to open parent dir for fsync: {}", e);
-            }
-        }
-        let dir_fsync_ns = dir_fsync_start.elapsed().as_nanos();
-
-        tracing::info!(
-            path = ?path,
-            bytes = write_bytes,
-            finish_total_ms = finish_start.elapsed().as_secs_f64() * 1000.0,
-            write_ms = (write_ns as f64) / 1_000_000.0,
-            rename_ms = (rename_ns as f64) / 1_000_000.0,
-            dir_fsync_ms = (dir_fsync_ns as f64) / 1_000_000.0,
-            "sst finished to path"
-        );
-
-        Ok(())
-    }
 }
 
 /// Factory trait for creating SST writers and readers
 pub trait SstFactory: Send + Sync {
     /// Create a new dynamic SST writer
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the writer cannot be created.
     fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>>;
 
     /// Open an existing SST file for reading
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be opened or decoded.
     fn open(&self, path: &Path) -> MidgeResult<Box<dyn SstReaderExt>>;
 }
 
@@ -281,9 +263,9 @@ mod tests {
             // Mock serialization: just concatenate all data
             let mut result = Vec::new();
             for (k, v) in self.data {
-                result.extend_from_slice(&[k.len() as u8]);
+                result.extend_from_slice(&[u8::try_from(k.len()).unwrap_or(u8::MAX)]);
                 result.extend_from_slice(&k);
-                result.extend_from_slice(&[v.len() as u8]);
+                result.extend_from_slice(&[u8::try_from(v.len()).unwrap_or(u8::MAX)]);
                 result.extend_from_slice(&v);
             }
             Ok(result)
@@ -489,7 +471,7 @@ mod tests {
     #[test]
     fn should_get_handle_large_values() {
         // Arrange
-        let large_value = vec![42u8; 100000];
+        let large_value = vec![42u8; 100_000];
         let mut reader = MockSstReader::new();
         reader.insert(b"key".to_vec(), large_value.clone());
 
@@ -539,14 +521,14 @@ mod tests {
     }
 
     #[test]
-    fn should_finish_to_path_default_impl_writes_file() {
+    fn should_finish_writer_to_path_helper_writes_file() {
         // Arrange
         let writer = MockSstWriter::new();
-        let boxed = Box::new(writer);
+        let boxed: Box<dyn DynSstWriter> = Box::new(writer);
         let temp_path = PathBuf::from("/tmp/test_sst_finish.bin");
 
         // Act
-        let result = boxed.finish_to_path(&temp_path);
+        let result = crate::sst::fs::finish_writer_to_path(boxed, &temp_path);
 
         // Assert
         assert!(result.is_ok());

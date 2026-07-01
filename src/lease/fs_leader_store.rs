@@ -10,7 +10,7 @@
 //! 3. Fsync the temp file.
 //! 4. Atomic rename temp → `.midge_leader`.
 //! 5. Fsync the parent directory.
-//! 6. Re-read `.midge_leader` to confirm our holder_id won the race.
+//! 6. Re-read `.midge_leader` to confirm our `holder_id` won the race.
 
 use super::traits::{
     format_leader_record, parse_leader_record, LeaderRecord, LeaderStore, LeaseError,
@@ -39,7 +39,7 @@ impl FsLeaderStore {
     fn temp_path() -> FsPath {
         static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        FsPath::new(format!(".midge_leader.{}.{}.tmp", std::process::id(), n,))
+        FsPath::new(format!(".midge_leader.{}.{}.tmp", std::process::id(), n))
     }
 }
 
@@ -50,7 +50,7 @@ impl LeaderStore for FsLeaderStore {
         // Attempt to create a lock file exclusively.  `create_new` fails if the
         // file already exists, giving us cross-thread and cross-process mutual
         // exclusion for the read-increment-write cycle.
-        let _lock_file = match self.fs.open(
+        let Ok(_lock_file) = self.fs.open(
             &lock_path,
             OpenOptions {
                 mode: OpenMode::ReadWrite,
@@ -58,13 +58,10 @@ impl LeaderStore for FsLeaderStore {
                 create_new: true,
                 truncate: false,
             },
-        ) {
-            Ok(f) => f,
-            Err(_) => {
-                return Err(LeaseError::AcquisitionFailed(
-                    "another acquire is in progress (lock file exists)".to_string(),
-                ));
-            }
+        ) else {
+            return Err(LeaseError::AcquisitionFailed(
+                "another acquire is in progress (lock file exists)".to_string(),
+            ));
         };
 
         // Lock acquired — perform the read-increment-write CAS.
@@ -82,7 +79,7 @@ impl LeaderStore for FsLeaderStore {
         match self.fs.exists(&path) {
             Ok(true) => {}
             Ok(false) => return Ok(None),
-            Err(e) => return Err(LeaseError::IoError(format!("exists check failed: {}", e))),
+            Err(e) => return Err(LeaseError::IoError(format!("exists check failed: {e}"))),
         }
 
         let opts = OpenOptions {
@@ -101,14 +98,13 @@ impl LeaderStore for FsLeaderStore {
                     return Ok(None);
                 }
                 return Err(LeaseError::IoError(format!(
-                    "failed to open leader record: {}",
-                    e
+                    "failed to open leader record: {e}"
                 )));
             }
         };
 
         let len = file.len().map_err(|e| {
-            LeaseError::IoError(format!("failed to read leader record length: {}", e))
+            LeaseError::IoError(format!("failed to read leader record length: {e}"))
         })?;
 
         if len == 0 {
@@ -117,10 +113,10 @@ impl LeaderStore for FsLeaderStore {
 
         let data = file
             .read_at(0, len)
-            .map_err(|e| LeaseError::IoError(format!("failed to read leader record: {}", e)))?;
+            .map_err(|e| LeaseError::IoError(format!("failed to read leader record: {e}")))?;
 
         let content = String::from_utf8(data.to_vec())
-            .map_err(|e| LeaseError::IoError(format!("leader record not UTF-8: {}", e)))?;
+            .map_err(|e| LeaseError::IoError(format!("leader record not UTF-8: {e}")))?;
 
         Ok(parse_leader_record(&content))
     }

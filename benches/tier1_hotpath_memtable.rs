@@ -22,7 +22,7 @@ const LOOKUP_BATCH_SIZE: usize = 1024;
 /// Pre-compute a key (deterministic, no allocation in hot path)
 #[inline]
 fn make_key(i: usize) -> Vec<u8> {
-    format!("key_{:010}", i).into_bytes()
+    format!("key_{i:010}").into_bytes()
 }
 
 /// Pre-compute value of given size
@@ -31,7 +31,7 @@ fn make_value(size: usize) -> Vec<u8> {
 }
 
 fn make_value_indexed(i: usize) -> Vec<u8> {
-    format!("value_{}", i).into_bytes()
+    format!("value_{i}").into_bytes()
 }
 
 // ─── Insert Benchmarks ───────────────────────────────────────────────────────
@@ -141,7 +141,7 @@ fn bench_put_batch(c: &mut Criterion) {
                 black_box(memtable)
             },
             BatchSize::SmallInput,
-        )
+        );
     });
 
     group.finish();
@@ -176,7 +176,7 @@ fn bench_get_point(c: &mut Criterion) {
                 }
             }
             black_box(hits)
-        })
+        });
     });
 
     group.bench_function("miss", |b| {
@@ -188,7 +188,7 @@ fn bench_get_point(c: &mut Criterion) {
                 }
             }
             black_box(misses)
-        })
+        });
     });
 
     group.finish();
@@ -219,7 +219,7 @@ fn bench_delete(c: &mut Criterion) {
                 let _ = memtable.delete(black_box(key));
             },
             BatchSize::SmallInput,
-        )
+        );
     });
 
     group.finish();
@@ -242,7 +242,7 @@ fn bench_size_bytes(c: &mut Criterion) {
     }
 
     group.bench_function("size_query", |b| {
-        b.iter(|| black_box(memtable.size_bytes()))
+        b.iter(|| black_box(memtable.size_bytes()));
     });
 
     group.finish();

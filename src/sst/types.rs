@@ -11,6 +11,7 @@ pub struct BlockHandle {
 }
 
 impl BlockHandle {
+    #[must_use]
     pub fn new(offset: u64, size: u64) -> Self {
         Self { offset, size }
     }
@@ -39,7 +40,7 @@ impl Block {
 }
 
 /// RocksDB-compatible magic number for SST footer validation
-pub const SST_FOOTER_MAGIC: u64 = 0xdb4775248b80fb57;
+pub const SST_FOOTER_MAGIC: u64 = 0xdb47_7524_8b80_fb57;
 
 /// Legacy SST entry format without persisted expiration metadata.
 pub const SST_FORMAT_V1: u32 = 1;
@@ -57,6 +58,7 @@ pub struct Footer {
 }
 
 impl Footer {
+    #[must_use]
     pub fn new(meta_index_handle: BlockHandle, index_handle: BlockHandle) -> Self {
         Self {
             meta_index_handle,
@@ -66,11 +68,13 @@ impl Footer {
         }
     }
 
+    #[must_use]
     pub fn with_trie(mut self, trie_handle: BlockHandle) -> Self {
         self.trie_handle = Some(trie_handle);
         self
     }
 
+    #[must_use]
     pub fn with_block_bloom(mut self, block_bloom_handle: BlockHandle) -> Self {
         self.block_bloom_handle = Some(block_bloom_handle);
         self
@@ -78,12 +82,13 @@ impl Footer {
 
     /// Encode footer to exactly 72 bytes
     /// Layout:
-    ///   [meta_index_handle: 16 bytes]
-    ///   [index_handle: 16 bytes]
-    ///   [trie_handle: 16 bytes (optional, 0 if None)]
-    ///   [block_bloom_handle: 16 bytes (optional, 0 if None)]
+    ///   [`meta_index_handle`: 16 bytes]
+    ///   [`index_handle`: 16 bytes]
+    ///   [`trie_handle`: 16 bytes (optional, 0 if None)]
+    ///   [`block_bloom_handle`: 16 bytes (optional, 0 if None)]
     ///   [magic: 8 bytes]
     /// Total: 72 bytes (extended from 56 for block bloom support)
+    #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = vec![0u8; 72];
         // Store handles as fixed 16 bytes each
@@ -109,6 +114,10 @@ impl Footer {
     }
 
     /// Decode footer from 48, 56, or 72 bytes (backward compatible)
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::Corruption` when the footer is truncated or has an invalid magic value.
     pub fn decode(data: &[u8]) -> crate::common::MidgeResult<Self> {
         if data.len() < 48 {
             return Err(crate::common::MidgeError::Corruption(
@@ -140,8 +149,7 @@ impl Footer {
         ]);
         if magic != SST_FOOTER_MAGIC {
             return Err(crate::common::MidgeError::Corruption(format!(
-                "Invalid footer magic: expected 0x{:016x}, got 0x{:016x}",
-                SST_FOOTER_MAGIC, magic
+                "Invalid footer magic: expected 0x{SST_FOOTER_MAGIC:016x}, got 0x{magic:016x}"
             )));
         }
 
@@ -218,22 +226,25 @@ impl Default for SstMetadata {
 }
 
 impl SstMetadata {
+    #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(4 + 8 + 8);
         buf.extend_from_slice(&self.format_version.to_le_bytes());
-        match self.range_tombstone_handle {
-            Some(handle) => {
-                buf.extend_from_slice(&handle.offset.to_le_bytes());
-                buf.extend_from_slice(&handle.size.to_le_bytes());
-            }
-            None => {
-                buf.extend_from_slice(&0u64.to_le_bytes());
-                buf.extend_from_slice(&0u64.to_le_bytes());
-            }
+        if let Some(handle) = self.range_tombstone_handle {
+            buf.extend_from_slice(&handle.offset.to_le_bytes());
+            buf.extend_from_slice(&handle.size.to_le_bytes());
+        } else {
+            buf.extend_from_slice(&0u64.to_le_bytes());
+            buf.extend_from_slice(&0u64.to_le_bytes());
         }
         buf
     }
 
+    /// Decode SST metadata from the meta block payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::Corruption` when the metadata block is truncated.
     pub fn decode(data: &[u8]) -> crate::common::MidgeResult<Self> {
         if data.len() < 20 {
             return Err(crate::common::MidgeError::Corruption(
@@ -269,24 +280,39 @@ pub struct RangeTombstone {
 }
 
 impl RangeTombstone {
+    #[must_use]
     pub fn new(start: Vec<u8>, end: Vec<u8>, seq: u64) -> Self {
         Self { start, end, seq }
     }
 
     /// Check if a key is covered by this range tombstone
+    #[must_use]
     pub fn covers(&self, key: &[u8]) -> bool {
         key >= self.start.as_slice() && key < self.end.as_slice()
     }
 }
 
+#[must_use]
 pub fn encode_range_tombstones(tombstones: &[RangeTombstone]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.extend_from_slice(&(tombstones.len() as u32).to_le_bytes());
+    buf.extend_from_slice(
+        &u32::try_from(tombstones.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
 
     for tombstone in tombstones {
-        buf.extend_from_slice(&(tombstone.start.len() as u32).to_le_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(tombstone.start.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(&tombstone.start);
-        buf.extend_from_slice(&(tombstone.end.len() as u32).to_le_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(tombstone.end.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(&tombstone.end);
         buf.extend_from_slice(&tombstone.seq.to_le_bytes());
     }
@@ -294,6 +320,11 @@ pub fn encode_range_tombstones(tombstones: &[RangeTombstone]) -> Vec<u8> {
     buf
 }
 
+/// Decode serialized range tombstones.
+///
+/// # Errors
+///
+/// Returns `MidgeError::Corruption` when the encoded tombstone block is truncated.
 pub fn decode_range_tombstones(data: &[u8]) -> crate::common::MidgeResult<Vec<RangeTombstone>> {
     if data.len() < 4 {
         return Err(crate::common::MidgeError::Corruption(
@@ -424,9 +455,9 @@ impl fmt::Display for KeyState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             KeyState::Absent => write!(f, "Absent"),
-            KeyState::Tombstone(seq) => write!(f, "Tombstone(seq={})", seq),
+            KeyState::Tombstone(seq) => write!(f, "Tombstone(seq={seq})"),
             KeyState::Value(_, seq, exp, op) => {
-                write!(f, "Value(seq={}, exp={:?}, op={})", seq, exp, op)
+                write!(f, "Value(seq={seq}, exp={exp:?}, op={op})")
             }
         }
     }
@@ -710,7 +741,7 @@ mod tests {
         // Arrange
         let mut data = vec![0u8; 56];
         // Wrong magic at end
-        data[48..56].copy_from_slice(&0xffffffffffffffff_u64.to_le_bytes());
+        data[48..56].copy_from_slice(&0xffff_ffff_ffff_ffff_u64.to_le_bytes());
 
         // Act
         let result = Footer::decode(&data);
@@ -1127,7 +1158,7 @@ mod tests {
         let state = KeyState::Absent;
 
         // Act
-        let formatted = format!("{}", state);
+        let formatted = format!("{state}");
 
         // Assert
         assert_eq!(formatted, "Absent");
@@ -1139,7 +1170,7 @@ mod tests {
         let state = KeyState::Tombstone(42);
 
         // Act
-        let formatted = format!("{}", state);
+        let formatted = format!("{state}");
 
         // Assert
         assert!(formatted.contains("Tombstone"));
@@ -1152,7 +1183,7 @@ mod tests {
         let state = KeyState::Value(Bytes::from("val"), 100, Some(500), 0);
 
         // Act
-        let formatted = format!("{}", state);
+        let formatted = format!("{state}");
 
         // Assert
         assert!(formatted.contains("Value"));

@@ -1,4 +1,4 @@
-//! Factory for creating io::Fs-backed SST readers and writers
+//! Factory for creating `io::Fs-backed` SST readers and writers
 
 use crate::common::MidgeResult;
 use crate::sst::traits::{DynSstWriter, SstFactory};
@@ -13,7 +13,7 @@ use crate::sst::types::{
     encode_range_tombstones, BlockHandle, Footer, RangeTombstone, SstMetadata, SST_FORMAT_V2,
 };
 
-/// SST factory that uses io::Fs abstraction
+/// SST factory that uses `io::Fs` abstraction
 /// Allows using different filesystem implementations (Real, Mock, Chaos) for testing
 pub struct FsSstFactoryIo {
     fs: Arc<dyn Fs>,
@@ -32,18 +32,24 @@ impl FsSstFactoryIo {
     }
 
     /// Create with custom block size
+    #[must_use]
     pub fn with_block_size(mut self, block_size: usize) -> Self {
         self.block_size = block_size;
         self
     }
 
     /// Set the compression policy for SST blocks produced by this factory.
+    #[must_use]
     pub fn with_compression_policy(mut self, policy: CompressionPolicy) -> Self {
         self.compression_policy = policy;
         self
     }
 
-    /// Open an SST file using the io::Fs backend
+    /// Open an SST file using the `io::Fs` backend
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened or parsed as an SST reader.
     pub fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         let path_str = path.to_str().unwrap_or("").to_string();
         let start = std::time::Instant::now();
@@ -54,8 +60,7 @@ impl FsSstFactoryIo {
             .fs
             .metadata(&crate::io::FsPath::new(path_str.as_str()))
             .ok()
-            .map(|m| m.len)
-            .unwrap_or(0);
+            .map_or(0, |m| m.len);
         tracing::info!(path = ?path, size_bytes = size, open_ms = elapsed.as_secs_f64() * 1000.0, "sst reader opened");
         Ok(Box::new(reader))
     }
@@ -98,7 +103,11 @@ impl InMemorySstWriter {
         let compressed = compression::compress_block_with_trailer(block_bytes, compression_policy)?;
         let offset = file_bytes.len() as u64;
         let size = 4 + compressed.len() as u64;
-        file_bytes.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        file_bytes.extend_from_slice(
+            &u32::try_from(compressed.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         file_bytes.extend_from_slice(&compressed);
         Ok(BlockHandle::new(offset, size))
     }
@@ -106,7 +115,8 @@ impl InMemorySstWriter {
     fn serialize_index(index_entries: &[(Vec<u8>, BlockHandle)]) -> Vec<u8> {
         let mut index_bytes = Vec::new();
         for (key, handle) in index_entries {
-            index_bytes.extend_from_slice(&(key.len() as u32).to_le_bytes());
+            index_bytes
+                .extend_from_slice(&u32::try_from(key.len()).unwrap_or(u32::MAX).to_le_bytes());
             index_bytes.extend_from_slice(key);
             index_bytes.extend_from_slice(&handle.offset.to_le_bytes());
             index_bytes.extend_from_slice(&handle.size.to_le_bytes());
@@ -120,7 +130,7 @@ impl InMemorySstWriter {
             .zip(key.iter())
             .take_while(|(left, right)| left == right)
             .count();
-        shared.min(u16::MAX as usize) as u16
+        u16::try_from(shared.min(u16::MAX as usize)).unwrap_or(u16::MAX)
     }
 }
 
@@ -139,7 +149,7 @@ impl DynSstWriter for InMemorySstWriter {
     ) -> MidgeResult<()> {
         self.entries.push(PendingEntry {
             key: key.to_vec(),
-            value: value.map(|bytes| bytes.to_vec()),
+            value: value.map(<[u8]>::to_vec),
             sequence: seq,
             op_type,
             expiration,
@@ -321,7 +331,7 @@ mod tests {
         writer.add_with_meta(b"alpha", None, 9, 2, None)?;
         writer.add_with_meta(b"beta", Some(b"value-b"), 8, 1, None)?;
         writer.add_range_tombstone(b"cat", b"cow", 7)?;
-        writer.finish_to_path(&path)?;
+        crate::sst::fs::finish_writer_to_path(writer, &path)?;
 
         // Act
         let reader = factory.open(std::path::Path::new("stateful.sst"))?;

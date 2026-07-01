@@ -3,6 +3,11 @@ use crate::common::{MidgeError, MidgeResult};
 pub const WAL_FRAME_HEADER_LEN: usize = 8;
 pub const WAL_MAX_RECORD_LEN: usize = 64 * 1024 * 1024;
 
+/// Compute the encoded WAL frame length for a payload.
+///
+/// # Errors
+///
+/// Returns `MidgeError::InvalidArgument` when `payload_len` exceeds the WAL limits.
 pub fn encoded_frame_len(payload_len: usize) -> MidgeResult<usize> {
     if payload_len > WAL_MAX_RECORD_LEN {
         return Err(MidgeError::InvalidArgument(format!(
@@ -17,17 +22,71 @@ pub fn encoded_frame_len(payload_len: usize) -> MidgeResult<usize> {
     Ok(WAL_FRAME_HEADER_LEN + payload_len)
 }
 
+/// Append a length-prefixed WAL frame to `dst`.
+///
+/// # Errors
+///
+/// Returns `MidgeError::InvalidArgument` when the payload exceeds the WAL limits.
 pub fn append_frame(dst: &mut Vec<u8>, payload: &[u8]) -> MidgeResult<()> {
     let frame_len = encoded_frame_len(payload.len())?;
     let crc = crc32c::crc32c(payload);
 
     dst.reserve(frame_len);
-    dst.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    let payload_len = u32::try_from(payload.len())
+        .map_err(|_| MidgeError::InvalidArgument("WAL record length exceeds u32::MAX".into()))?;
+    dst.extend_from_slice(&payload_len.to_le_bytes());
     dst.extend_from_slice(&crc.to_le_bytes());
     dst.extend_from_slice(payload);
     Ok(())
 }
 
+/// Append a WAL frame whose payload is produced directly into `dst`.
+///
+/// This preserves the same frame layout as [`append_frame`] while avoiding an
+/// intermediate payload allocation on write hot paths.
+///
+/// # Errors
+///
+/// Returns `MidgeError::InvalidArgument` when the encoded payload exceeds WAL
+/// limits, or returns any error produced by `encode_payload`.
+pub fn append_frame_encoded(
+    dst: &mut Vec<u8>,
+    encode_payload: impl FnOnce(&mut Vec<u8>) -> MidgeResult<()>,
+) -> MidgeResult<()> {
+    let frame_start = dst.len();
+    dst.extend_from_slice(&[0; WAL_FRAME_HEADER_LEN]);
+    let payload_start = dst.len();
+
+    if let Err(error) = encode_payload(dst) {
+        dst.truncate(frame_start);
+        return Err(error);
+    }
+
+    let payload_len = dst.len().saturating_sub(payload_start);
+    if let Err(error) = encoded_frame_len(payload_len) {
+        dst.truncate(frame_start);
+        return Err(error);
+    }
+
+    let Ok(payload_len_u32) = u32::try_from(payload_len) else {
+        dst.truncate(frame_start);
+        return Err(MidgeError::InvalidArgument(
+            "WAL record length exceeds u32::MAX".into(),
+        ));
+    };
+    let crc = crc32c::crc32c(&dst[payload_start..]);
+
+    dst[frame_start..frame_start + 4].copy_from_slice(&payload_len_u32.to_le_bytes());
+    dst[frame_start + 4..frame_start + WAL_FRAME_HEADER_LEN].copy_from_slice(&crc.to_le_bytes());
+    Ok(())
+}
+
+/// Decode the fixed-size WAL frame header.
+///
+/// # Errors
+///
+/// Returns `MidgeError::Corruption` when the header is malformed or declares
+/// an oversized payload.
 pub fn decode_frame_header(header: &[u8]) -> MidgeResult<(usize, u32)> {
     if header.len() != WAL_FRAME_HEADER_LEN {
         return Err(MidgeError::Corruption(format!(
@@ -53,6 +112,11 @@ pub fn decode_frame_header(header: &[u8]) -> MidgeResult<(usize, u32)> {
     Ok((payload_len, expected_crc))
 }
 
+/// Verify the CRC32C of a WAL frame payload.
+///
+/// # Errors
+///
+/// Returns `MidgeError::Corruption` when the CRC does not match.
 pub fn verify_frame_crc(payload: &[u8], expected_crc: u32) -> MidgeResult<()> {
     let actual_crc = crc32c::crc32c(payload);
     if actual_crc != expected_crc {
@@ -84,6 +148,26 @@ mod tests {
             prop_assert_eq!(payload_len, payload.len());
             prop_assert_eq!(&buf[WAL_FRAME_HEADER_LEN..], payload.as_slice());
             verify_frame_crc(&buf[WAL_FRAME_HEADER_LEN..], expected_crc)?;
+        }
+
+        #[test]
+        fn should_match_append_frame_when_payload_is_encoded_in_place(
+            prefix in proptest::collection::vec(any::<u8>(), 0..64),
+            payload in proptest::collection::vec(any::<u8>(), 0..8192)
+        ) {
+            // Arrange
+            let mut expected = prefix.clone();
+            append_frame(&mut expected, &payload)?;
+            let mut actual = prefix;
+
+            // Act
+            append_frame_encoded(&mut actual, |dst| {
+                dst.extend_from_slice(&payload);
+                Ok(())
+            })?;
+
+            // Assert
+            prop_assert_eq!(actual, expected);
         }
 
         #[test]

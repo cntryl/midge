@@ -1,10 +1,10 @@
-//! Factory for creating io::Fs-backed WAL readers and writers
+//! Factory for creating `io::Fs-backed` WAL readers and writers
 
 use crate::common::MidgeResult;
 use crate::io::Fs;
 use std::sync::Arc;
 
-/// WAL factory that uses io::Fs abstraction
+/// WAL factory that uses `io::Fs` abstraction
 /// Allows using different filesystem implementations (Real, Mock, Chaos) for testing
 pub struct FsWalFactoryIo {
     fs: Arc<dyn Fs>,
@@ -16,13 +16,21 @@ impl FsWalFactoryIo {
         Self { fs }
     }
 
-    /// Create a new WAL writer using the io::Fs backend
+    /// Create a new WAL writer using the `io::Fs` backend
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the writer cannot be created.
     pub fn create_writer(&self, path_str: &str) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
         let writer = super::FsWalWriterIo::new(path_str, Arc::clone(&self.fs))?;
         Ok(Box::new(writer))
     }
 
-    /// Create a new WAL reader using the io::Fs backend
+    /// Create a new WAL reader using the `io::Fs` backend
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reader cannot be opened.
     pub fn create_reader(&self, path_str: &str) -> MidgeResult<Box<dyn crate::wal::WalReaderDyn>> {
         let reader = super::FsWalReaderIo::open(path_str, Arc::clone(&self.fs))?;
         Ok(Box::new(reader))
@@ -78,7 +86,7 @@ mod tests {
     }
 
     #[test]
-    fn should_create_reader() -> MidgeResult<()> {
+    fn should_create_reader() {
         // Arrange
         let fs = Arc::new(crate::io::MockFs::new());
         let factory = FsWalFactoryIo::new(fs);
@@ -88,6 +96,5 @@ mod tests {
 
         // Assert
         assert!(result.is_err()); // File doesn't exist in mock
-        Ok(())
     }
 }

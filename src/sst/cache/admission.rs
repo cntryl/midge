@@ -3,6 +3,7 @@
 //! Admission control uses a probabilistic counter to track the frequency
 //! of keys. Keys that fail the admission check are not added to the cache.
 
+use std::convert::TryFrom;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ impl AdmissionCounter {
     ///
     /// `num_cells`: Size of counter table (typically 64 or 128)
     /// `reset_interval`: How often to reset counters (typically 1000)
+    #[must_use]
     pub fn new(num_cells: usize, reset_interval: u64) -> Self {
         let cells: Vec<AtomicU64> = (0..num_cells).map(|_| AtomicU64::new(0)).collect();
         Self {
@@ -34,11 +36,10 @@ impl AdmissionCounter {
     }
 
     /// Hash a byte key to a cell index
-    #[inline(always)]
     fn hash_key(key: &[u8]) -> u64 {
         let mut h = 5381u64;
         for &b in key {
-            h = h.wrapping_mul(33).wrapping_add(b as u64);
+            h = h.wrapping_mul(33).wrapping_add(u64::from(b));
         }
         h
     }
@@ -47,7 +48,8 @@ impl AdmissionCounter {
     ///
     /// Returns true if the key has been seen before (or randomly with threshold probability)
     pub fn estimate(&self, key: &[u8]) -> bool {
-        let cell_idx = (Self::hash_key(key) as usize) % self.cells.len();
+        let hash = Self::hash_key(key);
+        let cell_idx = usize::try_from(hash).unwrap_or(0) % self.cells.len();
         let counter = self.cells[cell_idx].load(Ordering::Relaxed);
 
         // Admit if counter is non-zero (key has been seen before)
@@ -74,7 +76,8 @@ impl AdmissionCounter {
 
     /// Record an access to a key
     pub fn record_access(&self, key: &[u8]) {
-        let cell_idx = (Self::hash_key(key) as usize) % self.cells.len();
+        let hash = Self::hash_key(key);
+        let cell_idx = usize::try_from(hash).unwrap_or(0) % self.cells.len();
         let old_count = self.cells[cell_idx].fetch_add(1, Ordering::Relaxed);
 
         // Periodically reset to avoid saturation
@@ -151,7 +154,7 @@ mod tests {
         // Arrange
         let counter = AdmissionCounter::new(64, 1000);
         for i in 0..50 {
-            counter.record_access(format!("key_{}", i).as_bytes());
+            counter.record_access(format!("key_{i}").as_bytes());
         }
 
         // Act
@@ -210,9 +213,7 @@ mod tests {
     fn should_handle_many_cells() {
         // Arrange
         let counter = AdmissionCounter::new(1024, 1000);
-        let keys: Vec<Vec<u8>> = (0..100)
-            .map(|i| format!("key_{}", i).into_bytes())
-            .collect();
+        let keys: Vec<Vec<u8>> = (0..100).map(|i| format!("key_{i}").into_bytes()).collect();
 
         // Act
         for key in &keys {
@@ -221,7 +222,7 @@ mod tests {
 
         // Assert - all recorded keys should be admitted
         for key in &keys {
-            assert!(counter.estimate(key), "Key {:?} should be admitted", key);
+            assert!(counter.estimate(key), "Key {key:?} should be admitted");
         }
     }
 
@@ -258,13 +259,13 @@ mod tests {
 
         // Act - record many keys, some will collide
         for i in 0..50 {
-            counter.record_access(format!("key_{}", i).as_bytes());
+            counter.record_access(format!("key_{i}").as_bytes());
         }
 
         // Assert - at least some keys should be tracked
         let mut tracked_count = 0;
         for i in 0..50 {
-            if counter.estimate(format!("key_{}", i).as_bytes()) {
+            if counter.estimate(format!("key_{i}").as_bytes()) {
                 tracked_count += 1;
             }
         }

@@ -1,14 +1,14 @@
-//! AWS S3 provider with SigV4 authentication
+//! AWS S3 provider with `SigV4` authentication
 //!
-//! Specialized implementation of S3Provider for AWS with:
-//! - SigV4 signature-based authentication
+//! Specialized implementation of `S3Provider` for AWS with:
+//! - `SigV4` signature-based authentication
 //! - AWS credential handling (access key, secret key, optional session token)
 //! - Region-specific endpoint routing
 
 use super::s3::{AwsCredentials, S3Provider};
 use crate::common::MidgeResult;
 
-/// AWS S3 provider with SigV4 authentication
+/// AWS S3 provider with `SigV4` authentication
 ///
 /// Provides convenient constructors for AWS-specific credential types.
 pub struct AwsS3Provider {
@@ -53,7 +53,7 @@ impl AwsS3Provider {
 
     /// Create AWS S3 provider with temporary credentials (includes session token)
     ///
-    /// Used for federated credentials from AssumeRole or similar
+    /// Used for federated credentials from `AssumeRole` or similar
     ///
     /// # Arguments
     /// * `bucket` - S3 bucket name
@@ -78,19 +78,19 @@ impl AwsS3Provider {
         Ok(Self { inner })
     }
 
-    /// Create AWS S3 provider from AwsCredentials
+    /// Create AWS S3 provider from `AwsCredentials`
     pub fn from_credentials(bucket: String, creds: AwsCredentials) -> MidgeResult<Self> {
         let region = creds.region.clone();
         let inner = S3Provider::aws(bucket, region, creds)?;
         Ok(Self { inner })
     }
 
-    /// Access the underlying S3Provider for lower-level operations
+    /// Access the underlying `S3Provider` for lower-level operations
     pub fn inner(&self) -> &S3Provider {
         &self.inner
     }
 
-    /// Convert into the underlying S3Provider
+    /// Convert into the underlying `S3Provider`
     pub fn into_inner(self) -> S3Provider {
         self.inner
     }

@@ -19,6 +19,7 @@ pub struct LruPolicy {
 
 impl LruPolicy {
     /// Create a new LRU policy
+    #[must_use]
     pub fn new() -> Self {
         Self {
             generations: Mutex::new(HashMap::new()),

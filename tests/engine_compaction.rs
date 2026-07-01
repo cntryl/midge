@@ -9,6 +9,7 @@ use bytes::Bytes;
 mod common;
 use cntryl_midge::Query;
 use common::*;
+use std::collections::HashSet;
 
 // ============================================================================
 // TEST GROUP 1: Snapshot Reads Across Flush
@@ -17,10 +18,10 @@ use common::*;
 #[test]
 fn should_preserve_snapshot_reads_when_flushing_while_snapshot_is_open() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     for i in 0..100 {
-        let key = format!("concurrent_key_{:04}", i);
+        let key = format!("concurrent_key_{i:04}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin write tx");
@@ -61,14 +62,14 @@ fn should_preserve_snapshot_reads_when_flushing_while_snapshot_is_open() {
 #[test]
 fn should_preserve_both_write_batches_after_flushing_between_batches() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     {
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin first batch tx");
         for i in 0..500 {
-            let key = format!("key_{:04}", i);
+            let key = format!("key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None)
                 .expect("put first batch value");
         }
@@ -84,7 +85,7 @@ fn should_preserve_both_write_batches_after_flushing_between_batches() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin second batch tx");
         for i in 500..1000 {
-            let key = format!("key_{:04}", i);
+            let key = format!("key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None)
                 .expect("put second batch value");
         }
@@ -107,10 +108,10 @@ fn should_preserve_both_write_batches_after_flushing_between_batches() {
 #[test]
 fn should_preserve_range_tombstones_after_flushing_deleted_range() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     for i in 100..900 {
-        let key = format!("k{:04}", i);
+        let key = format!("k{i:04}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin seed tx");
@@ -151,13 +152,13 @@ fn should_preserve_range_tombstones_after_flushing_deleted_range() {
 #[test]
 fn should_preserve_large_values_after_flushing() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     let large_value = vec![0xAB; 100_000]; // 100KB value
 
     // Act
     for i in 0..10 {
-        let key = format!("large_{:02}", i);
+        let key = format!("large_{i:02}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin large value tx");
@@ -184,10 +185,10 @@ fn should_preserve_large_values_after_flushing() {
 #[test]
 fn should_preserve_latest_overwritten_value_after_flushing() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     for version in 0..100 {
-        let value = format!("v{}", version);
+        let value = format!("v{version}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin overwrite tx");
@@ -215,7 +216,7 @@ fn should_preserve_latest_overwritten_value_after_flushing() {
 #[test]
 fn should_preserve_all_keys_after_repeated_flushes() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Act
@@ -224,7 +225,7 @@ fn should_preserve_all_keys_after_repeated_flushes() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin batch tx");
         for i in 0..500 {
-            let key = format!("batch{:02}_key{:04}", batch, i);
+            let key = format!("batch{batch:02}_key{i:04}");
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put batch value");
         }
@@ -263,7 +264,7 @@ fn should_preserve_all_keys_after_repeated_flushes() {
 #[test]
 fn should_publish_compacted_ssts_in_manifest_when_compaction_completes() {
     // Arrange: Create engine and write data to trigger L0 compaction
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Write enough data to create multiple L0 files via flush
@@ -272,7 +273,7 @@ fn should_publish_compacted_ssts_in_manifest_when_compaction_completes() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin batch tx");
         for i in 0..100 {
-            let key = format!("batch{:02}_key{:04}", batch, i);
+            let key = format!("batch{batch:02}_key{i:04}");
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put batch value");
         }
@@ -323,14 +324,14 @@ fn should_publish_compacted_ssts_in_manifest_when_compaction_completes() {
 #[test]
 fn should_cleanup_input_ssts_after_compaction_manifest_publishes() {
     // Arrange: Create 5 L0 files (5 batches Ã— 100 keys each)
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
     for batch in 0..5 {
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin batch tx");
         for i in 0..100 {
-            let key = format!("batch{:02}_key{:04}", batch, i);
+            let key = format!("batch{batch:02}_key{i:04}");
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put batch value");
         }
@@ -348,7 +349,7 @@ fn should_cleanup_input_ssts_after_compaction_manifest_publishes() {
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .expect("begin new batch tx");
     for i in 0..100 {
-        let key = format!("batch99_key{:04}", i);
+        let key = format!("batch99_key{i:04}");
         tx.put(key.as_bytes().to_vec(), b"new_value".to_vec(), None)
             .expect("put new batch value");
     }
@@ -378,4 +379,86 @@ fn should_cleanup_input_ssts_after_compaction_manifest_publishes() {
 
     let new_val = tx.get(b"batch99_key0000").expect("get new batch key");
     assert_eq!(new_val, Some(Bytes::copy_from_slice(b"new_value")));
+}
+
+#[test]
+fn should_assign_unique_output_sequences_given_emergent_followup_compaction() {
+    // Arrange
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
+    let cf = engine.create_column_family("test").expect("create cf");
+    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, false)
+        .expect("disable automatic compaction while seeding L0 files");
+
+    let batch_count = 12;
+    let keys_per_batch = 20;
+    for batch in 0..batch_count {
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin batch tx");
+        for key_idx in 0..keys_per_batch {
+            let key = format!("batch{batch:02}_key{key_idx:04}");
+            let value = format!("value-{batch:02}-{key_idx:04}");
+            tx.put(key.into_bytes(), value.into_bytes(), None)
+                .expect("put batch value");
+        }
+        tx.commit(cntryl_midge::WriteOptions::buffered())
+            .expect("commit batch");
+        engine.flush_cf(&cf).expect("flush batch");
+    }
+
+    // Act
+    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, true)
+        .expect("enable manual compaction");
+    engine.compact_all().expect("compact all seeded L0 files");
+
+    // Assert
+    let layout = engine.get_storage_layout().expect("storage layout");
+    let compacted_names: Vec<String> = layout
+        .levels
+        .iter()
+        .flat_map(|level| level.files.iter())
+        .filter(|file| file.level > 0)
+        .map(|file| file.name.clone())
+        .collect();
+
+    assert!(
+        compacted_names.len() >= 2,
+        "test must produce follow-up compaction outputs; got {compacted_names:?}"
+    );
+    assert!(
+        compacted_names
+            .iter()
+            .all(|name| !name.ends_with("00000000000000000000.sst")),
+        "compaction outputs must never use sequence zero: {compacted_names:?}"
+    );
+
+    let unique_names: HashSet<&str> = compacted_names.iter().map(String::as_str).collect();
+    assert_eq!(
+        unique_names.len(),
+        compacted_names.len(),
+        "follow-up compactions must publish unique SST names: {compacted_names:?}"
+    );
+
+    let read_tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin read tx after compaction");
+    let total = read_tx
+        .scan(&Query::new())
+        .expect("scan compacted data")
+        .remaining();
+    assert_eq!(
+        total,
+        batch_count * keys_per_batch,
+        "all seeded data must remain readable after repeated follow-up compactions"
+    );
+
+    for batch in 0..batch_count {
+        let key = format!("batch{batch:02}_key0000");
+        let value = format!("value-{batch:02}-0000");
+        assert_eq!(
+            read_tx.get(key.as_bytes()).expect("get compacted key"),
+            Some(Bytes::from(value)),
+            "compacted key should remain readable: {key}"
+        );
+    }
 }

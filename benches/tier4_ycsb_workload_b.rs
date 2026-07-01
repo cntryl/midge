@@ -39,11 +39,8 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     // Phase 2: Warm-up (not measured)
     {
         let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
-        let _warmup_ops = ycsb::run_multi_client_for_duration(
-            Arc::clone(&engine),
-            clients,
-            WARMUP,
-            |client_id, stop| {
+        let _warmup_ops =
+            ycsb::run_multi_client_for_duration(&engine, clients, WARMUP, |client_id, stop| {
                 let zipf = Arc::clone(&zipf);
                 move |e, cf, op_index| {
                     let op_r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
@@ -77,19 +74,18 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         .expect("warmup commit");
                     }
                 }
-            },
-        );
+            });
     }
 
     // Flush to ensure warmup data is durable before measured phase
     engine.flush_cf(&cf).unwrap();
 
     // Phase 3: Measured (duration-based; multi-client)
-    let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
+    let measured = ctx.measure_ref(engine.as_ref(), |_e| {
         let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
         let write_opts = cntryl_midge::WriteOptions::buffered(); // Back to buffered for measured phase
-        ycsb::run_multi_client_for_duration(
-            Arc::clone(&engine),
+        ycsb::run_multi_client_for_duration_with_stats(
+            &engine,
             clients,
             MEASURED,
             |client_id, stop| {
@@ -128,8 +124,11 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
         )
     });
 
-    ctx.set_elements(measured_ops);
-    ctx.set_bytes(measured_ops * ycsb::logical_entry_size_bytes() as u64);
+    ctx.set_elements(measured.operations);
+    ctx.set_bytes(measured.operations * ycsb::logical_entry_size_bytes() as u64);
+    for (name, value) in measured.latency_tags() {
+        ctx.tag(name, value.to_string());
+    }
 }
 
 #[stress_test]

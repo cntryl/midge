@@ -25,7 +25,7 @@ fn should_not_create_filesystem_artifacts_when_memory_mode() {
     let opts = opts_for_mode("memory");
 
     // Act: Open, write, close
-    let engine = open_with_mode(opts, "memory");
+    let engine = open_with_mode(&opts, "memory");
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 
@@ -48,7 +48,7 @@ fn should_not_persist_data_across_restart_given_memory_mode_when_reopening() {
     let opts1 = opts_for_mode("memory");
 
     {
-        let engine = open_with_mode(opts1, "memory");
+        let engine = open_with_mode(&opts1, "memory");
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
@@ -67,7 +67,7 @@ fn should_not_persist_data_across_restart_given_memory_mode_when_reopening() {
     // Assert: New memory engine instance has no data
     let opts2 = opts_for_mode("memory");
     {
-        let engine = open_with_mode(opts2, "memory");
+        let engine = open_with_mode(&opts2, "memory");
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
@@ -87,7 +87,7 @@ fn should_isolate_data_given_multiple_memory_engines_when_separate_instances() {
     let opts2 = opts_for_mode("memory");
 
     // Act: Write different data to each
-    let engine1 = open_with_mode(opts1, "memory");
+    let engine1 = open_with_mode(&opts1, "memory");
     let cf1 = engine1.create_column_family("test").expect("create cf");
     let cf_id1 = cf1.id();
     let mut tx = engine1
@@ -97,7 +97,7 @@ fn should_isolate_data_given_multiple_memory_engines_when_separate_instances() {
         .expect("put");
     tx.commit(WriteOptions::buffered()).unwrap();
 
-    let engine2 = open_with_mode(opts2, "memory");
+    let engine2 = open_with_mode(&opts2, "memory");
     let cf2 = engine2.create_column_family("test").expect("create cf");
     let cf_id2 = cf2.id();
     let mut tx = engine2
@@ -130,7 +130,7 @@ fn should_handle_many_writes_efficiently_when_writing_100_keys() {
     // Arrange
     // Memory mode only test
     let opts = opts_for_mode("memory");
-    let engine = open_with_mode(opts, "memory");
+    let engine = open_with_mode(&opts, "memory");
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 
@@ -145,7 +145,7 @@ fn should_handle_many_writes_efficiently_when_writing_100_keys() {
 
     // Assert: All writes succeeded and data is retrievable
     let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-    for i in [0, 25, 50, 75, 99].iter() {
+    for i in &[0, 25, 50, 75, 99] {
         let key = format!("write_test_{i:03}");
         let got = tx.get(key.as_bytes()).expect("get");
         assert_eq!(
@@ -160,7 +160,7 @@ fn should_handle_many_writes_efficiently_when_writing_100_keys() {
 fn should_handle_many_deletes_efficiently_when_deleting_50_keys() {
     // Memory mode only test
     let opts = opts_for_mode("memory");
-    let engine = open_with_mode(opts, "memory");
+    let engine = open_with_mode(&opts, "memory");
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 
@@ -183,7 +183,7 @@ fn should_handle_many_deletes_efficiently_when_deleting_50_keys() {
 
     // Assert: All deleted
     let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-    for i in [0, 10, 25, 49].iter() {
+    for i in &[0, 10, 25, 49] {
         let key = format!("delete_test_{i:02}");
         let got = tx.get(key.as_bytes()).expect("get");
         assert_eq!(got, None, "expected key to be deleted but found it");
@@ -195,7 +195,7 @@ fn should_handle_mixed_operations_efficiently_when_put_delete_overwrite() {
     // Arrange
     // Memory mode only test
     let opts = opts_for_mode("memory");
-    let engine = open_with_mode(opts, "memory");
+    let engine = open_with_mode(&opts, "memory");
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 

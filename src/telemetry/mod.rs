@@ -27,7 +27,7 @@ impl Telemetry {
     /// Initialize global telemetry
     pub fn init(config: TelemetryConfig) -> crate::common::MidgeResult<()> {
         let enabled = config.enabled;
-        let metrics = Metrics::new(&config)?;
+        let metrics = Metrics::new(&config);
 
         #[cfg(feature = "telemetry")]
         if enabled {
@@ -92,8 +92,7 @@ impl Telemetry {
                 .build()
                 .map_err(|e| {
                     crate::common::MidgeError::Internal(format!(
-                        "Failed to initialize OTLP exporter: {}",
-                        e
+                        "Failed to initialize OTLP exporter: {e}"
                     ))
                 })?;
 

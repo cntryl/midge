@@ -28,7 +28,9 @@ use cntryl_midge::sst::compression::{
 
 /// Build a compressible payload (repeating pattern — high redundancy).
 fn compressible_payload(size: usize) -> Vec<u8> {
-    (0..size).map(|i| (i % 64) as u8).collect()
+    (0..size)
+        .map(|i| u8::try_from(i % 64).expect("pattern byte fits in u8"))
+        .collect()
 }
 
 /// Build an incompressible payload (every byte distinct mod 256).
@@ -37,15 +39,15 @@ fn incompressible_payload(size: usize) -> Vec<u8> {
     let mut v = Vec::with_capacity(size);
     let mut state: u32 = 0xDEAD_BEEF;
     for _ in 0..size {
-        state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-        v.push((state >> 24) as u8);
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        v.push(u8::try_from(state >> 24).expect("shifted LCG byte fits in u8"));
     }
     v
 }
 
 // ─── Block Compress — Multi-Size ─────────────────────────────────────────────
 
-/// Benchmark compress_block_with_trailer for multiple block sizes and policies.
+/// Benchmark `compress_block_with_trailer` for multiple block sizes and policies.
 fn bench_block_compress_sizes(c: &mut Criterion) {
     let mut group = c.benchmark_group("compression/block_compress");
     group.sampling_mode(SamplingMode::Flat);
@@ -73,8 +75,8 @@ fn bench_block_compress_sizes(c: &mut Criterion) {
             group.bench_with_input(BenchmarkId::new(*policy_name, size), &data, |b, data| {
                 b.iter(|| {
                     let out = compress_block_with_trailer(black_box(data), policy).unwrap();
-                    black_box(out)
-                })
+                    black_box(out);
+                });
             });
         }
     }
@@ -84,7 +86,7 @@ fn bench_block_compress_sizes(c: &mut Criterion) {
 
 // ─── Block Decompress — Multi-Size ───────────────────────────────────────────
 
-/// Benchmark decompress_block_with_trailer for multiple block sizes and codecs.
+/// Benchmark `decompress_block_with_trailer` for multiple block sizes and codecs.
 fn bench_block_decompress_sizes(c: &mut Criterion) {
     let mut group = c.benchmark_group("compression/block_decompress");
     group.sampling_mode(SamplingMode::Flat);
@@ -111,8 +113,8 @@ fn bench_block_decompress_sizes(c: &mut Criterion) {
                     b.iter(|| {
                         let out =
                             decompress_block_with_trailer(black_box(compressed.as_ref())).unwrap();
-                        black_box(out)
-                    })
+                        black_box(out);
+                    });
                 },
             );
         }
@@ -149,8 +151,8 @@ fn bench_compress_incompressible(c: &mut Criterion) {
         group.bench_function(*name, |b| {
             b.iter(|| {
                 let out = compress_block_with_trailer(black_box(&data), policy).unwrap();
-                black_box(out)
-            })
+                black_box(out);
+            });
         });
     }
 
@@ -183,8 +185,8 @@ fn bench_batch_block_compress(c: &mut Criterion) {
                 let out = compress_block_with_trailer(black_box(block), &policy).unwrap();
                 total += out.len();
             }
-            black_box(total)
-        })
+            black_box(total);
+        });
     });
 
     let policy_zstd = CompressionPolicy::Fixed(CompressionAlgo::Zstd3);
@@ -196,8 +198,8 @@ fn bench_batch_block_compress(c: &mut Criterion) {
                 let out = compress_block_with_trailer(black_box(block), &policy_zstd).unwrap();
                 total += out.len();
             }
-            black_box(total)
-        })
+            black_box(total);
+        });
     });
 
     group.finish();
@@ -230,8 +232,8 @@ fn bench_batch_block_decompress(c: &mut Criterion) {
                 let out = decompress_block_with_trailer(black_box(block.as_ref())).unwrap();
                 total += out.len();
             }
-            black_box(total)
-        })
+            black_box(total);
+        });
     });
 
     let policy_zstd = CompressionPolicy::Fixed(CompressionAlgo::Zstd3);
@@ -249,8 +251,8 @@ fn bench_batch_block_decompress(c: &mut Criterion) {
                 let out = decompress_block_with_trailer(black_box(block.as_ref())).unwrap();
                 total += out.len();
             }
-            black_box(total)
-        })
+            black_box(total);
+        });
     });
 
     group.finish();
@@ -279,8 +281,8 @@ fn bench_wal_batch_compress(c: &mut Criterion) {
                 let (out, _) = compress_wal_value(black_box(rec));
                 total += out.len();
             }
-            black_box(total)
-        })
+            black_box(total);
+        });
     });
 
     group.finish();
@@ -310,8 +312,8 @@ fn bench_wal_batch_decompress(c: &mut Criterion) {
                 let out = decompress_wal_value(black_box(data.as_ref()), *comp).unwrap();
                 total += out.len();
             }
-            black_box(total)
-        })
+            black_box(total);
+        });
     });
 
     group.finish();

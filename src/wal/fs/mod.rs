@@ -1,11 +1,11 @@
 //! Filesystem-backed Write-Ahead Log (WAL).
 //!
-//! This module provides the io::Fs-based WAL implementations:
-//! - **FsWalWriterIo**: Append WAL records to local file
-//! - **FsWalReaderIo**: Read WAL records from local file
-//! - **FsWalFactoryIo**: Factory for creating readers/writers with swappable Fs implementations
+//! This module provides the `io::Fs-based` WAL implementations:
+//! - **`FsWalWriterIo`**: Append WAL records to local file
+//! - **`FsWalReaderIo`**: Read WAL records from local file
+//! - **`FsWalFactoryIo`**: Factory for creating readers/writers with swappable Fs implementations
 //!
-//! The io::Fs abstraction enables better testability with Mock and Chaos implementations.
+//! The `io::Fs` abstraction enables better testability with Mock and Chaos implementations.
 
 mod factory_io;
 mod reader_io;

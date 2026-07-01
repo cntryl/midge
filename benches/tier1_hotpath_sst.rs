@@ -34,14 +34,15 @@ fn bench_encode(c: &mut Criterion) {
 
     let prev = b"user:1000:settings";
     let key = b"user:1000:profile";
-    let shared = shared_prefix_len(prev, key);
-    let delta = &key[shared..];
+    let shared_len = shared_prefix_len(prev, key);
+    let shared = u16::try_from(shared_len).expect("shared prefix length fits in u16");
+    let delta = &key[shared_len..];
 
     let value = b"value_data";
 
     g.bench_function("encode_small", |b| {
         b.iter(|| {
-            black_box(encode(delta, shared as u16, Some(value), 1, EntryType::Put));
+            black_box(encode(delta, shared, Some(value), 1, EntryType::Put));
         });
     });
 
@@ -58,10 +59,11 @@ fn bench_decode(c: &mut Criterion) {
 
     let prev = b"user:1000:settings";
     let key = b"user:1000:profile";
-    let shared = shared_prefix_len(prev, key);
-    let delta = &key[shared..];
+    let shared_len = shared_prefix_len(prev, key);
+    let shared = u16::try_from(shared_len).expect("shared prefix length fits in u16");
+    let delta = &key[shared_len..];
 
-    let encoded = encode(delta, shared as u16, Some(b"value"), 1, EntryType::Put);
+    let encoded = encode(delta, shared, Some(b"value"), 1, EntryType::Put);
 
     g.bench_function("decode_small", |b| {
         b.iter(|| {
@@ -82,14 +84,15 @@ fn bench_roundtrip(c: &mut Criterion) {
 
     let prev = b"user:1000:settings";
     let key = b"user:1000:profile";
-    let shared = shared_prefix_len(prev, key);
-    let delta = &key[shared..];
+    let shared_len = shared_prefix_len(prev, key);
+    let shared = u16::try_from(shared_len).expect("shared prefix length fits in u16");
+    let delta = &key[shared_len..];
 
     let value = b"value_data";
 
     g.bench_function("roundtrip_small", |b| {
         b.iter(|| {
-            let encoded = encode(delta, shared as u16, Some(value), 1, EntryType::Put);
+            let encoded = encode(delta, shared, Some(value), 1, EntryType::Put);
             let _ = decode(&encoded, 0).unwrap();
             black_box(encoded);
         });

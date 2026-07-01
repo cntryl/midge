@@ -51,6 +51,9 @@ fn should_expose_local_engine_observability_surfaces() {
         metrics.wal_append_count >= metrics.wal_fsync_count,
         "WAL append counter should never be below fsync counter"
     );
+    assert_eq!(metrics.cache_hits + metrics.cache_misses, 0);
+    assert_eq!(metrics.cloud_async_wal_uploads_failed, 0);
+    assert_eq!(metrics.hybrid_pending_evictions, 0);
     assert_eq!(layout.health, EngineHealth::Healthy);
     assert!(
         layout

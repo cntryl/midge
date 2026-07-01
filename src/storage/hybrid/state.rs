@@ -46,10 +46,7 @@ impl DiskState {
 
     /// Percentage of disk used
     pub fn usage_percent(&self, limit: u64) -> u32 {
-        if limit == 0 {
-            return 100;
-        }
-        ((self.total_committed() as f64 / limit as f64) * 100.0) as u32
+        usage_percent(self.total_committed(), limit)
     }
 }
 
@@ -92,11 +89,17 @@ impl AtomicDiskState {
     }
 
     pub fn usage_percent(&self, limit: u64) -> u32 {
-        if limit == 0 {
-            return 100;
-        }
-        ((self.total_committed() as f64 / limit as f64) * 100.0) as u32
+        usage_percent(self.total_committed(), limit)
     }
+}
+
+fn usage_percent(total_committed: u64, limit: u64) -> u32 {
+    if limit == 0 {
+        return 100;
+    }
+
+    let percent = total_committed.saturating_mul(100) / limit;
+    u32::try_from(percent).unwrap_or(u32::MAX)
 }
 
 impl Default for AtomicDiskState {

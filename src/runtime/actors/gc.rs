@@ -23,7 +23,7 @@ impl GcActor {
     }
 
     /// Check for garbage collection opportunities
-    pub fn check(&self, state: &RuntimeState) {
+    pub fn check(state: &RuntimeState) {
         // Find SST files that are still referenced in the manifest
         let manifest_ssts: HashSet<String> = state
             .manifest
@@ -39,7 +39,15 @@ impl GcActor {
                     entry
                         .ok()
                         .and_then(|e| e.file_name().into_string().ok())
-                        .filter(|name| name.ends_with(".sst") || name.ends_with(".sst.tmp"))
+                        .filter(|name| {
+                            let path = std::path::Path::new(&name);
+                            path.extension()
+                                .is_some_and(|ext| ext.eq_ignore_ascii_case("sst"))
+                                || path
+                                    .file_name()
+                                    .and_then(|file_name| file_name.to_str())
+                                    .is_some_and(|file_name| file_name.ends_with(".sst.tmp"))
+                        })
                 })
                 .collect::<HashSet<_>>(),
             Err(e) => {
@@ -81,7 +89,7 @@ impl GcActor {
         state: &mut RuntimeState,
         sst_names: &[String],
         hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
-    ) -> MidgeResult<()> {
+    ) {
         // Get set of SSTs pinned by active snapshots
         let pinned_ssts = state.get_pinned_sst_names();
 
@@ -122,7 +130,7 @@ impl GcActor {
 
             // Actually delete the file
             match std::fs::remove_file(&sst_path) {
-                Ok(_) => {
+                Ok(()) => {
                     tracing::info!(sst_name, path = %sst_path.display(), "Deleted obsolete SST");
                     deleted_count += 1;
                 }
@@ -166,8 +174,6 @@ impl GcActor {
                 "GC deletion batch complete"
             );
         }
-
-        Ok(())
     }
 
     /// Get timestamp of last GC run

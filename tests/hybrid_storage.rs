@@ -31,13 +31,10 @@ fn should_trigger_eviction_at_high_watermark() {
     // Note: This test assumes cloud storage is available
     // In a pure local test, we validate the logic without touching actual cloud
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Hybrid: Trigger Eviction at High Watermark (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Hybrid: Trigger Eviction at High Watermark (mode: {mode}) ===");
 
         // Arrange: Set tight memory budget to make eviction triggerable
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write large values to reach high watermark (~70% of budget)
@@ -48,7 +45,7 @@ fn should_trigger_eviction_at_high_watermark() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..10 {
-            let key = format!("large_key_{:02}", i);
+            let key = format!("large_key_{i:02}");
             tx.put(key.as_bytes().to_vec(), large_value.clone(), None)
                 .ok();
         }
@@ -68,34 +65,27 @@ fn should_trigger_eviction_at_high_watermark() {
             .expect("begin_tx");
         let readable = (0..10)
             .filter(|i| {
-                let key = format!("large_key_{:02}", i);
+                let key = format!("large_key_{i:02}");
                 tx.get(key.as_bytes()).ok().flatten().is_some()
             })
             .count();
 
         assert!(
             readable >= 8,
-            "high watermark eviction caused data loss in mode: {}",
-            mode
+            "high watermark eviction caused data loss in mode: {mode}"
         );
 
-        eprintln!(
-            "âœ“ High watermark eviction triggered safely; {} keys readable",
-            readable
-        );
+        eprintln!("âœ“ High watermark eviction triggered safely; {readable} keys readable");
     });
 }
 
 #[test]
 fn should_block_writes_at_emergency_watermark() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Hybrid: Block Writes at Emergency (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Hybrid: Block Writes at Emergency (mode: {mode}) ===");
 
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act: Fill close to emergency watermark
@@ -108,27 +98,21 @@ fn should_block_writes_at_emergency_watermark() {
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
-            let key = format!("emergency_key_{:02}", attempt);
+            let key = format!("emergency_key_{attempt:02}");
 
-            match tx.put(key.as_bytes().to_vec(), large_value.clone(), None) {
-                Ok(_) => {
-                    // Write succeeded in transaction
-                    match tx.commit(WriteOptions::buffered()) {
-                        Ok(_) => {
-                            writes_completed += 1;
-                        }
-                        Err(_) => {
-                            // Commit may fail at emergency watermark
-                            emergency_write_blocked = true;
-                            break;
-                        }
-                    }
-                }
-                Err(_) => {
-                    // Put may fail at emergency watermark
+            if let Ok(()) = tx.put(key.as_bytes().to_vec(), large_value.clone(), None) {
+                // Write succeeded in transaction
+                if let Ok(()) = tx.commit(WriteOptions::buffered()) {
+                    writes_completed += 1;
+                } else {
+                    // Commit may fail at emergency watermark
                     emergency_write_blocked = true;
                     break;
                 }
+            } else {
+                // Put may fail at emergency watermark
+                emergency_write_blocked = true;
+                break;
             }
 
             // Wait for eviction to process
@@ -144,13 +128,11 @@ fn should_block_writes_at_emergency_watermark() {
 
         assert!(
             writes_completed > 0 || emergency_write_blocked,
-            "neither writes completed nor backpressure activated in mode: {}",
-            mode
+            "neither writes completed nor backpressure activated in mode: {mode}"
         );
 
         eprintln!(
-            "âœ“ Emergency watermark handling active; writes: {}, blocked: {}",
-            writes_completed, emergency_write_blocked
+            "âœ“ Emergency watermark handling active; writes: {writes_completed}, blocked: {emergency_write_blocked}"
         );
     });
 }
@@ -158,13 +140,10 @@ fn should_block_writes_at_emergency_watermark() {
 #[test]
 fn should_resume_writes_after_eviction_clears_pressure() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Hybrid: Resume Writes After Eviction (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Hybrid: Resume Writes After Eviction (mode: {mode}) ===");
 
         // Arrange
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Fill to pressure point
@@ -174,7 +153,7 @@ fn should_resume_writes_after_eviction_clears_pressure() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..20 {
-            let key = format!("pressure_key_{:02}", i);
+            let key = format!("pressure_key_{i:02}");
             tx.put(key.as_bytes().to_vec(), medium_value.clone(), None)
                 .ok();
         }
@@ -190,7 +169,7 @@ fn should_resume_writes_after_eviction_clears_pressure() {
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
-            let key = format!("resume_key_{:02}", i);
+            let key = format!("resume_key_{i:02}");
             if tx
                 .put(key.as_bytes().to_vec(), medium_value.clone(), None)
                 .is_ok()
@@ -203,24 +182,20 @@ fn should_resume_writes_after_eviction_clears_pressure() {
         // Assert: Writes can resume after eviction
         assert!(
             resume_writes >= 5,
-            "writes did not resume after eviction in mode: {}",
-            mode
+            "writes did not resume after eviction in mode: {mode}"
         );
 
-        eprintln!(
-            "âœ“ Writes resumed after eviction; {} resume writes succeeded",
-            resume_writes
-        );
+        eprintln!("âœ“ Writes resumed after eviction; {resume_writes} resume writes succeeded");
     });
 }
 
 #[test]
 fn should_prefer_local_reads_before_eviction() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Hybrid: Prefer Local Reads (mode: {}) ===", mode);
+        eprintln!("\n=== Hybrid: Prefer Local Reads (mode: {mode}) ===");
 
         // Arrange: Write small data that fits comfortably in cache
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let small_value = b"cached_value";
@@ -229,7 +204,7 @@ fn should_prefer_local_reads_before_eviction() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..50 {
-            let key = format!("local_pref_key_{:04}", i);
+            let key = format!("local_pref_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), small_value.to_vec(), None)
                 .ok();
         }
@@ -243,7 +218,7 @@ fn should_prefer_local_reads_before_eviction() {
 
         let mut local_hits = 0;
         for i in 0..50 {
-            let key = format!("local_pref_key_{:04}", i);
+            let key = format!("local_pref_key_{i:04}");
             if tx.get(key.as_bytes()).ok().flatten().is_some() {
                 local_hits += 1;
             }
@@ -253,27 +228,20 @@ fn should_prefer_local_reads_before_eviction() {
         // (In a real scenario with cloud metrics, we'd verify 0 cloud fetches)
         assert!(
             local_hits >= 45,
-            "local cache hit rate too low in mode: {}",
-            mode
+            "local cache hit rate too low in mode: {mode}"
         );
 
-        eprintln!(
-            "âœ“ Local read preference working; {} cache hits",
-            local_hits
-        );
+        eprintln!("âœ“ Local read preference working; {local_hits} cache hits");
     });
 }
 
 #[test]
 fn should_fetch_from_cloud_after_local_eviction() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Hybrid: Fetch from Cloud After Eviction (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Hybrid: Fetch from Cloud After Eviction (mode: {mode}) ===");
 
         // Arrange: Write and evict to cloud
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write large batch
@@ -283,7 +251,7 @@ fn should_fetch_from_cloud_after_local_eviction() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..20 {
-            let key = format!("evict_fetch_key_{:02}", i);
+            let key = format!("evict_fetch_key_{i:02}");
             tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
         }
         tx.commit(WriteOptions::buffered()).expect("commit");
@@ -299,7 +267,7 @@ fn should_fetch_from_cloud_after_local_eviction() {
 
         let mut cloud_fetched = 0;
         for i in 0..20 {
-            let key = format!("evict_fetch_key_{:02}", i);
+            let key = format!("evict_fetch_key_{i:02}");
             if tx.get(key.as_bytes()).ok().flatten().is_some() {
                 cloud_fetched += 1;
             }
@@ -308,26 +276,22 @@ fn should_fetch_from_cloud_after_local_eviction() {
         // Assert: Data accessible via cloud fetch
         assert!(
             cloud_fetched >= 15,
-            "cloud fetch after eviction failed in mode: {}",
-            mode
+            "cloud fetch after eviction failed in mode: {mode}"
         );
 
-        eprintln!(
-            "âœ“ Cloud fetch working after eviction; {} keys fetched",
-            cloud_fetched
-        );
+        eprintln!("âœ“ Cloud fetch working after eviction; {cloud_fetched} keys fetched");
     });
 }
 
 #[test]
 fn should_persist_eviction_state_across_restart() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        eprintln!("\n=== Hybrid: Persist Eviction State (mode: {}) ===", mode);
+        eprintln!("\n=== Hybrid: Persist Eviction State (mode: {mode}) ===");
 
         // Arrange
         // Act: Write, evict, note manifest state
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let value = vec![b'E'; 128 * 1024]; // 128KB
@@ -336,7 +300,7 @@ fn should_persist_eviction_state_across_restart() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             for i in 0..15 {
-                let key = format!("persist_evict_key_{:02}", i);
+                let key = format!("persist_evict_key_{i:02}");
                 tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
             }
             tx.commit(WriteOptions::buffered()).expect("commit");
@@ -349,7 +313,7 @@ fn should_persist_eviction_state_across_restart() {
 
         // Assert: Restart and verify eviction state
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Verify:
@@ -363,7 +327,7 @@ fn should_persist_eviction_state_across_restart() {
 
             let mut persisted = 0;
             for i in 0..15 {
-                let key = format!("persist_evict_key_{:02}", i);
+                let key = format!("persist_evict_key_{i:02}");
                 if tx.get(key.as_bytes()).ok().flatten().is_some() {
                     persisted += 1;
                 }
@@ -371,14 +335,10 @@ fn should_persist_eviction_state_across_restart() {
 
             assert!(
                 persisted >= 12,
-                "eviction state not persisted across restart in mode: {}",
-                mode
+                "eviction state not persisted across restart in mode: {mode}"
             );
 
-            eprintln!(
-                "âœ“ Eviction state persisted; {} keys still accessible",
-                persisted
-            );
+            eprintln!("âœ“ Eviction state persisted; {persisted} keys still accessible");
         }
     });
 }
@@ -386,13 +346,10 @@ fn should_persist_eviction_state_across_restart() {
 #[test]
 fn should_handle_cloud_unavailable_during_eviction() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Hybrid: Cloud Down During Eviction (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Hybrid: Cloud Down During Eviction (mode: {mode}) ===");
 
         // Arrange: Fill cache near capacity
-        let engine = open_with_mode(opts.clone(), mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let large_value = vec![b'U'; 512 * 1024]; // 512KB
@@ -401,7 +358,7 @@ fn should_handle_cloud_unavailable_during_eviction() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..12 {
-            let key = format!("cloud_down_key_{:02}", i);
+            let key = format!("cloud_down_key_{i:02}");
             tx.put(key.as_bytes().to_vec(), large_value.clone(), None)
                 .ok();
         }
@@ -424,7 +381,7 @@ fn should_handle_cloud_unavailable_during_eviction() {
 
         let mut accessible = 0;
         for i in 0..12 {
-            let key = format!("cloud_down_key_{:02}", i);
+            let key = format!("cloud_down_key_{i:02}");
             if tx.get(key.as_bytes()).ok().flatten().is_some() {
                 accessible += 1;
             }
@@ -432,13 +389,11 @@ fn should_handle_cloud_unavailable_during_eviction() {
 
         assert!(
             accessible >= 10,
-            "cloud unavailability during eviction caused data loss in mode: {}",
-            mode
+            "cloud unavailability during eviction caused data loss in mode: {mode}"
         );
 
         eprintln!(
-            "âœ“ Handled cloud unavailability gracefully; {} keys still accessible",
-            accessible
+            "âœ“ Handled cloud unavailability gracefully; {accessible} keys still accessible"
         );
     });
 }
@@ -446,12 +401,9 @@ fn should_handle_cloud_unavailable_during_eviction() {
 #[test]
 fn should_not_evict_ssts_with_active_readers() {
     for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!(
-            "\n=== Hybrid: Don't Evict Active Readers (mode: {}) ===",
-            mode
-        );
+        eprintln!("\n=== Hybrid: Don't Evict Active Readers (mode: {mode}) ===");
 
-        let engine = Arc::new(open_with_mode(opts.clone(), mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Arrange: Write and create snapshot
@@ -461,7 +413,7 @@ fn should_not_evict_ssts_with_active_readers() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         for i in 0..25 {
-            let key = format!("reader_protect_key_{:02}", i);
+            let key = format!("reader_protect_key_{i:02}");
             tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
         }
         tx.commit(WriteOptions::buffered()).expect("commit");
@@ -487,7 +439,7 @@ fn should_not_evict_ssts_with_active_readers() {
         // Assert: Snapshot reads still succeed (SST not evicted)
         let mut snapshot_reads = 0;
         for i in 0..25 {
-            let key = format!("reader_protect_key_{:02}", i);
+            let key = format!("reader_protect_key_{i:02}");
             if snapshot.get(key.as_bytes()).ok().flatten().is_some() {
                 snapshot_reads += 1;
             }
@@ -495,13 +447,11 @@ fn should_not_evict_ssts_with_active_readers() {
 
         assert!(
             snapshot_reads >= 20,
-            "active reader SST was evicted in mode: {}",
-            mode
+            "active reader SST was evicted in mode: {mode}"
         );
 
         eprintln!(
-            "âœ“ Active readers protected from eviction; {} snapshot reads successful",
-            snapshot_reads
+            "âœ“ Active readers protected from eviction; {snapshot_reads} snapshot reads successful"
         );
     });
 }

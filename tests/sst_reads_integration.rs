@@ -8,12 +8,12 @@ use common::{open_with_mode, opts_for_mode};
 #[test]
 fn should_read_from_sst_after_flush() -> MidgeResult<()> {
     // Arrange: Create engine
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Write keys that will be flushed to SST
     for i in 0..10 {
-        let key = format!("key_{:03}", i);
+        let key = format!("key_{i:03}");
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"value_from_sst".to_vec(), None)?;
         tx.commit(WriteOptions::buffered())?;
@@ -41,13 +41,13 @@ fn should_read_from_sst_after_flush() -> MidgeResult<()> {
 #[test]
 fn should_track_l0_sst_reads() -> MidgeResult<()> {
     // Arrange: Create engine and write multiple batches to create L0 files
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Write and flush multiple times to create multiple L0 SSTs
     for batch in 0..3 {
         for i in 0..5 {
-            let key = format!("batch{}_key{}", batch, i);
+            let key = format!("batch{batch}_key{i}");
             let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)?;
             tx.commit(WriteOptions::buffered())?;
@@ -59,7 +59,7 @@ fn should_track_l0_sst_reads() -> MidgeResult<()> {
     // Act: Read keys that require checking multiple L0 files
     // Assert: Reads succeed across multiple L0 files
     for batch in 0..3 {
-        let key = format!("batch{}_key0", batch);
+        let key = format!("batch{batch}_key0");
         let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
         let value = read_tx.get(key.as_bytes())?;
         assert_eq!(value, Some(b"value".to_vec().into()));
@@ -74,12 +74,12 @@ fn should_track_l0_sst_reads() -> MidgeResult<()> {
 #[test]
 fn should_use_key_ranges_for_higher_levels() -> MidgeResult<()> {
     // Arrange: Create engine
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Write sorted keys
     for i in 0..20 {
-        let key = format!("key_{:03}", i);
+        let key = format!("key_{i:03}");
         let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
         tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None)?;
         tx.commit(WriteOptions::buffered())?;
@@ -108,7 +108,7 @@ fn should_use_key_ranges_for_higher_levels() -> MidgeResult<()> {
 #[test]
 fn should_handle_memtable_and_sst_reads() -> MidgeResult<()> {
     // Arrange: Mix of memtable and SST data
-    let engine = open_with_mode(opts_for_mode("memory"), "memory");
+    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Write to SST

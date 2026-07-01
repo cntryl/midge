@@ -55,8 +55,8 @@ struct PhaseResult {
 }
 
 fn run_streaming_phase(
-    engine: Arc<MidgeEngine>,
-    head: Arc<AtomicU64>,
+    engine: &Arc<MidgeEngine>,
+    head: &Arc<AtomicU64>,
     duration: Duration,
     count: bool,
 ) -> PhaseResult {
@@ -66,8 +66,8 @@ fn run_streaming_phase(
     let mut handles = Vec::with_capacity(WRITERS + READERS);
 
     for _ in 0..WRITERS {
-        let engine = Arc::clone(&engine);
-        let head = Arc::clone(&head);
+        let engine = Arc::clone(engine);
+        let head = Arc::clone(head);
         let stop = Arc::clone(&stop);
         let barrier = Arc::clone(&barrier);
 
@@ -101,8 +101,8 @@ fn run_streaming_phase(
     }
 
     for _ in 0..READERS {
-        let engine = Arc::clone(&engine);
-        let head = Arc::clone(&head);
+        let engine = Arc::clone(engine);
+        let head = Arc::clone(head);
         let stop = Arc::clone(&stop);
         let barrier = Arc::clone(&barrier);
 
@@ -179,7 +179,7 @@ fn run_streaming(ctx: &mut StressContext, opts: MidgeOptions) {
     // Warmup (unmeasured)
     // -------------------------------------------------------------------------
 
-    let _warmup = run_streaming_phase(Arc::clone(&engine), Arc::clone(&head), WARMUP, false);
+    let _warmup = run_streaming_phase(&engine, &head, WARMUP, false);
 
     // -------------------------------------------------------------------------
     // Measured phase
@@ -192,7 +192,7 @@ fn run_streaming(ctx: &mut StressContext, opts: MidgeOptions) {
         lag_sum,
         lag_max,
     } = ctx.measure_ref(engine.as_ref(), |_e| {
-        run_streaming_phase(Arc::clone(&engine), Arc::clone(&head), MEASURED, true)
+        run_streaming_phase(&engine, &head, MEASURED, true)
     });
 
     // -------------------------------------------------------------------------
@@ -207,21 +207,24 @@ fn run_streaming(ctx: &mut StressContext, opts: MidgeOptions) {
     ctx.set_bytes(total_ops.saturating_mul(bytes_per_op));
 
     // Extra shape diagnostics (not used for throughput math).
-    let avg_lag = if reads == 0 {
-        0.0
-    } else {
-        (lag_sum as f64) / (reads as f64)
-    };
-    let miss_rate = if reads == 0 {
-        0.0
-    } else {
-        (misses as f64) / (reads as f64)
-    };
+    let avg_lag_milli_keys = lag_sum
+        .saturating_mul(1_000)
+        .checked_div(reads)
+        .unwrap_or(0);
+    let miss_rate_ppm = misses
+        .saturating_mul(1_000_000)
+        .checked_div(reads)
+        .unwrap_or(0);
 
-    eprintln!(
-        "streaming: writers={} readers={} tail_window={} writes={} reads={} miss_rate={:.3} avg_lag={:.1} max_lag={} ",
-        WRITERS, READERS, TAIL_WINDOW, writes, reads, miss_rate, avg_lag, lag_max
-    );
+    ctx.tag("writers", WRITERS.to_string());
+    ctx.tag("readers", READERS.to_string());
+    ctx.tag("tail_window_keys", TAIL_WINDOW.to_string());
+    ctx.tag("writes", writes.to_string());
+    ctx.tag("reads", reads.to_string());
+    ctx.tag("read_misses", misses.to_string());
+    ctx.tag("read_miss_rate_ppm", miss_rate_ppm.to_string());
+    ctx.tag("avg_lag_milli_keys", avg_lag_milli_keys.to_string());
+    ctx.tag("max_lag_keys", lag_max.to_string());
 }
 
 #[stress_test]

@@ -42,7 +42,7 @@ fn run_sst_point_seek_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
             .expect("begin");
         for (i, k) in keys[start..end].iter().enumerate() {
             let idx = start + i;
-            let v = vec![(idx % 251) as u8; VALUE_SIZE];
+            let v = vec![u8::try_from(idx % 251).expect("value byte fits in u8"); VALUE_SIZE];
             tx.put(k.to_vec(), v, None).unwrap();
         }
         tx.commit(write_opts).unwrap();
@@ -80,7 +80,7 @@ fn run_sst_range_seek_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
             .expect("begin");
         for (i, k) in keys[start..end].iter().enumerate() {
             let idx = start + i;
-            let v = vec![(idx % 251) as u8; VALUE_SIZE];
+            let v = vec![u8::try_from(idx % 251).expect("value byte fits in u8"); VALUE_SIZE];
             tx.put(k.to_vec(), v, None).unwrap();
         }
         tx.commit(write_opts).unwrap();
@@ -126,7 +126,7 @@ fn run_sst_sparse_keyspace_seek_case(ctx: &mut StressContext, opts: MidgeOptions
             let spaced = (i as u64) << 20;
             k[..8].copy_from_slice(&spaced.to_be_bytes());
             keys.push(k);
-            let v = vec![(i % 251) as u8; VALUE_SIZE];
+            let v = vec![u8::try_from(i % 251).expect("value byte fits in u8"); VALUE_SIZE];
             tx.put(k.to_vec(), v, None).unwrap();
         }
         tx.commit(write_opts).unwrap();

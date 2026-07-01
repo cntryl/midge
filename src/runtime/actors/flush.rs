@@ -51,14 +51,14 @@ impl FlushActor {
     /// Handle a flush request for a column family
     ///
     /// If SBA is available, reserves space before flushing. Handles backpressure
-    /// responses (WaitForCloud, WaitForCompaction, RejectNoSpace).
+    /// responses (`WaitForCloud`, `WaitForCompaction`, `RejectNoSpace`).
     ///
     /// This freezes the active memtable and queues it for background flush.
     /// Returns the name of the SST file that will be created.
     pub fn handle_flush(
         &mut self,
         state: &mut RuntimeState,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<FlushOutput> {
         // Invariant: a flush may create output files early, but those files are
@@ -120,8 +120,7 @@ impl FlushActor {
             let max_immutable = state.max_immutable_memtables;
             let immutable_count = state
                 .get_cf(cf_id)
-                .map(|cf| cf.immutable_memtables.len())
-                .unwrap_or(0);
+                .map_or(0, |cf| cf.immutable_memtables.len());
 
             tracing::warn!(
                 cf_id = cf_id,
@@ -133,8 +132,7 @@ impl FlushActor {
                 t.metrics().record_write_stall_memory();
             }
             return Err(MidgeError::WriteStall(format!(
-                "immutable memtable queue full ({}/{}); flush in progress",
-                immutable_count, max_immutable
+                "immutable memtable queue full ({immutable_count}/{max_immutable}); flush in progress"
             )));
         }
 
@@ -143,7 +141,7 @@ impl FlushActor {
         // Get the column family (after stall check to avoid borrow issues)
         let cf = state
             .get_cf_mut(cf_id)
-            .ok_or_else(|| MidgeError::Internal(format!("Column family {} not found", cf_id)))?;
+            .ok_or_else(|| MidgeError::Internal(format!("Column family {cf_id} not found")))?;
 
         if cf.memtable.size_bytes() == 0 {
             return Ok(FlushOutput {
@@ -188,16 +186,24 @@ impl FlushActor {
         state.manifest.next_sst_seqs.insert(cf_id, sst_seq + 1);
 
         self.in_progress += 1;
-
         tracing::info!(cf_id = cf_id, sst_name = %sst_name, "Flush started");
 
-        // Write frozen memtable to SST file (blocking for now; could be async)
-        let write_start = std::time::Instant::now();
-        let mut file_meta = self.write_memtable_to_sst(&frozen, &sst_path, cf_id, &sst_name)?;
-        let write_ns = write_start.elapsed().as_nanos();
-        file_meta.level = 0;
+        self.publish_flush_output(state, cf_id, &sst_name, &frozen, &sst_path, sba)
+    }
 
-        tracing::info!(cf_id = cf_id, sst_name = %sst_name, write_ms = (write_ns as f64) / 1_000_000.0, "SST file written");
+    fn publish_flush_output(
+        &self,
+        state: &mut RuntimeState,
+        cf_id: crate::types::ColumnFamilyId,
+        sst_name: &str,
+        frozen: &std::sync::Arc<crate::sst::SkipListMemtable>,
+        sst_path: &std::path::PathBuf,
+        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+    ) -> MidgeResult<FlushOutput> {
+        let start = std::time::Instant::now();
+        let mut file_meta = self.write_memtable_to_sst(frozen, sst_path, cf_id, sst_name)?;
+        file_meta.level = 0;
+        let write_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         state.append_intent(crate::runtime::IntentLogEntry::FlushPublish {
             phase: crate::runtime::PublicationPhase::OutputDurable,
@@ -208,18 +214,23 @@ impl FlushActor {
 
         fail::fail_point!("midge::flush::after_sst_write_before_publish");
 
-        // Signal flush completion to SBA if available
         if let Some(hybrid) = sba {
-            let sst_path_obj = std::fs::metadata(&sst_path)?;
+            let sst_path_obj = std::fs::metadata(sst_path)?;
             hybrid.flush_completed(sst_path_obj.len());
 
-            let remote_bytes = std::fs::read(&sst_path)?;
-            hybrid.write_sst_object(&sst_name, remote_bytes)?;
-            tracing::debug!(cf_id = cf_id, sst_name = %sst_name, "SST mirrored to authoritative cloud storage");
+            let remote_bytes = std::fs::read(sst_path)?;
+            hybrid.write_sst_object(sst_name, remote_bytes)?;
+            tracing::debug!(
+                cf_id = cf_id,
+                sst_name = %sst_name,
+                "SST mirrored to authoritative cloud storage"
+            );
         }
 
+        tracing::info!(cf_id = cf_id, sst_name = %sst_name, write_ms, "SST file written");
+
         Ok(FlushOutput {
-            sst_name,
+            sst_name: sst_name.to_string(),
             file_meta: Some(file_meta),
         })
     }
@@ -229,7 +240,7 @@ impl FlushActor {
         &self,
         memtable: &std::sync::Arc<crate::sst::SkipListMemtable>,
         path: &Path,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         sst_name: &str,
     ) -> MidgeResult<crate::runtime::FileMeta> {
         // Invariant: this function may write a complete SST file, but it does
@@ -271,12 +282,20 @@ impl FlushActor {
         }
         let add_ns = add_start.elapsed().as_nanos();
 
-        // Finish and write to path (finish_to_path does its own timing)
+        // Finish and write to path (helper records its own timing)
         let finish_start = std::time::Instant::now();
-        Box::new(writer).finish_to_path(path)?;
+        crate::sst::fs::finish_writer_to_path(writer, path)?;
         let finish_ns = finish_start.elapsed().as_nanos();
 
-        tracing::info!(path = ?path, added = added_count, add_ms = (add_ns as f64) / 1_000_000.0, finish_ms = (finish_ns as f64) / 1_000_000.0, "memtable -> sst flush breakdown");
+        let add_duration_ms =
+            std::time::Duration::from_nanos(u64::try_from(add_ns).unwrap_or(u64::MAX))
+                .as_secs_f64()
+                * 1000.0;
+        let finish_duration_ms =
+            std::time::Duration::from_nanos(u64::try_from(finish_ns).unwrap_or(u64::MAX))
+                .as_secs_f64()
+                * 1000.0;
+        tracing::info!(path = ?path, added = added_count, add_duration_ms, finish_duration_ms, "memtable -> sst flush breakdown");
 
         let sst_bytes = std::fs::read(path)?;
         let size_bytes = sst_bytes.len() as u64;
@@ -297,7 +316,7 @@ impl FlushActor {
     pub fn handle_flush_complete(
         &mut self,
         state: &mut RuntimeState,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         sst_name: &str,
         sequence: u64,
     ) {

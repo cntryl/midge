@@ -201,19 +201,19 @@
 //! SSTs intentionally use synchronous, direct filesystem I/O via `std::fs` rather than
 //! the callback-driven `StorageBackend` trait. This is correct because:
 //!
-//! - **Immutable after finalize()**: SST files never change once written, only read or deleted
+//! - **Immutable after `finalize()`**: SST files never change once written, only read or deleted
 //! - **Blocking I/O required**: SST access patterns (seek + read at offset) need synchronous I/O
-//! - **Local files first**: SSTs are written locally, then persisted to cloud via HybridStorage
+//! - **Local files first**: SSTs are written locally, then persisted to cloud via `HybridStorage`
 //! - **Hot path on read side**: Reader needs fast, direct access without callback overhead
 //!
 //! ### Integration with Storage Layer
 //!
-//! - **Write path**: Compaction creates SSTs via `FsSstFactoryIo` (using io::Fs abstraction)
+//! - **Write path**: Compaction creates SSTs via `FsSstFactoryIo` (using `io::Fs` abstraction)
 //!   → Files stored in local directory
-//!   → HybridStorage persists to cloud (via `StorageBackend` callbacks)
+//!   → `HybridStorage` persists to cloud (via `StorageBackend` callbacks)
 //!
 //! - **Read path**: Queries use `SstFileIo` to read local SSTs
-//!   → Uses io::Fs for flexible filesystem backends (Real, Mock, Chaos)
+//!   → Uses `io::Fs` for flexible filesystem backends (Real, Mock, Chaos)
 //!   → Block cache + bloom filters for optimization
 //!   → No cloud access on read (reads hit local cache or cloud-synced local file)
 //!
@@ -223,7 +223,7 @@
 //! - **encoding**: TLV-based entry encoding for SST files
 //! - **types**: SST file format types (blocks, footers, handles)
 //! - **traits**: Reader/Writer/Factory contracts for SST implementations
-//! - **fs**: Filesystem-backed SST implementation (uses io::Fs abstraction)
+//! - **fs**: Filesystem-backed SST implementation (uses `io::Fs` abstraction)
 
 use crate::common::MidgeResult;
 use crate::iterators::skiplist::OpType;
@@ -256,19 +256,19 @@ pub const SST_SEQUENCE_WIDTH: usize = 20;
 /// Format a canonical SST filename. Storage roots already encode the object
 /// type via the `sst/` directory or cloud prefix, so the file name only carries
 /// ordering identity.
+#[must_use]
 pub fn file_name(cf_id: u32, level: u32, sequence: u64) -> String {
-    format!(
-        "{cf_id:06}_{level:02}_{sequence:0width$}.sst",
-        width = SST_SEQUENCE_WIDTH
-    )
+    format!("{cf_id:06}_{level:02}_{sequence:0SST_SEQUENCE_WIDTH$}.sst")
 }
 
 /// Format the cloud object key for an SST file.
+#[must_use]
 pub fn object_key(file_name: &str) -> String {
     format!("sst/{file_name}")
 }
 
 /// Format the temporary staging path for an SST file inside the local SST root.
+#[must_use]
 pub fn temp_object_key(file_name: &str) -> String {
     format!("sst/{file_name}.tmp")
 }
@@ -285,8 +285,25 @@ pub struct KvPair {
 
 /// Memtable trait for lock-free concurrent access
 pub trait Memtable: Send + Sync {
+    /// Insert or update a value in the memtable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value cannot be recorded in the underlying memtable.
     fn put(&self, key: Vec<u8>, value: Vec<u8>) -> MidgeResult<()>;
+
+    /// Read the latest visible value for `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot service the read.
     fn get(&self, key: &[u8]) -> MidgeResult<Option<Vec<u8>>>;
+
+    /// Record a tombstone for `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tombstone cannot be recorded.
     fn delete(&self, key: Vec<u8>) -> MidgeResult<()>;
     fn size_bytes(&self) -> usize;
 }
@@ -299,6 +316,7 @@ pub struct SkipListMemtable {
 }
 
 impl SkipListMemtable {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             skiplist: Arc::new(SkipList::new()),
@@ -319,8 +337,7 @@ impl SkipListMemtable {
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
 
         exp_time <= now
     }
@@ -347,6 +364,7 @@ impl SkipListMemtable {
 
     /// Iterate over all entries in the memtable.
     /// Returns (key, value, sequence) tuples in sorted order.
+    #[must_use]
     pub fn iter_all(&self, max_seq: u64) -> Vec<(Vec<u8>, Option<Vec<u8>>, u64)> {
         self.iter_all_with_meta(max_seq)
             .into_iter()
@@ -355,6 +373,10 @@ impl SkipListMemtable {
     }
 
     /// Get visible value at or before `snapshot_seq` (respecting expirations).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot service the lookup.
     pub fn get_at_seq(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<Option<Vec<u8>>> {
         let visible = self.skiplist.get_visible_with_exp(key, snapshot_seq);
 
@@ -366,8 +388,7 @@ impl SkipListMemtable {
                     Some(bytes.to_vec())
                 }
             }
-            Some(None) => None,
-            None => None,
+            Some(None) | None => None,
         })
     }
 
@@ -375,40 +396,47 @@ impl SkipListMemtable {
     ///
     /// Expired visible values are surfaced as tombstones so older versions do
     /// not reappear through lower layers during snapshot reads.
+    /// Get the full presence state for a key at `snapshot_seq`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot service the lookup.
     pub fn get_key_state_at(
         &self,
         key: &[u8],
         snapshot_seq: u64,
     ) -> MidgeResult<crate::sst::types::KeyState> {
-        for (entry_key, value, seq, is_tombstone, exp, op) in
-            self.skiplist.drain_with_meta_with_exp()
-        {
-            if entry_key.as_ref() != key {
-                continue;
-            }
-            if snapshot_seq != u64::MAX && seq > snapshot_seq {
-                continue;
-            }
-
-            return Ok(match (value, is_tombstone) {
-                (_, true) | (None, _) => crate::sst::types::KeyState::Tombstone(seq),
-                (Some(value), false) => {
-                    if Self::is_expired(exp) {
-                        crate::sst::types::KeyState::Tombstone(seq)
-                    } else {
-                        crate::sst::types::KeyState::Value(value, seq, exp, op.as_u8())
+        Ok(self
+            .skiplist
+            .get_visible_entry_with_exp(key, snapshot_seq)
+            .map_or(crate::sst::types::KeyState::Absent, |entry| {
+                match (entry.value, entry.is_tombstone) {
+                    (_, true) | (None, _) => crate::sst::types::KeyState::Tombstone(entry.seq),
+                    (Some(value), false) => {
+                        if Self::is_expired(entry.expiration) {
+                            crate::sst::types::KeyState::Tombstone(entry.seq)
+                        } else {
+                            crate::sst::types::KeyState::Value(
+                                value,
+                                entry.seq,
+                                entry.expiration,
+                                entry.op.as_u8(),
+                            )
+                        }
                     }
                 }
-            });
-        }
-
-        Ok(crate::sst::types::KeyState::Absent)
+            }))
     }
 
     /// Get value as Bytes (zero-copy, for performance-critical paths).
     ///
     /// Returns Bytes instead of `Vec<u8>`, avoiding allocation for callers
     /// that can work with the Arc-based Bytes type.
+    /// Get the latest visible value as `Bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot service the lookup.
     pub fn get_bytes(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
         let visible = self.skiplist.get_visible_with_exp(key, u64::MAX);
 
@@ -420,12 +448,16 @@ impl SkipListMemtable {
                     Some(bytes)
                 }
             }
-            Some(None) => None,
-            None => None,
+            Some(None) | None => None,
         })
     }
 
     /// Get value at sequence as Bytes (zero-copy, for snapshot reads).
+    /// Get the visible value at `snapshot_seq` as `Bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot service the lookup.
     pub fn get_bytes_at_seq(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<Option<Bytes>> {
         let visible = self.skiplist.get_visible_with_exp(key, snapshot_seq);
 
@@ -437,8 +469,7 @@ impl SkipListMemtable {
                     Some(bytes)
                 }
             }
-            Some(None) => None,
-            None => None,
+            Some(None) | None => None,
         })
     }
 
@@ -446,6 +477,11 @@ impl SkipListMemtable {
     ///
     /// Expired visible values are surfaced as tombstones so they suppress older
     /// values during cross-layer merges.
+    /// Scan the key-state view across a range at `snapshot_seq`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot service the scan.
     pub fn range_state_at(
         &self,
         start: Option<&[u8]>,
@@ -487,6 +523,11 @@ impl SkipListMemtable {
     }
 
     /// Put with explicit sequence and optional expiration (Unix millis)
+    /// Insert or update a value using an explicit sequence number.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot record the write.
     pub fn put_with_seq(
         &self,
         key: Vec<u8>,
@@ -498,6 +539,11 @@ impl SkipListMemtable {
     }
 
     /// Put with explicit sequence, accepting pre-allocated Bytes (zero-copy fast path).
+    /// Insert or update a `Bytes` value using an explicit sequence number.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot record the write.
     pub fn put_bytes_with_seq(
         &self,
         key: Bytes,
@@ -514,6 +560,11 @@ impl SkipListMemtable {
     }
 
     /// Put with optional expiration (backwards compatible) - generates seq internally
+    /// Insert or update a value with an expiration timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot record the write.
     pub fn put_with_exp(
         &self,
         key: Vec<u8>,
@@ -525,11 +576,21 @@ impl SkipListMemtable {
     }
 
     /// Delete with explicit sequence (tombstone)
+    /// Record a tombstone using an explicit sequence number.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot record the tombstone.
     pub fn delete_with_seq(&self, key: Vec<u8>, seq: u64) -> MidgeResult<()> {
         self.delete_bytes_with_seq(Bytes::from(key), seq)
     }
 
     /// Delete with explicit sequence, accepting pre-allocated Bytes (zero-copy fast path).
+    /// Record a tombstone using an explicit sequence number and `Bytes` key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot record the tombstone.
     pub fn delete_bytes_with_seq(&self, key: Bytes, seq: u64) -> MidgeResult<()> {
         let size_delta = key.len() + 16;
         self.skiplist.delete(key, seq);
@@ -538,7 +599,12 @@ impl SkipListMemtable {
         Ok(())
     }
 
-    /// Delete range with explicit sequence [start_key, end_key)
+    /// Delete range with explicit sequence [`start_key`, `end_key`)
+    /// Record a range tombstone using an explicit sequence number.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying memtable cannot record the tombstone.
     pub fn delete_range_with_seq(
         &self,
         start_key: &[u8],
@@ -585,8 +651,7 @@ impl Memtable for SkipListMemtable {
                     Some(bytes.to_vec())
                 }
             }
-            Some(None) => None,
-            None => None,
+            Some(None) | None => None,
         })
     }
 
@@ -606,15 +671,23 @@ impl Memtable for SkipListMemtable {
 
 #[cfg(test)]
 mod tests {
+    use super::SkipListMemtable;
+    use crate::sst::types::KeyState;
+    use bytes::Bytes;
+
     #[test]
     fn should_format_sst_names_in_lexicographic_sequence_order() {
+        // Arrange
         let names = [1, 2, 10, u64::MAX]
             .into_iter()
             .map(|seq| super::file_name(7, 2, seq))
             .collect::<Vec<_>>();
+
+        // Act
         let mut sorted = names.clone();
         sorted.sort();
 
+        // Assert
         assert_eq!(names, sorted);
         assert_eq!(names[0], "000007_02_00000000000000000001.sst");
         assert_eq!(names[3], "000007_02_18446744073709551615.sst");
@@ -622,16 +695,72 @@ mod tests {
 
     #[test]
     fn should_format_sst_object_keys_without_repeating_sst_prefix_in_file_name() {
+        // Arrange
         let file_name = super::file_name(0, 0, 1);
 
+        // Act
+        let object_key = super::object_key(&file_name);
+        let temp_object_key = super::temp_object_key(&file_name);
+
+        // Assert
         assert_eq!(file_name, "000000_00_00000000000000000001.sst");
+        assert_eq!(object_key, "sst/000000_00_00000000000000000001.sst");
         assert_eq!(
-            super::object_key(&file_name),
-            "sst/000000_00_00000000000000000001.sst"
-        );
-        assert_eq!(
-            super::temp_object_key(&file_name),
+            temp_object_key,
             "sst/000000_00_00000000000000000001.sst.tmp"
         );
+    }
+
+    #[test]
+    fn should_get_memtable_key_state_with_direct_lookup() {
+        // Arrange
+        let memtable = SkipListMemtable::new();
+        memtable
+            .put_with_seq(b"key".to_vec(), b"old".to_vec(), 10, None)
+            .expect("put old value");
+        memtable
+            .put_with_seq(b"key".to_vec(), b"new".to_vec(), 20, None)
+            .expect("put new value");
+
+        // Act
+        let at_15 = memtable.get_key_state_at(b"key", 15).expect("state at 15");
+        let at_25 = memtable.get_key_state_at(b"key", 25).expect("state at 25");
+
+        // Assert
+        assert!(matches!(
+            at_15,
+            KeyState::Value(value, 10, None, 0) if value == Bytes::from_static(b"old")
+        ));
+        assert!(matches!(
+            at_25,
+            KeyState::Value(value, 20, None, 0) if value == Bytes::from_static(b"new")
+        ));
+    }
+
+    #[test]
+    fn should_get_memtable_tombstone_key_state_with_direct_lookup() {
+        // Arrange
+        let memtable = SkipListMemtable::new();
+        memtable
+            .put_with_seq(b"key".to_vec(), b"value".to_vec(), 10, None)
+            .expect("put value");
+        memtable
+            .delete_with_seq(b"key".to_vec(), 20)
+            .expect("delete value");
+
+        // Act
+        let before_delete = memtable
+            .get_key_state_at(b"key", 15)
+            .expect("state before delete");
+        let after_delete = memtable
+            .get_key_state_at(b"key", 25)
+            .expect("state after delete");
+
+        // Assert
+        assert!(matches!(
+            before_delete,
+            KeyState::Value(value, 10, None, 0) if value == Bytes::from_static(b"value")
+        ));
+        assert!(matches!(after_delete, KeyState::Tombstone(20)));
     }
 }

@@ -26,11 +26,14 @@
 
 // Foundation - no dependencies
 pub mod common;
+pub mod config;
+pub mod types;
 
 // Internal modules — used by engine/runtime; the compiler reports "dead" because
 // no external crate references them. They are exercised by unit tests within each module.
 #[allow(dead_code)]
 mod compaction;
+mod diagnostics;
 pub mod handler;
 #[cfg(test)]
 pub mod io;
@@ -70,9 +73,8 @@ pub mod testkit;
 pub use common::{MidgeError, MidgeResult};
 
 // Engine / Transactions
-pub use engine::{
-    ColumnFamilyHandle, ColumnFamilyId, Engine, IsolationLevel, Transaction, TransactionMode,
-};
+pub use engine::{ColumnFamilyHandle, Engine, IsolationLevel, Transaction, TransactionMode};
+pub use types::ColumnFamilyId;
 
 // Backward-compatible alias
 pub type MidgeEngine = Engine;
@@ -81,17 +83,19 @@ pub type MidgeEngine = Engine;
 pub use engine::{Direction, Query, ScanIterator};
 
 // Observability and diagnostics
-pub use engine::{
-    EngineHealth, ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot,
-    SnapshotPinSnapshot, StorageFileLayout, StorageLayoutLevel, StorageLayoutSnapshot,
-    StorageVerificationReport,
+pub use config::EngineHealth;
+pub use types::{
+    ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot, SnapshotPinSnapshot,
+    StorageFileLayout, StorageLayoutLevel, StorageLayoutSnapshot, StorageVerificationReport,
 };
 
 // Configuration
 pub use engine::{
+    Goal, MemoryBudget, OpenOptions, RecoveryPolicy, Storage, WorkloadProfile, WriteOptions,
+};
+pub use storage::providers::{
     AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, GcsApiStyle,
-    GcsCredentialSource, Goal, MemoryBudget, OpenOptions, RecoveryPolicy, S3CredentialSource,
-    Storage, WorkloadProfile, WriteOptions,
+    GcsCredentialSource, S3CredentialSource,
 };
 
 // Key/value types

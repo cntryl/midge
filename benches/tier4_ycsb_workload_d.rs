@@ -25,6 +25,7 @@ const CLIENTS_64: usize = 64;
 
 const WORKLOAD_SEED: u64 = 0xD0D0_EA5E_5678_9ABC;
 
+#[allow(clippy::too_many_lines)]
 fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
 
@@ -39,11 +40,8 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     // Phase 2: Warm-up (not measured)
     {
         let cf_id = cf.id();
-        let _warmup_ops = ycsb::run_multi_client_for_duration(
-            Arc::clone(&engine),
-            clients,
-            WARMUP,
-            |client_id, stop| {
+        let _warmup_ops =
+            ycsb::run_multi_client_for_duration(&engine, clients, WARMUP, |client_id, stop| {
                 let mut inserts_so_far: u64 = 0;
                 move |e, _cf, op_index| {
                     let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
@@ -87,18 +85,17 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         .expect("begin");
                     let _ = tx.get(&k[..]).expect("warmup get");
                 }
-            },
-        );
+            });
     }
 
     // Flush to ensure warmup data is durable before measured phase
     engine.flush_cf(&cf).unwrap();
 
     // Phase 3: Measured (duration-based; multi-client)
-    let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
+    let measured = ctx.measure_ref(engine.as_ref(), |_e| {
         let write_opts = cntryl_midge::WriteOptions::buffered(); // Back to buffered for measured phase
-        ycsb::run_multi_client_for_duration(
-            Arc::clone(&engine),
+        ycsb::run_multi_client_for_duration_with_stats(
+            &engine,
             clients,
             MEASURED,
             |client_id, stop| {
@@ -150,8 +147,11 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
         )
     });
 
-    ctx.set_elements(measured_ops);
-    ctx.set_bytes(measured_ops * ycsb::logical_entry_size_bytes() as u64);
+    ctx.set_elements(measured.operations);
+    ctx.set_bytes(measured.operations * ycsb::logical_entry_size_bytes() as u64);
+    for (name, value) in measured.latency_tags() {
+        ctx.tag(name, value.to_string());
+    }
 }
 
 #[stress_test]

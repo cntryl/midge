@@ -1,6 +1,7 @@
 //! Cached block value with metadata
 
 use bytes::Bytes;
+use std::convert::TryFrom;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
@@ -18,23 +19,26 @@ pub struct CacheValue {
 impl CacheValue {
     /// Create a new cached value
     pub fn new(data: Bytes) -> Self {
+        let inserted_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let inserted_at = u64::try_from(inserted_at).unwrap_or(u64::MAX);
         Self {
             data: Arc::new(data),
-            inserted_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64,
+            inserted_at,
             access_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// Get the size of the cached data in bytes
+    #[must_use]
     pub fn size_bytes(&self) -> usize {
         self.data.len()
     }
 
     /// Increment access count and return the new value
-    #[inline(always)]
+    #[must_use]
     pub fn increment_access(&self) -> u64 {
         self.access_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -42,6 +46,7 @@ impl CacheValue {
     }
 
     /// Get current access count
+    #[must_use]
     pub fn access_count(&self) -> u64 {
         self.access_count.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -163,7 +168,7 @@ mod tests {
             let v = std::sync::Arc::clone(&value);
             let handle = std::thread::spawn(move || {
                 for _ in 0..10 {
-                    v.increment_access();
+                    let _ = v.increment_access();
                 }
             });
             handles.push(handle);
@@ -180,19 +185,25 @@ mod tests {
     #[test]
     fn should_record_insertion_timestamp() {
         // Arrange
-        let before_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
+        let before_time = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )
+        .unwrap_or(u64::MAX);
 
         // Act
         let data = Bytes::from(&b"test"[..]);
         let value = CacheValue::new(data);
 
-        let after_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
+        let after_time = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )
+        .unwrap_or(u64::MAX);
 
         // Assert
         assert!(value.inserted_at >= before_time);
@@ -204,11 +215,11 @@ mod tests {
         // Arrange
         let data = Bytes::from(&b"test"[..]);
         let value1 = CacheValue::new(data);
-        value1.increment_access();
+        let _ = value1.increment_access();
 
         // Act
         let value2 = value1.clone();
-        value2.increment_access();
+        let _ = value2.increment_access();
 
         // Assert (both share the same Arc, so access count is shared)
         assert_eq!(value1.access_count(), 2);
@@ -238,7 +249,7 @@ mod tests {
 
         // Act
         let value2 = value1.clone();
-        value1.increment_access();
+        let _ = value1.increment_access();
 
         // Assert (clones share the same Arc for access_count)
         assert_eq!(value2.access_count(), 1);

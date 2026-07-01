@@ -3,6 +3,7 @@
 //! Tests for column family lifecycle, isolation, and persistence.
 
 use bytes::Bytes;
+use cntryl_midge::MidgeError;
 mod common;
 use common::*;
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use std::sync::Arc;
 fn should_create_column_family_given_valid_name_when_engine_open() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
 
         // Act
         let cf = engine.create_column_family("test_cf").unwrap();
@@ -30,7 +31,7 @@ fn should_create_column_family_given_valid_name_when_engine_open() {
 fn should_create_multiple_column_families_given_unique_names_when_engine_open() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
 
         // Act
         let cf1 = engine.create_column_family("cf1").unwrap();
@@ -50,7 +51,7 @@ fn should_create_multiple_column_families_given_unique_names_when_engine_open() 
 fn should_fail_create_column_family_given_duplicate_name_when_cf_exists() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         engine.create_column_family("test_cf").unwrap();
 
         // Act
@@ -67,7 +68,7 @@ fn should_fail_create_column_family_given_duplicate_name_when_cf_exists() {
 fn should_create_column_family_with_custom_config_given_config_when_creating() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let _engine = Arc::new(open_with_mode(opts, mode));
+        let _engine = Arc::new(open_with_mode(&opts, mode));
 
         // Act - would need create_column_family_with_options(name, config)
         // let config = ColumnFamilyConfig { memtable_size: 1024 * 1024 };
@@ -86,7 +87,7 @@ fn should_create_column_family_with_custom_config_given_config_when_creating() {
 fn should_drop_column_family_given_empty_cf_when_requested() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test_cf").unwrap();
         let cf_id = cf.id();
 
@@ -102,7 +103,7 @@ fn should_drop_column_family_given_empty_cf_when_requested() {
 fn should_drop_column_family_given_flushed_data_when_requested() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test_cf").unwrap();
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -123,7 +124,7 @@ fn should_drop_column_family_given_flushed_data_when_requested() {
 fn should_fail_drop_column_family_given_unflushed_data_when_memtable_not_empty() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test_cf").unwrap();
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -145,7 +146,7 @@ fn should_fail_drop_column_family_given_unflushed_data_when_memtable_not_empty()
 fn should_fail_drop_default_column_family_given_drop_request_when_default_cf() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let default_cf_id = 0;
 
         // Act
@@ -160,27 +161,25 @@ fn should_fail_drop_default_column_family_given_drop_request_when_default_cf() {
 fn should_invalidate_handle_given_cf_dropped_when_accessing() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test_cf").unwrap();
         let cf_id = cf.id();
         engine.drop_column_family(cf_id).unwrap();
 
         // Act
-        let tx_result = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite);
+        let read_only_result = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly);
+        let read_write_result = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite);
 
-        // Assert - currently the engine allows operations on dropped CF handles
-        // This documents current behavior; ideal behavior would be to return error
-        // The CF handle becomes stale but operations may succeed until engine restart
-        match tx_result {
-            Ok(mut tx) => {
-                let put_result = tx.put(b"key1".to_vec(), b"value1".to_vec(), None);
-                if put_result.is_ok() {
-                    let _ = tx.commit(cntryl_midge::WriteOptions::buffered());
+        // Assert
+        for result in [read_only_result, read_write_result] {
+            match result {
+                Err(MidgeError::InvalidArgument(message)) => {
+                    assert_eq!(message, format!("column family {cf_id} does not exist"));
                 }
-                // Currently succeeds - documents actual behavior
-            }
-            Err(_e) => {
-                // Would prefer this path - CF handle should be invalid
+                Err(error) => {
+                    panic!("expected InvalidArgument for dropped CF in {mode}, got {error}")
+                }
+                Ok(_) => panic!("expected begin_tx to fail for dropped CF in {mode}"),
             }
         }
     });
@@ -192,7 +191,7 @@ fn should_delete_cf_data_given_cf_dropped_when_persisted() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test_cf").unwrap();
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -205,7 +204,7 @@ fn should_delete_cf_data_given_cf_dropped_when_persisted() {
 
         // Assert (Phase 2) - dropped CF data should not be recovered
         {
-            let _engine = open_with_mode(opts, mode);
+            let _engine = open_with_mode(&opts, mode);
             // Would need get_column_family_by_name or list to verify CF is gone
         }
     });
@@ -215,7 +214,7 @@ fn should_delete_cf_data_given_cf_dropped_when_persisted() {
 fn should_allow_recreate_cf_with_same_name_given_cf_dropped_when_creating() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf1 = engine.create_column_family("test_cf").unwrap();
         let mut tx = engine
             .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -251,7 +250,7 @@ fn should_allow_recreate_cf_with_same_name_given_cf_dropped_when_creating() {
 fn should_list_default_cf_only_given_no_custom_cfs_when_listing() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
 
         // Act
         let cfs = engine.list_column_families().unwrap();
@@ -266,7 +265,7 @@ fn should_list_default_cf_only_given_no_custom_cfs_when_listing() {
 fn should_list_all_column_families_given_multiple_cfs_when_listing() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         engine.create_column_family("cf1").unwrap();
         engine.create_column_family("cf2").unwrap();
 
@@ -275,7 +274,10 @@ fn should_list_all_column_families_given_multiple_cfs_when_listing() {
 
         // Assert
         assert_eq!(cfs.len(), 3); // default + cf1 + cf2
-        let names: Vec<&str> = cfs.iter().map(|cf| cf.name()).collect();
+        let names: Vec<&str> = cfs
+            .iter()
+            .map(cntryl_midge::ColumnFamilyHandle::name)
+            .collect();
         assert!(names.contains(&"default"));
         assert!(names.contains(&"cf1"));
         assert!(names.contains(&"cf2"));
@@ -286,7 +288,7 @@ fn should_list_all_column_families_given_multiple_cfs_when_listing() {
 fn should_not_list_dropped_cf_given_cf_dropped_when_listing() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test_cf").unwrap();
         engine.drop_column_family(cf.id()).unwrap();
 
@@ -294,7 +296,10 @@ fn should_not_list_dropped_cf_given_cf_dropped_when_listing() {
         let cfs = engine.list_column_families().unwrap();
 
         // Assert
-        let names: Vec<&str> = cfs.iter().map(|cf| cf.name()).collect();
+        let names: Vec<&str> = cfs
+            .iter()
+            .map(cntryl_midge::ColumnFamilyHandle::name)
+            .collect();
         assert!(!names.contains(&"test_cf"));
     });
 }
@@ -307,7 +312,7 @@ fn should_not_list_dropped_cf_given_cf_dropped_when_listing() {
 fn should_isolate_keys_given_same_key_in_different_cfs_when_reading() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let default_cf = engine.create_column_family("test").expect("create cf");
         let cf1 = engine.create_column_family("cf1").unwrap();
 
@@ -350,7 +355,7 @@ fn should_isolate_keys_given_same_key_in_different_cfs_when_reading() {
 fn should_isolate_deletes_given_delete_in_one_cf_when_other_cf_has_same_key() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf1 = engine.create_column_family("cf1").unwrap();
         let cf2 = engine.create_column_family("cf2").unwrap();
         let mut tx1 = engine
@@ -392,13 +397,13 @@ fn should_isolate_deletes_given_delete_in_one_cf_when_other_cf_has_same_key() {
 fn should_isolate_data_given_different_data_volumes_when_reading() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf1 = engine.create_column_family("cf1").unwrap();
         let cf2 = engine.create_column_family("cf2").unwrap();
 
         // Act - write different amounts to each CF
         for i in 0..100 {
-            let key = format!("key{}", i);
+            let key = format!("key{i}");
             let mut tx = engine
                 .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
@@ -439,13 +444,13 @@ fn should_isolate_data_given_different_data_volumes_when_reading() {
 fn should_isolate_compaction_given_per_cf_data_when_compacting() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf1 = engine.create_column_family("cf1").unwrap();
         let cf2 = engine.create_column_family("cf2").unwrap();
 
         // Write data to both CFs
         for i in 0..50 {
-            let key = format!("key{}", i);
+            let key = format!("key{i}");
             let mut tx1 = engine
                 .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
@@ -492,16 +497,19 @@ fn should_persist_cf_metadata_given_restart_when_cf_created() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             engine.create_column_family("test_cf").unwrap();
             // Engine dropped
         }
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cfs = engine.list_column_families().unwrap();
-            let names: Vec<&str> = cfs.iter().map(|cf| cf.name()).collect();
+            let names: Vec<&str> = cfs
+                .iter()
+                .map(cntryl_midge::ColumnFamilyHandle::name)
+                .collect();
             assert!(names.contains(&"test_cf"));
         }
     });
@@ -513,7 +521,7 @@ fn should_persist_cf_data_given_restart_when_data_flushed() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test_cf").unwrap();
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -525,7 +533,7 @@ fn should_persist_cf_data_given_restart_when_data_flushed() {
 
         // Assert (Phase 2)
         {
-            let _engine = open_with_mode(opts, mode);
+            let _engine = open_with_mode(&opts, mode);
             // Would need get_column_family_by_name to retrieve CF handle
             // let cf = engine.get_column_family_by_name("test_cf").unwrap();
             // let result = engine.get(&cf, b"key1").unwrap();
@@ -540,7 +548,7 @@ fn should_persist_multiple_cfs_given_restart_when_all_flushed() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = open_with_mode(&opts, mode);
             let cf1 = engine.create_column_family("cf1").unwrap();
             let cf2 = engine.create_column_family("cf2").unwrap();
             let mut tx1 = engine
@@ -559,7 +567,7 @@ fn should_persist_multiple_cfs_given_restart_when_all_flushed() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cfs = engine.list_column_families().unwrap();
             assert_eq!(cfs.len(), 3); // default + cf1 + cf2
         }
@@ -572,7 +580,7 @@ fn should_persist_cf_drop_given_restart_when_cf_was_dropped() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = Arc::new(open_with_mode(opts.clone(), mode));
+            let engine = Arc::new(open_with_mode(&opts, mode));
             let cf = engine.create_column_family("test_cf").unwrap();
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -587,9 +595,12 @@ fn should_persist_cf_drop_given_restart_when_cf_was_dropped() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let engine = open_with_mode(&opts, mode);
             let cfs = engine.list_column_families().unwrap();
-            let names: Vec<&str> = cfs.iter().map(|cf| cf.name()).collect();
+            let names: Vec<&str> = cfs
+                .iter()
+                .map(cntryl_midge::ColumnFamilyHandle::name)
+                .collect();
             assert!(!names.contains(&"test_cf"));
         }
     });
@@ -603,7 +614,7 @@ fn should_persist_cf_drop_given_restart_when_cf_was_dropped() {
 fn should_get_column_family_by_name_given_existing_cf_when_querying() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         engine.create_column_family("test_cf").unwrap();
 
         // Act
@@ -618,7 +629,7 @@ fn should_get_column_family_by_name_given_existing_cf_when_querying() {
 fn should_fail_get_column_family_given_nonexistent_name_when_querying() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let _engine = Arc::new(open_with_mode(opts, mode));
+        let _engine = Arc::new(open_with_mode(&opts, mode));
 
         // Act
         // let result = engine.get_column_family_by_name("nonexistent");
@@ -632,7 +643,7 @@ fn should_fail_get_column_family_given_nonexistent_name_when_querying() {
 fn should_get_default_column_family_given_fresh_engine_when_querying() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
 
         // Act
         let cf = engine.get_column_family("default").expect("get cf");
@@ -651,7 +662,7 @@ fn should_get_default_column_family_given_fresh_engine_when_querying() {
 fn should_isolate_cf_after_flush_given_same_key_when_reading() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf1 = engine.create_column_family("cf1").unwrap();
         let cf2 = engine.create_column_family("cf2").unwrap();
 
@@ -691,7 +702,7 @@ fn should_isolate_cf_after_flush_given_same_key_when_reading() {
 fn should_handle_operations_on_default_cf_given_custom_cfs_exist_when_operating() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let _cf1 = engine.create_column_family("cf1").unwrap();
         let _cf2 = engine.create_column_family("cf2").unwrap();
         let default_cf = engine.create_column_family("test").expect("create cf");
@@ -719,16 +730,16 @@ fn should_handle_operations_on_default_cf_given_custom_cfs_exist_when_operating(
 fn should_maintain_cf_isolation_given_many_cfs_when_operating() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let mut cfs = Vec::new();
         for i in 0..10 {
-            let name = format!("cf{}", i);
+            let name = format!("cf{i}");
             cfs.push(engine.create_column_family(&name).unwrap());
         }
 
         // Act - write unique value to each CF
         for (i, cf) in cfs.iter().enumerate() {
-            let value = format!("value{}", i);
+            let value = format!("value{i}");
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
@@ -739,7 +750,7 @@ fn should_maintain_cf_isolation_given_many_cfs_when_operating() {
 
         // Assert - each CF has its own value
         for (i, cf) in cfs.iter().enumerate() {
-            let expected = format!("value{}", i);
+            let expected = format!("value{i}");
             let tx_read = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                 .unwrap();

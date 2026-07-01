@@ -18,7 +18,7 @@ fn setup_engine(opts: MidgeOptions) -> cntryl_midge::MidgeEngine {
     cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
 }
 
-fn run_reopen_clean_case(ctx: &mut StressContext, opts: MidgeOptions) {
+fn run_reopen_clean_case(ctx: &mut StressContext, opts: &MidgeOptions) {
     // Setup (not measured): create initial metadata, then close.
     {
         let engine = setup_engine(opts.clone());
@@ -47,13 +47,13 @@ fn run_reopen_clean_case(ctx: &mut StressContext, opts: MidgeOptions) {
 #[stress_test]
 fn tier3_recovery_reopen_clean_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_reopen_clean_case(ctx, opts);
+    run_reopen_clean_case(ctx, &opts);
 }
 
 #[stress_test]
 fn tier3_recovery_reopen_clean_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_reopen_clean_case(ctx, opts);
+    run_reopen_clean_case(ctx, &opts);
 }
 
 stress_main!();

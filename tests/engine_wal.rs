@@ -10,11 +10,11 @@ use common::*;
 #[test]
 fn should_recover_data_from_wal_after_flush() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..50 {
-        let key = format!("wal_key_{:04}", i);
+        let key = format!("wal_key_{i:04}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin tx");
@@ -39,7 +39,7 @@ fn should_recover_data_from_wal_after_flush() {
 #[test]
 fn should_handle_large_values_in_wal() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     let large_value = vec![0xFF; 1_000_000];
@@ -61,7 +61,7 @@ fn should_handle_large_values_in_wal() {
 
     // Assert
     assert_eq!(
-        retrieved.as_ref().map(|val| val.len()),
+        retrieved.as_ref().map(bytes::Bytes::len),
         Some(1_000_000),
         "expected the full large value to survive recovery"
     );
@@ -70,11 +70,11 @@ fn should_handle_large_values_in_wal() {
 #[test]
 fn should_recover_deletes_from_wal() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..30 {
-        let key = format!("del_key_{:04}", i);
+        let key = format!("del_key_{i:04}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin tx");
@@ -87,7 +87,7 @@ fn should_recover_deletes_from_wal() {
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .expect("begin delete tx");
     for i in 0..10 {
-        let key = format!("del_key_{:04}", i);
+        let key = format!("del_key_{i:04}");
         txn.delete(key.into_bytes()).expect("delete");
     }
     txn.commit(WriteOptions::buffered())
@@ -98,7 +98,7 @@ fn should_recover_deletes_from_wal() {
 
     let mut deleted_count = 0;
     for i in 0..10 {
-        let key = format!("del_key_{:04}", i);
+        let key = format!("del_key_{i:04}");
         let read_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin read tx");
@@ -114,11 +114,11 @@ fn should_recover_deletes_from_wal() {
 #[test]
 fn should_recover_range_tombstones_from_wal() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for i in 0..100 {
-        let key = format!("k{:03}", i);
+        let key = format!("k{i:03}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin tx");
@@ -156,14 +156,14 @@ fn should_recover_range_tombstones_from_wal() {
 #[test]
 fn should_handle_wal_rotation_multiple_segments() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     let mut batch_count = 0;
 
     for batch in 0..5 {
         for i in 0..100 {
-            let key = format!("batch{}_key{:04}", batch, i);
+            let key = format!("batch{batch}_key{i:04}");
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin tx");
@@ -190,7 +190,7 @@ fn should_handle_wal_rotation_multiple_segments() {
 #[test]
 fn should_recover_mixed_operations_from_wal() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     let mut tx0 = engine
@@ -216,7 +216,7 @@ fn should_recover_mixed_operations_from_wal() {
         .expect("commit overwrite");
 
     for i in 0..20 {
-        let key = format!("dr_{:02}", i);
+        let key = format!("dr_{i:02}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin tx");

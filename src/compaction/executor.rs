@@ -57,8 +57,7 @@ impl<I: Iterator<Item = CompactionVersion>> StreamDeduplicate<I> {
     pub fn new(inner: I) -> Self {
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
 
         Self {
             inner,
@@ -213,8 +212,7 @@ pub fn collect_versions(
 pub fn deduplicate_versions(versions: &[CompactionVersion]) -> Vec<CompactionVersion> {
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
 
     // Map: key -> newest visible version (by sequence).
     let mut newest_by_key: BTreeMap<Vec<u8>, CompactionVersion> = BTreeMap::new();
@@ -356,10 +354,16 @@ pub fn write_compaction_output_to_sst(
 
     let path = Path::new(output_filename);
     let finish_start = std::time::Instant::now();
-    writer.finish_to_path(path)?;
+    crate::sst::fs::finish_writer_to_path(writer, path)?;
     let finish_ns = finish_start.elapsed().as_nanos();
 
-    tracing::info!(output = %output_filename, versions = added, add_ms = (add_ns as f64) / 1_000_000.0, finish_ms = (finish_ns as f64) / 1_000_000.0, "compaction write breakdown");
+    tracing::info!(
+        output = %output_filename,
+        versions = added,
+        add_ns = add_ns,
+        finish_ns = finish_ns,
+        "compaction write breakdown"
+    );
 
     Ok(())
 }

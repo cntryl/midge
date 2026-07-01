@@ -11,9 +11,10 @@
 //! For actual hot-path I/O, use `FileSystem` which implements `StorageBackend`.
 
 use crate::storage::abstraction::{
-    Atomicity, DirEntry, Durability, FileCapabilities, OpenMode, OpenOptions, ReadRange,
-    RenameOptions, RenameReport, Storage, StorageCapabilities, StorageError, StorageErrorKind,
-    StorageFile, StoragePath, StorageResult, SyncMode,
+    Atomicity, DirEntry, DirectorySupport, Durability, FileCapabilities, OpenDisposition, OpenMode,
+    OpenOptions, ReadRange, RenameOptions, RenameReport, Storage, StorageCapabilities,
+    StorageError, StorageErrorKind, StorageFile, StoragePath, StorageResult, SyncMode,
+    VectoredIoCapabilities,
 };
 use parking_lot::Mutex;
 use std::fs;
@@ -42,10 +43,10 @@ impl LocalFsStorage {
         for component in Path::new(rel.as_str()).components() {
             match component {
                 Component::Normal(part) => out.push(part),
-                Component::CurDir => {}
-                Component::ParentDir => {}
-                Component::RootDir => {}
-                Component::Prefix(_) => {}
+                Component::CurDir
+                | Component::ParentDir
+                | Component::RootDir
+                | Component::Prefix(_) => {}
             }
         }
         out
@@ -86,9 +87,11 @@ impl StorageFile for LocalFsFile {
     fn capabilities(&self) -> FileCapabilities {
         // Portable slow path; optimized backends can override.
         FileCapabilities {
-            supports_readv_at: false,
-            supports_writev_at: false,
-            supports_appendv: false,
+            vectored_io: VectoredIoCapabilities {
+                read: false,
+                write: false,
+                append: false,
+            },
             supports_read_ranges: false,
         }
     }
@@ -108,7 +111,10 @@ impl StorageFile for LocalFsFile {
         file.seek(SeekFrom::Start(offset))
             .map_err(|e| LocalFsStorage::map_fs_err(e, "seek"))?;
 
-        let mut buf = vec![0u8; len as usize];
+        let len = usize::try_from(len).map_err(|_| {
+            StorageError::new(StorageErrorKind::InvalidInput, "read length exceeds usize")
+        })?;
+        let mut buf = vec![0u8; len];
         let mut filled = 0usize;
         while filled < buf.len() {
             let n = file
@@ -126,7 +132,7 @@ impl StorageFile for LocalFsFile {
     fn read_ranges(&self, ranges: &[ReadRange]) -> StorageResult<Vec<Vec<u8>>> {
         let mut out = Vec::with_capacity(ranges.len());
         for r in ranges {
-            out.push(self.read_at(r.offset, r.len as u64)?);
+            out.push(self.read_at(r.offset, u64::from(r.len))?);
         }
         Ok(out)
     }
@@ -203,8 +209,7 @@ impl StorageFile for LocalFsFile {
 impl Storage for LocalFsStorage {
     fn capabilities(&self) -> StorageCapabilities {
         StorageCapabilities {
-            supports_directories: true,
-            supports_dir_sync: false,
+            directory_support: DirectorySupport::ListOnly,
             supports_atomic_rename: true,
             supports_append: true,
         }
@@ -217,7 +222,12 @@ impl Storage for LocalFsStorage {
     ) -> StorageResult<Box<dyn StorageFile>> {
         let full = self.full_path(path);
 
-        if options.create || options.create_new {
+        if matches!(
+            options.disposition,
+            OpenDisposition::CreateIfMissing
+                | OpenDisposition::CreateNew
+                | OpenDisposition::TruncateExisting
+        ) {
             if let Some(parent) = full.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|e| LocalFsStorage::map_fs_err(e, "create_dir_all(parent)"))?;
@@ -233,9 +243,18 @@ impl Storage for LocalFsStorage {
                 opts.read(true).write(true);
             }
         }
-        opts.create(options.create);
-        opts.create_new(options.create_new);
-        opts.truncate(options.truncate);
+        match options.disposition {
+            OpenDisposition::OpenExisting => {}
+            OpenDisposition::CreateIfMissing => {
+                opts.create(true);
+            }
+            OpenDisposition::CreateNew => {
+                opts.create_new(true);
+            }
+            OpenDisposition::TruncateExisting => {
+                opts.truncate(true);
+            }
+        }
         opts.append(options.append);
 
         let file = opts

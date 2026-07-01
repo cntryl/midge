@@ -214,6 +214,7 @@ pub enum CompressionAlgo {
 
 impl CompressionAlgo {
     /// Parse compression code from u8
+    #[must_use]
     pub fn from_u8(code: u8) -> Option<Self> {
         match code {
             0 => Some(Self::None),
@@ -227,6 +228,7 @@ impl CompressionAlgo {
     }
 
     /// Convert to u8 code
+    #[must_use]
     pub fn to_u8(self) -> u8 {
         self as u8
     }
@@ -274,10 +276,14 @@ pub const MIN_COMPRESS_SIZE: usize = 256;
 /// Maximum block size after compression
 pub const MAX_BLOCK_SIZE: usize = 64 * 1024;
 
-/// Block trailer size (compression_type + crc32c)
+/// Block trailer size (`compression_type` + crc32c)
 pub const BLOCK_TRAILER_SIZE: usize = 5;
 
 /// Compress block data according to policy
+///
+/// # Errors
+///
+/// Returns an error when the selected compression algorithm fails or is unsupported.
 pub fn compress_block(
     data: &[u8],
     policy: &CompressionPolicy,
@@ -296,11 +302,16 @@ pub fn compress_block(
             min_savings_bytes,
             min_ratio,
             check_algorithms,
-        } => compress_adaptive(data, *min_savings_bytes, *min_ratio, check_algorithms),
+        } => Ok(compress_adaptive(
+            data,
+            *min_savings_bytes,
+            *min_ratio,
+            check_algorithms,
+        )),
     }
 }
 
-#[inline(always)]
+#[inline]
 fn compress_with_algo(data: &[u8], algo: CompressionAlgo) -> MidgeResult<(Bytes, CompressionAlgo)> {
     match algo {
         CompressionAlgo::None => Ok((Bytes::copy_from_slice(data), CompressionAlgo::None)),
@@ -326,8 +337,7 @@ fn compress_with_algo(data: &[u8], algo: CompressionAlgo) -> MidgeResult<(Bytes,
 
         CompressionAlgo::Zlib | CompressionAlgo::Snappy => {
             Err(crate::common::MidgeError::NotSupported(format!(
-                "compression algorithm {:?} not available (missing dependency)",
-                algo
+                "compression algorithm {algo:?} not available (missing dependency)"
             )))
         }
     }
@@ -338,10 +348,12 @@ fn compress_adaptive(
     min_savings: usize,
     min_ratio: f32,
     algos: &[CompressionAlgo],
-) -> MidgeResult<(Bytes, CompressionAlgo)> {
+) -> (Bytes, CompressionAlgo) {
     let mut best_compressed = Bytes::copy_from_slice(data);
     let mut best_algo = CompressionAlgo::None;
     let mut best_size = data.len();
+    let min_ratio = f64::from(min_ratio);
+    let data_len = f64::from(u32::try_from(data.len()).unwrap_or(u32::MAX));
 
     for &algo in algos {
         if algo == CompressionAlgo::None {
@@ -351,7 +363,7 @@ fn compress_adaptive(
         // Try compression
         if let Ok((compressed, _)) = compress_with_algo(data, algo) {
             let compressed_size = compressed.len();
-            let ratio = compressed_size as f32 / data.len() as f32;
+            let ratio = f64::from(u32::try_from(compressed_size).unwrap_or(u32::MAX)) / data_len;
             let savings = data.len().saturating_sub(compressed_size);
 
             // Check if this is better
@@ -363,11 +375,15 @@ fn compress_adaptive(
         }
     }
 
-    Ok((best_compressed, best_algo))
+    (best_compressed, best_algo)
 }
 
 /// Decompress block data based on compression type.
-#[inline(always)]
+///
+/// # Errors
+///
+/// Returns an error when the compressed data is corrupt or the algorithm is unsupported.
+#[inline]
 pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult<Bytes> {
     match algo {
         CompressionAlgo::None => Ok(Bytes::copy_from_slice(compressed)),
@@ -392,8 +408,7 @@ pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult
 
         CompressionAlgo::Zlib | CompressionAlgo::Snappy => {
             Err(crate::common::MidgeError::NotSupported(format!(
-                "decompression algorithm {:?} not available (missing dependency)",
-                algo
+                "decompression algorithm {algo:?} not available (missing dependency)"
             )))
         }
     }
@@ -402,6 +417,10 @@ pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult
 /// Compress block data and append a trailer (`[compressed_data][algo:u8][crc32c:u32 LE]`).
 ///
 /// CRC32C covers `compressed_data + compression_type`.
+///
+/// # Errors
+///
+/// Returns an error when block compression fails or the chosen algorithm is unsupported.
 pub fn compress_block_with_trailer(data: &[u8], policy: &CompressionPolicy) -> MidgeResult<Bytes> {
     let (compressed, algo) = compress_block(data, policy)?;
 
@@ -420,6 +439,11 @@ pub fn compress_block_with_trailer(data: &[u8], policy: &CompressionPolicy) -> M
 /// Strip the block trailer, verify CRC32C, and decompress.
 ///
 /// Input layout: `[compressed_data][algo:u8][crc32c:u32 LE]`
+///
+/// # Errors
+///
+/// Returns an error when the trailer is invalid, the CRC does not match, or
+/// decompression fails.
 pub fn decompress_block_with_trailer(block: &[u8]) -> MidgeResult<Bytes> {
     if block.len() < BLOCK_TRAILER_SIZE {
         return Err(crate::common::MidgeError::Corruption(
@@ -443,15 +467,13 @@ pub fn decompress_block_with_trailer(block: &[u8]) -> MidgeResult<Bytes> {
     let computed_crc = crc32c::crc32c(&block[..data_plus_algo_len]);
     if computed_crc != stored_crc {
         return Err(crate::common::MidgeError::Corruption(format!(
-            "block CRC32C mismatch: stored {:#010x}, computed {:#010x}",
-            stored_crc, computed_crc
+            "block CRC32C mismatch: stored {stored_crc:#010x}, computed {computed_crc:#010x}"
         )));
     }
 
     let algo = CompressionAlgo::from_u8(algo_byte).ok_or_else(|| {
         crate::common::MidgeError::Corruption(format!(
-            "unknown compression algorithm code: {}",
-            algo_byte
+            "unknown compression algorithm code: {algo_byte}"
         ))
     })?;
 
@@ -497,6 +519,7 @@ fn is_likely_compressible(value: &[u8]) -> bool {
 ///
 /// Performs a quick entropy check before expensive LZ4 compression to avoid
 /// CPU waste on random/encrypted data in constrained environments.
+#[must_use]
 pub fn compress_wal_value(value: &[u8]) -> (Bytes, Option<u8>) {
     if value.len() < MIN_COMPRESS_SIZE {
         return (Bytes::copy_from_slice(value), None);
@@ -520,14 +543,17 @@ pub fn compress_wal_value(value: &[u8]) -> (Bytes, Option<u8>) {
 /// Decompress a WAL record value based on the compression byte.
 ///
 /// If `compression` is `None` or `Some(0)` (None algo), the value is returned as-is.
+///
+/// # Errors
+///
+/// Returns an error when the compression code is unknown or decompression fails.
 pub fn decompress_wal_value(value: &[u8], compression: Option<u8>) -> MidgeResult<Bytes> {
     match compression {
         None | Some(0) => Ok(Bytes::copy_from_slice(value)),
         Some(algo_byte) => {
             let algo = CompressionAlgo::from_u8(algo_byte).ok_or_else(|| {
                 crate::common::MidgeError::Corruption(format!(
-                    "unknown WAL compression algorithm code: {}",
-                    algo_byte
+                    "unknown WAL compression algorithm code: {algo_byte}"
                 ))
             })?;
             decompress_block(value, algo)
@@ -621,7 +647,7 @@ mod tests {
         // Act
         for code in valid_codes {
             let algo = CompressionAlgo::from_u8(code).expect("valid code");
-            assert_eq!(algo.to_u8(), code, "roundtrip failed for code {}", code);
+            assert_eq!(algo.to_u8(), code, "roundtrip failed for code {code}");
         }
 
         // Assert
@@ -657,7 +683,7 @@ mod tests {
             let result = CompressionAlgo::from_u8(code);
 
             // Assert
-            assert!(result.is_none(), "code {} should be invalid", code);
+            assert!(result.is_none(), "code {code} should be invalid");
         }
     }
 

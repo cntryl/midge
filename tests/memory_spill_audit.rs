@@ -13,14 +13,14 @@ use common::*;
 fn should_commit_large_transaction_given_memory_budget_exceeded_when_committed() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts.memory_budget(128 * 1024), mode);
+        let engine = open_with_mode(&opts.memory_budget(128 * 1024), mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin large transaction");
         for i in 0..500 {
-            let key = format!("large_key_{:05}", i);
+            let key = format!("large_key_{i:05}");
             tx.put(key.as_bytes().to_vec(), vec![65u8; 1024], None)
                 .expect("put large value");
         }
@@ -52,14 +52,14 @@ fn should_commit_large_transaction_given_memory_budget_exceeded_when_committed()
 fn should_preserve_values_given_two_large_transactions_within_budget_when_read() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts.memory_budget(256 * 1024), mode);
+        let engine = open_with_mode(&opts.memory_budget(256 * 1024), mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx1 = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin first transaction");
         for i in 0..128 {
-            let key = format!("batch1_key_{:03}", i);
+            let key = format!("batch1_key_{i:03}");
             tx1.put(key.as_bytes().to_vec(), vec![65u8; 1024], None)
                 .expect("put batch1 value");
         }
@@ -70,7 +70,7 @@ fn should_preserve_values_given_two_large_transactions_within_budget_when_read()
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin second transaction");
         for i in 0..128 {
-            let key = format!("batch2_key_{:03}", i);
+            let key = format!("batch2_key_{i:03}");
             tx2.put(key.as_bytes().to_vec(), vec![66u8; 1024], None)
                 .expect("put batch2 value");
         }
@@ -106,14 +106,14 @@ fn should_preserve_values_given_two_large_transactions_within_budget_when_read()
 fn should_preserve_sample_keys_given_large_transaction_low_budget_when_committed() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts.memory_budget(64 * 1024), mode);
+        let engine = open_with_mode(&opts.memory_budget(64 * 1024), mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin low-budget transaction");
         for i in 0..200 {
-            let key = format!("spilltest_key_{:04}", i);
+            let key = format!("spilltest_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), vec![88u8; 512], None)
                 .expect("put low-budget value");
         }

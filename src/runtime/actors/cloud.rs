@@ -7,7 +7,6 @@
 //! - Coordinating with manifest for cloud state
 
 use super::super::state::RuntimeState;
-use crate::common::MidgeResult;
 use crate::storage::StorageBackend;
 
 /// Actor handling cloud storage operations
@@ -29,13 +28,13 @@ impl CloudActor {
         state: &mut RuntimeState,
         sst_name: &str,
         storage: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
-    ) -> MidgeResult<()> {
+    ) {
         let sst_path = state.sst_dir.join(sst_name);
 
         // Validate SST exists before upload
         if !sst_path.exists() {
             tracing::warn!(sst_name, path = %sst_path.display(), "SST file not found for upload");
-            return Ok(());
+            return;
         }
 
         // Read file content
@@ -43,7 +42,7 @@ impl CloudActor {
             Ok(d) => d,
             Err(e) => {
                 tracing::error!(sst_name, error = %e, "Failed to read SST file for upload");
-                return Ok(());
+                return;
             }
         };
 
@@ -53,7 +52,7 @@ impl CloudActor {
         // Submit SST to cloud storage via hybrid backend
         if let Some(s) = storage {
             let (tx, _rx) = std::sync::mpsc::channel();
-            s.submit_write(cloud_key.clone(), data.clone(), tx);
+            s.submit_write(&cloud_key, data.clone(), tx);
             self.uploads_in_progress += 1;
 
             tracing::info!(
@@ -65,19 +64,17 @@ impl CloudActor {
         } else {
             tracing::debug!(sst_name, "No hybrid storage available for SST upload");
         }
-
-        Ok(())
     }
 
     /// Upload a WAL segment to cloud storage
-    pub fn upload_wal(&mut self, state: &mut RuntimeState, segment_id: u64) -> MidgeResult<()> {
+    pub fn upload_wal(&mut self, state: &mut RuntimeState, segment_id: u64) {
         let wal_name = crate::wal::segment_file_name(segment_id);
         let wal_path = state.wal_dir.join(&wal_name);
 
         // Validate WAL exists before upload
         if !wal_path.exists() {
             tracing::warn!(segment_id, path = %wal_path.display(), "WAL file not found for upload");
-            return Ok(());
+            return;
         }
 
         // Read file content
@@ -85,7 +82,7 @@ impl CloudActor {
             Ok(d) => d,
             Err(e) => {
                 tracing::error!(segment_id, error = %e, "Failed to read WAL file for upload");
-                return Ok(());
+                return;
             }
         };
 
@@ -106,8 +103,6 @@ impl CloudActor {
             cloud_key = %cloud_key,
             "Cloud WAL upload started"
         );
-
-        Ok(())
     }
 
     /// Handle upload completion

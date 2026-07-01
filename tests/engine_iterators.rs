@@ -7,22 +7,22 @@
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
 //!
-//! These tests run across all storage modes (Memory, LocalDisk, CloudBacked).
+//! These tests run across all storage modes (Memory, `LocalDisk`, `CloudBacked`).
 
 use bytes::Bytes;
 mod common;
 use cntryl_midge::{Query, Transaction};
 use common::*;
 
-fn collect_scan(tx: &Transaction, query: Query) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let mut iter = tx.scan(&query).unwrap();
+fn collect_scan(tx: &Transaction, query: &Query) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut iter = tx.scan(query).unwrap();
     std::iter::from_fn(|| iter.next()).collect()
 }
 
 fn scan_between(tx: &Transaction, start: &[u8], end: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
     collect_scan(
         tx,
-        Query::new()
+        &Query::new()
             .start_key(Bytes::copy_from_slice(start))
             .end_key(Bytes::copy_from_slice(end)),
     )
@@ -36,7 +36,7 @@ fn scan_between(tx: &Transaction, start: &[u8], end: &[u8]) -> Vec<(Vec<u8>, Vec
 fn should_iterate_all_keys_in_order_given_populated_db_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Populate with ordered keys (zero-padded for lexicographic ordering)
@@ -45,8 +45,8 @@ fn should_iterate_all_keys_in_order_given_populated_db_when_scanning() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -62,8 +62,8 @@ fn should_iterate_all_keys_in_order_given_populated_db_when_scanning() {
         // Assert
         assert_eq!(results.len(), 10);
         for (idx, (k, v)) in results.iter().enumerate() {
-            assert_eq!(k, format!("k{:02}", idx).as_bytes());
-            assert_eq!(v, format!("v{:02}", idx).as_bytes());
+            assert_eq!(k, format!("k{idx:02}").as_bytes());
+            assert_eq!(v, format!("v{idx:02}").as_bytes());
         }
     });
 }
@@ -72,7 +72,7 @@ fn should_iterate_all_keys_in_order_given_populated_db_when_scanning() {
 fn should_iterate_in_reverse_given_reverse_query_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..5 {
@@ -80,8 +80,8 @@ fn should_iterate_in_reverse_given_reverse_query_when_scanning() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -93,7 +93,7 @@ fn should_iterate_in_reverse_given_reverse_query_when_scanning() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = collect_scan(&tx, query);
+        let results = collect_scan(&tx, &query);
 
         // Assert: Results should be in reverse order
         assert_eq!(results.len(), 5);
@@ -109,7 +109,7 @@ fn should_iterate_in_reverse_given_reverse_query_when_scanning() {
 fn should_limit_results_given_limit_query_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..10 {
@@ -117,8 +117,8 @@ fn should_limit_results_given_limit_query_when_scanning() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -130,7 +130,7 @@ fn should_limit_results_given_limit_query_when_scanning() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = collect_scan(&tx, query);
+        let results = collect_scan(&tx, &query);
 
         // Assert
         assert_eq!(results.len(), 3);
@@ -144,7 +144,7 @@ fn should_limit_results_given_limit_query_when_scanning() {
 fn should_return_empty_given_empty_db_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -162,7 +162,7 @@ fn should_return_empty_given_empty_db_when_scanning() {
 fn should_return_next_key_given_seek_to_missing_key_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Create non-contiguous keys
@@ -192,7 +192,7 @@ fn should_return_next_key_given_seek_to_missing_key_when_scanning() {
 fn should_return_empty_given_seek_past_end_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine
@@ -217,7 +217,7 @@ fn should_return_empty_given_seek_past_end_when_scanning() {
 fn should_return_empty_given_invalid_range_when_start_greater_than_end() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine
@@ -242,7 +242,7 @@ fn should_return_empty_given_invalid_range_when_start_greater_than_end() {
 fn should_skip_deleted_keys_given_tombstones_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..5 {
@@ -250,8 +250,8 @@ fn should_skip_deleted_keys_given_tombstones_when_scanning() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -284,7 +284,7 @@ fn should_skip_deleted_keys_given_tombstones_when_scanning() {
 fn should_respect_range_tombstones_given_delete_range_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..10 {
@@ -292,8 +292,8 @@ fn should_respect_range_tombstones_given_delete_range_when_scanning() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -327,7 +327,7 @@ fn should_respect_range_tombstones_given_delete_range_when_scanning() {
 fn should_return_latest_value_given_interleaved_puts_deletes_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Initial put
@@ -373,7 +373,7 @@ fn should_return_latest_value_given_interleaved_puts_deletes_when_scanning() {
 fn should_match_regular_scan_given_streaming_scan_when_comparing() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..8 {
@@ -381,8 +381,8 @@ fn should_match_regular_scan_given_streaming_scan_when_comparing() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -397,7 +397,7 @@ fn should_match_regular_scan_given_streaming_scan_when_comparing() {
 
         // Act: Scan with query
         let query = cntryl_midge::Query::new();
-        let scan_results = collect_scan(&tx, query);
+        let scan_results = collect_scan(&tx, &query);
 
         // Assert: Should produce identical results
         assert_eq!(range_results, scan_results);
@@ -408,7 +408,7 @@ fn should_match_regular_scan_given_streaming_scan_when_comparing() {
 fn should_respect_limit_given_streaming_scan_when_limited() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..20 {
@@ -416,8 +416,8 @@ fn should_respect_limit_given_streaming_scan_when_limited() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -431,7 +431,7 @@ fn should_respect_limit_given_streaming_scan_when_limited() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = collect_scan(&tx, query);
+        let results = collect_scan(&tx, &query);
 
         // Assert
         assert_eq!(results.len(), 5);
@@ -444,7 +444,7 @@ fn should_respect_limit_given_streaming_scan_when_limited() {
 fn should_respect_limit_in_reverse_query_when_limited() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..10 {
@@ -452,8 +452,8 @@ fn should_respect_limit_in_reverse_query_when_limited() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -465,7 +465,7 @@ fn should_respect_limit_in_reverse_query_when_limited() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = collect_scan(&tx, query);
+        let results = collect_scan(&tx, &query);
 
         // Assert: Should return last 3 keys in descending order
         assert_eq!(results.len(), 3);
@@ -479,7 +479,7 @@ fn should_respect_limit_in_reverse_query_when_limited() {
 fn should_apply_tombstones_given_streaming_scan_when_keys_deleted() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..10 {
@@ -487,8 +487,8 @@ fn should_apply_tombstones_given_streaming_scan_when_keys_deleted() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -507,7 +507,7 @@ fn should_apply_tombstones_given_streaming_scan_when_keys_deleted() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = collect_scan(&tx, query);
+        let results = collect_scan(&tx, &query);
 
         // Assert
         assert_eq!(results.len(), 8);
@@ -520,7 +520,7 @@ fn should_apply_tombstones_given_streaming_scan_when_keys_deleted() {
 fn should_handle_large_scan_given_many_keys_when_iterating() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Insert 500 keys (batch into one transaction for speed)
@@ -529,8 +529,8 @@ fn should_handle_large_scan_given_many_keys_when_iterating() {
             .unwrap();
         for i in 0..500 {
             tx.put(
-                format!("k{:04}", i).as_bytes().to_vec(),
-                format!("v{:04}", i).as_bytes().to_vec(),
+                format!("k{i:04}").as_bytes().to_vec(),
+                format!("v{i:04}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -548,8 +548,8 @@ fn should_handle_large_scan_given_many_keys_when_iterating() {
 
         // Verify ordering
         for (idx, (k, v)) in results.iter().enumerate() {
-            assert_eq!(k, format!("k{:04}", idx).as_bytes());
-            assert_eq!(v, format!("v{:04}", idx).as_bytes());
+            assert_eq!(k, format!("k{idx:04}").as_bytes());
+            assert_eq!(v, format!("v{idx:04}").as_bytes());
         }
     });
 }
@@ -557,13 +557,13 @@ fn should_handle_large_scan_given_many_keys_when_iterating() {
 #[test]
 fn should_iterate_memtable_plus_multiple_ssts_given_flushed_batches_when_scanning() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for batch in 0..3 {
         for i in 0..20 {
-            let key = format!("sst{:02}_k{:02}", batch, i);
-            let value = format!("sst{:02}_v{:02}", batch, i);
+            let key = format!("sst{batch:02}_k{i:02}");
+            let value = format!("sst{batch:02}_v{i:02}");
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
@@ -574,8 +574,8 @@ fn should_iterate_memtable_plus_multiple_ssts_given_flushed_batches_when_scannin
     }
 
     for i in 0..10 {
-        let key = format!("mem_k{:02}", i);
-        let value = format!("mem_v{:02}", i);
+        let key = format!("mem_k{i:02}");
+        let value = format!("mem_v{i:02}");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
@@ -587,7 +587,7 @@ fn should_iterate_memtable_plus_multiple_ssts_given_flushed_batches_when_scannin
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let results = collect_scan(&tx, cntryl_midge::Query::new());
+    let results = collect_scan(&tx, &cntryl_midge::Query::new());
 
     // Assert
     assert_eq!(results.len(), 70);
@@ -600,7 +600,7 @@ fn should_iterate_memtable_plus_multiple_ssts_given_flushed_batches_when_scannin
 #[test]
 fn should_return_latest_value_across_levels_given_overwrite_in_newer_sst_when_scanning() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     let mut tx = engine
@@ -622,7 +622,7 @@ fn should_return_latest_value_across_levels_given_overwrite_in_newer_sst_when_sc
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let results = collect_scan(&tx, cntryl_midge::Query::new());
+    let results = collect_scan(&tx, &cntryl_midge::Query::new());
 
     // Assert
     assert_eq!(results.len(), 2);
@@ -637,7 +637,7 @@ fn should_return_latest_value_across_levels_given_overwrite_in_newer_sst_when_sc
 #[test]
 fn should_hide_deleted_keys_across_compacted_ssts_when_scanning() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for batch in 0..4 {
@@ -666,7 +666,7 @@ fn should_hide_deleted_keys_across_compacted_ssts_when_scanning() {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let results = collect_scan(&tx, cntryl_midge::Query::new());
+    let results = collect_scan(&tx, &cntryl_midge::Query::new());
 
     // Assert
     for deleted in [b"k020", b"k021", b"k050", b"k079"] {
@@ -683,7 +683,7 @@ fn should_hide_deleted_keys_across_compacted_ssts_when_scanning() {
 #[test]
 fn should_scan_compacted_ssts_given_new_iterator_after_compaction_when_levels_change() {
     // Arrange
-    let engine = open_with_mode(opts_for_mode("local"), "local");
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     for batch in 0..5 {
@@ -704,7 +704,7 @@ fn should_scan_compacted_ssts_given_new_iterator_after_compaction_when_levels_ch
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let results = collect_scan(&tx, cntryl_midge::Query::new());
+    let results = collect_scan(&tx, &cntryl_midge::Query::new());
 
     // Assert
     assert_eq!(results.len(), 100);
@@ -716,7 +716,7 @@ fn should_scan_compacted_ssts_given_new_iterator_after_compaction_when_levels_ch
 fn should_handle_concurrent_streaming_scans_when_multiple_threads() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = std::sync::Arc::new(open_with_mode(opts, mode));
+        let engine = std::sync::Arc::new(open_with_mode(&opts, mode));
         let cf = engine
             .create_column_family("test")
             .expect("create cf")
@@ -728,8 +728,8 @@ fn should_handle_concurrent_streaming_scans_when_multiple_threads() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();
@@ -747,7 +747,7 @@ fn should_handle_concurrent_streaming_scans_when_multiple_threads() {
                     let tx = engine_clone
                         .begin_tx(cf_clone.id(), cntryl_midge::TransactionMode::ReadOnly)
                         .unwrap();
-                    collect_scan(&tx, query)
+                    collect_scan(&tx, &query)
                 })
             })
             .collect();
@@ -768,7 +768,7 @@ fn should_handle_concurrent_streaming_scans_when_multiple_threads() {
 fn should_produce_identical_results_given_repeated_scans_when_rewinding() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..15 {
@@ -776,8 +776,8 @@ fn should_produce_identical_results_given_repeated_scans_when_rewinding() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(
-                format!("k{:02}", i).as_bytes().to_vec(),
-                format!("v{:02}", i).as_bytes().to_vec(),
+                format!("k{i:02}").as_bytes().to_vec(),
+                format!("v{i:02}").as_bytes().to_vec(),
                 None,
             )
             .unwrap();

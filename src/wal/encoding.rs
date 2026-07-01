@@ -15,20 +15,22 @@
 //!   - `val: [u8; len]`
 //!
 //! Required fields:
-//! - OP, CF_ID, SEQ, KEY
+//! - OP, `CF_ID`, SEQ, KEY
 //!
 //! Optional fields:
-//! - VALUE, EXPIRATION, RANGE_END, TXN_ID, COMPRESSION
+//! - VALUE, EXPIRATION, `RANGE_END`, `TXN_ID`, COMPRESSION
 //!
 //! Unknown tags are skipped (forward-compatible). Duplicate tags are accepted; the
 //! *last* occurrence wins.
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::wal::types::{WalOpKind, WalRecord};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 
 const MAGIC: [u8; 2] = *b"MW";
 const VERSION: u8 = 1;
+const TXN_BATCH_MAGIC: [u8; 2] = *b"TB";
+const TXN_BATCH_VERSION: u8 = 1;
 const PREFIX_LEN: usize = 3; // MAGIC (2) + VERSION (1)
 const TLV_HEADER_LEN: usize = 1 + 4; // tag (1) + len (4)
 
@@ -64,30 +66,126 @@ pub struct WalRecordView<'a> {
     pub compression: Option<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxnBatchRecord {
+    pub cf_id: u32,
+    pub op: WalOpKind,
+    pub key: Bytes,
+    pub value: Option<Bytes>,
+    pub seq: u64,
+    pub expiration: Option<u64>,
+    pub range_end: Option<Bytes>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TxnBatchEncodeRecord<'a> {
+    pub cf_id: u32,
+    pub op: WalOpKind,
+    pub key: &'a [u8],
+    pub value: Option<&'a [u8]>,
+    pub seq: u64,
+    pub expiration: Option<u64>,
+    pub range_end: Option<&'a [u8]>,
+    pub txn_id: Option<u64>,
+    pub writer_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedTxnBatch {
+    pub txn_id: u64,
+    pub begin_seq: u64,
+    pub commit_seq: u64,
+    pub writer_epoch: u64,
+    pub records: Vec<TxnBatchRecord>,
+}
+
+struct TxnBatchHeader {
+    txn_id: u64,
+    begin_seq: u64,
+    commit_seq: u64,
+    op_count: usize,
+}
+
+const TXN_BATCH_MIN_PREFIX_LEN: usize = 3 + (8 * 3) + 4;
+const TXN_BATCH_RECORD_FIXED_LEN: usize = 1 + 4 + 8 + 1 + 1 + 1;
+
 fn corruption(msg: impl Into<String>) -> MidgeError {
     MidgeError::Corruption(msg.into())
 }
 
+fn payload_capacity(record: &WalRecord) -> MidgeResult<usize> {
+    // Use checked adds to avoid overflow on 32-bit systems or huge values.
+    let mut capacity = PREFIX_LEN;
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + 1)?; // OP
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + 4)?; // CF_ID
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?; // SEQ
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + record.key.len())?;
+
+    if let Some(v) = &record.value {
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + v.len())?;
+    }
+
+    if record.expiration.is_some() {
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
+    }
+    if let Some(r) = &record.range_end {
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + r.len())?;
+    }
+    if record.txn_id.is_some() {
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
+    }
+    // writer_epoch is always present
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
+    if record.compression.is_some() {
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + 1)?;
+    }
+
+    Ok(capacity)
+}
+
 #[inline]
-fn put_tlv(buf: &mut BytesMut, tag: u8, val: &[u8]) {
-    buf.put_u8(tag);
-    buf.put_u32_le(val.len() as u32);
+fn push_tlv(buf: &mut Vec<u8>, tag: u8, val: &[u8]) -> MidgeResult<()> {
+    let len = u32::try_from(val.len())
+        .map_err(|_| MidgeError::InvalidArgument("TLV value exceeds u32::MAX".into()))?;
+    buf.push(tag);
+    buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(val);
+    Ok(())
 }
 
 #[inline]
-fn put_u8(buf: &mut BytesMut, tag: u8, v: u8) {
-    put_tlv(buf, tag, &[v]);
+fn push_u8(buf: &mut Vec<u8>, tag: u8, v: u8) -> MidgeResult<()> {
+    push_tlv(buf, tag, &[v])
 }
 
 #[inline]
-fn put_u32(buf: &mut BytesMut, tag: u8, v: u32) {
-    put_tlv(buf, tag, &v.to_le_bytes());
+fn push_u32(buf: &mut Vec<u8>, tag: u8, v: u32) -> MidgeResult<()> {
+    push_tlv(buf, tag, &v.to_le_bytes())
 }
 
 #[inline]
-fn put_u64(buf: &mut BytesMut, tag: u8, v: u64) {
-    put_tlv(buf, tag, &v.to_le_bytes());
+fn push_u64(buf: &mut Vec<u8>, tag: u8, v: u64) -> MidgeResult<()> {
+    push_tlv(buf, tag, &v.to_le_bytes())
+}
+
+#[inline]
+fn put_tlv(buf: &mut Vec<u8>, tag: u8, val: &[u8]) -> MidgeResult<()> {
+    push_tlv(buf, tag, val)
+}
+
+#[inline]
+fn put_u8(buf: &mut Vec<u8>, tag: u8, v: u8) -> MidgeResult<()> {
+    push_u8(buf, tag, v)
+}
+
+#[inline]
+fn put_u32(buf: &mut Vec<u8>, tag: u8, v: u32) -> MidgeResult<()> {
+    push_u32(buf, tag, v)
+}
+
+#[inline]
+fn put_u64(buf: &mut Vec<u8>, tag: u8, v: u64) -> MidgeResult<()> {
+    push_u64(buf, tag, v)
 }
 
 #[inline]
@@ -132,74 +230,94 @@ fn add_capacity(capacity: usize, delta: usize) -> MidgeResult<usize> {
         .ok_or_else(|| MidgeError::InvalidArgument("record size overflow".into()))
 }
 
+enum EncodedValue<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Bytes),
+}
+
+impl EncodedValue<'_> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Owned(bytes) => bytes.as_ref(),
+        }
+    }
+}
+
 /// Encode a WAL record to bytes (v2 payload).
+///
+/// # Errors
+///
+/// Returns an error when record sizing overflows or value compression fails.
 pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
-    // Use checked adds to avoid overflow on 32-bit systems or huge values.
-    let mut capacity = PREFIX_LEN;
-    capacity = add_capacity(capacity, TLV_HEADER_LEN + 1)?; // OP
-    capacity = add_capacity(capacity, TLV_HEADER_LEN + 4)?; // CF_ID
-    capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?; // SEQ
-    capacity = add_capacity(capacity, TLV_HEADER_LEN + record.key.len())?;
+    let mut buf = Vec::with_capacity(payload_capacity(record)?);
+    encode_into(record, &mut buf)?;
+    Ok(Bytes::from(buf))
+}
 
-    if let Some(v) = &record.value {
-        capacity = add_capacity(capacity, TLV_HEADER_LEN + v.len())?;
+/// Encode a WAL record payload directly into an existing buffer.
+///
+/// # Errors
+///
+/// Returns an error when record sizing overflows or a TLV field exceeds `u32::MAX`.
+pub fn encode_into(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
+    let start_len = buf.len();
+    if let Err(error) = encode_into_inner(record, buf) {
+        buf.truncate(start_len);
+        return Err(error);
     }
+    Ok(())
+}
 
-    if record.expiration.is_some() {
-        capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
-    }
-    if let Some(r) = &record.range_end {
-        capacity = add_capacity(capacity, TLV_HEADER_LEN + r.len())?;
-    }
-    if record.txn_id.is_some() {
-        capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
-    }
-    // writer_epoch is always present
-    capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
-    if record.compression.is_some() {
-        capacity = add_capacity(capacity, TLV_HEADER_LEN + 1)?;
-    }
-
-    let mut buf = BytesMut::with_capacity(capacity);
-
+fn encode_into_inner(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
+    buf.reserve(payload_capacity(record)?);
     buf.extend_from_slice(&MAGIC);
-    buf.put_u8(VERSION);
+    buf.push(VERSION);
 
-    put_u8(&mut buf, tags::OP, record.op.to_wire_format());
-    put_u32(&mut buf, tags::CF_ID, record.cf_id);
-    put_u64(&mut buf, tags::SEQ, record.seq);
-    put_tlv(&mut buf, tags::KEY, &record.key);
+    put_u8(buf, tags::OP, record.op.to_wire_format())?;
+    put_u32(buf, tags::CF_ID, record.cf_id)?;
+    put_u64(buf, tags::SEQ, record.seq)?;
+    put_tlv(buf, tags::KEY, &record.key)?;
 
-    put_u64(&mut buf, tags::WRITER_EPOCH, record.writer_epoch);
+    put_u64(buf, tags::WRITER_EPOCH, record.writer_epoch)?;
 
     if let Some(v) = &record.value {
         // Preserve Some(empty) distinctly from None by always emitting VALUE when present.
-        let (write_val, comp_byte) = crate::sst::compression::compress_wal_value(v);
-        put_tlv(&mut buf, tags::VALUE, &write_val);
+        let (write_val, comp_byte) = if v.len() < crate::sst::compression::MIN_COMPRESS_SIZE {
+            (EncodedValue::Borrowed(v.as_ref()), None)
+        } else {
+            let (value, comp_byte) = crate::sst::compression::compress_wal_value(v);
+            (EncodedValue::Owned(value), comp_byte)
+        };
+        put_tlv(buf, tags::VALUE, write_val.as_slice())?;
         if let Some(cb) = comp_byte {
-            put_u8(&mut buf, tags::COMPRESSION, cb);
+            put_u8(buf, tags::COMPRESSION, cb)?;
         } else if let Some(c) = record.compression {
-            put_u8(&mut buf, tags::COMPRESSION, c);
+            put_u8(buf, tags::COMPRESSION, c)?;
         }
     } else if let Some(c) = record.compression {
-        put_u8(&mut buf, tags::COMPRESSION, c);
+        put_u8(buf, tags::COMPRESSION, c)?;
     }
 
     if let Some(exp) = record.expiration {
-        put_u64(&mut buf, tags::EXPIRATION, exp);
+        put_u64(buf, tags::EXPIRATION, exp)?;
     }
     if let Some(r) = &record.range_end {
-        put_tlv(&mut buf, tags::RANGE_END, r);
+        put_tlv(buf, tags::RANGE_END, r)?;
     }
     if let Some(txn_id) = record.txn_id {
-        put_u64(&mut buf, tags::TXN_ID, txn_id);
+        put_u64(buf, tags::TXN_ID, txn_id)?;
     }
 
-    Ok(buf.freeze())
+    Ok(())
 }
 
 /// Zero-copy decode into a borrowed view.
-pub fn decode_view<'a>(data: &'a [u8]) -> MidgeResult<WalRecordView<'a>> {
+///
+/// # Errors
+///
+/// Returns `MidgeError::Corruption` when the payload prefix or any TLV field is malformed.
+pub fn decode_view(data: &[u8]) -> MidgeResult<WalRecordView<'_>> {
     if data.len() < PREFIX_LEN {
         return Err(corruption("truncated WAL payload prefix"));
     }
@@ -306,18 +424,23 @@ pub fn decode_view<'a>(data: &'a [u8]) -> MidgeResult<WalRecordView<'a>> {
 
 /// Compatibility adapter: decode into owned `WalRecord`.
 ///
-/// This allocates for key/value/range_end. Prefer [`decode_view`] in hot paths.
+/// This allocates for `key/value/range_end`. Prefer [`decode_view`] in hot paths.
 ///
 /// If the record carries a `COMPRESSION` tag, the value is transparently
 /// decompressed before being returned.
-pub fn decode(bytes: impl Buf) -> MidgeResult<WalRecord> {
+/// Decode an owned WAL record from a payload buffer.
+///
+/// # Errors
+///
+/// Returns an error when the payload is malformed or value decompression fails.
+pub fn decode(mut bytes: impl Buf) -> MidgeResult<WalRecord> {
     // WAL frames must be contiguous; enforce this.
     let data = bytes.chunk();
     if data.len() != bytes.remaining() {
         return Err(corruption("non-contiguous WAL buffer"));
     }
-
-    let view = decode_view(data)?;
+    let owned = bytes.copy_to_bytes(bytes.remaining());
+    let view = decode_view(owned.as_ref())?;
 
     // Decompress value if a compression tag is present
     let value = match view.value {
@@ -341,6 +464,373 @@ pub fn decode(bytes: impl Buf) -> MidgeResult<WalRecord> {
         writer_epoch: view.writer_epoch,
         compression: None, // Decompressed — no longer carries a compression tag
     })
+}
+
+fn push_len_prefixed_bytes(buf: &mut Vec<u8>, value: &[u8]) -> MidgeResult<()> {
+    let len = u32::try_from(value.len()).map_err(|_| {
+        MidgeError::InvalidArgument("transaction batch field exceeds u32::MAX".into())
+    })?;
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(value);
+    Ok(())
+}
+
+fn txn_batch_len_prefixed_field_len(value: &[u8]) -> MidgeResult<usize> {
+    let _ = u32::try_from(value.len()).map_err(|_| {
+        MidgeError::InvalidArgument("transaction batch field exceeds u32::MAX".into())
+    })?;
+    add_capacity(4, value.len())
+}
+
+fn txn_batch_payload_records_encoded_len(
+    records: &[TxnBatchEncodeRecord<'_>],
+) -> MidgeResult<usize> {
+    let _ = u32::try_from(records.len()).map_err(|_| {
+        MidgeError::InvalidArgument("transaction batch op_count exceeds u32::MAX".into())
+    })?;
+
+    let mut len = TXN_BATCH_MIN_PREFIX_LEN;
+    for record in records {
+        len = add_capacity(len, TXN_BATCH_RECORD_FIXED_LEN)?;
+        if record.expiration.is_some() {
+            len = add_capacity(len, 8)?;
+        }
+        len = add_capacity(len, txn_batch_len_prefixed_field_len(record.key)?)?;
+        if let Some(value) = record.value {
+            len = add_capacity(len, txn_batch_len_prefixed_field_len(value)?)?;
+        }
+        if let Some(range_end) = record.range_end {
+            len = add_capacity(len, txn_batch_len_prefixed_field_len(range_end)?)?;
+        }
+    }
+    Ok(len)
+}
+
+fn read_exact_slice<'a>(input: &mut &'a [u8], len: usize, field: &str) -> MidgeResult<&'a [u8]> {
+    if input.len() < len {
+        return Err(corruption(format!(
+            "truncated transaction batch {field}: need {len}, have {}",
+            input.len()
+        )));
+    }
+    let (head, tail) = input.split_at(len);
+    *input = tail;
+    Ok(head)
+}
+
+fn read_u8(input: &mut &[u8], field: &str) -> MidgeResult<u8> {
+    Ok(read_exact_slice(input, 1, field)?[0])
+}
+
+fn read_u32(input: &mut &[u8], field: &str) -> MidgeResult<u32> {
+    let raw = read_exact_slice(input, 4, field)?;
+    Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+}
+
+fn read_u64(input: &mut &[u8], field: &str) -> MidgeResult<u64> {
+    let raw = read_exact_slice(input, 8, field)?;
+    Ok(u64::from_le_bytes([
+        raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+    ]))
+}
+
+fn read_len_prefixed_bytes(input: &mut &[u8], field: &str) -> MidgeResult<Bytes> {
+    let len = usize::try_from(read_u32(input, field)?).unwrap_or(usize::MAX);
+    let raw = read_exact_slice(input, len, field)?;
+    Ok(Bytes::copy_from_slice(raw))
+}
+
+/// Encode an owned set of WAL records as a nested transaction batch payload.
+///
+/// # Errors
+///
+/// Returns an error if the batch is empty, sequence metadata is inconsistent,
+/// a record contains nested transaction markers, metadata does not match the
+/// outer transaction, or encoded lengths exceed `u32::MAX`.
+pub fn encode_txn_batch_payload(
+    txn_id: u64,
+    begin_seq: u64,
+    commit_seq: u64,
+    writer_epoch: u64,
+    records: &[WalRecord],
+) -> MidgeResult<Bytes> {
+    let records: Vec<_> = records
+        .iter()
+        .map(|record| TxnBatchEncodeRecord {
+            cf_id: record.cf_id,
+            op: record.op,
+            key: record.key.as_ref(),
+            value: record.value.as_ref().map(Bytes::as_ref),
+            seq: record.seq,
+            expiration: record.expiration,
+            range_end: record.range_end.as_ref().map(Bytes::as_ref),
+            txn_id: record.txn_id,
+            writer_epoch: record.writer_epoch,
+        })
+        .collect();
+    encode_txn_batch_payload_records(txn_id, begin_seq, commit_seq, writer_epoch, &records)
+}
+
+/// Encode borrowed WAL record views as a nested transaction batch payload.
+///
+/// # Errors
+///
+/// Returns an error if the batch is empty, sequence metadata is inconsistent,
+/// a record contains nested transaction markers, metadata does not match the
+/// outer transaction, or encoded lengths exceed `u32::MAX`.
+pub fn encode_txn_batch_payload_records(
+    txn_id: u64,
+    begin_seq: u64,
+    commit_seq: u64,
+    writer_epoch: u64,
+    records: &[TxnBatchEncodeRecord<'_>],
+) -> MidgeResult<Bytes> {
+    if records.is_empty() {
+        return Err(MidgeError::InvalidArgument(
+            "transaction batch must contain at least one operation".into(),
+        ));
+    }
+    if commit_seq <= begin_seq {
+        return Err(MidgeError::InvalidArgument(
+            "transaction batch commit sequence must be greater than begin sequence".into(),
+        ));
+    }
+    let expected_op_count = u64::try_from(records.len()).unwrap_or(u64::MAX);
+    if commit_seq - begin_seq - 1 != expected_op_count {
+        return Err(MidgeError::InvalidArgument(
+            "transaction batch sequence span does not match operation count".into(),
+        ));
+    }
+
+    let expected_payload_len = txn_batch_payload_records_encoded_len(records)?;
+    let mut buf = Vec::with_capacity(expected_payload_len);
+    buf.extend_from_slice(&TXN_BATCH_MAGIC);
+    buf.push(TXN_BATCH_VERSION);
+    buf.extend_from_slice(&txn_id.to_le_bytes());
+    buf.extend_from_slice(&begin_seq.to_le_bytes());
+    buf.extend_from_slice(&commit_seq.to_le_bytes());
+    buf.extend_from_slice(
+        &u32::try_from(records.len())
+            .map_err(|_| {
+                MidgeError::InvalidArgument("transaction batch op_count exceeds u32::MAX".into())
+            })?
+            .to_le_bytes(),
+    );
+
+    for (index, record) in records.iter().enumerate() {
+        if matches!(
+            record.op,
+            WalOpKind::TxnBegin | WalOpKind::TxnCommit | WalOpKind::TxnBatch
+        ) {
+            return Err(MidgeError::InvalidArgument(
+                "transaction batch cannot contain nested transaction markers".into(),
+            ));
+        }
+        let expected_seq = begin_seq + 1 + u64::try_from(index).unwrap_or(u64::MAX);
+        if record.seq != expected_seq {
+            return Err(MidgeError::InvalidArgument(format!(
+                "transaction batch contains non-contiguous sequence {} at op index {index} (expected {expected_seq})",
+                record.seq
+            )));
+        }
+        if record.txn_id != Some(txn_id) {
+            return Err(MidgeError::InvalidArgument(format!(
+                "transaction batch record {index} has mismatched txn_id {:?} (expected {txn_id})",
+                record.txn_id
+            )));
+        }
+        if record.writer_epoch != writer_epoch {
+            return Err(MidgeError::InvalidArgument(format!(
+                "transaction batch record {index} has mismatched writer_epoch {} (expected {writer_epoch})",
+                record.writer_epoch
+            )));
+        }
+
+        buf.push(record.op.to_wire_format());
+        buf.extend_from_slice(&record.cf_id.to_le_bytes());
+        buf.extend_from_slice(&record.seq.to_le_bytes());
+        match record.expiration {
+            Some(expiration) => {
+                buf.push(1);
+                buf.extend_from_slice(&expiration.to_le_bytes());
+            }
+            None => buf.push(0),
+        }
+        push_len_prefixed_bytes(&mut buf, record.key)?;
+        match record.value {
+            Some(value) => {
+                buf.push(1);
+                push_len_prefixed_bytes(&mut buf, value)?;
+            }
+            None => buf.push(0),
+        }
+        match record.range_end {
+            Some(range_end) => {
+                buf.push(1);
+                push_len_prefixed_bytes(&mut buf, range_end)?;
+            }
+            None => buf.push(0),
+        }
+    }
+
+    Ok(Bytes::from(buf))
+}
+
+/// Decode and validate a nested transaction batch payload.
+///
+/// # Errors
+///
+/// Returns corruption if the payload magic/version, outer metadata, operation
+/// count, sequence range, per-operation fields, flags, or trailing bytes are
+/// malformed.
+pub fn decode_txn_batch_payload(
+    outer_record: &WalRecord,
+    payload: &[u8],
+) -> MidgeResult<DecodedTxnBatch> {
+    let (header, mut input) = decode_txn_batch_header(outer_record, payload)?;
+    let records = decode_txn_batch_records(&mut input, header.begin_seq, header.op_count)?;
+    if !input.is_empty() {
+        return Err(corruption("transaction batch payload has trailing bytes"));
+    }
+
+    Ok(DecodedTxnBatch {
+        txn_id: header.txn_id,
+        begin_seq: header.begin_seq,
+        commit_seq: header.commit_seq,
+        writer_epoch: outer_record.writer_epoch,
+        records,
+    })
+}
+
+fn decode_txn_batch_header<'a>(
+    outer_record: &WalRecord,
+    payload: &'a [u8],
+) -> MidgeResult<(TxnBatchHeader, &'a [u8])> {
+    if payload.len() < TXN_BATCH_MIN_PREFIX_LEN {
+        return Err(corruption("truncated transaction batch payload prefix"));
+    }
+    if payload[0..2] != TXN_BATCH_MAGIC {
+        return Err(corruption("invalid transaction batch payload magic"));
+    }
+    if payload[2] != TXN_BATCH_VERSION {
+        return Err(corruption("unsupported transaction batch payload version"));
+    }
+
+    let mut input = &payload[3..];
+    let txn_id = read_u64(&mut input, "txn_id")?;
+    let begin_seq = read_u64(&mut input, "begin_seq")?;
+    let commit_seq = read_u64(&mut input, "commit_seq")?;
+    let op_count = usize::try_from(read_u32(&mut input, "op_count")?).unwrap_or(usize::MAX);
+
+    let header = TxnBatchHeader {
+        txn_id,
+        begin_seq,
+        commit_seq,
+        op_count,
+    };
+    validate_txn_batch_header(outer_record, &header)?;
+    Ok((header, input))
+}
+
+fn validate_txn_batch_header(outer_record: &WalRecord, header: &TxnBatchHeader) -> MidgeResult<()> {
+    if header.op_count == 0 {
+        return Err(corruption("transaction batch payload has empty op_count"));
+    }
+    if outer_record.txn_id != Some(header.txn_id) {
+        return Err(corruption(format!(
+            "transaction batch outer txn_id {:?} does not match payload txn_id {}",
+            outer_record.txn_id, header.txn_id
+        )));
+    }
+    if outer_record.seq != header.commit_seq {
+        return Err(corruption(format!(
+            "transaction batch outer seq {} does not match payload commit_seq {}",
+            outer_record.seq, header.commit_seq
+        )));
+    }
+    if header.commit_seq <= header.begin_seq {
+        return Err(corruption(
+            "transaction batch payload commit_seq must be greater than begin_seq",
+        ));
+    }
+    let expected_count =
+        usize::try_from(header.commit_seq - header.begin_seq - 1).unwrap_or(usize::MAX);
+    if header.op_count != expected_count {
+        return Err(corruption(format!(
+            "transaction batch payload op_count {} does not match sequence span {expected_count}",
+            header.op_count
+        )));
+    }
+    Ok(())
+}
+
+fn decode_txn_batch_records(
+    input: &mut &[u8],
+    begin_seq: u64,
+    op_count: usize,
+) -> MidgeResult<Vec<TxnBatchRecord>> {
+    let mut records = Vec::with_capacity(op_count);
+    for index in 0..op_count {
+        records.push(decode_txn_batch_record(input, begin_seq, index)?);
+    }
+    Ok(records)
+}
+
+fn decode_txn_batch_record(
+    input: &mut &[u8],
+    begin_seq: u64,
+    index: usize,
+) -> MidgeResult<TxnBatchRecord> {
+    let op = WalOpKind::from_wire_format(read_u8(input, "op")?)?;
+    if matches!(
+        op,
+        WalOpKind::TxnBegin | WalOpKind::TxnCommit | WalOpKind::TxnBatch
+    ) {
+        return Err(corruption(
+            "transaction batch payload cannot contain nested transaction markers",
+        ));
+    }
+    let cf_id = read_u32(input, "cf_id")?;
+    let seq = read_u64(input, "seq")?;
+    let expected_seq = begin_seq + 1 + u64::try_from(index).unwrap_or(u64::MAX);
+    if seq != expected_seq {
+        return Err(corruption(format!(
+            "transaction batch payload sequence {seq} at op index {index} does not match expected {expected_seq}"
+        )));
+    }
+    let expiration = read_optional_u64(input, "expiration")?;
+    let key = read_len_prefixed_bytes(input, "key")?;
+    let value = read_optional_bytes(input, "value")?;
+    let range_end = read_optional_bytes(input, "range_end")?;
+    Ok(TxnBatchRecord {
+        cf_id,
+        op,
+        key,
+        value,
+        seq,
+        expiration,
+        range_end,
+    })
+}
+
+fn read_optional_u64(input: &mut &[u8], field: &str) -> MidgeResult<Option<u64>> {
+    match read_u8(input, &format!("{field} flag"))? {
+        0 => Ok(None),
+        1 => Ok(Some(read_u64(input, field)?)),
+        flag => Err(corruption(format!(
+            "invalid transaction batch {field} flag {flag}"
+        ))),
+    }
+}
+
+fn read_optional_bytes(input: &mut &[u8], field: &str) -> MidgeResult<Option<Bytes>> {
+    match read_u8(input, &format!("{field} flag"))? {
+        0 => Ok(None),
+        1 => Ok(Some(read_len_prefixed_bytes(input, field)?)),
+        flag => Err(corruption(format!(
+            "invalid transaction batch {field} flag {flag}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -464,7 +954,7 @@ mod tests {
         // Assert
         match err {
             MidgeError::Corruption(_) => {}
-            other => panic!("expected corruption error, got: {:?}", other),
+            other => panic!("expected corruption error, got: {other:?}"),
         }
     }
 
@@ -481,7 +971,7 @@ mod tests {
         // Assert
         match err {
             MidgeError::Corruption(_) => {}
-            other => panic!("expected corruption error, got: {:?}", other),
+            other => panic!("expected corruption error, got: {other:?}"),
         }
     }
 
@@ -499,8 +989,133 @@ mod tests {
         // Assert
         match err {
             MidgeError::Corruption(_) => {}
-            other => panic!("expected corruption error, got: {:?}", other),
+            other => panic!("expected corruption error, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn should_roundtrip_transaction_batch_payload() {
+        let mut put = WalRecord::new_cf(
+            7,
+            WalOpKind::Insert,
+            Bytes::from_static(b"k1"),
+            Some(Bytes::from_static(b"v1")),
+            11,
+            9,
+        );
+        put.txn_id = Some(42);
+
+        let mut delete_range = WalRecord::new_cf(
+            3,
+            WalOpKind::DeleteRange,
+            Bytes::from_static(b"a"),
+            None,
+            12,
+            9,
+        );
+        delete_range.txn_id = Some(42);
+        delete_range.range_end = Some(Bytes::from_static(b"z"));
+
+        let payload =
+            encode_txn_batch_payload(42, 10, 13, 9, &[put.clone(), delete_range.clone()]).unwrap();
+        let mut outer = WalRecord::new_cf(
+            0,
+            WalOpKind::TxnBatch,
+            Bytes::from_static(b"txn"),
+            Some(payload.clone()),
+            13,
+            9,
+        );
+        outer.txn_id = Some(42);
+
+        let decoded = decode_txn_batch_payload(&outer, &payload).unwrap();
+
+        assert_eq!(decoded.txn_id, 42);
+        assert_eq!(decoded.begin_seq, 10);
+        assert_eq!(decoded.commit_seq, 13);
+        assert_eq!(decoded.records.len(), 2);
+        assert_eq!(decoded.records[0].op, WalOpKind::Insert);
+        assert_eq!(decoded.records[0].seq, 11);
+        assert_eq!(decoded.records[1].op, WalOpKind::DeleteRange);
+        assert_eq!(decoded.records[1].range_end, Some(Bytes::from_static(b"z")));
+    }
+
+    #[test]
+    fn should_estimate_transaction_batch_payload_encoded_length() {
+        // Arrange
+        let records = [
+            TxnBatchEncodeRecord {
+                cf_id: 7,
+                op: WalOpKind::Put,
+                key: b"alpha".as_ref(),
+                value: Some(b"value".as_ref()),
+                seq: 11,
+                expiration: Some(123),
+                range_end: None,
+                txn_id: Some(42),
+                writer_epoch: 9,
+            },
+            TxnBatchEncodeRecord {
+                cf_id: 3,
+                op: WalOpKind::DeleteRange,
+                key: b"a".as_ref(),
+                value: None,
+                seq: 12,
+                expiration: None,
+                range_end: Some(b"z".as_ref()),
+                txn_id: Some(42),
+                writer_epoch: 9,
+            },
+        ];
+
+        // Act
+        let expected_len = txn_batch_payload_records_encoded_len(&records).unwrap();
+        let payload = encode_txn_batch_payload_records(42, 10, 13, 9, &records).unwrap();
+
+        // Assert
+        assert_eq!(expected_len, payload.len());
+    }
+
+    #[test]
+    fn should_reject_transaction_batch_payload_with_sequence_gap() {
+        let mut put = WalRecord::new_cf(
+            0,
+            WalOpKind::Put,
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            12,
+            5,
+        );
+        put.txn_id = Some(77);
+
+        let error = encode_txn_batch_payload(77, 10, 12, 5, &[put]).unwrap_err();
+        assert!(error.to_string().contains("non-contiguous sequence"));
+    }
+
+    #[test]
+    fn should_reject_transaction_batch_payload_when_outer_metadata_mismatches() {
+        let mut put = WalRecord::new_cf(
+            0,
+            WalOpKind::Put,
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            2,
+            1,
+        );
+        put.txn_id = Some(5);
+        let payload = encode_txn_batch_payload(5, 1, 3, 1, &[put]).unwrap();
+        let mut outer = WalRecord::new_cf(
+            0,
+            WalOpKind::TxnBatch,
+            Bytes::from_static(b"txn"),
+            Some(payload.clone()),
+            99,
+            1,
+        );
+        outer.txn_id = Some(6);
+
+        let error = decode_txn_batch_payload(&outer, &payload).unwrap_err();
+        assert!(error.to_string().contains("outer txn_id"));
     }
 
     proptest! {

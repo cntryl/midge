@@ -1,14 +1,14 @@
-//! Durability coordination logic — manages waiter groups, CloudAsync inflight state, and frontier checks.
+//! Durability coordination logic — manages waiter groups, `CloudAsync` inflight state, and frontier checks.
 //!
-//! Extracted from EventLoop to reduce cognitive load and improve testability.
+//! Extracted from `EventLoop` to reduce cognitive load and improve testability.
 //! Owns the policy-independent parts of durability enforcement.
 
 use crate::common::KeyedGroupCommit;
-use crate::engine::api::Durability;
+use crate::types::ReadDurability;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
-/// Single CloudAsync segment being uploaded
+/// Single `CloudAsync` segment being uploaded
 #[derive(Debug, Clone)]
 pub struct CloudAsyncInflightSegment {
     pub enqueued_at: Instant,
@@ -40,44 +40,47 @@ pub enum DurabilityWaiter {
     },
     Read {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Vec<u8>,
         sequence: u64,
         #[allow(dead_code)]
-        requested_durability: Durability,
+        requested_durability: ReadDurability,
     },
     RangeScan {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start: Vec<u8>,
         end: Vec<u8>,
         sequence: u64,
         #[allow(dead_code)]
-        requested_durability: Durability,
+        requested_durability: ReadDurability,
     },
 }
 
 /// Coordinates all durability-related state and decisions.
 ///
 /// Owns:
-/// - Group commit waiter queues (KeyedGroupCommit)
-/// - CloudAsync inflight segment tracking
+/// - Group commit waiter queues (`KeyedGroupCommit`)
+/// - `CloudAsync` inflight segment tracking
 /// - Durability frontier checks
 ///
 /// Does NOT own:
-/// - WAL actor (read-only access to WalState for frontier checks)
+/// - WAL actor (read-only access to `WalState` for frontier checks)
 /// - Storage or network concerns (those are caller's responsibility)
 pub struct DurabilityCoordinator {
     /// Group commit: waiters keyed by WAL segment or generation
     waiters: Option<KeyedGroupCommit<u64, DurabilityWaiter>>,
 
-    /// CloudAsync: track enqueue->ack per WAL segment
+    /// `CloudAsync`: track enqueue->ack per WAL segment
     inflight: HashMap<u64, CloudAsyncInflightSegment>,
 
-    /// CloudAsync: timestamp of last flush/rotate
+    /// `CloudAsync`: timestamp of last flush/rotate
     last_cloud_flush: Instant,
 
-    /// Is CloudAsync enabled? (read from wal_actor.is_cloud_async())
+    /// `CloudAsync`: a seal failed after local WAL flush and must be retried.
+    cloud_seal_retry_needed: bool,
+
+    /// Is `CloudAsync` enabled? (read from `wal_actor.is_cloud_async()`)
     is_cloud_async: bool,
 
     cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
@@ -94,6 +97,7 @@ impl DurabilityCoordinator {
             waiters: Some(KeyedGroupCommit::new(initial_durability_key)),
             inflight: HashMap::new(),
             last_cloud_flush: Instant::now(),
+            cloud_seal_retry_needed: false,
             is_cloud_async,
             cloud_runtime_policy,
         }
@@ -101,12 +105,11 @@ impl DurabilityCoordinator {
 
     /// Check if a sequence number is durable at the requested level.
     ///
-    /// Special case: u64::MAX (latest available) always returns true and bypasses durability checks.
+    /// Special case: `u64::MAX` (latest available) always returns true and bypasses durability checks.
     #[inline]
     pub fn is_durable(
-        &self,
         sequence: u64,
-        requested_durability: Durability,
+        requested_durability: ReadDurability,
         local_durable_seq: u64,
         cloud_durable_seq: u64,
     ) -> bool {
@@ -116,8 +119,8 @@ impl DurabilityCoordinator {
         }
 
         match requested_durability {
-            Durability::Strict | Durability::Steady => sequence <= local_durable_seq,
-            Durability::CloudPersisted => sequence <= cloud_durable_seq,
+            ReadDurability::Strict | ReadDurability::Steady => sequence <= local_durable_seq,
+            ReadDurability::CloudPersisted => sequence <= cloud_durable_seq,
         }
     }
 
@@ -146,16 +149,13 @@ impl DurabilityCoordinator {
     pub fn drain_all_waiters(&self) -> Vec<DurabilityWaiter> {
         self.waiters
             .as_ref()
-            .map(|w| w.drain_all())
+            .map(super::super::common::singleflight::KeyedGroupCommit::drain_all)
             .unwrap_or_default()
     }
 
     /// Check if there are pending waiters.
     pub fn has_pending_waiters(&self) -> bool {
-        self.waiters
-            .as_ref()
-            .map(|w| w.pending_len() > 0)
-            .unwrap_or(false)
+        self.waiters.as_ref().is_some_and(|w| w.pending_len() > 0)
     }
 
     /// Rotate group commit to new key (advance generation/segment).
@@ -165,7 +165,7 @@ impl DurabilityCoordinator {
         }
     }
 
-    /// Record a CloudAsync segment enqueued for upload.
+    /// Record a `CloudAsync` segment enqueued for upload.
     pub fn record_cloud_segment_inflight(&mut self, segment_id: u64, max_sequence: u64) {
         self.inflight.insert(
             segment_id,
@@ -176,7 +176,7 @@ impl DurabilityCoordinator {
         );
     }
 
-    /// Get the contiguous acked CloudAsync segments starting at the oldest
+    /// Get the contiguous acked `CloudAsync` segments starting at the oldest
     /// inflight segment. A later segment ack never makes earlier gaps durable.
     pub fn take_contiguous_acked_cloud_segments(
         &mut self,
@@ -209,14 +209,14 @@ impl DurabilityCoordinator {
         Ok(ready)
     }
 
-    /// Get timing info for a CloudAsync segment (for telemetry).
+    /// Get timing info for a `CloudAsync` segment (for telemetry).
     pub fn take_cloud_segment_timing(&mut self, segment_id: u64) -> Option<Instant> {
         self.inflight
             .remove(&segment_id)
             .map(|info| info.enqueued_at)
     }
 
-    /// Remove and return the max_sequence for a specific inflight segment.
+    /// Remove and return the `max_sequence` for a specific inflight segment.
     /// Useful when a segment fails and we need to invalidate idempotency allocations
     /// that were part of that segment.
     pub fn take_cloud_segment_max_sequence(&mut self, segment_id: u64) -> Option<u64> {
@@ -237,12 +237,12 @@ impl DurabilityCoordinator {
         self.inflight.clear();
     }
 
-    /// Check if CloudAsync should flush based on thresholds.
+    /// Check if `CloudAsync` should flush based on thresholds.
     ///
     /// **CRITICAL**: This function MUST NOT flush based on pending writer count alone.
     /// Implicit flush-on-writer causes sequential benchmarks to measure cloud upload
-    /// overhead instead of engine throughput. CloudAsync uploads run asynchronously;
-    /// commits never block on upload completion unless explicit CloudStrict policy is used.
+    /// overhead instead of engine throughput. `CloudAsync` uploads run asynchronously;
+    /// commits never block on upload completion unless explicit `CloudStrict` policy is used.
     ///
     /// Flush triggers (ALL must be satisfied):
     /// - `pending_writes > 0` (some local WAL data exists to seal)
@@ -266,14 +266,27 @@ impl DurabilityCoordinator {
                     >= self.cloud_runtime_policy.wal_seal.max_flush_delay)
     }
 
-    /// Update last flush timestamp (call after CloudAsync segment is enqueued).
+    pub fn mark_cloud_seal_retry_needed(&mut self) {
+        self.cloud_seal_retry_needed = true;
+    }
+
+    pub fn clear_cloud_seal_retry_needed(&mut self) {
+        self.cloud_seal_retry_needed = false;
+    }
+
+    #[must_use]
+    pub fn cloud_seal_retry_needed(&self) -> bool {
+        self.cloud_seal_retry_needed
+    }
+
+    /// Update last flush timestamp (call after `CloudAsync` segment is enqueued).
     pub fn record_cloud_flush(&mut self) {
         self.last_cloud_flush = Instant::now();
     }
 
     /// Get reference to waiters for inspection (internal use only).
     #[allow(dead_code)]
-    pub(super) fn waiters(&self) -> &Option<KeyedGroupCommit<u64, DurabilityWaiter>> {
-        &self.waiters
+    pub(super) fn waiters(&self) -> Option<&KeyedGroupCommit<u64, DurabilityWaiter>> {
+        self.waiters.as_ref()
     }
 }

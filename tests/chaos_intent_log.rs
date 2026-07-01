@@ -9,7 +9,7 @@
 //! 2. Compaction state is correctly recovery-safe at all points
 //! 3. Intent log enables safe deferral of GC operations
 //!
-//! **Storage Modes**: Local  
+//! **Storage Modes**: Local\
 //! **Pattern**: Parent spawns child crash process, recovers, validates all data intact
 
 use std::fs;
@@ -110,8 +110,8 @@ fn child_create_data_flush_compact_and_crash() {
             .expect("begin tx");
 
         for i in 0..100 {
-            let key = format!("wal_compaction_key_{:02}_{:03}", batch, i);
-            let value = format!("wal_compaction_value_{:02}_{:03}", batch, i);
+            let key = format!("wal_compaction_key_{batch:02}_{i:03}");
+            let value = format!("wal_compaction_value_{batch:02}_{i:03}");
 
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                 .expect("put");
@@ -190,7 +190,7 @@ fn should_crash_in_child_when_wal_compaction_crash_scenario_requested() {
             panic!("child should have crashed");
         }
         _ => {
-            panic!("unknown scenario: {}", scenario);
+            panic!("unknown scenario: {scenario}");
             // Assert (implicit: panics above prove test executed)
         }
     }

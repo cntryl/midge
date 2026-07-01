@@ -1,4 +1,4 @@
-//! Auto-tuning logic for choosing between SparseIndex and TrieIndex
+//! Auto-tuning logic for choosing between `SparseIndex` and `TrieIndex`
 
 use super::profiler::KeyStructureProfile;
 
@@ -11,6 +11,7 @@ pub enum IndexKind {
 }
 
 impl IndexKind {
+    #[must_use]
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
             0 => Some(Self::Sparse),
@@ -19,6 +20,7 @@ impl IndexKind {
         }
     }
 
+    #[must_use]
     pub fn to_u8(self) -> u8 {
         self as u8
     }
@@ -31,16 +33,17 @@ impl IndexTuner {
     /// Decide which index kind to use based on key structure profile
     ///
     /// Returns Trie if ANY of these conditions are met:
-    /// 1. High prefix correlation (avg_shared_prefix >= 6 AND entropy < 3.5)
-    /// 2. Strong hierarchical signal (common_prefix_len >= 2 OR max_shared_prefix >= 8)
-    /// 3. Small branching factor (prefix_divergence < 256)
+    /// 1. High prefix correlation (`avg_shared_prefix` >= 6 AND entropy < 3.5)
+    /// 2. Strong hierarchical signal (`common_prefix_len` >= 2 OR `max_shared_prefix` >= 8)
+    /// 3. Small branching factor (`prefix_divergence` < 256)
     /// 4. High key length variance (indicates structured keys with meaningful suffixes)
     ///
     /// Returns Sparse if ANY of these conditions are met:
     /// 1. Keys look random (entropy > 4.0)
-    /// 2. Many branch points (prefix_divergence >= 1024)
-    /// 3. Too few keys (key_count < 128)
+    /// 2. Many branch points (`prefix_divergence` >= 1024)
+    /// 3. Too few keys (`key_count` < 128)
     /// 4. Very short keys (avg key length < 8)
+    #[must_use]
     pub fn decide(profile: &KeyStructureProfile) -> IndexKind {
         // Early exit for tiny SSTs
         if profile.key_count < 128 {
@@ -86,6 +89,7 @@ impl IndexTuner {
     }
 
     /// Get human-readable explanation for the decision
+    #[must_use]
     pub fn explain(profile: &KeyStructureProfile) -> String {
         let decision = Self::decide(profile);
 

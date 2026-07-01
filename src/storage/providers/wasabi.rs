@@ -2,10 +2,10 @@
 //!
 //! Specialized implementation leveraging generic S3 provider for Wasabi's S3-compatible API:
 //! - Automatic endpoint configuration
-//! - Simple access key / secret key authentication (no SigV4 complexity)
+//! - Simple access key / secret key authentication (no `SigV4` complexity)
 //! - Automatic region-based URL generation
 //!
-//! Wasabi regions: https://wasabi.com/
+//! Wasabi regions: <https://wasabi.com>/
 
 use super::s3::{S3Config, S3Provider};
 use crate::common::MidgeResult;
@@ -17,7 +17,7 @@ use crate::common::MidgeResult;
 ///
 /// # Regions
 /// Common Wasabi regions: `us-east-1`, `us-west-1`, `eu-west-1`, `ap-northeast-1`, etc.
-/// See https://wasabi.com/ for current region list.
+/// See <https://wasabi.com>/ for current region list.
 pub struct WasabiProvider {
     inner: S3Provider,
 }
@@ -32,7 +32,7 @@ impl WasabiProvider {
     /// * `secret_key` - Wasabi secret key
     pub fn new(
         bucket: String,
-        region: String,
+        region: &str,
         access_key: String,
         secret_key: String,
     ) -> MidgeResult<Self> {
@@ -40,12 +40,12 @@ impl WasabiProvider {
         S3Provider::custom(config, access_key, secret_key).map(|inner| Self { inner })
     }
 
-    /// Access the underlying S3Provider for lower-level operations
+    /// Access the underlying `S3Provider` for lower-level operations
     pub fn inner(&self) -> &S3Provider {
         &self.inner
     }
 
-    /// Convert into the underlying S3Provider
+    /// Convert into the underlying `S3Provider`
     pub fn into_inner(self) -> S3Provider {
         self.inner
     }
@@ -63,7 +63,7 @@ mod tests {
         // Act
         let provider = WasabiProvider::new(
             "my-bucket".into(),
-            "us-east-1".into(),
+            "us-east-1",
             "wasabi-access-key".into(),
             "wasabi-secret-key".into(),
         )
@@ -84,13 +84,9 @@ mod tests {
         let backend_ref_counts: Vec<usize> = regions
             .iter()
             .map(|region| {
-                let provider = WasabiProvider::new(
-                    "bucket".into(),
-                    (*region).into(),
-                    "key".into(),
-                    "secret".into(),
-                )
-                .expect("should create wasabi provider for region");
+                let provider =
+                    WasabiProvider::new("bucket".into(), region, "key".into(), "secret".into())
+                        .expect("should create wasabi provider for region");
                 let backend = provider.inner().backend();
                 Arc::strong_count(&backend)
             })

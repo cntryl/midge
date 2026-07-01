@@ -50,6 +50,16 @@ fn default_next_wal_seq() -> u64 {
     1
 }
 
+fn millis_since_epoch() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
 /// Cloud checkpoint for WAL coordination
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloudCheckpoint {
@@ -158,10 +168,7 @@ impl Manifest {
     /// Create a new column family
     pub fn create_column_family(&mut self, name: String) -> u32 {
         let id = self.next_cf_id();
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let created_at = millis_since_epoch();
 
         self.column_families.push(ColumnFamilyMeta {
             id,
@@ -202,19 +209,14 @@ impl Manifest {
             .iter_mut()
             .find(|cf| cf.id == cf_id && cf.deleted_at.is_none())
         {
-            cf.deleted_at = Some(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-            );
+            cf.deleted_at = Some(millis_since_epoch());
             true
         } else {
             false
         }
     }
 
-    /// Apply a ManifestEdit (journal replay or live append)
+    /// Apply a `ManifestEdit` (journal replay or live append)
     pub fn apply_edit(&mut self, edit: &crate::metadata::ManifestEdit) {
         match edit {
             crate::metadata::ManifestEdit::AddSst(meta) => {
@@ -381,11 +383,15 @@ mod tests {
         let mut manifest = Manifest::default();
 
         // Act
-        for i in 0..5 {
+        for i in 0_u64..5 {
             let file = FileMeta {
-                name: crate::sst::file_name(0, i as u32, i as u64),
-                level: i as u32,
-                size_bytes: 1000 + (i as u64 * 100),
+                name: crate::sst::file_name(
+                    0,
+                    u32::try_from(i).expect("loop index fits in u32"),
+                    i,
+                ),
+                level: u32::try_from(i).expect("loop index fits in u32"),
+                size_bytes: 1000 + (i * 100),
                 ..Default::default()
             };
             manifest.add_file(file);
@@ -653,17 +659,23 @@ mod tests {
         // Arrange
         let mut manifest = Manifest::default();
         let cf_id = manifest.create_column_family("cf".to_string());
-        let before = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let before = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .expect("timestamp fits in u64");
 
         // Act
         manifest.delete_column_family(cf_id);
-        let after = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let after = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .expect("timestamp fits in u64");
 
         // Assert: deleted_at is set and within time window
         let cf = manifest
@@ -690,7 +702,7 @@ mod tests {
         for level in 0..4 {
             for i in 0..3 {
                 manifest.add_file(FileMeta {
-                    name: format!("l{}_f{}.sst", level, i),
+                    name: format!("l{level}_f{i}.sst"),
                     level,
                     ..Default::default()
                 });

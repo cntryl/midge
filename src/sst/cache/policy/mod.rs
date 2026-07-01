@@ -2,7 +2,7 @@
 //!
 //! Pluggable eviction policies determining which blocks to evict when cache is full.
 //! - **LRU**: Least Recently Used
-//! - **TinyLFU**: Frequency + recency (W-TinyLFU)
+//! - **`TinyLFU`**: Frequency + recency (W-TinyLFU)
 //! - **CLOCK-Pro**: Strong scan resistance
 
 pub mod clockpro;
@@ -53,6 +53,7 @@ pub enum CachePolicyType {
 
 impl CachePolicyType {
     /// Create a policy instance (legacy trait object interface)
+    #[must_use]
     pub fn create(&self) -> Box<dyn CachePolicy> {
         match self {
             CachePolicyType::Lru => Box::new(LruPolicy::new()),

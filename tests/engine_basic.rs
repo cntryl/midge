@@ -1,7 +1,7 @@
 //! Core KV Engine Integration Tests
 //!
 //! Tests the basic put/get/delete operations end-to-end using the public
-//! MidgeEngine API. These tests are **storage-mode invariant**: every supported
+//! `MidgeEngine` API. These tests are **storage-mode invariant**: every supported
 //! backend (Memory, FS, Cloud) must pass with identical behavior.
 //!
 //! Naming convention:
@@ -22,7 +22,7 @@ use common::*;
 fn should_get_value_given_existing_key_when_put() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -41,8 +41,7 @@ fn should_get_value_given_existing_key_when_put() {
         assert_eq!(
             got,
             Some(Bytes::from_static(b"value")),
-            "unexpected value in mode: {}",
-            mode
+            "unexpected value in mode: {mode}"
         );
     });
 }
@@ -51,7 +50,7 @@ fn should_get_value_given_existing_key_when_put() {
 fn should_return_none_given_nonexistent_key_when_get() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -61,7 +60,7 @@ fn should_return_none_given_nonexistent_key_when_get() {
         let got = tx.get(b"nonexistent").expect("get");
 
         // Assert
-        assert_eq!(got, None, "expected None in mode: {}", mode);
+        assert_eq!(got, None, "expected None in mode: {mode}");
     });
 }
 
@@ -69,7 +68,7 @@ fn should_return_none_given_nonexistent_key_when_get() {
 fn should_overwrite_value_given_existing_key_when_put() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -94,8 +93,7 @@ fn should_overwrite_value_given_existing_key_when_put() {
         assert_eq!(
             got,
             Some(Bytes::from_static(b"value2")),
-            "incorrect overwrite behavior in mode: {}",
-            mode
+            "incorrect overwrite behavior in mode: {mode}"
         );
     });
 }
@@ -104,7 +102,7 @@ fn should_overwrite_value_given_existing_key_when_put() {
 fn should_handle_empty_value_when_put() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -120,7 +118,7 @@ fn should_handle_empty_value_when_put() {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin_tx");
         let got = tx.get(b"key").expect("get empty");
-        assert_eq!(got, Some(Bytes::new()), "failed in mode: {}", mode);
+        assert_eq!(got, Some(Bytes::new()), "failed in mode: {mode}");
     });
 }
 
@@ -128,7 +126,7 @@ fn should_handle_empty_value_when_put() {
 fn should_handle_binary_data_when_put() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
         let data = vec![0, 1, 2, 3, 255, 254, 253];
 
@@ -148,8 +146,7 @@ fn should_handle_binary_data_when_put() {
         assert_eq!(
             got,
             Some(Bytes::from(data)),
-            "binary mismatch in mode: {}",
-            mode
+            "binary mismatch in mode: {mode}"
         );
     });
 }
@@ -158,7 +155,7 @@ fn should_handle_binary_data_when_put() {
 fn should_return_none_given_deleted_key_when_get() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx = engine
@@ -180,7 +177,7 @@ fn should_return_none_given_deleted_key_when_get() {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin_tx");
         let got = tx.get(b"key").expect("get");
-        assert_eq!(got, None, "expected None after delete in mode: {}", mode);
+        assert_eq!(got, None, "expected None after delete in mode: {mode}");
     });
 }
 
@@ -188,7 +185,7 @@ fn should_return_none_given_deleted_key_when_get() {
 fn should_succeed_given_nonexistent_key_when_delete() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -205,11 +202,12 @@ fn should_succeed_given_nonexistent_key_when_delete() {
 
 #[test]
 fn should_handle_many_operations_when_sequential() {
+    const COUNT: usize = 100;
+
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
-        const COUNT: usize = 100;
 
         // Act
         for i in 0..COUNT {
@@ -235,9 +233,7 @@ fn should_handle_many_operations_when_sequential() {
             assert_eq!(
                 got,
                 Some(Bytes::from(expected)),
-                "mismatch for key {} in mode: {}",
-                key,
-                mode
+                "mismatch for key {key} in mode: {mode}"
             );
         }
     });
@@ -248,7 +244,7 @@ fn should_retrieve_written_data_across_storage_modes() {
     // Validate that data written is retrievable across all storage modes.
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange: Open engine and write data
-        let engine = open_with_mode(opts, mode);
+        let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act: Perform various operations
@@ -269,8 +265,7 @@ fn should_retrieve_written_data_across_storage_modes() {
         let got = tx.get(b"artifact_test_0").expect("get");
         assert!(
             got.is_some(),
-            "failed to retrieve written data in mode: {}",
-            mode
+            "failed to retrieve written data in mode: {mode}"
         );
     });
 }

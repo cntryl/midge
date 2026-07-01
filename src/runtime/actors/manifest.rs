@@ -24,7 +24,7 @@ impl ManifestActor {
     /// Add a new SST file to the manifest
     pub fn add_sst(&mut self, state: &mut RuntimeState, file_meta: FileMeta) -> MidgeResult<()> {
         // Validate SST file exists and is readable (defensive: avoid manifest pointing at corrupt file)
-        if !state.memory_mode {
+        if !state.is_memory_mode() {
             let sst_path = state.sst_dir.join(&file_meta.name);
             if !sst_path.exists() {
                 return Err(crate::common::MidgeError::Internal(format!(
@@ -43,7 +43,7 @@ impl ManifestActor {
         }
 
         // Append to manifest journal (durable edit log) - skip in memory mode
-        if !state.memory_mode {
+        if !state.is_memory_mode() {
             let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
                 name: file_meta.name.clone(),
                 level: file_meta.level,
@@ -96,15 +96,15 @@ impl ManifestActor {
     pub fn compaction_complete(
         &mut self,
         state: &mut RuntimeState,
-        removed: Vec<String>,
-        added: Vec<FileMeta>,
+        removed: &[String],
+        added: &[FileMeta],
     ) -> MidgeResult<()> {
         // Append compaction edits to manifest journal as a single batch (reduces fixed overhead)
         let mut edits = Vec::with_capacity(removed.len() + added.len());
-        for n in &removed {
+        for n in removed {
             edits.push(crate::metadata::ManifestEdit::RemoveSst { name: n.clone() });
         }
-        for f in &added {
+        for f in added {
             edits.push(crate::metadata::ManifestEdit::AddSst(
                 crate::metadata::FileMeta {
                     name: f.name.clone(),
@@ -135,7 +135,7 @@ impl ManifestActor {
         state.manifest.files.retain(|f| !removed.contains(&f.name));
 
         // Add new files
-        for file_meta in &added {
+        for file_meta in added {
             let manifest_meta = crate::metadata::FileMeta {
                 name: file_meta.name.clone(),
                 level: file_meta.level,
@@ -163,9 +163,9 @@ impl ManifestActor {
     }
 
     /// Persist manifest to disk
-    pub fn persist(&self, state: &RuntimeState) -> MidgeResult<()> {
+    pub fn persist(state: &RuntimeState) -> MidgeResult<()> {
         // Skip persistence in memory mode
-        if state.memory_mode {
+        if state.is_memory_mode() {
             tracing::debug!("Manifest: skipping persistence in memory mode");
             return Ok(());
         }
@@ -189,28 +189,32 @@ impl ManifestActor {
     pub fn create_column_family(
         &mut self,
         state: &mut RuntimeState,
-        name: String,
+        name: &str,
     ) -> MidgeResult<u32> {
         // If the CF already exists and is active, return its id (idempotent CF creation).
-        if let Some(existing) = state.manifest.get_column_family_by_name(&name) {
+        if let Some(existing) = state.manifest.get_column_family_by_name(name) {
             let cf_id = existing.id;
             // Ensure runtime state has a ColumnFamilyState for it (recovery path)
             state.column_families.entry(cf_id).or_insert_with(|| {
-                crate::runtime::state::ColumnFamilyState::new(cf_id, name.clone())
+                crate::runtime::state::ColumnFamilyState::new(cf_id, name.to_string())
             });
             tracing::info!(cf_id = cf_id, cf_name = %name, "Manifest: column family already exists, returning existing id");
             return Ok(cf_id);
         }
 
+        let name = name.to_string();
+
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis() as u64;
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
 
         let cf_id = state.manifest.create_column_family(name.clone());
 
         // Append create CF to journal (skip in memory mode)
-        if !state.memory_mode {
+        if !state.is_memory_mode() {
             let edit = crate::metadata::ManifestEdit::CreateColumnFamily {
                 id: cf_id,
                 name: name.clone(),
@@ -234,7 +238,7 @@ impl ManifestActor {
     pub fn drop_column_family(
         &mut self,
         state: &mut RuntimeState,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     ) -> MidgeResult<()> {
         // Prevent dropping default CF
         if cf_id == 0 {
@@ -245,13 +249,12 @@ impl ManifestActor {
 
         if !state.manifest.delete_column_family(cf_id) {
             return Err(crate::common::MidgeError::Internal(format!(
-                "Column family {} not found or already deleted",
-                cf_id
+                "Column family {cf_id} not found or already deleted"
             )));
         }
 
         // Append drop CF edit to journal (skip in memory mode)
-        if !state.memory_mode {
+        if !state.is_memory_mode() {
             let edit = crate::metadata::ManifestEdit::DropColumnFamily { id: cf_id };
             crate::metadata::append_edit(&state.db_path, &edit)?;
         }
@@ -276,6 +279,8 @@ impl Default for ManifestActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sst::types::SST_FOOTER_MAGIC;
+    use std::io::Write;
 
     #[test]
     fn should_initialize_manifest_actor_with_zero_pending_edits() {
@@ -387,7 +392,7 @@ mod tests {
         // Arrange: create a temp dir and a leftover .tmp file (simulate crash before rename)
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let sst_name = crate::sst::file_name(0, 0, 2);
-        let tmp_name = format!("{}.tmp", sst_name);
+        let tmp_name = format!("{sst_name}.tmp");
         let tmp_path = tmp.path().join(&tmp_name);
 
         // Write a temp file but do not rename
@@ -428,11 +433,9 @@ mod tests {
         let sst_path = state.sst_dir.join(&sst_name);
 
         // Write a minimal valid SST footer so the reader's validation accepts it
-        use crate::sst::types::SST_FOOTER_MAGIC;
         let mut f = std::fs::File::create(&sst_path)?;
         let mut buf = vec![0u8; 48];
         buf[40..48].copy_from_slice(&SST_FOOTER_MAGIC.to_le_bytes());
-        use std::io::Write;
         f.write_all(&buf)?;
         f.sync_all()?;
         assert!(

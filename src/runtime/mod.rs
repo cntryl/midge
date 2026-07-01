@@ -5,7 +5,7 @@
 //!
 //! # Architecture
 //!
-//! - **EventLoop**: Receives messages and dispatches to actors
+//! - **`EventLoop`**: Receives messages and dispatches to actors
 //! - **State**: Centralized mutable state owned by runtime
 //! - **Actors**: Stateless handlers that process messages and return state updates
 //! - **Actors**: Stateless handlers that process messages and return state updates
@@ -14,6 +14,7 @@ pub mod actors;
 pub mod durability;
 pub mod event_loop;
 pub mod intent_persistence;
+pub(crate) mod read_resources;
 pub mod read_snapshot;
 pub mod snapshot_cache;
 pub mod state;
@@ -77,6 +78,7 @@ pub struct RuntimeConfig {
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
     pub compression_policy: crate::sst::compression::CompressionPolicy,
+    pub block_cache_size: usize,
     /// Fencing epoch from leader election.  Stamped on every WAL record.
     pub writer_epoch: u64,
     /// Shared lease-health flag.  Set to `false` by the heartbeat thread when
@@ -98,6 +100,7 @@ impl Default for RuntimeConfig {
             hybrid_storage_events: None,
             cloud_metadata_storage: None,
             compression_policy: crate::sst::compression::CompressionPolicy::default(),
+            block_cache_size: 128 * 1024 * 1024,
             writer_epoch: 0,
             lease_healthy: None,
             leader_store: None,
@@ -107,6 +110,8 @@ impl Default for RuntimeConfig {
 
 /// Global request ID counter for routing responses to correct requesters.
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+const WRITE_STALL_STATUS_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Allocate a new, globally unique request ID.
 ///
@@ -145,7 +150,7 @@ pub struct CompactionPlan {
     pub input_files: Vec<String>,
     pub source_level: u32,
     pub target_level: u32,
-    pub cf_id: crate::engine::ColumnFamilyId,
+    pub cf_id: crate::types::ColumnFamilyId,
 }
 
 /// Simplified file metadata for message passing.
@@ -156,7 +161,7 @@ pub struct FileMeta {
     pub size_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_crc32c: Option<u32>,
-    pub cf_id: crate::engine::ColumnFamilyId,
+    pub cf_id: crate::types::ColumnFamilyId,
     pub smallest_key: Option<Vec<u8>>,
     pub largest_key: Option<Vec<u8>>,
     pub smallest_seq: Option<u64>,
@@ -173,18 +178,18 @@ pub struct FileMeta {
 #[derive(Debug, Clone)]
 pub enum TransactionOp {
     Put {
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Bytes,
         value: Bytes,
         ttl_seconds: Option<u64>,
         insert_only: bool,
     },
     Delete {
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Bytes,
     },
     DeleteRange {
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start_key: Bytes,
         end_key: Bytes,
     },
@@ -205,11 +210,11 @@ pub enum IntentLogEntry {
     /// Seqno allocated
     SeqnoAllocated {
         seqno: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     },
     /// Flush plan created
     FlushPlanned {
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         seqno_range: (u64, u64),
     },
     /// Compaction plan created
@@ -220,14 +225,14 @@ pub enum IntentLogEntry {
     /// Flush output SST is durable and awaiting publication cleanup.
     FlushPublish {
         phase: PublicationPhase,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         sequence: u64,
         file_meta: FileMeta,
     },
     /// Compaction output SSTs are durable and awaiting publication cleanup.
     CompactionPublish {
         phase: PublicationPhase,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         removed: Vec<String>,
         added: Vec<FileMeta>,
     },
@@ -253,12 +258,12 @@ pub enum RuntimeMsg {
     /// Request memtable flush for a column family.
     FlushMemtable {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     },
     /// Memtable flush completed.
     FlushComplete {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         sst_name: String,
         sequence: u64,
     },
@@ -276,7 +281,7 @@ pub enum RuntimeMsg {
         request_id: u64,
         input_ssts: Vec<String>,
         output_ssts: Vec<String>,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         target_level: u32,
         succeeded: bool,
     },
@@ -285,7 +290,7 @@ pub enum RuntimeMsg {
     /// Append record to WAL.
     WalAppend {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Vec<u8>,
         value: Option<Vec<u8>>,
         ttl_seconds: Option<u64>, // TTL in seconds, None means no expiration
@@ -295,7 +300,7 @@ pub enum RuntimeMsg {
     /// Append delete range tombstone to WAL.
     WalAppendDeleteRange {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
         durability_policy: Option<DurabilityPolicy>,
@@ -305,14 +310,15 @@ pub enum RuntimeMsg {
     ///
     /// Sequence numbers are allocated in-order inside the runtime.
     /// The response returns the last allocated sequence for the transaction.
-    /// The durability_policy parameter allows per-request durability control
-    /// (e.g., BestEffort for bulk loads to skip WAL writes entirely).
+    /// The `durability_policy` parameter allows per-request durability control
+    /// (e.g., `BestEffort` for bulk loads to skip WAL writes entirely).
     ApplyTransaction {
         request_id: u64,
         ops: Vec<TransactionOp>,
         durability_policy: Option<DurabilityPolicy>,
         start_sequence: Option<u64>,
         isolation_policy: TransactionIsolationPolicy,
+        response_tx: Option<Sender<RuntimeResponse>>,
     },
     /// Sync WAL to disk.
     WalSync { request_id: u64 },
@@ -365,7 +371,7 @@ pub enum RuntimeMsg {
     /// Drop a column family (soft delete).
     ManifestDropColumnFamily {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     },
 
     /// Begin an ingest barrier: prevent new compactions, bump ingest epoch,
@@ -397,28 +403,28 @@ pub enum RuntimeMsg {
     /// Query a value from memtables and SST files.
     ///
     /// INVARIANT: Reads must respect the durability frontier.
-    /// If requested_durability is Strict/Steady, the read must not return data
-    /// with seqno > local_durable_seq. Reads at higher seqnos are queued in
-    /// durability_waiters until the frontier advances.
+    /// If `requested_durability` is Strict/Steady, the read must not return data
+    /// with seqno > `local_durable_seq`. Reads at higher seqnos are queued in
+    /// `durability_waiters` until the frontier advances.
     Read {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         key: Vec<u8>,
         sequence: u64, // Read at this sequence number or earlier.
-        requested_durability: crate::engine::api::Durability, // Durability level requested
+        requested_durability: crate::types::ReadDurability, // Durability level requested
     },
     /// Scan a range of keys from memtables and SST files.
     ///
     /// INVARIANT: Range scans must respect the durability frontier.
-    /// Same semantics as Read: if requested_durability is Strict/Steady,
-    /// the scan must not return data with seqno > local_durable_seq.
+    /// Same semantics as Read: if `requested_durability` is Strict/Steady,
+    /// the scan must not return data with seqno > `local_durable_seq`.
     RangeScan {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         start: Vec<u8>,
         end: Vec<u8>,
         sequence: u64, // Read at this sequence number or earlier.
-        requested_durability: crate::engine::api::Durability, // Durability level requested
+        requested_durability: crate::types::ReadDurability, // Durability level requested
     },
 
     // === Observability ===
@@ -447,18 +453,18 @@ pub enum RuntimeMsg {
     /// allowing transactions to execute reads directly without message passing.
     CaptureReadSnapshot {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
         sequence: u64,
     },
 
     /// Combined begin-transaction: atomically fetch current sequence AND capture
     /// a read snapshot in a single event-loop round-trip.
     ///
-    /// Replaces the previous two-message pattern (GetCurrentSequence + CaptureReadSnapshot)
+    /// Replaces the previous two-message pattern (`GetCurrentSequence` + `CaptureReadSnapshot`)
     /// to halve the message-passing overhead of `begin_tx`.
     BeginTransaction {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     },
 
     /// Register a transaction snapshot so compaction/GC can respect active readers.
@@ -475,7 +481,7 @@ pub enum RuntimeMsg {
     UnregisterSnapshot { snapshot_id: u64 },
 
     // === Control ===
-    /// Shutdown the runtime (no request_id; fire-and-forget).
+    /// Shutdown the runtime (no `request_id`; fire-and-forget).
     Shutdown,
     /// Trigger a full compaction sweep and wait for completion.
     CompactAll { request_id: u64 },
@@ -485,10 +491,10 @@ pub enum RuntimeMsg {
     StartupPing { request_id: u64 },
 
     /// Check if writes should be stalled for a column family.
-    /// Used by Engine::commit() to expose backpressure before accepting writes.
+    /// Used by `Engine::commit()` to expose backpressure before accepting writes.
     CheckWriteStall {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     },
 
     /// Block until writes are no longer stalled for `cf_id`.
@@ -497,7 +503,7 @@ pub enum RuntimeMsg {
     /// until a stall-clearing event occurs (e.g. flush completion).
     WaitForWriteStallClear {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     },
 
     /// Best-effort cancel for a previous `WaitForWriteStallClear` request.
@@ -508,12 +514,23 @@ pub enum RuntimeMsg {
 }
 
 impl RuntimeMsg {
-    /// Extract the request_id for messages that expect a response.
+    /// Extract the `request_id` for messages that expect a response.
     ///
     /// Returns `None` for messages that do not participate in request/response
     /// routing (e.g., `Shutdown`).
     pub fn request_id(&self) -> Option<u64> {
-        use RuntimeMsg::*;
+        use RuntimeMsg::{
+            ApplyTransaction, BeginIngest, BeginTransaction, CancelWaitForWriteStallClear,
+            CaptureReadSnapshot, CheckCompaction, CheckGc, CheckWriteStall, CloudUploadComplete,
+            CloudUploadSst, CloudUploadWal, CompactAll, CompactionComplete, DeleteObsoleteSsts,
+            EndIngest, FlushComplete, FlushMemtable, GetCurrentSequence, GetIngestState,
+            GetReadAmpMetrics, GetRecoveryMetrics, GetRuntimeConfig, GetRuntimeMetrics,
+            GetStorageLayout, ManifestAddSst, ManifestCompactionComplete,
+            ManifestCreateColumnFamily, ManifestDropColumnFamily, ManifestPersist, Noop, RangeScan,
+            Read, RegisterSnapshot, RunCompaction, SealWalForCloud, SetRuntimeConfig, Shutdown,
+            StartupPing, UnregisterSnapshot, WaitForWriteStallClear, WalAppend,
+            WalAppendDeleteRange, WalRotate, WalSync, WalSyncComplete,
+        };
         match self {
             FlushMemtable { request_id, .. }
             | FlushComplete { request_id, .. }
@@ -558,14 +575,23 @@ impl RuntimeMsg {
             | CheckWriteStall { request_id, .. }
             | WaitForWriteStallClear { request_id, .. } => Some(*request_id),
 
-            CancelWaitForWriteStallClear { .. } | UnregisterSnapshot { .. } => None,
-
-            Shutdown => None,
+            CancelWaitForWriteStallClear { .. } | UnregisterSnapshot { .. } | Shutdown => None,
         }
     }
 
     pub fn kind_name(&self) -> &'static str {
-        use RuntimeMsg::*;
+        use RuntimeMsg::{
+            ApplyTransaction, BeginIngest, BeginTransaction, CancelWaitForWriteStallClear,
+            CaptureReadSnapshot, CheckCompaction, CheckGc, CheckWriteStall, CloudUploadComplete,
+            CloudUploadSst, CloudUploadWal, CompactAll, CompactionComplete, DeleteObsoleteSsts,
+            EndIngest, FlushComplete, FlushMemtable, GetCurrentSequence, GetIngestState,
+            GetReadAmpMetrics, GetRecoveryMetrics, GetRuntimeConfig, GetRuntimeMetrics,
+            GetStorageLayout, ManifestAddSst, ManifestCompactionComplete,
+            ManifestCreateColumnFamily, ManifestDropColumnFamily, ManifestPersist, Noop, RangeScan,
+            Read, RegisterSnapshot, RunCompaction, SealWalForCloud, SetRuntimeConfig, Shutdown,
+            StartupPing, UnregisterSnapshot, WaitForWriteStallClear, WalAppend,
+            WalAppendDeleteRange, WalRotate, WalSync, WalSyncComplete,
+        };
         match self {
             FlushMemtable { .. } => "FlushMemtable",
             FlushComplete { .. } => "FlushComplete",
@@ -618,7 +644,7 @@ impl RuntimeMsg {
 
 /// Response from runtime operations.
 ///
-/// Copilot: every response variant MUST carry the originating request_id.
+/// Copilot: every response variant MUST carry the originating `request_id`.
 #[derive(Debug)]
 pub enum RuntimeResponse {
     Ok {
@@ -665,7 +691,7 @@ pub enum RuntimeResponse {
     },
     ColumnFamilyCreated {
         request_id: u64,
-        cf_id: crate::engine::ColumnFamilyId,
+        cf_id: crate::types::ColumnFamilyId,
     },
     ReadAmpMetricsSnapshot {
         request_id: u64,
@@ -692,13 +718,13 @@ pub enum RuntimeResponse {
     /// Stable operator-facing runtime metrics snapshot.
     RuntimeMetricsSnapshot {
         request_id: u64,
-        snapshot: Box<crate::engine::RuntimeMetricsSnapshot>,
+        snapshot: Box<crate::types::RuntimeMetricsSnapshot>,
     },
 
     /// Stable operator-facing storage layout snapshot.
     StorageLayoutSnapshot {
         request_id: u64,
-        snapshot: crate::engine::StorageLayoutSnapshot,
+        snapshot: crate::types::StorageLayoutSnapshot,
     },
 
     /// Current authoritative runtime sequence.
@@ -713,7 +739,7 @@ pub enum RuntimeResponse {
         snapshot: Arc<super::runtime::read_snapshot::ReadSnapshot>,
     },
 
-    /// Combined response for BeginTransaction: sequence + snapshot in one round-trip.
+    /// Combined response for `BeginTransaction`: sequence + snapshot in one round-trip.
     BeginTransactionResult {
         request_id: u64,
         /// Start sequence for the transaction (current committed sequence).
@@ -771,7 +797,7 @@ impl RuntimeResponse {
     }
 }
 
-/// ResponseRouter - per-request routing using oneshot-style channels.
+/// `ResponseRouter` - per-request routing using oneshot-style channels.
 ///
 /// Uses `DashMap` for lock-free concurrent access, eliminating the
 /// `Mutex<HashMap>` contention point between caller threads (register)
@@ -788,7 +814,7 @@ impl ResponseRouter {
         }
     }
 
-    /// Register a new pending response for a given request_id.
+    /// Register a new pending response for a given `request_id`.
     ///
     /// Returns a receiver that will yield exactly one `RuntimeResponse`.
     pub fn register(&self, request_id: u64) -> Receiver<RuntimeResponse> {
@@ -823,14 +849,15 @@ impl ResponseRouter {
 /// Handle for submitting work to the runtime.
 ///
 /// Copilot:
-/// - Route responses by request_id using ResponseRouter.
-/// - Use per-request channels (bounded(1)) created via ResponseRouter::register.
-/// - Never use a single shared response_rx.
-/// - RuntimeHandle MUST be thread-safe and support concurrent callers.
+/// - Route responses by `request_id` using `ResponseRouter`.
+/// - Use per-request channels (bounded(1)) created via `ResponseRouter::register`.
+/// - Never use a single shared `response_rx`.
+/// - `RuntimeHandle` MUST be thread-safe and support concurrent callers.
 #[derive(Clone)]
 pub struct RuntimeHandle {
     msg_tx: Sender<RuntimeMsg>,
     router: Arc<ResponseRouter>,
+    ingest_active: Arc<std::sync::atomic::AtomicBool>,
     /// Lock-free snapshot cache for read-path bypass.
     ///
     /// Allows `begin_tx` to capture a read snapshot without event loop round-trip.
@@ -838,6 +865,14 @@ pub struct RuntimeHandle {
 }
 
 impl RuntimeHandle {
+    /// Return whether the runtime ingest barrier is currently active.
+    ///
+    /// This is intentionally a direct atomic read instead of an event-loop
+    /// message because transaction creation sits on the API hot path.
+    pub(crate) fn ingest_active(&self) -> bool {
+        self.ingest_active.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Submit a message to the runtime (fire-and-forget).
     ///
     /// For messages that expect a response, prefer `send_and_wait`.
@@ -847,7 +882,7 @@ impl RuntimeHandle {
             .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))
     }
 
-    /// Register a response channel for a request_id.
+    /// Register a response channel for a `request_id`.
     ///
     /// Intended for benchmarks to pre-register receivers and avoid
     /// per-iteration allocations in hot loops.
@@ -887,8 +922,7 @@ impl RuntimeHandle {
                     Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
                         waited += std::time::Duration::from_secs(2);
                         eprintln!(
-                            "[midge] still waiting for response: request_id={request_id} kind={msg_kind} waited={:?}",
-                            waited
+                            "[midge] still waiting for response: request_id={request_id} kind={msg_kind} waited={waited:?}"
                         );
                     }
                     Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
@@ -938,7 +972,7 @@ impl RuntimeHandle {
 
     /// Submit a message and wait for a response that matches a predicate.
     ///
-    /// Since each request_id yields exactly one response, this is mainly
+    /// Since each `request_id` yields exactly one response, this is mainly
     /// useful for callers that want to validate the response shape.
     pub fn send_and_wait_filtered<F>(
         &self,
@@ -963,25 +997,87 @@ impl RuntimeHandle {
         self.send(RuntimeMsg::Shutdown)
     }
 
+    pub(crate) fn send_apply_transaction_and_wait(
+        &self,
+        request_id: u64,
+        ops: Vec<TransactionOp>,
+        durability_policy: Option<DurabilityPolicy>,
+        start_sequence: Option<u64>,
+        isolation_policy: TransactionIsolationPolicy,
+    ) -> MidgeResult<RuntimeResponse> {
+        let (response_tx, response_rx) = channel::bounded(1);
+        self.msg_tx
+            .send(RuntimeMsg::ApplyTransaction {
+                request_id,
+                ops,
+                durability_policy,
+                start_sequence,
+                isolation_policy,
+                response_tx: Some(response_tx),
+            })
+            .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))?;
+
+        response_rx
+            .recv()
+            .map_err(|_| MidgeError::Internal("Response channel closed".to_string()))
+    }
+
+    pub(crate) fn send_apply_transaction_and_wait_timeout(
+        &self,
+        request_id: u64,
+        ops: Vec<TransactionOp>,
+        durability_policy: Option<DurabilityPolicy>,
+        start_sequence: Option<u64>,
+        isolation_policy: TransactionIsolationPolicy,
+        timeout: Duration,
+    ) -> MidgeResult<Option<RuntimeResponse>> {
+        let (response_tx, response_rx) = channel::bounded(1);
+        self.msg_tx
+            .send(RuntimeMsg::ApplyTransaction {
+                request_id,
+                ops,
+                durability_policy,
+                start_sequence,
+                isolation_policy,
+                response_tx: Some(response_tx),
+            })
+            .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))?;
+
+        match response_rx.recv_timeout(timeout) {
+            Ok(response) => Ok(Some(response)),
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => Ok(None),
+            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                Err(MidgeError::Internal("Response channel closed".to_string()))
+            }
+        }
+    }
+
     /// Check if writes should be stalled for the given column family.
     ///
     /// Returns `true` if memory budget is exceeded (immutable memtable queue full
     /// or total memtable memory over threshold).
     ///
-    /// Used by Engine::commit() to expose backpressure to clients before
+    /// This probe is an advisory preflight. If the runtime cannot answer promptly,
+    /// report stalled instead of letting a client commit block indefinitely.
+    ///
+    /// Used by `Engine::commit()` to expose backpressure to clients before
     /// accepting new write transactions.
-    pub fn check_write_stall(&self, cf_id: crate::engine::ColumnFamilyId) -> MidgeResult<bool> {
-        let response = self.send_and_wait(RuntimeMsg::CheckWriteStall {
-            request_id: next_request_id()?,
-            cf_id,
-        })?;
+    pub fn check_write_stall(&self, cf_id: crate::types::ColumnFamilyId) -> MidgeResult<bool> {
+        let response = self.send_and_wait_timeout(
+            RuntimeMsg::CheckWriteStall {
+                request_id: next_request_id()?,
+                cf_id,
+            },
+            WRITE_STALL_STATUS_TIMEOUT,
+        )?;
 
         match response {
-            RuntimeResponse::WriteStallStatus { is_stalled, .. } => Ok(is_stalled),
-            RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(MidgeError::Internal(
+            Some(RuntimeResponse::WriteStallStatus { is_stalled, .. }) => Ok(is_stalled),
+            Some(RuntimeResponse::Error { error, .. }) => Err(error),
+            Some(_) => Err(MidgeError::Internal(
                 "Unexpected response to CheckWriteStall".to_string(),
             )),
+            None => Ok(true),
         }
     }
 }
@@ -1005,19 +1101,19 @@ pub struct Runtime {
 
 impl Runtime {
     /// Create a new runtime and a corresponding handle for submitting work.
-    pub fn new() -> MidgeResult<(Self, RuntimeHandle)> {
+    pub fn new() -> (Self, RuntimeHandle) {
         let (msg_tx, msg_rx) = channel::bounded(1000);
         let router = Arc::new(ResponseRouter::new());
 
         let trace_enabled = std::env::var("MIDGE_TRACE_RUNTIME")
-            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false);
+            .is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
 
         let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
 
         let handle = RuntimeHandle {
             msg_tx: msg_tx.clone(),
             router: router.clone(),
+            ingest_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             snapshot_cache,
         };
 
@@ -1029,7 +1125,7 @@ impl Runtime {
             router,
         };
 
-        Ok((runtime, handle))
+        (runtime, handle)
     }
 
     /// Start the runtime event loop in a background thread.
@@ -1054,11 +1150,13 @@ impl Runtime {
         let (init_tx, init_rx) = channel::bounded::<Result<(), String>>(1);
 
         let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
+        let ingest_active = Arc::clone(&state.ingest_active);
 
         // Handle for callers to use.
         let handle = RuntimeHandle {
             msg_tx: self.msg_tx.clone(),
             router: router.clone(),
+            ingest_active,
             snapshot_cache: snapshot_cache.clone(),
         };
 
@@ -1074,17 +1172,17 @@ impl Runtime {
                         event_loop.set_snapshot_cache(snapshot_cache);
                         // Signal successful initialization
                         let _ = init_tx.send(Ok(()));
-                        event_loop.run(msg_rx);
+                        event_loop.run(&msg_rx);
                     }
                     Err(e) => {
-                        let msg = format!("Failed to create event loop: {}", e);
+                        let msg = format!("Failed to create event loop: {e}");
                         tracing::error!("{}", msg);
                         // Signal initialization failure
                         let _ = init_tx.send(Err(msg));
                     }
                 }
             })
-            .map_err(|e| MidgeError::Internal(format!("Failed to spawn runtime thread: {}", e)))?;
+            .map_err(|e| MidgeError::Internal(format!("Failed to spawn runtime thread: {e}")))?;
 
         self.event_loop_handle = Some(event_loop_handle);
 
@@ -1287,7 +1385,7 @@ mod tests {
         assert!(RuntimeMsg::CompactAll { request_id: 8 }.kind_name() == "CompactAll");
 
         // Verify that CompactAll responds correctly when runtime is healthy
-        let (runtime, _handle) = Runtime::new().expect("create runtime");
+        let (runtime, _handle) = Runtime::new();
         let state = RuntimeState::new("/tmp/test_compact_all".into(), true);
         let (_runtime, h) = runtime
             .start_with_config(state, RuntimeConfig::default())
@@ -1479,7 +1577,7 @@ mod tests {
         // (no setup)
 
         // Act
-        let (runtime, handle) = Runtime::new().expect("Should create runtime");
+        let (runtime, handle) = Runtime::new();
 
         // Assert
         // Handle should be cloneable
@@ -1491,7 +1589,7 @@ mod tests {
     #[test]
     fn should_handle_send_noop_message() {
         // Arrange
-        let (runtime, handle) = Runtime::new().expect("Should create runtime");
+        let (runtime, handle) = Runtime::new();
         let msg = RuntimeMsg::Noop { request_id: 1 };
 
         // Act
@@ -1505,7 +1603,7 @@ mod tests {
     #[test]
     fn should_detect_closed_channel_on_send() {
         // Arrange
-        let (runtime, handle) = Runtime::new().expect("Should create runtime");
+        let (runtime, handle) = Runtime::new();
 
         // Act - Drop runtime to close channel
         drop(runtime);
@@ -1521,7 +1619,7 @@ mod tests {
     #[test]
     fn should_require_request_id_for_send_wait() {
         // Arrange
-        let (runtime, handle) = Runtime::new().expect("Should create runtime");
+        let (runtime, handle) = Runtime::new();
         let msg = RuntimeMsg::Shutdown;
 
         // Act
@@ -1540,11 +1638,9 @@ mod tests {
         // (no setup)
 
         // Act
-        let result = Runtime::new();
+        let (runtime, _handle) = Runtime::new();
 
         // Assert
-        assert!(result.is_ok());
-        let (runtime, _handle) = result.unwrap();
         drop(runtime);
     }
 
@@ -1554,7 +1650,7 @@ mod tests {
         // (no setup)
 
         // Act
-        let (_runtime, _handle) = Runtime::new().expect("Should create runtime");
+        let (_runtime, _handle) = Runtime::new();
 
         // Assert - Default should have tracing disabled
         // (Verified by not panicking)
@@ -1563,7 +1659,7 @@ mod tests {
     #[test]
     fn should_shutdown_runtime() {
         // Arrange
-        let (runtime, _handle) = Runtime::new().expect("Should create runtime");
+        let (runtime, _handle) = Runtime::new();
 
         // Act - Shutdown should not panic
         runtime.shutdown();

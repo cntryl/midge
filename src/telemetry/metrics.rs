@@ -3,7 +3,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::common::MidgeResult;
 use crate::telemetry::config::TelemetryConfig;
 
 /// Metric counters (atomic, zero-copy)
@@ -101,7 +100,7 @@ pub struct Metrics {
     pub idempotency_cache_evictions: Arc<AtomicU64>,
 
     // Phase 3 observability: Transaction and sequence metrics
-    /// Total number of pending transactions started (set pending_txn_min_seq)
+    /// Total number of pending transactions started (set `pending_txn_min_seq`)
     pub pending_txn_started: Arc<AtomicU64>,
     /// Total milliseconds transactions spent pending (sum of all durations)
     pub pending_txn_duration_ms_total: Arc<AtomicU64>,
@@ -123,8 +122,9 @@ pub struct Metrics {
 
 impl Metrics {
     /// Create a new metrics collector
-    pub fn new(_config: &TelemetryConfig) -> MidgeResult<Self> {
-        Ok(Self {
+    #[must_use]
+    pub fn new(config: &TelemetryConfig) -> Self {
+        Self {
             puts: Arc::new(AtomicU64::new(0)),
             deletes: Arc::new(AtomicU64::new(0)),
             merges: Arc::new(AtomicU64::new(0)),
@@ -197,8 +197,8 @@ impl Metrics {
             idempotency_cache_hits: Arc::new(AtomicU64::new(0)),
             event_loop_wakes: Arc::new(AtomicU64::new(0)),
             event_loop_batch_total: Arc::new(AtomicU64::new(0)),
-            enabled: _config.enabled && _config.enable_metrics,
-        })
+            enabled: config.enabled && config.features.enable_metrics,
+        }
     }
 
     #[inline]
@@ -647,7 +647,7 @@ impl Metrics {
             return None;
         }
         let hits = self.idempotency_cache_hits.load(Ordering::Relaxed);
-        Some(hits as f64 / total as f64)
+        Some(u64_to_f64(hits) / u64_to_f64(total))
     }
 
     /// Get average pending transaction duration in milliseconds
@@ -658,7 +658,7 @@ impl Metrics {
             return None;
         }
         let total = self.pending_txn_duration_ms_total.load(Ordering::Relaxed);
-        Some(total as f64 / count as f64)
+        Some(u64_to_f64(total) / u64_to_f64(count))
     }
 
     /// Get all metrics as a snapshot
@@ -700,6 +700,28 @@ impl Metrics {
             wal_fsync_count: self.wal_fsync_count.load(Ordering::Relaxed),
             wal_append_ns_total: self.wal_append_ns_total.load(Ordering::Relaxed),
             wal_fsync_ns_total: self.wal_fsync_ns_total.load(Ordering::Relaxed),
+            cloud_async_wal_segments_sealed: self
+                .cloud_async_wal_segments_sealed
+                .load(Ordering::Relaxed),
+            cloud_async_wal_bytes_sealed: self.cloud_async_wal_bytes_sealed.load(Ordering::Relaxed),
+            cloud_async_wal_seal_latency_us: self
+                .cloud_async_wal_seal_latency_us
+                .load(Ordering::Relaxed),
+            cloud_async_wal_uploads_started: self
+                .cloud_async_wal_uploads_started
+                .load(Ordering::Relaxed),
+            cloud_async_wal_uploads_completed: self
+                .cloud_async_wal_uploads_completed
+                .load(Ordering::Relaxed),
+            cloud_async_wal_uploads_failed: self
+                .cloud_async_wal_uploads_failed
+                .load(Ordering::Relaxed),
+            cloud_async_wal_upload_latency_us: self
+                .cloud_async_wal_upload_latency_us
+                .load(Ordering::Relaxed),
+            cloud_async_wal_ack_latency_us: self
+                .cloud_async_wal_ack_latency_us
+                .load(Ordering::Relaxed),
             wal_recovery_records_replayed: self
                 .wal_recovery_records_replayed
                 .load(Ordering::Relaxed),
@@ -749,6 +771,14 @@ pub struct MetricsSnapshot {
     pub wal_fsync_count: u64,
     pub wal_append_ns_total: u64,
     pub wal_fsync_ns_total: u64,
+    pub cloud_async_wal_segments_sealed: u64,
+    pub cloud_async_wal_bytes_sealed: u64,
+    pub cloud_async_wal_seal_latency_us: u64,
+    pub cloud_async_wal_uploads_started: u64,
+    pub cloud_async_wal_uploads_completed: u64,
+    pub cloud_async_wal_uploads_failed: u64,
+    pub cloud_async_wal_upload_latency_us: u64,
+    pub cloud_async_wal_ack_latency_us: u64,
     pub wal_recovery_records_replayed: u64,
     pub wal_recovery_bytes_replayed: u64,
     pub intent_log_replay_runs: u64,
@@ -762,7 +792,7 @@ impl MetricsSnapshot {
         if total == 0 {
             0.0
         } else {
-            self.cache_hits as f64 / total as f64
+            u64_to_f64(self.cache_hits) / u64_to_f64(total)
         }
     }
 
@@ -777,6 +807,13 @@ impl MetricsSnapshot {
     }
 }
 
+fn u64_to_f64(value: u64) -> f64 {
+    let upper = u32::try_from(value >> 32).unwrap_or(u32::MAX);
+    let lower_mask = u64::from(u32::MAX);
+    let lower = u32::try_from(value & lower_mask).unwrap_or(u32::MAX);
+    f64::from(upper) * 4_294_967_296.0 + f64::from(lower)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,7 +822,7 @@ mod tests {
     fn should_record_metrics_atomically() {
         // Arrange
         let config = TelemetryConfig::default().with_enabled(true);
-        let metrics = Metrics::new(&config).unwrap();
+        let metrics = Metrics::new(&config);
 
         // Act
         metrics.record_put();
@@ -803,7 +840,7 @@ mod tests {
     fn should_calculate_cache_hit_ratio() {
         // Arrange
         let config = TelemetryConfig::default().with_enabled(true);
-        let metrics = Metrics::new(&config).unwrap();
+        let metrics = Metrics::new(&config);
 
         // Act
         metrics.record_cache_hit();
@@ -820,7 +857,7 @@ mod tests {
     fn should_not_record_when_disabled() {
         // Arrange
         let config = TelemetryConfig::default().with_enabled(false);
-        let metrics = Metrics::new(&config).unwrap();
+        let metrics = Metrics::new(&config);
 
         // Act
         metrics.record_put();
@@ -836,7 +873,7 @@ mod tests {
     fn should_record_recovery_metrics_when_replay_occurs() {
         // Arrange
         let config = TelemetryConfig::default().with_enabled(true);
-        let metrics = Metrics::new(&config).unwrap();
+        let metrics = Metrics::new(&config);
 
         // Act
         metrics.record_wal_recovery(42, 4096);
@@ -855,7 +892,7 @@ mod tests {
     fn should_record_strict_write_conflict_metrics_with_breakdown() {
         // Arrange
         let config = TelemetryConfig::default().with_enabled(true);
-        let metrics = Metrics::new(&config).unwrap();
+        let metrics = Metrics::new(&config);
 
         // Act
         metrics.record_write_conflict_point();

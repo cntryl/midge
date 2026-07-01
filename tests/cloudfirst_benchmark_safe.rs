@@ -1,7 +1,7 @@
-//! CloudAsync durability policy verification tests
+//! `CloudAsync` durability policy verification tests
 //!
-//! Ensures CloudAsync background mode never blocks on single writes,
-//! while CloudStrict mode provides explicit cloud durability guarantees.
+//! Ensures `CloudAsync` background mode never blocks on single writes,
+//! while `CloudStrict` mode provides explicit cloud durability guarantees.
 
 mod common;
 use cntryl_midge::{TransactionMode, WriteOptions};
@@ -11,7 +11,7 @@ use common::{open_with_mode, opts_for_mode};
 fn should_batch_writes_when_using_cloud_mode() {
     // Arrange
     let opts = opts_for_mode("cloud");
-    let engine = open_with_mode(opts, "cloud");
+    let engine = open_with_mode(&opts, "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 
@@ -21,8 +21,8 @@ fn should_batch_writes_when_using_cloud_mode() {
         let mut tx = engine
             .begin_tx(cf_id, TransactionMode::ReadWrite)
             .expect("begin");
-        let key = format!("key_{:04}", i);
-        let value = format!("value_{:04}", i);
+        let key = format!("key_{i:04}");
+        let value = format!("value_{i:04}");
         tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
             .unwrap();
         tx.commit(WriteOptions::buffered()).unwrap();
@@ -33,9 +33,9 @@ fn should_batch_writes_when_using_cloud_mode() {
         let tx = engine
             .begin_tx(cf_id, TransactionMode::ReadOnly)
             .expect("begin");
-        let key = format!("key_{:04}", i);
+        let key = format!("key_{i:04}");
         let value = tx.get(key.as_bytes()).unwrap();
-        assert!(value.is_some(), "key_{:04} should exist", i);
+        assert!(value.is_some(), "key_{i:04} should exist");
     }
 }
 
@@ -43,7 +43,7 @@ fn should_batch_writes_when_using_cloud_mode() {
 fn should_support_cloud_strict_for_explicit_durability() {
     // Arrange
     let opts = opts_for_mode("cloud");
-    let engine = open_with_mode(opts, "cloud");
+    let engine = open_with_mode(&opts, "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 
@@ -70,7 +70,7 @@ fn should_support_cloud_strict_for_explicit_durability() {
 fn should_flush_cloud_segments_on_shutdown() {
     // Arrange
     let opts = opts_for_mode("cloud");
-    let engine = open_with_mode(opts, "cloud");
+    let engine = open_with_mode(&opts, "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 
@@ -79,8 +79,8 @@ fn should_flush_cloud_segments_on_shutdown() {
         let mut tx = engine
             .begin_tx(cf_id, TransactionMode::ReadWrite)
             .expect("begin");
-        let key = format!("shutdown_key_{:04}", i);
-        let value = format!("shutdown_value_{:04}", i);
+        let key = format!("shutdown_key_{i:04}");
+        let value = format!("shutdown_value_{i:04}");
         tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
             .unwrap();
         tx.commit(WriteOptions::buffered()).unwrap();

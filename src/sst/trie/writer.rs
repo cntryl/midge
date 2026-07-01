@@ -11,6 +11,7 @@ pub struct TrieWriter {
 
 impl TrieWriter {
     /// Create a new trie writer
+    #[must_use]
     pub fn new(enabled: bool) -> Self {
         Self {
             builder: TrieBuilder::new(),
@@ -22,6 +23,10 @@ impl TrieWriter {
     ///
     /// Only call this for the first key of each block.
     /// Keys must be added in sorted order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the key order is invalid or trie encoding fails.
     pub fn add_block_key(&mut self, key: &[u8], block_id: u32) -> MidgeResult<()> {
         if !self.enabled {
             return Ok(());
@@ -31,6 +36,7 @@ impl TrieWriter {
     }
 
     /// Finish building and return serialized trie
+    #[must_use]
     pub fn finish(self) -> Option<Vec<u8>> {
         if !self.enabled {
             return None;
@@ -45,11 +51,13 @@ impl TrieWriter {
     }
 
     /// Check if trie is enabled
+    #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
 
     /// Get number of nodes in trie
+    #[must_use]
     pub fn node_count(&self) -> usize {
         self.builder.node_count()
     }
@@ -303,8 +311,10 @@ mod tests {
 
         // Act
         for i in 0..100 {
-            let key = format!("key_{:04}", i).into_bytes();
-            writer.add_block_key(&key, i as u32).unwrap();
+            let key = format!("key_{i:04}").into_bytes();
+            writer
+                .add_block_key(&key, u32::try_from(i).unwrap_or(u32::MAX))
+                .unwrap();
         }
         let result = writer.finish();
 
@@ -314,8 +324,11 @@ mod tests {
 
         let reader = TrieReader::new(&data).unwrap();
         for i in 0..100 {
-            let key = format!("key_{:04}", i).into_bytes();
-            assert_eq!(reader.find_block(&key), Some(i as u32));
+            let key = format!("key_{i:04}").into_bytes();
+            assert_eq!(
+                reader.find_block(&key),
+                Some(u32::try_from(i).unwrap_or(u32::MAX))
+            );
         }
     }
 
@@ -401,7 +414,7 @@ mod tests {
 
         // Act
         for (idx, &bid) in block_ids.iter().enumerate() {
-            let key = format!("key_{}", idx).into_bytes();
+            let key = format!("key_{idx}").into_bytes();
             writer.add_block_key(&key, bid).unwrap();
         }
         let result = writer.finish();
@@ -412,7 +425,7 @@ mod tests {
 
         let reader = TrieReader::new(&data).unwrap();
         for (idx, &bid) in block_ids.iter().enumerate() {
-            let key = format!("key_{}", idx).into_bytes();
+            let key = format!("key_{idx}").into_bytes();
             assert_eq!(reader.find_block(&key), Some(bid));
         }
     }

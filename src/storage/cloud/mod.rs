@@ -19,7 +19,7 @@
 //! ## Async Model
 //!
 //! - `submit_*()` methods return immediately (non-blocking)
-//! - Results are sent back via `CloudCallback` channels (mpsc::Sender<CloudEvent>)
+//! - Results are sent back via `CloudCallback` channels (`mpsc::Sender`<CloudEvent>)
 //! - Events are received asynchronously but callback processing is synchronous
 //! - No futures in the engine: all async work happens in `CloudExecutor` embedded tokio runtime
 
@@ -56,7 +56,7 @@ impl<T: Clone> CloudOutcome<T> {
     pub fn from_result(result: Result<T, MidgeError>) -> Self {
         match result {
             Ok(value) => CloudOutcome::Ok(value),
-            Err(err) => CloudOutcome::Err(format!("{:?}", err)),
+            Err(err) => CloudOutcome::Err(format!("{err:?}")),
         }
     }
 }
@@ -64,31 +64,30 @@ impl<T: Clone> CloudOutcome<T> {
 /// Cloud operation completion events sent back via callback.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
-#[allow(clippy::enum_variant_names)]
 pub enum CloudEvent {
-    PutComplete {
+    Put {
         key: String,
         result: CloudOutcome<()>,
     },
-    GetComplete {
+    Get {
         key: String,
         result: CloudOutcome<Vec<u8>>,
     },
-    GetRangeComplete {
+    GetRange {
         key: String,
         start: u64,
         end: Option<u64>,
         result: CloudOutcome<Vec<u8>>,
     },
-    DeleteComplete {
+    Delete {
         key: String,
         result: CloudOutcome<()>,
     },
-    ListComplete {
+    List {
         prefix: String,
         result: CloudOutcome<Vec<String>>,
     },
-    HeadComplete {
+    Head {
         key: String,
         result: CloudOutcome<ObjectMetadata>,
     },
@@ -141,16 +140,16 @@ pub trait CloudBackend: Send + Sync + 'static {
     /// provider to allow conditional writes.
     fn submit_put(
         &self,
-        key: String,
+        key: &str,
         data: Vec<u8>,
         headers: Vec<(String, String)>,
         callback: CloudCallback,
     );
-    fn submit_get(&self, key: String, callback: CloudCallback);
-    fn submit_get_range(&self, key: String, start: u64, end: Option<u64>, callback: CloudCallback);
-    fn submit_delete(&self, key: String, headers: Vec<(String, String)>, callback: CloudCallback);
-    fn submit_list(&self, prefix: String, callback: CloudCallback);
-    fn submit_head(&self, key: String, callback: CloudCallback);
+    fn submit_get(&self, key: &str, callback: CloudCallback);
+    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback);
+    fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback);
+    fn submit_list(&self, prefix: &str, callback: CloudCallback);
+    fn submit_head(&self, key: &str, callback: CloudCallback);
 }
 
 /// Deterministic mock backend for testing (synchronous).
@@ -200,18 +199,19 @@ impl Default for MockCloudBackend {
 impl CloudBackend for MockCloudBackend {
     fn submit_put(
         &self,
-        key: String,
+        key: &str,
         data: Vec<u8>,
         headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
+        let key = key.to_string();
         // Honor `If-None-Match: *` (conditional create).
         let if_none_match = headers
             .iter()
             .any(|(k, v)| k.eq_ignore_ascii_case("if-none-match") && v == "*");
         if if_none_match && self.storage.lock().contains_key(&key) {
             // Simulate conditional failure (precondition failed)
-            let event = CloudEvent::PutComplete {
+            let event = CloudEvent::Put {
                 key,
                 result: CloudOutcome::Err("precondition failed".to_string()),
             };
@@ -227,7 +227,7 @@ impl CloudBackend for MockCloudBackend {
         {
             let exists = self.storage.lock().contains_key(&key);
             if !exists {
-                let event = CloudEvent::PutComplete {
+                let event = CloudEvent::Put {
                     key,
                     result: CloudOutcome::Err("precondition failed".to_string()),
                 };
@@ -237,10 +237,10 @@ impl CloudBackend for MockCloudBackend {
 
             // compare expected value to stored generation-based etag
             let gens_lock = self.gens.lock();
-            let current_gen = gens_lock.get(&key).cloned().unwrap_or(0);
-            let current_etag = format!("mock-gen-{}", current_gen);
+            let current_gen = gens_lock.get(&key).copied().unwrap_or(0);
+            let current_etag = format!("mock-gen-{current_gen}");
             if expected != &current_etag {
-                let event = CloudEvent::PutComplete {
+                let event = CloudEvent::Put {
                     key,
                     result: CloudOutcome::Err("precondition failed".to_string()),
                 };
@@ -255,18 +255,19 @@ impl CloudBackend for MockCloudBackend {
             store.insert(key.clone(), data.clone());
         }
         let mut gens = self.gens.lock();
-        let new_gen = gens.get(&key).cloned().unwrap_or(0).saturating_add(1);
+        let new_gen = gens.get(&key).copied().unwrap_or(0).saturating_add(1);
         gens.insert(key.clone(), new_gen);
 
         self.uploads.lock().push((key.clone(), data.len() as u64));
-        let event = CloudEvent::PutComplete {
+        let event = CloudEvent::Put {
             key,
             result: CloudOutcome::Ok(()),
         };
         let _ = callback.send(event);
     }
 
-    fn submit_get(&self, key: String, callback: CloudCallback) {
+    fn submit_get(&self, key: &str, callback: CloudCallback) {
+        let key = key.to_string();
         let result = self
             .storage
             .lock()
@@ -274,25 +275,27 @@ impl CloudBackend for MockCloudBackend {
             .cloned()
             .ok_or(MidgeError::NotFound);
         self.downloads.lock().push(key.clone());
-        let event = CloudEvent::GetComplete {
+        let event = CloudEvent::Get {
             key,
             result: CloudOutcome::from_result(result),
         };
         let _ = callback.send(event);
     }
 
-    fn submit_get_range(&self, key: String, start: u64, end: Option<u64>, callback: CloudCallback) {
+    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
+        let key = key.to_string();
         let result = self
             .storage
             .lock()
             .get(&key)
             .map(|data| {
-                let end_idx = end.unwrap_or(data.len() as u64) as usize;
-                let start_idx = start as usize;
+                let end_idx =
+                    usize::try_from(end.unwrap_or(usize_to_u64(data.len()))).unwrap_or(usize::MAX);
+                let start_idx = usize::try_from(start).unwrap_or(usize::MAX);
                 data[start_idx..end_idx].to_vec()
             })
             .ok_or(MidgeError::NotFound);
-        let event = CloudEvent::GetRangeComplete {
+        let event = CloudEvent::GetRange {
             key,
             start,
             end,
@@ -301,14 +304,15 @@ impl CloudBackend for MockCloudBackend {
         let _ = callback.send(event);
     }
 
-    fn submit_delete(&self, key: String, headers: Vec<(String, String)>, callback: CloudCallback) {
+    fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
+        let key = key.to_string();
         if let Some((_, expected)) = headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("if-match"))
         {
             let exists = self.storage.lock().contains_key(&key);
             if !exists {
-                let event = CloudEvent::DeleteComplete {
+                let event = CloudEvent::Delete {
                     key,
                     result: CloudOutcome::Err("precondition failed".to_string()),
                 };
@@ -316,10 +320,10 @@ impl CloudBackend for MockCloudBackend {
                 return;
             }
 
-            let current_gen = self.gens.lock().get(&key).cloned().unwrap_or(0);
-            let current_etag = format!("mock-gen-{}", current_gen);
+            let current_gen = self.gens.lock().get(&key).copied().unwrap_or(0);
+            let current_etag = format!("mock-gen-{current_gen}");
             if expected.trim_matches('"') != current_etag {
-                let event = CloudEvent::DeleteComplete {
+                let event = CloudEvent::Delete {
                     key,
                     result: CloudOutcome::Err("precondition failed".to_string()),
                 };
@@ -330,14 +334,15 @@ impl CloudBackend for MockCloudBackend {
 
         self.storage.lock().remove(&key);
         self.gens.lock().remove(&key);
-        let event = CloudEvent::DeleteComplete {
+        let event = CloudEvent::Delete {
             key,
             result: CloudOutcome::Ok(()),
         };
         let _ = callback.send(event);
     }
 
-    fn submit_list(&self, prefix: String, callback: CloudCallback) {
+    fn submit_list(&self, prefix: &str, callback: CloudCallback) {
+        let prefix = prefix.to_string();
         let results: Vec<_> = self
             .storage
             .lock()
@@ -345,25 +350,26 @@ impl CloudBackend for MockCloudBackend {
             .filter(|k| k.starts_with(&prefix))
             .cloned()
             .collect();
-        let event = CloudEvent::ListComplete {
+        let event = CloudEvent::List {
             prefix,
             result: CloudOutcome::Ok(results),
         };
         let _ = callback.send(event);
     }
 
-    fn submit_head(&self, key: String, callback: CloudCallback) {
+    fn submit_head(&self, key: &str, callback: CloudCallback) {
+        let key = key.to_string();
         let result = self
             .storage
             .lock()
             .get(&key)
             .map(|data| {
                 // ETag is generation based and independent from content length.
-                let gen = self.gens.lock().get(&key).cloned().unwrap_or(0);
-                ObjectMetadata::new(data.len() as u64, format!("mock-gen-{}", gen), 0)
+                let gen = self.gens.lock().get(&key).copied().unwrap_or(0);
+                ObjectMetadata::new(data.len() as u64, format!("mock-gen-{gen}"), 0)
             })
             .ok_or(MidgeError::NotFound);
-        let event = CloudEvent::HeadComplete {
+        let event = CloudEvent::Head {
             key,
             result: CloudOutcome::from_result(result),
         };
@@ -407,7 +413,7 @@ impl CloudStorage {
         } else if suffix.is_empty() {
             namespace.to_string()
         } else {
-            format!("{}/{}", namespace, suffix)
+            format!("{namespace}/{suffix}")
         }
     }
 
@@ -423,57 +429,61 @@ impl CloudStorage {
 
     pub fn submit_put(
         &self,
-        key: String,
+        key: &str,
         data: Vec<u8>,
         headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
-        let full_key = self.full_path(&key);
+        let full_key = self.full_path(key);
         if let Some(error) = self.precondition_error(&full_key, &headers) {
-            let _ = callback.send(CloudEvent::PutComplete {
+            let _ = callback.send(CloudEvent::Put {
                 key: full_key,
                 result: CloudOutcome::Err(error),
             });
             return;
         }
-        self.backend.submit_put(full_key, data, headers, callback);
+        self.backend.submit_put(&full_key, data, headers, callback);
     }
 
-    pub fn submit_get(&self, key: String, callback: CloudCallback) {
-        self.backend.submit_get(self.full_path(&key), callback);
+    pub fn submit_get(&self, key: &str, callback: CloudCallback) {
+        let full_key = self.full_path(key);
+        self.backend.submit_get(&full_key, callback);
     }
 
     pub fn submit_get_range(
         &self,
-        key: String,
+        key: &str,
         start: u64,
         end: Option<u64>,
         callback: CloudCallback,
     ) {
+        let full_key = self.full_path(key);
         self.backend
-            .submit_get_range(self.full_path(&key), start, end, callback);
+            .submit_get_range(&full_key, start, end, callback);
     }
 
-    pub fn submit_delete(&self, key: String, callback: CloudCallback) {
+    pub fn submit_delete(&self, key: &str, callback: CloudCallback) {
         self.submit_delete_with_headers(key, vec![], callback);
     }
 
     pub fn submit_delete_with_headers(
         &self,
-        key: String,
+        key: &str,
         headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
-        self.backend
-            .submit_delete(self.full_path(&key), headers, callback);
+        let full_key = self.full_path(key);
+        self.backend.submit_delete(&full_key, headers, callback);
     }
 
-    pub fn submit_list(&self, prefix: String, callback: CloudCallback) {
-        self.backend.submit_list(self.full_path(&prefix), callback);
+    pub fn submit_list(&self, prefix: &str, callback: CloudCallback) {
+        let full_prefix = self.full_path(prefix);
+        self.backend.submit_list(&full_prefix, callback);
     }
 
-    pub fn submit_head(&self, key: String, callback: CloudCallback) {
-        self.backend.submit_head(self.full_path(&key), callback);
+    pub fn submit_head(&self, key: &str, callback: CloudCallback) {
+        let full_key = self.full_path(key);
+        self.backend.submit_head(&full_key, callback);
     }
 
     fn precondition_error(&self, full_key: &str, headers: &[(String, String)]) -> Option<String> {
@@ -491,9 +501,9 @@ impl CloudStorage {
         }
 
         let (tx, rx) = std::sync::mpsc::channel();
-        self.backend.submit_head(full_key.to_string(), tx);
+        self.backend.submit_head(full_key, tx);
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(CloudEvent::HeadComplete { result, .. }) => match result {
+            Ok(CloudEvent::Head { result, .. }) => match result {
                 CloudOutcome::Ok(metadata) => {
                     if if_none_match.as_deref() == Some("*") {
                         Some("precondition failed: object already exists".to_string())
@@ -516,15 +526,12 @@ impl CloudStorage {
                             None
                         }
                     } else {
-                        Some(format!("precondition check failed: {}", error))
+                        Some(format!("precondition check failed: {error}"))
                     }
                 }
             },
-            Ok(other) => Some(format!(
-                "unexpected precondition HEAD response: {:?}",
-                other
-            )),
-            Err(error) => Some(format!("precondition HEAD timed out: {}", error)),
+            Ok(other) => Some(format!("unexpected precondition HEAD response: {other:?}")),
+            Err(error) => Some(format!("precondition HEAD timed out: {error}")),
         }
     }
 }
@@ -538,11 +545,15 @@ pub(crate) fn is_not_found_error(error: &str) -> bool {
         || lowered.contains("blobnotfound")
 }
 
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
 impl StorageBackend for CloudStorage {
-    fn submit_read(&self, key: String, callback: StorageCallback) {
+    fn submit_read(&self, key: &str, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_get(key.clone(), tx);
-        if let Ok(CloudEvent::GetComplete { key, result }) = rx.recv() {
+        self.submit_get(key, tx);
+        if let Ok(CloudEvent::Get { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(data) => StorageOutcome::Ok(data),
                 CloudOutcome::Err(err) => StorageOutcome::Err(err),
@@ -555,10 +566,10 @@ impl StorageBackend for CloudStorage {
         }
     }
 
-    fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback) {
+    fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_put(key.clone(), data, vec![], tx);
-        if let Ok(CloudEvent::PutComplete { key, result }) = rx.recv() {
+        self.submit_put(key, data, vec![], tx);
+        if let Ok(CloudEvent::Put { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
                 CloudOutcome::Err(err) => StorageOutcome::Err(err),
@@ -573,14 +584,14 @@ impl StorageBackend for CloudStorage {
 
     fn submit_write_with_headers(
         &self,
-        key: String,
+        key: &str,
         data: Vec<u8>,
         headers: Vec<(String, String)>,
         callback: StorageCallback,
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_put(key.clone(), data, headers, tx);
-        if let Ok(CloudEvent::PutComplete { key, result }) = rx.recv() {
+        self.submit_put(key, data, headers, tx);
+        if let Ok(CloudEvent::Put { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
                 CloudOutcome::Err(err) => StorageOutcome::Err(err),
@@ -593,10 +604,10 @@ impl StorageBackend for CloudStorage {
         }
     }
 
-    fn submit_delete(&self, key: String, callback: StorageCallback) {
+    fn submit_delete(&self, key: &str, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        CloudStorage::submit_delete(self, key.clone(), tx);
-        if let Ok(CloudEvent::DeleteComplete { key, result }) = rx.recv() {
+        CloudStorage::submit_delete(self, key, tx);
+        if let Ok(CloudEvent::Delete { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
                 CloudOutcome::Err(err) => StorageOutcome::Err(err),
@@ -611,13 +622,13 @@ impl StorageBackend for CloudStorage {
 
     fn submit_delete_with_headers(
         &self,
-        key: String,
+        key: &str,
         headers: Vec<(String, String)>,
         callback: StorageCallback,
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
-        CloudStorage::submit_delete_with_headers(self, key.clone(), headers, tx);
-        if let Ok(CloudEvent::DeleteComplete { key, result }) = rx.recv() {
+        CloudStorage::submit_delete_with_headers(self, key, headers, tx);
+        if let Ok(CloudEvent::Delete { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
                 CloudOutcome::Err(err) => StorageOutcome::Err(err),
@@ -630,10 +641,10 @@ impl StorageBackend for CloudStorage {
         }
     }
 
-    fn submit_list(&self, prefix: String, callback: StorageCallback) {
+    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        CloudStorage::submit_list(self, prefix.clone(), tx);
-        if let Ok(CloudEvent::ListComplete {
+        CloudStorage::submit_list(self, prefix, tx);
+        if let Ok(CloudEvent::List {
             prefix: key_prefix,
             result,
         }) = rx.recv()
@@ -650,11 +661,11 @@ impl StorageBackend for CloudStorage {
         }
     }
 
-    fn submit_head(&self, key: String, callback: StorageCallback) {
+    fn submit_head(&self, key: &str, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        CloudStorage::submit_head(self, key.clone(), tx);
+        CloudStorage::submit_head(self, key, tx);
         let event = match rx.recv() {
-            Ok(CloudEvent::HeadComplete { key, result }) => {
+            Ok(CloudEvent::Head { key, result }) => {
                 let outcome = match result {
                     CloudOutcome::Ok(metadata) => StorageOutcome::Ok(StorageObjectMetadata {
                         size: metadata.size,
@@ -669,11 +680,11 @@ impl StorageBackend for CloudStorage {
                 }
             }
             Ok(other) => StorageEvent::HeadComplete {
-                key,
+                key: key.to_string(),
                 result: StorageOutcome::Err(format!("unexpected cloud HEAD response: {other:?}")),
             },
             Err(error) => StorageEvent::HeadComplete {
-                key,
+                key: key.to_string(),
                 result: StorageOutcome::Err(format!("cloud HEAD channel closed: {error}")),
             },
         };
@@ -742,7 +753,7 @@ mod tests {
     #[test]
     fn should_create_object_metadata_with_correct_fields() {
         // Arrange
-        let metadata = ObjectMetadata::new(1024, "etag123".into(), 1000000);
+        let metadata = ObjectMetadata::new(1024, "etag123".into(), 1_000_000);
 
         // Act
         let cloned = metadata.clone();
@@ -750,7 +761,7 @@ mod tests {
         // Assert
         assert_eq!(cloned.size, 1024);
         assert_eq!(cloned.etag, "etag123");
-        assert_eq!(cloned.last_modified, 1000000);
+        assert_eq!(cloned.last_modified, 1_000_000);
     }
 
     #[test]
@@ -791,12 +802,12 @@ mod tests {
         let data = vec![1, 2, 3];
 
         // Act
-        storage.submit_put("file".into(), data, vec![], tx);
+        storage.submit_put("file", data, vec![], tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            CloudEvent::PutComplete { key, result } => {
+            CloudEvent::Put { key, result } => {
                 assert_eq!(key, "midge/file");
                 assert!(result.is_ok());
             }
@@ -811,17 +822,17 @@ mod tests {
 
         // First put a file
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("testfile".into(), vec![1, 2, 3], vec![], put_tx);
+        storage.submit_put("testfile", vec![1, 2, 3], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act
         let (tx, rx) = mpsc::channel();
-        storage.submit_get("testfile".into(), tx);
+        storage.submit_get("testfile", tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            CloudEvent::GetComplete { key, result } => {
+            CloudEvent::Get { key, result } => {
                 assert!(key.starts_with("midge/"));
                 assert!(result.is_ok());
             }
@@ -836,12 +847,12 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        storage.submit_delete("file".into(), tx);
+        storage.submit_delete("file", tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            CloudEvent::DeleteComplete { key, result } => {
+            CloudEvent::Delete { key, result } => {
                 assert_eq!(key, "midge/file");
                 assert!(result.is_ok());
             }
@@ -856,27 +867,27 @@ mod tests {
 
         // First put multiple files
         let (tx, rx) = mpsc::channel();
-        storage.submit_put("prefix/file1".into(), vec![1], vec![], tx);
+        storage.submit_put("prefix/file1", vec![1], vec![], tx);
         let _ = rx.recv();
 
         let (tx, rx) = mpsc::channel();
-        storage.submit_put("prefix/file2".into(), vec![2], vec![], tx);
+        storage.submit_put("prefix/file2", vec![2], vec![], tx);
         let _ = rx.recv();
 
         // Act
         let (tx, rx) = mpsc::channel();
-        storage.submit_list("prefix".into(), tx);
+        storage.submit_list("prefix", tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            CloudEvent::ListComplete { prefix, result } => {
+            CloudEvent::List { prefix, result } => {
                 assert!(prefix.starts_with("midge/"));
                 match result {
                     CloudOutcome::Ok(items) => {
                         assert!(!items.is_empty());
                     }
-                    _ => panic!("Expected Ok result"),
+                    CloudOutcome::Err(_) => panic!("Expected Ok result"),
                 }
             }
             _ => panic!("Expected ListComplete"),
@@ -890,23 +901,23 @@ mod tests {
 
         // First put a file
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("testfile".into(), vec![1, 2, 3], vec![], put_tx);
+        storage.submit_put("testfile", vec![1, 2, 3], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act
         let (tx, rx) = mpsc::channel();
-        storage.submit_head("testfile".into(), tx);
+        storage.submit_head("testfile", tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            CloudEvent::HeadComplete { key, result } => {
+            CloudEvent::Head { key, result } => {
                 assert!(key.starts_with("midge/"));
                 match result {
                     CloudOutcome::Ok(metadata) => {
                         assert_eq!(metadata.size, 3);
                     }
-                    _ => panic!("Expected Ok metadata"),
+                    CloudOutcome::Err(_) => panic!("Expected Ok metadata"),
                 }
             }
             _ => panic!("Expected HeadComplete"),
@@ -918,17 +929,17 @@ mod tests {
         // Arrange
         let storage = CloudStorage::with_mock();
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("file1".into(), vec![1], vec![], put_tx);
+        storage.submit_put("file1", vec![1], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Get current etag via HEAD
         let (head_tx, head_rx) = mpsc::channel();
-        storage.submit_head("file1".into(), head_tx);
+        storage.submit_head("file1", head_tx);
         let head_event = head_rx.recv().unwrap();
         let current_etag = match head_event {
-            CloudEvent::HeadComplete { result, .. } => match result {
+            CloudEvent::Head { result, .. } => match result {
                 CloudOutcome::Ok(meta) => meta.etag,
-                _ => panic!("expected head ok"),
+                CloudOutcome::Err(_) => panic!("expected head ok"),
             },
             _ => panic!("expected head event"),
         };
@@ -936,22 +947,22 @@ mod tests {
         // Act - conditional update with matching If-Match
         let headers = vec![("If-Match".into(), current_etag.clone())];
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("file1".into(), vec![9, 9, 9], headers, put_tx);
+        storage.submit_put("file1", vec![9, 9, 9], headers, put_tx);
         let put_event = put_rx.recv().unwrap();
 
         // Assert - success and new etag changed
         match put_event {
-            CloudEvent::PutComplete { result, .. } => assert!(result.is_ok()),
+            CloudEvent::Put { result, .. } => assert!(result.is_ok()),
             _ => panic!("expected put complete"),
         }
 
         let (head_tx, head_rx) = mpsc::channel();
-        storage.submit_head("file1".into(), head_tx);
+        storage.submit_head("file1", head_tx);
         let head_event = head_rx.recv().unwrap();
         let new_etag = match head_event {
-            CloudEvent::HeadComplete { result, .. } => match result {
+            CloudEvent::Head { result, .. } => match result {
                 CloudOutcome::Ok(meta) => meta.etag,
-                _ => panic!("expected head ok"),
+                CloudOutcome::Err(_) => panic!("expected head ok"),
             },
             _ => panic!("expected head event"),
         };
@@ -964,18 +975,18 @@ mod tests {
         // Arrange
         let storage = CloudStorage::with_mock();
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("file2".into(), vec![1], vec![], put_tx);
+        storage.submit_put("file2", vec![1], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act - conditional update with non-matching If-Match
         let headers = vec![("If-Match".into(), "mock-gen-999".into())];
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("file2".into(), vec![2], headers, put_tx);
+        storage.submit_put("file2", vec![2], headers, put_tx);
         let put_event = put_rx.recv().unwrap();
 
         // Assert - precondition failed
         match put_event {
-            CloudEvent::PutComplete { result, .. } => assert!(result.is_err()),
+            CloudEvent::Put { result, .. } => assert!(result.is_err()),
             _ => panic!("expected put complete"),
         }
     }
@@ -988,12 +999,12 @@ mod tests {
         // Act - If-Match on non-existent key should fail
         let headers = vec![("If-Match".into(), "mock-gen-1".into())];
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("no-such".into(), vec![1], headers, put_tx);
+        storage.submit_put("no-such", vec![1], headers, put_tx);
         let put_event = put_rx.recv().unwrap();
 
         // Assert - precondition failed
         match put_event {
-            CloudEvent::PutComplete { result, .. } => assert!(result.is_err()),
+            CloudEvent::Put { result, .. } => assert!(result.is_err()),
             _ => panic!("expected put complete"),
         }
     }
@@ -1003,18 +1014,18 @@ mod tests {
         // Arrange
         let storage = CloudStorage::with_mock();
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("file3".into(), vec![1], vec![], put_tx);
+        storage.submit_put("file3", vec![1], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act - conditional create should fail when object exists
         let headers = vec![("If-None-Match".into(), "*".into())];
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("file3".into(), vec![2], headers, put_tx);
+        storage.submit_put("file3", vec![2], headers, put_tx);
         let put_event = put_rx.recv().unwrap();
 
         // Assert - precondition failed
         match put_event {
-            CloudEvent::PutComplete { result, .. } => assert!(result.is_err()),
+            CloudEvent::Put { result, .. } => assert!(result.is_err()),
             _ => panic!("expected put complete"),
         }
     }
@@ -1024,13 +1035,13 @@ mod tests {
         // Arrange
         let storage = CloudStorage::with_mock();
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("delete-file".into(), vec![1], vec![], put_tx);
+        storage.submit_put("delete-file", vec![1], vec![], put_tx);
         let _ = put_rx.recv();
 
         let (head_tx, head_rx) = mpsc::channel();
-        storage.submit_head("delete-file".into(), head_tx);
+        storage.submit_head("delete-file", head_tx);
         let etag = match head_rx.recv().unwrap() {
-            CloudEvent::HeadComplete {
+            CloudEvent::Head {
                 result: CloudOutcome::Ok(metadata),
                 ..
             } => metadata.etag,
@@ -1040,20 +1051,20 @@ mod tests {
         // Act
         let (delete_tx, delete_rx) = mpsc::channel();
         storage.submit_delete_with_headers(
-            "delete-file".into(),
+            "delete-file",
             vec![("If-Match".into(), etag)],
             delete_tx,
         );
 
         // Assert
         match delete_rx.recv().unwrap() {
-            CloudEvent::DeleteComplete { result, .. } => assert!(result.is_ok()),
+            CloudEvent::Delete { result, .. } => assert!(result.is_ok()),
             other => panic!("expected delete complete, got {other:?}"),
         }
         let (head_tx, head_rx) = mpsc::channel();
-        storage.submit_head("delete-file".into(), head_tx);
+        storage.submit_head("delete-file", head_tx);
         match head_rx.recv().unwrap() {
-            CloudEvent::HeadComplete { result, .. } => assert!(result.is_err()),
+            CloudEvent::Head { result, .. } => assert!(result.is_err()),
             other => panic!("expected HEAD complete, got {other:?}"),
         }
     }
@@ -1063,26 +1074,26 @@ mod tests {
         // Arrange
         let storage = CloudStorage::with_mock();
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("stale-delete-file".into(), vec![1], vec![], put_tx);
+        storage.submit_put("stale-delete-file", vec![1], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act
         let (delete_tx, delete_rx) = mpsc::channel();
         storage.submit_delete_with_headers(
-            "stale-delete-file".into(),
+            "stale-delete-file",
             vec![("If-Match".into(), "mock-gen-999".into())],
             delete_tx,
         );
 
         // Assert
         match delete_rx.recv().unwrap() {
-            CloudEvent::DeleteComplete { result, .. } => assert!(result.is_err()),
+            CloudEvent::Delete { result, .. } => assert!(result.is_err()),
             other => panic!("expected delete complete, got {other:?}"),
         }
         let (head_tx, head_rx) = mpsc::channel();
-        storage.submit_head("stale-delete-file".into(), head_tx);
+        storage.submit_head("stale-delete-file", head_tx);
         match head_rx.recv().unwrap() {
-            CloudEvent::HeadComplete {
+            CloudEvent::Head {
                 result: CloudOutcome::Ok(_),
                 ..
             } => {}
@@ -1097,17 +1108,17 @@ mod tests {
 
         // First put a file
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("rangefile".into(), vec![1, 2, 3, 4, 5], vec![], put_tx);
+        storage.submit_put("rangefile", vec![1, 2, 3, 4, 5], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act
         let (tx, rx) = mpsc::channel();
-        storage.submit_get_range("rangefile".into(), 1, Some(4), tx);
+        storage.submit_get_range("rangefile", 1, Some(4), tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            CloudEvent::GetRangeComplete {
+            CloudEvent::GetRange {
                 key,
                 start,
                 end,
@@ -1129,12 +1140,12 @@ mod tests {
 
         // Act
         let (tx, rx) = mpsc::channel();
-        storage.submit_get_range("file".into(), 0, None, tx);
+        storage.submit_get_range("file", 0, None, tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            CloudEvent::GetRangeComplete { end, .. } => {
+            CloudEvent::GetRange { end, .. } => {
                 assert_eq!(end, None);
             }
             _ => panic!("Expected GetRangeComplete"),
@@ -1151,12 +1162,12 @@ mod tests {
         let data = vec![1, 2, 3];
 
         // Act
-        storage.submit_put("file".into(), data, vec![], tx);
+        storage.submit_put("file", data, vec![], tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            CloudEvent::PutComplete { key, result } => {
+            CloudEvent::Put { key, result } => {
                 assert_eq!(key, "midge/file");
                 assert!(result.is_ok());
             }
@@ -1172,16 +1183,16 @@ mod tests {
 
         // First put a file so we can get it
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("testfile".into(), vec![1, 2, 3], vec![], put_tx);
+        storage.submit_put("testfile", vec![1, 2, 3], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act
-        storage.submit_get("testfile".into(), tx);
+        storage.submit_get("testfile", tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            CloudEvent::GetComplete { key, result } => {
+            CloudEvent::Get { key, result } => {
                 assert_eq!(key, "midge/testfile");
                 assert!(result.is_ok());
             }
@@ -1194,21 +1205,21 @@ mod tests {
         // Arrange
         let storage = CloudStorage::with_mock();
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("prefix/file1".into(), vec![1], vec![], put_tx);
+        storage.submit_put("prefix/file1", vec![1], vec![], put_tx);
         let _ = put_rx.recv();
 
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("prefix/file2".into(), vec![2], vec![], put_tx);
+        storage.submit_put("prefix/file2", vec![2], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act
         let (tx, rx) = mpsc::channel();
-        storage.submit_list("prefix".into(), tx);
+        storage.submit_list("prefix", tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            CloudEvent::ListComplete { prefix, result } => {
+            CloudEvent::List { prefix, result } => {
                 assert_eq!(prefix, "midge/prefix");
                 match result {
                     CloudOutcome::Ok(items) => {
@@ -1216,7 +1227,7 @@ mod tests {
                         assert!(items.iter().any(|k| k.contains("file1")));
                         assert!(items.iter().any(|k| k.contains("file2")));
                     }
-                    _ => panic!("Expected Ok result"),
+                    CloudOutcome::Err(_) => panic!("Expected Ok result"),
                 }
             }
             _ => panic!("Expected ListComplete"),
@@ -1233,12 +1244,12 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        storage.submit_put("largefile".into(), large_data.clone(), vec![], tx);
+        storage.submit_put("largefile", large_data.clone(), vec![], tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            CloudEvent::PutComplete { result, .. } => {
+            CloudEvent::Put { result, .. } => {
                 assert!(result.is_ok());
             }
             _ => panic!("Expected PutComplete"),
@@ -1246,15 +1257,15 @@ mod tests {
 
         // Verify we can retrieve it
         let (tx, rx) = mpsc::channel();
-        storage.submit_get("largefile".into(), tx);
+        storage.submit_get("largefile", tx);
         let event = rx.recv().unwrap();
 
         match event {
-            CloudEvent::GetComplete { result, .. } => match result {
+            CloudEvent::Get { result, .. } => match result {
                 CloudOutcome::Ok(data) => {
                     assert_eq!(data.len(), 1_000_000);
                 }
-                _ => panic!("Expected Ok"),
+                CloudOutcome::Err(_) => panic!("Expected Ok"),
             },
             _ => panic!("Expected GetComplete"),
         }
@@ -1268,20 +1279,20 @@ mod tests {
 
         // Act: put and get binary data round-trip
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("binaryfile".into(), binary_data.clone(), vec![], put_tx);
+        storage.submit_put("binaryfile", binary_data.clone(), vec![], put_tx);
         let _ = put_rx.recv();
 
         let (tx, rx) = mpsc::channel();
-        storage.submit_get("binaryfile".into(), tx);
+        storage.submit_get("binaryfile", tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            CloudEvent::GetComplete { result, .. } => match result {
+            CloudEvent::Get { result, .. } => match result {
                 CloudOutcome::Ok(data) => {
                     assert_eq!(data, binary_data, "binary data must be preserved exactly");
                 }
-                _ => panic!("Expected Ok result"),
+                CloudOutcome::Err(_) => panic!("Expected Ok result"),
             },
             _ => panic!("Expected GetComplete"),
         }
@@ -1296,27 +1307,27 @@ mod tests {
 
         // Put operation
         let (tx, _rx) = mpsc::channel();
-        storage.submit_put("f1".into(), vec![1, 2], vec![], tx);
+        storage.submit_put("f1", vec![1, 2], vec![], tx);
 
         // Get operation
         let (tx, _rx) = mpsc::channel();
-        storage.submit_get("f2".into(), tx);
+        storage.submit_get("f2", tx);
 
         // Delete operation
         let (tx, _rx) = mpsc::channel();
-        storage.submit_delete("f3".into(), tx);
+        storage.submit_delete("f3", tx);
 
         // List operation
         let (tx, _rx) = mpsc::channel();
-        storage.submit_list("prefix".into(), tx);
+        storage.submit_list("prefix", tx);
 
         // Head operation
         let (tx, _rx) = mpsc::channel();
-        storage.submit_head("f4".into(), tx);
+        storage.submit_head("f4", tx);
 
         // Get range operation
         let (tx, _rx) = mpsc::channel();
-        storage.submit_get_range("f5".into(), 0, Some(100), tx);
+        storage.submit_get_range("f5", 0, Some(100), tx);
 
         // Assert
         // Smoke test: all calls complete without panic and storage remains valid.
@@ -1330,12 +1341,12 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        storage.submit_get("nonexistent".into(), tx);
+        storage.submit_get("nonexistent", tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            CloudEvent::GetComplete { result, .. } => {
+            CloudEvent::Get { result, .. } => {
                 assert!(result.is_err());
             }
             _ => panic!("Expected GetComplete"),
@@ -1349,21 +1360,21 @@ mod tests {
 
         // Put an empty file
         let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("emptyfile".into(), vec![], vec![], put_tx);
+        storage.submit_put("emptyfile", vec![], vec![], put_tx);
         let _ = put_rx.recv();
 
         // Act
         let (tx, rx) = mpsc::channel();
-        storage.submit_head("emptyfile".into(), tx);
+        storage.submit_head("emptyfile", tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            CloudEvent::HeadComplete { result, .. } => match result {
+            CloudEvent::Head { result, .. } => match result {
                 CloudOutcome::Ok(metadata) => {
                     assert_eq!(metadata.size, 0);
                 }
-                _ => panic!("Expected Ok metadata"),
+                CloudOutcome::Err(_) => panic!("Expected Ok metadata"),
             },
             _ => panic!("Expected HeadComplete"),
         }

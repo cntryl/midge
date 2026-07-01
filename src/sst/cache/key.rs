@@ -10,6 +10,7 @@
 //! - Filter blocks: Always admitted, protected from eviction
 //! - Data blocks: Admission control, evictable
 
+use std::convert::TryFrom;
 use std::hash::{Hash, Hasher};
 
 /// Type of cached block
@@ -39,6 +40,7 @@ pub struct CacheKey {
 
 impl CacheKey {
     /// Create a new cache key for a block
+    #[must_use]
     pub fn new(sst_id: u64, block_offset: u64, block_type: BlockType) -> Self {
         Self {
             sst_id,
@@ -48,27 +50,30 @@ impl CacheKey {
     }
 
     /// Create a cache key for a data block
+    #[must_use]
     pub fn for_data(sst_id: u64, block_offset: u64) -> Self {
         Self::new(sst_id, block_offset, BlockType::Data)
     }
 
     /// Create a cache key for an index block
+    #[must_use]
     pub fn for_index(sst_id: u64, block_offset: u64) -> Self {
         Self::new(sst_id, block_offset, BlockType::Index)
     }
 
     /// Create a cache key for a filter block
+    #[must_use]
     pub fn for_filter(sst_id: u64, block_offset: u64) -> Self {
         Self::new(sst_id, block_offset, BlockType::Filter)
     }
 
-    /// Get the shard index for this key (0..num_shards)
-    #[inline(always)]
+    /// Get the shard index for this key (`0..num_shards`)
+    #[must_use]
     pub fn shard_index(&self, num_shards: usize) -> usize {
         // Use XOR combination of both fields for better distribution
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.hash(&mut hasher);
-        (hasher.finish() as usize) % num_shards
+        usize::try_from(hasher.finish()).unwrap_or(0) % num_shards
     }
 }
 

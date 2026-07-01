@@ -12,6 +12,9 @@ readme = "README.md"
 keywords = ["database", "kv", "lsm", "embedded", "storage"]
 categories = ["database-implementations"]
 
+[workspace.lints.clippy]
+pedantic = "deny"
+
 [lib]
 name = "cntryl_midge"
 path = "src/lib.rs"
@@ -227,6 +230,11 @@ path = "benches/tier2_subsystem_bloom_build.rs"
 harness = false
 
 [[bench]]
+name = "tier2_subsystem_compression"
+path = "benches/tier2_subsystem_compression.rs"
+harness = false
+
+[[bench]]
 name = "tier2_subsystem_sst_point_read_bloom"
 path = "benches/tier2_subsystem_sst_point_read_bloom.rs"
 harness = false
@@ -254,6 +262,16 @@ harness = false
 [[bench]]
 name = "tier2_subsystem_event_loop"
 path = "benches/tier2_subsystem_event_loop.rs"
+harness = false
+
+[[bench]]
+name = "tier2_subsystem_local_throughput_regression"
+path = "benches/tier2_subsystem_local_throughput_regression.rs"
+harness = false
+
+[[bench]]
+name = "tier2_subsystem_transaction_latency"
+path = "benches/tier2_subsystem_transaction_latency.rs"
 harness = false
 
 # Tier 3
@@ -294,8 +312,18 @@ harness = false
 
 # Tier 4
 [[bench]]
+name = "tier4_ycsb_workload_a"
+path = "benches/tier4_ycsb_workload_a.rs"
+harness = false
+
+[[bench]]
 name = "tier4_ycsb_workload_b"
 path = "benches/tier4_ycsb_workload_b.rs"
+harness = false
+
+[[bench]]
+name = "tier4_ycsb_workload_c"
+path = "benches/tier4_ycsb_workload_c.rs"
 harness = false
 
 [[bench]]
@@ -314,6 +342,21 @@ path = "benches/tier4_ycsb_workload_f.rs"
 harness = false
 
 [[bench]]
+name = "tier4_streaming_workload"
+path = "benches/tier4_streaming_workload.rs"
+harness = false
+
+[[bench]]
+name = "tier4_system_compaction_throughput"
+path = "benches/tier4_system_compaction_throughput.rs"
+harness = false
+
+[[bench]]
+name = "tier4_system_durability_cloud"
+path = "benches/tier4_system_durability_cloud.rs"
+harness = false
+
+[[bench]]
 name = "tier4_system_engine_batch_throughput"
 path = "benches/tier4_system_engine_batch_throughput.rs"
 harness = false
@@ -324,17 +367,6 @@ path = "benches/tier4_system_recovery_throughput.rs"
 harness = false
 
 [[bench]]
-name = "tier4_durability_cloud_failure_scenarios"
-path = "benches/tier4_durability_cloud_failure_scenarios.rs"
-harness = false
-
-[[bench]]
 name = "tier4_mvcc_snapshot_isolation_under_concurrency"
 path = "benches/tier4_mvcc_snapshot_isolation_under_concurrency.rs"
-harness = false
-
-# Tier 5: Exploratory / Multi-Minute Sweeps
-[[bench]]
-name = "tier5_memtable_sizing_sweep"
-path = "benches/tier5_memtable_sizing_sweep.rs"
 harness = false

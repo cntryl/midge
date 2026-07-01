@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+pub use crate::diagnostics::{TransactionCommitTimingGuard, TransactionCommitTimingSample};
+
 pub const DEFAULT_MEMTABLE_SWEEP_SIZE_BYTES: [usize; 5] = [
     128 * 1024,
     512 * 1024,
@@ -40,6 +42,7 @@ pub struct RuntimeCounterSnapshot {
 }
 
 impl RuntimeCounterSnapshot {
+    #[must_use]
     pub fn from_runtime_metrics(metrics: &RuntimeMetricsSnapshot) -> Self {
         Self {
             write_stalls_total: metrics.write_stalls_total,
@@ -67,6 +70,7 @@ pub struct RuntimeCounterDeltas {
 }
 
 impl RuntimeCounterDeltas {
+    #[must_use]
     pub fn between(start: RuntimeCounterSnapshot, end: RuntimeCounterSnapshot) -> Self {
         Self {
             write_stalls_total: end
@@ -90,6 +94,7 @@ impl RuntimeCounterDeltas {
 }
 
 impl MemtableSweepSize {
+    #[must_use]
     pub fn default_derived() -> Self {
         Self {
             label: "default".to_string(),
@@ -97,6 +102,7 @@ impl MemtableSweepSize {
         }
     }
 
+    #[must_use]
     pub fn explicit(bytes: usize) -> Self {
         Self {
             label: format_memtable_size_label(bytes),
@@ -116,11 +122,11 @@ pub fn unique_bench_path(prefix: &str) -> PathBuf {
     let base_dir = std::env::var("MIDGE_BENCH_DIR")
         .ok()
         .filter(|val| !val.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base_dir.join(format!("midge_bench_{}_{}_{}", prefix, pid, counter))
+        .map_or_else(std::env::temp_dir, PathBuf::from);
+    base_dir.join(format!("midge_bench_{prefix}_{pid}_{counter}"))
 }
 
+#[must_use]
 pub fn default_memtable_sweep_sizes() -> Vec<MemtableSweepSize> {
     DEFAULT_MEMTABLE_SWEEP_SIZE_BYTES
         .into_iter()
@@ -129,6 +135,15 @@ pub fn default_memtable_sweep_sizes() -> Vec<MemtableSweepSize> {
         .collect()
 }
 
+/// Parse a comma-separated memtable size list.
+///
+/// Empty input returns the default sweep sizes. Entries may be byte counts or
+/// the literal `default`.
+///
+/// # Errors
+///
+/// Returns an error when the list contains an empty entry, a non-numeric byte
+/// count other than `default`, or a zero byte count.
 pub fn parse_memtable_sweep_sizes(input: Option<&str>) -> Result<Vec<MemtableSweepSize>, String> {
     let Some(input) = input.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(default_memtable_sweep_sizes());
@@ -158,6 +173,7 @@ pub fn parse_memtable_sweep_sizes(input: Option<&str>) -> Result<Vec<MemtableSwe
     Ok(sizes)
 }
 
+#[must_use]
 pub fn format_memtable_size_label(bytes: usize) -> String {
     if bytes.is_multiple_of(1024 * 1024) {
         format!("{}MiB", bytes / (1024 * 1024))
@@ -168,21 +184,40 @@ pub fn format_memtable_size_label(bytes: usize) -> String {
     }
 }
 
+/// Enable or disable runtime compaction for a benchmark engine.
+///
+/// # Errors
+///
+/// Returns an error if the engine cannot apply the runtime setting.
 pub fn set_runtime_compaction_enabled(engine: &Engine, enabled: bool) -> crate::MidgeResult<()> {
     engine.set_runtime_compaction_enabled(enabled)
 }
 
+/// Request one runtime compaction pass for a benchmark engine.
+///
+/// # Errors
+///
+/// Returns an error if the engine cannot enqueue or run the compaction request.
 pub fn kick_runtime_compaction_once(engine: &Engine) -> crate::MidgeResult<()> {
     engine.kick_runtime_compaction_once()
 }
 
+/// Initialize telemetry settings used by benchmark binaries.
+///
+/// Repeated initialization is treated as success when telemetry is already
+/// globally available.
+///
+/// # Errors
+///
+/// Returns an error if telemetry initialization fails for a reason other than
+/// an already initialized global telemetry instance.
 pub fn init_benchmark_telemetry() -> crate::MidgeResult<()> {
     let mut config = crate::telemetry::TelemetryConfig::new()
         .with_enabled(true)
         .with_service_name("midge-bench".to_string());
-    config.enable_logging = false;
-    config.enable_tracing = false;
-    config.enable_metrics = true;
+    config.features.enable_logging = false;
+    config.features.enable_tracing = false;
+    config.features.enable_metrics = true;
 
     match crate::telemetry::Telemetry::init(config) {
         Ok(()) => Ok(()),
@@ -215,6 +250,7 @@ impl std::fmt::Display for BenchStorageMode {
 
 impl BenchStorageMode {
     /// Return string representation for benchmark IDs.
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             BenchStorageMode::Memory => "memory",
@@ -239,14 +275,14 @@ pub const DURABLE_STORAGE_MODES: [BenchStorageMode; 1] = [BenchStorageMode::Loca
 #[derive(Clone, Debug)]
 pub struct BenchEngineConfig {
     pub storage_mode: BenchStorageMode,
-    /// High-level tuning knobs (use the public OpenOptions builder).
+    /// High-level tuning knobs (use the public `OpenOptions` builder).
     pub goal: Goal,
     pub workload: WorkloadProfile,
     pub memory_budget: MemoryBudget,
     /// Optional WAL batch config to control group commit behavior for benches.
     pub wal_batch_config: Option<crate::wal::policy::BatchConfig>,
     pub enable_compaction: bool,
-    /// Optional override for memtable size (bytes). If None, derived from OpenOptions.
+    /// Optional override for memtable size (bytes). If None, derived from `OpenOptions`.
     pub memtable_size: Option<usize>,
 }
 
@@ -265,6 +301,7 @@ impl Default for BenchEngineConfig {
 }
 
 impl BenchEngineConfig {
+    #[must_use]
     pub fn memory() -> Self {
         Self {
             storage_mode: BenchStorageMode::Memory,
@@ -272,6 +309,7 @@ impl BenchEngineConfig {
         }
     }
 
+    #[must_use]
     pub fn local_disk() -> Self {
         Self {
             storage_mode: BenchStorageMode::LocalDisk,
@@ -279,31 +317,37 @@ impl BenchEngineConfig {
         }
     }
 
+    #[must_use]
     pub fn with_goal(mut self, goal: Goal) -> Self {
         self.goal = goal;
         self
     }
 
+    #[must_use]
     pub fn with_workload(mut self, workload: WorkloadProfile) -> Self {
         self.workload = workload;
         self
     }
 
+    #[must_use]
     pub fn with_memory_budget(mut self, budget: MemoryBudget) -> Self {
         self.memory_budget = budget;
         self
     }
 
+    #[must_use]
     pub fn with_wal_batch_config(mut self, cfg: crate::wal::policy::BatchConfig) -> Self {
         self.wal_batch_config = Some(cfg);
         self
     }
 
+    #[must_use]
     pub fn with_compaction(mut self, enabled: bool) -> Self {
         self.enable_compaction = enabled;
         self
     }
 
+    #[must_use]
     pub fn with_memtable_size(mut self, size: usize) -> Self {
         self.memtable_size = Some(size);
         self
@@ -313,6 +357,12 @@ impl BenchEngineConfig {
     ///
     /// `db_path` is required for `LocalDisk` storage mode and should be the
     /// filesystem path the engine will use. Pass `None` for `Memory` mode.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `LocalDisk` is selected without a `db_path`, or when the
+    /// currently unsupported `CloudBacked` mode is selected.
+    #[must_use]
     pub fn build_midge_options(&self, db_path: Option<PathBuf>) -> MidgeOptions {
         let storage_mode = match self.storage_mode {
             BenchStorageMode::Memory => StorageMode::Memory,
@@ -338,6 +388,11 @@ impl BenchEngineConfig {
 }
 
 /// Setup a benchmark engine with the given configuration.
+///
+/// # Panics
+///
+/// Panics if the benchmark engine cannot be opened with the derived options.
+#[must_use]
 pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> Engine {
     let path = unique_bench_path(prefix);
 
@@ -347,10 +402,11 @@ pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> Engine {
     }
 
     let opts = config.build_midge_options(Some(path));
-    Engine::open_with_options(opts).expect("failed to open engine")
+    Engine::open_with_options(&opts).expect("failed to open engine")
 }
 
 /// Setup engine with storage mode (convenience wrapper with defaults).
+#[must_use]
 pub fn setup_engine_with_mode(prefix: &str, mode: BenchStorageMode) -> Engine {
     let config = BenchEngineConfig {
         storage_mode: mode,
@@ -361,6 +417,7 @@ pub fn setup_engine_with_mode(prefix: &str, mode: BenchStorageMode) -> Engine {
 
 /// Setup a benchmark engine at a specific path with the given configuration.
 /// This creates a NEW database at the path (deletes any existing data).
+#[must_use]
 pub fn setup_engine_at_path(path: &Path, config: &BenchEngineConfig) -> Engine {
     let _ = std::fs::remove_dir_all(path);
     reopen_engine_at_path(path, config)
@@ -368,16 +425,23 @@ pub fn setup_engine_at_path(path: &Path, config: &BenchEngineConfig) -> Engine {
 
 /// Reopen an existing database at a specific path.
 /// Does NOT delete existing data - use for recovery/reopen tests.
+///
+/// # Panics
+///
+/// Panics if `config` uses memory storage, or if the engine cannot be opened at
+/// the requested path.
+#[must_use]
 pub fn reopen_engine_at_path(path: &Path, config: &BenchEngineConfig) -> Engine {
     if let BenchStorageMode::Memory = config.storage_mode {
         panic!("setup_engine_at_path requires persistent storage");
     }
 
     let opts = config.build_midge_options(Some(path.to_path_buf()));
-    Engine::open_with_options(opts).expect("failed to open engine")
+    Engine::open_with_options(&opts).expect("failed to open engine")
 }
 
 /// Setup Arc-wrapped engine for concurrent benchmarks.
+#[must_use]
 pub fn setup_engine_arc(prefix: &str, mode: BenchStorageMode) -> Arc<Engine> {
     Arc::new(setup_engine_with_mode(prefix, mode))
 }
@@ -424,6 +488,10 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 /// Create an on-disk "seed" directory by invoking a builder closure once.
 /// The builder receives the path where it should materialize the database.
+///
+/// # Panics
+///
+/// Panics if the provided builder panics.
 pub fn create_seed_dir<F>(seed_prefix: &str, builder: F) -> PathBuf
 where
     F: FnOnce(&Path),
@@ -440,6 +508,11 @@ where
 /// This clones the seed directory to a unique temp path, reopens the engine at
 /// that path using `config`, invokes `measure_fn` exactly once with ownership of
 /// the opened engine, measures elapsed time, then cleans up.
+///
+/// # Panics
+///
+/// Panics if the seed directory cannot be cloned, the engine cannot be opened,
+/// or `measure_fn` panics.
 pub fn run_single_shot_from_seed<F>(
     seed_path: &Path,
     config: &BenchEngineConfig,
@@ -471,6 +544,11 @@ where
 ///
 /// Useful when per-sample restore is expensive but must not be included in the
 /// timed critical section (e.g., creating multiple L0 files before `compact_all`).
+///
+/// # Panics
+///
+/// Panics if the seed directory cannot be cloned, the engine cannot be opened,
+/// or either closure panics.
 pub fn run_single_shot_with_restore<R, T>(
     seed_path: &Path,
     config: &BenchEngineConfig,
@@ -508,6 +586,11 @@ where
 /// directory path and the config.
 ///
 /// Return a value from the closure if you want its `Drop` to be excluded from timing.
+///
+/// # Panics
+///
+/// Panics if the seed directory cannot be cloned or if the provided closure
+/// panics.
 pub fn run_single_shot_open_from_seed<F, R>(
     seed_path: &Path,
     config: &BenchEngineConfig,
@@ -542,13 +625,14 @@ where
 /// ```no_run
 /// use cntryl_midge::testkit::bench::consume_iterator;
 /// # use cntryl_midge::{Engine, Query};
-/// # let engine = Engine::open_with_options(cntryl_midge::testkit::memory_opts()).unwrap();
+/// # let engine = Engine::open_with_options(&cntryl_midge::testkit::memory_opts()).unwrap();
 /// # let cf = engine.create_column_family("cf1").unwrap();
 /// # let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
 /// let iter = tx.scan(&Query::new()).unwrap();
 /// let count = consume_iterator(iter);
 /// println!("Scanned {} items", count);
 /// ```
+#[must_use]
 pub fn consume_iterator(mut iter: crate::engine::api::iterator::Iterator) -> usize {
     let mut count = 0;
     while iter.next().is_some() {
@@ -567,13 +651,14 @@ pub fn consume_iterator(mut iter: crate::engine::api::iterator::Iterator) -> usi
 /// ```no_run
 /// use cntryl_midge::testkit::bench::consume_n_from_iterator;
 /// # use cntryl_midge::{Engine, Query};
-/// # let engine = Engine::open_with_options(cntryl_midge::testkit::memory_opts()).unwrap();
+/// # let engine = Engine::open_with_options(&cntryl_midge::testkit::memory_opts()).unwrap();
 /// # let cf = engine.create_column_family("cf1").unwrap();
 /// # let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
 /// let iter = tx.scan(&Query::new()).unwrap();
 /// let count = consume_n_from_iterator(iter, 100);
 /// println!("Scanned {} items (max 100)", count);
 /// ```
+#[must_use]
 pub fn consume_n_from_iterator(
     mut iter: crate::engine::api::iterator::Iterator,
     n: usize,
@@ -611,11 +696,12 @@ mod tests {
         });
 
         // Act
-        let _d = run_single_shot_from_seed(&seed, &BenchEngineConfig::default(), |_engine| {});
+        let duration =
+            run_single_shot_from_seed(&seed, &BenchEngineConfig::default(), |_engine| {});
 
         // Assert
         // Just ensure no panic and a sane duration.
-        assert!(_d.as_nanos() > 0);
+        assert!(duration.as_nanos() > 0);
     }
 
     #[test]
@@ -633,7 +719,7 @@ mod tests {
         let seq_timed = seq.clone();
 
         // Act
-        let _d = run_single_shot_with_restore(
+        let duration = run_single_shot_with_restore(
             &seed,
             &BenchEngineConfig::default(),
             move |_engine| {
@@ -647,7 +733,7 @@ mod tests {
         // Assert
         let captured = seq.lock().unwrap().clone();
         assert_eq!(captured, vec!["restore", "timed"]);
-        assert!(_d.as_nanos() > 0);
+        assert!(duration.as_nanos() > 0);
     }
 
     #[test]

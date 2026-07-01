@@ -1,11 +1,11 @@
-//! Filesystem WAL writer using io::Fs abstraction
+//! Filesystem WAL writer using `io::Fs` abstraction
 //!
-//! This writer uses the base io::Fs trait instead of storage abstractions directly,
+//! This writer uses the base `io::Fs` trait instead of storage abstractions directly,
 //! allowing for swappable implementations (Real, Mock, Chaos) for testing.
 //!
 //! Architectural rules (Copilot: read carefully and DO NOT modify):
 //! ---------------------------------------------------------------
-//! • FsWalWriterIo ONLY appends bytes to the active WAL file `wal.log`.
+//! • `FsWalWriterIo` ONLY appends bytes to the active WAL file `wal.log`.
 //! • It NEVER assigns sequence numbers.
 //! • It NEVER rotates WAL segments.
 //! • It NEVER writes metadata beyond the encoded WAL record format.
@@ -24,7 +24,11 @@ use std::sync::Arc;
 
 use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 
-/// Filesystem-backed WAL writer using io::Fs.
+const MAX_BACKOFF_MS: u64 = 100;
+const MAX_WAIT_ATTEMPTS: u32 = 50;
+const JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Filesystem-backed WAL writer using `io::Fs`.
 ///
 /// This struct is responsible ONLY for writing bytes to `wal.log`.
 /// It does not manage segment rotation, sequence assignment, recovery,
@@ -59,6 +63,10 @@ pub struct FsWalWriterIo {
 }
 impl FsWalWriterIo {
     /// Create a new WAL writer targeting `wal.log` using the provided filesystem.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WAL file cannot be created or opened.
     pub fn new(path_str: &str, fs: Arc<dyn Fs>) -> MidgeResult<Self> {
         let path = FsPath::new(path_str);
 
@@ -81,7 +89,7 @@ impl FsWalWriterIo {
 
         let writer = Self {
             path: path.clone(),
-            fs: Arc::clone(&fs),
+            fs,
             current_pos: Arc::new(std::sync::atomic::AtomicU64::new(current_pos)),
             queue: Arc::new(Mutex::new(Vec::new())),
             queue_cond: Arc::new(Condvar::new()),
@@ -94,7 +102,7 @@ impl FsWalWriterIo {
 
         // Spawn background writer thread
         let config = WriterConfig {
-            fs: Arc::clone(&fs),
+            fs: Arc::clone(&writer.fs),
             path,
             queue: writer.queue.clone(),
             queue_cond: writer.queue_cond.clone(),
@@ -114,14 +122,17 @@ impl FsWalWriterIo {
         Ok(writer)
     }
 
-    fn encode_record_frame(&self, record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
+    fn encode_record_frame(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
         let e_start = std::time::Instant::now();
-        let encoded = encoding::encode(record)?;
+        crate::wal::frame::append_frame_encoded(buf, |payload| {
+            encoding::encode_into(record, payload)
+        })?;
         let e_elapsed = e_start.elapsed();
         if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics().record_wal_encode(e_elapsed.as_nanos() as u64);
+            t.metrics()
+                .record_wal_encode(u64::try_from(e_elapsed.as_nanos()).unwrap_or(u64::MAX));
         }
-        crate::wal::frame::append_frame(buf, &encoded)
+        Ok(())
     }
 
     fn take_buffer(&self) -> Vec<u8> {
@@ -153,9 +164,6 @@ impl FsWalWriterIo {
 
         // Enqueue with backpressure: if queue is full, wait for it to drain.
         let mut backoff_ms = 1u64;
-        const MAX_BACKOFF_MS: u64 = 100;
-        const MAX_WAIT_ATTEMPTS: u32 = 50;
-
         for attempt in 0..MAX_WAIT_ATTEMPTS {
             if let Some(err) = self.writer_failure() {
                 return Err(err);
@@ -170,7 +178,7 @@ impl FsWalWriterIo {
 
                 if attempt > 0 {
                     if let Some(t) = crate::telemetry::Telemetry::global() {
-                        t.metrics().record_wal_backpressure_wait(attempt as u64);
+                        t.metrics().record_wal_backpressure_wait(u64::from(attempt));
                     }
                 }
 
@@ -220,7 +228,7 @@ impl WalWriter for FsWalWriterIo {
         // writer thread has appended the bytes to the local WAL file.
         let mut buf = self.take_buffer();
         buf.clear();
-        self.encode_record_frame(record, &mut buf)?;
+        Self::encode_record_frame(record, &mut buf)?;
         self.enqueue_encoded(buf)
     }
 
@@ -249,7 +257,7 @@ impl WalWriter for FsWalWriterIo {
             if index + 1 == records.len() {
                 last_record_offset = buf.len() as u64;
             }
-            self.encode_record_frame(record, &mut buf)?;
+            Self::encode_record_frame(record, &mut buf)?;
         }
 
         let batch_start = self.enqueue_encoded(buf)?;
@@ -321,7 +329,8 @@ impl WalWriter for FsWalWriterIo {
         }
         let elapsed = sync_start.elapsed();
         if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics().record_wal_fsync_ns(elapsed.as_nanos() as u64);
+            t.metrics()
+                .record_wal_fsync_ns(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX));
             t.metrics().record_wal_fsync_count();
         }
         Ok(())
@@ -341,8 +350,6 @@ impl WalWriter for FsWalWriterIo {
         // === Phase 1.3: Join with timeout to prevent indefinite hangs ===
         // If writer thread is stuck in fsync (NFS hang, disk failure), we timeout
         // after 30s and detach the thread rather than blocking forever.
-        const JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
         if let Some(handle) = self.writer_thread.lock().take() {
             let start = std::time::Instant::now();
             loop {
@@ -460,6 +467,30 @@ mod tests {
         // Assert
         assert_eq!(pos, 0);
         assert!(writer.current_pos() > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_encode_record_frame_identically_to_payload_then_frame() -> MidgeResult<()> {
+        // Arrange
+        let mut record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"key"),
+            Some(Bytes::from_static(b"value")),
+            42,
+            7,
+        );
+        record.txn_id = Some(9);
+        let payload = crate::wal::encoding::encode(&record)?;
+        let mut expected = Vec::new();
+        crate::wal::frame::append_frame(&mut expected, &payload)?;
+        let mut actual = Vec::new();
+
+        // Act
+        FsWalWriterIo::encode_record_frame(&record, &mut actual)?;
+
+        // Assert
+        assert_eq!(actual, expected);
         Ok(())
     }
 }

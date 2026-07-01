@@ -15,6 +15,10 @@ pub struct TrieReader {
 
 impl TrieReader {
     /// Create a new trie reader from serialized data
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the serialized trie cannot be decoded or is empty.
     pub fn new(data: &[u8]) -> MidgeResult<Self> {
         let nodes = encoding::decode_trie(data)?;
 
@@ -31,6 +35,7 @@ impl TrieReader {
     /// Find block ID for exact key lookup
     ///
     /// Returns None if key not found in trie.
+    #[must_use]
     pub fn find_block(&self, key: &[u8]) -> Option<u32> {
         if key.is_empty() {
             return None;
@@ -76,6 +81,7 @@ impl TrieReader {
     /// Find block IDs for prefix range
     ///
     /// Returns all block IDs that contain keys with the given prefix.
+    #[must_use]
     pub fn find_prefix_range(&self, prefix: &[u8]) -> Vec<u32> {
         let mut result = Vec::new();
 
@@ -171,11 +177,12 @@ impl TrieReader {
     ///
     /// Algorithm:
     /// 1. Walk down the trie matching as much of `key` as possible.
-    /// 2. If an exact match is found, return its block_id.
+    /// 2. If an exact match is found, return its `block_id`.
     /// 3. If we diverge (child byte > remaining key byte), the subtree
     ///    rooted at that child contains the next key — return its leftmost leaf.
     /// 4. If no child >= remaining byte exists, backtrack to the nearest
     ///    ancestor that has a successor edge.
+    #[must_use]
     pub fn seek_next(&self, key: &[u8]) -> Option<u32> {
         if key.is_empty() {
             // Empty key: return the leftmost leaf in the entire trie
@@ -312,6 +319,7 @@ impl TrieReader {
     }
 
     /// Get number of nodes in trie
+    #[must_use]
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
@@ -334,8 +342,10 @@ mod tests {
     fn build_large_test_trie() -> Vec<u8> {
         let mut builder = TrieBuilder::new();
         for i in 0..100 {
-            let key = format!("key_{:04}", i).into_bytes();
-            builder.add_key(&key, i as u32).unwrap();
+            let key = format!("key_{i:04}").into_bytes();
+            builder
+                .add_key(&key, u32::try_from(i).unwrap_or(u32::MAX))
+                .unwrap();
         }
         builder.finish()
     }

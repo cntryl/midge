@@ -7,6 +7,7 @@
 //!
 //! This reduces false positives by 40-60% vs uniform 1% everywhere.
 
+use std::convert::TryFrom;
 use std::fmt;
 
 /// Configuration for tiered bloom filters across LSM levels
@@ -25,6 +26,7 @@ impl TieredBloomConfig {
     /// - L0: 0.1% (hot, small)
     /// - L1: 1.0% (moderate)
     /// - L2+: 5.0% (large, cold)
+    #[must_use]
     pub fn balanced() -> Self {
         Self {
             l0_fpr: 0.001,     // 0.1%
@@ -37,6 +39,7 @@ impl TieredBloomConfig {
     /// - L0: 0.01% (ultra-fine)
     /// - L1: 0.1%
     /// - L2+: 1.0%
+    #[must_use]
     pub fn aggressive() -> Self {
         Self {
             l0_fpr: 0.0001,
@@ -49,6 +52,7 @@ impl TieredBloomConfig {
     /// - L0: 0.5%
     /// - L1: 2.0%
     /// - L2+: 10.0%
+    #[must_use]
     pub fn conservative() -> Self {
         Self {
             l0_fpr: 0.005,
@@ -58,6 +62,7 @@ impl TieredBloomConfig {
     }
 
     /// Create a uniform configuration (all levels same FPR)
+    #[must_use]
     pub fn uniform(fpr: f64) -> Self {
         Self {
             l0_fpr: fpr,
@@ -67,6 +72,7 @@ impl TieredBloomConfig {
     }
 
     /// Get FPR for a specific level
+    #[must_use]
     pub fn fpr_for_level(&self, level: usize) -> f64 {
         match level {
             0 => self.l0_fpr,
@@ -76,7 +82,8 @@ impl TieredBloomConfig {
     }
 
     /// Estimate space savings vs uniform 1% FPR
-    /// Returns (total_bits_saved, percentage_saved)
+    /// Returns (`total_bits_saved`, `percentage_saved`)
+    #[must_use]
     pub fn estimate_space_savings_vs_uniform(
         &self,
         l0_keys: usize,
@@ -92,8 +99,13 @@ impl TieredBloomConfig {
             }
             let ln_p = fpr.ln();
             let ln_2_sq = 2.0_f64.ln().powi(2);
-            let m = -(n as f64) * ln_p / ln_2_sq;
-            (m.ceil() as usize).max(64)
+            let n_f64 = f64::from(u32::try_from(n).unwrap_or(u32::MAX));
+            let m = -n_f64 * ln_p / ln_2_sq;
+            if !m.is_finite() || m <= 0.0 {
+                return 0;
+            }
+
+            format!("{:.0}", m.ceil()).parse().unwrap_or(usize::MAX)
         };
 
         let uniform_total = calc_bits(l0_keys, uniform_fpr)
@@ -106,7 +118,9 @@ impl TieredBloomConfig {
         let saved = uniform_total.saturating_sub(tiered_total);
 
         let pct_saved = if uniform_total > 0 {
-            (saved as f64 / uniform_total as f64) * 100.0
+            (f64::from(u32::try_from(saved).unwrap_or(u32::MAX))
+                / f64::from(u32::try_from(uniform_total).unwrap_or(u32::MAX)))
+                * 100.0
         } else {
             0.0
         };
@@ -145,9 +159,9 @@ mod tests {
         let config = TieredBloomConfig::balanced();
 
         // Assert
-        assert_eq!(config.l0_fpr, 0.001);
-        assert_eq!(config.l1_fpr, 0.01);
-        assert_eq!(config.l2_plus_fpr, 0.05);
+        assert!((config.l0_fpr - 0.001).abs() < f64::EPSILON);
+        assert!((config.l1_fpr - 0.01).abs() < f64::EPSILON);
+        assert!((config.l2_plus_fpr - 0.05).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -158,10 +172,10 @@ mod tests {
         let config = TieredBloomConfig::balanced();
 
         // Assert
-        assert_eq!(config.fpr_for_level(0), 0.001);
-        assert_eq!(config.fpr_for_level(1), 0.01);
-        assert_eq!(config.fpr_for_level(2), 0.05);
-        assert_eq!(config.fpr_for_level(99), 0.05);
+        assert!((config.fpr_for_level(0) - 0.001).abs() < f64::EPSILON);
+        assert!((config.fpr_for_level(1) - 0.01).abs() < f64::EPSILON);
+        assert!((config.fpr_for_level(2) - 0.05).abs() < f64::EPSILON);
+        assert!((config.fpr_for_level(99) - 0.05).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -170,7 +184,7 @@ mod tests {
 
         // Act
         let config = TieredBloomConfig::balanced();
-        let (saved, pct) = config.estimate_space_savings_vs_uniform(1000, 10000, 100000);
+        let (saved, pct) = config.estimate_space_savings_vs_uniform(1000, 10_000, 100_000);
 
         // Tiered should save space by having higher FPR on larger levels
         // Assert
@@ -185,7 +199,7 @@ mod tests {
 
         // Act
         let config = TieredBloomConfig::balanced();
-        let display = format!("{}", config);
+        let display = format!("{config}");
 
         // Assert
         assert!(display.contains("L0"));
@@ -201,8 +215,8 @@ mod tests {
         let config = TieredBloomConfig::uniform(0.02);
 
         // Assert
-        assert_eq!(config.l0_fpr, 0.02);
-        assert_eq!(config.l1_fpr, 0.02);
-        assert_eq!(config.l2_plus_fpr, 0.02);
+        assert!((config.l0_fpr - 0.02).abs() < f64::EPSILON);
+        assert!((config.l1_fpr - 0.02).abs() < f64::EPSILON);
+        assert!((config.l2_plus_fpr - 0.02).abs() < f64::EPSILON);
     }
 }
