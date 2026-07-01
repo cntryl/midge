@@ -5,11 +5,18 @@
 
 use super::super::durability::DurabilityWaiter;
 use super::super::{RuntimeMsg, RuntimeResponse, TransactionOp};
+use super::snapshot::SnapshotCoordinator;
 use super::wal::ApplyTransactionRequest;
 use super::EventLoop;
 use crate::common::MidgeError;
 use crossbeam::channel::{Receiver, TryRecvError};
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
+
+const EXPLICIT_TRANSACTION_COALESCE_TARGET: usize = 8;
+const EXPLICIT_TRANSACTION_COALESCE_COLD_WINDOW: Duration = Duration::from_micros(25);
+const EXPLICIT_TRANSACTION_COALESCE_BUSY_WINDOW: Duration = Duration::from_micros(100);
+const EXPLICIT_TRANSACTION_COALESCE_IDLE_WAIT: Duration = Duration::from_micros(5);
 
 enum WriteResult {
     WalAppend {
@@ -85,6 +92,10 @@ impl EventLoop {
         let mut drained = 0usize;
 
         while drained < max {
+            if self.pending_msg.is_some() {
+                break;
+            }
+
             match self.drain_one_pending_write(msg_rx, max - drained) {
                 DrainOutcome::WritesHandled(count) => drained += count,
                 DrainOutcome::StashedNonWrite | DrainOutcome::ChannelEmpty => break,
@@ -107,6 +118,10 @@ impl EventLoop {
         msg_rx: &Receiver<RuntimeMsg>,
         max: usize,
     ) -> DrainOutcome {
+        if self.pending_msg.is_some() {
+            return DrainOutcome::StashedNonWrite;
+        }
+
         match msg_rx.try_recv() {
             Ok(RuntimeMsg::WalAppend {
                 request_id,
@@ -209,6 +224,7 @@ impl EventLoop {
             return 1;
         }
 
+        let initial_is_explicit = initial.start_sequence.is_some();
         let mut batch = CoalescedTransactionBatch::default();
 
         match self.prepare_transaction_for_coalescing(initial, &mut batch.staged_touches) {
@@ -228,7 +244,14 @@ impl EventLoop {
             }
         }
 
-        self.collect_coalesced_transaction_batch(msg_rx, max, &mut batch);
+        let explicit_collect_window = initial_is_explicit.then(|| {
+            if msg_rx.is_empty() {
+                EXPLICIT_TRANSACTION_COALESCE_COLD_WINDOW
+            } else {
+                EXPLICIT_TRANSACTION_COALESCE_BUSY_WINDOW
+            }
+        });
+        self.collect_coalesced_transaction_batch(msg_rx, max, &mut batch, explicit_collect_window);
         self.finish_coalesced_transaction_batch(batch)
     }
 
@@ -237,54 +260,126 @@ impl EventLoop {
         msg_rx: &Receiver<RuntimeMsg>,
         max: usize,
         batch: &mut CoalescedTransactionBatch,
+        explicit_collect_window: Option<Duration>,
     ) {
+        let collect_until = explicit_collect_window.map(|window| Instant::now() + window);
+
         while batch.handled < max {
             match msg_rx.try_recv() {
-                Ok(RuntimeMsg::ApplyTransaction {
+                Ok(msg) => {
+                    if !self.collect_coalesced_transaction_msg(msg, batch) {
+                        break;
+                    }
+                }
+                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => {
+                    if collect_until.is_none()
+                        || batch.handled >= EXPLICIT_TRANSACTION_COALESCE_TARGET
+                    {
+                        break;
+                    }
+
+                    let Some(collect_until) = collect_until else {
+                        break;
+                    };
+                    let now = Instant::now();
+                    if now >= collect_until {
+                        break;
+                    }
+
+                    let wait_for = collect_until
+                        .saturating_duration_since(now)
+                        .min(EXPLICIT_TRANSACTION_COALESCE_IDLE_WAIT);
+                    match msg_rx.recv_timeout(wait_for) {
+                        Ok(msg) => {
+                            if !self.collect_coalesced_transaction_msg(msg, batch) {
+                                break;
+                            }
+                        }
+                        Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                        Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_coalesced_transaction_msg(
+        &mut self,
+        msg: RuntimeMsg,
+        batch: &mut CoalescedTransactionBatch,
+    ) -> bool {
+        match msg {
+            RuntimeMsg::ApplyTransaction {
+                request_id,
+                ops,
+                durability_policy,
+                start_sequence,
+                isolation_policy,
+                response_tx,
+            } => {
+                if let Some(response_tx) = response_tx {
+                    self.register_inline_response(request_id, response_tx);
+                }
+
+                let request = ApplyTransactionRequest {
                     request_id,
                     ops,
                     durability_policy,
                     start_sequence,
                     isolation_policy,
-                    response_tx,
-                }) => {
-                    if let Some(response_tx) = response_tx {
-                        self.register_inline_response(request_id, response_tx);
-                    }
-
-                    let request = ApplyTransactionRequest {
+                };
+                match self.prepare_transaction_for_coalescing(request, &mut batch.staged_touches) {
+                    PrepareOutcome::Prepared {
                         request_id,
-                        ops,
-                        durability_policy,
-                        start_sequence,
-                        isolation_policy,
-                    };
-                    match self
-                        .prepare_transaction_for_coalescing(request, &mut batch.staged_touches)
-                    {
-                        PrepareOutcome::Prepared {
-                            request_id,
-                            prepared_transaction,
-                        } => {
-                            batch.push_prepared(request_id, prepared_transaction);
-                        }
-                        PrepareOutcome::Fallback(request) => {
-                            batch.fallback_request = Some(request);
-                            break;
-                        }
-                        PrepareOutcome::Error { request_id, error } => {
-                            batch.deferred_error = Some((request_id, error));
-                            break;
-                        }
+                        prepared_transaction,
+                    } => {
+                        batch.push_prepared(request_id, prepared_transaction);
+                        true
+                    }
+                    PrepareOutcome::Fallback(request) => {
+                        batch.fallback_request = Some(request);
+                        false
+                    }
+                    PrepareOutcome::Error { request_id, error } => {
+                        batch.deferred_error = Some((request_id, error));
+                        false
                     }
                 }
-                Ok(other) => {
-                    if self.pending_msg.is_none() {
-                        self.pending_msg = Some(other);
-                    }
-                    break;
+            }
+            other => self.handle_interleavable_coalescing_message(other),
+        }
+    }
+
+    fn handle_interleavable_coalescing_message(&mut self, msg: RuntimeMsg) -> bool {
+        match msg {
+            // Snapshot bookkeeping is actor-owned but does not observe or advance
+            // data/WAL state. Handling it here keeps transaction lifecycle traffic
+            // from fragmenting an already ordered ApplyTransaction batch.
+            RuntimeMsg::RegisterSnapshot {
+                request_id,
+                snapshot_id,
+                sequence,
+                pinned_sst_names,
+            } => {
+                let _ = SnapshotCoordinator::register(
+                    self,
+                    request_id,
+                    snapshot_id,
+                    sequence,
+                    pinned_sst_names,
+                );
+                true
+            }
+            RuntimeMsg::UnregisterSnapshot { snapshot_id } => {
+                let _ = SnapshotCoordinator::unregister(self, snapshot_id);
+                true
+            }
+            other => {
+                if self.pending_msg.is_none() {
+                    self.pending_msg = Some(other);
                 }
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+                false
             }
         }
     }
@@ -299,10 +394,11 @@ impl EventLoop {
             deferred_error,
         } = batch;
 
-        match self
+        let append_result = self
             .wal_actor
-            .append_prepared_transactions(&mut self.state, prepared)
-        {
+            .append_prepared_transactions(&mut self.state, prepared);
+
+        match append_result {
             Ok(results) => {
                 for result in results {
                     self.finish_drained_write(
@@ -314,22 +410,32 @@ impl EventLoop {
                         }),
                     );
                 }
+
+                if let Some((request_id, error)) = deferred_error {
+                    self.finish_drained_write(request_id, Err(error));
+                    handled += 1;
+                }
+
+                if let Some(request) = fallback_request {
+                    self.apply_single_transaction_request(request);
+                    handled += 1;
+                }
             }
             Err(error) => {
                 for request_id in request_ids {
                     self.finish_drained_write(request_id, Err(duplicate_midge_error(&error)));
                 }
+
+                if let Some((request_id, error)) = deferred_error {
+                    self.finish_drained_write(request_id, Err(error));
+                    handled += 1;
+                }
+
+                if let Some(request) = fallback_request {
+                    self.finish_drained_write(request.request_id, Err(error));
+                    handled += 1;
+                }
             }
-        }
-
-        if let Some((request_id, error)) = deferred_error {
-            self.finish_drained_write(request_id, Err(error));
-            handled += 1;
-        }
-
-        if let Some(request) = fallback_request {
-            self.apply_single_transaction_request(request);
-            handled += 1;
         }
 
         handled
@@ -725,6 +831,25 @@ mod tests {
         }
     }
 
+    fn inline_txn_msg(
+        request_id: u64,
+        ops: Vec<TransactionOp>,
+        durability_policy: Option<DurabilityPolicy>,
+    ) -> (RuntimeMsg, crossbeam::channel::Receiver<RuntimeResponse>) {
+        let (response_tx, response_rx) = crossbeam::channel::bounded(1);
+        (
+            RuntimeMsg::ApplyTransaction {
+                request_id,
+                ops,
+                durability_policy,
+                start_sequence: None,
+                isolation_policy: TransactionIsolationPolicy::LastWriteWins,
+                response_tx: Some(response_tx),
+            },
+            response_rx,
+        )
+    }
+
     fn put_op(
         cf_id: crate::types::ColumnFamilyId,
         key: &'static [u8],
@@ -810,6 +935,15 @@ mod tests {
         }
     }
 
+    fn expect_ok(rx: &crossbeam::channel::Receiver<RuntimeResponse>, expected_request_id: u64) {
+        match recv_response(rx) {
+            RuntimeResponse::Ok { request_id } => {
+                assert_eq!(request_id, expected_request_id);
+            }
+            other => panic!("unexpected response for {expected_request_id}: {other:?}"),
+        }
+    }
+
     fn expect_error<F>(
         rx: &crossbeam::channel::Receiver<RuntimeResponse>,
         expected_request_id: u64,
@@ -836,6 +970,16 @@ mod tests {
                 panic!("response channel disconnected before timeout")
             }
             Ok(response) => panic!("unexpected response: {response:?}"),
+        }
+    }
+
+    fn assert_no_additional_response(rx: &crossbeam::channel::Receiver<RuntimeResponse>) {
+        match rx.recv_timeout(NO_RESPONSE_TIMEOUT) {
+            Err(
+                crossbeam::channel::RecvTimeoutError::Timeout
+                | crossbeam::channel::RecvTimeoutError::Disconnected,
+            ) => {}
+            Ok(response) => panic!("unexpected additional response: {response:?}"),
         }
     }
 
@@ -1043,6 +1187,174 @@ mod tests {
     }
 
     #[test]
+    fn should_return_inline_responses_when_same_key_lww_transaction_falls_back_from_coalescing(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let mut fixture = EventLoopFixture::batched()?;
+        let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+        let (first_msg, first_rx) = inline_txn_msg(
+            34,
+            vec![put_op(0, b"same-key-inline", b"first")],
+            Some(DurabilityPolicy::Batched),
+        );
+        let (fallback_msg, fallback_rx) = inline_txn_msg(
+            35,
+            vec![put_op(0, b"same-key-inline", b"second")],
+            Some(DurabilityPolicy::Batched),
+        );
+
+        msg_tx.send(first_msg).expect("queue first transaction");
+        msg_tx
+            .send(fallback_msg)
+            .expect("queue same-key fallback transaction");
+
+        // Act
+        let handled = fixture.event_loop.drain_pending_writes(&msg_rx, 1024);
+
+        // Assert
+        assert_eq!(handled, 2);
+        assert_eq!(fixture.event_loop.wal_actor.append_calls(), 2);
+        assert_eq!(expect_transaction_applied(&first_rx, 34).1, 1);
+        assert_eq!(expect_transaction_applied(&fallback_rx, 35).1, 1);
+        assert_no_additional_response(&first_rx);
+        assert_no_additional_response(&fallback_rx);
+        assert_memtable_value(&fixture.event_loop, 0, b"same-key-inline", Some(b"second"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_return_inline_error_when_same_key_insert_only_fallback_rejects_from_coalescing(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let mut fixture = EventLoopFixture::batched()?;
+        let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+        let (first_msg, first_rx) = inline_txn_msg(
+            36,
+            vec![put_op(0, b"same-key-insert-inline", b"first")],
+            Some(DurabilityPolicy::Batched),
+        );
+        let (fallback_msg, fallback_rx) = inline_txn_msg(
+            37,
+            vec![insert_only_put_op(0, b"same-key-insert-inline", b"second")],
+            Some(DurabilityPolicy::Batched),
+        );
+
+        msg_tx.send(first_msg).expect("queue first transaction");
+        msg_tx
+            .send(fallback_msg)
+            .expect("queue same-key insert-only fallback transaction");
+
+        // Act
+        let handled = fixture.event_loop.drain_pending_writes(&msg_rx, 1024);
+
+        // Assert
+        assert_eq!(handled, 2);
+        assert_eq!(fixture.event_loop.wal_actor.append_calls(), 1);
+        assert_eq!(expect_transaction_applied(&first_rx, 36).1, 1);
+        expect_error(
+            &fallback_rx,
+            37,
+            |error| matches!(error, MidgeError::InvalidArgument(message) if message == "key already exists"),
+        );
+        assert_no_additional_response(&first_rx);
+        assert_no_additional_response(&fallback_rx);
+        assert_memtable_value(
+            &fixture.event_loop,
+            0,
+            b"same-key-insert-inline",
+            Some(b"first"),
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_coalesce_across_snapshot_bookkeeping_messages() -> MidgeResult<()> {
+        // Arrange
+        let mut fixture = EventLoopFixture::batched()?;
+        let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+        let first_rx = fixture.register(42);
+        let register_rx = fixture.register(43);
+        let second_rx = fixture.register(44);
+
+        msg_tx
+            .send(RuntimeMsg::RegisterSnapshot {
+                request_id: 43,
+                snapshot_id: 900,
+                sequence: 0,
+                pinned_sst_names: Vec::new(),
+            })
+            .expect("queue snapshot registration");
+        msg_tx
+            .send(txn_msg(
+                44,
+                vec![put_op(0, b"after-register", b"value-b")],
+                Some(DurabilityPolicy::Batched),
+            ))
+            .expect("queue second transaction");
+
+        // Act
+        let handled = fixture.event_loop.apply_transaction_with_coalescing(
+            &msg_rx,
+            txn_request(
+                42,
+                vec![put_op(0, b"before-register", b"value-a")],
+                Some(DurabilityPolicy::Batched),
+            ),
+            1024,
+        );
+
+        // Assert
+        assert_eq!(handled, 2);
+        assert_eq!(fixture.event_loop.wal_actor.append_calls(), 1);
+        assert_eq!(expect_transaction_applied(&first_rx, 42).1, 1);
+        expect_ok(&register_rx, 43);
+        assert_eq!(expect_transaction_applied(&second_rx, 44).1, 1);
+        assert_memtable_value(&fixture.event_loop, 0, b"before-register", Some(b"value-a"));
+        assert_memtable_value(&fixture.event_loop, 0, b"after-register", Some(b"value-b"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_drop_non_write_after_coalescing_stashes_pending_message() -> MidgeResult<()> {
+        // Arrange
+        let mut fixture = EventLoopFixture::batched()?;
+        let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+        let (txn_msg, txn_rx) = inline_txn_msg(
+            38,
+            vec![put_op(0, b"coalesce-before-non-write", b"value")],
+            Some(DurabilityPolicy::Batched),
+        );
+
+        msg_tx.send(txn_msg).expect("queue transaction");
+        msg_tx
+            .send(RuntimeMsg::Noop { request_id: 39 })
+            .expect("queue first non-write");
+        msg_tx
+            .send(RuntimeMsg::Noop { request_id: 40 })
+            .expect("queue second non-write");
+
+        // Act
+        let handled = fixture.event_loop.drain_pending_writes(&msg_rx, 1024);
+
+        // Assert
+        assert_eq!(handled, 1);
+        assert_eq!(expect_transaction_applied(&txn_rx, 38).1, 1);
+        match fixture.event_loop.pending_msg.take() {
+            Some(RuntimeMsg::Noop { request_id }) => assert_eq!(request_id, 39),
+            other => panic!("expected first non-write to be stashed, got {other:?}"),
+        }
+        match msg_rx.try_recv() {
+            Ok(RuntimeMsg::Noop { request_id }) => assert_eq!(request_id, 40),
+            other => panic!("expected second non-write to remain queued, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn should_error_insert_only_fallback_after_first_transaction_publishes() -> MidgeResult<()> {
         // Arrange
         let mut fixture = EventLoopFixture::batched()?;
@@ -1210,6 +1522,56 @@ mod tests {
         assert_eq!(expect_transaction_applied(&recovery_rx, 62).1, 1);
         assert_eq!(fixture.event_loop.wal_actor.append_calls(), 1);
         assert_memtable_value(&fixture.event_loop, 0, b"recovered", Some(b"value"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_fail_same_key_fallback_when_coalesced_prefix_append_fails() -> MidgeResult<()> {
+        // Arrange
+        let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+        let mut fixture = EventLoopFixture::batched()?;
+        let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+        let (first_msg, first_rx) = inline_txn_msg(
+            80,
+            vec![put_op(0, b"failed-same-key", b"first")],
+            Some(DurabilityPolicy::Batched),
+        );
+        let (fallback_msg, fallback_rx) = inline_txn_msg(
+            81,
+            vec![put_op(0, b"failed-same-key", b"second")],
+            Some(DurabilityPolicy::Batched),
+        );
+
+        msg_tx.send(first_msg).expect("queue first transaction");
+        msg_tx
+            .send(fallback_msg)
+            .expect("queue same-key fallback transaction");
+
+        {
+            let scenario = fail::FailScenario::setup();
+            let failpoint_guard = TxnAppendBatchNoSpaceFailpointGuard::setup(80);
+
+            // Act
+            let handled = fixture.event_loop.drain_pending_writes(&msg_rx, 1024);
+
+            // Assert
+            assert_eq!(handled, 2);
+            expect_error(&first_rx, 80, |error| {
+                matches!(error, MidgeError::NoSpace(_))
+            });
+            expect_error(&fallback_rx, 81, |error| {
+                matches!(error, MidgeError::NoSpace(_))
+            });
+            assert_no_additional_response(&first_rx);
+            assert_no_additional_response(&fallback_rx);
+            assert_eq!(fixture.event_loop.wal_actor.append_calls(), 0);
+            assert_eq!(fixture.event_loop.state.wal.pending_writes, 0);
+            assert_memtable_value(&fixture.event_loop, 0, b"failed-same-key", None);
+
+            drop(failpoint_guard);
+            scenario.teardown();
+        }
 
         Ok(())
     }

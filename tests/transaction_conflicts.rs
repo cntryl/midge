@@ -11,6 +11,7 @@ mod common;
 use cntryl_midge::WriteOptions;
 use common::*;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 // ============================================================================
 // BASIC LWW SEMANTICS TESTS
@@ -107,6 +108,86 @@ fn should_accept_both_committers_given_concurrent_puts_when_lww() {
         assert!(handle1.join().unwrap().is_ok());
         assert!(handle2.join().unwrap().is_ok());
     });
+}
+
+#[test]
+fn should_finish_concurrent_local_same_key_lww_buffered_commits_within_timeout() {
+    // Arrange
+    let mode = "local";
+    let opts = opts_for_mode(mode);
+    let engine = Arc::new(open_with_mode(&opts, mode));
+    let cf = engine.create_column_family("test").expect("create cf");
+    let cf_id = cf.id();
+    let worker_count = 16usize;
+    let barrier = Arc::new(std::sync::Barrier::new(worker_count + 1));
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let mut handles = Vec::with_capacity(worker_count);
+
+    for worker_id in 0..worker_count {
+        let worker_engine = Arc::clone(&engine);
+        let worker_barrier = Arc::clone(&barrier);
+        let worker_result_tx = result_tx.clone();
+        handles.push(std::thread::spawn(move || {
+            let result = (|| -> cntryl_midge::MidgeResult<()> {
+                let mut txn =
+                    worker_engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)?;
+                txn.put(
+                    b"shared-key".to_vec(),
+                    format!("value-{worker_id:02}").into_bytes(),
+                    None,
+                )?;
+                worker_barrier.wait();
+                txn.commit(WriteOptions::buffered())
+            })();
+
+            let _ = worker_result_tx.send((worker_id, result));
+        }));
+    }
+    drop(result_tx);
+
+    // Act
+    barrier.wait();
+
+    // Assert
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut seen = vec![false; worker_count];
+    for _ in 0..worker_count {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or_else(|| Duration::from_secs(0));
+        let (worker_id, result) = result_rx.recv_timeout(remaining).unwrap_or_else(|error| {
+            panic!("timed out waiting for concurrent commit result: {error:?}");
+        });
+        assert!(worker_id < worker_count, "invalid worker id {worker_id}");
+        assert!(
+            !std::mem::replace(&mut seen[worker_id], true),
+            "duplicate result from worker {worker_id}"
+        );
+        result.unwrap_or_else(|error| panic!("worker {worker_id} commit failed: {error:?}"));
+    }
+
+    for handle in handles {
+        handle
+            .join()
+            .expect("worker should not panic after reporting result");
+    }
+    assert!(
+        seen.into_iter().all(|received| received),
+        "every worker should report exactly one result"
+    );
+
+    let read_tx = engine
+        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin read tx");
+    let value = read_tx
+        .get(b"shared-key")
+        .expect("read shared key")
+        .expect("shared key should exist");
+    let final_value = std::str::from_utf8(value.as_ref()).expect("final value should be utf8");
+    assert!(
+        final_value.starts_with("value-"),
+        "final value should be one of the committed worker values, got {final_value}"
+    );
 }
 
 #[test]

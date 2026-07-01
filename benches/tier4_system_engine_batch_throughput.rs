@@ -22,8 +22,24 @@ use stress_config::BenchConfig;
 use cntryl_midge::testkit::MidgeOptions;
 
 const VALUE_SIZE: usize = 128;
+const BATCH_COMMITS: usize = 1_000;
 
-fn run_batch_commit_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops: usize) {
+fn run_batch_commit_case(
+    ctx: &mut StressContext,
+    opts: MidgeOptions,
+    storage_profile: &str,
+    num_ops: usize,
+) {
+    ctx.tag("storage_profile", storage_profile);
+    ctx.tag("batch_size", num_ops.to_string());
+    ctx.tag("batch_commits", BATCH_COMMITS.to_string());
+    ctx.set_elements(
+        u64::try_from(BATCH_COMMITS * num_ops).expect("logical record count fits in u64"),
+    );
+    ctx.set_bytes(
+        u64::try_from(BATCH_COMMITS * num_ops * VALUE_SIZE).expect("logical bytes fit in u64"),
+    );
+
     let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
@@ -37,33 +53,50 @@ fn run_batch_commit_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops: u
     }
 
     // Measure batch throughput: num_ops writes in a single commit
-    // Amortized over 1000 batches to measure stable throughput
-    ctx.set_elements(1_000);
-
     ctx.measure_ref(&engine, |e| {
-        let mut tx = e
-            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-            .expect("begin");
-        for (k, v) in &keys_vals {
-            tx.put(k.to_vec(), v.clone(), None).expect("put");
+        for _ in 0..BATCH_COMMITS {
+            let mut tx = e
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin");
+            for (k, v) in &keys_vals {
+                tx.put(k.to_vec(), v.clone(), None).expect("put");
+            }
+            tx.commit(cntryl_midge::WriteOptions::buffered())
+                .expect("commit");
         }
-        tx.commit(cntryl_midge::WriteOptions::buffered())
-            .expect("commit");
     });
 
     drop(engine);
 }
 
 #[stress_test]
+fn tier4_engine_batch_commit_throughput_1_local(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_batch_commit_case(ctx, opts, "local", 1);
+}
+
+#[stress_test]
+fn tier4_engine_batch_commit_throughput_10_local(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_batch_commit_case(ctx, opts, "local", 10);
+}
+
+#[stress_test]
 fn tier4_engine_batch_commit_throughput_100_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_batch_commit_case(ctx, opts, 100);
+    run_batch_commit_case(ctx, opts, "local", 100);
+}
+
+#[stress_test]
+fn tier4_engine_batch_commit_throughput_1000_local(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_batch_commit_case(ctx, opts, "local", 1_000);
 }
 
 #[stress_test]
 fn tier4_engine_batch_commit_throughput_100_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_batch_commit_case(ctx, opts, 100);
+    run_batch_commit_case(ctx, opts, "cloud", 100);
 }
 
 stress_main!();

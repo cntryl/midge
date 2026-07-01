@@ -422,14 +422,10 @@ impl IngestCoordinator {
             self.stall_flag.store(false, Ordering::Release);
         }
 
-        // Transaction commits must preserve per-transaction conflict semantics.
-        // Avoid cross-request write grouping when conflict checks are requested.
-        if start_sequence.is_some()
-            && matches!(
-                isolation_policy,
-                crate::runtime::TransactionIsolationPolicy::AbortOnWriteConflict
-            )
-        {
+        // Explicit transaction commits carry a start sequence and must not be
+        // merged by caller-side write grouping. The runtime may still coalesce
+        // safe WAL appends while preserving each transaction's response.
+        if start_sequence.is_some() {
             return self.submit_direct(
                 runtime,
                 ops,

@@ -269,6 +269,11 @@ name = "tier2_subsystem_local_throughput_regression"
 path = "benches/tier2_subsystem_local_throughput_regression.rs"
 harness = false
 
+[[bench]]
+name = "tier2_subsystem_transaction_latency"
+path = "benches/tier2_subsystem_transaction_latency.rs"
+harness = false
+
 # Tier 3
 [[bench]]
 name = "tier3_system_compaction"

@@ -174,9 +174,23 @@ impl RuntimePerfReport {
                 usize_to_u64(self.end_hybrid_pending_evictions),
             ),
         ];
-        tags.retain(|(_, value)| *value > 0);
+        tags.retain(|(name, value)| should_emit_runtime_perf_tag(name, *value));
         tags
     }
+}
+
+fn should_emit_runtime_perf_tag(name: &str, value: u64) -> bool {
+    value > 0
+        || matches!(
+            name,
+            "pending_cloud_uploads_end"
+                | "wal_cloud_durable_lag_end"
+                | "hybrid_max_local_bytes"
+                | "hybrid_total_committed_bytes"
+                | "hybrid_free_bytes"
+                | "hybrid_usage_percent"
+                | "hybrid_pending_evictions"
+        )
 }
 
 impl MultiClientRunStats {

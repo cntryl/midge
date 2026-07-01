@@ -2,6 +2,9 @@
 
 This repo uses [Criterion](https://bheisler.github.io/criterion.rs/book/) for micro- and subsystem-level benchmarking, and [cntryl-stress](https://github.com/cntryl/cntryl-stress) for system-level and workload stress tests.
 
+For regression thresholds, cloud/hybrid health guardrails, and rules for
+external LSM comparisons, see [Performance Targets](performance-targets.md).
+
 ## Running Benchmarks
 
 ### Criterion Benchmarks (Tier 1-2)
@@ -130,6 +133,8 @@ End-to-end behavior for a subsystem. Measure how components interact.
 - `tier2_subsystem_iterator_multi_sst.rs` — Range scans across SSTs
 - `tier2_subsystem_bloom_build.rs` — Bloom filter construction
 - `tier2_subsystem_read_amplification.rs` — Read efficiency
+- `tier2_subsystem_local_throughput_regression.rs` — Local buffered throughput regression guard
+- `tier2_subsystem_transaction_latency.rs` — Transaction commit latency and coalescing guard
 
 **Typical runtime:** 5-30 seconds each
 
@@ -165,7 +170,7 @@ Full system benchmarks with realistic access patterns. Standard workload suites 
 
 **Typical runtime:** 10-30 minutes each
 
-**Purpose:** Compare performance against standard benchmarks and track regression over time.
+**Purpose:** Track full-system regression over time under standard workload shapes.
 
 ## Tier 1-2 Microbenchmark Rules (Critical)
 
