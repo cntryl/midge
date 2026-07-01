@@ -318,6 +318,7 @@ pub enum RuntimeMsg {
         durability_policy: Option<DurabilityPolicy>,
         start_sequence: Option<u64>,
         isolation_policy: TransactionIsolationPolicy,
+        response_tx: Option<Sender<RuntimeResponse>>,
     },
     /// Sync WAL to disk.
     WalSync { request_id: u64 },
@@ -994,6 +995,61 @@ impl RuntimeHandle {
     /// Request runtime shutdown (fire-and-forget).
     pub fn shutdown(&self) -> MidgeResult<()> {
         self.send(RuntimeMsg::Shutdown)
+    }
+
+    pub(crate) fn send_apply_transaction_and_wait(
+        &self,
+        request_id: u64,
+        ops: Vec<TransactionOp>,
+        durability_policy: Option<DurabilityPolicy>,
+        start_sequence: Option<u64>,
+        isolation_policy: TransactionIsolationPolicy,
+    ) -> MidgeResult<RuntimeResponse> {
+        let (response_tx, response_rx) = channel::bounded(1);
+        self.msg_tx
+            .send(RuntimeMsg::ApplyTransaction {
+                request_id,
+                ops,
+                durability_policy,
+                start_sequence,
+                isolation_policy,
+                response_tx: Some(response_tx),
+            })
+            .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))?;
+
+        response_rx
+            .recv()
+            .map_err(|_| MidgeError::Internal("Response channel closed".to_string()))
+    }
+
+    pub(crate) fn send_apply_transaction_and_wait_timeout(
+        &self,
+        request_id: u64,
+        ops: Vec<TransactionOp>,
+        durability_policy: Option<DurabilityPolicy>,
+        start_sequence: Option<u64>,
+        isolation_policy: TransactionIsolationPolicy,
+        timeout: Duration,
+    ) -> MidgeResult<Option<RuntimeResponse>> {
+        let (response_tx, response_rx) = channel::bounded(1);
+        self.msg_tx
+            .send(RuntimeMsg::ApplyTransaction {
+                request_id,
+                ops,
+                durability_policy,
+                start_sequence,
+                isolation_policy,
+                response_tx: Some(response_tx),
+            })
+            .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))?;
+
+        match response_rx.recv_timeout(timeout) {
+            Ok(response) => Ok(Some(response)),
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => Ok(None),
+            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                Err(MidgeError::Internal("Response channel closed".to_string()))
+            }
+        }
     }
 
     /// Check if writes should be stalled for the given column family.

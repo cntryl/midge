@@ -13,7 +13,7 @@
 //! - Correctness: writes are atomic, ordered per CF, errors propagate to caller
 
 use crate::common::{MidgeError, MidgeResult};
-use crate::runtime::{next_request_id, RuntimeHandle, RuntimeMsg, RuntimeResponse, TransactionOp};
+use crate::runtime::{next_request_id, RuntimeHandle, RuntimeResponse, TransactionOp};
 use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -669,25 +669,23 @@ impl IngestCoordinator {
 
         let response = if let Some((timeout, timeout_msg)) = timeout {
             runtime
-                .send_and_wait_timeout(
-                    RuntimeMsg::ApplyTransaction {
-                        request_id,
-                        ops,
-                        durability_policy,
-                        start_sequence: options.start_sequence,
-                        isolation_policy: options.isolation_policy,
-                    },
+                .send_apply_transaction_and_wait_timeout(
+                    request_id,
+                    ops,
+                    durability_policy,
+                    options.start_sequence,
+                    options.isolation_policy,
                     timeout,
                 )?
                 .ok_or_else(|| MidgeError::Internal(timeout_msg.to_string()))?
         } else {
-            runtime.send_and_wait(RuntimeMsg::ApplyTransaction {
+            runtime.send_apply_transaction_and_wait(
                 request_id,
                 ops,
                 durability_policy,
-                start_sequence: options.start_sequence,
-                isolation_policy: options.isolation_policy,
-            })?
+                options.start_sequence,
+                options.isolation_policy,
+            )?
         };
 
         Self::decode_apply_transaction_response(response, expected_op_count, stall_flag)

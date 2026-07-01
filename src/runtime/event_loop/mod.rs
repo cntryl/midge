@@ -3,7 +3,7 @@
 //! Receives messages from `RuntimeHandle` and routes them to the correct actor.
 //!
 //! Copilot note:
-//! - Per-request routing is done exclusively via `router.complete()`.
+//! - Per-request routing flows through `respond()`.
 //! - `EventLoop` never touches `pending_responses` directly.
 //! - All read paths are local (memtables → SST later).
 //! - All actor responses flow through `respond()`.
@@ -33,7 +33,8 @@ mod snapshot;
 mod wal;
 mod write_batch;
 
-use crossbeam::channel::{Receiver, TryRecvError};
+use crossbeam::channel::{Receiver, Sender, TryRecvError};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -87,6 +88,8 @@ pub struct EventLoop {
 
     /// Per-request router (oneshot channels)
     pub(super) router: Arc<ResponseRouter>,
+    /// Direct response channels for hot runtime-internal requests.
+    pub(super) inline_responses: RefCell<HashMap<u64, Sender<RuntimeResponse>>>,
 
     /// One buffered message we pulled from the channel while draining writes.
     ///
@@ -213,6 +216,7 @@ impl EventLoop {
                 config.cloud_runtime_policy.clone(),
             ),
             router,
+            inline_responses: RefCell::new(HashMap::new()),
             pending_msg: None,
             worker_msg_tx,
 
@@ -783,10 +787,25 @@ impl EventLoop {
         }
     }
 
-    /// Helper: deliver a `RuntimeResponse` to the requester via the router.
+    pub(super) fn register_inline_response(
+        &self,
+        request_id: u64,
+        response_tx: Sender<RuntimeResponse>,
+    ) {
+        self.inline_responses
+            .borrow_mut()
+            .insert(request_id, response_tx);
+    }
+
+    /// Helper: deliver a `RuntimeResponse` to the requester.
     #[inline]
     pub(super) fn respond(&self, request_id: u64, resp: RuntimeResponse) {
-        self.router.complete(resp);
+        let inline_tx = self.inline_responses.borrow_mut().remove(&request_id);
+        if let Some(response_tx) = inline_tx {
+            let _ = response_tx.send(resp);
+        } else {
+            self.router.complete(resp);
+        }
 
         // Optional trace
         if self.trace_enabled {

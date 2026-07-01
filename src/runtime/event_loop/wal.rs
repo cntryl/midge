@@ -2,7 +2,7 @@ use super::super::durability::DurabilityWaiter;
 use super::{EventLoop, HandleOutcome};
 use crate::runtime::{RuntimeMsg, RuntimeResponse, TransactionIsolationPolicy, TransactionOp};
 use crate::wal::DurabilityPolicy;
-use crossbeam::channel::Receiver;
+use crossbeam::channel::{Receiver, Sender};
 
 pub(super) struct WalCoordinator;
 
@@ -28,6 +28,7 @@ impl WalCoordinator {
         event_loop: &mut EventLoop,
         msg_rx: &Receiver<RuntimeMsg>,
         request: ApplyTransactionRequest,
+        response_tx: Option<Sender<RuntimeResponse>>,
     ) -> HandleOutcome {
         let ApplyTransactionRequest {
             request_id,
@@ -36,6 +37,10 @@ impl WalCoordinator {
             start_sequence,
             isolation_policy,
         } = request;
+        if let Some(response_tx) = response_tx {
+            event_loop.register_inline_response(request_id, response_tx);
+        }
+
         if !Self::accept_write(event_loop, request_id) {
             return HandleOutcome::Continue;
         }

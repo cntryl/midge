@@ -162,7 +162,12 @@ impl EventLoop {
                 durability_policy,
                 start_sequence,
                 isolation_policy,
+                response_tx,
             }) => {
+                if let Some(response_tx) = response_tx {
+                    self.register_inline_response(request_id, response_tx);
+                }
+
                 let handled = self.apply_transaction_with_coalescing(
                     msg_rx,
                     ApplyTransactionRequest {
@@ -241,7 +246,12 @@ impl EventLoop {
                     durability_policy,
                     start_sequence,
                     isolation_policy,
+                    response_tx,
                 }) => {
+                    if let Some(response_tx) = response_tx {
+                        self.register_inline_response(request_id, response_tx);
+                    }
+
                     let request = ApplyTransactionRequest {
                         request_id,
                         ops,
@@ -711,6 +721,7 @@ mod tests {
             durability_policy,
             start_sequence: None,
             isolation_policy: TransactionIsolationPolicy::LastWriteWins,
+            response_tx: None,
         }
     }
 

@@ -190,6 +190,7 @@ impl RuntimeDispatcher {
                 durability_policy,
                 start_sequence,
                 isolation_policy,
+                response_tx,
             } => WalCoordinator::apply_transaction(
                 event_loop,
                 msg_rx,
@@ -200,6 +201,7 @@ impl RuntimeDispatcher {
                     start_sequence,
                     isolation_policy,
                 },
+                response_tx,
             ),
             RuntimeMsg::WalAppend {
                 request_id,
