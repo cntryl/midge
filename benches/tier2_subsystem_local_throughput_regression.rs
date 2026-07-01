@@ -39,15 +39,17 @@ fn make_key_value_batch() -> KeyValueBatch {
         .collect()
 }
 
-fn run_batched_write_workload(engine: &Engine, cf_id: cntryl_midge::ColumnFamilyId) {
-    let keys_vals = make_key_value_batch();
-
+fn run_batched_write_workload(
+    engine: &Engine,
+    cf_id: cntryl_midge::ColumnFamilyId,
+    keys_vals: &KeyValueBatch,
+) {
     for _ in 0..BATCH_ITERATIONS {
         let mut tx = engine
             .begin_tx(cf_id, TransactionMode::ReadWrite)
             .expect("begin transaction");
 
-        for (key, value) in &keys_vals {
+        for (key, value) in keys_vals {
             tx.put(key.clone(), value.clone(), None)
                 .expect("put batch value");
         }
@@ -79,10 +81,11 @@ fn benchmark_batched_writes(c: &mut Criterion) {
                     let cf = engine
                         .create_column_family("test")
                         .expect("failed to create column family");
-                    (engine, cf.id())
+                    let keys_vals = make_key_value_batch();
+                    (engine, cf.id(), keys_vals)
                 },
-                |(engine, cf_id)| {
-                    run_batched_write_workload(&engine, cf_id);
+                |(engine, cf_id, keys_vals)| {
+                    run_batched_write_workload(&engine, cf_id, &keys_vals);
                 },
                 criterion::BatchSize::SmallInput,
             );

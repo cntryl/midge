@@ -104,7 +104,7 @@ impl WriterRunner {
         let mut file_opt = self.open_file_handle().ok();
 
         loop {
-            let Some(batch) = self.wait_for_batch_or_pending_sync() else {
+            let Some(mut batch) = self.wait_for_batch_or_pending_sync() else {
                 break;
             };
 
@@ -119,7 +119,7 @@ impl WriterRunner {
 
             if !batch.is_empty() {
                 let batch_len = batch.iter().map(|entry| entry.data.len()).sum::<usize>() as u64;
-                let start_pos = match self.write_batch(&mut file_opt, &batch) {
+                let start_pos = match self.write_batch(&mut file_opt, &mut batch) {
                     Ok(start_pos) => start_pos,
                     Err(message) => {
                         self.fail_writes(&batch, message);
@@ -186,7 +186,7 @@ impl WriterRunner {
     fn write_batch<'a>(
         &'a self,
         file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
-        batch: &[QueuedWrite],
+        batch: &mut [QueuedWrite],
     ) -> Result<u64, String> {
         let big_bytes = bytes::Bytes::from(Self::coalesce_batch(batch));
         let write_start = Instant::now();
@@ -206,7 +206,11 @@ impl WriterRunner {
         Ok(start_pos)
     }
 
-    fn coalesce_batch(batch: &[QueuedWrite]) -> Vec<u8> {
+    fn coalesce_batch(batch: &mut [QueuedWrite]) -> Vec<u8> {
+        if let [entry] = batch {
+            return std::mem::take(&mut entry.data);
+        }
+
         let total: usize = batch.iter().map(|entry| entry.data.len()).sum();
         let mut big = Vec::with_capacity(total);
         for entry in batch {
@@ -220,26 +224,30 @@ impl WriterRunner {
         file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
         big_bytes: bytes::Bytes,
     ) -> Result<u64, String> {
+        let start_pos = self
+            .config
+            .current_pos
+            .load(std::sync::atomic::Ordering::SeqCst);
         self.ensure_file_handle(file_opt)?;
 
         if let Some(file) = file_opt.as_mut() {
-            match file.append(big_bytes.clone()) {
-                Ok(pos) => return Ok(pos),
+            match file.write_at(start_pos, big_bytes.clone()) {
+                Ok(()) => return Ok(start_pos),
                 Err(e1) => {
-                    tracing::warn!(error = ?e1, "wal writer append failed; reopening and retrying");
+                    tracing::warn!(error = ?e1, start_pos, "wal writer write_at failed; reopening and retrying");
                 }
             }
         }
 
         *file_opt = self.open_file_handle().ok();
         if let Some(file) = file_opt.as_mut() {
-            return file.append(big_bytes).map_err(|e| {
-                tracing::error!(error = ?e, "wal writer append failed after retry");
-                format!("wal writer append failed after retry: {e}")
+            return file.write_at(start_pos, big_bytes).map(|()| start_pos).map_err(|e| {
+                tracing::error!(error = ?e, start_pos, "wal writer write_at failed after retry");
+                format!("wal writer write_at failed after retry: {e}")
             });
         }
 
-        Err("wal writer could not reopen file handle after append failure".to_string())
+        Err("wal writer could not reopen file handle after write_at failure".to_string())
     }
 
     fn ensure_file_handle<'a>(
@@ -342,6 +350,10 @@ impl WriterRunner {
         let mut pool = self.config.buf_pool.lock();
         let mut dropped = 0usize;
         for entry in batch {
+            if entry.data.is_empty() {
+                continue;
+            }
+
             if pool.len() < MAX_BUFFER_POOL_SIZE {
                 pool.push(entry.data);
             } else {

@@ -10,7 +10,7 @@ use super::wal::ApplyTransactionRequest;
 use super::EventLoop;
 use crate::common::MidgeError;
 use crossbeam::channel::{Receiver, TryRecvError};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const EXPLICIT_TRANSACTION_COALESCE_TARGET: usize = 8;
@@ -455,8 +455,8 @@ impl EventLoop {
             return PrepareOutcome::Fallback(request);
         }
 
-        let ops_for_staging = request.ops.clone();
         let request_id = request.request_id;
+        staged_touches.record_ops(&request.ops);
         let result = self.wal_actor.prepare_transaction_append(
             &mut self.state,
             crate::runtime::actors::wal::TransactionAppendParams {
@@ -469,13 +469,10 @@ impl EventLoop {
         );
 
         match result {
-            Ok(prepared_transaction) => {
-                staged_touches.record_ops(&ops_for_staging);
-                PrepareOutcome::Prepared {
-                    request_id,
-                    prepared_transaction,
-                }
-            }
+            Ok(prepared_transaction) => PrepareOutcome::Prepared {
+                request_id,
+                prepared_transaction,
+            },
             Err(error) => PrepareOutcome::Error { request_id, error },
         }
     }
@@ -631,7 +628,7 @@ impl CoalescedTransactionBatch {
 
 #[derive(Default)]
 struct StagedTransactionTouches {
-    point_keys: HashSet<(crate::types::ColumnFamilyId, Vec<u8>)>,
+    point_keys: HashMap<crate::types::ColumnFamilyId, HashSet<Vec<u8>>>,
     ranges: Vec<StagedRange>,
 }
 
@@ -659,7 +656,10 @@ impl StagedTransactionTouches {
         for op in ops {
             match op {
                 TransactionOp::Put { cf_id, key, .. } | TransactionOp::Delete { cf_id, key } => {
-                    self.point_keys.insert((*cf_id, key.to_vec()));
+                    self.point_keys
+                        .entry(*cf_id)
+                        .or_default()
+                        .insert(key.to_vec());
                 }
                 TransactionOp::DeleteRange {
                     cf_id,
@@ -675,7 +675,9 @@ impl StagedTransactionTouches {
     }
 
     fn touches_point(&self, cf_id: crate::types::ColumnFamilyId, key: &[u8]) -> bool {
-        self.point_keys.contains(&(cf_id, key.to_vec()))
+        self.point_keys
+            .get(&cf_id)
+            .is_some_and(|keys| keys.contains(key))
             || self.ranges.iter().any(|range| {
                 range.cf_id == cf_id
                     && key >= range.start_key.as_slice()
@@ -689,8 +691,9 @@ impl StagedTransactionTouches {
         start_key: &[u8],
         end_key: &[u8],
     ) -> bool {
-        self.point_keys.iter().any(|(point_cf_id, key)| {
-            *point_cf_id == cf_id && key.as_slice() >= start_key && key.as_slice() < end_key
+        self.point_keys.get(&cf_id).is_some_and(|keys| {
+            keys.iter()
+                .any(|key| key.as_slice() >= start_key && key.as_slice() < end_key)
         }) || self.ranges.iter().any(|range| {
             range.cf_id == cf_id
                 && range.start_key.as_slice() < end_key
