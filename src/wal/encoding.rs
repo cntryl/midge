@@ -107,6 +107,7 @@ struct TxnBatchHeader {
 }
 
 const TXN_BATCH_MIN_PREFIX_LEN: usize = 3 + (8 * 3) + 4;
+const TXN_BATCH_RECORD_FIXED_LEN: usize = 1 + 4 + 8 + 1 + 1 + 1;
 
 fn corruption(msg: impl Into<String>) -> MidgeError {
     MidgeError::Corruption(msg.into())
@@ -474,6 +475,37 @@ fn push_len_prefixed_bytes(buf: &mut Vec<u8>, value: &[u8]) -> MidgeResult<()> {
     Ok(())
 }
 
+fn txn_batch_len_prefixed_field_len(value: &[u8]) -> MidgeResult<usize> {
+    let _ = u32::try_from(value.len()).map_err(|_| {
+        MidgeError::InvalidArgument("transaction batch field exceeds u32::MAX".into())
+    })?;
+    add_capacity(4, value.len())
+}
+
+fn txn_batch_payload_records_encoded_len(
+    records: &[TxnBatchEncodeRecord<'_>],
+) -> MidgeResult<usize> {
+    let _ = u32::try_from(records.len()).map_err(|_| {
+        MidgeError::InvalidArgument("transaction batch op_count exceeds u32::MAX".into())
+    })?;
+
+    let mut len = TXN_BATCH_MIN_PREFIX_LEN;
+    for record in records {
+        len = add_capacity(len, TXN_BATCH_RECORD_FIXED_LEN)?;
+        if record.expiration.is_some() {
+            len = add_capacity(len, 8)?;
+        }
+        len = add_capacity(len, txn_batch_len_prefixed_field_len(record.key)?)?;
+        if let Some(value) = record.value {
+            len = add_capacity(len, txn_batch_len_prefixed_field_len(value)?)?;
+        }
+        if let Some(range_end) = record.range_end {
+            len = add_capacity(len, txn_batch_len_prefixed_field_len(range_end)?)?;
+        }
+    }
+    Ok(len)
+}
+
 fn read_exact_slice<'a>(input: &mut &'a [u8], len: usize, field: &str) -> MidgeResult<&'a [u8]> {
     if input.len() < len {
         return Err(corruption(format!(
@@ -570,7 +602,8 @@ pub fn encode_txn_batch_payload_records(
         ));
     }
 
-    let mut buf = Vec::with_capacity(TXN_BATCH_MIN_PREFIX_LEN);
+    let expected_payload_len = txn_batch_payload_records_encoded_len(records)?;
+    let mut buf = Vec::with_capacity(expected_payload_len);
     buf.extend_from_slice(&TXN_BATCH_MAGIC);
     buf.push(TXN_BATCH_VERSION);
     buf.extend_from_slice(&txn_id.to_le_bytes());
@@ -1005,6 +1038,42 @@ mod tests {
         assert_eq!(decoded.records[0].seq, 11);
         assert_eq!(decoded.records[1].op, WalOpKind::DeleteRange);
         assert_eq!(decoded.records[1].range_end, Some(Bytes::from_static(b"z")));
+    }
+
+    #[test]
+    fn should_estimate_transaction_batch_payload_encoded_length() {
+        // Arrange
+        let records = [
+            TxnBatchEncodeRecord {
+                cf_id: 7,
+                op: WalOpKind::Put,
+                key: b"alpha".as_ref(),
+                value: Some(b"value".as_ref()),
+                seq: 11,
+                expiration: Some(123),
+                range_end: None,
+                txn_id: Some(42),
+                writer_epoch: 9,
+            },
+            TxnBatchEncodeRecord {
+                cf_id: 3,
+                op: WalOpKind::DeleteRange,
+                key: b"a".as_ref(),
+                value: None,
+                seq: 12,
+                expiration: None,
+                range_end: Some(b"z".as_ref()),
+                txn_id: Some(42),
+                writer_epoch: 9,
+            },
+        ];
+
+        // Act
+        let expected_len = txn_batch_payload_records_encoded_len(&records).unwrap();
+        let payload = encode_txn_batch_payload_records(42, 10, 13, 9, &records).unwrap();
+
+        // Assert
+        assert_eq!(expected_len, payload.len());
     }
 
     #[test]
