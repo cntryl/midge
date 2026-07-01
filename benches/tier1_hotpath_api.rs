@@ -59,6 +59,7 @@ fn setup_db(name: &str) -> MidgeEngine {
         // with compaction disabled.
         memory_budget: Some(4 * 1024 * 1024 * 1024), // 4 GiB
         cloud_runtime_policy_overrides: None,
+        simulated_cloud_overrides: None,
     };
 
     MidgeEngine::open_with_options(&opts).unwrap()

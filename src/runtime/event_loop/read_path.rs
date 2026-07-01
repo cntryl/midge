@@ -32,13 +32,14 @@ impl EventLoop {
             .strip_prefix(&self.state.db_path)
             .unwrap_or_else(|_| std::path::Path::new("sst"))
             .to_path_buf();
-        let mut snapshot = super::super::ReadSnapshot::new(
+        let mut snapshot = super::super::ReadSnapshot::new_with_resources(
             cf_state.memtable.clone(),
             cf_state.immutable_memtables.clone(),
             sst_files,
             std::sync::Arc::clone(&self.state.fs),
             sst_path_prefix,
             self.state.is_memory_mode(),
+            self.read_resources.clone(),
         );
         snapshot.cf_id = cf_id;
         Some(snapshot)

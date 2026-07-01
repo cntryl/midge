@@ -40,6 +40,47 @@ pub fn append_frame(dst: &mut Vec<u8>, payload: &[u8]) -> MidgeResult<()> {
     Ok(())
 }
 
+/// Append a WAL frame whose payload is produced directly into `dst`.
+///
+/// This preserves the same frame layout as [`append_frame`] while avoiding an
+/// intermediate payload allocation on write hot paths.
+///
+/// # Errors
+///
+/// Returns `MidgeError::InvalidArgument` when the encoded payload exceeds WAL
+/// limits, or returns any error produced by `encode_payload`.
+pub fn append_frame_encoded(
+    dst: &mut Vec<u8>,
+    encode_payload: impl FnOnce(&mut Vec<u8>) -> MidgeResult<()>,
+) -> MidgeResult<()> {
+    let frame_start = dst.len();
+    dst.extend_from_slice(&[0; WAL_FRAME_HEADER_LEN]);
+    let payload_start = dst.len();
+
+    if let Err(error) = encode_payload(dst) {
+        dst.truncate(frame_start);
+        return Err(error);
+    }
+
+    let payload_len = dst.len().saturating_sub(payload_start);
+    if let Err(error) = encoded_frame_len(payload_len) {
+        dst.truncate(frame_start);
+        return Err(error);
+    }
+
+    let Ok(payload_len_u32) = u32::try_from(payload_len) else {
+        dst.truncate(frame_start);
+        return Err(MidgeError::InvalidArgument(
+            "WAL record length exceeds u32::MAX".into(),
+        ));
+    };
+    let crc = crc32c::crc32c(&dst[payload_start..]);
+
+    dst[frame_start..frame_start + 4].copy_from_slice(&payload_len_u32.to_le_bytes());
+    dst[frame_start + 4..frame_start + WAL_FRAME_HEADER_LEN].copy_from_slice(&crc.to_le_bytes());
+    Ok(())
+}
+
 /// Decode the fixed-size WAL frame header.
 ///
 /// # Errors
@@ -107,6 +148,26 @@ mod tests {
             prop_assert_eq!(payload_len, payload.len());
             prop_assert_eq!(&buf[WAL_FRAME_HEADER_LEN..], payload.as_slice());
             verify_frame_crc(&buf[WAL_FRAME_HEADER_LEN..], expected_crc)?;
+        }
+
+        #[test]
+        fn should_match_append_frame_when_payload_is_encoded_in_place(
+            prefix in proptest::collection::vec(any::<u8>(), 0..64),
+            payload in proptest::collection::vec(any::<u8>(), 0..8192)
+        ) {
+            // Arrange
+            let mut expected = prefix.clone();
+            append_frame(&mut expected, &payload)?;
+            let mut actual = prefix;
+
+            // Act
+            append_frame_encoded(&mut actual, |dst| {
+                dst.extend_from_slice(&payload);
+                Ok(())
+            })?;
+
+            // Assert
+            prop_assert_eq!(actual, expected);
         }
 
         #[test]

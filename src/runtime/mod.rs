@@ -14,6 +14,7 @@ pub mod actors;
 pub mod durability;
 pub mod event_loop;
 pub mod intent_persistence;
+pub(crate) mod read_resources;
 pub mod read_snapshot;
 pub mod snapshot_cache;
 pub mod state;
@@ -77,6 +78,7 @@ pub struct RuntimeConfig {
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
     pub compression_policy: crate::sst::compression::CompressionPolicy,
+    pub block_cache_size: usize,
     /// Fencing epoch from leader election.  Stamped on every WAL record.
     pub writer_epoch: u64,
     /// Shared lease-health flag.  Set to `false` by the heartbeat thread when
@@ -98,6 +100,7 @@ impl Default for RuntimeConfig {
             hybrid_storage_events: None,
             cloud_metadata_storage: None,
             compression_policy: crate::sst::compression::CompressionPolicy::default(),
+            block_cache_size: 128 * 1024 * 1024,
             writer_epoch: 0,
             lease_healthy: None,
             leader_store: None,

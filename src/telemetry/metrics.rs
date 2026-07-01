@@ -700,6 +700,28 @@ impl Metrics {
             wal_fsync_count: self.wal_fsync_count.load(Ordering::Relaxed),
             wal_append_ns_total: self.wal_append_ns_total.load(Ordering::Relaxed),
             wal_fsync_ns_total: self.wal_fsync_ns_total.load(Ordering::Relaxed),
+            cloud_async_wal_segments_sealed: self
+                .cloud_async_wal_segments_sealed
+                .load(Ordering::Relaxed),
+            cloud_async_wal_bytes_sealed: self.cloud_async_wal_bytes_sealed.load(Ordering::Relaxed),
+            cloud_async_wal_seal_latency_us: self
+                .cloud_async_wal_seal_latency_us
+                .load(Ordering::Relaxed),
+            cloud_async_wal_uploads_started: self
+                .cloud_async_wal_uploads_started
+                .load(Ordering::Relaxed),
+            cloud_async_wal_uploads_completed: self
+                .cloud_async_wal_uploads_completed
+                .load(Ordering::Relaxed),
+            cloud_async_wal_uploads_failed: self
+                .cloud_async_wal_uploads_failed
+                .load(Ordering::Relaxed),
+            cloud_async_wal_upload_latency_us: self
+                .cloud_async_wal_upload_latency_us
+                .load(Ordering::Relaxed),
+            cloud_async_wal_ack_latency_us: self
+                .cloud_async_wal_ack_latency_us
+                .load(Ordering::Relaxed),
             wal_recovery_records_replayed: self
                 .wal_recovery_records_replayed
                 .load(Ordering::Relaxed),
@@ -749,6 +771,14 @@ pub struct MetricsSnapshot {
     pub wal_fsync_count: u64,
     pub wal_append_ns_total: u64,
     pub wal_fsync_ns_total: u64,
+    pub cloud_async_wal_segments_sealed: u64,
+    pub cloud_async_wal_bytes_sealed: u64,
+    pub cloud_async_wal_seal_latency_us: u64,
+    pub cloud_async_wal_uploads_started: u64,
+    pub cloud_async_wal_uploads_completed: u64,
+    pub cloud_async_wal_uploads_failed: u64,
+    pub cloud_async_wal_upload_latency_us: u64,
+    pub cloud_async_wal_ack_latency_us: u64,
     pub wal_recovery_records_replayed: u64,
     pub wal_recovery_bytes_replayed: u64,
     pub intent_log_replay_runs: u64,

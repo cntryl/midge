@@ -77,6 +77,9 @@ pub struct DurabilityCoordinator {
     /// `CloudAsync`: timestamp of last flush/rotate
     last_cloud_flush: Instant,
 
+    /// `CloudAsync`: a seal failed after local WAL flush and must be retried.
+    cloud_seal_retry_needed: bool,
+
     /// Is `CloudAsync` enabled? (read from `wal_actor.is_cloud_async()`)
     is_cloud_async: bool,
 
@@ -94,6 +97,7 @@ impl DurabilityCoordinator {
             waiters: Some(KeyedGroupCommit::new(initial_durability_key)),
             inflight: HashMap::new(),
             last_cloud_flush: Instant::now(),
+            cloud_seal_retry_needed: false,
             is_cloud_async,
             cloud_runtime_policy,
         }
@@ -260,6 +264,19 @@ impl DurabilityCoordinator {
                 || pending_writes >= self.cloud_runtime_policy.wal_seal.max_pending_writes
                 || self.last_cloud_flush.elapsed()
                     >= self.cloud_runtime_policy.wal_seal.max_flush_delay)
+    }
+
+    pub fn mark_cloud_seal_retry_needed(&mut self) {
+        self.cloud_seal_retry_needed = true;
+    }
+
+    pub fn clear_cloud_seal_retry_needed(&mut self) {
+        self.cloud_seal_retry_needed = false;
+    }
+
+    #[must_use]
+    pub fn cloud_seal_retry_needed(&self) -> bool {
+        self.cloud_seal_retry_needed
     }
 
     /// Update last flush timestamp (call after `CloudAsync` segment is enqueued).

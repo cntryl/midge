@@ -31,6 +31,154 @@ pub struct MultiClientRunStats {
     pub latency_max_us: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RuntimePerfSnapshot {
+    pub write_stalls_total: u64,
+    pub write_stalls_memory_total: u64,
+    pub write_stalls_compaction_total: u64,
+    pub write_stalls_cloud_total: u64,
+    pub write_stalls_no_space_total: u64,
+    pub wal_append_count: u64,
+    pub wal_fsync_count: u64,
+    pub wal_append_ns_total: u64,
+    pub wal_fsync_ns_total: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cloud_async_wal_segments_sealed: u64,
+    pub cloud_async_wal_uploads_started: u64,
+    pub cloud_async_wal_uploads_completed: u64,
+    pub cloud_async_wal_uploads_failed: u64,
+    pub cloud_async_wal_seal_latency_us: u64,
+    pub cloud_async_wal_upload_latency_us: u64,
+    pub cloud_async_wal_ack_latency_us: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RuntimePerfReport {
+    pub end_pending_cloud_uploads: usize,
+    pub end_wal_local_durable_seq: u64,
+    pub end_wal_cloud_durable_seq: u64,
+    pub end_hybrid_max_local_bytes: u64,
+    pub end_hybrid_total_committed_bytes: u64,
+    pub end_hybrid_free_bytes: u64,
+    pub end_hybrid_usage_percent: u32,
+    pub end_hybrid_pending_evictions: usize,
+    pub write_stalls_total: u64,
+    pub write_stalls_memory_total: u64,
+    pub write_stalls_compaction_total: u64,
+    pub write_stalls_cloud_total: u64,
+    pub write_stalls_no_space_total: u64,
+    pub wal_append_count: u64,
+    pub wal_fsync_count: u64,
+    pub wal_append_ns_total: u64,
+    pub wal_fsync_ns_total: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cloud_async_wal_segments_sealed: u64,
+    pub cloud_async_wal_uploads_started: u64,
+    pub cloud_async_wal_uploads_completed: u64,
+    pub cloud_async_wal_uploads_failed: u64,
+    pub cloud_async_wal_seal_latency_us: u64,
+    pub cloud_async_wal_upload_latency_us: u64,
+    pub cloud_async_wal_ack_latency_us: u64,
+}
+
+impl RuntimePerfReport {
+    #[must_use]
+    pub fn tags(&self) -> Vec<(&'static str, u64)> {
+        let mut tags = vec![
+            ("write_stalls", self.write_stalls_total),
+            ("write_stalls_memory", self.write_stalls_memory_total),
+            (
+                "write_stalls_compaction",
+                self.write_stalls_compaction_total,
+            ),
+            ("write_stalls_cloud", self.write_stalls_cloud_total),
+            ("write_stalls_no_space", self.write_stalls_no_space_total),
+            ("wal_append_count", self.wal_append_count),
+            ("wal_fsync_count", self.wal_fsync_count),
+            (
+                "avg_wal_append_us",
+                average_u64(self.wal_append_ns_total, self.wal_append_count * 1_000),
+            ),
+            (
+                "avg_wal_sync_us",
+                average_u64(self.wal_fsync_ns_total, self.wal_fsync_count * 1_000),
+            ),
+            ("cache_hits", self.cache_hits),
+            ("cache_misses", self.cache_misses),
+            (
+                "cache_hit_ratio_ppm",
+                ratio_ppm(self.cache_hits, self.cache_misses),
+            ),
+            (
+                "cloud_async_wal_segments_sealed",
+                self.cloud_async_wal_segments_sealed,
+            ),
+            (
+                "cloud_async_wal_uploads_started",
+                self.cloud_async_wal_uploads_started,
+            ),
+            (
+                "cloud_async_wal_uploads_completed",
+                self.cloud_async_wal_uploads_completed,
+            ),
+            (
+                "cloud_async_wal_uploads_failed",
+                self.cloud_async_wal_uploads_failed,
+            ),
+            (
+                "avg_cloud_async_wal_seal_us",
+                average_u64(
+                    self.cloud_async_wal_seal_latency_us,
+                    self.cloud_async_wal_segments_sealed,
+                ),
+            ),
+            (
+                "avg_cloud_async_wal_upload_us",
+                average_u64(
+                    self.cloud_async_wal_upload_latency_us,
+                    self.cloud_async_wal_uploads_completed,
+                ),
+            ),
+            (
+                "avg_cloud_async_wal_ack_us",
+                average_u64(
+                    self.cloud_async_wal_ack_latency_us,
+                    self.cloud_async_wal_uploads_completed,
+                ),
+            ),
+            (
+                "pending_cloud_uploads_end",
+                usize_to_u64(self.end_pending_cloud_uploads),
+            ),
+            ("wal_local_durable_seq_end", self.end_wal_local_durable_seq),
+            ("wal_cloud_durable_seq_end", self.end_wal_cloud_durable_seq),
+            (
+                "wal_cloud_durable_lag_end",
+                self.end_wal_local_durable_seq
+                    .saturating_sub(self.end_wal_cloud_durable_seq),
+            ),
+            ("hybrid_max_local_bytes", self.end_hybrid_max_local_bytes),
+            (
+                "hybrid_total_committed_bytes",
+                self.end_hybrid_total_committed_bytes,
+            ),
+            ("hybrid_free_bytes", self.end_hybrid_free_bytes),
+            (
+                "hybrid_usage_percent",
+                u64::from(self.end_hybrid_usage_percent),
+            ),
+            (
+                "hybrid_pending_evictions",
+                usize_to_u64(self.end_hybrid_pending_evictions),
+            ),
+        ];
+        tags.retain(|(_, value)| *value > 0);
+        tags
+    }
+}
+
 impl MultiClientRunStats {
     #[must_use]
     pub fn latency_tags(&self) -> [(&'static str, u64); 4] {
@@ -142,6 +290,104 @@ pub fn open_tier4_engine(mut opts: MidgeOptions) -> Engine {
         .filter(|value| *value > 0);
 
     Engine::open_with_options(&opts).expect("open tier4 engine")
+}
+
+/// Capture a benchmark runtime performance counter snapshot.
+///
+/// # Panics
+///
+/// Panics if runtime metrics cannot be captured.
+pub fn capture_runtime_perf_snapshot(engine: &Engine) -> RuntimePerfSnapshot {
+    let metrics = engine
+        .get_runtime_metrics()
+        .expect("capture runtime performance snapshot");
+    RuntimePerfSnapshot {
+        write_stalls_total: metrics.write_stalls_total,
+        write_stalls_memory_total: metrics.write_stalls_memory_total,
+        write_stalls_compaction_total: metrics.write_stalls_compaction_total,
+        write_stalls_cloud_total: metrics.write_stalls_cloud_total,
+        write_stalls_no_space_total: metrics.write_stalls_no_space_total,
+        wal_append_count: metrics.wal_append_count,
+        wal_fsync_count: metrics.wal_fsync_count,
+        wal_append_ns_total: metrics.wal_append_ns_total,
+        wal_fsync_ns_total: metrics.wal_fsync_ns_total,
+        cache_hits: metrics.cache_hits,
+        cache_misses: metrics.cache_misses,
+        cloud_async_wal_segments_sealed: metrics.cloud_async_wal_segments_sealed,
+        cloud_async_wal_uploads_started: metrics.cloud_async_wal_uploads_started,
+        cloud_async_wal_uploads_completed: metrics.cloud_async_wal_uploads_completed,
+        cloud_async_wal_uploads_failed: metrics.cloud_async_wal_uploads_failed,
+        cloud_async_wal_seal_latency_us: metrics.cloud_async_wal_seal_latency_us,
+        cloud_async_wal_upload_latency_us: metrics.cloud_async_wal_upload_latency_us,
+        cloud_async_wal_ack_latency_us: metrics.cloud_async_wal_ack_latency_us,
+    }
+}
+
+/// Build a benchmark runtime performance report from a prior snapshot.
+///
+/// # Panics
+///
+/// Panics if runtime metrics cannot be captured.
+pub fn runtime_perf_report(engine: &Engine, start: RuntimePerfSnapshot) -> RuntimePerfReport {
+    let end = engine
+        .get_runtime_metrics()
+        .expect("capture runtime performance report");
+    RuntimePerfReport {
+        end_pending_cloud_uploads: end.pending_cloud_uploads,
+        end_wal_local_durable_seq: end.wal_local_durable_seq,
+        end_wal_cloud_durable_seq: end.wal_cloud_durable_seq,
+        end_hybrid_max_local_bytes: end.hybrid_max_local_bytes,
+        end_hybrid_total_committed_bytes: end.hybrid_total_committed_bytes,
+        end_hybrid_free_bytes: end.hybrid_free_bytes,
+        end_hybrid_usage_percent: end.hybrid_usage_percent,
+        end_hybrid_pending_evictions: end.hybrid_pending_evictions,
+        write_stalls_total: end
+            .write_stalls_total
+            .saturating_sub(start.write_stalls_total),
+        write_stalls_memory_total: end
+            .write_stalls_memory_total
+            .saturating_sub(start.write_stalls_memory_total),
+        write_stalls_compaction_total: end
+            .write_stalls_compaction_total
+            .saturating_sub(start.write_stalls_compaction_total),
+        write_stalls_cloud_total: end
+            .write_stalls_cloud_total
+            .saturating_sub(start.write_stalls_cloud_total),
+        write_stalls_no_space_total: end
+            .write_stalls_no_space_total
+            .saturating_sub(start.write_stalls_no_space_total),
+        wal_append_count: end.wal_append_count.saturating_sub(start.wal_append_count),
+        wal_fsync_count: end.wal_fsync_count.saturating_sub(start.wal_fsync_count),
+        wal_append_ns_total: end
+            .wal_append_ns_total
+            .saturating_sub(start.wal_append_ns_total),
+        wal_fsync_ns_total: end
+            .wal_fsync_ns_total
+            .saturating_sub(start.wal_fsync_ns_total),
+        cache_hits: end.cache_hits.saturating_sub(start.cache_hits),
+        cache_misses: end.cache_misses.saturating_sub(start.cache_misses),
+        cloud_async_wal_segments_sealed: end
+            .cloud_async_wal_segments_sealed
+            .saturating_sub(start.cloud_async_wal_segments_sealed),
+        cloud_async_wal_uploads_started: end
+            .cloud_async_wal_uploads_started
+            .saturating_sub(start.cloud_async_wal_uploads_started),
+        cloud_async_wal_uploads_completed: end
+            .cloud_async_wal_uploads_completed
+            .saturating_sub(start.cloud_async_wal_uploads_completed),
+        cloud_async_wal_uploads_failed: end
+            .cloud_async_wal_uploads_failed
+            .saturating_sub(start.cloud_async_wal_uploads_failed),
+        cloud_async_wal_seal_latency_us: end
+            .cloud_async_wal_seal_latency_us
+            .saturating_sub(start.cloud_async_wal_seal_latency_us),
+        cloud_async_wal_upload_latency_us: end
+            .cloud_async_wal_upload_latency_us
+            .saturating_sub(start.cloud_async_wal_upload_latency_us),
+        cloud_async_wal_ack_latency_us: end
+            .cloud_async_wal_ack_latency_us
+            .saturating_sub(start.cloud_async_wal_ack_latency_us),
+    }
 }
 
 /// # Panics
@@ -552,6 +798,17 @@ fn usize_to_u64(value: usize) -> u64 {
 
 fn duration_to_micros(value: Duration) -> u64 {
     u64::try_from(value.as_micros().max(1)).unwrap_or(u64::MAX)
+}
+
+fn average_u64(total: u64, count: u64) -> u64 {
+    total.checked_div(count).unwrap_or(0)
+}
+
+fn ratio_ppm(hits: u64, misses: u64) -> u64 {
+    let total = hits.saturating_add(misses);
+    hits.saturating_mul(1_000_000)
+        .checked_div(total)
+        .unwrap_or(0)
 }
 
 fn u128_to_u64(value: u128) -> u64 {

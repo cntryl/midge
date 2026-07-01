@@ -91,11 +91,20 @@ impl EventLoop {
     }
 
     pub(super) fn handle_get_runtime_metrics(&self, request_id: u64) {
+        let mut snapshot = self.state.runtime_metrics_snapshot();
+        if let Some(storage) = &self.hybrid_storage {
+            let budget = storage.budget_snapshot();
+            snapshot.hybrid_max_local_bytes = budget.max_local_bytes;
+            snapshot.hybrid_total_committed_bytes = budget.total_committed_bytes;
+            snapshot.hybrid_free_bytes = budget.free_bytes;
+            snapshot.hybrid_usage_percent = budget.usage_percent;
+            snapshot.hybrid_pending_evictions = budget.pending_evictions;
+        }
         self.respond(
             request_id,
             RuntimeResponse::RuntimeMetricsSnapshot {
                 request_id,
-                snapshot: Box::new(self.state.runtime_metrics_snapshot()),
+                snapshot: Box::new(snapshot),
             },
         );
     }

@@ -25,7 +25,7 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::wal::types::{WalOpKind, WalRecord};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 
 const MAGIC: [u8; 2] = *b"MW";
 const VERSION: u8 = 1;
@@ -68,26 +68,79 @@ fn corruption(msg: impl Into<String>) -> MidgeError {
     MidgeError::Corruption(msg.into())
 }
 
+fn payload_capacity(record: &WalRecord) -> MidgeResult<usize> {
+    // Use checked adds to avoid overflow on 32-bit systems or huge values.
+    let mut capacity = PREFIX_LEN;
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + 1)?; // OP
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + 4)?; // CF_ID
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?; // SEQ
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + record.key.len())?;
+
+    if let Some(v) = &record.value {
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + v.len())?;
+    }
+
+    if record.expiration.is_some() {
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
+    }
+    if let Some(r) = &record.range_end {
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + r.len())?;
+    }
+    if record.txn_id.is_some() {
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
+    }
+    // writer_epoch is always present
+    capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
+    if record.compression.is_some() {
+        capacity = add_capacity(capacity, TLV_HEADER_LEN + 1)?;
+    }
+
+    Ok(capacity)
+}
+
 #[inline]
-fn put_tlv(buf: &mut BytesMut, tag: u8, val: &[u8]) {
-    buf.put_u8(tag);
-    buf.put_u32_le(u32::try_from(val.len()).expect("TLV value length exceeds u32::MAX"));
+fn push_tlv(buf: &mut Vec<u8>, tag: u8, val: &[u8]) -> MidgeResult<()> {
+    let len = u32::try_from(val.len())
+        .map_err(|_| MidgeError::InvalidArgument("TLV value exceeds u32::MAX".into()))?;
+    buf.push(tag);
+    buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(val);
+    Ok(())
 }
 
 #[inline]
-fn put_u8(buf: &mut BytesMut, tag: u8, v: u8) {
-    put_tlv(buf, tag, &[v]);
+fn push_u8(buf: &mut Vec<u8>, tag: u8, v: u8) -> MidgeResult<()> {
+    push_tlv(buf, tag, &[v])
 }
 
 #[inline]
-fn put_u32(buf: &mut BytesMut, tag: u8, v: u32) {
-    put_tlv(buf, tag, &v.to_le_bytes());
+fn push_u32(buf: &mut Vec<u8>, tag: u8, v: u32) -> MidgeResult<()> {
+    push_tlv(buf, tag, &v.to_le_bytes())
 }
 
 #[inline]
-fn put_u64(buf: &mut BytesMut, tag: u8, v: u64) {
-    put_tlv(buf, tag, &v.to_le_bytes());
+fn push_u64(buf: &mut Vec<u8>, tag: u8, v: u64) -> MidgeResult<()> {
+    push_tlv(buf, tag, &v.to_le_bytes())
+}
+
+#[inline]
+fn put_tlv(buf: &mut Vec<u8>, tag: u8, val: &[u8]) -> MidgeResult<()> {
+    push_tlv(buf, tag, val)
+}
+
+#[inline]
+fn put_u8(buf: &mut Vec<u8>, tag: u8, v: u8) -> MidgeResult<()> {
+    push_u8(buf, tag, v)
+}
+
+#[inline]
+fn put_u32(buf: &mut Vec<u8>, tag: u8, v: u32) -> MidgeResult<()> {
+    push_u32(buf, tag, v)
+}
+
+#[inline]
+fn put_u64(buf: &mut Vec<u8>, tag: u8, v: u64) -> MidgeResult<()> {
+    push_u64(buf, tag, v)
 }
 
 #[inline]
@@ -132,74 +185,86 @@ fn add_capacity(capacity: usize, delta: usize) -> MidgeResult<usize> {
         .ok_or_else(|| MidgeError::InvalidArgument("record size overflow".into()))
 }
 
+enum EncodedValue<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Bytes),
+}
+
+impl EncodedValue<'_> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Owned(bytes) => bytes.as_ref(),
+        }
+    }
+}
+
 /// Encode a WAL record to bytes (v2 payload).
 ///
 /// # Errors
 ///
 /// Returns an error when record sizing overflows or value compression fails.
 pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
-    // Use checked adds to avoid overflow on 32-bit systems or huge values.
-    let mut capacity = PREFIX_LEN;
-    capacity = add_capacity(capacity, TLV_HEADER_LEN + 1)?; // OP
-    capacity = add_capacity(capacity, TLV_HEADER_LEN + 4)?; // CF_ID
-    capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?; // SEQ
-    capacity = add_capacity(capacity, TLV_HEADER_LEN + record.key.len())?;
+    let mut buf = Vec::with_capacity(payload_capacity(record)?);
+    encode_into(record, &mut buf)?;
+    Ok(Bytes::from(buf))
+}
 
-    if let Some(v) = &record.value {
-        capacity = add_capacity(capacity, TLV_HEADER_LEN + v.len())?;
+/// Encode a WAL record payload directly into an existing buffer.
+///
+/// # Errors
+///
+/// Returns an error when record sizing overflows or a TLV field exceeds `u32::MAX`.
+pub fn encode_into(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
+    let start_len = buf.len();
+    if let Err(error) = encode_into_inner(record, buf) {
+        buf.truncate(start_len);
+        return Err(error);
     }
+    Ok(())
+}
 
-    if record.expiration.is_some() {
-        capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
-    }
-    if let Some(r) = &record.range_end {
-        capacity = add_capacity(capacity, TLV_HEADER_LEN + r.len())?;
-    }
-    if record.txn_id.is_some() {
-        capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
-    }
-    // writer_epoch is always present
-    capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
-    if record.compression.is_some() {
-        capacity = add_capacity(capacity, TLV_HEADER_LEN + 1)?;
-    }
-
-    let mut buf = BytesMut::with_capacity(capacity);
-
+fn encode_into_inner(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
+    buf.reserve(payload_capacity(record)?);
     buf.extend_from_slice(&MAGIC);
-    buf.put_u8(VERSION);
+    buf.push(VERSION);
 
-    put_u8(&mut buf, tags::OP, record.op.to_wire_format());
-    put_u32(&mut buf, tags::CF_ID, record.cf_id);
-    put_u64(&mut buf, tags::SEQ, record.seq);
-    put_tlv(&mut buf, tags::KEY, &record.key);
+    put_u8(buf, tags::OP, record.op.to_wire_format())?;
+    put_u32(buf, tags::CF_ID, record.cf_id)?;
+    put_u64(buf, tags::SEQ, record.seq)?;
+    put_tlv(buf, tags::KEY, &record.key)?;
 
-    put_u64(&mut buf, tags::WRITER_EPOCH, record.writer_epoch);
+    put_u64(buf, tags::WRITER_EPOCH, record.writer_epoch)?;
 
     if let Some(v) = &record.value {
         // Preserve Some(empty) distinctly from None by always emitting VALUE when present.
-        let (write_val, comp_byte) = crate::sst::compression::compress_wal_value(v);
-        put_tlv(&mut buf, tags::VALUE, &write_val);
+        let (write_val, comp_byte) = if v.len() < crate::sst::compression::MIN_COMPRESS_SIZE {
+            (EncodedValue::Borrowed(v.as_ref()), None)
+        } else {
+            let (value, comp_byte) = crate::sst::compression::compress_wal_value(v);
+            (EncodedValue::Owned(value), comp_byte)
+        };
+        put_tlv(buf, tags::VALUE, write_val.as_slice())?;
         if let Some(cb) = comp_byte {
-            put_u8(&mut buf, tags::COMPRESSION, cb);
+            put_u8(buf, tags::COMPRESSION, cb)?;
         } else if let Some(c) = record.compression {
-            put_u8(&mut buf, tags::COMPRESSION, c);
+            put_u8(buf, tags::COMPRESSION, c)?;
         }
     } else if let Some(c) = record.compression {
-        put_u8(&mut buf, tags::COMPRESSION, c);
+        put_u8(buf, tags::COMPRESSION, c)?;
     }
 
     if let Some(exp) = record.expiration {
-        put_u64(&mut buf, tags::EXPIRATION, exp);
+        put_u64(buf, tags::EXPIRATION, exp)?;
     }
     if let Some(r) = &record.range_end {
-        put_tlv(&mut buf, tags::RANGE_END, r);
+        put_tlv(buf, tags::RANGE_END, r)?;
     }
     if let Some(txn_id) = record.txn_id {
-        put_u64(&mut buf, tags::TXN_ID, txn_id);
+        put_u64(buf, tags::TXN_ID, txn_id)?;
     }
 
-    Ok(buf.freeze())
+    Ok(())
 }
 
 /// Zero-copy decode into a borrowed view.

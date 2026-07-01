@@ -18,6 +18,11 @@ pub enum StorageMode {
     CloudBacked { local_cache_path: PathBuf },
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SimulatedCloudOverrides {
+    pub local_storage_budget_bytes: Option<u64>,
+}
+
 /// Configuration options for opening a `MidgeEngine` in tests.
 #[derive(Debug, Clone, Default)]
 pub struct CloudRuntimePolicyOverrides {
@@ -46,6 +51,8 @@ pub struct MidgeOptions {
     pub memory_budget: Option<usize>,
     /// Internal cloud runtime tuning used only by tests.
     pub cloud_runtime_policy_overrides: Option<CloudRuntimePolicyOverrides>,
+    /// Internal simulated-cloud storage tuning used only by tests.
+    pub simulated_cloud_overrides: Option<SimulatedCloudOverrides>,
 }
 
 impl Default for MidgeOptions {
@@ -59,6 +66,7 @@ impl Default for MidgeOptions {
             enable_compaction: true,
             memory_budget: None,
             cloud_runtime_policy_overrides: None,
+            simulated_cloud_overrides: None,
         }
     }
 }
@@ -83,6 +91,15 @@ impl MidgeOptions {
         self
     }
 
+    #[must_use]
+    pub fn with_simulated_cloud_local_storage_budget(mut self, bytes: u64) -> Self {
+        let overrides = self
+            .simulated_cloud_overrides
+            .get_or_insert_with(SimulatedCloudOverrides::default);
+        overrides.local_storage_budget_bytes = Some(bytes);
+        self
+    }
+
     /// Convert `MidgeOptions` to `OpenOptions` for use with `Engine::open`.
     #[must_use]
     pub fn to_open_options(&self) -> crate::OpenOptions {
@@ -97,6 +114,18 @@ impl MidgeOptions {
                 prefix: "test-prefix/".to_string(),
             },
         };
+
+        if let (StorageMode::CloudBacked { local_cache_path }, Some(local_storage_budget_bytes)) = (
+            &self.storage_mode,
+            self.simulated_cloud_overrides
+                .as_ref()
+                .and_then(|overrides| overrides.local_storage_budget_bytes),
+        ) {
+            crate::storage::test_support::register_simulated_cloud_budget(
+                local_cache_path,
+                local_storage_budget_bytes,
+            );
+        }
 
         // Build OpenOptions via constructors so defaults are sensible
         let mut open_opts = match storage {
@@ -216,6 +245,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             enable_compaction: false,
             memory_budget: None,
             cloud_runtime_policy_overrides: None,
+            simulated_cloud_overrides: None,
         },
         "local" => {
             let timestamp = std::time::SystemTime::now()
@@ -237,6 +267,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 enable_compaction: false,
                 memory_budget: None,
                 cloud_runtime_policy_overrides: None,
+                simulated_cloud_overrides: None,
             }
         }
         "cloud" => {
@@ -265,6 +296,39 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 enable_compaction: false,
                 memory_budget: None,
                 cloud_runtime_policy_overrides: None,
+                simulated_cloud_overrides: None,
+            }
+        }
+        "hybrid" => {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let test_dir = PathBuf::from(format!(
+                "target/tmp/midge_test_hybrid_{}_{}_{}",
+                std::process::id(),
+                unique_id,
+                timestamp
+            ));
+            let _ = std::fs::create_dir_all(&test_dir);
+            let local_storage_budget_bytes = std::env::var("MIDGE_BENCH_HYBRID_LOCAL_BUDGET_BYTES")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(8 * 1024 * 1024);
+            MidgeOptions {
+                storage_mode: StorageMode::CloudBacked {
+                    local_cache_path: test_dir,
+                },
+                wal_sync: true,
+                wal_batch_config: None,
+                memtable_size: 2 * 1024 * 1024,
+                compression: false,
+                enable_compaction: false,
+                memory_budget: None,
+                cloud_runtime_policy_overrides: None,
+                simulated_cloud_overrides: Some(SimulatedCloudOverrides {
+                    local_storage_budget_bytes: Some(local_storage_budget_bytes),
+                }),
             }
         }
         _ => panic!("unknown storage mode: {mode}"),
@@ -318,6 +382,7 @@ pub fn compaction_test_opts() -> MidgeOptions {
         enable_compaction: true,
         memory_budget: None,
         cloud_runtime_policy_overrides: None,
+        simulated_cloud_overrides: None,
     }
 }
 
@@ -335,6 +400,7 @@ pub fn manual_compaction_test_opts() -> MidgeOptions {
         enable_compaction: false,
         memory_budget: None,
         cloud_runtime_policy_overrides: None,
+        simulated_cloud_overrides: None,
     }
 }
 
@@ -352,5 +418,6 @@ pub fn durability_opts() -> MidgeOptions {
         enable_compaction: false,
         memory_budget: None,
         cloud_runtime_policy_overrides: None,
+        simulated_cloud_overrides: None,
     }
 }

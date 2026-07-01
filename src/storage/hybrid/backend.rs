@@ -171,6 +171,15 @@ pub struct HybridStorage {
     upload_worker_handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HybridStorageBudgetSnapshot {
+    pub max_local_bytes: u64,
+    pub total_committed_bytes: u64,
+    pub free_bytes: u64,
+    pub usage_percent: u32,
+    pub pending_evictions: usize,
+}
+
 impl HybridStorage {
     /// Create a new hybrid storage with an external event sender.
     ///
@@ -739,6 +748,19 @@ impl HybridStorage {
     /// Get mutable access to the budget actor for testing and monitoring
     pub fn budget_actor(&self) -> parking_lot::MutexGuard<'_, actor::StorageBudgetActor> {
         self.budget_actor.lock()
+    }
+
+    pub fn budget_snapshot(&self) -> HybridStorageBudgetSnapshot {
+        let actor = self.budget_actor.lock();
+        let disk_state = actor.disk_state();
+        let max_local_bytes = actor.max_local_bytes();
+        HybridStorageBudgetSnapshot {
+            max_local_bytes,
+            total_committed_bytes: disk_state.total_committed(),
+            free_bytes: disk_state.free_bytes(max_local_bytes),
+            usage_percent: disk_state.usage_percent(max_local_bytes),
+            pending_evictions: actor.pending_evictions().len(),
+        }
     }
 
     /// Get count of pending uploads (for monitoring)

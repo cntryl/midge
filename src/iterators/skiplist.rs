@@ -45,6 +45,15 @@ impl OpType {
     }
 }
 
+/// Visible skiplist entry metadata at a snapshot sequence.
+pub struct SkipListVisibleEntry {
+    pub value: Option<Bytes>,
+    pub seq: u64,
+    pub is_tombstone: bool,
+    pub expiration: Option<u64>,
+    pub op: OpType,
+}
+
 /// A version node in the lock-free version chain (newest-first).
 #[derive(Debug)]
 struct VersionNode {
@@ -316,6 +325,37 @@ impl SkipList {
             if node.key.as_ref() == key {
                 if let Some(vn) = Self::visible_version(&node.versions_head, snapshot_seq, guard) {
                     return Some(vn.val.clone().map(|val| (val, vn.exp)));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get visible value metadata at or before `snapshot_seq`.
+    ///
+    /// Returns `(value, seq, is_tombstone, expiration, op_type)` for the
+    /// newest visible version of `key`.
+    #[inline]
+    pub fn get_visible_entry_with_exp(
+        &self,
+        key: &[u8],
+        snapshot_seq: u64,
+    ) -> Option<SkipListVisibleEntry> {
+        let guard = &epoch::pin();
+        let node_ptr = self.find_node(key, guard);
+
+        // SAFETY: node_ptr was returned by find_node under the epoch guard.
+        if let Some(node) = unsafe { node_ptr.as_ref() } {
+            if node.key.as_ref() == key {
+                if let Some(vn) = Self::visible_version(&node.versions_head, snapshot_seq, guard) {
+                    return Some(SkipListVisibleEntry {
+                        value: vn.val.clone(),
+                        seq: vn.seq,
+                        is_tombstone: vn.val.is_none(),
+                        expiration: vn.exp,
+                        op: vn.op,
+                    });
                 }
             }
         }

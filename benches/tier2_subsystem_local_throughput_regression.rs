@@ -1,6 +1,6 @@
 //! Tier 2 â€” Local Durability Throughput Regression Guard
 //!
-//! Measures: batched write throughput for local vs memory mode
+//! Measures: batched write throughput for memory, local, cloud, and hybrid modes
 //! Purpose: Catch unintended local throughput collapse (regression guard)
 //!
 //! This benchmark ensures that local mode with batched durability doesn't
@@ -44,8 +44,8 @@ fn benchmark_batched_writes(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(6));
 
-    // Measure both memory and local modes
-    for mode in &["memory", "local"] {
+    // Measure all benchmark storage profiles plus memory for a fast ceiling.
+    for mode in &["memory", "local", "cloud", "hybrid"] {
         let opts = opts_for_mode(mode);
 
         group.throughput(Throughput::Bytes(
@@ -93,60 +93,37 @@ fn verify_local_throughput_minimum(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(6));
 
-    let mem_opts = opts_for_mode("memory");
-    let local_opts = opts_for_mode("local");
+    for (name, opts) in [
+        ("memory_baseline", opts_for_mode("memory")),
+        ("local_throughput", opts_for_mode("local")),
+        ("cloud_throughput", opts_for_mode("cloud")),
+        ("hybrid_throughput", opts_for_mode("hybrid")),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter_batched(
+                || {
+                    let engine = Engine::open_with_options(&opts).unwrap();
+                    let cf = engine.create_column_family("test").unwrap();
+                    let keys_vals = make_key_value_batch();
+                    (engine, cf, keys_vals)
+                },
+                |(engine, cf, keys_vals)| {
+                    let cf_id = cf.id();
 
-    // Benchmark memory mode
-    group.bench_function("memory_baseline", |b| {
-        b.iter_batched(
-            || {
-                let engine = Engine::open_with_options(&mem_opts).unwrap();
-                let cf = engine.create_column_family("test").unwrap();
-                let keys_vals = make_key_value_batch();
-                (engine, cf, keys_vals)
-            },
-            |(engine, cf, keys_vals)| {
-                let cf_id = cf.id();
-
-                for _ in 0..BATCH_ITERATIONS {
-                    let mut tx = engine
-                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                        .expect("begin");
-                    for (k, v) in &keys_vals {
-                        tx.put(k.clone(), v.clone(), None).expect("put");
+                    for _ in 0..BATCH_ITERATIONS {
+                        let mut tx = engine
+                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                            .expect("begin");
+                        for (k, v) in &keys_vals {
+                            tx.put(k.clone(), v.clone(), None).expect("put");
+                        }
+                        tx.commit(WriteOptions::buffered()).expect("commit");
                     }
-                    tx.commit(WriteOptions::buffered()).expect("commit");
-                }
-            },
-            criterion::BatchSize::SmallInput,
-        );
-    });
-
-    // Benchmark local mode
-    group.bench_function("local_throughput", |b| {
-        b.iter_batched(
-            || {
-                let engine = Engine::open_with_options(&local_opts).unwrap();
-                let cf = engine.create_column_family("test").unwrap();
-                let keys_vals = make_key_value_batch();
-                (engine, cf, keys_vals)
-            },
-            |(engine, cf, keys_vals)| {
-                let cf_id = cf.id();
-
-                for _ in 0..BATCH_ITERATIONS {
-                    let mut tx = engine
-                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                        .expect("begin");
-                    for (k, v) in &keys_vals {
-                        tx.put(k.clone(), v.clone(), None).expect("put");
-                    }
-                    tx.commit(WriteOptions::buffered()).expect("commit");
-                }
-            },
-            criterion::BatchSize::SmallInput,
-        );
-    });
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
 
     group.finish();
 }

@@ -159,6 +159,7 @@ fn open_cloud_engine(db_path: &Path, overrides: Option<CloudRuntimePolicyOverrid
         enable_compaction: false,
         memory_budget: None,
         cloud_runtime_policy_overrides: overrides,
+        simulated_cloud_overrides: None,
     };
 
     Engine::open(

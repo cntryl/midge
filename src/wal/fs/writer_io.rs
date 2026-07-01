@@ -124,13 +124,15 @@ impl FsWalWriterIo {
 
     fn encode_record_frame(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
         let e_start = std::time::Instant::now();
-        let encoded = encoding::encode(record)?;
+        crate::wal::frame::append_frame_encoded(buf, |payload| {
+            encoding::encode_into(record, payload)
+        })?;
         let e_elapsed = e_start.elapsed();
         if let Some(t) = crate::telemetry::Telemetry::global() {
             t.metrics()
                 .record_wal_encode(u64::try_from(e_elapsed.as_nanos()).unwrap_or(u64::MAX));
         }
-        crate::wal::frame::append_frame(buf, &encoded)
+        Ok(())
     }
 
     fn take_buffer(&self) -> Vec<u8> {
@@ -465,6 +467,30 @@ mod tests {
         // Assert
         assert_eq!(pos, 0);
         assert!(writer.current_pos() > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_encode_record_frame_identically_to_payload_then_frame() -> MidgeResult<()> {
+        // Arrange
+        let mut record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"key"),
+            Some(Bytes::from_static(b"value")),
+            42,
+            7,
+        );
+        record.txn_id = Some(9);
+        let payload = crate::wal::encoding::encode(&record)?;
+        let mut expected = Vec::new();
+        crate::wal::frame::append_frame(&mut expected, &payload)?;
+        let mut actual = Vec::new();
+
+        // Act
+        FsWalWriterIo::encode_record_frame(&record, &mut actual)?;
+
+        // Assert
+        assert_eq!(actual, expected);
         Ok(())
     }
 }

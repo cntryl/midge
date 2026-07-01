@@ -406,29 +406,26 @@ impl SkipListMemtable {
         key: &[u8],
         snapshot_seq: u64,
     ) -> MidgeResult<crate::sst::types::KeyState> {
-        for (entry_key, value, seq, is_tombstone, exp, op) in
-            self.skiplist.drain_with_meta_with_exp()
-        {
-            if entry_key.as_ref() != key {
-                continue;
-            }
-            if snapshot_seq != u64::MAX && seq > snapshot_seq {
-                continue;
-            }
-
-            return Ok(match (value, is_tombstone) {
-                (_, true) | (None, _) => crate::sst::types::KeyState::Tombstone(seq),
-                (Some(value), false) => {
-                    if Self::is_expired(exp) {
-                        crate::sst::types::KeyState::Tombstone(seq)
-                    } else {
-                        crate::sst::types::KeyState::Value(value, seq, exp, op.as_u8())
+        Ok(self
+            .skiplist
+            .get_visible_entry_with_exp(key, snapshot_seq)
+            .map_or(crate::sst::types::KeyState::Absent, |entry| {
+                match (entry.value, entry.is_tombstone) {
+                    (_, true) | (None, _) => crate::sst::types::KeyState::Tombstone(entry.seq),
+                    (Some(value), false) => {
+                        if Self::is_expired(entry.expiration) {
+                            crate::sst::types::KeyState::Tombstone(entry.seq)
+                        } else {
+                            crate::sst::types::KeyState::Value(
+                                value,
+                                entry.seq,
+                                entry.expiration,
+                                entry.op.as_u8(),
+                            )
+                        }
                     }
                 }
-            });
-        }
-
-        Ok(crate::sst::types::KeyState::Absent)
+            }))
     }
 
     /// Get value as Bytes (zero-copy, for performance-critical paths).
@@ -674,15 +671,23 @@ impl Memtable for SkipListMemtable {
 
 #[cfg(test)]
 mod tests {
+    use super::SkipListMemtable;
+    use crate::sst::types::KeyState;
+    use bytes::Bytes;
+
     #[test]
     fn should_format_sst_names_in_lexicographic_sequence_order() {
+        // Arrange
         let names = [1, 2, 10, u64::MAX]
             .into_iter()
             .map(|seq| super::file_name(7, 2, seq))
             .collect::<Vec<_>>();
+
+        // Act
         let mut sorted = names.clone();
         sorted.sort();
 
+        // Assert
         assert_eq!(names, sorted);
         assert_eq!(names[0], "000007_02_00000000000000000001.sst");
         assert_eq!(names[3], "000007_02_18446744073709551615.sst");
@@ -690,16 +695,72 @@ mod tests {
 
     #[test]
     fn should_format_sst_object_keys_without_repeating_sst_prefix_in_file_name() {
+        // Arrange
         let file_name = super::file_name(0, 0, 1);
 
+        // Act
+        let object_key = super::object_key(&file_name);
+        let temp_object_key = super::temp_object_key(&file_name);
+
+        // Assert
         assert_eq!(file_name, "000000_00_00000000000000000001.sst");
+        assert_eq!(object_key, "sst/000000_00_00000000000000000001.sst");
         assert_eq!(
-            super::object_key(&file_name),
-            "sst/000000_00_00000000000000000001.sst"
-        );
-        assert_eq!(
-            super::temp_object_key(&file_name),
+            temp_object_key,
             "sst/000000_00_00000000000000000001.sst.tmp"
         );
+    }
+
+    #[test]
+    fn should_get_memtable_key_state_with_direct_lookup() {
+        // Arrange
+        let memtable = SkipListMemtable::new();
+        memtable
+            .put_with_seq(b"key".to_vec(), b"old".to_vec(), 10, None)
+            .expect("put old value");
+        memtable
+            .put_with_seq(b"key".to_vec(), b"new".to_vec(), 20, None)
+            .expect("put new value");
+
+        // Act
+        let at_15 = memtable.get_key_state_at(b"key", 15).expect("state at 15");
+        let at_25 = memtable.get_key_state_at(b"key", 25).expect("state at 25");
+
+        // Assert
+        assert!(matches!(
+            at_15,
+            KeyState::Value(value, 10, None, 0) if value == Bytes::from_static(b"old")
+        ));
+        assert!(matches!(
+            at_25,
+            KeyState::Value(value, 20, None, 0) if value == Bytes::from_static(b"new")
+        ));
+    }
+
+    #[test]
+    fn should_get_memtable_tombstone_key_state_with_direct_lookup() {
+        // Arrange
+        let memtable = SkipListMemtable::new();
+        memtable
+            .put_with_seq(b"key".to_vec(), b"value".to_vec(), 10, None)
+            .expect("put value");
+        memtable
+            .delete_with_seq(b"key".to_vec(), 20)
+            .expect("delete value");
+
+        // Act
+        let before_delete = memtable
+            .get_key_state_at(b"key", 15)
+            .expect("state before delete");
+        let after_delete = memtable
+            .get_key_state_at(b"key", 25)
+            .expect("state after delete");
+
+        // Assert
+        assert!(matches!(
+            before_delete,
+            KeyState::Value(value, 10, None, 0) if value == Bytes::from_static(b"value")
+        ));
+        assert!(matches!(after_delete, KeyState::Tombstone(20)));
     }
 }

@@ -921,8 +921,7 @@ impl RuntimeState {
         })
     }
 
-    pub fn runtime_metrics_snapshot(&self) -> crate::types::RuntimeMetricsSnapshot {
-        let now = Instant::now();
+    fn snapshot_retention_metrics(&self, now: Instant) -> (usize, u64) {
         let pinned_ssts = self.get_pinned_sst_names().len();
         let oldest_snapshot_age_seconds = self
             .snapshots
@@ -933,15 +932,31 @@ impl RuntimeState {
             })
             .max()
             .unwrap_or(0);
+        (pinned_ssts, oldest_snapshot_age_seconds)
+    }
 
+    fn memtable_counts(&self) -> (usize, usize) {
         let active_memtables = self.column_families.len();
         let immutable_memtables = self
             .column_families
             .values()
             .map(|cf| cf.immutable_memtables.len())
             .sum();
-        let sst_count = self.manifest.files.len();
-        let sst_bytes = self.manifest.files.iter().map(|file| file.size_bytes).sum();
+        (active_memtables, immutable_memtables)
+    }
+
+    fn sst_totals(&self) -> (usize, u64) {
+        (
+            self.manifest.files.len(),
+            self.manifest.files.iter().map(|file| file.size_bytes).sum(),
+        )
+    }
+
+    pub fn runtime_metrics_snapshot(&self) -> crate::types::RuntimeMetricsSnapshot {
+        let now = Instant::now();
+        let (pinned_ssts, oldest_snapshot_age_seconds) = self.snapshot_retention_metrics(now);
+        let (active_memtables, immutable_memtables) = self.memtable_counts();
+        let (sst_count, sst_bytes) = self.sst_totals();
         let residue = self.storage_residue_assessment();
         let telemetry = crate::telemetry::Telemetry::global().map(|t| t.metrics().snapshot());
 
@@ -991,11 +1006,42 @@ impl RuntimeState {
             write_conflicts_total: telemetry.as_ref().map_or(0, |m| m.write_conflicts),
             write_conflicts_point_total: telemetry.as_ref().map_or(0, |m| m.write_conflicts_point),
             write_conflicts_range_total: telemetry.as_ref().map_or(0, |m| m.write_conflicts_range),
+            cache_hits: telemetry.as_ref().map_or(0, |m| m.cache_hits),
+            cache_misses: telemetry.as_ref().map_or(0, |m| m.cache_misses),
             wal_append_count: telemetry.as_ref().map_or(0, |m| m.wal_append_count),
             wal_flush_count: telemetry.as_ref().map_or(0, |m| m.wal_flush_count),
             wal_fsync_count: telemetry.as_ref().map_or(0, |m| m.wal_fsync_count),
             wal_append_ns_total: telemetry.as_ref().map_or(0, |m| m.wal_append_ns_total),
             wal_fsync_ns_total: telemetry.as_ref().map_or(0, |m| m.wal_fsync_ns_total),
+            cloud_async_wal_segments_sealed: telemetry
+                .as_ref()
+                .map_or(0, |m| m.cloud_async_wal_segments_sealed),
+            cloud_async_wal_bytes_sealed: telemetry
+                .as_ref()
+                .map_or(0, |m| m.cloud_async_wal_bytes_sealed),
+            cloud_async_wal_seal_latency_us: telemetry
+                .as_ref()
+                .map_or(0, |m| m.cloud_async_wal_seal_latency_us),
+            cloud_async_wal_uploads_started: telemetry
+                .as_ref()
+                .map_or(0, |m| m.cloud_async_wal_uploads_started),
+            cloud_async_wal_uploads_completed: telemetry
+                .as_ref()
+                .map_or(0, |m| m.cloud_async_wal_uploads_completed),
+            cloud_async_wal_uploads_failed: telemetry
+                .as_ref()
+                .map_or(0, |m| m.cloud_async_wal_uploads_failed),
+            cloud_async_wal_upload_latency_us: telemetry
+                .as_ref()
+                .map_or(0, |m| m.cloud_async_wal_upload_latency_us),
+            cloud_async_wal_ack_latency_us: telemetry
+                .as_ref()
+                .map_or(0, |m| m.cloud_async_wal_ack_latency_us),
+            hybrid_max_local_bytes: 0,
+            hybrid_total_committed_bytes: 0,
+            hybrid_free_bytes: 0,
+            hybrid_usage_percent: 0,
+            hybrid_pending_evictions: 0,
             wal_recovery_records_replayed: self.wal_recovery_records_replayed,
             wal_recovery_bytes_replayed: self.wal_recovery_bytes_replayed,
             intent_log_replay_runs: self.intent_log_replay_runs,

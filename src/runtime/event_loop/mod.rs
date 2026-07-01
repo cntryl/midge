@@ -42,6 +42,7 @@ use super::actors::{
     CloudActor, CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor, WalActor,
 };
 use super::durability::DurabilityCoordinator;
+use super::read_resources::ReadResources;
 use super::read_snapshot::ReadSnapshot;
 use super::snapshot_cache::{CfSnapshotData, PublishedSnapshot, SnapshotCache};
 use super::state::RuntimeState;
@@ -103,6 +104,8 @@ pub struct EventLoop {
     pub(super) write_stall_waiter_queues: HashMap<crate::types::ColumnFamilyId, VecDeque<u64>>,
     /// Lock-free snapshot cache shared with Engine for read-path bypass.
     pub(super) snapshot_cache: Option<Arc<SnapshotCache>>,
+    /// Shared SST readers and block cache used by runtime read snapshots.
+    pub(super) read_resources: Option<Arc<ReadResources>>,
 
     /// Shared flag from the lease heartbeat. When `false`, the event loop
     /// rejects new write operations with `MidgeError::Fenced`.
@@ -141,6 +144,19 @@ impl EventLoop {
                 crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
                     .with_compression_policy(config.compression_policy.clone()),
             )
+        };
+        let read_resources = if memory_mode {
+            None
+        } else {
+            let sst_path_prefix = sst_dir
+                .strip_prefix(&state.db_path)
+                .unwrap_or_else(|_| std::path::Path::new("sst"))
+                .to_path_buf();
+            Some(Arc::new(ReadResources::new(
+                Arc::clone(&state.fs),
+                sst_path_prefix,
+                config.block_cache_size,
+            )))
         };
 
         // Create actors - they handle memory_mode internally
@@ -203,6 +219,7 @@ impl EventLoop {
             write_stall_waiters: HashMap::new(),
             write_stall_waiter_queues: HashMap::new(),
             snapshot_cache: None,
+            read_resources,
             lease_healthy: config.lease_healthy.clone(),
         };
 
@@ -266,13 +283,14 @@ impl EventLoop {
             cf_snapshots.insert(
                 cf_id,
                 CfSnapshotData {
-                    snapshot: Arc::new(ReadSnapshot::new(
+                    snapshot: Arc::new(ReadSnapshot::new_with_resources(
                         cf_state.memtable.clone(),
                         cf_state.immutable_memtables.clone(),
                         cf_files,
                         Arc::clone(&self.state.fs),
                         sst_path_prefix,
                         self.state.is_memory_mode(),
+                        self.read_resources.clone(),
                     )),
                 },
             );
@@ -282,6 +300,17 @@ impl EventLoop {
             sequence: self.state.sequence,
             cf_snapshots,
         });
+
+        if let Some(read_resources) = &self.read_resources {
+            let live_names = self
+                .state
+                .manifest
+                .files
+                .iter()
+                .map(|file| file.name.clone())
+                .collect();
+            read_resources.prune_to_live_ssts(&live_names);
+        }
     }
 
     fn build_sst_file_meta(
@@ -770,14 +799,11 @@ impl EventLoop {
             return true;
         }
 
-        if self.wal_actor.should_sync_batch()
-            || self.wal_actor.has_pending_data()
-            || self.wal_actor.has_pending_cloud_writes()
-        {
+        if self.wal_actor.should_sync_batch() || self.wal_actor.has_pending_cloud_writes() {
             return true;
         }
 
-        if self.durability.has_pending_waiters() {
+        if self.durability.cloud_seal_retry_needed() && self.state.wal.pending_writes > 0 {
             return true;
         }
 
@@ -798,6 +824,10 @@ impl EventLoop {
         }
 
         false
+    }
+
+    fn idle_progress_timeout(&self) -> Option<Duration> {
+        self.wal_actor.sync_deadline_timeout()
     }
 
     fn progress_pass(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
@@ -914,20 +944,51 @@ impl EventLoop {
                 continue;
             }
 
+            let idle_timeout = self.idle_progress_timeout();
             let msg = if let Some(storage_rx) = self.hybrid_storage_events.clone() {
-                crossbeam::channel::select! {
-                    recv(msg_rx) -> msg => msg.ok(),
-                    recv(storage_rx) -> ev => {
-                        match ev {
-                            Ok(ev) => {
-                                self.handle_storage_event(ev);
+                if let Some(timeout) = idle_timeout {
+                    crossbeam::channel::select! {
+                        recv(msg_rx) -> msg => msg.ok(),
+                        recv(storage_rx) -> ev => {
+                            match ev {
+                                Ok(ev) => {
+                                    self.handle_storage_event(ev);
+                                }
+                                Err(_) => {
+                                    self.hybrid_storage_events = None;
+                                }
                             }
-                            Err(_) => {
-                                self.hybrid_storage_events = None;
-                            }
+                            continue;
                         }
+                        default(timeout) => {
+                            self.progress_pass(msg_rx);
+                            continue;
+                        }
+                    }
+                } else {
+                    crossbeam::channel::select! {
+                        recv(msg_rx) -> msg => msg.ok(),
+                        recv(storage_rx) -> ev => {
+                            match ev {
+                                Ok(ev) => {
+                                    self.handle_storage_event(ev);
+                                }
+                                Err(_) => {
+                                    self.hybrid_storage_events = None;
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
+            } else if let Some(timeout) = idle_timeout {
+                match msg_rx.recv_timeout(timeout) {
+                    Ok(msg) => Some(msg),
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                        self.progress_pass(msg_rx);
                         continue;
                     }
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => None,
                 }
             } else {
                 msg_rx.recv().ok()

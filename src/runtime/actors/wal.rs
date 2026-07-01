@@ -1554,6 +1554,17 @@ impl WalActor {
         by_bytes || by_time
     }
 
+    /// Return how long the event loop can sleep before the batched sync deadline.
+    #[must_use]
+    pub fn sync_deadline_timeout(&self) -> Option<Duration> {
+        if !self.has_pending_data() {
+            return None;
+        }
+
+        let max_delay = Duration::from_millis(self.batch_config.max_delay_ms);
+        Some(max_delay.saturating_sub(self.last_sync_instant.elapsed()))
+    }
+
     /// Returns true if there is any buffered data awaiting sync.
     pub fn has_pending_data(&self) -> bool {
         self.bytes_since_sync > 0 || self.pending_sync_count > 0
@@ -1832,12 +1843,37 @@ mod tests {
             0,
             "no syncs should have been performed yet"
         );
+        assert!(
+            wal_actor.sync_deadline_timeout().is_some(),
+            "pending data should expose a sync deadline timeout"
+        );
 
         Ok(())
     }
 
     #[test]
+    fn should_not_report_sync_deadline_without_pending_data() -> MidgeResult<()> {
+        // Arrange
+        let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+        let wal_actor = WalActor::new(
+            temp.path().to_path_buf(),
+            DurabilityPolicy::Batched,
+            BatchConfig::default(),
+            false,
+            1,
+        )?;
+
+        // Act
+        let deadline = wal_actor.sync_deadline_timeout();
+
+        // Assert
+        assert_eq!(deadline, None);
+        Ok(())
+    }
+
+    #[test]
     fn should_rotate_to_lex_sortable_wal_segment_name() -> MidgeResult<()> {
+        // Arrange
         let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
         let db_path = temp.path().to_path_buf();
         let wal_dir = db_path.join("wal");
@@ -1850,8 +1886,10 @@ mod tests {
             1,
         )?;
 
+        // Act
         wal_actor.rotate(&mut state)?;
 
+        // Assert
         assert!(
             wal_dir
                 .join(crate::wal::cloud_segment_file_name(1))

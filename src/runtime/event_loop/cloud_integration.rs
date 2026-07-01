@@ -32,6 +32,7 @@ impl EventLoop {
         let bytes_buffered = self.wal_actor.bytes_since_sync() as u64;
         let seal_start = Instant::now();
         let max_sequence = self.wal_actor.flush_for_cloud_upload(&mut self.state)?;
+        self.durability.mark_cloud_seal_retry_needed();
         fail::fail_point!(
             "midge::cloud::inject_fail_after_wal_flush_before_rotate",
             |_| Err(crate::common::MidgeError::Internal(
@@ -66,6 +67,7 @@ impl EventLoop {
         self.durability
             .record_cloud_segment_inflight(segment_id, max_sequence);
         self.durability.record_cloud_flush();
+        self.durability.clear_cloud_seal_retry_needed();
 
         if let Some(telemetry) = crate::telemetry::Telemetry::global() {
             telemetry.metrics().record_cloud_async_wal_segment_sealed(

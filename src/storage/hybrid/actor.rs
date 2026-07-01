@@ -192,6 +192,10 @@ impl StorageBudgetActor {
         self.disk_state.clone()
     }
 
+    pub fn max_local_bytes(&self) -> u64 {
+        self.policy.max_local_bytes
+    }
+
     /// Get pending eviction queue
     pub fn pending_evictions(&self) -> Vec<(u64, u64)> {
         self.pending_evictions.iter().copied().collect()
