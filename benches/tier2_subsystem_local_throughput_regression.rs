@@ -109,6 +109,9 @@ struct CommitTimingTotals {
     succeeded: u64,
     commit_total_ns: u64,
     submit_apply_transaction_ns: u64,
+    write_group_leader_collect_ns: u64,
+    write_group_runtime_apply_ns: u64,
+    write_group_follower_wait_ns: u64,
     durability_finalize_ns: u64,
     unregister_snapshot_ns: u64,
 }
@@ -130,6 +133,15 @@ impl CommitTimingTotals {
             totals.submit_apply_transaction_ns = totals
                 .submit_apply_transaction_ns
                 .saturating_add(sample.submit_apply_transaction_ns);
+            totals.write_group_leader_collect_ns = totals
+                .write_group_leader_collect_ns
+                .saturating_add(sample.write_group_leader_collect_ns);
+            totals.write_group_runtime_apply_ns = totals
+                .write_group_runtime_apply_ns
+                .saturating_add(sample.write_group_runtime_apply_ns);
+            totals.write_group_follower_wait_ns = totals
+                .write_group_follower_wait_ns
+                .saturating_add(sample.write_group_follower_wait_ns);
             totals.durability_finalize_ns = totals
                 .durability_finalize_ns
                 .saturating_add(sample.durability_finalize_ns);
@@ -152,6 +164,10 @@ struct TransactionLatencyBreakdown {
     put_us: f64,
     commit_total_us: f64,
     submit_apply_transaction_us: f64,
+    write_group_leader_collect_us: f64,
+    write_group_runtime_apply_us: f64,
+    write_group_follower_wait_us: f64,
+    submit_apply_other_us: f64,
     durability_finalize_us: f64,
     unregister_snapshot_us: f64,
     runtime_submit_ack_non_wal_us: f64,
@@ -165,7 +181,19 @@ impl TransactionLatencyBreakdown {
         let mut dominant = ("begin_tx", self.begin_tx_us);
         for candidate in [
             ("put", self.put_us),
-            ("submit_apply_transaction", self.submit_apply_transaction_us),
+            (
+                "write_group_leader_collect",
+                self.write_group_leader_collect_us,
+            ),
+            (
+                "write_group_runtime_apply",
+                self.write_group_runtime_apply_us,
+            ),
+            (
+                "write_group_follower_wait",
+                self.write_group_follower_wait_us,
+            ),
+            ("submit_apply_other", self.submit_apply_other_us),
             ("durability_finalize", self.durability_finalize_us),
             ("unregister_snapshot", self.unregister_snapshot_us),
         ] {
@@ -440,6 +468,23 @@ fn latency_breakdown_from_totals(
         commit_totals.submit_apply_transaction_ns,
         commit_totals.samples,
     );
+    let write_group_leader_collect_us = ns_to_avg_us(
+        commit_totals.write_group_leader_collect_ns,
+        commit_totals.samples,
+    );
+    let write_group_runtime_apply_us = ns_to_avg_us(
+        commit_totals.write_group_runtime_apply_ns,
+        commit_totals.samples,
+    );
+    let write_group_follower_wait_us = ns_to_avg_us(
+        commit_totals.write_group_follower_wait_ns,
+        commit_totals.samples,
+    );
+    let submit_apply_other_us = (submit_apply_transaction_us
+        - write_group_leader_collect_us
+        - write_group_runtime_apply_us
+        - write_group_follower_wait_us)
+        .max(0.0);
     let avg_wal_append_us = ns_to_avg_us(wal_append_ns_total, physical_wal_appends);
 
     TransactionLatencyBreakdown {
@@ -451,6 +496,10 @@ fn latency_breakdown_from_totals(
         put_us: ns_to_avg_us(client_totals.put_ns, client_totals.transactions),
         commit_total_us: ns_to_avg_us(commit_totals.commit_total_ns, commit_totals.samples),
         submit_apply_transaction_us,
+        write_group_leader_collect_us,
+        write_group_runtime_apply_us,
+        write_group_follower_wait_us,
+        submit_apply_other_us,
         durability_finalize_us: ns_to_avg_us(
             commit_totals.durability_finalize_ns,
             commit_totals.samples,
@@ -487,7 +536,7 @@ fn report_transaction_latency_breakdown(breakdown: TransactionLatencyBreakdown) 
     }
 
     eprintln!(
-        "transaction_latency_breakdown workload={} clients={} transactions={} begin_tx_us={:.2} put_us={:.2} commit_total_us={:.2} submit_apply_transaction_us={:.2} durability_finalize_us={:.2} unregister_snapshot_us={:.2} runtime_submit_ack_non_wal_us={:.2} logical_txn_records={} physical_wal_appends={} avg_txn_records_per_append={:.2} avg_wal_append_us={:.2} dominant_phase={}",
+        "transaction_latency_breakdown workload={} clients={} transactions={} begin_tx_us={:.2} put_us={:.2} commit_total_us={:.2} submit_apply_transaction_us={:.2} write_group_leader_collect_us={:.2} write_group_runtime_apply_us={:.2} write_group_follower_wait_us={:.2} submit_apply_other_us={:.2} durability_finalize_us={:.2} unregister_snapshot_us={:.2} runtime_submit_ack_non_wal_us={:.2} logical_txn_records={} physical_wal_appends={} avg_txn_records_per_append={:.2} avg_wal_append_us={:.2} dominant_phase={}",
         breakdown.kind.label(),
         breakdown.clients,
         breakdown.transactions,
@@ -495,6 +544,10 @@ fn report_transaction_latency_breakdown(breakdown: TransactionLatencyBreakdown) 
         breakdown.put_us,
         breakdown.commit_total_us,
         breakdown.submit_apply_transaction_us,
+        breakdown.write_group_leader_collect_us,
+        breakdown.write_group_runtime_apply_us,
+        breakdown.write_group_follower_wait_us,
+        breakdown.submit_apply_other_us,
         breakdown.durability_finalize_us,
         breakdown.unregister_snapshot_us,
         breakdown.runtime_submit_ack_non_wal_us,

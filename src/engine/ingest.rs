@@ -72,6 +72,29 @@ const WRITE_GROUP_RESCUE_INTERVAL: Duration = Duration::from_micros(50);
 struct ApplyTransactionOptions {
     start_sequence: Option<u64>,
     isolation_policy: crate::runtime::TransactionIsolationPolicy,
+    collect_submit_timing: bool,
+}
+
+fn submit_timing_phase_start(enabled: bool) -> Option<Instant> {
+    enabled.then(Instant::now)
+}
+
+fn record_submit_leader_collect(started_at: Option<Instant>) {
+    if let Some(started_at) = started_at {
+        crate::diagnostics::record_transaction_submit_leader_collect(started_at.elapsed());
+    }
+}
+
+fn record_submit_runtime_apply(started_at: Option<Instant>) {
+    if let Some(started_at) = started_at {
+        crate::diagnostics::record_transaction_submit_runtime_apply(started_at.elapsed());
+    }
+}
+
+fn record_submit_follower_wait(started_at: Option<Instant>) {
+    if let Some(started_at) = started_at {
+        crate::diagnostics::record_transaction_submit_follower_wait(started_at.elapsed());
+    }
 }
 
 /// Pending batch request waiting for leader to group it with others
@@ -383,6 +406,7 @@ impl IngestCoordinator {
         durability_policy: Option<crate::wal::DurabilityPolicy>,
         start_sequence: Option<u64>,
         isolation_policy: crate::runtime::TransactionIsolationPolicy,
+        collect_submit_timing: bool,
     ) -> MidgeResult<u64> {
         if ops.is_empty() {
             return Ok(0);
@@ -412,18 +436,19 @@ impl IngestCoordinator {
                 durability_policy,
                 start_sequence,
                 isolation_policy,
+                collect_submit_timing,
             );
         }
 
         if self.write_group_coord.try_acquire_leader() {
-            self.drain_as_leader(runtime, Some(ops), durability_policy)
+            self.drain_as_leader(runtime, Some(ops), durability_policy, collect_submit_timing)
                 .unwrap_or_else(|| {
                     Err(MidgeError::Internal(
                         "Write group leader completed with no result".to_string(),
                     ))
                 })
         } else {
-            self.submit_as_follower(runtime, ops, durability_policy)
+            self.submit_as_follower(runtime, ops, durability_policy, collect_submit_timing)
         }
     }
 
@@ -432,6 +457,7 @@ impl IngestCoordinator {
         runtime: &RuntimeHandle,
         initial_ops: Option<Vec<TransactionOp>>,
         durability_policy: Option<crate::wal::DurabilityPolicy>,
+        collect_submit_timing: bool,
     ) -> Option<MidgeResult<u64>> {
         let _leader_guard = LeaderGuard::new(Arc::clone(&self.write_group_coord));
 
@@ -460,7 +486,9 @@ impl IngestCoordinator {
                 break;
             }
 
+            let collect_started_at = submit_timing_phase_start(collect_submit_timing);
             all_ops = self.drain_pending_queue(all_ops, &mut pending_requests);
+            record_submit_leader_collect(collect_started_at);
 
             if all_ops.is_empty() {
                 break;
@@ -471,7 +499,8 @@ impl IngestCoordinator {
                 .batches_grouped
                 .fetch_add(batch_size as u64, Ordering::Relaxed);
 
-            let result = self.apply_transaction(runtime, all_ops, batch_durability);
+            let result =
+                self.apply_transaction(runtime, all_ops, batch_durability, collect_submit_timing);
 
             self.notify_waiters(&pending_requests, &result);
 
@@ -523,6 +552,7 @@ impl IngestCoordinator {
         runtime: &RuntimeHandle,
         ops: Vec<TransactionOp>,
         durability_policy: Option<crate::wal::DurabilityPolicy>,
+        collect_submit_timing: bool,
     ) -> MidgeResult<u64> {
         Self::send_apply_transaction(
             runtime,
@@ -531,6 +561,7 @@ impl IngestCoordinator {
             ApplyTransactionOptions {
                 start_sequence: None,
                 isolation_policy: crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+                collect_submit_timing,
             },
             &self.stall_flag,
             Some((WRITE_GROUP_APPLY_TIMEOUT, "Write group commit timed out")),
@@ -577,6 +608,7 @@ impl IngestCoordinator {
         runtime: &RuntimeHandle,
         ops: Vec<TransactionOp>,
         durability_policy: Option<crate::wal::DurabilityPolicy>,
+        collect_submit_timing: bool,
     ) -> MidgeResult<u64> {
         let (result_tx, result_rx) = crossbeam::channel::bounded(1);
 
@@ -587,13 +619,14 @@ impl IngestCoordinator {
         };
 
         match self.write_group_coord.pending_queue.0.try_send(pending) {
-            Ok(()) => self.wait_for_grouped_result(runtime, &result_rx),
+            Ok(()) => self.wait_for_grouped_result(runtime, &result_rx, collect_submit_timing),
             Err(crossbeam::channel::TrySendError::Full(pending)) => self.submit_direct(
                 runtime,
                 pending.ops,
                 pending.durability_policy,
                 None,
                 crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+                collect_submit_timing,
             ),
             Err(crossbeam::channel::TrySendError::Disconnected(_)) => Err(MidgeError::Internal(
                 "Write grouping coordinator disconnected".to_string(),
@@ -605,12 +638,15 @@ impl IngestCoordinator {
         &self,
         runtime: &RuntimeHandle,
         result_rx: &crossbeam::channel::Receiver<MidgeResult<u64>>,
+        collect_submit_timing: bool,
     ) -> MidgeResult<u64> {
         let started_at = Instant::now();
+        let follower_wait_started_at = submit_timing_phase_start(collect_submit_timing);
 
         loop {
             let elapsed = started_at.elapsed();
             if elapsed >= WRITE_GROUP_WAIT_TIMEOUT {
+                record_submit_follower_wait(follower_wait_started_at);
                 return Err(MidgeError::Internal(
                     "Write grouping leader timed out".to_string(),
                 ));
@@ -619,13 +655,17 @@ impl IngestCoordinator {
             let remaining = WRITE_GROUP_WAIT_TIMEOUT.saturating_sub(elapsed);
             let wait_for = remaining.min(WRITE_GROUP_RESCUE_INTERVAL);
             match result_rx.recv_timeout(wait_for) {
-                Ok(result) => return result,
+                Ok(result) => {
+                    record_submit_follower_wait(follower_wait_started_at);
+                    return result;
+                }
                 Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
                     if self.write_group_coord.try_acquire_leader() {
-                        let _ = self.drain_as_leader(runtime, None, None);
+                        let _ = self.drain_as_leader(runtime, None, None, collect_submit_timing);
                     }
                 }
                 Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                    record_submit_follower_wait(follower_wait_started_at);
                     return Err(MidgeError::Internal(
                         "Write grouping leader disconnected".to_string(),
                     ));
@@ -641,6 +681,7 @@ impl IngestCoordinator {
         durability_policy: Option<crate::wal::DurabilityPolicy>,
         start_sequence: Option<u64>,
         isolation_policy: crate::runtime::TransactionIsolationPolicy,
+        collect_submit_timing: bool,
     ) -> MidgeResult<u64> {
         Self::send_apply_transaction(
             runtime,
@@ -649,6 +690,7 @@ impl IngestCoordinator {
             ApplyTransactionOptions {
                 start_sequence,
                 isolation_policy,
+                collect_submit_timing,
             },
             &self.stall_flag,
             None,
@@ -667,7 +709,8 @@ impl IngestCoordinator {
     ) -> MidgeResult<u64> {
         let request_id = next_request_id()?;
 
-        let response = if let Some((timeout, timeout_msg)) = timeout {
+        let runtime_apply_started_at = submit_timing_phase_start(options.collect_submit_timing);
+        let response_result = if let Some((timeout, timeout_msg)) = timeout {
             runtime
                 .send_apply_transaction_and_wait_timeout(
                     request_id,
@@ -676,8 +719,10 @@ impl IngestCoordinator {
                     options.start_sequence,
                     options.isolation_policy,
                     timeout,
-                )?
-                .ok_or_else(|| MidgeError::Internal(timeout_msg.to_string()))?
+                )
+                .and_then(|response| {
+                    response.ok_or_else(|| MidgeError::Internal(timeout_msg.to_string()))
+                })
         } else {
             runtime.send_apply_transaction_and_wait(
                 request_id,
@@ -685,9 +730,11 @@ impl IngestCoordinator {
                 durability_policy,
                 options.start_sequence,
                 options.isolation_policy,
-            )?
+            )
         };
+        record_submit_runtime_apply(runtime_apply_started_at);
 
+        let response = response_result?;
         Self::decode_apply_transaction_response(response, expected_op_count, stall_flag)
     }
 
@@ -947,6 +994,7 @@ impl IngestCoordinator {
             ApplyTransactionOptions {
                 start_sequence: None,
                 isolation_policy: crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+                collect_submit_timing: false,
             },
             stall_flag,
             None,
@@ -1060,7 +1108,7 @@ mod tests {
             .expect("queue pending request");
 
         // Act
-        let initial_result = coordinator.drain_as_leader(&runtime_handle, None, None);
+        let initial_result = coordinator.drain_as_leader(&runtime_handle, None, None, false);
 
         // Assert
         assert!(initial_result.is_none());

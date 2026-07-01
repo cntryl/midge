@@ -1,8 +1,10 @@
 //! Internal diagnostics hooks used by tests and benchmarks.
 
 use crossbeam::queue::SegQueue;
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 static TRANSACTION_COMMIT_TIMING_ENABLED: AtomicBool = AtomicBool::new(false);
 static TRANSACTION_COMMIT_TIMINGS: OnceLock<SegQueue<TransactionCommitTimingSample>> =
@@ -13,9 +15,33 @@ static TRANSACTION_COMMIT_TIMINGS: OnceLock<SegQueue<TransactionCommitTimingSamp
 pub struct TransactionCommitTimingSample {
     pub commit_total_ns: u64,
     pub submit_apply_transaction_ns: u64,
+    pub write_group_leader_collect_ns: u64,
+    pub write_group_runtime_apply_ns: u64,
+    pub write_group_follower_wait_ns: u64,
     pub durability_finalize_ns: u64,
     pub unregister_snapshot_ns: u64,
     pub succeeded: bool,
+}
+
+/// Internal per-thread submit timing accumulated while one transaction commits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TransactionSubmitTimingSample {
+    pub(crate) leader_collect: u64,
+    pub(crate) runtime_apply: u64,
+    pub(crate) follower_wait: u64,
+}
+
+impl TransactionSubmitTimingSample {
+    const ZERO: Self = Self {
+        leader_collect: 0,
+        runtime_apply: 0,
+        follower_wait: 0,
+    };
+}
+
+thread_local! {
+    static CURRENT_TRANSACTION_SUBMIT_TIMING: Cell<TransactionSubmitTimingSample> =
+        const { Cell::new(TransactionSubmitTimingSample::ZERO) };
 }
 
 /// Guard that enables collection of internal transaction commit timing samples.
@@ -62,6 +88,50 @@ pub(crate) fn record_transaction_commit_timing(sample: TransactionCommitTimingSa
     transaction_commit_timing_queue().push(sample);
 }
 
+pub(crate) fn clear_current_transaction_submit_timing() {
+    if transaction_commit_timing_enabled() {
+        CURRENT_TRANSACTION_SUBMIT_TIMING
+            .with(|timing| timing.set(TransactionSubmitTimingSample::ZERO));
+    }
+}
+
+#[must_use]
+pub(crate) fn take_current_transaction_submit_timing() -> TransactionSubmitTimingSample {
+    if !transaction_commit_timing_enabled() {
+        return TransactionSubmitTimingSample::ZERO;
+    }
+
+    CURRENT_TRANSACTION_SUBMIT_TIMING.with(|timing| {
+        let sample = timing.get();
+        timing.set(TransactionSubmitTimingSample::ZERO);
+        sample
+    })
+}
+
+pub(crate) fn record_transaction_submit_leader_collect(duration: Duration) {
+    record_current_transaction_submit_timing(|sample| {
+        sample.leader_collect = sample
+            .leader_collect
+            .saturating_add(duration_as_nanos(duration));
+    });
+}
+
+pub(crate) fn record_transaction_submit_runtime_apply(duration: Duration) {
+    record_current_transaction_submit_timing(|sample| {
+        sample.runtime_apply = sample
+            .runtime_apply
+            .saturating_add(duration_as_nanos(duration));
+    });
+}
+
+pub(crate) fn record_transaction_submit_follower_wait(duration: Duration) {
+    record_current_transaction_submit_timing(|sample| {
+        sample.follower_wait = sample
+            .follower_wait
+            .saturating_add(duration_as_nanos(duration));
+    });
+}
+
 fn transaction_commit_timing_queue() -> &'static SegQueue<TransactionCommitTimingSample> {
     TRANSACTION_COMMIT_TIMINGS.get_or_init(SegQueue::new)
 }
@@ -79,4 +149,22 @@ fn drain_transaction_commit_timings() -> Vec<TransactionCommitTimingSample> {
     }
 
     samples
+}
+
+fn record_current_transaction_submit_timing(
+    update: impl FnOnce(&mut TransactionSubmitTimingSample),
+) {
+    if !transaction_commit_timing_enabled() {
+        return;
+    }
+
+    CURRENT_TRANSACTION_SUBMIT_TIMING.with(|timing| {
+        let mut sample = timing.get();
+        update(&mut sample);
+        timing.set(sample);
+    });
+}
+
+fn duration_as_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }

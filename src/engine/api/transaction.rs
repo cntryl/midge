@@ -185,9 +185,12 @@ struct CommitTiming {
 
 impl CommitTiming {
     fn maybe_start() -> Option<Self> {
-        crate::diagnostics::transaction_commit_timing_enabled().then(|| Self {
-            started_at: Instant::now(),
-            sample: crate::diagnostics::TransactionCommitTimingSample::default(),
+        crate::diagnostics::transaction_commit_timing_enabled().then(|| {
+            crate::diagnostics::clear_current_transaction_submit_timing();
+            Self {
+                started_at: Instant::now(),
+                sample: crate::diagnostics::TransactionCommitTimingSample::default(),
+            }
         })
     }
 
@@ -197,7 +200,11 @@ impl CommitTiming {
 
     fn record_submit(timing: &mut Option<Self>, started_at: Option<Instant>) {
         if let (Some(timing), Some(started_at)) = (timing.as_mut(), started_at) {
+            let submit_timing = crate::diagnostics::take_current_transaction_submit_timing();
             timing.sample.submit_apply_transaction_ns = duration_as_nanos(started_at.elapsed());
+            timing.sample.write_group_leader_collect_ns = submit_timing.leader_collect;
+            timing.sample.write_group_runtime_apply_ns = submit_timing.runtime_apply;
+            timing.sample.write_group_follower_wait_ns = submit_timing.follower_wait;
         }
     }
 
@@ -402,12 +409,14 @@ impl Transaction {
 
         let durability_policy = Some(effective_wal_durability_policy(self.cloud_mode, opts)?);
         let submit_started_at = CommitTiming::phase_start(timing.as_ref());
+        let collect_submit_timing = timing.is_some();
         let commit_result = self.coordinator.submit_ops(
             &self.runtime_handle,
             runtime_ops,
             durability_policy,
             Some(self.start_sequence()),
             isolation_policy,
+            collect_submit_timing,
         );
         CommitTiming::record_submit(&mut timing, submit_started_at);
 
