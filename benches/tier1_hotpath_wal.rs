@@ -15,6 +15,8 @@ const WAL_ENCODE_BATCH_SIZE_SMALL: usize = 512;
 const WAL_DECODE_BATCH_SIZE_DEFAULT: usize = 256;
 const WAL_DECODE_BATCH_SIZE_DELETE: usize = 512;
 const WAL_DECODE_BATCH_SIZE_MEDIUM: usize = 512;
+const WAL_ROUNDTRIP_BATCH_SIZE_DEFAULT: usize = 256;
+const WAL_ROUNDTRIP_BATCH_SIZE_MEDIUM: usize = 128;
 
 cntryl_stress::stress_allocator!();
 
@@ -137,10 +139,23 @@ fn decode_delete(ctx: &mut StressContext) {
 }
 
 fn run_roundtrip(ctx: &mut StressContext, scenario: &'static str, record: &WalRecord) {
+    let batch_size = if scenario == "medium" {
+        WAL_ROUNDTRIP_BATCH_SIZE_MEDIUM
+    } else {
+        WAL_ROUNDTRIP_BATCH_SIZE_DEFAULT
+    };
     ctx.parameter("scenario", scenario);
-    ctx.measure_micro(|| {
-        let encoded = encode(record).unwrap();
-        black_box(decode(encoded).unwrap());
+    ctx.parameter("roundtrip_batch_size", batch_size);
+
+    stress_config::measure_micro_batch(ctx, batch_size as u64, || {
+        let mut decoded = 0usize;
+        for _ in 0..batch_size {
+            let encoded = encode(record).unwrap();
+            let record = decode(encoded).unwrap();
+            decoded = decoded.wrapping_add(record.key.len());
+            decoded = decoded.wrapping_add(record.value.as_ref().map_or(0, Bytes::len));
+        }
+        black_box(decoded);
     });
 }
 

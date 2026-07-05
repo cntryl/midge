@@ -7,16 +7,11 @@ mod stress_config;
 
 use cntryl_midge::sst::{Memtable, SkipListMemtable};
 use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 const LOOKUP_BATCH_SIZE: usize = 8192;
 const LOOKUP_BATCH_OPS: u64 = 8192;
 const PUT_SINGLE_BATCH_SIZE: usize = 1024;
 const PUT_SINGLE_BATCH_OPS: u64 = 1024;
-const PUT_COUNTED_BATCH_SIZE: usize = 4096;
-const PUT_COUNTED_BATCH_OPS: u64 = 4096;
-const PUT_COUNTED_LARGE_BATCH_SIZE: usize = 65_536;
-const PUT_COUNTED_LARGE_BATCH_OPS: u64 = 65_536;
 const ROTATING_WRITE_KEYS: usize = 4096;
 const SIZE_BYTES_BATCH_SIZE: usize = 1024;
 const SIZE_BYTES_BATCH_OPS: u64 = 1024;
@@ -48,40 +43,17 @@ fn run_put_single(ctx: &mut StressContext, scenario: &'static str, value_size: u
     let value = make_value(value_size);
     let keys: Vec<Vec<u8>> = (100..100 + ROTATING_WRITE_KEYS).map(make_key).collect();
     let memtable = warmed_memtable(&value);
-    let counter = AtomicUsize::new(0);
+    let mut key_index = 0usize;
     ctx.parameter("scenario", scenario);
     ctx.parameter("value_size", value_size);
     ctx.parameter("batch_size", PUT_SINGLE_BATCH_SIZE);
 
     stress_config::measure_micro_batch(ctx, PUT_SINGLE_BATCH_OPS, || {
         for _ in 0..PUT_SINGLE_BATCH_SIZE {
-            let idx = counter.fetch_add(1, Ordering::Relaxed) % keys.len();
+            let idx = key_index % keys.len();
+            key_index = key_index.wrapping_add(1);
             let _ = memtable.put(black_box(keys[idx].clone()), black_box(value.clone()));
         }
-    });
-}
-
-fn run_put_counted(ctx: &mut StressContext, scenario: &'static str, value_size: usize) {
-    let value = make_value(value_size);
-    let keys: Vec<Vec<u8>> = (100..100 + ROTATING_WRITE_KEYS).map(make_key).collect();
-    let memtable = warmed_memtable(&value);
-    let (batch_size, batch_ops) = if value_size >= 4096 {
-        (PUT_COUNTED_LARGE_BATCH_SIZE, PUT_COUNTED_LARGE_BATCH_OPS)
-    } else {
-        (PUT_COUNTED_BATCH_SIZE, PUT_COUNTED_BATCH_OPS)
-    };
-    let pairs: Vec<(Vec<u8>, Vec<u8>)> = (0..batch_size)
-        .map(|i| (keys[i % keys.len()].clone(), value.clone()))
-        .collect();
-    ctx.parameter("scenario", scenario);
-    ctx.parameter("value_size", value_size);
-    ctx.parameter("batch_size", batch_size);
-
-    let _completed = ctx.measure_counted(|| {
-        for (key, value) in pairs {
-            let _ = memtable.put(black_box(key), black_box(value));
-        }
-        batch_ops
     });
 }
 
@@ -91,22 +63,6 @@ fn run_put_counted(ctx: &mut StressContext, scenario: &'static str, value_size: 
 )]
 fn put_single_64b(ctx: &mut StressContext) {
     run_put_single(ctx, "64b_value", 64);
-}
-
-#[stress_test(
-    tier = 2,
-    metadata(component = "memtable", scenario = "put_single_1kb")
-)]
-fn put_single_1kb(ctx: &mut StressContext) {
-    run_put_counted(ctx, "1kb_value", 1024);
-}
-
-#[stress_test(
-    tier = 2,
-    metadata(component = "memtable", scenario = "put_single_4kb")
-)]
-fn put_single_4kb(ctx: &mut StressContext) {
-    run_put_counted(ctx, "4kb_value", 4096);
 }
 
 #[stress_test(tier = 1, metadata(component = "memtable", scenario = "put_batch_100"))]

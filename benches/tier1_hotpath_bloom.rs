@@ -16,6 +16,7 @@ use cntryl_midge::Bytes;
 use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
 const PROBE_BATCH_SIZE: usize = 256;
+const HASH_MISS_BATCH_SIZE: usize = 512;
 
 cntryl_stress::stress_allocator!();
 
@@ -99,11 +100,18 @@ fn batch_100_lookups_mixed(ctx: &mut StressContext) {
 #[stress_test(tier = 1, metadata(component = "bloom", scenario = "hashes_via_miss"))]
 fn compute_hashes_via_miss(ctx: &mut StressContext) {
     let (filter, _keys) = build_filter(100);
-    let miss_key = b"key_00001000";
+    let miss_keys: Vec<Vec<u8>> = (0..HASH_MISS_BATCH_SIZE)
+        .map(|i| format!("miss_hash_probe_{i:010}").into_bytes())
+        .collect();
+    ctx.parameter("probe_batch_size", HASH_MISS_BATCH_SIZE);
 
-    ctx.measure_micro(|| {
-        let result = filter.contains(black_box(miss_key));
-        black_box(result.definitely_not_present())
+    stress_config::measure_micro_batch(ctx, HASH_MISS_BATCH_SIZE as u64, || {
+        let mut misses = 0usize;
+        for key in &miss_keys {
+            let result = filter.contains(black_box(key.as_slice()));
+            misses += usize::from(result.definitely_not_present());
+        }
+        black_box(misses);
     });
 }
 

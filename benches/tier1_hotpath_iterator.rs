@@ -9,7 +9,8 @@ use cntryl_midge::iterators::skiplist::SkipList;
 use cntryl_midge::Bytes;
 use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
-const ITER_SINGLE_STEP_BATCH_SIZE: usize = 4096;
+const ITER_SINGLE_STEP_BATCH_SIZE: usize = 16_384;
+const SEEK_WINDOW_COUNT: usize = 64;
 
 cntryl_stress::stress_allocator!();
 
@@ -102,17 +103,21 @@ fn wide_80_keys(ctx: &mut StressContext) {
     metadata(component = "iterator", scenario = "next_after_seek")
 )]
 fn next_after_seek(ctx: &mut StressContext) {
-    let sl = create_populated_skiplist(100);
-    let start_key = make_key(50);
-    let end_key = make_key(51);
+    let sl = create_populated_skiplist(256);
+    let start_keys: Vec<Bytes> = (64..64 + SEEK_WINDOW_COUNT).map(make_key).collect();
+    let end_keys: Vec<Bytes> = (65..65 + SEEK_WINDOW_COUNT).map(make_key).collect();
+    let mut key_index = 0usize;
     ctx.parameter("batch_size", ITER_SINGLE_STEP_BATCH_SIZE);
+    ctx.parameter("seek_windows", SEEK_WINDOW_COUNT);
 
     stress_config::measure_micro_batch(ctx, ITER_SINGLE_STEP_BATCH_SIZE as u64, || {
         let mut seen = 0usize;
         for _ in 0..ITER_SINGLE_STEP_BATCH_SIZE {
+            let idx = key_index % SEEK_WINDOW_COUNT;
+            key_index = key_index.wrapping_add(1);
             let entries = sl.range(
-                Some(black_box(start_key.as_ref())),
-                Some(black_box(end_key.as_ref())),
+                Some(black_box(start_keys[idx].as_ref())),
+                Some(black_box(end_keys[idx].as_ref())),
             );
             seen += usize::from(!entries.is_empty());
         }

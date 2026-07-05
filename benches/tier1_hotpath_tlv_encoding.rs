@@ -14,20 +14,35 @@ use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
 cntryl_stress::stress_allocator!();
 
+const TLV_PRIMITIVE_BATCH_SIZE: usize = 2048;
+
 fn run_varint32_encode(ctx: &mut StressContext, name: &'static str, value: u32) {
     let mut buf = BytesMut::with_capacity(5);
+    encode_varint32(&mut buf, value);
+    assert_eq!(decode_varint32(buf.as_ref()).unwrap(), value);
+    buf.clear();
     ctx.parameter("case", name);
+    ctx.parameter("batch_size", TLV_PRIMITIVE_BATCH_SIZE);
 
-    ctx.measure_micro(|| {
-        buf.clear();
-        encode_varint32(&mut buf, black_box(value));
-        black_box(buf.as_ref());
+    stress_config::measure_micro_batch(ctx, TLV_PRIMITIVE_BATCH_SIZE as u64, || {
+        let mut encoded_len = 0usize;
+        for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
+            buf.clear();
+            encode_varint32(&mut buf, black_box(value));
+            encoded_len = encoded_len.wrapping_add(buf.len());
+            black_box(buf.as_ref());
+        }
+        black_box(encoded_len);
     });
 }
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "varint32_encode_small_1")
+    metadata(
+        component = "tlv",
+        scenario = "varint32_encode_small_1",
+        validated_micro = "true"
+    )
 )]
 fn varint32_encode_small_1(ctx: &mut StressContext) {
     run_varint32_encode(ctx, "small_1", 1);
@@ -35,7 +50,11 @@ fn varint32_encode_small_1(ctx: &mut StressContext) {
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "varint32_encode_small_127")
+    metadata(
+        component = "tlv",
+        scenario = "varint32_encode_small_127",
+        validated_micro = "true"
+    )
 )]
 fn varint32_encode_small_127(ctx: &mut StressContext) {
     run_varint32_encode(ctx, "small_127", 127);
@@ -43,7 +62,11 @@ fn varint32_encode_small_127(ctx: &mut StressContext) {
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "varint32_encode_medium_256")
+    metadata(
+        component = "tlv",
+        scenario = "varint32_encode_medium_256",
+        validated_micro = "true"
+    )
 )]
 fn varint32_encode_medium_256(ctx: &mut StressContext) {
     run_varint32_encode(ctx, "medium_256", 256);
@@ -51,7 +74,11 @@ fn varint32_encode_medium_256(ctx: &mut StressContext) {
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "varint32_encode_medium_16384")
+    metadata(
+        component = "tlv",
+        scenario = "varint32_encode_medium_16384",
+        validated_micro = "true"
+    )
 )]
 fn varint32_encode_medium_16384(ctx: &mut StressContext) {
     run_varint32_encode(ctx, "medium_16384", 16_384);
@@ -59,7 +86,11 @@ fn varint32_encode_medium_16384(ctx: &mut StressContext) {
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "varint32_encode_large_1m")
+    metadata(
+        component = "tlv",
+        scenario = "varint32_encode_large_1m",
+        validated_micro = "true"
+    )
 )]
 fn varint32_encode_large_1m(ctx: &mut StressContext) {
     run_varint32_encode(ctx, "large_1m", 1_000_000);
@@ -67,7 +98,11 @@ fn varint32_encode_large_1m(ctx: &mut StressContext) {
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "varint32_encode_max")
+    metadata(
+        component = "tlv",
+        scenario = "varint32_encode_max",
+        validated_micro = "true"
+    )
 )]
 fn varint32_encode_max(ctx: &mut StressContext) {
     run_varint32_encode(ctx, "max", u32::MAX);
@@ -77,14 +112,26 @@ fn run_varint32_decode(ctx: &mut StressContext, name: &'static str, value: u32) 
     let mut buf = BytesMut::with_capacity(5);
     encode_varint32(&mut buf, value);
     let data = buf.freeze();
+    assert_eq!(decode_varint32(data.as_ref()).unwrap(), value);
     ctx.parameter("case", name);
+    ctx.parameter("batch_size", TLV_PRIMITIVE_BATCH_SIZE);
 
-    ctx.measure_micro(|| black_box(decode_varint32(black_box(data.as_ref())).unwrap()));
+    stress_config::measure_micro_batch(ctx, TLV_PRIMITIVE_BATCH_SIZE as u64, || {
+        let mut decoded = 0u32;
+        for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
+            decoded ^= decode_varint32(black_box(data.as_ref())).unwrap();
+        }
+        black_box(decoded);
+    });
 }
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "varint32_decode_small_1")
+    metadata(
+        component = "tlv",
+        scenario = "varint32_decode_small_1",
+        validated_micro = "true"
+    )
 )]
 fn varint32_decode_small_1(ctx: &mut StressContext) {
     run_varint32_decode(ctx, "small_1", 1);
@@ -92,7 +139,11 @@ fn varint32_decode_small_1(ctx: &mut StressContext) {
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "varint32_decode_small_127")
+    metadata(
+        component = "tlv",
+        scenario = "varint32_decode_small_127",
+        validated_micro = "true"
+    )
 )]
 fn varint32_decode_small_127(ctx: &mut StressContext) {
     run_varint32_decode(ctx, "small_127", 127);
@@ -100,7 +151,11 @@ fn varint32_decode_small_127(ctx: &mut StressContext) {
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "varint32_decode_medium_256")
+    metadata(
+        component = "tlv",
+        scenario = "varint32_decode_medium_256",
+        validated_micro = "true"
+    )
 )]
 fn varint32_decode_medium_256(ctx: &mut StressContext) {
     run_varint32_decode(ctx, "medium_256", 256);
@@ -108,7 +163,11 @@ fn varint32_decode_medium_256(ctx: &mut StressContext) {
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "varint32_decode_medium_16384")
+    metadata(
+        component = "tlv",
+        scenario = "varint32_decode_medium_16384",
+        validated_micro = "true"
+    )
 )]
 fn varint32_decode_medium_16384(ctx: &mut StressContext) {
     run_varint32_decode(ctx, "medium_16384", 16_384);
@@ -116,7 +175,11 @@ fn varint32_decode_medium_16384(ctx: &mut StressContext) {
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "varint32_decode_large_1m")
+    metadata(
+        component = "tlv",
+        scenario = "varint32_decode_large_1m",
+        validated_micro = "true"
+    )
 )]
 fn varint32_decode_large_1m(ctx: &mut StressContext) {
     run_varint32_decode(ctx, "large_1m", 1_000_000);
@@ -124,7 +187,11 @@ fn varint32_decode_large_1m(ctx: &mut StressContext) {
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "varint32_decode_max")
+    metadata(
+        component = "tlv",
+        scenario = "varint32_decode_max",
+        validated_micro = "true"
+    )
 )]
 fn varint32_decode_max(ctx: &mut StressContext) {
     run_varint32_decode(ctx, "max", u32::MAX);
@@ -132,84 +199,177 @@ fn varint32_decode_max(ctx: &mut StressContext) {
 
 fn run_encode_u8_tag(ctx: &mut StressContext, name: &'static str, value: u8) {
     let mut buf = BytesMut::with_capacity(3);
+    encode_u8_with_tag(&mut buf, 7, value);
+    let (tag, decoded, consumed) = decode_tlv_field(buf.as_ref()).unwrap();
+    assert_eq!(tag, 7);
+    assert_eq!(decoded, &[value]);
+    assert_eq!(consumed, buf.len());
+    buf.clear();
     ctx.parameter("case", name);
+    ctx.parameter("batch_size", TLV_PRIMITIVE_BATCH_SIZE);
 
-    ctx.measure_micro(|| {
-        buf.clear();
-        encode_u8_with_tag(&mut buf, 7, black_box(value));
-        black_box(buf.as_ref());
+    stress_config::measure_micro_batch(ctx, TLV_PRIMITIVE_BATCH_SIZE as u64, || {
+        let mut encoded_len = 0usize;
+        for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
+            buf.clear();
+            encode_u8_with_tag(&mut buf, 7, black_box(value));
+            encoded_len = encoded_len.wrapping_add(buf.len());
+            black_box(buf.as_ref());
+        }
+        black_box(encoded_len);
     });
 }
 
-#[stress_test(tier = 1, metadata(component = "tlv", scenario = "encode_u8_tag_0"))]
+#[stress_test(
+    tier = 1,
+    metadata(
+        component = "tlv",
+        scenario = "encode_u8_tag_0",
+        validated_micro = "true"
+    )
+)]
 fn encode_u8_tag_0(ctx: &mut StressContext) {
     run_encode_u8_tag(ctx, "u8_0", 0);
 }
 
-#[stress_test(tier = 1, metadata(component = "tlv", scenario = "encode_u8_tag_1"))]
+#[stress_test(
+    tier = 1,
+    metadata(
+        component = "tlv",
+        scenario = "encode_u8_tag_1",
+        validated_micro = "true"
+    )
+)]
 fn encode_u8_tag_1(ctx: &mut StressContext) {
     run_encode_u8_tag(ctx, "u8_1", 1);
 }
 
-#[stress_test(tier = 1, metadata(component = "tlv", scenario = "encode_u8_tag_127"))]
+#[stress_test(
+    tier = 1,
+    metadata(
+        component = "tlv",
+        scenario = "encode_u8_tag_127",
+        validated_micro = "true"
+    )
+)]
 fn encode_u8_tag_127(ctx: &mut StressContext) {
     run_encode_u8_tag(ctx, "u8_127", 127);
 }
 
-#[stress_test(tier = 1, metadata(component = "tlv", scenario = "encode_u8_tag_255"))]
+#[stress_test(
+    tier = 1,
+    metadata(
+        component = "tlv",
+        scenario = "encode_u8_tag_255",
+        validated_micro = "true"
+    )
+)]
 fn encode_u8_tag_255(ctx: &mut StressContext) {
     run_encode_u8_tag(ctx, "u8_255", 255);
 }
 
 fn run_encode_u64_tag(ctx: &mut StressContext, name: &'static str, value: u64) {
     let mut buf = BytesMut::with_capacity(10);
+    encode_u64_with_tag(&mut buf, 9, value);
+    let (tag, decoded, consumed) = decode_tlv_field(buf.as_ref()).unwrap();
+    assert_eq!(tag, 9);
+    assert_eq!(decoded, value.to_be_bytes().as_slice());
+    assert_eq!(consumed, buf.len());
+    buf.clear();
     ctx.parameter("case", name);
+    ctx.parameter("batch_size", TLV_PRIMITIVE_BATCH_SIZE);
 
-    ctx.measure_micro(|| {
-        buf.clear();
-        encode_u64_with_tag(&mut buf, 9, black_box(value));
-        black_box(buf.as_ref());
+    stress_config::measure_micro_batch(ctx, TLV_PRIMITIVE_BATCH_SIZE as u64, || {
+        let mut encoded_len = 0usize;
+        for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
+            buf.clear();
+            encode_u64_with_tag(&mut buf, 9, black_box(value));
+            encoded_len = encoded_len.wrapping_add(buf.len());
+            black_box(buf.as_ref());
+        }
+        black_box(encoded_len);
     });
 }
 
-#[stress_test(tier = 1, metadata(component = "tlv", scenario = "encode_u64_tag_0"))]
+#[stress_test(
+    tier = 1,
+    metadata(
+        component = "tlv",
+        scenario = "encode_u64_tag_0",
+        validated_micro = "true"
+    )
+)]
 fn encode_u64_tag_0(ctx: &mut StressContext) {
     run_encode_u64_tag(ctx, "u64_0", 0);
 }
 
-#[stress_test(tier = 1, metadata(component = "tlv", scenario = "encode_u64_tag_1m"))]
+#[stress_test(
+    tier = 1,
+    metadata(
+        component = "tlv",
+        scenario = "encode_u64_tag_1m",
+        validated_micro = "true"
+    )
+)]
 fn encode_u64_tag_1m(ctx: &mut StressContext) {
     run_encode_u64_tag(ctx, "u64_1000000", 1_000_000);
 }
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "encode_u64_tag_i64_max")
+    metadata(
+        component = "tlv",
+        scenario = "encode_u64_tag_i64_max",
+        validated_micro = "true"
+    )
 )]
 fn encode_u64_tag_i64_max(ctx: &mut StressContext) {
     run_encode_u64_tag(ctx, "u64_9223372036854775807", i64::MAX as u64);
 }
 
-#[stress_test(tier = 1, metadata(component = "tlv", scenario = "encode_u64_tag_max"))]
+#[stress_test(
+    tier = 1,
+    metadata(
+        component = "tlv",
+        scenario = "encode_u64_tag_max",
+        validated_micro = "true"
+    )
+)]
 fn encode_u64_tag_max(ctx: &mut StressContext) {
     run_encode_u64_tag(ctx, "u64_18446744073709551615", u64::MAX);
 }
 
 fn run_encode_bytes_tag(ctx: &mut StressContext, name: &'static str, data: &[u8]) {
     let mut buf = BytesMut::with_capacity(1 + 5 + data.len());
+    encode_bytes_with_tag(&mut buf, 11, data).unwrap();
+    let (tag, value, consumed) = decode_tlv_field(buf.as_ref()).unwrap();
+    assert_eq!(tag, 11);
+    assert_eq!(value, data);
+    assert_eq!(consumed, buf.len());
+    buf.clear();
     ctx.parameter("case", name);
     ctx.parameter("payload_size", data.len());
+    ctx.parameter("batch_size", TLV_PRIMITIVE_BATCH_SIZE);
 
-    ctx.measure_micro(|| {
-        buf.clear();
-        encode_bytes_with_tag(&mut buf, 11, black_box(data)).unwrap();
-        black_box(buf.as_ref());
+    stress_config::measure_micro_batch(ctx, TLV_PRIMITIVE_BATCH_SIZE as u64, || {
+        let mut encoded_len = 0usize;
+        for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
+            buf.clear();
+            encode_bytes_with_tag(&mut buf, 11, black_box(data)).unwrap();
+            encoded_len = encoded_len.wrapping_add(buf.len());
+            black_box(buf.as_ref());
+        }
+        black_box(encoded_len);
     });
 }
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "encode_bytes_tag_8b")
+    metadata(
+        component = "tlv",
+        scenario = "encode_bytes_tag_8b",
+        validated_micro = "true"
+    )
 )]
 fn encode_bytes_tag_8b(ctx: &mut StressContext) {
     run_encode_bytes_tag(ctx, "small_8b", &[0u8; 8]);
@@ -217,7 +377,11 @@ fn encode_bytes_tag_8b(ctx: &mut StressContext) {
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "encode_bytes_tag_64b")
+    metadata(
+        component = "tlv",
+        scenario = "encode_bytes_tag_64b",
+        validated_micro = "true"
+    )
 )]
 fn encode_bytes_tag_64b(ctx: &mut StressContext) {
     run_encode_bytes_tag(ctx, "medium_64b", &[1u8; 64]);
@@ -225,7 +389,11 @@ fn encode_bytes_tag_64b(ctx: &mut StressContext) {
 
 #[stress_test(
     tier = 1,
-    metadata(component = "tlv", scenario = "encode_bytes_tag_256b")
+    metadata(
+        component = "tlv",
+        scenario = "encode_bytes_tag_256b",
+        validated_micro = "true"
+    )
 )]
 fn encode_bytes_tag_256b(ctx: &mut StressContext) {
     run_encode_bytes_tag(ctx, "large_256b", &[2u8; 256]);
@@ -235,23 +403,58 @@ fn run_decode_field(ctx: &mut StressContext, name: &'static str, data: &[u8]) {
     let mut buf = BytesMut::with_capacity(1 + 5 + data.len());
     encode_bytes_with_tag(&mut buf, 11, data).unwrap();
     let encoded = buf.freeze();
+    let (tag, value, consumed) = decode_tlv_field(encoded.as_ref()).unwrap();
+    assert_eq!(tag, 11);
+    assert_eq!(value, data);
+    assert_eq!(consumed, encoded.len());
     ctx.parameter("case", name);
     ctx.parameter("payload_size", data.len());
+    ctx.parameter("batch_size", TLV_PRIMITIVE_BATCH_SIZE);
 
-    ctx.measure_micro(|| black_box(decode_tlv_field(black_box(encoded.as_ref())).unwrap()));
+    stress_config::measure_micro_batch(ctx, TLV_PRIMITIVE_BATCH_SIZE as u64, || {
+        let mut total = 0usize;
+        for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
+            let (tag, value, consumed) = decode_tlv_field(black_box(encoded.as_ref())).unwrap();
+            total = total.wrapping_add(usize::from(tag));
+            total = total.wrapping_add(value.len());
+            total = total.wrapping_add(consumed);
+        }
+        black_box(total);
+    });
 }
 
-#[stress_test(tier = 1, metadata(component = "tlv", scenario = "decode_field_8b"))]
+#[stress_test(
+    tier = 1,
+    metadata(
+        component = "tlv",
+        scenario = "decode_field_8b",
+        validated_micro = "true"
+    )
+)]
 fn decode_field_8b(ctx: &mut StressContext) {
     run_decode_field(ctx, "small_8b", &[0u8; 8]);
 }
 
-#[stress_test(tier = 1, metadata(component = "tlv", scenario = "decode_field_64b"))]
+#[stress_test(
+    tier = 1,
+    metadata(
+        component = "tlv",
+        scenario = "decode_field_64b",
+        validated_micro = "true"
+    )
+)]
 fn decode_field_64b(ctx: &mut StressContext) {
     run_decode_field(ctx, "medium_64b", &[1u8; 64]);
 }
 
-#[stress_test(tier = 1, metadata(component = "tlv", scenario = "decode_field_256b"))]
+#[stress_test(
+    tier = 1,
+    metadata(
+        component = "tlv",
+        scenario = "decode_field_256b",
+        validated_micro = "true"
+    )
+)]
 fn decode_field_256b(ctx: &mut StressContext) {
     run_decode_field(ctx, "large_256b", &[2u8; 256]);
 }

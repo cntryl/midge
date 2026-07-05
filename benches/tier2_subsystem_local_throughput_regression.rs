@@ -8,7 +8,7 @@ use cntryl_stress::{stress_main, stress_test, StressContext};
 
 const NUM_OPS_PER_BATCH: usize = 100;
 const VALUE_SIZE: usize = 128;
-const BATCH_ITERATIONS: usize = 100;
+const BATCH_ITERATIONS: usize = 500;
 
 type KeyValueBatch = Vec<(Vec<u8>, Vec<u8>)>;
 

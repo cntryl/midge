@@ -28,7 +28,10 @@ use cntryl_midge::{testkit::MidgeOptions, MidgeEngine};
 const KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
 const DEFAULT_VALUE_SIZE: usize = 100;
 const TARGET_BATCH: usize = 1_000;
-const DEFAULT_COMPACTION_KEYS: usize = 10_000;
+const MANY_SST_COMPACTION_KEYS_LOCAL: usize = 10_000;
+const MANY_SST_COMPACTION_KEYS_CLOUD: usize = 20_000;
+const MANY_SST_LOCAL_SAMPLE_ENGINES: usize = 1;
+const MANY_SST_CLOUD_SAMPLE_ENGINES: usize = 64;
 
 fn precompute_kv(num_keys: usize, value_size: usize) -> (Vec<[u8; KEY_SIZE]>, Vec<Vec<u8>>) {
     cntryl_midge::testkit::stress::precompute_kv16_u64_be(num_keys, value_size, u8::MAX)
@@ -38,26 +41,11 @@ fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
     cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
 }
 
-fn set_compaction_signal(
-    ctx: &mut StressContext,
-    case_name: &str,
-    logical_keys: usize,
-    value_size: usize,
-    input_files: usize,
-) {
-    ctx.tag("case", case_name);
-    ctx.tag("input_keys", logical_keys.to_string());
-    ctx.tag("input_files", input_files.to_string());
-    ctx.set_elements(logical_keys as u64);
-    ctx.set_bytes((logical_keys * (KEY_SIZE + value_size)) as u64);
-}
-
-fn run_compact_all_many_sst_case(
-    ctx: &mut StressContext,
+fn setup_many_sst_engine(
     opts: MidgeOptions,
     num_keys: usize,
     value_size: usize,
-) {
+) -> (MidgeEngine, usize) {
     let (keys, values) = precompute_kv(num_keys, value_size);
 
     let engine = setup_engine(opts);
@@ -87,14 +75,59 @@ fn run_compact_all_many_sst_case(
         engine.flush_cf(&cf).expect("setup flush"); // Ensure durability after each batch
     }
 
-    // Measure compact_all() across many pre-flushed SST files.
-    set_compaction_signal(ctx, "many_sst", num_keys, value_size, batches);
+    (engine, batches)
+}
 
-    stress_config::measure_external(ctx, num_keys as u64, || {
-        engine.compact_all().expect("compact_all failed");
+fn set_compaction_signal(
+    ctx: &mut StressContext,
+    case_name: &str,
+    logical_keys: usize,
+    value_size: usize,
+    input_files: usize,
+) {
+    ctx.tag("case", case_name);
+    ctx.tag("input_keys", logical_keys.to_string());
+    ctx.tag("input_files", input_files.to_string());
+    ctx.set_elements(logical_keys as u64);
+    ctx.set_bytes((logical_keys * (KEY_SIZE + value_size)) as u64);
+}
+
+fn run_compact_all_many_sst_case(
+    ctx: &mut StressContext,
+    storage_profile: &'static str,
+    num_keys: usize,
+    value_size: usize,
+    sample_engines: usize,
+) {
+    let mut engines = Vec::with_capacity(sample_engines);
+    let mut input_files = 0usize;
+    for _ in 0..sample_engines {
+        let (engine, batches) = setup_many_sst_engine(
+            cntryl_midge::testkit::opts_for_mode(storage_profile),
+            num_keys,
+            value_size,
+        );
+        input_files += batches;
+        engines.push(engine);
+    }
+
+    // Measure compact_all() across independent pre-flushed engines. A single
+    // compact_all call is sub-millisecond in simulated-cloud mode, so the cloud
+    // row needs multiple prepared engines to avoid measuring timer jitter.
+    let logical_keys = num_keys * sample_engines;
+    set_compaction_signal(ctx, "many_sst", logical_keys, value_size, input_files);
+    ctx.parameter("storage_profile", storage_profile);
+    ctx.parameter("keys_per_engine", num_keys);
+    ctx.parameter("files_per_engine", num_keys.div_ceil(TARGET_BATCH));
+    ctx.parameter("sample_engines", sample_engines);
+
+    stress_config::measure_external(ctx, logical_keys as u64, || {
+        for engine in &engines {
+            engine.compact_all().expect("compact_all failed");
+        }
     });
 
-    drop(engine);
+    drop(engines);
 }
 
 fn run_many_overlapping_l0_files_case(
@@ -204,14 +237,24 @@ fn run_overlap_pressure_compact_case(
 
 #[stress_test(tier = 4)]
 fn tier4_compaction_compact_all_many_sst_local(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_compact_all_many_sst_case(ctx, opts, DEFAULT_COMPACTION_KEYS, DEFAULT_VALUE_SIZE);
+    run_compact_all_many_sst_case(
+        ctx,
+        "local",
+        MANY_SST_COMPACTION_KEYS_LOCAL,
+        DEFAULT_VALUE_SIZE,
+        MANY_SST_LOCAL_SAMPLE_ENGINES,
+    );
 }
 
 #[stress_test(tier = 4)]
 fn tier4_compaction_compact_all_many_sst_cloud(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_compact_all_many_sst_case(ctx, opts, DEFAULT_COMPACTION_KEYS, DEFAULT_VALUE_SIZE);
+    run_compact_all_many_sst_case(
+        ctx,
+        "cloud",
+        MANY_SST_COMPACTION_KEYS_CLOUD,
+        DEFAULT_VALUE_SIZE,
+        MANY_SST_CLOUD_SAMPLE_ENGINES,
+    );
 }
 
 #[stress_test(tier = 4)]

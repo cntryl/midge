@@ -26,10 +26,10 @@ const KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
 const DEFAULT_VALUE_SIZE: usize = 100;
 const TARGET_BATCH: usize = 1_000;
 const DEFAULT_COMPACTION_KEYS: usize = 1_000;
-const LOCAL_FLUSH_REPEATS: usize = 2048;
-const LOCAL_FLUSH_REPEAT_OPS: u64 = 2048;
-const CLOUD_FLUSH_REPEATS: usize = 128;
-const CLOUD_FLUSH_REPEAT_OPS: u64 = 128;
+const LOCAL_FLUSH_REPEATS: usize = 65_536;
+const LOCAL_FLUSH_REPEAT_OPS: u64 = 65_536;
+const CLOUD_FLUSH_REPEATS: usize = 1024;
+const CLOUD_FLUSH_REPEAT_OPS: u64 = 1024;
 
 fn precompute_kv(num_keys: usize, value_size: usize) -> (Vec<[u8; KEY_SIZE]>, Vec<Vec<u8>>) {
     cntryl_midge::testkit::stress::precompute_kv16_u64_be(num_keys, value_size, u8::MAX)

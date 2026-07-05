@@ -23,26 +23,34 @@ use stress_config::{BenchConfig, MidgeStressContextExt as _};
 use cntryl_midge::testkit::MidgeOptions;
 
 const VALUE_SIZE: usize = 128;
+const PUT_BATCH_SIZE: usize = 64;
 
 fn run_single_put_case(ctx: &mut StressContext, opts: MidgeOptions) {
     ctx.set_elements(50_000); // cheap (Âµs-scale)
+    ctx.parameter("put_batch_size", PUT_BATCH_SIZE);
 
     let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
 
-    // Precompute one key-value pair outside measurement
-    let k = cntryl_midge::testkit::stress::key16_u64_be(0);
+    let keys: Vec<[u8; 16]> = (0..4096)
+        .map(cntryl_midge::testkit::stress::key16_u64_be)
+        .collect();
     let v = vec![1u8; VALUE_SIZE];
+    let mut key_index = 0usize;
 
-    // Measure ONLY one put/commit call
-    let _ = ctx.measure_batch(1, || {
-        let e = &engine;
-        let mut tx = e
-            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-            .expect("begin");
-        tx.put(k.to_vec(), v.clone(), None).unwrap();
-        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+    // Measure repeated logical put/commit calls per framework iteration.
+    let _ = ctx.measure_batch(PUT_BATCH_SIZE as u64, || {
+        for _ in 0..PUT_BATCH_SIZE {
+            let k = keys[key_index % keys.len()];
+            key_index = key_index.wrapping_add(1);
+            let e = &engine;
+            let mut tx = e
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin");
+            tx.put(k.to_vec(), v.clone(), None).unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        }
     });
 
     drop(engine);

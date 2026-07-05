@@ -8,11 +8,16 @@
 //! - decode single SST entry
 //! - roundtrip encode→decode
 
+#[path = "./stress_config.rs"]
+mod stress_config;
+
 use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
 use cntryl_midge::sst::encoding::{decode, encode, EntryType};
 
 cntryl_stress::stress_allocator!();
+
+const DECODE_BATCH_SIZE: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Shared prefix helper (allocation-free)
@@ -47,7 +52,11 @@ fn encode_small(ctx: &mut StressContext) {
 // ---------------------------------------------------------------------------
 #[stress_test(
     tier = 1,
-    metadata(component = "sst_encoding", scenario = "decode_small")
+    metadata(
+        component = "sst_encoding",
+        scenario = "decode_small",
+        validated_micro = "true"
+    )
 )]
 fn decode_small(ctx: &mut StressContext) {
     let prev = b"user:1000:settings";
@@ -56,10 +65,23 @@ fn decode_small(ctx: &mut StressContext) {
     let shared = u16::try_from(shared_len).expect("shared prefix length fits in u16");
     let delta = &key[shared_len..];
 
-    let encoded = encode(delta, shared, Some(b"value"), 1, EntryType::Put);
+    let encoded_entries: Vec<Vec<u8>> = (0..DECODE_BATCH_SIZE)
+        .map(|i| encode(delta, shared, Some(b"value"), i as u64 + 1, EntryType::Put))
+        .collect();
+    let (view, consumed) = decode(&encoded_entries[0], 0).unwrap();
+    assert_eq!(view.shared_len, shared);
+    assert_eq!(view.key_delta, delta);
+    assert_eq!(view.value, Some(b"value".as_slice()));
+    assert_eq!(consumed, encoded_entries[0].len());
+    ctx.parameter("decode_batch_size", DECODE_BATCH_SIZE);
 
-    ctx.measure_micro(|| {
-        black_box(decode(&encoded, 0).unwrap());
+    stress_config::measure_micro_batch(ctx, DECODE_BATCH_SIZE as u64, || {
+        let mut consumed_total = 0usize;
+        for encoded in &encoded_entries {
+            let (_view, consumed) = decode(black_box(encoded.as_slice()), 0).unwrap();
+            consumed_total = consumed_total.wrapping_add(consumed);
+        }
+        black_box(consumed_total);
     });
 }
 

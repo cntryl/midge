@@ -8,6 +8,7 @@ mod stress_config;
 use cntryl_midge::sst::trie::{TrieBuilder, TrieReader};
 use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
+const TRIE_FIND_BATCH_SIZE: usize = 2048;
 const TRIE_PREFIX_BATCH_SIZE: usize = 256;
 
 cntryl_stress::stress_allocator!();
@@ -21,25 +22,44 @@ fn build_profile_trie() -> Vec<u8> {
     builder.finish()
 }
 
-fn run_find_block(ctx: &mut StressContext, scenario: &'static str, key: &'static [u8]) {
+fn measure_find_block(
+    ctx: &mut StressContext,
+    reader: &TrieReader,
+    key: &'static [u8],
+    expected: Option<u32>,
+) {
+    assert_eq!(reader.find_block(key), expected);
+    ctx.parameter("find_batch_size", TRIE_FIND_BATCH_SIZE);
+
+    stress_config::measure_micro_batch(ctx, TRIE_FIND_BATCH_SIZE as u64, || {
+        let mut found = 0u32;
+        for _ in 0..TRIE_FIND_BATCH_SIZE {
+            found = found.wrapping_add(reader.find_block(black_box(key)).unwrap_or(u32::MAX));
+        }
+        black_box(found);
+    });
+}
+
+fn run_find_block(
+    ctx: &mut StressContext,
+    scenario: &'static str,
+    key: &'static [u8],
+    expected: Option<u32>,
+) {
     let encoded = build_profile_trie();
     let reader = TrieReader::new(&encoded).unwrap();
     ctx.parameter("scenario", scenario);
-
-    ctx.measure_micro(|| {
-        let block_id = reader.find_block(black_box(key));
-        black_box(block_id);
-    });
+    measure_find_block(ctx, &reader, key, expected);
 }
 
 #[stress_test(tier = 1, metadata(component = "trie", scenario = "find_hit"))]
 fn find_hit(ctx: &mut StressContext) {
-    run_find_block(ctx, "find_hit", b"user:050:profile");
+    run_find_block(ctx, "find_hit", b"user:050:profile", Some(50));
 }
 
 #[stress_test(tier = 1, metadata(component = "trie", scenario = "find_miss"))]
 fn find_miss(ctx: &mut StressContext) {
-    run_find_block(ctx, "find_miss", b"user:999:profile");
+    run_find_block(ctx, "find_miss", b"user:050:profily", None);
 }
 
 #[stress_test(
@@ -47,7 +67,7 @@ fn find_miss(ctx: &mut StressContext) {
     metadata(component = "trie", scenario = "find_partial_match")
 )]
 fn find_partial_match(ctx: &mut StressContext) {
-    run_find_block(ctx, "find_partial_match", b"user:050:prof");
+    run_find_block(ctx, "find_partial_match", b"user:050:prof", None);
 }
 
 fn build_hierarchical_trie() -> Vec<u8> {
@@ -120,11 +140,7 @@ fn build_long_key_trie() -> Vec<u8> {
 fn short_keys_high_branch(ctx: &mut StressContext) {
     let encoded = build_short_key_trie();
     let reader = TrieReader::new(&encoded).unwrap();
-
-    ctx.measure_micro(|| {
-        let block_id = reader.find_block(black_box(b"k050"));
-        black_box(block_id);
-    });
+    measure_find_block(ctx, &reader, b"k050", Some(50));
 }
 
 #[stress_test(
@@ -134,11 +150,12 @@ fn short_keys_high_branch(ctx: &mut StressContext) {
 fn long_keys_shared_prefix(ctx: &mut StressContext) {
     let encoded = build_long_key_trie();
     let reader = TrieReader::new(&encoded).unwrap();
-
-    ctx.measure_micro(|| {
-        let block_id = reader.find_block(black_box(b"very_long_shared_prefix_key_0000000050"));
-        black_box(block_id);
-    });
+    measure_find_block(
+        ctx,
+        &reader,
+        b"very_long_shared_prefix_key_0000000050",
+        Some(50),
+    );
 }
 
 stress_main!();

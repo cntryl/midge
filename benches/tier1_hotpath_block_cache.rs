@@ -8,9 +8,11 @@ mod stress_config;
 use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
 use cntryl_midge::Bytes;
 use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const INSERT_BATCH_ROUNDS: usize = 4;
+const HOT_GET_BATCH_SIZE: usize = 1024;
 
 cntryl_stress::stress_allocator!();
 
@@ -30,6 +32,18 @@ fn make_block_data(size: usize) -> Bytes {
 
 fn create_cache(capacity: u64) -> BlockCache {
     BlockCache::new(capacity, 16, CachePolicyType::Lru)
+}
+
+fn wait_for_cache_entries(cache: &BlockCache, expected_len: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while cache.len() < expected_len {
+        assert!(
+            Instant::now() < deadline,
+            "cache admission did not settle: expected {expected_len} entries, got {}",
+            cache.len()
+        );
+        thread::yield_now();
+    }
 }
 
 fn precompute_keys_and_blocks(num_blocks: usize, block_size: usize) -> (Vec<CacheKey>, Vec<Bytes>) {
@@ -55,35 +69,18 @@ fn get_hot_single_4k(ctx: &mut StressContext) {
         let block = make_block_data(4096);
         cache.put(key, &block);
     }
+    wait_for_cache_entries(&cache, 1000);
     let hot_key = make_cache_key(42 * 4096);
+    assert!(cache.get(&hot_key).is_some());
     ctx.parameter("block_size", 4096);
+    ctx.parameter("batch_size", HOT_GET_BATCH_SIZE);
 
-    ctx.measure_micro(|| black_box(cache.get(black_box(&hot_key))));
-}
-
-#[stress_test(
-    tier = 1,
-    metadata(component = "block_cache", scenario = "insert_single_4k")
-)]
-fn insert_single_4k(ctx: &mut StressContext) {
-    let cache = create_cache(100 * 1024 * 1024);
-    for i in 0..100 {
-        let key = make_cache_key(i * 4096);
-        let block = make_block_data(4096);
-        cache.put(key, &block);
-    }
-
-    let insert_keys: Vec<CacheKey> = (0u64..4096)
-        .map(|i| make_cache_key((1000 + i) * 4096))
-        .collect();
-    let block_data = make_block_data(4096);
-    let key_index = AtomicUsize::new(0);
-    ctx.parameter("block_size", 4096);
-    ctx.parameter("rotating_keys", insert_keys.len());
-
-    ctx.measure_micro(|| {
-        let idx = key_index.fetch_add(1, Ordering::Relaxed) % insert_keys.len();
-        cache.put(black_box(insert_keys[idx]), black_box(&block_data));
+    stress_config::measure_micro_batch(ctx, HOT_GET_BATCH_SIZE as u64, || {
+        let mut hits = 0usize;
+        for _ in 0..HOT_GET_BATCH_SIZE {
+            hits += usize::from(cache.get(black_box(&hot_key)).is_some());
+        }
+        black_box(hits);
     });
 }
 
@@ -100,6 +97,13 @@ fn get_batch_hit_1000(ctx: &mut StressContext) {
     for i in 0..num_blocks {
         cache.put(keys[i], &blocks[i]);
     }
+    wait_for_cache_entries(&cache, num_blocks);
+    let warmed_hits = keys
+        .iter()
+        .take(num_blocks)
+        .filter(|key| cache.get(key).is_some())
+        .count();
+    assert_eq!(warmed_hits, num_blocks);
     ctx.parameter("block_size", block_size);
     ctx.parameter("lookup_batch_size", num_blocks);
 
@@ -127,6 +131,7 @@ fn get_batch_miss_1000(ctx: &mut StressContext) {
     for i in 0..num_blocks {
         cache.put(keys[i], &blocks[i]);
     }
+    wait_for_cache_entries(&cache, num_blocks);
 
     let miss_keys: Vec<CacheKey> = (0..num_blocks)
         .map(|i| {

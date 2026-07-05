@@ -12,9 +12,16 @@ use cntryl_midge::sst::compression::{
 use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
 const BLOCK_SIZE: usize = 16 * 1024;
-const RAW_NONE_BATCH_SIZE: usize = 256;
-const RAW_NONE_BATCH_OPS: u64 = 256;
-const TRAILER_COMPRESS_BATCH_SIZE: usize = 128;
+const RAW_COMPRESS_BATCH_SIZE: usize = 256;
+const RAW_ZSTD_COMPRESS_WINDOW_BLOCKS: usize = 32;
+const RAW_ZSTD_COMPRESS_WINDOW_REPEATS: usize =
+    RAW_COMPRESS_BATCH_SIZE / RAW_ZSTD_COMPRESS_WINDOW_BLOCKS;
+const RAW_NONE_BATCH_SIZE: usize = 4096;
+const TRAILER_COMPRESS_BATCH_SIZE: usize = 1024;
+const TRAILER_ZSTD_COMPRESS_BATCH_SIZE: usize = 256;
+const TRAILER_ZSTD_COMPRESS_WINDOW_REPEATS: usize =
+    TRAILER_ZSTD_COMPRESS_BATCH_SIZE / RAW_ZSTD_COMPRESS_WINDOW_BLOCKS;
+const RAW_NONE_PREWARM_REPEATS: usize = 4096;
 const WAL_SKIP_BATCH_SIZE: usize = 1024;
 const WAL_SKIP_BATCH_OPS: u64 = 1024;
 
@@ -24,14 +31,54 @@ fn compressible_block() -> Vec<u8> {
     (0u8..64).cycle().take(BLOCK_SIZE).collect()
 }
 
+fn compressible_block_window() -> Vec<Vec<u8>> {
+    (0..RAW_ZSTD_COMPRESS_WINDOW_BLOCKS)
+        .map(|i| (0u8..64).cycle().take(BLOCK_SIZE + i * 7).collect())
+        .collect()
+}
+
 fn run_compress_raw(ctx: &mut StressContext, name: &'static str, policy: &CompressionPolicy) {
+    if matches!(name, "zstd3" | "zstd9") {
+        run_compress_raw_zstd_window(ctx, name, policy);
+        return;
+    }
+
     let data = compressible_block();
     ctx.parameter("codec", name);
     ctx.parameter("block_size", data.len());
+    ctx.parameter("batch_size", RAW_COMPRESS_BATCH_SIZE);
 
-    ctx.measure_micro(|| {
-        let out = compress_block(black_box(&data), black_box(policy)).unwrap();
-        black_box(out);
+    stress_config::measure_micro_batch(ctx, RAW_COMPRESS_BATCH_SIZE as u64, || {
+        let mut bytes = 0usize;
+        for _ in 0..RAW_COMPRESS_BATCH_SIZE {
+            let out = compress_block(black_box(&data), black_box(policy)).unwrap();
+            bytes = bytes.wrapping_add(out.0.len());
+        }
+        black_box(bytes);
+    });
+}
+
+fn run_compress_raw_zstd_window(
+    ctx: &mut StressContext,
+    name: &'static str,
+    policy: &CompressionPolicy,
+) {
+    let blocks = compressible_block_window();
+    ctx.parameter("codec", name);
+    ctx.parameter("block_size", BLOCK_SIZE);
+    ctx.parameter("batch_size", RAW_COMPRESS_BATCH_SIZE);
+    ctx.parameter("block_window", RAW_ZSTD_COMPRESS_WINDOW_BLOCKS);
+    ctx.parameter("window_repeats", RAW_ZSTD_COMPRESS_WINDOW_REPEATS);
+
+    stress_config::measure_micro_batch(ctx, RAW_COMPRESS_BATCH_SIZE as u64, || {
+        let mut bytes = 0usize;
+        for _ in 0..RAW_ZSTD_COMPRESS_WINDOW_REPEATS {
+            for block in &blocks {
+                let out = compress_block(black_box(block), black_box(policy)).unwrap();
+                bytes = bytes.wrapping_add(out.0.len());
+            }
+        }
+        black_box(bytes);
     });
 }
 
@@ -76,8 +123,17 @@ fn compress_raw_none(ctx: &mut StressContext) {
     ctx.parameter("codec", "none");
     ctx.parameter("block_size", data.len());
     ctx.parameter("batch_size", RAW_NONE_BATCH_SIZE);
+    ctx.parameter("prewarm_repeats", RAW_NONE_PREWARM_REPEATS);
 
-    stress_config::measure_micro_batch(ctx, RAW_NONE_BATCH_OPS, || {
+    let mut prewarm_bytes = 0usize;
+    for _ in 0..RAW_NONE_PREWARM_REPEATS {
+        let out = compress_block(black_box(&data), black_box(&CompressionPolicy::None))
+            .expect("none compression should succeed");
+        prewarm_bytes = prewarm_bytes.wrapping_add(out.0.len());
+    }
+    black_box(prewarm_bytes);
+
+    stress_config::measure_micro_batch(ctx, RAW_NONE_BATCH_SIZE as u64, || {
         let mut bytes = 0usize;
         for _ in 0..RAW_NONE_BATCH_SIZE {
             let out = compress_block(black_box(&data), black_box(&CompressionPolicy::None))
@@ -125,6 +181,11 @@ fn decompress_raw_zstd9(ctx: &mut StressContext) {
 }
 
 fn run_compress_trailer(ctx: &mut StressContext, name: &'static str, policy: &CompressionPolicy) {
+    if name == "zstd3" {
+        run_compress_trailer_zstd_window(ctx, policy);
+        return;
+    }
+
     let data = compressible_block();
     ctx.parameter("codec", name);
     ctx.parameter("block_size", data.len());
@@ -135,6 +196,26 @@ fn run_compress_trailer(ctx: &mut StressContext, name: &'static str, policy: &Co
         for _ in 0..TRAILER_COMPRESS_BATCH_SIZE {
             let out = compress_block_with_trailer(black_box(&data), policy).unwrap();
             bytes = bytes.wrapping_add(out.len());
+        }
+        black_box(bytes);
+    });
+}
+
+fn run_compress_trailer_zstd_window(ctx: &mut StressContext, policy: &CompressionPolicy) {
+    let blocks = compressible_block_window();
+    ctx.parameter("codec", "zstd3");
+    ctx.parameter("block_size", BLOCK_SIZE);
+    ctx.parameter("batch_size", TRAILER_ZSTD_COMPRESS_BATCH_SIZE);
+    ctx.parameter("block_window", RAW_ZSTD_COMPRESS_WINDOW_BLOCKS);
+    ctx.parameter("window_repeats", TRAILER_ZSTD_COMPRESS_WINDOW_REPEATS);
+
+    stress_config::measure_micro_batch(ctx, TRAILER_ZSTD_COMPRESS_BATCH_SIZE as u64, || {
+        let mut bytes = 0usize;
+        for _ in 0..TRAILER_ZSTD_COMPRESS_WINDOW_REPEATS {
+            for block in &blocks {
+                let out = compress_block_with_trailer(black_box(block), policy).unwrap();
+                bytes = bytes.wrapping_add(out.len());
+            }
         }
         black_box(bytes);
     });
