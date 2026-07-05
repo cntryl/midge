@@ -1,20 +1,10 @@
-//! Tier 2 — Memtable rotate benchmark
+//! Tier 2 — Memtable Rotate Benchmarks
 //!
-//! **Target Runtime:** < 2 seconds total
-//! **Run Frequency:** CI / Pre-commit
-//!
-//! Covers memtable rotation behavior (fill + drain cycle)
-
-#[path = "./criterion_config.rs"]
-mod criterion_config;
-
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_config::criterion_config_for_tier2;
-use std::hint::black_box;
+//! Measures fill + drain cycle cost for small and large memtables.
 
 use cntryl_midge::sst::SkipListMemtable;
+use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
-/// Pre-generate keys and values as raw bytes
 fn make_kv_pairs(count: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
     (0..count)
         .map(|i| {
@@ -26,57 +16,30 @@ fn make_kv_pairs(count: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
         .collect()
 }
 
-/// Benchmark memtable rotate small (100 entries)
-fn bench_memtable_rotate_small(c: &mut Criterion) {
-    let kv_pairs = make_kv_pairs(100);
+fn run_memtable_rotate(ctx: &mut StressContext, count: usize) {
+    let kv_pairs = make_kv_pairs(count);
+    ctx.parameter("entry_count", count);
 
-    let mut group = c.benchmark_group("subsystem_memtable_rotate_small");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(100));
-
-    group.bench_function("rotate_small", |b| {
-        b.iter(|| {
-            let memtable = SkipListMemtable::new();
-            for (key, value) in &kv_pairs {
-                memtable
-                    .put_with_exp(key.clone(), value.clone(), None)
-                    .unwrap();
-            }
-            // Drain (simulate rotation)
-            black_box(memtable.iter_all(u64::MAX))
-        });
+    let _completed = ctx.measure_counted(|| {
+        let memtable = SkipListMemtable::new();
+        for (key, value) in &kv_pairs {
+            memtable
+                .put_with_exp(key.clone(), value.clone(), None)
+                .unwrap();
+        }
+        black_box(memtable.iter_all(u64::MAX));
+        count as u64
     });
-
-    group.finish();
 }
 
-/// Benchmark memtable rotate large (10k entries)
-fn bench_memtable_rotate_large(c: &mut Criterion) {
-    let kv_pairs = make_kv_pairs(10_000);
-
-    let mut group = c.benchmark_group("subsystem_memtable_rotate_large");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(10_000));
-
-    group.bench_function("rotate_large", |b| {
-        b.iter(|| {
-            let memtable = SkipListMemtable::new();
-            for (key, value) in &kv_pairs {
-                memtable
-                    .put_with_exp(key.clone(), value.clone(), None)
-                    .unwrap();
-            }
-            // Drain (simulate rotation)
-            black_box(memtable.iter_all(u64::MAX))
-        });
-    });
-
-    group.finish();
+#[stress_test(tier = 2, metadata(component = "memtable", scenario = "rotate_small"))]
+fn rotate_small(ctx: &mut StressContext) {
+    run_memtable_rotate(ctx, 100);
 }
 
-criterion_group! {
-    name = tier2_subsystem_memtable_rotate;
-    config = criterion_config_for_tier2();
-    targets = bench_memtable_rotate_small, bench_memtable_rotate_large
+#[stress_test(tier = 2, metadata(component = "memtable", scenario = "rotate_large"))]
+fn rotate_large(ctx: &mut StressContext) {
+    run_memtable_rotate(ctx, 10_000);
 }
-criterion_main!(tier2_subsystem_memtable_rotate);
+
+stress_main!();

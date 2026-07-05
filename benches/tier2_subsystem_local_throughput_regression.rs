@@ -1,30 +1,14 @@
 //! Tier 2 - Local Durability Throughput Regression Guard
 //!
-//! Measures: batched write throughput for memory and local storage modes
-//! Purpose: Catch unintended local throughput collapse (regression guard)
-//!
-//! This benchmark ensures that local mode with buffered durability does not
-//! drop below 50% of memory throughput for the same workload.
-//!
-//! If this fails, it indicates a regression in local WAL batching, memtable
-//! configuration, or durability path performance.
-
-#[path = "./criterion_config.rs"]
-mod criterion_config;
-
-use std::time::Duration;
+//! Measures batched write throughput for memory and local storage modes.
 
 use cntryl_midge::testkit::{bench::init_benchmark_telemetry, opts_for_mode};
 use cntryl_midge::{Engine, TransactionMode, WriteOptions};
-use criterion::{
-    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
-};
-use criterion_config::criterion_config_for_tier2;
+use cntryl_stress::{stress_main, stress_test, StressContext};
 
 const NUM_OPS_PER_BATCH: usize = 100;
 const VALUE_SIZE: usize = 128;
 const BATCH_ITERATIONS: usize = 100;
-const THROUGHPUT_MODES: [&str; 2] = ["memory", "local"];
 
 type KeyValueBatch = Vec<(Vec<u8>, Vec<u8>)>;
 
@@ -59,45 +43,40 @@ fn run_batched_write_workload(
     }
 }
 
-fn benchmark_batched_writes(c: &mut Criterion) {
+fn run_mode(ctx: &mut StressContext, mode: &'static str) {
     init_benchmark_telemetry().expect("initialize benchmark telemetry");
+    let opts = opts_for_mode(mode);
+    ctx.parameter("storage_profile", mode);
+    ctx.parameter("batch_size", NUM_OPS_PER_BATCH);
+    ctx.parameter("batch_iterations", BATCH_ITERATIONS);
+    ctx.parameter(
+        "logical_bytes",
+        NUM_OPS_PER_BATCH * VALUE_SIZE * BATCH_ITERATIONS,
+    );
 
-    let mut group = c.benchmark_group("tier2_local_throughput_regression");
-    group.sampling_mode(SamplingMode::Flat);
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(6));
+    let engine = Engine::open_with_options(&opts).expect("failed to open engine");
+    let cf = engine
+        .create_column_family("test")
+        .expect("failed to create column family");
+    let keys_vals = make_key_value_batch();
 
-    for mode in THROUGHPUT_MODES {
-        let opts = opts_for_mode(mode);
-
-        group.throughput(Throughput::Bytes(
-            (NUM_OPS_PER_BATCH * VALUE_SIZE * BATCH_ITERATIONS) as u64,
-        ));
-
-        group.bench_with_input(BenchmarkId::from_parameter(mode), mode, |b, _mode| {
-            b.iter_batched(
-                || {
-                    let engine = Engine::open_with_options(&opts).expect("failed to open engine");
-                    let cf = engine
-                        .create_column_family("test")
-                        .expect("failed to create column family");
-                    let keys_vals = make_key_value_batch();
-                    (engine, cf.id(), keys_vals)
-                },
-                |(engine, cf_id, keys_vals)| {
-                    run_batched_write_workload(&engine, cf_id, &keys_vals);
-                },
-                criterion::BatchSize::SmallInput,
-            );
-        });
-    }
-
-    group.finish();
+    let _completed = ctx.measure_counted(|| {
+        run_batched_write_workload(&engine, cf.id(), &keys_vals);
+        (NUM_OPS_PER_BATCH * BATCH_ITERATIONS) as u64
+    });
 }
 
-criterion_group! {
-    name = benches;
-    config = criterion_config_for_tier2();
-    targets = benchmark_batched_writes
+#[stress_test(
+    tier = 2,
+    metadata(component = "local_throughput", scenario = "memory")
+)]
+fn memory(ctx: &mut StressContext) {
+    run_mode(ctx, "memory");
 }
-criterion_main!(benches);
+
+#[stress_test(tier = 2, metadata(component = "local_throughput", scenario = "local"))]
+fn local(ctx: &mut StressContext) {
+    run_mode(ctx, "local");
+}
+
+stress_main!();

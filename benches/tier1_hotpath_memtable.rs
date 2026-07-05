@@ -1,31 +1,33 @@
 //! Tier 1 — Memtable Hot Path Benchmarks
 //!
-//! **Target Runtime:** < 1 second total
-//! **Run Frequency:** Every PR (CI gate)
-//!
-//! Covers critical memtable hot paths:
-//! - Insert operations (single and batch, various value sizes)
-//! - Point lookups (hit/miss)
+//! Covers insert, lookup, delete, and size accounting on the in-memory memtable.
 
-#[path = "./criterion_config.rs"]
-mod criterion_config;
+#[path = "./stress_config.rs"]
+mod stress_config;
 
 use cntryl_midge::sst::{Memtable, SkipListMemtable};
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput};
-use criterion_config::criterion_config_for_tier1;
-use std::hint::black_box;
+use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-const LOOKUP_BATCH_SIZE: usize = 1024;
+const LOOKUP_BATCH_SIZE: usize = 8192;
+const LOOKUP_BATCH_OPS: u64 = 8192;
+const PUT_SINGLE_BATCH_SIZE: usize = 1024;
+const PUT_SINGLE_BATCH_OPS: u64 = 1024;
+const PUT_COUNTED_BATCH_SIZE: usize = 4096;
+const PUT_COUNTED_BATCH_OPS: u64 = 4096;
+const PUT_COUNTED_LARGE_BATCH_SIZE: usize = 65_536;
+const PUT_COUNTED_LARGE_BATCH_OPS: u64 = 65_536;
+const ROTATING_WRITE_KEYS: usize = 4096;
+const SIZE_BYTES_BATCH_SIZE: usize = 1024;
+const SIZE_BYTES_BATCH_OPS: u64 = 1024;
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+cntryl_stress::stress_allocator!();
 
-/// Pre-compute a key (deterministic, no allocation in hot path)
 #[inline]
 fn make_key(i: usize) -> Vec<u8> {
     format!("key_{i:010}").into_bytes()
 }
 
-/// Pre-compute value of given size
 fn make_value(size: usize) -> Vec<u8> {
     vec![b'x'; size]
 }
@@ -34,230 +36,190 @@ fn make_value_indexed(i: usize) -> Vec<u8> {
     format!("value_{i}").into_bytes()
 }
 
-// ─── Insert Benchmarks ───────────────────────────────────────────────────────
-
-/// Benchmark single key-value insertion into a fresh memtable
-fn bench_put_single(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memtable/put_single");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
-
-    let small_val = make_value(64);
-    let medium_val = make_value(1024);
-    let large_val = make_value(4096);
-
-    // Use iter_batched to create a fresh memtable for each iteration bundle.
-    // This prevents unbounded accumulation of nodes in a single memtable.
-    // With BatchSize::SmallInput, Criterion will batch ~8-16 iterations together,
-    // creating a new memtable for each batch.
-
-    group.bench_function("64b_value", |b| {
-        b.iter_batched(
-            || {
-                let memtable = SkipListMemtable::new();
-                // Warm with 100 initial inserts (different keys)
-                for i in 0..100 {
-                    let _ = memtable.put(make_key(i), small_val.clone());
-                }
-                memtable
-            },
-            |memtable| {
-                // Each iteration uses a fresh memtable from setup.
-                // Insert one key (deterministic, unique across all batches).
-                static COUNTER: std::sync::atomic::AtomicUsize =
-                    std::sync::atomic::AtomicUsize::new(100);
-                let idx = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = memtable.put(black_box(make_key(idx)), black_box(small_val.clone()));
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
-    group.bench_function("1kb_value", |b| {
-        b.iter_batched(
-            || {
-                let memtable = SkipListMemtable::new();
-                for i in 0..100 {
-                    let _ = memtable.put(make_key(i), medium_val.clone());
-                }
-                memtable
-            },
-            |memtable| {
-                static COUNTER: std::sync::atomic::AtomicUsize =
-                    std::sync::atomic::AtomicUsize::new(100);
-                let idx = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = memtable.put(black_box(make_key(idx)), black_box(medium_val.clone()));
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
-    group.bench_function("4kb_value", |b| {
-        b.iter_batched(
-            || {
-                let memtable = SkipListMemtable::new();
-                for i in 0..100 {
-                    let _ = memtable.put(make_key(i), large_val.clone());
-                }
-                memtable
-            },
-            |memtable| {
-                static COUNTER: std::sync::atomic::AtomicUsize =
-                    std::sync::atomic::AtomicUsize::new(100);
-                let idx = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = memtable.put(black_box(make_key(idx)), black_box(large_val.clone()));
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
-    group.finish();
+fn warmed_memtable(value: &[u8]) -> SkipListMemtable {
+    let memtable = SkipListMemtable::new();
+    for i in 0..100 {
+        let _ = memtable.put(make_key(i), value.to_vec());
+    }
+    memtable
 }
 
-/// Benchmark sequential insertions (batch pattern)
-fn bench_put_batch(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memtable/put_batch");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(100));
+fn run_put_single(ctx: &mut StressContext, scenario: &'static str, value_size: usize) {
+    let value = make_value(value_size);
+    let keys: Vec<Vec<u8>> = (100..100 + ROTATING_WRITE_KEYS).map(make_key).collect();
+    let memtable = warmed_memtable(&value);
+    let counter = AtomicUsize::new(0);
+    ctx.parameter("scenario", scenario);
+    ctx.parameter("value_size", value_size);
+    ctx.parameter("batch_size", PUT_SINGLE_BATCH_SIZE);
 
-    // Pre-create keys and values outside the hot loop
+    stress_config::measure_micro_batch(ctx, PUT_SINGLE_BATCH_OPS, || {
+        for _ in 0..PUT_SINGLE_BATCH_SIZE {
+            let idx = counter.fetch_add(1, Ordering::Relaxed) % keys.len();
+            let _ = memtable.put(black_box(keys[idx].clone()), black_box(value.clone()));
+        }
+    });
+}
+
+fn run_put_counted(ctx: &mut StressContext, scenario: &'static str, value_size: usize) {
+    let value = make_value(value_size);
+    let keys: Vec<Vec<u8>> = (100..100 + ROTATING_WRITE_KEYS).map(make_key).collect();
+    let memtable = warmed_memtable(&value);
+    let (batch_size, batch_ops) = if value_size >= 4096 {
+        (PUT_COUNTED_LARGE_BATCH_SIZE, PUT_COUNTED_LARGE_BATCH_OPS)
+    } else {
+        (PUT_COUNTED_BATCH_SIZE, PUT_COUNTED_BATCH_OPS)
+    };
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = (0..batch_size)
+        .map(|i| (keys[i % keys.len()].clone(), value.clone()))
+        .collect();
+    ctx.parameter("scenario", scenario);
+    ctx.parameter("value_size", value_size);
+    ctx.parameter("batch_size", batch_size);
+
+    let _completed = ctx.measure_counted(|| {
+        for (key, value) in pairs {
+            let _ = memtable.put(black_box(key), black_box(value));
+        }
+        batch_ops
+    });
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "memtable", scenario = "put_single_64b")
+)]
+fn put_single_64b(ctx: &mut StressContext) {
+    run_put_single(ctx, "64b_value", 64);
+}
+
+#[stress_test(
+    tier = 2,
+    metadata(component = "memtable", scenario = "put_single_1kb")
+)]
+fn put_single_1kb(ctx: &mut StressContext) {
+    run_put_counted(ctx, "1kb_value", 1024);
+}
+
+#[stress_test(
+    tier = 2,
+    metadata(component = "memtable", scenario = "put_single_4kb")
+)]
+fn put_single_4kb(ctx: &mut StressContext) {
+    run_put_counted(ctx, "4kb_value", 4096);
+}
+
+#[stress_test(tier = 1, metadata(component = "memtable", scenario = "put_batch_100"))]
+fn put_batch_100(ctx: &mut StressContext) {
     let keys: Vec<Vec<u8>> = (0..100).map(make_key).collect();
     let value = make_value(128);
+    ctx.parameter("batch_size", keys.len());
+    ctx.parameter("value_size", value.len());
 
-    group.bench_function("100_inserts", |b| {
-        b.iter_batched(
-            || {
-                let memtable = SkipListMemtable::new();
-                let items: Vec<(Vec<u8>, Vec<u8>)> = keys
-                    .iter()
-                    .map(|key| (key.clone(), value.clone()))
-                    .collect();
-                (memtable, items)
-            },
-            |(memtable, items)| {
-                for (key, val) in items {
-                    let _ = memtable.put(black_box(key), black_box(val));
-                }
-                black_box(memtable)
-            },
-            BatchSize::SmallInput,
-        );
+    stress_config::measure_micro_batch(ctx, keys.len() as u64, || {
+        let memtable = SkipListMemtable::new();
+        for key in &keys {
+            let _ = memtable.put(black_box(key.clone()), black_box(value.clone()));
+        }
+        black_box(memtable);
     });
-
-    group.finish();
 }
 
-// ─── Lookup Benchmarks ───────────────────────────────────────────────────────
-
-/// Benchmark point lookup (hit and miss)
-fn bench_get_point(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memtable/get_point");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(LOOKUP_BATCH_SIZE as u64));
-
-    // Pre-compute all keys outside benchmark
+#[stress_test(tier = 1, metadata(component = "memtable", scenario = "get_hit"))]
+fn get_hit(ctx: &mut StressContext) {
     let keys: Vec<Vec<u8>> = (0..1000).map(make_key).collect();
     let values: Vec<Vec<u8>> = (0..1000).map(make_value_indexed).collect();
-
     let memtable = SkipListMemtable::new();
     for i in 0..1000 {
         let _ = memtable.put(keys[i].clone(), values[i].clone());
     }
+    let hit_keys: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
+    ctx.parameter("lookup_batch_size", LOOKUP_BATCH_SIZE);
+    ctx.parameter("lookup_key_count", hit_keys.len());
 
-    let hit_key = keys[500].as_slice();
-    let miss_key = make_key(2000);
-
-    group.bench_function("hit", |b| {
-        b.iter(|| {
-            let mut hits = 0usize;
-            for _ in 0..LOOKUP_BATCH_SIZE {
-                if memtable.get(black_box(hit_key)).unwrap().is_some() {
-                    hits += 1;
-                }
+    stress_config::measure_micro_batch(ctx, LOOKUP_BATCH_OPS, || {
+        let mut hits = 0usize;
+        for i in 0..LOOKUP_BATCH_SIZE {
+            let hit_key = hit_keys[i % hit_keys.len()];
+            if memtable.get(black_box(hit_key)).unwrap().is_some() {
+                hits += 1;
             }
-            black_box(hits)
-        });
+        }
+        black_box(hits);
     });
-
-    group.bench_function("miss", |b| {
-        b.iter(|| {
-            let mut misses = 0usize;
-            for _ in 0..LOOKUP_BATCH_SIZE {
-                if memtable.get(black_box(&miss_key)).unwrap().is_none() {
-                    misses += 1;
-                }
-            }
-            black_box(misses)
-        });
-    });
-
-    group.finish();
 }
 
-/// Benchmark delete operations
-fn bench_delete(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memtable/delete");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
+#[stress_test(tier = 1, metadata(component = "memtable", scenario = "get_miss"))]
+fn get_miss(ctx: &mut StressContext) {
+    let keys: Vec<Vec<u8>> = (0..1000).map(make_key).collect();
+    let values: Vec<Vec<u8>> = (0..1000).map(make_value_indexed).collect();
+    let memtable = SkipListMemtable::new();
+    for i in 0..1000 {
+        let _ = memtable.put(keys[i].clone(), values[i].clone());
+    }
+    let miss_keys: Vec<Vec<u8>> = (0..1000)
+        .map(|i| format!("key_{i:010}_missing").into_bytes())
+        .collect();
+    ctx.parameter("lookup_batch_size", LOOKUP_BATCH_SIZE);
+    ctx.parameter("lookup_key_count", miss_keys.len());
 
+    stress_config::measure_micro_batch(ctx, LOOKUP_BATCH_OPS, || {
+        let mut misses = 0usize;
+        for i in 0..LOOKUP_BATCH_SIZE {
+            let miss_key = &miss_keys[i % miss_keys.len()];
+            if memtable
+                .get(black_box(miss_key.as_slice()))
+                .unwrap()
+                .is_none()
+            {
+                misses += 1;
+            }
+        }
+        black_box(misses);
+    });
+}
+
+#[stress_test(tier = 1, metadata(component = "memtable", scenario = "delete"))]
+fn delete(ctx: &mut StressContext) {
     let keys: Vec<Vec<u8>> = (0..100).map(make_key).collect();
     let value = make_value(128);
+    ctx.parameter("key_count", keys.len());
 
-    group.bench_function("delete", |b| {
-        b.iter_batched(
-            || {
-                // Create a warm memtable per iteration to prevent unbounded
-                // version-chain growth that causes OOM on CI runners.
-                let mt = SkipListMemtable::new();
-                for key in &keys {
-                    let _ = mt.put(key.clone(), value.clone());
-                }
-                let key = keys[50].clone();
-                (mt, key)
-            },
-            |(memtable, key)| {
-                let _ = memtable.delete(black_box(key));
-            },
-            BatchSize::SmallInput,
-        );
+    ctx.measure_micro(|| {
+        let memtable = SkipListMemtable::new();
+        for key in &keys {
+            let _ = memtable.put(key.clone(), value.clone());
+        }
+        let _ = memtable.delete(black_box(keys[50].clone()));
     });
-
-    group.finish();
 }
 
-// ─── Size Benchmark ─────────────────────────────────────────────────────────
-
-/// Benchmark memtable size tracking
-fn bench_size_bytes(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memtable/size_bytes");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
-
+#[stress_test(
+    tier = 1,
+    metadata(
+        component = "memtable",
+        scenario = "size_bytes",
+        validated_micro = "true"
+    )
+)]
+fn size_bytes(ctx: &mut StressContext) {
     let keys: Vec<Vec<u8>> = (0..100).map(make_key).collect();
     let value = make_value(1024);
-
     let memtable = SkipListMemtable::new();
     for key in &keys {
         let _ = memtable.put(key.clone(), value.clone());
     }
+    ctx.parameter("key_count", keys.len());
+    ctx.parameter("value_size", value.len());
+    ctx.parameter("batch_size", SIZE_BYTES_BATCH_SIZE);
 
-    group.bench_function("size_query", |b| {
-        b.iter(|| black_box(memtable.size_bytes()));
+    stress_config::measure_micro_batch(ctx, SIZE_BYTES_BATCH_OPS, || {
+        let mut total = 0usize;
+        for _ in 0..SIZE_BYTES_BATCH_SIZE {
+            total = total.wrapping_add(memtable.size_bytes());
+        }
+        black_box(total);
     });
-
-    group.finish();
 }
 
-// ─── Criterion Setup ─────────────────────────────────────────────────────────
-
-criterion_group! {
-    name = tier1_hotpath_memtable;
-    config = criterion_config_for_tier1();
-    targets =
-        bench_put_single,
-        bench_put_batch,
-        bench_get_point,
-        bench_delete,
-        bench_size_bytes
-}
-criterion_main!(tier1_hotpath_memtable);
+stress_main!();

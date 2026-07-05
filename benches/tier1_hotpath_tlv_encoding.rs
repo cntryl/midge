@@ -1,244 +1,278 @@
 //! Tier 1 — Hot Path TLV Encoding Benchmarks
 //!
-//! **Target Runtime:** < 1 second total
-//! **Run Frequency:** Every PR (CI gate)
-//!
-//! Covers common TLV primitive encoding/decoding hot paths:
-//! - Varint32 encoding/decoding (critical for SST and WAL)
-//! - Tagged field encoding (bytes, u64, u8)
-//! - Field decoding from serialized TLV
-//!
-//! These are the foundational building blocks used by both WAL and SST,
-//! so performance here directly impacts overall I/O throughput.
+//! Covers common TLV primitive encoding/decoding hot paths used by WAL and SST.
 
-#[path = "./criterion_config.rs"]
-mod criterion_config;
-
-use cntryl_midge::BytesMut;
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_config::criterion_config_for_tier1;
+#[path = "./stress_config.rs"]
+mod stress_config;
 
 use cntryl_midge::common::tlv::{
     decode_tlv_field, decode_varint32, encode_bytes_with_tag, encode_u64_with_tag,
     encode_u8_with_tag, encode_varint32, encode_varint_with_tag,
 };
-use std::hint::black_box;
+use cntryl_midge::BytesMut;
+use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
-// ============================================================================
-// Varint Encoding Benchmarks (Most Critical Path)
-// ============================================================================
+cntryl_stress::stress_allocator!();
 
-/// Benchmark varint32 encoding for various value ranges.
-/// Varints are used extensively in both WAL and SST encoding.
-fn bench_varint32_encode(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_tlv_varint32_encode");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
+fn run_varint32_encode(ctx: &mut StressContext, name: &'static str, value: u32) {
+    let mut buf = BytesMut::with_capacity(5);
+    ctx.parameter("case", name);
 
-    let test_cases = [
-        ("small_1", 1u32),
-        ("small_127", 127u32),
-        ("medium_256", 256u32),
-        ("medium_16384", 16_384u32),
-        ("large_1m", 1_000_000u32),
-        ("max", u32::MAX),
-    ];
-
-    for (name, value) in test_cases {
-        group.bench_function(name, |b| {
-            let mut buf = BytesMut::with_capacity(5);
-            b.iter(|| {
-                buf.clear();
-                encode_varint32(&mut buf, black_box(value));
-                black_box(buf.as_ref());
-            });
-        });
-    }
-
-    group.finish();
+    ctx.measure_micro(|| {
+        buf.clear();
+        encode_varint32(&mut buf, black_box(value));
+        black_box(buf.as_ref());
+    });
 }
 
-/// Benchmark varint32 decoding for various value ranges.
-fn bench_varint32_decode(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_tlv_varint32_decode");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
-
-    // Pre-encode test values
-    let test_cases = vec![
-        ("small_1", 1u32),
-        ("small_127", 127u32),
-        ("medium_256", 256u32),
-        ("medium_16384", 16_384u32),
-        ("large_1m", 1_000_000u32),
-        ("max", u32::MAX),
-    ];
-
-    for (name, value) in &test_cases {
-        let mut buf = BytesMut::with_capacity(5);
-        encode_varint32(&mut buf, *value);
-        let data = buf.freeze();
-
-        group.bench_function(*name, |b| {
-            b.iter(|| black_box(decode_varint32(black_box(data.as_ref())).unwrap()));
-        });
-    }
-
-    group.finish();
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "varint32_encode_small_1")
+)]
+fn varint32_encode_small_1(ctx: &mut StressContext) {
+    run_varint32_encode(ctx, "small_1", 1);
 }
 
-// ============================================================================
-// Tagged Field Encoding Benchmarks
-// ============================================================================
-
-/// Benchmark tagged field encoding for fixed sizes and values.
-fn bench_tagged_field_encoding(c: &mut Criterion) {
-    let mut group_u8 = c.benchmark_group("hotpath_tlv_encode_u8_tag");
-    group_u8.sampling_mode(SamplingMode::Flat);
-    group_u8.throughput(Throughput::Elements(1));
-
-    let u8_cases = [
-        ("u8_0", 0u8),
-        ("u8_1", 1u8),
-        ("u8_127", 127u8),
-        ("u8_255", 255u8),
-    ];
-    for (name, value) in u8_cases {
-        group_u8.bench_function(name, |b| {
-            let mut buf = BytesMut::with_capacity(3);
-            b.iter(|| {
-                buf.clear();
-                encode_u8_with_tag(&mut buf, 7, black_box(value));
-                black_box(buf.as_ref());
-            });
-        });
-    }
-
-    group_u8.finish();
-
-    let mut group_u64 = c.benchmark_group("hotpath_tlv_encode_u64_tag");
-    group_u64.sampling_mode(SamplingMode::Flat);
-    group_u64.throughput(Throughput::Elements(1));
-
-    let u64_cases = [
-        ("u64_0", 0u64),
-        ("u64_1000000", 1_000_000u64),
-        ("u64_9223372036854775807", i64::MAX as u64),
-        ("u64_18446744073709551615", u64::MAX),
-    ];
-    for (name, value) in u64_cases {
-        group_u64.bench_function(name, |b| {
-            let mut buf = BytesMut::with_capacity(10);
-            b.iter(|| {
-                buf.clear();
-                encode_u64_with_tag(&mut buf, 9, black_box(value));
-                black_box(buf.as_ref());
-            });
-        });
-    }
-
-    group_u64.finish();
-
-    let mut group_bytes = c.benchmark_group("hotpath_tlv_encode_bytes_tag");
-    group_bytes.sampling_mode(SamplingMode::Flat);
-    group_bytes.throughput(Throughput::Elements(1));
-
-    let small = [0u8; 8];
-    let medium = [1u8; 64];
-    let large = [2u8; 256];
-    let bytes_cases = [
-        ("small_8b", small.as_slice()),
-        ("medium_64b", medium.as_slice()),
-        ("large_256b", large.as_slice()),
-    ];
-
-    for (name, data) in bytes_cases {
-        group_bytes.bench_function(name, |b| {
-            let mut buf = BytesMut::with_capacity(1 + 5 + data.len());
-            b.iter(|| {
-                buf.clear();
-                encode_bytes_with_tag(&mut buf, 11, black_box(data)).unwrap();
-                black_box(buf.as_ref());
-            });
-        });
-    }
-
-    group_bytes.finish();
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "varint32_encode_small_127")
+)]
+fn varint32_encode_small_127(ctx: &mut StressContext) {
+    run_varint32_encode(ctx, "small_127", 127);
 }
 
-/// Benchmark decoding a tagged field from serialized TLV data.
-fn bench_tlv_field_decode(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_tlv_decode_field");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
-
-    let small = [0u8; 8];
-    let medium = [1u8; 64];
-    let large = [2u8; 256];
-    let decode_cases = [
-        ("small_8b", small.as_slice()),
-        ("medium_64b", medium.as_slice()),
-        ("large_256b", large.as_slice()),
-    ];
-
-    for (name, data) in decode_cases {
-        let mut buf = BytesMut::with_capacity(1 + 5 + data.len());
-        encode_bytes_with_tag(&mut buf, 11, data).unwrap();
-        let encoded = buf.freeze();
-
-        group.bench_function(name, |b| {
-            b.iter(|| black_box(decode_tlv_field(black_box(encoded.as_ref())).unwrap()));
-        });
-    }
-
-    group.finish();
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "varint32_encode_medium_256")
+)]
+fn varint32_encode_medium_256(ctx: &mut StressContext) {
+    run_varint32_encode(ctx, "medium_256", 256);
 }
 
-// ============================================================================
-// Batch Encoding Benchmarks (Realistic SST/WAL Pattern)
-// ============================================================================
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "varint32_encode_medium_16384")
+)]
+fn varint32_encode_medium_16384(ctx: &mut StressContext) {
+    run_varint32_encode(ctx, "medium_16384", 16_384);
+}
 
-/// Benchmark encoding multiple fields in sequence (realistic SST entry encoding pattern).
-fn bench_batch_field_encoding(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_tlv_batch_encode");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1)); // Per complete entry
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "varint32_encode_large_1m")
+)]
+fn varint32_encode_large_1m(ctx: &mut StressContext) {
+    run_varint32_encode(ctx, "large_1m", 1_000_000);
+}
 
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "varint32_encode_max")
+)]
+fn varint32_encode_max(ctx: &mut StressContext) {
+    run_varint32_encode(ctx, "max", u32::MAX);
+}
+
+fn run_varint32_decode(ctx: &mut StressContext, name: &'static str, value: u32) {
+    let mut buf = BytesMut::with_capacity(5);
+    encode_varint32(&mut buf, value);
+    let data = buf.freeze();
+    ctx.parameter("case", name);
+
+    ctx.measure_micro(|| black_box(decode_varint32(black_box(data.as_ref())).unwrap()));
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "varint32_decode_small_1")
+)]
+fn varint32_decode_small_1(ctx: &mut StressContext) {
+    run_varint32_decode(ctx, "small_1", 1);
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "varint32_decode_small_127")
+)]
+fn varint32_decode_small_127(ctx: &mut StressContext) {
+    run_varint32_decode(ctx, "small_127", 127);
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "varint32_decode_medium_256")
+)]
+fn varint32_decode_medium_256(ctx: &mut StressContext) {
+    run_varint32_decode(ctx, "medium_256", 256);
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "varint32_decode_medium_16384")
+)]
+fn varint32_decode_medium_16384(ctx: &mut StressContext) {
+    run_varint32_decode(ctx, "medium_16384", 16_384);
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "varint32_decode_large_1m")
+)]
+fn varint32_decode_large_1m(ctx: &mut StressContext) {
+    run_varint32_decode(ctx, "large_1m", 1_000_000);
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "varint32_decode_max")
+)]
+fn varint32_decode_max(ctx: &mut StressContext) {
+    run_varint32_decode(ctx, "max", u32::MAX);
+}
+
+fn run_encode_u8_tag(ctx: &mut StressContext, name: &'static str, value: u8) {
+    let mut buf = BytesMut::with_capacity(3);
+    ctx.parameter("case", name);
+
+    ctx.measure_micro(|| {
+        buf.clear();
+        encode_u8_with_tag(&mut buf, 7, black_box(value));
+        black_box(buf.as_ref());
+    });
+}
+
+#[stress_test(tier = 1, metadata(component = "tlv", scenario = "encode_u8_tag_0"))]
+fn encode_u8_tag_0(ctx: &mut StressContext) {
+    run_encode_u8_tag(ctx, "u8_0", 0);
+}
+
+#[stress_test(tier = 1, metadata(component = "tlv", scenario = "encode_u8_tag_1"))]
+fn encode_u8_tag_1(ctx: &mut StressContext) {
+    run_encode_u8_tag(ctx, "u8_1", 1);
+}
+
+#[stress_test(tier = 1, metadata(component = "tlv", scenario = "encode_u8_tag_127"))]
+fn encode_u8_tag_127(ctx: &mut StressContext) {
+    run_encode_u8_tag(ctx, "u8_127", 127);
+}
+
+#[stress_test(tier = 1, metadata(component = "tlv", scenario = "encode_u8_tag_255"))]
+fn encode_u8_tag_255(ctx: &mut StressContext) {
+    run_encode_u8_tag(ctx, "u8_255", 255);
+}
+
+fn run_encode_u64_tag(ctx: &mut StressContext, name: &'static str, value: u64) {
+    let mut buf = BytesMut::with_capacity(10);
+    ctx.parameter("case", name);
+
+    ctx.measure_micro(|| {
+        buf.clear();
+        encode_u64_with_tag(&mut buf, 9, black_box(value));
+        black_box(buf.as_ref());
+    });
+}
+
+#[stress_test(tier = 1, metadata(component = "tlv", scenario = "encode_u64_tag_0"))]
+fn encode_u64_tag_0(ctx: &mut StressContext) {
+    run_encode_u64_tag(ctx, "u64_0", 0);
+}
+
+#[stress_test(tier = 1, metadata(component = "tlv", scenario = "encode_u64_tag_1m"))]
+fn encode_u64_tag_1m(ctx: &mut StressContext) {
+    run_encode_u64_tag(ctx, "u64_1000000", 1_000_000);
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "encode_u64_tag_i64_max")
+)]
+fn encode_u64_tag_i64_max(ctx: &mut StressContext) {
+    run_encode_u64_tag(ctx, "u64_9223372036854775807", i64::MAX as u64);
+}
+
+#[stress_test(tier = 1, metadata(component = "tlv", scenario = "encode_u64_tag_max"))]
+fn encode_u64_tag_max(ctx: &mut StressContext) {
+    run_encode_u64_tag(ctx, "u64_18446744073709551615", u64::MAX);
+}
+
+fn run_encode_bytes_tag(ctx: &mut StressContext, name: &'static str, data: &[u8]) {
+    let mut buf = BytesMut::with_capacity(1 + 5 + data.len());
+    ctx.parameter("case", name);
+    ctx.parameter("payload_size", data.len());
+
+    ctx.measure_micro(|| {
+        buf.clear();
+        encode_bytes_with_tag(&mut buf, 11, black_box(data)).unwrap();
+        black_box(buf.as_ref());
+    });
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "encode_bytes_tag_8b")
+)]
+fn encode_bytes_tag_8b(ctx: &mut StressContext) {
+    run_encode_bytes_tag(ctx, "small_8b", &[0u8; 8]);
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "encode_bytes_tag_64b")
+)]
+fn encode_bytes_tag_64b(ctx: &mut StressContext) {
+    run_encode_bytes_tag(ctx, "medium_64b", &[1u8; 64]);
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "tlv", scenario = "encode_bytes_tag_256b")
+)]
+fn encode_bytes_tag_256b(ctx: &mut StressContext) {
+    run_encode_bytes_tag(ctx, "large_256b", &[2u8; 256]);
+}
+
+fn run_decode_field(ctx: &mut StressContext, name: &'static str, data: &[u8]) {
+    let mut buf = BytesMut::with_capacity(1 + 5 + data.len());
+    encode_bytes_with_tag(&mut buf, 11, data).unwrap();
+    let encoded = buf.freeze();
+    ctx.parameter("case", name);
+    ctx.parameter("payload_size", data.len());
+
+    ctx.measure_micro(|| black_box(decode_tlv_field(black_box(encoded.as_ref())).unwrap()));
+}
+
+#[stress_test(tier = 1, metadata(component = "tlv", scenario = "decode_field_8b"))]
+fn decode_field_8b(ctx: &mut StressContext) {
+    run_decode_field(ctx, "small_8b", &[0u8; 8]);
+}
+
+#[stress_test(tier = 1, metadata(component = "tlv", scenario = "decode_field_64b"))]
+fn decode_field_64b(ctx: &mut StressContext) {
+    run_decode_field(ctx, "medium_64b", &[1u8; 64]);
+}
+
+#[stress_test(tier = 1, metadata(component = "tlv", scenario = "decode_field_256b"))]
+fn decode_field_256b(ctx: &mut StressContext) {
+    run_decode_field(ctx, "large_256b", &[2u8; 256]);
+}
+
+#[stress_test(tier = 1, metadata(component = "tlv", scenario = "sst_entry_full"))]
+fn sst_entry_full(ctx: &mut StressContext) {
     let key_delta = black_box(b"mykey");
     let value = black_box(b"myvalue");
     let seq = black_box(12345u64);
     let entry_type = black_box(0u8);
+    let mut buf = BytesMut::with_capacity(256);
 
-    group.bench_function("sst_entry_full", |b| {
-        let mut buf = BytesMut::with_capacity(256);
-        b.iter(|| {
-            buf.clear();
-            // Simulate SST entry encoding: shared_len + key_delta + value + sequence + entry_type
-            encode_varint_with_tag(&mut buf, 1, 0);
-            encode_bytes_with_tag(&mut buf, 2, key_delta).unwrap();
-            encode_bytes_with_tag(&mut buf, 3, value).unwrap();
-            encode_u64_with_tag(&mut buf, 4, seq);
-            encode_u8_with_tag(&mut buf, 5, entry_type);
-            black_box(&buf);
-        });
+    ctx.measure_micro(|| {
+        buf.clear();
+        encode_varint_with_tag(&mut buf, 1, 0);
+        encode_bytes_with_tag(&mut buf, 2, key_delta).unwrap();
+        encode_bytes_with_tag(&mut buf, 3, value).unwrap();
+        encode_u64_with_tag(&mut buf, 4, seq);
+        encode_u8_with_tag(&mut buf, 5, entry_type);
+        black_box(&buf);
     });
-
-    group.finish();
 }
 
-// ============================================================================
-// Criterion Main
-// ============================================================================
-
-criterion_group!(
-    name = benches;
-    config = criterion_config_for_tier1();
-    targets =
-        bench_varint32_encode,
-        bench_varint32_decode,
-        bench_tagged_field_encoding,
-        bench_tlv_field_decode,
-        bench_batch_field_encoding
-);
-
-criterion_main!(benches);
+stress_main!();

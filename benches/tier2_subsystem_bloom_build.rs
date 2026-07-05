@@ -1,95 +1,43 @@
 //! Tier 2 — Bloom Build Benchmarks
 //!
-//! **Target Runtime:** < 2 seconds total
-//! **Run Frequency:** CI / Pre-commit
-//!
-//! Covers bloom filter building operations:
-//! - Building filters with different key counts
-//! - Measures key insertion throughput (hashing + bit-setting)
-
-#[path = "./criterion_config.rs"]
-mod criterion_config;
+//! Measures bloom filter construction throughput for deterministic keysets.
 
 use cntryl_midge::sst::bloom::BloomWriter;
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_config::criterion_config_for_tier2;
-use std::hint::black_box;
+use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
-/// Pre-generate keys as raw bytes (no Bytes wrapper overhead in benchmark)
 fn make_test_keys(count: usize) -> Vec<Vec<u8>> {
     (0..count)
         .map(|i| format!("key_{i:010}").into_bytes())
         .collect()
 }
 
-/// Benchmark building bloom filter with 10k keys
-fn bench_bloom_build_10k_keys(c: &mut Criterion) {
-    let keys = make_test_keys(10_000);
+fn run_bloom_build(ctx: &mut StressContext, count: usize) {
+    let keys = make_test_keys(count);
+    ctx.parameter("key_count", count);
 
-    let mut group = c.benchmark_group("subsystem_bloom_build_10k_keys");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(10_000));
-
-    group.bench_function("build_10k_keys", |b| {
-        b.iter(|| {
-            let mut builder = BloomWriter::with_defaults(10_000);
-            for key in &keys {
-                builder.insert(key);
-            }
-            black_box(builder.finish())
-        });
+    let _completed = ctx.measure_counted(|| {
+        let mut builder = BloomWriter::with_defaults(count);
+        for key in &keys {
+            builder.insert(key);
+        }
+        black_box(builder.finish());
+        count as u64
     });
-
-    group.finish();
 }
 
-/// Benchmark building bloom filter with 100k keys
-fn bench_bloom_build_100k_keys(c: &mut Criterion) {
-    let keys = make_test_keys(100_000);
-
-    let mut group = c.benchmark_group("subsystem_bloom_build_100k_keys");
-    group.sampling_mode(SamplingMode::Flat);
-    group.measurement_time(std::time::Duration::from_secs(6));
-    group.throughput(Throughput::Elements(100_000));
-
-    group.bench_function("build_100k_keys", |b| {
-        b.iter(|| {
-            let mut builder = BloomWriter::with_defaults(100_000);
-            for key in &keys {
-                builder.insert(key);
-            }
-            black_box(builder.finish())
-        });
-    });
-
-    group.finish();
+#[stress_test(tier = 2, metadata(component = "bloom", scenario = "build_10k_keys"))]
+fn build_10k_keys(ctx: &mut StressContext) {
+    run_bloom_build(ctx, 10_000);
 }
 
-/// Benchmark building bloom filter with 1M keys (stress test)
-fn bench_bloom_build_1m_keys(c: &mut Criterion) {
-    let keys = make_test_keys(1_000_000);
-
-    let mut group = c.benchmark_group("subsystem_bloom_build_1m_keys");
-    group.sampling_mode(SamplingMode::Flat);
-    group.measurement_time(std::time::Duration::from_secs(6));
-    group.throughput(Throughput::Elements(1_000_000));
-
-    group.bench_function("build_1m_keys", |b| {
-        b.iter(|| {
-            let mut builder = BloomWriter::with_defaults(1_000_000);
-            for key in &keys {
-                builder.insert(key);
-            }
-            black_box(builder.finish())
-        });
-    });
-
-    group.finish();
+#[stress_test(tier = 2, metadata(component = "bloom", scenario = "build_100k_keys"))]
+fn build_100k_keys(ctx: &mut StressContext) {
+    run_bloom_build(ctx, 100_000);
 }
 
-criterion_group! {
-    name = tier2_subsystem_bloom_build;
-    config = criterion_config_for_tier2();
-    targets = bench_bloom_build_10k_keys, bench_bloom_build_100k_keys, bench_bloom_build_1m_keys
+#[stress_test(tier = 2, metadata(component = "bloom", scenario = "build_1m_keys"))]
+fn build_1m_keys(ctx: &mut StressContext) {
+    run_bloom_build(ctx, 1_000_000);
 }
-criterion_main!(tier2_subsystem_bloom_build);
+
+stress_main!();

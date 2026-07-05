@@ -7,139 +7,104 @@
 //! - Hash computation and containment checks
 //! - Single key lookups (hit/miss)
 
-#[path = "./criterion_config.rs"]
-mod criterion_config;
+#[path = "./stress_config.rs"]
+mod stress_config;
 
 use cntryl_midge::sst::bloom::writer::BloomFilterOps;
 use cntryl_midge::sst::bloom::BloomWriter;
 use cntryl_midge::Bytes;
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_config::criterion_config_for_tier1;
-use std::hint::black_box;
+use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
 const PROBE_BATCH_SIZE: usize = 256;
 
-/// Benchmark bloom filter containment check (hit vs miss)
-fn bench_bloom_maybe_contains(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_bloom_maybe_contains");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(PROBE_BATCH_SIZE as u64));
+cntryl_stress::stress_allocator!();
 
-    // Build filter once outside benchmark loop
-    let mut builder = BloomWriter::with_defaults(100);
-    let keys: Vec<Bytes> = (0..100)
+fn build_filter(expected_keys: usize) -> (cntryl_midge::sst::bloom::BloomReader, Vec<Bytes>) {
+    let mut builder = BloomWriter::with_defaults(expected_keys);
+    let keys: Vec<Bytes> = (0..expected_keys)
         .map(|i| Bytes::from(format!("key_{i:010}")))
         .collect();
     for key in &keys {
         builder.insert(key);
     }
-    let filter = builder.finish();
-
-    // Batch probes so timer noise does not dominate these sub-10ns operations.
-    let hit_key = keys[42].as_ref();
-    let miss_key = b"key_00001000";
-
-    group.bench_function("maybe_contains_hit", |b| {
-        b.iter(|| {
-            let mut matches = 0usize;
-            for _ in 0..PROBE_BATCH_SIZE {
-                let result = filter.contains(black_box(hit_key));
-                matches += usize::from(result.might_be_present());
-            }
-            black_box(matches)
-        });
-    });
-
-    group.bench_function("maybe_contains_miss", |b| {
-        b.iter(|| {
-            let mut misses = 0usize;
-            for _ in 0..PROBE_BATCH_SIZE {
-                let result = filter.contains(black_box(miss_key));
-                misses += usize::from(result.definitely_not_present());
-            }
-            black_box(misses)
-        });
-    });
-
-    group.finish();
+    (builder.finish(), keys)
 }
 
-/// Benchmark bloom filter batch lookups (realistic access pattern)
-fn bench_bloom_batch_lookups(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_bloom_batch_lookups");
-    group.measurement_time(std::time::Duration::from_millis(200));
-    group.sampling_mode(SamplingMode::Flat);
+#[stress_test(
+    tier = 1,
+    metadata(component = "bloom", scenario = "maybe_contains_hit")
+)]
+fn maybe_contains_hit(ctx: &mut StressContext) {
+    let (filter, keys) = build_filter(100);
+    let hit_key = keys[42].as_ref();
+    ctx.parameter("probe_batch_size", PROBE_BATCH_SIZE);
 
-    // Build a larger filter
-    let mut builder = BloomWriter::with_defaults(1000);
-    let keys: Vec<Bytes> = (0..1000)
-        .map(|i| Bytes::from(format!("key_{i:010}")))
-        .collect();
-    for key in &keys {
-        builder.insert(key);
-    }
-    let filter = builder.finish();
+    stress_config::measure_micro_batch(ctx, PROBE_BATCH_SIZE as u64, || {
+        let mut matches = 0usize;
+        for _ in 0..PROBE_BATCH_SIZE {
+            let result = filter.contains(black_box(hit_key));
+            matches += usize::from(result.might_be_present());
+        }
+        black_box(matches);
+    });
+}
 
-    // Precompute lookup keys (mix of hits and misses)
+#[stress_test(
+    tier = 1,
+    metadata(component = "bloom", scenario = "maybe_contains_miss")
+)]
+fn maybe_contains_miss(ctx: &mut StressContext) {
+    let (filter, _keys) = build_filter(100);
+    let miss_key = b"key_00001000";
+    ctx.parameter("probe_batch_size", PROBE_BATCH_SIZE);
+
+    stress_config::measure_micro_batch(ctx, PROBE_BATCH_SIZE as u64, || {
+        let mut misses = 0usize;
+        for _ in 0..PROBE_BATCH_SIZE {
+            let result = filter.contains(black_box(miss_key));
+            misses += usize::from(result.definitely_not_present());
+        }
+        black_box(misses);
+    });
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "bloom", scenario = "batch_mixed_lookup")
+)]
+fn batch_100_lookups_mixed(ctx: &mut StressContext) {
+    let (filter, keys) = build_filter(1000);
     let lookup_keys: Vec<(bool, Vec<u8>)> = (0..100)
         .map(|i| {
             if i % 2 == 0 {
-                (true, keys[i * 5].to_vec()) // hit
+                (true, keys[i * 5].to_vec())
             } else {
-                (false, format!("miss_{i:010}").into_bytes()) // miss
+                (false, format!("miss_{i:010}").into_bytes())
             }
         })
         .collect();
+    ctx.parameter("lookup_count", lookup_keys.len());
 
-    group.throughput(Throughput::Elements(100));
-
-    group.bench_function("batch_100_lookups_mixed", |b| {
-        b.iter(|| {
-            let mut count = 0u32;
-            for (_is_hit, key) in &lookup_keys {
-                if filter.contains(black_box(key)).might_be_present() {
-                    count += 1;
-                }
+    stress_config::measure_micro_batch(ctx, lookup_keys.len() as u64, || {
+        let mut count = 0u32;
+        for (_is_hit, key) in &lookup_keys {
+            if filter.contains(black_box(key)).might_be_present() {
+                count += 1;
             }
-            black_box(count)
-        });
+        }
+        black_box(count);
     });
-
-    group.finish();
 }
 
-/// Benchmark hash computation isolated (via contains on miss)
-fn bench_bloom_compute_hashes(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_bloom_compute_hashes");
-    group.measurement_time(std::time::Duration::from_millis(200));
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
-
-    let mut builder = BloomWriter::with_defaults(100);
-    let keys: Vec<Bytes> = (0..100)
-        .map(|i| Bytes::from(format!("key_{i:010}")))
-        .collect();
-    for key in &keys {
-        builder.insert(key);
-    }
-    let filter = builder.finish();
-
-    // Precompute miss key
+#[stress_test(tier = 1, metadata(component = "bloom", scenario = "hashes_via_miss"))]
+fn compute_hashes_via_miss(ctx: &mut StressContext) {
+    let (filter, _keys) = build_filter(100);
     let miss_key = b"key_00001000";
 
-    group.bench_function("compute_hashes_via_miss", |b| {
-        b.iter(|| {
-            let result = filter.contains(black_box(miss_key));
-            black_box(result.definitely_not_present())
-        });
+    ctx.measure_micro(|| {
+        let result = filter.contains(black_box(miss_key));
+        black_box(result.definitely_not_present())
     });
-
-    group.finish();
 }
 
-criterion_group! {
-    name = tier1_hotpath_bloom;
-    config = criterion_config_for_tier1();
-    targets = bench_bloom_maybe_contains, bench_bloom_batch_lookups, bench_bloom_compute_hashes
-}
-criterion_main!(tier1_hotpath_bloom);
+stress_main!();

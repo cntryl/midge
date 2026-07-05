@@ -18,7 +18,7 @@ mod stress_config;
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 #[allow(unused_imports)]
-use stress_config::BenchConfig;
+use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
 use cntryl_midge::{testkit::MidgeOptions, MidgeEngine};
 
@@ -26,6 +26,10 @@ const KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
 const DEFAULT_VALUE_SIZE: usize = 100;
 const TARGET_BATCH: usize = 1_000;
 const DEFAULT_COMPACTION_KEYS: usize = 1_000;
+const LOCAL_FLUSH_REPEATS: usize = 2048;
+const LOCAL_FLUSH_REPEAT_OPS: u64 = 2048;
+const CLOUD_FLUSH_REPEATS: usize = 128;
+const CLOUD_FLUSH_REPEAT_OPS: u64 = 128;
 
 fn precompute_kv(num_keys: usize, value_size: usize) -> (Vec<[u8; KEY_SIZE]>, Vec<Vec<u8>>) {
     cntryl_midge::testkit::stress::precompute_kv16_u64_be(num_keys, value_size, u8::MAX)
@@ -35,7 +39,14 @@ fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
     cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
 }
 
-fn run_flush_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize, value_size: usize) {
+fn run_flush_case(
+    ctx: &mut StressContext,
+    opts: MidgeOptions,
+    num_keys: usize,
+    value_size: usize,
+    flush_repeats: usize,
+    flush_repeat_ops: u64,
+) {
     let (keys, values) = precompute_kv(num_keys, value_size);
 
     let engine = setup_engine(opts);
@@ -60,10 +71,15 @@ fn run_flush_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize, 
     // Ensure durability before measurement
     engine.flush_cf(&cf).expect("setup flush");
 
-    ctx.set_elements(1_000); // expensive (disk I/O)
+    ctx.parameter("flush_repeats", flush_repeats);
 
-    // Measure ONLY one flush call
-    ctx.measure_ref(&engine, |e| e.flush_cf(&cf).expect("flush failed"));
+    // Measure ONLY flush calls. Keep the repeat count bounded; unbounded
+    // simulated-cloud flush loops can hit durable-capacity write stalls.
+    stress_config::measure_external(ctx, flush_repeat_ops, || {
+        for _ in 0..flush_repeats {
+            engine.flush_cf(&cf).expect("flush failed");
+        }
+    });
 
     drop(engine);
 }
@@ -80,16 +96,30 @@ fn run_flush_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize, 
 // Stress tests (explicit, one datapoint per test)
 // ---------------------------------------------------------------------------
 
-#[stress_test]
+#[stress_test(tier = 3)]
 fn tier3_compaction_flush_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_flush_case(ctx, opts, DEFAULT_COMPACTION_KEYS, DEFAULT_VALUE_SIZE);
+    run_flush_case(
+        ctx,
+        opts,
+        DEFAULT_COMPACTION_KEYS,
+        DEFAULT_VALUE_SIZE,
+        LOCAL_FLUSH_REPEATS,
+        LOCAL_FLUSH_REPEAT_OPS,
+    );
 }
 
-#[stress_test]
+#[stress_test(tier = 3)]
 fn tier3_compaction_flush_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_flush_case(ctx, opts, DEFAULT_COMPACTION_KEYS, DEFAULT_VALUE_SIZE);
+    run_flush_case(
+        ctx,
+        opts,
+        DEFAULT_COMPACTION_KEYS,
+        DEFAULT_VALUE_SIZE,
+        CLOUD_FLUSH_REPEATS,
+        CLOUD_FLUSH_REPEAT_OPS,
+    );
 }
 
 stress_main!();

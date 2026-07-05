@@ -25,7 +25,7 @@ mod stress_config;
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 #[allow(unused_imports)]
-use stress_config::BenchConfig;
+use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -103,7 +103,7 @@ fn measure_snapshot_bench_writers(
     num_ops: usize,
     num_keys: usize,
 ) {
-    ctx.measure_ref(engine, |_e| {
+    stress_config::measure_external(ctx, num_ops as u64, || {
         let mut handles = vec![];
 
         for writer_id in 0..num_writers {
@@ -161,7 +161,7 @@ fn tag_writer_p99(ctx: &mut StressContext, writer_samples: &Arc<Mutex<Vec<u64>>>
 /// - Compaction happening in background
 /// - Snapshot must not see partial/dirty updates
 /// - Writer latency should not increase catastrophically due to snapshot hold
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_mvcc_snapshot_isolation_under_concurrency_4threads(ctx: &mut StressContext) {
     const NUM_READERS: usize = 2;
     const NUM_WRITERS: usize = 2;
@@ -230,7 +230,7 @@ fn tier4_mvcc_snapshot_isolation_under_concurrency_4threads(ctx: &mut StressCont
 /// - Multiple writers continuously update different keys
 /// - Measure: Writer latency and compaction throughput
 /// Expected: Writers do NOT timeout or degrade catastrophically
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_mvcc_long_snapshot_fairness_10sec(ctx: &mut StressContext) {
     const LONG_SNAPSHOT_DURATION: Duration = Duration::from_secs(10);
     const NUM_WRITERS: usize = 4;
@@ -271,7 +271,7 @@ fn tier4_mvcc_long_snapshot_fairness_10sec(ctx: &mut StressContext) {
     };
 
     // Measure writer throughput under long-running snapshot
-    ctx.measure_ref(&engine, |_e| {
+    stress_config::measure_external(ctx, NUM_OPS as u64, || {
         let mut handles = vec![];
 
         for writer_id in 0..NUM_WRITERS {

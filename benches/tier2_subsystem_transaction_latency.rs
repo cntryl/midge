@@ -6,9 +6,6 @@
 //! This benchmark uses only public `Engine::begin_tx`, transaction `commit`,
 //! and runtime metrics. It does not call runtime internals directly.
 
-#[path = "./criterion_config.rs"]
-mod criterion_config;
-
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -21,15 +18,15 @@ use cntryl_midge::testkit::{
     opts_for_mode,
 };
 use cntryl_midge::{ColumnFamilyId, Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions};
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_config::criterion_config_for_tier2;
+use cntryl_stress::{stress_main, stress_test, StressContext};
 use hdrhistogram::Histogram;
 
 const COALESCING_CLIENTS: usize = 16;
-const COALESCING_TXNS_PER_CLIENT: usize = 32;
+const COALESCING_TXNS_PER_CLIENT: usize = 128;
 const COALESCING_VALUE_SIZE: usize = 64;
-const LATENCY_SEQUENTIAL_TXNS: usize = 256;
-const LATENCY_READ_ONLY_TXNS: usize = 256;
+const LATENCY_SEQUENTIAL_TXNS: usize = 1024;
+const LATENCY_READ_ONLY_TXNS: usize = 4096;
+const LATENCY_SAMPLE_REPEATS: usize = 16;
 const MAX_DIRECT_SUBMIT_FOLLOWER_WAIT_US: f64 = 1.0;
 const MIN_AVG_TXN_RECORDS_PER_APPEND: f64 = 7.0;
 
@@ -289,10 +286,6 @@ fn ns_to_us_ceil(ns: u64) -> u64 {
 fn logical_coalescing_txn_records() -> u64 {
     u64::try_from(COALESCING_CLIENTS * COALESCING_TXNS_PER_CLIENT)
         .expect("logical transaction count fits in u64")
-}
-
-fn latency_workload_records(clients: usize, txns_per_client: usize) -> u64 {
-    u64::try_from(clients * txns_per_client).expect("transaction count fits in u64")
 }
 
 fn make_latency_client_workloads(
@@ -644,128 +637,208 @@ fn open_local_engine_with_cf(cf_name: &str) -> (Arc<Engine>, ColumnFamilyId) {
     (engine, cf.id())
 }
 
-fn benchmark_transaction_latency_breakdown(c: &mut Criterion) {
+fn tag_transaction_latency_breakdown(
+    ctx: &mut StressContext,
+    breakdown: TransactionLatencyBreakdown,
+) {
+    ctx.parameter("workload", breakdown.kind.label());
+    ctx.parameter("clients", breakdown.clients);
+    ctx.parameter("transactions", breakdown.transactions);
+    ctx.parameter("begin_tx_us", format!("{:.2}", breakdown.begin_tx_us));
+    ctx.parameter("put_us", format!("{:.2}", breakdown.put_us));
+    ctx.parameter(
+        "commit_total_us",
+        format!("{:.2}", breakdown.commit_total_us),
+    );
+    ctx.parameter("commit_samples", breakdown.commit_samples);
+    ctx.parameter("commit_p50_us", breakdown.commit_p50_us);
+    ctx.parameter("commit_p95_us", breakdown.commit_p95_us);
+    ctx.parameter("commit_p99_us", breakdown.commit_p99_us);
+    ctx.parameter("commit_max_us", breakdown.commit_max_us);
+    ctx.parameter(
+        "submit_apply_transaction_us",
+        format!("{:.2}", breakdown.submit_apply_transaction_us),
+    );
+    ctx.parameter(
+        "write_group_leader_collect_us",
+        format!("{:.2}", breakdown.write_group_leader_collect_us),
+    );
+    ctx.parameter(
+        "write_group_runtime_apply_us",
+        format!("{:.2}", breakdown.write_group_runtime_apply_us),
+    );
+    ctx.parameter(
+        "write_group_follower_wait_us",
+        format!("{:.2}", breakdown.write_group_follower_wait_us),
+    );
+    ctx.parameter(
+        "submit_apply_other_us",
+        format!("{:.2}", breakdown.submit_apply_other_us),
+    );
+    ctx.parameter(
+        "durability_finalize_us",
+        format!("{:.2}", breakdown.durability_finalize_us),
+    );
+    ctx.parameter(
+        "unregister_snapshot_us",
+        format!("{:.2}", breakdown.unregister_snapshot_us),
+    );
+    ctx.parameter(
+        "runtime_submit_ack_non_wal_us",
+        format!("{:.2}", breakdown.runtime_submit_ack_non_wal_us),
+    );
+    ctx.parameter("logical_txn_records", breakdown.logical_txn_records);
+    ctx.parameter("physical_wal_appends", breakdown.physical_wal_appends);
+    ctx.parameter(
+        "avg_txn_records_per_append",
+        format!("{:.2}", breakdown.avg_txn_records_per_append),
+    );
+    ctx.parameter(
+        "avg_wal_append_us",
+        format!("{:.2}", breakdown.avg_wal_append_us),
+    );
+    ctx.parameter("dominant_phase", breakdown.dominant_phase());
+}
+
+fn tag_transaction_coalescing_signal(ctx: &mut StressContext, signal: TransactionCoalescingSignal) {
+    ctx.parameter("logical_txn_records", signal.logical_txn_records);
+    ctx.parameter("physical_wal_appends", signal.physical_wal_appends);
+    ctx.parameter(
+        "avg_txn_records_per_append",
+        format!("{:.2}", signal.avg_txn_records_per_append),
+    );
+    ctx.parameter(
+        "avg_wal_append_us",
+        format!("{:.2}", signal.avg_wal_append_us),
+    );
+}
+
+fn run_latency_breakdown_case(
+    ctx: &mut StressContext,
+    kind: LatencyWorkloadKind,
+    clients: usize,
+    txns_per_client: usize,
+    cf_name: &'static str,
+    key_prefix: &'static str,
+) {
     init_benchmark_telemetry().expect("initialize benchmark telemetry");
+    let (engine, cf_id) = open_local_engine_with_cf(cf_name);
+    let workloads = make_latency_client_workloads(clients, txns_per_client, key_prefix);
+    ctx.parameter("workload", kind.label());
+    ctx.parameter("clients", clients);
+    ctx.parameter("txns_per_client", txns_per_client);
+    ctx.parameter("sample_repeats", LATENCY_SAMPLE_REPEATS);
 
-    let mut group = c.benchmark_group("tier2_transaction_latency_breakdown");
-    group.sampling_mode(SamplingMode::Flat);
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
+    let mut observed = None;
+    let _completed = ctx.measure_counted(|| {
+        let mut completed = 0u64;
+        for _ in 0..LATENCY_SAMPLE_REPEATS {
+            let breakdown =
+                run_buffered_transaction_latency_breakdown(&engine, cf_id, kind, workloads.clone());
+            assert_transaction_latency_guardrails(breakdown);
+            report_transaction_latency_breakdown(breakdown);
+            completed = completed.saturating_add(breakdown.transactions);
+            observed = Some(breakdown);
+        }
+        completed
+    });
 
-    group.throughput(Throughput::Elements(latency_workload_records(
+    tag_transaction_latency_breakdown(ctx, observed.expect("latency breakdown recorded"));
+}
+
+#[stress_test(
+    tier = 2,
+    metadata(
+        component = "transaction_latency",
+        scenario = "sequential_buffered_single_op"
+    )
+)]
+fn sequential_buffered_single_op(ctx: &mut StressContext) {
+    run_latency_breakdown_case(
+        ctx,
+        LatencyWorkloadKind::SequentialBufferedSingleOp,
         1,
         LATENCY_SEQUENTIAL_TXNS,
-    )));
-    group.bench_function(
-        LatencyWorkloadKind::SequentialBufferedSingleOp.label(),
-        |b| {
-            b.iter_batched(
-                || {
-                    let (engine, cf_id) = open_local_engine_with_cf("latency_seq");
-                    let workloads =
-                        make_latency_client_workloads(1, LATENCY_SEQUENTIAL_TXNS, "latency_seq");
-                    (engine, cf_id, workloads)
-                },
-                |(engine, cf_id, workloads)| {
-                    let breakdown = run_buffered_transaction_latency_breakdown(
-                        &engine,
-                        cf_id,
-                        LatencyWorkloadKind::SequentialBufferedSingleOp,
-                        workloads,
-                    );
-                    assert_transaction_latency_guardrails(breakdown);
-                    report_transaction_latency_breakdown(breakdown);
-                    black_box(breakdown);
-                },
-                criterion::BatchSize::SmallInput,
-            );
-        },
+        "latency_seq",
+        "latency_seq",
     );
-
-    group.throughput(Throughput::Elements(logical_coalescing_txn_records()));
-    group.bench_function(
-        LatencyWorkloadKind::ConcurrentBufferedSingleOp.label(),
-        |b| {
-            b.iter_batched(
-                || {
-                    let (engine, cf_id) = open_local_engine_with_cf("latency_concurrent");
-                    let workloads = make_latency_client_workloads(
-                        COALESCING_CLIENTS,
-                        COALESCING_TXNS_PER_CLIENT,
-                        "latency_concurrent",
-                    );
-                    (engine, cf_id, workloads)
-                },
-                |(engine, cf_id, workloads)| {
-                    let breakdown = run_buffered_transaction_latency_breakdown(
-                        &engine,
-                        cf_id,
-                        LatencyWorkloadKind::ConcurrentBufferedSingleOp,
-                        workloads,
-                    );
-                    assert_transaction_latency_guardrails(breakdown);
-                    report_transaction_latency_breakdown(breakdown);
-                    black_box(breakdown);
-                },
-                criterion::BatchSize::SmallInput,
-            );
-        },
-    );
-
-    group.throughput(Throughput::Elements(
-        u64::try_from(LATENCY_READ_ONLY_TXNS).expect("read-only transaction count fits in u64"),
-    ));
-    group.bench_function(LatencyWorkloadKind::ReadOnlyBeginTx.label(), |b| {
-        b.iter_batched(
-            || open_local_engine_with_cf("latency_read_only"),
-            |(engine, cf_id)| {
-                let breakdown = run_read_only_begin_tx_latency_baseline(&engine, cf_id);
-                assert_transaction_latency_guardrails(breakdown);
-                report_transaction_latency_breakdown(breakdown);
-                black_box(breakdown);
-            },
-            criterion::BatchSize::SmallInput,
-        );
-    });
-
-    group.finish();
 }
 
-fn benchmark_transaction_coalescing_signal(c: &mut Criterion) {
+#[stress_test(
+    tier = 2,
+    metadata(
+        component = "transaction_latency",
+        scenario = "concurrent_buffered_single_op"
+    )
+)]
+fn concurrent_buffered_single_op(ctx: &mut StressContext) {
+    run_latency_breakdown_case(
+        ctx,
+        LatencyWorkloadKind::ConcurrentBufferedSingleOp,
+        COALESCING_CLIENTS,
+        COALESCING_TXNS_PER_CLIENT,
+        "latency_concurrent",
+        "latency_concurrent",
+    );
+}
+
+#[stress_test(
+    tier = 2,
+    metadata(component = "transaction_latency", scenario = "read_only_begin_tx")
+)]
+fn read_only_begin_tx(ctx: &mut StressContext) {
     init_benchmark_telemetry().expect("initialize benchmark telemetry");
+    let (engine, cf_id) = open_local_engine_with_cf("latency_read_only");
+    ctx.parameter("workload", LatencyWorkloadKind::ReadOnlyBeginTx.label());
+    ctx.parameter("transactions", LATENCY_READ_ONLY_TXNS);
+    ctx.parameter("sample_repeats", LATENCY_SAMPLE_REPEATS);
 
-    let mut group = c.benchmark_group("tier2_transaction_coalescing_signal");
-    group.sampling_mode(SamplingMode::Flat);
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.throughput(Throughput::Elements(logical_coalescing_txn_records()));
-
-    group.bench_function("buffered_concurrent_single_op_transactions", |b| {
-        b.iter_batched(
-            || {
-                let (engine, cf_id) = open_local_engine_with_cf("coalescing");
-                (engine, cf_id)
-            },
-            |(engine, cf_id)| {
-                let signal = run_transaction_coalescing_signal(&engine, cf_id);
-                assert_transaction_coalescing_guardrail(signal);
-                report_transaction_coalescing_signal(signal);
-                black_box((
-                    signal.physical_wal_appends,
-                    signal.avg_txn_records_per_append,
-                    signal.avg_wal_append_us,
-                ));
-            },
-            criterion::BatchSize::SmallInput,
-        );
+    let mut observed = None;
+    let _completed = ctx.measure_counted(|| {
+        let mut completed = 0u64;
+        for _ in 0..LATENCY_SAMPLE_REPEATS {
+            let breakdown = run_read_only_begin_tx_latency_baseline(&engine, cf_id);
+            assert_transaction_latency_guardrails(breakdown);
+            report_transaction_latency_breakdown(breakdown);
+            completed = completed.saturating_add(breakdown.transactions);
+            observed = Some(breakdown);
+        }
+        completed
     });
 
-    group.finish();
+    tag_transaction_latency_breakdown(ctx, observed.expect("read-only breakdown recorded"));
 }
 
-criterion_group! {
-    name = tier2_subsystem_transaction_latency;
-    config = criterion_config_for_tier2();
-    targets = benchmark_transaction_latency_breakdown, benchmark_transaction_coalescing_signal
+#[stress_test(
+    tier = 2,
+    metadata(component = "transaction_latency", scenario = "coalescing_signal")
+)]
+fn coalescing_signal(ctx: &mut StressContext) {
+    init_benchmark_telemetry().expect("initialize benchmark telemetry");
+    let (engine, cf_id) = open_local_engine_with_cf("coalescing");
+    ctx.parameter("clients", COALESCING_CLIENTS);
+    ctx.parameter("txns_per_client", COALESCING_TXNS_PER_CLIENT);
+    ctx.parameter("sample_repeats", LATENCY_SAMPLE_REPEATS);
+
+    let mut observed = None;
+    let _completed = ctx.measure_counted(|| {
+        let mut completed = 0u64;
+        for _ in 0..LATENCY_SAMPLE_REPEATS {
+            let signal = run_transaction_coalescing_signal(&engine, cf_id);
+            assert_transaction_coalescing_guardrail(signal);
+            report_transaction_coalescing_signal(signal);
+            black_box((
+                signal.physical_wal_appends,
+                signal.avg_txn_records_per_append,
+                signal.avg_wal_append_us,
+            ));
+            completed = completed.saturating_add(signal.logical_txn_records);
+            observed = Some(signal);
+        }
+        completed
+    });
+
+    tag_transaction_coalescing_signal(ctx, observed.expect("coalescing signal recorded"));
 }
-criterion_main!(tier2_subsystem_transaction_latency);
+
+stress_main!();

@@ -7,7 +7,7 @@ mod stress_config;
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 #[allow(unused_imports)]
-use stress_config::BenchConfig;
+use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -109,62 +109,66 @@ fn run_workload_a_with_distribution(
     let perf_start = ycsb::capture_runtime_perf_snapshot(engine.as_ref());
 
     // Phase 3: Measured (duration-based; multi-client)
-    let measured = ctx.measure_ref(engine.as_ref(), |_e| {
-        let zipf = match distribution {
-            KeyDistribution::Zipf { theta } => {
-                Some(Arc::new(ZipfianGenerator::new(initial_keys, theta)))
-            }
-        };
-        let write_opts = cntryl_midge::WriteOptions::buffered(); // Back to buffered for measured phase
-        ycsb::run_multi_client_for_duration_with_stats(
-            &engine,
-            clients,
-            MEASURED,
-            |client_id, stop| {
-                let zipf = zipf.clone();
-                move |e, cf, op_index| {
-                    let op_r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
-                    let cf_id = cf.id();
-
-                    let key_idx = match &zipf {
-                        Some(zipf) => {
-                            // Reserve draw=0 for op selection; use draw>=1 for key selection.
-                            let mut draw: u64 = 1;
-                            zipf.next_from_u64(&mut || {
-                                let r = ycsb::deterministic_u64(
-                                    WORKLOAD_SEED,
-                                    client_id,
-                                    op_index,
-                                    draw,
-                                );
-                                draw = draw.wrapping_add(1);
-                                r
-                            }) as u64
-                        }
-                        None => 0,
-                    };
-                    let k = ycsb::make_key(key_idx);
-
-                    // Deterministic, stochastic 50/50 mix (avoids perfect alternation).
-                    if (op_r & 1) == 0 {
-                        let tx = e
-                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                            .expect("measured begin");
-                        let _ = tx.get(&k[..]).expect("measured get");
-                    } else {
-                        let v = ycsb::make_value((op_index % 251) as u8);
-                        ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
-                            let mut tx = e
-                                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                                .expect("measured begin");
-                            tx.put(k.to_vec(), v.clone(), None).expect("measured put");
-                            tx.commit(write_opts)
-                        })
-                        .expect("measured commit");
-                    }
+    let measured = stress_config::measure_external_counted(ctx, || {
+        let measured = {
+            let zipf = match distribution {
+                KeyDistribution::Zipf { theta } => {
+                    Some(Arc::new(ZipfianGenerator::new(initial_keys, theta)))
                 }
-            },
-        )
+            };
+            let write_opts = cntryl_midge::WriteOptions::buffered(); // Back to buffered for measured phase
+            ycsb::run_multi_client_for_duration_with_stats(
+                &engine,
+                clients,
+                MEASURED,
+                |client_id, stop| {
+                    let zipf = zipf.clone();
+                    move |e, cf, op_index| {
+                        let op_r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
+                        let cf_id = cf.id();
+
+                        let key_idx = match &zipf {
+                            Some(zipf) => {
+                                // Reserve draw=0 for op selection; use draw>=1 for key selection.
+                                let mut draw: u64 = 1;
+                                zipf.next_from_u64(&mut || {
+                                    let r = ycsb::deterministic_u64(
+                                        WORKLOAD_SEED,
+                                        client_id,
+                                        op_index,
+                                        draw,
+                                    );
+                                    draw = draw.wrapping_add(1);
+                                    r
+                                }) as u64
+                            }
+                            None => 0,
+                        };
+                        let k = ycsb::make_key(key_idx);
+
+                        // Deterministic, stochastic 50/50 mix (avoids perfect alternation).
+                        if (op_r & 1) == 0 {
+                            let tx = e
+                                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                                .expect("measured begin");
+                            let _ = tx.get(&k[..]).expect("measured get");
+                        } else {
+                            let v = ycsb::make_value((op_index % 251) as u8);
+                            ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
+                                let mut tx = e
+                                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                                    .expect("measured begin");
+                                tx.put(k.to_vec(), v.clone(), None).expect("measured put");
+                                tx.commit(write_opts)
+                            })
+                            .expect("measured commit");
+                        }
+                    }
+                },
+            )
+        };
+        let operations = measured.operations;
+        (measured, operations)
     });
 
     ctx.set_elements(measured.operations);
@@ -189,73 +193,73 @@ fn run_workload_a(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     );
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_ycsb_a_memory_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
     run_workload_a(ctx, opts, "memory", CLIENTS_1);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_ycsb_a_memory_16_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
     run_workload_a(ctx, opts, "memory", CLIENTS_16);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_ycsb_a_memory_64_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
     run_workload_a(ctx, opts, "memory", CLIENTS_64);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_ycsb_a_local_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_workload_a(ctx, opts, "local", CLIENTS_1);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_ycsb_a_local_16_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_workload_a(ctx, opts, "local", CLIENTS_16);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_ycsb_a_local_64_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_workload_a(ctx, opts, "local", CLIENTS_64);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_ycsb_a_cloud_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_workload_a(ctx, opts, "cloud", CLIENTS_1);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_ycsb_a_cloud_16_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_workload_a(ctx, opts, "cloud", CLIENTS_16);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_ycsb_a_cloud_64_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_workload_a(ctx, opts, "cloud", CLIENTS_64);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_ycsb_a_hybrid_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("hybrid");
     run_workload_a(ctx, opts, "hybrid", CLIENTS_1);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_ycsb_a_hybrid_16_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("hybrid");
     run_workload_a(ctx, opts, "hybrid", CLIENTS_16);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_ycsb_a_hybrid_64_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("hybrid");
     run_workload_a(ctx, opts, "hybrid", CLIENTS_64);

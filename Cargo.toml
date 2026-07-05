@@ -101,9 +101,8 @@ libc = "0.2"
 winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 
 [dev-dependencies]
-criterion = "0.8"
 proptest = "1.11"
-cntryl-stress = "0.2.3"
+cntryl-stress = { git = "https://github.com/cntryl/stress", package = "cntryl-stress" }
 
 # =============================================================================
 # Features

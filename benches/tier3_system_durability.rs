@@ -11,7 +11,7 @@ mod stress_config;
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 #[allow(unused_imports)]
-use stress_config::BenchConfig;
+use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
 use cntryl_midge::testkit::MidgeOptions;
 
@@ -29,7 +29,8 @@ fn run_single_durability_call(ctx: &mut StressContext, opts: MidgeOptions) {
     let v = vec![1u8; VALUE_SIZE];
 
     // Measure ONLY one put/commit call
-    ctx.measure_ref(&engine, |e| {
+    let _ = ctx.measure_batch(1, || {
+        let e = &engine;
         let mut tx = e
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin");
@@ -40,14 +41,14 @@ fn run_single_durability_call(ctx: &mut StressContext, opts: MidgeOptions) {
     drop(engine);
 }
 
-#[stress_test]
+#[stress_test(tier = 3)]
 fn tier3_durability_sync_call_local(ctx: &mut StressContext) {
     let mut opts = cntryl_midge::testkit::opts_for_mode("local");
     opts.wal_sync = true;
     run_single_durability_call(ctx, opts);
 }
 
-#[stress_test]
+#[stress_test(tier = 3)]
 fn tier3_durability_async_call_local(ctx: &mut StressContext) {
     let mut opts = cntryl_midge::testkit::opts_for_mode("local");
     opts.wal_sync = false;

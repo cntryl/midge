@@ -1,27 +1,11 @@
 //! Tier 2 — Block Cache Subsystem Benchmarks
 //!
-//! **Target Runtime:** < 2 seconds total
-//! **Run Frequency:** CI / Pre-commit
-//!
-//! Covers block cache subsystem operations:
-//! - Eviction scanning and filling
-//! - Hit ratio calculations
-//! - Hot set rotation patterns
-//! - LRU eviction under pressure (1k, 10k entries)
-
-#[path = "./criterion_config.rs"]
-mod criterion_config;
-
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_config::criterion_config_for_tier2;
-use std::hint::black_box;
+//! Covers hot set rotation and LRU eviction under pressure.
 
 use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
 use cntryl_midge::Bytes;
+use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/// Pre-computed block keys to avoid allocation in benchmarks.
 struct PrecomputedKeys {
     keys: Vec<CacheKey>,
 }
@@ -40,7 +24,6 @@ impl PrecomputedKeys {
     }
 }
 
-/// Pre-allocated block data to avoid allocation in benchmarks.
 fn make_block_data_static() -> Bytes {
     Bytes::from_static(&[0xAB; 4096])
 }
@@ -49,83 +32,58 @@ fn create_cache(capacity: u64) -> BlockCache {
     BlockCache::new(capacity, 16, CachePolicyType::Lru)
 }
 
-// ─── Hot Set Rotation Benchmarks ─────────────────────────────────────────────
-
-/// Benchmark hot set rotation
-fn bench_hotset_rotation(c: &mut Criterion) {
+#[stress_test(
+    tier = 2,
+    metadata(component = "block_cache", scenario = "hotset_rotation")
+)]
+fn rotate_50_entries(ctx: &mut StressContext) {
     let keys = PrecomputedKeys::linear(100);
     let block = make_block_data_static();
+    ctx.parameter("entries", 50);
+    ctx.parameter("rounds", 10);
 
-    let mut group = c.benchmark_group("block_cache/hotset_rotation");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(500)); // 10 rounds * 50 ops
+    let _completed = ctx.measure_counted(|| {
+        let cache = create_cache(1024 * 1024);
+        for i in 0..50 {
+            cache.put(keys.get_linear(i), &block);
+        }
 
-    group.bench_function("rotate_50_entries", |b| {
-        b.iter_batched(
-            || {
-                let cache = create_cache(1024 * 1024); // 1MB cache
-                for i in 0..50 {
-                    cache.put(keys.get_linear(i), &block);
+        let mut completed = 0u64;
+        for round in 0..10 {
+            for i in 0..50 {
+                let key = keys.get_linear((i + round) % 75);
+                if cache.get(&key).is_none() {
+                    cache.put(key, &block);
                 }
-                cache
-            },
-            |cache| {
-                for round in 0..10 {
-                    for i in 0..50 {
-                        let key = keys.get_linear((i + round) % 75);
-                        if cache.get(&key).is_none() {
-                            cache.put(key, &block);
-                        }
-                    }
-                }
-                black_box(());
-            },
-            criterion::BatchSize::SmallInput,
-        );
+                completed += 1;
+            }
+        }
+        black_box(&cache);
+        completed
     });
-
-    group.finish();
 }
 
-// ─── LRU Eviction Benchmarks ─────────────────────────────────────────────────
-
-/// Benchmark LRU eviction with 10k entries
-fn bench_lru_eviction_10k(c: &mut Criterion) {
+#[stress_test(
+    tier = 2,
+    metadata(component = "block_cache", scenario = "lru_eviction_10k")
+)]
+fn evict_10k(ctx: &mut StressContext) {
     let keys = PrecomputedKeys::linear(10_500);
     let block = make_block_data_static();
+    ctx.parameter("initial_blocks", 500);
+    ctx.parameter("insert_blocks", 10_000);
 
-    let mut group = c.benchmark_group("block_cache/lru_eviction");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(10_000));
-
-    group.bench_function("evict_10k", |b| {
-        b.iter_batched(
-            || {
-                let cache = create_cache(2 * 1024 * 1024); // 2MB holds ~500 blocks
-                for i in 0..500 {
-                    cache.put(keys.get_linear(i), &block);
-                }
-                cache
-            },
-            |cache| {
-                for i in 500..10_500 {
-                    cache.put(keys.get_linear(i), &block);
-                }
-                black_box(cache)
-            },
-            criterion::BatchSize::SmallInput,
-        );
+    let _completed = ctx.measure_counted(|| {
+        let cache = create_cache(2 * 1024 * 1024);
+        for i in 0..500 {
+            cache.put(keys.get_linear(i), &block);
+        }
+        for i in 500..10_500 {
+            cache.put(keys.get_linear(i), &block);
+        }
+        black_box(cache);
+        10_000
     });
-
-    group.finish();
 }
 
-// ─── Criterion Setup ─────────────────────────────────────────────────────────
-criterion_group! {
-    name = tier2_subsystem_block_cache;
-    config = criterion_config_for_tier2();
-    targets =
-        bench_hotset_rotation,
-        bench_lru_eviction_10k
-}
-criterion_main!(tier2_subsystem_block_cache);
+stress_main!();

@@ -12,13 +12,8 @@
 //! - System metrics: Blocks read per query, cache hit rate, amplification factor
 //! - Realistic patterns: Zipfian key distribution, mixed get/scan operations
 
-#[path = "./criterion_config.rs"]
-mod criterion_config;
-
 use cntryl_midge::Bytes;
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_config::criterion_config_for_tier2;
-use std::hint::black_box;
+use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
 // ─── Configuration ──────────────────────────────────────────────────────
 
@@ -298,124 +293,101 @@ impl ZipfianDistribution {
 
 // ─── Benchmark Scenarios ────────────────────────────────────────────────────
 
-/// Benchmark: Point lookups with zipfian distribution (80/20 workload)
-fn bench_read_amp_point_lookups_zipfian(c: &mut Criterion) {
-    let mut group = c.benchmark_group("read_amplification_point_lookups_zipfian");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(LOOKUPS_PER_ITER as u64));
-
+#[stress_test(
+    tier = 2,
+    metadata(component = "read_amplification", scenario = "point_lookups_zipfian")
+)]
+fn point_lookups_zipfian(ctx: &mut StressContext) {
     let lookup_keys = precompute_zipf_keys(LOOKUPS_PER_ITER, 40_000, 1.5);
+    ctx.parameter("lookup_count", LOOKUPS_PER_ITER);
+    ctx.parameter("distribution", "zipfian");
 
-    group.bench_function("1000_gets_80_20_dist", |b| {
-        b.iter(|| {
-            let mut lsm = LsmSimulator::new_zipfian();
+    let _completed = ctx.measure_counted(|| {
+        let mut lsm = LsmSimulator::new_zipfian();
+        let mut total_blocks_read = 0u32;
+        let mut total_cache_hits = 0u32;
+        let mut total_found = 0u32;
 
-            let mut total_blocks_read = 0u32;
-            let mut total_cache_hits = 0u32;
-            let mut total_found = 0u32;
-
-            // Perform 1000 lookups
-            for key in &lookup_keys {
-                let (br, ch, found) = lsm.get(key);
-                total_blocks_read += br;
-                total_cache_hits += ch;
-                if found {
-                    total_found += 1;
-                }
+        for key in &lookup_keys {
+            let (br, ch, found) = lsm.get(key);
+            total_blocks_read += br;
+            total_cache_hits += ch;
+            if found {
+                total_found += 1;
             }
+        }
 
-            black_box((total_blocks_read, total_cache_hits, total_found))
-        });
+        black_box((total_blocks_read, total_cache_hits, total_found));
+        LOOKUPS_PER_ITER as u64
     });
-
-    group.finish();
 }
 
-/// Benchmark: Mixed get/scan workload (70% get, 30% scan)
-fn bench_read_amp_mixed_get_scan(c: &mut Criterion) {
-    let mut group = c.benchmark_group("read_amplification_mixed_get_scan");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(
-        (MIXED_GETS_PER_ITER + (MIXED_SCANS_PER_ITER * SCAN_WIDTH)) as u64,
-    )); // 1000 operations (gets + scan chunks)
-
+#[stress_test(
+    tier = 2,
+    metadata(component = "read_amplification", scenario = "mixed_get_scan")
+)]
+fn mixed_get_scan(ctx: &mut StressContext) {
     let get_keys = precompute_zipf_keys(MIXED_GETS_PER_ITER, 40_000, 1.5);
     let scan_starts = precompute_zipf_starts(MIXED_SCANS_PER_ITER, 40_000, 1.5);
+    let logical_ops = MIXED_GETS_PER_ITER + (MIXED_SCANS_PER_ITER * SCAN_WIDTH);
+    ctx.parameter("gets", MIXED_GETS_PER_ITER);
+    ctx.parameter("scans", MIXED_SCANS_PER_ITER);
+    ctx.parameter("scan_width", SCAN_WIDTH);
 
-    group.bench_function("700_gets_300_scan", |b| {
-        b.iter(|| {
-            let mut lsm = LsmSimulator::new_zipfian();
+    let _completed = ctx.measure_counted(|| {
+        let mut lsm = LsmSimulator::new_zipfian();
+        let mut total_blocks_read = 0u32;
+        let mut total_cache_hits = 0u32;
+        let mut total_found = 0u32;
 
-            let mut total_blocks_read = 0u32;
-            let mut total_cache_hits = 0u32;
-            let mut total_found = 0u32;
-
-            // 700 point lookups
-            for key in &get_keys {
-                let (br, ch, found) = lsm.get(key);
-                total_blocks_read += br;
-                total_cache_hits += ch;
-                if found {
-                    total_found += 1;
-                }
+        for key in &get_keys {
+            let (br, ch, found) = lsm.get(key);
+            total_blocks_read += br;
+            total_cache_hits += ch;
+            if found {
+                total_found += 1;
             }
+        }
 
-            // 300 scans (30 scans of 10 keys each)
-            for &start_key in &scan_starts {
-                let (br, ch, found) = lsm.scan(start_key, SCAN_WIDTH);
-                total_blocks_read += br;
-                total_cache_hits += ch;
-                total_found += found;
-            }
+        for &start_key in &scan_starts {
+            let (br, ch, found) = lsm.scan(start_key, SCAN_WIDTH);
+            total_blocks_read += br;
+            total_cache_hits += ch;
+            total_found += found;
+        }
 
-            black_box((total_blocks_read, total_cache_hits, total_found))
-        });
+        black_box((total_blocks_read, total_cache_hits, total_found));
+        logical_ops as u64
     });
-
-    group.finish();
 }
 
-/// Benchmark: Uniform distribution (baseline - no skew)
-fn bench_read_amp_uniform_distribution(c: &mut Criterion) {
-    let mut group = c.benchmark_group("read_amplification_uniform_distribution");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(LOOKUPS_PER_ITER as u64));
-
+#[stress_test(
+    tier = 2,
+    metadata(component = "read_amplification", scenario = "uniform_distribution")
+)]
+fn uniform_distribution(ctx: &mut StressContext) {
     let lookup_keys = precompute_uniform_keys(LOOKUPS_PER_ITER, 40_000);
+    ctx.parameter("lookup_count", LOOKUPS_PER_ITER);
+    ctx.parameter("distribution", "uniform");
 
-    group.bench_function("1000_uniform_gets", |b| {
-        b.iter(|| {
-            let mut lsm = LsmSimulator::new_zipfian();
+    let _completed = ctx.measure_counted(|| {
+        let mut lsm = LsmSimulator::new_zipfian();
+        let mut total_blocks_read = 0u32;
+        let mut total_cache_hits = 0u32;
+        let mut total_found = 0u32;
 
-            let mut total_blocks_read = 0u32;
-            let mut total_cache_hits = 0u32;
-            let mut total_found = 0u32;
-
-            // Perform 1000 lookups with uniform distribution
-            for key in &lookup_keys {
-                let (br, ch, found) = lsm.get(key);
-                total_blocks_read += br;
-                total_cache_hits += ch;
-                if found {
-                    total_found += 1;
-                }
+        for key in &lookup_keys {
+            let (br, ch, found) = lsm.get(key);
+            total_blocks_read += br;
+            total_cache_hits += ch;
+            if found {
+                total_found += 1;
             }
+        }
 
-            black_box((total_blocks_read, total_cache_hits, total_found))
-        });
+        black_box((total_blocks_read, total_cache_hits, total_found));
+        LOOKUPS_PER_ITER as u64
     });
-
-    group.finish();
 }
 
-// ─── Criterion Setup ────────────────────────────────────────────────────────
-
-criterion_group! {
-    name = tier2_subsystem_read_amplification;
-    config = criterion_config_for_tier2();
-    targets =
-        bench_read_amp_point_lookups_zipfian,
-        bench_read_amp_mixed_get_scan,
-        bench_read_amp_uniform_distribution
-}
-criterion_main!(tier2_subsystem_read_amplification);
+stress_main!();

@@ -1,30 +1,22 @@
-//! Tier 1 â€” Hot Path API Benchmarks
+//! Tier 1 — Hot Path API Benchmarks
 //!
-//! **Target Runtime:** < 1 second total
-//! **Run Frequency:** Every PR (CI gate)
-//!
-//! Covers critical API hot paths:
-//! - Batch writes (put/delete) - memtable operations only
-//! - Single put/get operations
-//!
-//! Note: Heavy I/O operations (flush, scan) are in tier2/tier3.
+//! Covers memory-only public API write and read hot paths.
 
-#[path = "./criterion_config.rs"]
-mod criterion_config;
+#[path = "./stress_config.rs"]
+mod stress_config;
 
 use cntryl_midge::Bytes;
 use cntryl_midge::{
     testkit::{MidgeOptions, StorageMode},
     MidgeEngine,
 };
-use criterion::{
-    criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
-};
-use criterion_config::criterion_config_for_tier1;
-use std::hint::black_box;
+use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SINGLE_GET_BATCH_SIZE: usize = 256;
 const SINGLE_PUT_BATCH_SIZE: usize = 32;
+
+cntryl_stress::stress_allocator!();
 
 fn make_fixed_kv(size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
     let mut keys = Vec::with_capacity(size);
@@ -40,24 +32,15 @@ fn make_fixed_kv(size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
     (keys, vals)
 }
 
-fn setup_db(name: &str) -> MidgeEngine {
-    let _ = name;
-
-    // Tier 1 benches must be memtable-only: avoid filesystem/WAL I/O and avoid
-    // background work triggered by frequent memtable flushes.
+fn setup_db() -> MidgeEngine {
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
         wal_sync: false,
         wal_batch_config: None,
-        // Keep the memtable large enough that we do not trigger flush/compaction
-        // during the measurement window.
-        memtable_size: 1024 * 1024 * 1024, // 1 GiB
+        memtable_size: 1024 * 1024 * 1024,
         compression: false,
         enable_compaction: false,
-        // Explicit large budget to prevent WriteStall in CI where Auto budget
-        // (based on available RAM) can be too small for thousands of iterations
-        // with compaction disabled.
-        memory_budget: Some(4 * 1024 * 1024 * 1024), // 4 GiB
+        memory_budget: Some(4 * 1024 * 1024 * 1024),
         cloud_runtime_policy_overrides: None,
         simulated_cloud_overrides: None,
     };
@@ -65,69 +48,49 @@ fn setup_db(name: &str) -> MidgeEngine {
     MidgeEngine::open_with_options(&opts).unwrap()
 }
 
-/// Benchmark batch put operations (hot path for write throughput)
-///
-/// Measures throughput of multiple puts in a single transaction + commit.
-/// This is the canonical way to batch writes in Midge.
-fn bench_batch_put(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_batch_put");
-    group.sampling_mode(SamplingMode::Flat);
-
-    // Setup database once, reuse across iterations.
-    let engine = setup_db("batch_put");
+fn run_batch_put(ctx: &mut StressContext, batch_size: usize) {
+    let engine = setup_db();
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
-
-    // Reuse WriteOptions across iterations (allowed optimization)
     let write_opts = cntryl_midge::WriteOptions::buffered();
+    let (keys, vals) = make_fixed_kv(batch_size);
+    ctx.parameter("batch_size", batch_size);
+    ctx.parameter("storage_profile", "memory");
 
-    for &batch_size in &[100, 1_000] {
-        // Precompute keys/values ONCE (outside measurement)
-        let (keys, vals) = make_fixed_kv(batch_size);
+    stress_config::measure_micro_batch(ctx, batch_size as u64, || {
+        let mut tx = engine
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        for i in 0..batch_size {
+            tx.put(keys[i].to_vec(), vals[i].to_vec(), None).unwrap();
+        }
+        tx.commit(write_opts).unwrap();
+        black_box(());
+    });
 
-        group.throughput(Throughput::Elements(batch_size as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(batch_size),
-            &batch_size,
-            |b, &size| {
-                b.iter(|| {
-                    // Measure: begin transaction, add all puts, commit
-                    let mut tx = engine
-                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                        .unwrap();
-                    for i in 0..size {
-                        tx.put(keys[i].to_vec(), vals[i].to_vec(), None).unwrap();
-                    }
-                    tx.commit(write_opts).unwrap();
-                    black_box(());
-                });
-            },
-        );
-    }
-
-    // CRITICAL: Flush memtable to prevent unbounded version-chain growth
     let _ = engine.flush_cf(&cf);
-
-    group.finish();
 }
 
-/// Benchmark single get operations (hot path for reads)
-///
-/// This benchmarks reads from the memtable (in-memory), which is the fastest
-/// read path. SST reads are benchmarked separately in tier2.
-fn bench_single_get(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_single_get");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(SINGLE_GET_BATCH_SIZE as u64));
+#[stress_test(tier = 1, metadata(component = "api", scenario = "batch_put_100"))]
+fn batch_put_100(ctx: &mut StressContext) {
+    run_batch_put(ctx, 100);
+}
 
-    let engine = setup_db("single_get");
+#[stress_test(tier = 1, metadata(component = "api", scenario = "batch_put_1000"))]
+fn batch_put_1000(ctx: &mut StressContext) {
+    run_batch_put(ctx, 1_000);
+}
+
+fn setup_get_fixture() -> (
+    MidgeEngine,
+    cntryl_midge::ColumnFamilyId,
+    Vec<Bytes>,
+    Vec<Bytes>,
+) {
+    let engine = setup_db();
     let cf = engine.create_column_family("cf1").unwrap();
-
-    // Precompute keys and values
     let num_keys = 1_000;
     let (keys, vals) = make_fixed_kv(num_keys);
-
-    // Pre-populate with data (NO flush - keep in memtable for hot path)
     for i in 0..num_keys {
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -135,30 +98,38 @@ fn bench_single_get(c: &mut Criterion) {
         tx.put(keys[i].to_vec(), vals[i].to_vec(), None).unwrap();
         tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
     }
-    // Note: intentionally NOT flushing to keep data in memtable
+    (engine, cf.id(), keys, vals)
+}
 
-    // Hit rate benchmark - cycle through keys (all in memtable)
-    let mut counter = 0;
-    let cf_id = cf.id();
-    group.bench_function("single_get_hit_memtable", |b| {
-        b.iter(|| {
-            let mut hits = 0usize;
-            for _ in 0..SINGLE_GET_BATCH_SIZE {
-                let idx = counter % num_keys;
-                counter += 1;
-                let tx = engine
-                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                    .expect("begin");
-                if tx.get(black_box(&keys[idx])).unwrap().is_some() {
-                    hits += 1;
-                }
+#[stress_test(
+    tier = 1,
+    metadata(component = "api", scenario = "single_get_hit_memtable")
+)]
+fn single_get_hit_memtable(ctx: &mut StressContext) {
+    let (engine, cf_id, keys, _vals) = setup_get_fixture();
+    let counter = AtomicUsize::new(0);
+    ctx.parameter("batch_size", SINGLE_GET_BATCH_SIZE);
+    ctx.parameter("key_count", keys.len());
+
+    stress_config::measure_micro_batch(ctx, SINGLE_GET_BATCH_SIZE as u64, || {
+        let mut hits = 0usize;
+        for _ in 0..SINGLE_GET_BATCH_SIZE {
+            let idx = counter.fetch_add(1, Ordering::Relaxed) % keys.len();
+            let tx = engine
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin");
+            if tx.get(black_box(&keys[idx])).unwrap().is_some() {
+                hits += 1;
             }
-            black_box(hits)
-        });
+        }
+        black_box(hits);
     });
+}
 
-    // Miss rate benchmark - use keys not in the populated set
-    // Pre-generate miss keys to avoid allocation in hot path
+#[stress_test(tier = 1, metadata(component = "api", scenario = "single_get_miss"))]
+fn single_get_miss(ctx: &mut StressContext) {
+    let (engine, cf_id, keys, _vals) = setup_get_fixture();
+    let num_keys = keys.len();
     let miss_keys: Vec<Bytes> = (0..num_keys)
         .map(|i| {
             let mut key = [0u8; 16];
@@ -166,73 +137,48 @@ fn bench_single_get(c: &mut Criterion) {
             Bytes::copy_from_slice(&key)
         })
         .collect();
+    let counter = AtomicUsize::new(0);
+    ctx.parameter("batch_size", SINGLE_GET_BATCH_SIZE);
+    ctx.parameter("key_count", num_keys);
 
-    let mut miss_counter = 0;
-    group.bench_function("single_get_miss", |b| {
-        b.iter(|| {
-            let mut misses = 0usize;
-            for _ in 0..SINGLE_GET_BATCH_SIZE {
-                let idx = miss_counter % num_keys;
-                miss_counter += 1;
-                let tx = engine
-                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                    .expect("begin");
-                if tx.get(black_box(&miss_keys[idx])).unwrap().is_none() {
-                    misses += 1;
-                }
+    stress_config::measure_micro_batch(ctx, SINGLE_GET_BATCH_SIZE as u64, || {
+        let mut misses = 0usize;
+        for _ in 0..SINGLE_GET_BATCH_SIZE {
+            let idx = counter.fetch_add(1, Ordering::Relaxed) % num_keys;
+            let tx = engine
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin");
+            if tx.get(black_box(&miss_keys[idx])).unwrap().is_none() {
+                misses += 1;
             }
-            black_box(misses)
-        });
+        }
+        black_box(misses);
     });
-
-    // CRITICAL: Flush memtable to prevent unbounded version-chain growth
-    let _ = engine.flush_cf(&cf);
-
-    group.finish();
 }
 
-/// Benchmark single put operations (baseline for comparison)
-fn bench_single_put(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_single_put");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(SINGLE_PUT_BATCH_SIZE as u64));
-
-    // The write workload itself is what we want to measure, not the slowdown
-    // from version chains growing across the entire Criterion run.
+#[stress_test(tier = 1, metadata(component = "api", scenario = "single_put"))]
+fn single_put(ctx: &mut StressContext) {
+    let engine = setup_db();
+    let cf = engine.create_column_family("cf1").unwrap();
+    let cf_id = cf.id();
     let num_ops = 10_000;
     let (keys, vals) = make_fixed_kv(num_ops);
-    let mut counter = 0;
+    let counter = AtomicUsize::new(0);
+    ctx.parameter("batch_size", SINGLE_PUT_BATCH_SIZE);
+    ctx.parameter("key_count", num_ops);
 
-    group.bench_function("single_put", |b| {
-        b.iter_batched(
-            || {
-                let engine = setup_db("single_put");
-                let cf = engine.create_column_family("cf1").unwrap();
-                (engine, cf.id())
-            },
-            |(engine, cf_id)| {
-                for _ in 0..SINGLE_PUT_BATCH_SIZE {
-                    let idx = counter % num_ops;
-                    counter += 1;
-                    let mut tx = engine
-                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                        .expect("begin");
-                    tx.put(keys[idx].to_vec(), vals[idx].to_vec(), None)
-                        .unwrap();
-                    tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
-                }
-                black_box(counter);
-            },
-            BatchSize::SmallInput,
-        );
+    stress_config::measure_micro_batch(ctx, SINGLE_PUT_BATCH_SIZE as u64, || {
+        for _ in 0..SINGLE_PUT_BATCH_SIZE {
+            let idx = counter.fetch_add(1, Ordering::Relaxed) % num_ops;
+            let mut tx = engine
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin");
+            tx.put(keys[idx].to_vec(), vals[idx].to_vec(), None)
+                .unwrap();
+            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        }
+        black_box(counter.load(Ordering::Relaxed));
     });
-
-    group.finish();
 }
 
-criterion_group! {
-    name = tier1_hotpath_api;
-    config = criterion_config_for_tier1();
-    targets = bench_batch_put, bench_single_get, bench_single_put
-}
-criterion_main!(tier1_hotpath_api);
+stress_main!();

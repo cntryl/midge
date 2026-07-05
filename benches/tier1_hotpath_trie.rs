@@ -1,175 +1,144 @@
 //! Tier 1 — Trie Index Hot Path Benchmarks
 //!
-//! **Target Runtime:** < 1 second total
-//! **Run Frequency:** Every PR (CI gate)
-//!
-//! Covers trie index hot paths:
-//! - Exact key lookup (`find_block`)
-//! - Prefix range lookup (`find_prefix_range`)
-//! - Hit/miss scenarios at different trie depths
+//! Covers exact key lookup, prefix range lookup, and key-shape sensitivity.
 
-#[path = "./criterion_config.rs"]
-mod criterion_config;
+#[path = "./stress_config.rs"]
+mod stress_config;
 
 use cntryl_midge::sst::trie::{TrieBuilder, TrieReader};
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_config::criterion_config_for_tier1;
-use std::hint::black_box;
+use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
 const TRIE_PREFIX_BATCH_SIZE: usize = 256;
 
-/// Benchmark trie exact key lookup (hot path for point reads)
-fn bench_trie_find_block(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_trie_find_block");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
+cntryl_stress::stress_allocator!();
 
-    // Build trie with 100 keys (simulates small SST)
+fn build_profile_trie() -> Vec<u8> {
     let mut builder = TrieBuilder::new();
     for i in 0_u32..100 {
-        // Use zero-padded format to ensure lexicographic order matches numeric order
         let key = format!("user:{i:03}:profile");
         builder.add_key(key.as_bytes(), i).unwrap();
     }
-    let encoded = builder.finish();
-    let reader = TrieReader::new(&encoded).unwrap();
-
-    // Precompute keys for different scenarios
-    let key_hit = b"user:050:profile"; // Exists in trie
-    let key_miss = b"user:999:profile"; // Doesn't exist
-    let key_partial = b"user:050:prof"; // Partial match
-
-    group.bench_function("find_hit", |b| {
-        b.iter(|| {
-            let block_id = reader.find_block(black_box(key_hit));
-            black_box(block_id);
-        });
-    });
-
-    group.bench_function("find_miss", |b| {
-        b.iter(|| {
-            let block_id = reader.find_block(black_box(key_miss));
-            black_box(block_id);
-        });
-    });
-
-    group.bench_function("find_partial_match", |b| {
-        b.iter(|| {
-            let block_id = reader.find_block(black_box(key_partial));
-            black_box(block_id);
-        });
-    });
-
-    group.finish();
+    builder.finish()
 }
 
-/// Benchmark trie prefix range lookup
-fn bench_trie_prefix_range(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_trie_prefix_range");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(TRIE_PREFIX_BATCH_SIZE as u64));
+fn run_find_block(ctx: &mut StressContext, scenario: &'static str, key: &'static [u8]) {
+    let encoded = build_profile_trie();
+    let reader = TrieReader::new(&encoded).unwrap();
+    ctx.parameter("scenario", scenario);
 
-    // Build trie with hierarchical keys (use zero-padded IDs for lexicographic order)
+    ctx.measure_micro(|| {
+        let block_id = reader.find_block(black_box(key));
+        black_box(block_id);
+    });
+}
+
+#[stress_test(tier = 1, metadata(component = "trie", scenario = "find_hit"))]
+fn find_hit(ctx: &mut StressContext) {
+    run_find_block(ctx, "find_hit", b"user:050:profile");
+}
+
+#[stress_test(tier = 1, metadata(component = "trie", scenario = "find_miss"))]
+fn find_miss(ctx: &mut StressContext) {
+    run_find_block(ctx, "find_miss", b"user:999:profile");
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "trie", scenario = "find_partial_match")
+)]
+fn find_partial_match(ctx: &mut StressContext) {
+    run_find_block(ctx, "find_partial_match", b"user:050:prof");
+}
+
+fn build_hierarchical_trie() -> Vec<u8> {
     let mut builder = TrieBuilder::new();
     for user_id in 0_u32..10 {
         for resource in &["prefs", "profile", "settings"] {
-            // Sorted order: prefs < profile < settings
             let key = format!("user:{user_id:02}:{resource}");
             builder.add_key(key.as_bytes(), user_id).unwrap();
         }
     }
-    let encoded = builder.finish();
-    let reader = TrieReader::new(&encoded).unwrap();
-
-    // Precompute prefixes
-    let prefix_single_user = b"user:05:"; // Should match 3 keys
-    let prefix_all_users = b"user:"; // Should match many keys
-    let prefix_no_match = b"admin:"; // No matches
-
-    group.bench_function("prefix_single_user", |b| {
-        b.iter(|| {
-            let mut total = 0usize;
-            for _ in 0..TRIE_PREFIX_BATCH_SIZE {
-                let blocks = reader.find_prefix_range(black_box(prefix_single_user));
-                total = total.wrapping_add(blocks.len());
-            }
-            black_box(total);
-        });
-    });
-
-    group.bench_function("prefix_all_users", |b| {
-        b.iter(|| {
-            let mut total = 0usize;
-            for _ in 0..TRIE_PREFIX_BATCH_SIZE {
-                let blocks = reader.find_prefix_range(black_box(prefix_all_users));
-                total = total.wrapping_add(blocks.len());
-            }
-            black_box(total);
-        });
-    });
-
-    group.bench_function("prefix_no_match", |b| {
-        b.iter(|| {
-            let mut misses = 0usize;
-            for _ in 0..TRIE_PREFIX_BATCH_SIZE {
-                let blocks = reader.find_prefix_range(black_box(prefix_no_match));
-                misses += usize::from(blocks.is_empty());
-            }
-            black_box(misses);
-        });
-    });
-
-    group.finish();
+    builder.finish()
 }
 
-/// Benchmark trie with different key patterns
-fn bench_trie_key_patterns(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_trie_key_patterns");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
+fn run_prefix_range(ctx: &mut StressContext, scenario: &'static str, prefix: &'static [u8]) {
+    let encoded = build_hierarchical_trie();
+    let reader = TrieReader::new(&encoded).unwrap();
+    ctx.parameter("scenario", scenario);
+    ctx.parameter("prefix_batch_size", TRIE_PREFIX_BATCH_SIZE);
 
-    // Short keys with high branching (use zero-padded for lexicographic order)
-    let mut builder_short = TrieBuilder::new();
+    stress_config::measure_micro_batch(ctx, TRIE_PREFIX_BATCH_SIZE as u64, || {
+        let mut total = 0usize;
+        for _ in 0..TRIE_PREFIX_BATCH_SIZE {
+            let blocks = reader.find_prefix_range(black_box(prefix));
+            total = total.wrapping_add(blocks.len());
+        }
+        black_box(total);
+    });
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "trie", scenario = "prefix_single_user")
+)]
+fn prefix_single_user(ctx: &mut StressContext) {
+    run_prefix_range(ctx, "prefix_single_user", b"user:05:");
+}
+
+#[stress_test(tier = 1, metadata(component = "trie", scenario = "prefix_all_users"))]
+fn prefix_all_users(ctx: &mut StressContext) {
+    run_prefix_range(ctx, "prefix_all_users", b"user:");
+}
+
+#[stress_test(tier = 1, metadata(component = "trie", scenario = "prefix_no_match"))]
+fn prefix_no_match(ctx: &mut StressContext) {
+    run_prefix_range(ctx, "prefix_no_match", b"admin:");
+}
+
+fn build_short_key_trie() -> Vec<u8> {
+    let mut builder = TrieBuilder::new();
     for i in 0_u32..100 {
         let key = format!("k{i:03}");
-        builder_short.add_key(key.as_bytes(), i).unwrap();
+        builder.add_key(key.as_bytes(), i).unwrap();
     }
-    let encoded_short = builder_short.finish();
-    let reader_short = TrieReader::new(&encoded_short).unwrap();
+    builder.finish()
+}
 
-    // Long keys with shared prefix
-    let mut builder_long = TrieBuilder::new();
+fn build_long_key_trie() -> Vec<u8> {
+    let mut builder = TrieBuilder::new();
     for i in 0_u32..100 {
         let key = format!("very_long_shared_prefix_key_{i:010}");
-        builder_long.add_key(key.as_bytes(), i).unwrap();
+        builder.add_key(key.as_bytes(), i).unwrap();
     }
-    let encoded_long = builder_long.finish();
-    let reader_long = TrieReader::new(&encoded_long).unwrap();
-
-    group.bench_function("short_keys_high_branch", |b| {
-        b.iter(|| {
-            let block_id = reader_short.find_block(black_box(b"k050"));
-            black_box(block_id);
-        });
-    });
-
-    group.bench_function("long_keys_shared_prefix", |b| {
-        b.iter(|| {
-            let block_id =
-                reader_long.find_block(black_box(b"very_long_shared_prefix_key_0000000050"));
-            black_box(block_id);
-        });
-    });
-
-    group.finish();
+    builder.finish()
 }
 
-criterion_group! {
-    name = tier1_hotpath_trie;
-    config = criterion_config_for_tier1();
-    targets =
-        bench_trie_find_block,
-        bench_trie_prefix_range,
-        bench_trie_key_patterns
+#[stress_test(
+    tier = 1,
+    metadata(component = "trie", scenario = "short_keys_high_branch")
+)]
+fn short_keys_high_branch(ctx: &mut StressContext) {
+    let encoded = build_short_key_trie();
+    let reader = TrieReader::new(&encoded).unwrap();
+
+    ctx.measure_micro(|| {
+        let block_id = reader.find_block(black_box(b"k050"));
+        black_box(block_id);
+    });
 }
-criterion_main!(tier1_hotpath_trie);
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "trie", scenario = "long_keys_shared_prefix")
+)]
+fn long_keys_shared_prefix(ctx: &mut StressContext) {
+    let encoded = build_long_key_trie();
+    let reader = TrieReader::new(&encoded).unwrap();
+
+    ctx.measure_micro(|| {
+        let block_id = reader.find_block(black_box(b"very_long_shared_prefix_key_0000000050"));
+        black_box(block_id);
+    });
+}
+
+stress_main!();

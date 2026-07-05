@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 #[allow(unused_imports)]
-use stress_config::BenchConfig;
+use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
 use cntryl_midge::testkit::{ycsb, MidgeOptions};
 use cntryl_midge::WriteOptions;
@@ -195,8 +195,8 @@ fn run_durability_puts_case(
     let cf_id = cf.id();
     let perf_start = ycsb::capture_runtime_perf_snapshot(&engine);
 
-    let latency = ctx.measure_ref(&engine, |e| {
-        run_commit_latency_workload(e, cf_id, num_ops, write_opts)
+    let latency = stress_config::measure_external(ctx, num_ops as u64, || {
+        run_commit_latency_workload(&engine, cf_id, num_ops, write_opts)
     });
 
     let stats = CommitLatencyStats::from_histogram(&latency);
@@ -219,7 +219,7 @@ fn run_durability_puts_case(
     drop(engine);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_durability_async_cloud_1000(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     let local_buffered_p99_us = measure_unreported_local_buffered_p99(1_000);
@@ -235,7 +235,7 @@ fn tier4_durability_async_cloud_1000(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_durability_sync_seal_cloud_250(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_durability_puts_case(
@@ -248,7 +248,7 @@ fn tier4_durability_sync_seal_cloud_250(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_durability_cloud_strict_100(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_durability_puts_case(

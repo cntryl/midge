@@ -13,7 +13,7 @@ mod stress_config;
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 #[allow(unused_imports)]
-use stress_config::BenchConfig;
+use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
 use cntryl_midge::{testkit::MidgeOptions, Key, MidgeEngine, Query};
 const VALUE_SIZE: usize = 64; // Irrelevant to measured primitive; used only in setup
@@ -57,7 +57,7 @@ fn run_scan_query_case(
         .expect("begin");
 
     // Measure ONLY iterator construction and first advance
-    ctx.measure(|| {
+    let _ = ctx.measure_batch(1, || {
         let mut it = tx.scan(query).expect("scan failed");
         let _ = it.next();
     });
@@ -65,7 +65,7 @@ fn run_scan_query_case(
     drop(engine);
 }
 
-#[stress_test]
+#[stress_test(tier = 3)]
 fn tier3_scan_seek_memtable_only_mem(ctx: &mut StressContext) {
     ctx.set_elements(5_000);
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
@@ -83,7 +83,7 @@ fn tier3_scan_seek_memtable_only_mem(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test]
+#[stress_test(tier = 3)]
 fn tier3_scan_seek_l0_only_local(ctx: &mut StressContext) {
     ctx.set_elements(5_000);
     let opts = cntryl_midge::testkit::opts_for_mode("local");
@@ -103,7 +103,7 @@ fn tier3_scan_seek_l0_only_local(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test]
+#[stress_test(tier = 3)]
 fn tier3_scan_seek_l0_only_cloud(ctx: &mut StressContext) {
     ctx.set_elements(5_000);
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
@@ -123,7 +123,7 @@ fn tier3_scan_seek_l0_only_cloud(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test]
+#[stress_test(tier = 3)]
 fn tier3_scan_seek_multi_level_local(ctx: &mut StressContext) {
     ctx.set_elements(5_000);
     let opts = cntryl_midge::testkit::opts_for_mode("local");
@@ -149,7 +149,7 @@ fn tier3_scan_seek_multi_level_local(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test]
+#[stress_test(tier = 3)]
 fn tier3_scan_seek_multi_level_cloud(ctx: &mut StressContext) {
     ctx.set_elements(5_000);
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
@@ -174,7 +174,7 @@ fn tier3_scan_seek_multi_level_cloud(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test]
+#[stress_test(tier = 3)]
 fn tier3_scan_seek_after_compaction_local(ctx: &mut StressContext) {
     ctx.set_elements(5_000);
     let opts = cntryl_midge::testkit::opts_for_mode("local");
@@ -197,7 +197,7 @@ fn tier3_scan_seek_after_compaction_local(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test]
+#[stress_test(tier = 3)]
 fn tier3_scan_seek_after_compaction_cloud(ctx: &mut StressContext) {
     ctx.set_elements(5_000);
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");

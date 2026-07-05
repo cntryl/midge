@@ -17,7 +17,7 @@ mod stress_config;
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 #[allow(unused_imports)]
-use stress_config::BenchConfig;
+use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
 use cntryl_midge::{testkit::MidgeOptions, MidgeEngine};
 
@@ -61,7 +61,7 @@ fn run_reopen_after_flush_case(ctx: &mut StressContext, opts: &MidgeOptions) {
     // Measure reopen latency under flushed manifest state
     ctx.set_elements(100);
 
-    ctx.measure(|| {
+    stress_config::measure_external(ctx, 100, || {
         let engine = setup_engine(opts.clone());
         drop(engine);
     });
@@ -83,31 +83,31 @@ fn run_reopen_after_compaction_case(ctx: &mut StressContext, opts: &MidgeOptions
     // Measure reopen latency under compacted multi-level state
     ctx.set_elements(100);
 
-    ctx.measure(|| {
+    stress_config::measure_external(ctx, 100, || {
         let engine = setup_engine(opts.clone());
         drop(engine);
     });
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_recovery_reopen_after_flush_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_reopen_after_flush_case(ctx, &opts);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_recovery_reopen_after_flush_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_reopen_after_flush_case(ctx, &opts);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_recovery_reopen_after_compaction_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_reopen_after_compaction_case(ctx, &opts);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_recovery_reopen_after_compaction_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_reopen_after_compaction_case(ctx, &opts);

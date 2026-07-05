@@ -8,14 +8,11 @@
 //! - decode single SST entry
 //! - roundtrip encode→decode
 
-#[path = "./criterion_config.rs"]
-mod criterion_config;
-
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_config::criterion_config_for_tier1;
+use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
 use cntryl_midge::sst::encoding::{decode, encode, EntryType};
-use std::hint::black_box;
+
+cntryl_stress::stress_allocator!();
 
 // ---------------------------------------------------------------------------
 // Shared prefix helper (allocation-free)
@@ -27,11 +24,11 @@ fn shared_prefix_len(a: &[u8], b: &[u8]) -> usize {
 // ---------------------------------------------------------------------------
 // HOTPATH 1: Encode single entry
 // ---------------------------------------------------------------------------
-fn bench_encode(c: &mut Criterion) {
-    let mut g = c.benchmark_group("hotpath_sst_encode");
-    g.sampling_mode(SamplingMode::Flat);
-    g.throughput(Throughput::Elements(1));
-
+#[stress_test(
+    tier = 1,
+    metadata(component = "sst_encoding", scenario = "encode_small")
+)]
+fn encode_small(ctx: &mut StressContext) {
     let prev = b"user:1000:settings";
     let key = b"user:1000:profile";
     let shared_len = shared_prefix_len(prev, key);
@@ -40,23 +37,19 @@ fn bench_encode(c: &mut Criterion) {
 
     let value = b"value_data";
 
-    g.bench_function("encode_small", |b| {
-        b.iter(|| {
-            black_box(encode(delta, shared, Some(value), 1, EntryType::Put));
-        });
+    ctx.measure_micro(|| {
+        black_box(encode(delta, shared, Some(value), 1, EntryType::Put));
     });
-
-    g.finish();
 }
 
 // ---------------------------------------------------------------------------
 // HOTPATH 2: Decode single entry
 // ---------------------------------------------------------------------------
-fn bench_decode(c: &mut Criterion) {
-    let mut g = c.benchmark_group("hotpath_sst_decode");
-    g.sampling_mode(SamplingMode::Flat);
-    g.throughput(Throughput::Elements(1));
-
+#[stress_test(
+    tier = 1,
+    metadata(component = "sst_encoding", scenario = "decode_small")
+)]
+fn decode_small(ctx: &mut StressContext) {
     let prev = b"user:1000:settings";
     let key = b"user:1000:profile";
     let shared_len = shared_prefix_len(prev, key);
@@ -65,23 +58,19 @@ fn bench_decode(c: &mut Criterion) {
 
     let encoded = encode(delta, shared, Some(b"value"), 1, EntryType::Put);
 
-    g.bench_function("decode_small", |b| {
-        b.iter(|| {
-            black_box(decode(&encoded, 0).unwrap());
-        });
+    ctx.measure_micro(|| {
+        black_box(decode(&encoded, 0).unwrap());
     });
-
-    g.finish();
 }
 
 // ---------------------------------------------------------------------------
 // HOTPATH 4: Roundtrip (encode → decode 1 entry)
 // ---------------------------------------------------------------------------
-fn bench_roundtrip(c: &mut Criterion) {
-    let mut g = c.benchmark_group("hotpath_sst_roundtrip");
-    g.sampling_mode(SamplingMode::Flat);
-    g.throughput(Throughput::Elements(1));
-
+#[stress_test(
+    tier = 1,
+    metadata(component = "sst_encoding", scenario = "roundtrip_small")
+)]
+fn roundtrip_small(ctx: &mut StressContext) {
     let prev = b"user:1000:settings";
     let key = b"user:1000:profile";
     let shared_len = shared_prefix_len(prev, key);
@@ -90,26 +79,11 @@ fn bench_roundtrip(c: &mut Criterion) {
 
     let value = b"value_data";
 
-    g.bench_function("roundtrip_small", |b| {
-        b.iter(|| {
-            let encoded = encode(delta, shared, Some(value), 1, EntryType::Put);
-            let _ = decode(&encoded, 0).unwrap();
-            black_box(encoded);
-        });
+    ctx.measure_micro(|| {
+        let encoded = encode(delta, shared, Some(value), 1, EntryType::Put);
+        let _ = decode(&encoded, 0).unwrap();
+        black_box(encoded);
     });
-
-    g.finish();
 }
 
-// ---------------------------------------------------------------------------
-// Criterion registration
-// ---------------------------------------------------------------------------
-criterion_group! {
-    name = tier1_hotpath_sst;
-    config = criterion_config_for_tier1();
-    targets =
-        bench_encode,
-        bench_decode,
-        bench_roundtrip
-}
-criterion_main!(tier1_hotpath_sst);
+stress_main!();

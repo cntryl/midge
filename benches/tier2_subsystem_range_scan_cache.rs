@@ -1,59 +1,40 @@
 //! Tier 2 — Range Scan with Cache Warm/Cold
 //!
-//! **Target Runtime:** 3-6 seconds total
-//! **Run Frequency:** CI / Pre-commit
-//!
-//! **Purpose**: Quantifies block cache value for range scans by comparing warm vs cold cache.
-//! Validates that caching provides significant speedup for sequential access patterns.
-//!
-//! **Tier-2 Compliance**:
-//! - Subsystem interaction: Iterator → Block cache → Block reads
-//! - System metrics: Cache hit rate, blocks read, scan throughput
-//! - Realistic patterns: Sequential scans (10, 100, 1000 blocks)
-
-#[path = "./criterion_config.rs"]
-mod criterion_config;
+//! Quantifies block-cache behavior for sequential and strided scan shapes.
 
 use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
 use cntryl_midge::Bytes;
-use criterion::{
-    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
-};
-use criterion_config::criterion_config_for_tier2;
-use std::hint::black_box;
-
-// ─── Test Configuration ──────────────────────────────────────────────────────
+use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
 const BLOCK_SIZE: usize = 4096;
-const _KEYS_PER_BLOCK: usize = 100;
 const SST_ID: u64 = 1;
+const WARM_SCAN_REPEATS: usize = 512;
+const WARM_SCAN_REPEAT_OPS: u64 = 512;
+const COLD_SCAN_REPEATS: usize = 32;
+const COLD_SCAN_REPEAT_OPS: u64 = 32;
 
-/// Represents a range scan over consecutive blocks
 struct RangeScan {
     start_block: usize,
     num_blocks: usize,
 }
 
 impl RangeScan {
-    fn new(start_block: usize, num_blocks: usize) -> Self {
+    const fn new(start_block: usize, num_blocks: usize) -> Self {
         Self {
             start_block,
             num_blocks,
         }
     }
 
-    /// Execute scan with cache, returning (`blocks_read`, `cache_hits`)
     fn execute(&self, cache: &BlockCache, sst_id: u64, miss_block_data: &Bytes) -> (u32, u32) {
         let mut blocks_read = 0u32;
         let mut cache_hits = 0u32;
 
         for block_idx in self.start_block..(self.start_block + self.num_blocks) {
             let key = CacheKey::for_data(sst_id, (block_idx * BLOCK_SIZE) as u64);
-
             if cache.get(&key).is_some() {
                 cache_hits += 1;
             } else {
-                // Simulate block read + cache insert
                 blocks_read += 1;
                 cache.put(key, miss_block_data);
             }
@@ -63,12 +44,10 @@ impl RangeScan {
     }
 }
 
-/// Pre-generate block data (deterministic, no allocations in benchmark)
 fn precompute_block_data() -> Bytes {
     Bytes::from_static(&[0xCD; BLOCK_SIZE])
 }
 
-/// Populate cache with specified block range
 fn populate_cache(cache: &BlockCache, sst_id: u64, start_block: usize, num_blocks: usize) {
     let block_data = precompute_block_data();
     for block_idx in start_block..(start_block + num_blocks) {
@@ -77,134 +56,159 @@ fn populate_cache(cache: &BlockCache, sst_id: u64, start_block: usize, num_block
     }
 }
 
-// ─── Warm Cache Benchmarks ───────────────────────────────────────────────────
-
-/// Benchmark range scan with warm cache (all blocks cached)
-fn bench_range_scan_warm_cache(c: &mut Criterion) {
+fn run_warm_scan(ctx: &mut StressContext, num_blocks: usize) {
     let miss_block_data = precompute_block_data();
+    let cache = BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru);
+    populate_cache(&cache, SST_ID, 0, num_blocks);
+    let scan = RangeScan::new(0, num_blocks);
+    ctx.parameter("cache_state", "warm");
+    ctx.parameter("num_blocks", num_blocks);
+    ctx.parameter("scan_repeats", WARM_SCAN_REPEATS);
 
-    for &num_blocks in &[10, 100, 1000] {
-        let mut group = c.benchmark_group(format!("range_scan_warm_cache_{num_blocks}_blocks"));
-        group.sampling_mode(SamplingMode::Flat);
-        group.throughput(Throughput::Elements(num_blocks as u64));
+    let _completed = ctx.measure_counted(|| {
+        let mut blocks_read = 0u32;
+        let mut cache_hits = 0u32;
+        for _ in 0..WARM_SCAN_REPEATS {
+            let (read, hits) = scan.execute(&cache, SST_ID, &miss_block_data);
+            blocks_read = blocks_read.saturating_add(read);
+            cache_hits = cache_hits.saturating_add(hits);
+        }
+        black_box((blocks_read, cache_hits));
+        (num_blocks as u64) * WARM_SCAN_REPEAT_OPS
+    });
+}
 
-        group.bench_function("sequential_scan", |b| {
-            // Pre-populate cache
+fn run_cold_scan(ctx: &mut StressContext, num_blocks: usize) {
+    let miss_block_data = precompute_block_data();
+    ctx.parameter("cache_state", "cold");
+    ctx.parameter("num_blocks", num_blocks);
+    ctx.parameter("scan_repeats", COLD_SCAN_REPEATS);
+
+    let _completed = ctx.measure_counted(|| {
+        let mut blocks_read = 0u32;
+        let mut cache_hits = 0u32;
+        for _ in 0..COLD_SCAN_REPEATS {
             let cache = BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru);
-            populate_cache(&cache, SST_ID, 0, num_blocks);
-
             let scan = RangeScan::new(0, num_blocks);
-
-            b.iter(|| {
-                let (blocks_read, cache_hits) = scan.execute(&cache, SST_ID, &miss_block_data);
-
-                black_box((blocks_read, cache_hits))
-            });
-        });
-
-        group.finish();
-    }
+            let (read, hits) = scan.execute(&cache, SST_ID, &miss_block_data);
+            blocks_read = blocks_read.saturating_add(read);
+            cache_hits = cache_hits.saturating_add(hits);
+        }
+        black_box((blocks_read, cache_hits));
+        (num_blocks as u64) * COLD_SCAN_REPEAT_OPS
+    });
 }
 
-// ─── Cold Cache Benchmarks ───────────────────────────────────────────────────
-
-/// Benchmark range scan with cold cache (no blocks cached, must read all)
-fn bench_range_scan_cold_cache(c: &mut Criterion) {
-    let miss_block_data = precompute_block_data();
-
-    for &num_blocks in &[10, 100, 1000] {
-        let mut group = c.benchmark_group(format!("range_scan_cold_cache_{num_blocks}_blocks"));
-        group.sampling_mode(SamplingMode::Flat);
-        group.throughput(Throughput::Elements(num_blocks as u64));
-
-        group.bench_function("sequential_scan", |b| {
-            b.iter_batched(
-                || {
-                    // Create fresh cache for each iteration
-                    let cache = BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru);
-                    (cache, RangeScan::new(0, num_blocks))
-                },
-                |(cache, scan)| {
-                    let (blocks_read, cache_hits) = scan.execute(&cache, SST_ID, &miss_block_data);
-
-                    black_box((blocks_read, cache_hits))
-                },
-                criterion::BatchSize::SmallInput,
-            );
-        });
-
-        group.finish();
-    }
+#[stress_test(
+    tier = 2,
+    metadata(component = "range_scan_cache", scenario = "warm_10_blocks")
+)]
+fn warm_10_blocks(ctx: &mut StressContext) {
+    run_warm_scan(ctx, 10);
 }
 
-// ─── Partially Warm Cache ────────────────────────────────────────────────────
+#[stress_test(
+    tier = 2,
+    metadata(component = "range_scan_cache", scenario = "warm_100_blocks")
+)]
+fn warm_100_blocks(ctx: &mut StressContext) {
+    run_warm_scan(ctx, 100);
+}
 
-// ─── Strided Access Pattern ──────────────────────────────────────────────────
+#[stress_test(
+    tier = 2,
+    metadata(component = "range_scan_cache", scenario = "warm_1000_blocks")
+)]
+fn warm_1000_blocks(ctx: &mut StressContext) {
+    run_warm_scan(ctx, 1000);
+}
 
-/// Benchmark non-sequential access (every 10th block) with warm/cold cache
-fn bench_range_scan_strided_access(c: &mut Criterion) {
+#[stress_test(
+    tier = 2,
+    metadata(component = "range_scan_cache", scenario = "cold_10_blocks")
+)]
+fn cold_10_blocks(ctx: &mut StressContext) {
+    run_cold_scan(ctx, 10);
+}
+
+#[stress_test(
+    tier = 2,
+    metadata(component = "range_scan_cache", scenario = "cold_100_blocks")
+)]
+fn cold_100_blocks(ctx: &mut StressContext) {
+    run_cold_scan(ctx, 100);
+}
+
+#[stress_test(
+    tier = 2,
+    metadata(component = "range_scan_cache", scenario = "cold_1000_blocks")
+)]
+fn cold_1000_blocks(ctx: &mut StressContext) {
+    run_cold_scan(ctx, 1000);
+}
+
+#[stress_test(
+    tier = 2,
+    metadata(component = "range_scan_cache", scenario = "strided_warm")
+)]
+fn strided_warm(ctx: &mut StressContext) {
     let block_data = precompute_block_data();
     let stride = 10;
-    let num_accesses = 100; // Access 100 blocks with stride=10 (covers 1000 blocks)
+    let num_accesses = 100;
+    let cache = BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru);
+    for i in 0..num_accesses {
+        let block_idx = i * stride;
+        let key = CacheKey::for_data(SST_ID, (block_idx * BLOCK_SIZE) as u64);
+        cache.put(key, &block_data);
+    }
+    ctx.parameter("stride", stride);
+    ctx.parameter("num_accesses", num_accesses);
+    ctx.parameter("scan_repeats", WARM_SCAN_REPEATS);
 
-    let mut group = c.benchmark_group("range_scan_strided_access");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(num_accesses as u64));
+    let _completed = ctx.measure_counted(|| {
+        let mut cache_hits = 0u32;
+        for _ in 0..WARM_SCAN_REPEATS {
+            for i in 0..num_accesses {
+                let block_idx = i * stride;
+                let key = CacheKey::for_data(SST_ID, (block_idx * BLOCK_SIZE) as u64);
+                if cache.get(&key).is_some() {
+                    cache_hits += 1;
+                }
+            }
+        }
+        black_box(cache_hits);
+        (num_accesses as u64) * WARM_SCAN_REPEAT_OPS
+    });
+}
 
-    for &mode in &["warm", "cold"] {
-        group.bench_with_input(BenchmarkId::from_parameter(mode), &mode, |b, &mode| {
-            if mode == "warm" {
-                let cache = BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru);
-                // Pre-populate strided blocks
-                for i in 0..num_accesses {
-                    let block_idx = i * stride;
-                    let key = CacheKey::for_data(SST_ID, (block_idx * BLOCK_SIZE) as u64);
+#[stress_test(
+    tier = 2,
+    metadata(component = "range_scan_cache", scenario = "strided_cold")
+)]
+fn strided_cold(ctx: &mut StressContext) {
+    let block_data = precompute_block_data();
+    let stride = 10;
+    let num_accesses = 100;
+    ctx.parameter("stride", stride);
+    ctx.parameter("num_accesses", num_accesses);
+    ctx.parameter("scan_repeats", COLD_SCAN_REPEATS);
+
+    let _completed = ctx.measure_counted(|| {
+        let mut blocks_read = 0u32;
+        for _ in 0..COLD_SCAN_REPEATS {
+            let cache = BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru);
+            for i in 0..num_accesses {
+                let block_idx = i * stride;
+                let key = CacheKey::for_data(SST_ID, (block_idx * BLOCK_SIZE) as u64);
+                if cache.get(&key).is_none() {
+                    blocks_read += 1;
                     cache.put(key, &block_data);
                 }
-
-                b.iter(|| {
-                    let mut cache_hits = 0u32;
-                    for i in 0..num_accesses {
-                        let block_idx = i * stride;
-                        let key = CacheKey::for_data(SST_ID, (block_idx * BLOCK_SIZE) as u64);
-                        if cache.get(&key).is_some() {
-                            cache_hits += 1;
-                        }
-                    }
-                    black_box(cache_hits)
-                });
-            } else {
-                b.iter_batched(
-                    || BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru),
-                    |cache| {
-                        let mut blocks_read = 0u32;
-                        for i in 0..num_accesses {
-                            let block_idx = i * stride;
-                            let key = CacheKey::for_data(SST_ID, (block_idx * BLOCK_SIZE) as u64);
-                            if cache.get(&key).is_none() {
-                                blocks_read += 1;
-                                cache.put(key, &block_data);
-                            }
-                        }
-                        black_box(blocks_read)
-                    },
-                    criterion::BatchSize::SmallInput,
-                );
             }
-        });
-    }
-
-    group.finish();
+        }
+        black_box(blocks_read);
+        (num_accesses as u64) * COLD_SCAN_REPEAT_OPS
+    });
 }
 
-// ─── Criterion Setup ─────────────────────────────────────────────────────────
-
-criterion_group! {
-    name = tier2_subsystem_range_scan_cache;
-    config = criterion_config_for_tier2();
-    targets =
-        bench_range_scan_warm_cache,
-        bench_range_scan_cold_cache,
-        bench_range_scan_strided_access
-}
-criterion_main!(tier2_subsystem_range_scan_cache);
+stress_main!();

@@ -8,7 +8,7 @@ mod stress_config;
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 #[allow(unused_imports)]
-use stress_config::BenchConfig;
+use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -185,15 +185,19 @@ fn run_streaming(ctx: &mut StressContext, opts: MidgeOptions) {
     // Measured phase
     // -------------------------------------------------------------------------
 
+    let measured_phase = stress_config::measure_external_counted(ctx, || {
+        let phase = run_streaming_phase(&engine, &head, MEASURED, true);
+        let total_ops = phase.writes.saturating_add(phase.reads);
+        (phase, total_ops)
+    });
+
     let PhaseResult {
         writes,
         reads,
         read_misses: misses,
         lag_sum,
         lag_max,
-    } = ctx.measure_ref(engine.as_ref(), |_e| {
-        run_streaming_phase(&engine, &head, MEASURED, true)
-    });
+    } = measured_phase;
 
     // -------------------------------------------------------------------------
     // StressContext reporting
@@ -227,13 +231,13 @@ fn run_streaming(ctx: &mut StressContext, opts: MidgeOptions) {
     ctx.tag("max_lag_keys", lag_max.to_string());
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_streaming_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_streaming(ctx, opts);
 }
 
-#[stress_test]
+#[stress_test(tier = 4)]
 fn tier4_streaming_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_streaming(ctx, opts);

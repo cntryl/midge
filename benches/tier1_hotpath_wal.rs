@@ -1,25 +1,14 @@
 //! Tier 1 — Hot Path WAL Encoding Benchmarks
 //!
-//! **Target Runtime:** < 1 second total
-//! **Run Frequency:** Every PR (CI gate)
-//!
-//! Covers WAL record encoding/decoding hot paths:
-//! - TLV format serialization/deserialization
-//! - Fast path optimizations (`encode_delete`, `encode_put_simple`)
-//! - Parallel encoding for batches
-//!
-//! Note: I/O benchmarks are in `tier2_subsystem/wal_io.rs`
+//! Covers WAL record TLV serialization, deserialization, and round trips.
 
-#[path = "./criterion_config.rs"]
-mod criterion_config;
-
-use cntryl_midge::Bytes;
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_config::criterion_config_for_tier1;
+#[path = "./stress_config.rs"]
+mod stress_config;
 
 use cntryl_midge::wal::encoding::{decode, encode};
 use cntryl_midge::wal::{WalOpKind, WalRecord};
-use std::hint::black_box;
+use cntryl_midge::Bytes;
+use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
 
 const WAL_ENCODE_BATCH_SIZE_DEFAULT: usize = 128;
 const WAL_ENCODE_BATCH_SIZE_SMALL: usize = 512;
@@ -27,194 +16,148 @@ const WAL_DECODE_BATCH_SIZE_DEFAULT: usize = 256;
 const WAL_DECODE_BATCH_SIZE_DELETE: usize = 512;
 const WAL_DECODE_BATCH_SIZE_MEDIUM: usize = 512;
 
-// ============================================================================
-// Encoding Benchmarks
-// ============================================================================
+cntryl_stress::stress_allocator!();
 
-/// Benchmark WAL record encoding (TLV format) with different sizes.
-fn bench_wal_encode_record(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_wal_encode");
-    group.sampling_mode(SamplingMode::Flat);
-
-    let small_key = Bytes::from_static(b"key");
-    let small_value = Bytes::from_static(b"value");
-    let medium_key: Bytes = Bytes::from_static(&[0u8; 64]);
-    let medium_value: Bytes = Bytes::from_static(&[0u8; 256]);
-    let delete_key = Bytes::from_static(b"deleted_key");
-
-    let test_cases = [
-        (
-            "small_put",
-            WalRecord::new(
-                WalOpKind::Put,
-                small_key.clone(),
-                Some(small_value.clone()),
-                1,
-                1,
-            ),
-        ),
-        (
-            "medium_put",
-            WalRecord::new(
-                WalOpKind::Put,
-                medium_key.clone(),
-                Some(medium_value.clone()),
-                1,
-                1,
-            ),
-        ),
-        (
-            "delete",
-            WalRecord::new(WalOpKind::Delete, delete_key.clone(), None, 1, 1),
-        ),
-    ];
-
-    for (name, record) in test_cases {
-        let encode_batch_size = if name == "small_put" {
-            WAL_ENCODE_BATCH_SIZE_SMALL
-        } else {
-            WAL_ENCODE_BATCH_SIZE_DEFAULT
-        };
-        group.throughput(Throughput::Elements(encode_batch_size as u64));
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                let mut encoded = 0usize;
-                for _ in 0..encode_batch_size {
-                    let out = encode(&record).unwrap();
-                    encoded = encoded.wrapping_add(out.len());
-                }
-                black_box(encoded)
-            });
-        });
-    }
-
-    group.finish();
+fn small_put_record() -> WalRecord {
+    WalRecord::new(
+        WalOpKind::Put,
+        Bytes::from_static(b"key"),
+        Some(Bytes::from_static(b"value")),
+        1,
+        1,
+    )
 }
 
-/// Benchmark WAL record decoding (TLV format).
-fn bench_wal_decode_record(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_wal_decode");
-    group.sampling_mode(SamplingMode::Flat);
-
-    let small_key = Bytes::from_static(b"key");
-    let small_value = Bytes::from_static(b"value");
-    let medium_key: Bytes = Bytes::from_static(&[0u8; 64]);
-    let medium_value: Bytes = Bytes::from_static(&[0u8; 256]);
-    let delete_key = Bytes::from_static(b"deleted_key");
-
-    let test_cases = [
-        (
-            "small_put",
-            encode(&WalRecord::new(
-                WalOpKind::Put,
-                small_key.clone(),
-                Some(small_value.clone()),
-                1,
-                1,
-            ))
-            .unwrap(),
-        ),
-        (
-            "medium_put",
-            encode(&WalRecord::new(
-                WalOpKind::Put,
-                medium_key.clone(),
-                Some(medium_value.clone()),
-                1,
-                1,
-            ))
-            .unwrap(),
-        ),
-        (
-            "delete",
-            encode(&WalRecord::new(
-                WalOpKind::Delete,
-                delete_key.clone(),
-                None,
-                1,
-                1,
-            ))
-            .unwrap(),
-        ),
-    ];
-
-    for (name, encoded) in test_cases {
-        let decode_batch_size = if name == "medium_put" {
-            WAL_DECODE_BATCH_SIZE_MEDIUM
-        } else if name == "delete" {
-            WAL_DECODE_BATCH_SIZE_DELETE
-        } else {
-            WAL_DECODE_BATCH_SIZE_DEFAULT
-        };
-        group.throughput(Throughput::Elements(decode_batch_size as u64));
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                let mut decoded = 0usize;
-                for _ in 0..decode_batch_size {
-                    let record = decode(encoded.clone()).unwrap();
-                    // Keep decode work observable while averaging multiple probes.
-                    decoded += usize::from(record.seq >= 1);
-                }
-                black_box(decoded)
-            });
-        });
-    }
-
-    group.finish();
+fn medium_put_record() -> WalRecord {
+    WalRecord::new(
+        WalOpKind::Put,
+        Bytes::from_static(&[0u8; 64]),
+        Some(Bytes::from_static(&[0u8; 256])),
+        1,
+        1,
+    )
 }
 
-/// Benchmark full encode -> decode round-trip.
-fn bench_wal_roundtrip(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_wal_roundtrip");
-
-    let small_key = Bytes::from_static(b"key");
-    let small_value = Bytes::from_static(b"value");
-    let medium_key: Bytes = Bytes::from_static(&[0u8; 64]);
-    let medium_value: Bytes = Bytes::from_static(&[0u8; 256]);
-
-    let test_cases = [
-        (
-            "small",
-            WalRecord::new(
-                WalOpKind::Put,
-                small_key.clone(),
-                Some(small_value.clone()),
-                1,
-                1,
-            ),
-        ),
-        (
-            "medium",
-            WalRecord::new(
-                WalOpKind::Put,
-                medium_key.clone(),
-                Some(medium_value.clone()),
-                1,
-                1,
-            ),
-        ),
-    ];
-
-    group.throughput(Throughput::Elements(1));
-
-    for (name, record) in test_cases {
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                let encoded = encode(&record).unwrap();
-                black_box(decode(encoded).unwrap())
-            });
-        });
-    }
-
-    group.finish();
+fn delete_record() -> WalRecord {
+    WalRecord::new(
+        WalOpKind::Delete,
+        Bytes::from_static(b"deleted_key"),
+        None,
+        1,
+        1,
+    )
 }
 
-criterion_group! {
-    name = tier1_hotpath_wal;
-    config = criterion_config_for_tier1();
-    targets =
-        bench_wal_encode_record,
-        bench_wal_decode_record,
-        bench_wal_roundtrip
+fn run_encode_record(ctx: &mut StressContext, scenario: &'static str, record: &WalRecord) {
+    let encode_batch_size = if scenario == "small_put" {
+        WAL_ENCODE_BATCH_SIZE_SMALL
+    } else {
+        WAL_ENCODE_BATCH_SIZE_DEFAULT
+    };
+    ctx.parameter("scenario", scenario);
+    ctx.parameter("encode_batch_size", encode_batch_size);
+
+    stress_config::measure_micro_batch(ctx, encode_batch_size as u64, || {
+        let mut encoded = 0usize;
+        for _ in 0..encode_batch_size {
+            let out = encode(record).unwrap();
+            encoded = encoded.wrapping_add(out.len());
+        }
+        black_box(encoded);
+    });
 }
-criterion_main!(tier1_hotpath_wal);
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "wal_encoding", scenario = "encode_small_put")
+)]
+fn encode_small_put(ctx: &mut StressContext) {
+    run_encode_record(ctx, "small_put", &small_put_record());
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "wal_encoding", scenario = "encode_medium_put")
+)]
+fn encode_medium_put(ctx: &mut StressContext) {
+    run_encode_record(ctx, "medium_put", &medium_put_record());
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "wal_encoding", scenario = "encode_delete")
+)]
+fn encode_delete(ctx: &mut StressContext) {
+    run_encode_record(ctx, "delete", &delete_record());
+}
+
+fn run_decode_record(ctx: &mut StressContext, scenario: &'static str, encoded: &Bytes) {
+    let decode_batch_size = if scenario == "medium_put" {
+        WAL_DECODE_BATCH_SIZE_MEDIUM
+    } else if scenario == "delete" {
+        WAL_DECODE_BATCH_SIZE_DELETE
+    } else {
+        WAL_DECODE_BATCH_SIZE_DEFAULT
+    };
+    ctx.parameter("scenario", scenario);
+    ctx.parameter("decode_batch_size", decode_batch_size);
+
+    stress_config::measure_micro_batch(ctx, decode_batch_size as u64, || {
+        let mut decoded = 0usize;
+        for _ in 0..decode_batch_size {
+            let record = decode(encoded.clone()).unwrap();
+            decoded += usize::from(record.seq >= 1);
+        }
+        black_box(decoded);
+    });
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "wal_encoding", scenario = "decode_small_put")
+)]
+fn decode_small_put(ctx: &mut StressContext) {
+    run_decode_record(ctx, "small_put", &encode(&small_put_record()).unwrap());
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "wal_encoding", scenario = "decode_medium_put")
+)]
+fn decode_medium_put(ctx: &mut StressContext) {
+    run_decode_record(ctx, "medium_put", &encode(&medium_put_record()).unwrap());
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "wal_encoding", scenario = "decode_delete")
+)]
+fn decode_delete(ctx: &mut StressContext) {
+    run_decode_record(ctx, "delete", &encode(&delete_record()).unwrap());
+}
+
+fn run_roundtrip(ctx: &mut StressContext, scenario: &'static str, record: &WalRecord) {
+    ctx.parameter("scenario", scenario);
+    ctx.measure_micro(|| {
+        let encoded = encode(record).unwrap();
+        black_box(decode(encoded).unwrap());
+    });
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "wal_encoding", scenario = "roundtrip_small")
+)]
+fn roundtrip_small(ctx: &mut StressContext) {
+    run_roundtrip(ctx, "small", &small_put_record());
+}
+
+#[stress_test(
+    tier = 1,
+    metadata(component = "wal_encoding", scenario = "roundtrip_medium")
+)]
+fn roundtrip_medium(ctx: &mut StressContext) {
+    run_roundtrip(ctx, "medium", &medium_put_record());
+}
+
+stress_main!();
