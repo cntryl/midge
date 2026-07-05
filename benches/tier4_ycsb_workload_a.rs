@@ -42,6 +42,8 @@ fn run_workload_a_with_distribution(
     distribution: KeyDistribution,
 ) {
     ctx.tag("storage_profile", profile);
+    ctx.parameter("clients", clients);
+    ctx.parameter("measured_secs", MEASURED.as_secs());
     let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
 
     // Phase 1: Load (not measured)
@@ -214,33 +216,9 @@ fn tier4_ycsb_a_memory_64_clients(ctx: &mut StressContext) {
 }
 
 #[stress(tier = 4)]
-fn tier4_ycsb_a_local_1_client(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_workload_a(ctx, opts, "local", CLIENTS_1);
-}
-
-#[stress(tier = 4)]
-fn tier4_ycsb_a_local_16_clients(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_workload_a(ctx, opts, "local", CLIENTS_16);
-}
-
-#[stress(tier = 4)]
 fn tier4_ycsb_a_local_64_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_workload_a(ctx, opts, "local", CLIENTS_64);
-}
-
-#[stress(tier = 4)]
-fn tier4_ycsb_a_cloud_1_client(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_workload_a(ctx, opts, "cloud", CLIENTS_1);
-}
-
-#[stress(tier = 4)]
-fn tier4_ycsb_a_cloud_16_clients(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_workload_a(ctx, opts, "cloud", CLIENTS_16);
 }
 
 #[stress(tier = 4)]
@@ -250,20 +228,8 @@ fn tier4_ycsb_a_cloud_64_clients(ctx: &mut StressContext) {
 }
 
 #[stress(tier = 4)]
-fn tier4_ycsb_a_hybrid_1_client(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("hybrid");
-    run_workload_a(ctx, opts, "hybrid", CLIENTS_1);
-}
-
-#[stress(tier = 4)]
 fn tier4_ycsb_a_hybrid_16_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("hybrid");
     run_workload_a(ctx, opts, "hybrid", CLIENTS_16);
-}
-
-#[stress(tier = 4)]
-fn tier4_ycsb_a_hybrid_64_clients(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("hybrid");
-    run_workload_a(ctx, opts, "hybrid", CLIENTS_64);
 }
 stress_main!();

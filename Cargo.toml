@@ -346,26 +346,6 @@ path = "benches/tier4_streaming_workload.rs"
 harness = false
 
 [[bench]]
-name = "tier4_system_compaction_throughput"
-path = "benches/tier4_system_compaction_throughput.rs"
-harness = false
-
-[[bench]]
-name = "tier4_system_durability_cloud"
-path = "benches/tier4_system_durability_cloud.rs"
-harness = false
-
-[[bench]]
-name = "tier4_system_engine_batch_throughput"
-path = "benches/tier4_system_engine_batch_throughput.rs"
-harness = false
-
-[[bench]]
 name = "tier4_system_recovery_throughput"
 path = "benches/tier4_system_recovery_throughput.rs"
-harness = false
-
-[[bench]]
-name = "tier4_mvcc_snapshot_isolation_under_concurrency"
-path = "benches/tier4_mvcc_snapshot_isolation_under_concurrency.rs"
 harness = false

@@ -19,6 +19,7 @@ use cntryl_midge::testkit::MidgeOptions;
 const DEFAULT_INITIAL_KEYS: usize = 50_000; // Overridable for larger-than-RAM nightly runs
 const WARMUP: Duration = Duration::from_secs(1);
 const MEASURED: Duration = Duration::from_secs(5);
+const LOCAL_16_MEASURED: Duration = Duration::from_secs(12);
 
 const ZIPFIAN_THETA: f64 = 0.99;
 
@@ -28,7 +29,20 @@ const CLIENTS_64: usize = 64;
 
 const WORKLOAD_SEED: u64 = 0xB0B0_EA5E_5678_9ABC;
 
+fn measured_duration(profile: &str, clients: usize) -> Duration {
+    if profile == "local" && clients == CLIENTS_16 {
+        LOCAL_16_MEASURED
+    } else {
+        MEASURED
+    }
+}
+
 fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
+    let measured_window = measured_duration(profile, clients);
+    ctx.tag("storage_profile", profile);
+    ctx.parameter("clients", clients);
+    ctx.parameter("measured_secs", measured_window.as_secs());
+
     let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
 
     // Phase 1: Load (not measured)
@@ -90,7 +104,7 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
             ycsb::run_multi_client_for_duration_with_stats(
                 &engine,
                 clients,
-                MEASURED,
+                measured_window,
                 |client_id, stop| {
                     let zipf = Arc::clone(&zipf);
                     move |e, cf, op_index| {

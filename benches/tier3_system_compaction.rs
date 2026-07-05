@@ -85,13 +85,10 @@ fn run_flush_case(
     drop(engine);
 }
 
-// TIER 4 ONLY: compact_all() with complex setup patterns
-// Moved to tier4_system_compaction_throughput.rs
-
+// TIER 4 ONLY: compact_all() with complex setup patterns.
 // Reason: compact_all() cost depends heavily on keyspace overlap, file count,
-// and staged recovery. This is SYSTEM BEHAVIOR under varying conditions, not
-// a constant-time primitive cost. Tier 4 will measure cascading compaction
-// throughput, multi-level overlaps, and degradation curves.
+// and staged recovery. That requires a deterministic staged LSM layout before
+// it can produce a trustworthy benchmark signal.
 
 // ---------------------------------------------------------------------------
 // Stress tests (explicit, one datapoint per test)

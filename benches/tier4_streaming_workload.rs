@@ -13,7 +13,7 @@ use stress_config::{BenchConfig, MidgeStressContextExt as _};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cntryl_midge::testkit::ycsb;
 use cntryl_midge::{testkit::MidgeOptions, MidgeEngine};
@@ -27,8 +27,8 @@ const VALUE_SIZE: usize = 256;
 const WRITERS: usize = 2;
 const READERS: usize = 2;
 
-const WARMUP: Duration = Duration::from_secs(1);
-const MEASURED: Duration = Duration::from_secs(5);
+const WARMUP: Duration = Duration::from_secs(3);
+const MEASURED: Duration = Duration::from_secs(15);
 
 // Readers follow within this many keys of the head
 const TAIL_WINDOW: u64 = 1_000;
@@ -47,6 +47,7 @@ struct StreamingStats {
 
 #[derive(Default, Clone, Copy)]
 struct PhaseResult {
+    elapsed: Duration,
     writes: u64,
     reads: u64,
     read_misses: u64,
@@ -56,6 +57,7 @@ struct PhaseResult {
 
 fn run_streaming_phase(
     engine: &Arc<MidgeEngine>,
+    cf_id: cntryl_midge::ColumnFamilyId,
     head: &Arc<AtomicU64>,
     duration: Duration,
     count: bool,
@@ -72,8 +74,6 @@ fn run_streaming_phase(
         let barrier = Arc::clone(&barrier);
 
         handles.push(thread::spawn(move || {
-            let cf = engine.create_column_family("cf1").unwrap();
-            let cf_id = cf.id();
             barrier.wait();
 
             let mut local_writes: u64 = 0;
@@ -107,8 +107,6 @@ fn run_streaming_phase(
         let barrier = Arc::clone(&barrier);
 
         handles.push(thread::spawn(move || {
-            let cf = engine.create_column_family("cf1").unwrap();
-            let cf_id = cf.id();
             barrier.wait();
 
             let mut next: u64 = 0;
@@ -153,7 +151,9 @@ fn run_streaming_phase(
 
     // Release all workers at the same time, then start the phase window.
     barrier.wait();
+    let started_at = Instant::now();
     thread::sleep(duration);
+    let elapsed = started_at.elapsed();
     stop.store(true, Ordering::Release);
 
     let mut out = PhaseResult::default();
@@ -166,11 +166,14 @@ fn run_streaming_phase(
         out.lag_max = out.lag_max.max(r.lag_max);
     }
 
+    out.elapsed = elapsed;
     out
 }
 
 fn run_streaming(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOptions) {
     let engine = Arc::new(ycsb::open_tier4_engine(opts));
+    let cf = engine.create_column_family("cf1").unwrap();
+    let cf_id = cf.id();
 
     // Shared stream head across warmup + measured (represents the append log).
     let head = Arc::new(AtomicU64::new(0));
@@ -179,19 +182,16 @@ fn run_streaming(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOpt
     // Warmup (unmeasured)
     // -------------------------------------------------------------------------
 
-    let _warmup = run_streaming_phase(&engine, &head, WARMUP, false);
+    let _warmup = run_streaming_phase(&engine, cf_id, &head, WARMUP, false);
 
     // -------------------------------------------------------------------------
     // Measured phase
     // -------------------------------------------------------------------------
 
-    let measured_phase = stress_config::measure_external_counted(ctx, scenario, || {
-        let phase = run_streaming_phase(&engine, &head, MEASURED, true);
-        let total_ops = phase.writes.saturating_add(phase.reads);
-        (phase, total_ops)
-    });
+    let measured_phase = run_streaming_phase(&engine, cf_id, &head, MEASURED, true);
 
     let PhaseResult {
+        elapsed,
         writes,
         reads,
         read_misses: misses,
@@ -204,6 +204,7 @@ fn run_streaming(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOpt
     // -------------------------------------------------------------------------
 
     let total_ops = writes.saturating_add(reads);
+    ctx.record_external(scenario, elapsed, total_ops);
     ctx.set_elements(total_ops);
 
     // Approximate bytes: reads and writes both touch key+value.
@@ -222,6 +223,8 @@ fn run_streaming(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOpt
 
     ctx.tag("writers", WRITERS.to_string());
     ctx.tag("readers", READERS.to_string());
+    ctx.tag("warmup_secs", WARMUP.as_secs().to_string());
+    ctx.tag("measured_secs", MEASURED.as_secs().to_string());
     ctx.tag("tail_window_keys", TAIL_WINDOW.to_string());
     ctx.tag("writes", writes.to_string());
     ctx.tag("reads", reads.to_string());
