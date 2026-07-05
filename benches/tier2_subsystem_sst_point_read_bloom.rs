@@ -16,7 +16,7 @@ use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
 use cntryl_midge::sst::sparse_index::{IndexEntry, SparseIndexReader};
 use cntryl_midge::sst::types::BlockHandle;
 use cntryl_midge::Bytes;
-use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
+use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 // ─── Test Data ───────────────────────────────────────────────────────────────
 
@@ -105,7 +105,7 @@ fn build_mock_sst(sst_id: u64) -> MockSst {
 
 // ─── Point Read with Bloom Enabled ───────────────────────────────────────────
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "sst_point_read", scenario = "bloom_enabled")
 )]
@@ -116,7 +116,7 @@ fn bloom_enabled(ctx: &mut StressContext) {
     ctx.parameter("hit_ratio_pct", 10);
     ctx.parameter("bloom", "enabled");
 
-    let _completed = ctx.measure_counted(|| {
+    let _completed = ctx.measure_batch("bloom_enabled", 10_000, || {
         let mut bloom_checks = 0u32;
         let mut bloom_rejects = 0u32;
         let mut blocks_read = 0u32;
@@ -157,11 +157,10 @@ fn bloom_enabled(ctx: &mut StressContext) {
         }
 
         black_box((bloom_checks, bloom_rejects, blocks_read, cache_hits));
-        10_000
     });
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "sst_point_read", scenario = "bloom_disabled")
 )]
@@ -172,7 +171,7 @@ fn bloom_disabled(ctx: &mut StressContext) {
     ctx.parameter("hit_ratio_pct", 10);
     ctx.parameter("bloom", "disabled");
 
-    let _completed = ctx.measure_counted(|| {
+    let _completed = ctx.measure_batch("bloom_disabled", 10_000, || {
         let mut blocks_read = 0u32;
         let mut cache_hits = 0u32;
 
@@ -201,11 +200,10 @@ fn bloom_disabled(ctx: &mut StressContext) {
         }
 
         black_box((blocks_read, cache_hits));
-        10_000
     });
 }
 
-fn run_comparison(ctx: &mut StressContext, mode: &'static str) {
+fn run_comparison(ctx: &mut StressContext, scenario: &'static str, mode: &'static str) {
     let sst = build_mock_sst(3);
     let (hits, misses) = precompute_query_keys(42);
     let query_keys: Vec<Bytes> = hits.iter().chain(misses.iter()).cloned().collect();
@@ -213,14 +211,38 @@ fn run_comparison(ctx: &mut StressContext, mode: &'static str) {
     ctx.parameter("queries", query_keys.len());
     ctx.parameter("comparison_repeats", COMPARISON_REPEATS);
 
-    let _completed = ctx.measure_counted(|| {
-        if mode == "with_bloom" {
-            let mut bloom_rejects = 0u32;
-            let mut blocks_read = 0u32;
+    let _completed = ctx.measure_batch(
+        scenario,
+        (query_keys.len() as u64) * COMPARISON_REPEAT_OPS,
+        || {
+            if mode == "with_bloom" {
+                let mut bloom_rejects = 0u32;
+                let mut blocks_read = 0u32;
 
-            for _ in 0..COMPARISON_REPEATS {
-                for key in &query_keys {
-                    if sst.bloom.contains(key).might_be_present() {
+                for _ in 0..COMPARISON_REPEATS {
+                    for key in &query_keys {
+                        if sst.bloom.contains(key).might_be_present() {
+                            let range = sst.sparse_index.find_block_range(key);
+                            for block_idx in
+                                range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1)
+                            {
+                                let cache_key =
+                                    CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
+                                if sst.cache.get(&cache_key).is_none() {
+                                    blocks_read += 1;
+                                }
+                            }
+                        } else {
+                            bloom_rejects += 1;
+                        }
+                    }
+                }
+                black_box((bloom_rejects, blocks_read));
+            } else {
+                let mut blocks_read = 0u32;
+
+                for _ in 0..COMPARISON_REPEATS {
+                    for key in &query_keys {
                         let range = sst.sparse_index.find_block_range(key);
                         for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1)
                         {
@@ -230,46 +252,28 @@ fn run_comparison(ctx: &mut StressContext, mode: &'static str) {
                                 blocks_read += 1;
                             }
                         }
-                    } else {
-                        bloom_rejects += 1;
                     }
                 }
+                black_box(blocks_read);
             }
-            black_box((bloom_rejects, blocks_read));
-        } else {
-            let mut blocks_read = 0u32;
-
-            for _ in 0..COMPARISON_REPEATS {
-                for key in &query_keys {
-                    let range = sst.sparse_index.find_block_range(key);
-                    for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
-                        let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
-                        if sst.cache.get(&cache_key).is_none() {
-                            blocks_read += 1;
-                        }
-                    }
-                }
-            }
-            black_box(blocks_read);
-        }
-        (query_keys.len() as u64) * COMPARISON_REPEAT_OPS
-    });
+        },
+    );
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "sst_point_read", scenario = "comparison_with_bloom")
 )]
 fn comparison_with_bloom(ctx: &mut StressContext) {
-    run_comparison(ctx, "with_bloom");
+    run_comparison(ctx, "comparison_with_bloom", "with_bloom");
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "sst_point_read", scenario = "comparison_without_bloom")
 )]
 fn comparison_without_bloom(ctx: &mut StressContext) {
-    run_comparison(ctx, "without_bloom");
+    run_comparison(ctx, "comparison_without_bloom", "without_bloom");
 }
 
 stress_main!();

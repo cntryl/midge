@@ -16,7 +16,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_stress::{stress_main, stress_test, StressContext};
+use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
@@ -39,7 +39,7 @@ const CLIENTS_64: usize = 64;
 const WORKLOAD_SEED: u64 = 0xE0E0_EA5E_5678_9ABC;
 
 #[allow(clippy::too_many_lines)]
-fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
+fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
     let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
 
     // Phase 1: Load (not measured)
@@ -102,7 +102,9 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     engine.flush_cf(&cf).unwrap();
 
     // Phase 3: Measured (duration-based; multi-client)
-    let measured = stress_config::measure_external_counted(ctx, || {
+    let client_suffix = if clients == 1 { "client" } else { "clients" };
+    let measurement_name = format!("tier4_ycsb_e_{profile}_{clients}_{client_suffix}");
+    let measured = stress_config::measure_external_counted(ctx, measurement_name, || {
         let measured = {
             let write_opts = cntryl_midge::WriteOptions::buffered(); // Back to buffered for measured phase
             ycsb::run_multi_client_for_duration_with_stats(
@@ -173,40 +175,40 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     }
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_e_local_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_workload_e(ctx, opts, CLIENTS_1);
+    run_workload_e(ctx, opts, "local", CLIENTS_1);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_e_local_16_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_workload_e(ctx, opts, CLIENTS_16);
+    run_workload_e(ctx, opts, "local", CLIENTS_16);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_e_local_64_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_workload_e(ctx, opts, CLIENTS_64);
+    run_workload_e(ctx, opts, "local", CLIENTS_64);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_e_cloud_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_workload_e(ctx, opts, CLIENTS_1);
+    run_workload_e(ctx, opts, "cloud", CLIENTS_1);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_e_cloud_16_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_workload_e(ctx, opts, CLIENTS_16);
+    run_workload_e(ctx, opts, "cloud", CLIENTS_16);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_e_cloud_64_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_workload_e(ctx, opts, CLIENTS_64);
+    run_workload_e(ctx, opts, "cloud", CLIENTS_64);
 }
 
 stress_main!();

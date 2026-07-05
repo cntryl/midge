@@ -7,7 +7,6 @@
 //! and runtime metrics. It does not call runtime internals directly.
 
 use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
@@ -18,7 +17,7 @@ use cntryl_midge::testkit::{
     opts_for_mode,
 };
 use cntryl_midge::{ColumnFamilyId, Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions};
-use cntryl_stress::{stress_main, stress_test, StressContext};
+use cntryl_stress::{stress, stress_main, StressContext};
 use hdrhistogram::Histogram;
 
 const COALESCING_CLIENTS: usize = 16;
@@ -29,9 +28,6 @@ const LATENCY_READ_ONLY_TXNS: usize = 4096;
 const LATENCY_SAMPLE_REPEATS: usize = 16;
 const MAX_DIRECT_SUBMIT_FOLLOWER_WAIT_US: f64 = 1.0;
 const MIN_AVG_TXN_RECORDS_PER_APPEND: f64 = 7.0;
-
-static COALESCING_SIGNAL_REPORTED: AtomicBool = AtomicBool::new(false);
-static LATENCY_BREAKDOWN_REPORTED_MASK: AtomicU64 = AtomicU64::new(0);
 
 type LatencyClientWorkload = Vec<(Vec<u8>, Vec<u8>)>;
 
@@ -56,14 +52,6 @@ impl LatencyWorkloadKind {
             Self::SequentialBufferedSingleOp => "buffered_sequential_single_op_transactions",
             Self::ConcurrentBufferedSingleOp => "buffered_concurrent_single_op_transactions",
             Self::ReadOnlyBeginTx => "read_only_begin_tx_baseline",
-        }
-    }
-
-    fn report_mask(self) -> u64 {
-        match self {
-            Self::SequentialBufferedSingleOp => 1,
-            Self::ConcurrentBufferedSingleOp => 2,
-            Self::ReadOnlyBeginTx => 4,
         }
     }
 }
@@ -545,55 +533,6 @@ fn latency_breakdown_from_totals(
     }
 }
 
-fn report_transaction_coalescing_signal(signal: TransactionCoalescingSignal) {
-    if COALESCING_SIGNAL_REPORTED.swap(true, Ordering::Relaxed) {
-        return;
-    }
-
-    eprintln!(
-        "transaction_coalescing_signal logical_txn_records={} physical_wal_appends={} avg_txn_records_per_append={:.2} avg_wal_append_us={:.2}",
-        signal.logical_txn_records,
-        signal.physical_wal_appends,
-        signal.avg_txn_records_per_append,
-        signal.avg_wal_append_us
-    );
-}
-
-fn report_transaction_latency_breakdown(breakdown: TransactionLatencyBreakdown) {
-    let report_mask = breakdown.kind.report_mask();
-    if LATENCY_BREAKDOWN_REPORTED_MASK.fetch_or(report_mask, Ordering::Relaxed) & report_mask != 0 {
-        return;
-    }
-
-    eprintln!(
-        "transaction_latency_breakdown workload={} clients={} transactions={} begin_tx_us={:.2} put_us={:.2} commit_total_us={:.2} commit_samples={} commit_p50_us={} commit_p95_us={} commit_p99_us={} commit_max_us={} submit_apply_transaction_us={:.2} write_group_leader_collect_us={:.2} write_group_runtime_apply_us={:.2} write_group_follower_wait_us={:.2} submit_apply_other_us={:.2} durability_finalize_us={:.2} unregister_snapshot_us={:.2} runtime_submit_ack_non_wal_us={:.2} logical_txn_records={} physical_wal_appends={} avg_txn_records_per_append={:.2} avg_wal_append_us={:.2} dominant_phase={}",
-        breakdown.kind.label(),
-        breakdown.clients,
-        breakdown.transactions,
-        breakdown.begin_tx_us,
-        breakdown.put_us,
-        breakdown.commit_total_us,
-        breakdown.commit_samples,
-        breakdown.commit_p50_us,
-        breakdown.commit_p95_us,
-        breakdown.commit_p99_us,
-        breakdown.commit_max_us,
-        breakdown.submit_apply_transaction_us,
-        breakdown.write_group_leader_collect_us,
-        breakdown.write_group_runtime_apply_us,
-        breakdown.write_group_follower_wait_us,
-        breakdown.submit_apply_other_us,
-        breakdown.durability_finalize_us,
-        breakdown.unregister_snapshot_us,
-        breakdown.runtime_submit_ack_non_wal_us,
-        breakdown.logical_txn_records,
-        breakdown.physical_wal_appends,
-        breakdown.avg_txn_records_per_append,
-        breakdown.avg_wal_append_us,
-        breakdown.dominant_phase()
-    );
-}
-
 fn assert_transaction_latency_guardrails(breakdown: TransactionLatencyBreakdown) {
     match breakdown.kind {
         LatencyWorkloadKind::SequentialBufferedSingleOp
@@ -730,23 +669,29 @@ fn run_latency_breakdown_case(
     ctx.parameter("sample_repeats", LATENCY_SAMPLE_REPEATS);
 
     let mut observed = None;
-    let _completed = ctx.measure_counted(|| {
+    let logical_ops = (clients * txns_per_client * LATENCY_SAMPLE_REPEATS) as u64;
+    let measurement_name = match kind {
+        LatencyWorkloadKind::SequentialBufferedSingleOp => "sequential_buffered_single_op",
+        LatencyWorkloadKind::ConcurrentBufferedSingleOp => "concurrent_buffered_single_op",
+        LatencyWorkloadKind::ReadOnlyBeginTx => "read_only_begin_tx",
+    };
+    let _completed = ctx.measure_batch(measurement_name, logical_ops, || {
         let mut completed = 0u64;
         for _ in 0..LATENCY_SAMPLE_REPEATS {
             let breakdown =
                 run_buffered_transaction_latency_breakdown(&engine, cf_id, kind, workloads.clone());
             assert_transaction_latency_guardrails(breakdown);
-            report_transaction_latency_breakdown(breakdown);
             completed = completed.saturating_add(breakdown.transactions);
             observed = Some(breakdown);
         }
-        completed
+        assert_eq!(completed, logical_ops);
+        black_box(completed);
     });
 
     tag_transaction_latency_breakdown(ctx, observed.expect("latency breakdown recorded"));
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(
         component = "transaction_latency",
@@ -764,7 +709,7 @@ fn sequential_buffered_single_op(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(
         component = "transaction_latency",
@@ -782,7 +727,7 @@ fn concurrent_buffered_single_op(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "transaction_latency", scenario = "read_only_begin_tx")
 )]
@@ -794,22 +739,23 @@ fn read_only_begin_tx(ctx: &mut StressContext) {
     ctx.parameter("sample_repeats", LATENCY_SAMPLE_REPEATS);
 
     let mut observed = None;
-    let _completed = ctx.measure_counted(|| {
+    let logical_ops = (LATENCY_READ_ONLY_TXNS * LATENCY_SAMPLE_REPEATS) as u64;
+    let _completed = ctx.measure_batch("read_only_begin_tx", logical_ops, || {
         let mut completed = 0u64;
         for _ in 0..LATENCY_SAMPLE_REPEATS {
             let breakdown = run_read_only_begin_tx_latency_baseline(&engine, cf_id);
             assert_transaction_latency_guardrails(breakdown);
-            report_transaction_latency_breakdown(breakdown);
             completed = completed.saturating_add(breakdown.transactions);
             observed = Some(breakdown);
         }
-        completed
+        assert_eq!(completed, logical_ops);
+        black_box(completed);
     });
 
     tag_transaction_latency_breakdown(ctx, observed.expect("read-only breakdown recorded"));
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "transaction_latency", scenario = "coalescing_signal")
 )]
@@ -821,12 +767,13 @@ fn coalescing_signal(ctx: &mut StressContext) {
     ctx.parameter("sample_repeats", LATENCY_SAMPLE_REPEATS);
 
     let mut observed = None;
-    let _completed = ctx.measure_counted(|| {
+    let logical_ops =
+        logical_coalescing_txn_records().saturating_mul(LATENCY_SAMPLE_REPEATS as u64);
+    let _completed = ctx.measure_batch("coalescing_signal", logical_ops, || {
         let mut completed = 0u64;
         for _ in 0..LATENCY_SAMPLE_REPEATS {
             let signal = run_transaction_coalescing_signal(&engine, cf_id);
             assert_transaction_coalescing_guardrail(signal);
-            report_transaction_coalescing_signal(signal);
             black_box((
                 signal.physical_wal_appends,
                 signal.avg_txn_records_per_append,
@@ -835,7 +782,8 @@ fn coalescing_signal(ctx: &mut StressContext) {
             completed = completed.saturating_add(signal.logical_txn_records);
             observed = Some(signal);
         }
-        completed
+        assert_eq!(completed, logical_ops);
+        black_box(completed);
     });
 
     tag_transaction_coalescing_signal(ctx, observed.expect("coalescing signal recorded"));

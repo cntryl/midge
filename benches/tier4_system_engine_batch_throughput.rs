@@ -15,7 +15,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_stress::{stress_main, stress_test, StressContext};
+use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
@@ -53,8 +53,11 @@ fn run_batch_commit_case(
     }
 
     // Measure batch throughput: num_ops writes in a single commit
+    let measurement_name =
+        format!("tier4_engine_batch_commit_throughput_{num_ops}_{storage_profile}");
     stress_config::measure_external(
         ctx,
+        measurement_name,
         u64::try_from(num_ops * BATCH_COMMITS).expect("operation count fits"),
         || {
             for _ in 0..BATCH_COMMITS {
@@ -73,31 +76,31 @@ fn run_batch_commit_case(
     drop(engine);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_engine_batch_commit_throughput_1_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_batch_commit_case(ctx, opts, "local", 1);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_engine_batch_commit_throughput_10_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_batch_commit_case(ctx, opts, "local", 10);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_engine_batch_commit_throughput_100_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_batch_commit_case(ctx, opts, "local", 100);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_engine_batch_commit_throughput_1000_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_batch_commit_case(ctx, opts, "local", 1_000);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_engine_batch_commit_throughput_100_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_batch_commit_case(ctx, opts, "cloud", 100);

@@ -13,10 +13,11 @@ mod stress_config;
 
 use cntryl_midge::sst::sparse_index::{IndexEntry, SparseIndexReader};
 use cntryl_midge::sst::types::BlockHandle;
-use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
+use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
-const SPARSE_INDEX_LOOKUP_BATCH_SIZE_DEFAULT: usize = 256;
-const SPARSE_INDEX_LOOKUP_BATCH_SIZE_LARGE: usize = 1024;
+const SPARSE_INDEX_FIND_BATCH_SIZE: usize = 4096;
+const SPARSE_INDEX_LOOKUP_BATCH_SIZE_DEFAULT: usize = 1024;
+const SPARSE_INDEX_LOOKUP_BATCH_SIZE_LARGE: usize = 128;
 
 cntryl_stress::stress_allocator!();
 
@@ -35,13 +36,24 @@ fn run_find_block(ctx: &mut StressContext, scenario: &'static str, key: &'static
     let reader = build_sparse_index(100);
     ctx.parameter("scenario", scenario);
     ctx.parameter("entries", 100);
-    ctx.measure_micro(|| {
-        let range = reader.find_block_range(black_box(key));
-        black_box(range);
-    });
+    ctx.parameter("find_batch_size", SPARSE_INDEX_FIND_BATCH_SIZE);
+
+    stress_config::measure_hot_path_batch(
+        ctx,
+        scenario,
+        SPARSE_INDEX_FIND_BATCH_SIZE as u64,
+        || {
+            let mut start_blocks = 0usize;
+            for _ in 0..SPARSE_INDEX_FIND_BATCH_SIZE {
+                let range = reader.find_block_range(black_box(key));
+                start_blocks = start_blocks.wrapping_add(range.start_block);
+            }
+            black_box(start_blocks);
+        },
+    );
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "sparse_index", scenario = "find_beginning")
 )]
@@ -49,7 +61,7 @@ fn find_beginning(ctx: &mut StressContext) {
     run_find_block(ctx, "find_beginning", b"key_0000000050");
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "sparse_index", scenario = "find_middle")
 )]
@@ -57,12 +69,12 @@ fn find_middle(ctx: &mut StressContext) {
     run_find_block(ctx, "find_middle", b"key_0000005050");
 }
 
-#[stress_test(tier = 1, metadata(component = "sparse_index", scenario = "find_end"))]
+#[stress(tier = 1, metadata(component = "sparse_index", scenario = "find_end"))]
 fn find_end(ctx: &mut StressContext) {
     run_find_block(ctx, "find_end", b"key_0000009950");
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "sparse_index", scenario = "find_after_last")
 )]
@@ -70,7 +82,7 @@ fn find_after_last(ctx: &mut StressContext) {
     run_find_block(ctx, "find_after_last", b"key_0000099999");
 }
 
-fn run_index_size(ctx: &mut StressContext, size: usize) {
+fn run_index_size(ctx: &mut StressContext, scenario: &'static str, size: usize) {
     let lookup_batch_size = if size >= 1000 {
         SPARSE_INDEX_LOOKUP_BATCH_SIZE_LARGE
     } else {
@@ -81,7 +93,7 @@ fn run_index_size(ctx: &mut StressContext, size: usize) {
     ctx.parameter("entries", size);
     ctx.parameter("lookup_batch_size", lookup_batch_size);
 
-    stress_config::measure_micro_batch(ctx, lookup_batch_size as u64, || {
+    stress_config::measure_hot_path_batch(ctx, scenario, lookup_batch_size as u64, || {
         let mut found = 0usize;
         for _ in 0..lookup_batch_size {
             let range = reader.find_block_range(black_box(lookup_key.as_bytes()));
@@ -91,19 +103,19 @@ fn run_index_size(ctx: &mut StressContext, size: usize) {
     });
 }
 
-#[stress_test(tier = 1, metadata(component = "sparse_index", scenario = "size_10"))]
+#[stress(tier = 1, metadata(component = "sparse_index", scenario = "size_10"))]
 fn size_10_entries(ctx: &mut StressContext) {
-    run_index_size(ctx, 10);
+    run_index_size(ctx, "size_10_entries", 10);
 }
 
-#[stress_test(tier = 1, metadata(component = "sparse_index", scenario = "size_100"))]
+#[stress(tier = 1, metadata(component = "sparse_index", scenario = "size_100"))]
 fn size_100_entries(ctx: &mut StressContext) {
-    run_index_size(ctx, 100);
+    run_index_size(ctx, "size_100_entries", 100);
 }
 
-#[stress_test(tier = 1, metadata(component = "sparse_index", scenario = "size_1000"))]
+#[stress(tier = 1, metadata(component = "sparse_index", scenario = "size_1000"))]
 fn size_1000_entries(ctx: &mut StressContext) {
-    run_index_size(ctx, 1000);
+    run_index_size(ctx, "size_1000_entries", 1000);
 }
 
 stress_main!();

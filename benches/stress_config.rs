@@ -1,9 +1,9 @@
 //! Shared helpers for `cntryl-stress` benchmark files.
 //!
-//! Current `cntryl-stress` tiers derive their timing shape:
-//! Tier 1 uses `measure_micro`, Tier 2 uses fixed-operation `measure` or
-//! `measure_counted`, and Tiers 3+ use fixed-duration `measure_batch` or
-//! externally timed `record_external`.
+//! Current `cntryl-stress` measurements are named rows:
+//! Tier 1 uses `measure` or `measure_batch` for hot paths, Tier 2 uses
+//! fixed-operation `measure` or `measure_batch`, and Tiers 3+ use
+//! fixed-duration `measure_batch` or externally timed `record_external`.
 
 use cntryl_stress::StressContext;
 use std::time::Instant;
@@ -18,32 +18,37 @@ impl Default for BenchConfig {
 }
 
 #[allow(dead_code)]
-pub fn measure_micro_batch(
+pub fn measure_hot_path_batch(
     ctx: &mut StressContext,
+    name: impl Into<String>,
     logical_operations_per_iteration: u64,
     f: impl FnMut(),
 ) {
-    let iterations = ctx.measure_workload(f);
-    ctx.operations(iterations.saturating_mul(logical_operations_per_iteration));
+    let _completed = ctx.measure_batch(name, logical_operations_per_iteration, f);
 }
 
 #[allow(dead_code)]
 pub fn measure_external<R>(
     ctx: &mut StressContext,
+    name: impl Into<String>,
     completed_operations: u64,
     f: impl FnOnce() -> R,
 ) -> R {
     let started_at = Instant::now();
     let result = f();
-    ctx.record_external(started_at.elapsed(), completed_operations);
+    ctx.record_external(name, started_at.elapsed(), completed_operations);
     result
 }
 
 #[allow(dead_code)]
-pub fn measure_external_counted<R>(ctx: &mut StressContext, f: impl FnOnce() -> (R, u64)) -> R {
+pub fn measure_external_counted<R>(
+    ctx: &mut StressContext,
+    name: impl Into<String>,
+    f: impl FnOnce() -> (R, u64),
+) -> R {
     let started_at = Instant::now();
     let (result, completed_operations) = f();
-    ctx.record_external(started_at.elapsed(), completed_operations);
+    ctx.record_external(name, started_at.elapsed(), completed_operations);
     result
 }
 

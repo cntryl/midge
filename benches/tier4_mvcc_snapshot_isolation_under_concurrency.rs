@@ -23,17 +23,19 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_stress::{stress_main, stress_test, StressContext};
+use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const _KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
 const VALUE_SIZE: usize = 64;
+const BENCH_MEMTABLE_SIZE: usize = 1024 * 1024 * 1024;
+const BENCH_MEMORY_BUDGET: usize = 4 * 1024 * 1024 * 1024;
 
 /// Holds read-only snapshot + validation results
 #[allow(dead_code)]
@@ -44,6 +46,19 @@ struct SnapshotReader {
     observed_values: Vec<u64>,
     /// Isolation violations detected
     violations: usize,
+}
+
+#[derive(Debug)]
+struct WriterWindowResult {
+    completed_ops: u64,
+    elapsed: Duration,
+}
+
+fn open_mvcc_bench_engine() -> cntryl_midge::Engine {
+    let mut opts = cntryl_midge::testkit::opts_for_mode("memory");
+    opts.memtable_size = BENCH_MEMTABLE_SIZE;
+    opts.memory_budget = Some(BENCH_MEMORY_BUDGET);
+    cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
 }
 
 fn prepopulate_snapshot_bench(engine: &Arc<cntryl_midge::Engine>, cf_id: u32, num_keys: usize) {
@@ -95,51 +110,127 @@ fn spawn_snapshot_readers(
 }
 
 fn measure_snapshot_bench_writers(
-    ctx: &mut StressContext,
     engine: &Arc<cntryl_midge::Engine>,
     cf_id: u32,
     writer_samples: &Arc<Mutex<Vec<u64>>>,
     num_writers: usize,
-    num_ops: usize,
+    window: Duration,
     num_keys: usize,
-) {
-    stress_config::measure_external(ctx, num_ops as u64, || {
-        let mut handles = vec![];
+) -> WriterWindowResult {
+    let barrier = Arc::new(Barrier::new(num_writers + 1));
+    let completed_ops = Arc::new(AtomicU64::new(0));
+    let mut handles = vec![];
 
-        for writer_id in 0..num_writers {
-            let engine = Arc::clone(engine);
-            let writer_samples = Arc::clone(writer_samples);
-            let handle = thread::spawn(move || {
-                let mut ops_done = 0;
-                let write_opts = cntryl_midge::WriteOptions::buffered();
-                while ops_done < num_ops / num_writers {
-                    let key_idx = (writer_id + ops_done) % num_keys;
-                    let k = cntryl_midge::testkit::stress::key16_u64_be(key_idx as u64);
-                    let v = vec![
-                        u8::try_from(ops_done % 256).expect("modulo result fits in u8");
-                        VALUE_SIZE
-                    ];
+    for writer_id in 0..num_writers {
+        let barrier = Arc::clone(&barrier);
+        let completed_ops = Arc::clone(&completed_ops);
+        let engine = Arc::clone(engine);
+        let writer_samples = Arc::clone(writer_samples);
+        let handle = thread::spawn(move || {
+            let write_opts = cntryl_midge::WriteOptions::buffered();
+            let mut local_samples = Vec::new();
+            let mut ops_done = 0u64;
 
-                    let start = std::time::Instant::now();
-                    let mut tx = engine
-                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                        .unwrap();
-                    tx.put(k.to_vec(), v, None).unwrap();
-                    tx.commit(write_opts).unwrap();
-                    let elapsed_us =
-                        u64::try_from(start.elapsed().as_micros()).expect("latency fits in u64");
+            barrier.wait();
+            let started = Instant::now();
+            while started.elapsed() < window {
+                let key_idx = (writer_id + ops_done as usize) % num_keys;
+                let k = cntryl_midge::testkit::stress::key16_u64_be(key_idx as u64);
+                let v = vec![
+                    u8::try_from(ops_done % 256).expect("modulo result fits in u8");
+                    VALUE_SIZE
+                ];
 
-                    writer_samples.lock().unwrap().push(elapsed_us);
-                    ops_done += 1;
-                }
-            });
-            handles.push(handle);
-        }
+                let op_started = Instant::now();
+                let mut tx = engine
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                    .unwrap();
+                tx.put(k.to_vec(), v, None).unwrap();
+                tx.commit(write_opts).unwrap();
+                let elapsed_us =
+                    u64::try_from(op_started.elapsed().as_micros()).expect("latency fits in u64");
 
-        for handle in handles {
-            let _ = handle.join();
-        }
-    });
+                local_samples.push(elapsed_us);
+                ops_done = ops_done.saturating_add(1);
+            }
+
+            completed_ops.fetch_add(ops_done, Ordering::Relaxed);
+            writer_samples.lock().unwrap().extend(local_samples);
+        });
+        handles.push(handle);
+    }
+
+    barrier.wait();
+    let started = Instant::now();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    WriterWindowResult {
+        completed_ops: completed_ops.load(Ordering::Relaxed),
+        elapsed: started.elapsed(),
+    }
+}
+
+fn measure_long_snapshot_writers(
+    engine: &Arc<cntryl_midge::Engine>,
+    cf_id: u32,
+    writer_latencies: &Arc<Mutex<Vec<u64>>>,
+    num_writers: usize,
+    window: Duration,
+    num_keys: usize,
+) -> WriterWindowResult {
+    let barrier = Arc::new(Barrier::new(num_writers + 1));
+    let completed_ops = Arc::new(AtomicU64::new(0));
+    let mut handles = vec![];
+
+    for writer_id in 0..num_writers {
+        let barrier = Arc::clone(&barrier);
+        let completed_ops = Arc::clone(&completed_ops);
+        let engine = Arc::clone(engine);
+        let writer_latencies = Arc::clone(writer_latencies);
+        let handle = thread::spawn(move || {
+            let write_opts = cntryl_midge::WriteOptions::buffered();
+            let mut local_latencies = Vec::new();
+            let mut ops = 0u64;
+
+            barrier.wait();
+            let started = Instant::now();
+            while started.elapsed() < window {
+                let key_idx = (writer_id + ops as usize) % num_keys;
+                let k = cntryl_midge::testkit::stress::key16_u64_be(key_idx as u64);
+                let v =
+                    vec![u8::try_from(ops % 256).expect("modulo result fits in u8"); VALUE_SIZE];
+
+                let op_started = Instant::now();
+                let mut tx = engine
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                    .unwrap();
+                tx.put(k.to_vec(), v, None).unwrap();
+                tx.commit(write_opts).unwrap();
+                let elapsed_us =
+                    u64::try_from(op_started.elapsed().as_micros()).expect("latency fits in u64");
+
+                local_latencies.push(elapsed_us);
+                ops = ops.saturating_add(1);
+            }
+
+            completed_ops.fetch_add(ops, Ordering::Relaxed);
+            writer_latencies.lock().unwrap().extend(local_latencies);
+        });
+        handles.push(handle);
+    }
+
+    barrier.wait();
+    let started = Instant::now();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    WriterWindowResult {
+        completed_ops: completed_ops.load(Ordering::Relaxed),
+        elapsed: started.elapsed(),
+    }
 }
 
 fn tag_writer_p99(ctx: &mut StressContext, writer_samples: &Arc<Mutex<Vec<u64>>>) {
@@ -161,23 +252,23 @@ fn tag_writer_p99(ctx: &mut StressContext, writer_samples: &Arc<Mutex<Vec<u64>>>
 /// - Compaction happening in background
 /// - Snapshot must not see partial/dirty updates
 /// - Writer latency should not increase catastrophically due to snapshot hold
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_mvcc_snapshot_isolation_under_concurrency_4threads(ctx: &mut StressContext) {
+    const INTERNAL_WARMUP_DURATION: Duration = Duration::from_secs(1);
+    const MEASURED_WRITER_DURATION: Duration = Duration::from_secs(5);
     const NUM_READERS: usize = 2;
     const NUM_WRITERS: usize = 2;
-    const SNAPSHOT_HOLD_DURATION: Duration = Duration::from_secs(5);
+    const SNAPSHOT_HOLD_DURATION: Duration = Duration::from_secs(6);
     const NUM_KEYS: usize = 1_000;
-    const NUM_OPS: usize = 50_000; // Total operations across all writers
 
     ctx.tag("scenario", "mvcc_isolation_4threads");
     ctx.tag("readers", NUM_READERS.to_string().as_str());
     ctx.tag("writers", NUM_WRITERS.to_string().as_str());
-    ctx.tag("snapshot_hold_secs", "5");
-    ctx.set_elements(NUM_OPS as u64);
+    ctx.tag("snapshot_hold_secs", "6");
+    ctx.tag("writer_warmup_secs", "1");
+    ctx.tag("measured_writer_secs", "5");
 
-    let engine = Arc::new(cntryl_midge::testkit::stress::open_engine_no_compaction(
-        cntryl_midge::testkit::opts_for_mode("memory"),
-    ));
+    let engine = Arc::new(open_mvcc_bench_engine());
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
 
@@ -196,14 +287,29 @@ fn tier4_mvcc_snapshot_isolation_under_concurrency_4threads(ctx: &mut StressCont
         NUM_KEYS,
         SNAPSHOT_HOLD_DURATION,
     );
-    measure_snapshot_bench_writers(
-        ctx,
+
+    let _warmup_window = measure_snapshot_bench_writers(
         &engine,
         cf_id,
         &writer_samples,
         NUM_WRITERS,
-        NUM_OPS,
+        INTERNAL_WARMUP_DURATION,
         NUM_KEYS,
+    );
+    writer_samples.lock().unwrap().clear();
+
+    let writer_window = measure_snapshot_bench_writers(
+        &engine,
+        cf_id,
+        &writer_samples,
+        NUM_WRITERS,
+        MEASURED_WRITER_DURATION,
+        NUM_KEYS,
+    );
+    ctx.record_external(
+        "tier4_mvcc_snapshot_isolation_under_concurrency_4threads",
+        writer_window.elapsed,
+        writer_window.completed_ops,
     );
 
     // Signal readers to stop and wait for them
@@ -227,24 +333,28 @@ fn tier4_mvcc_snapshot_isolation_under_concurrency_4threads(ctx: &mut StressCont
 ///
 /// Setup:
 /// - One reader thread holds snapshot for 10s (simulating long query)
-/// - Multiple writers continuously update different keys
+/// - One writer continuously updates keys
 /// - Measure: Writer latency and compaction throughput
 /// Expected: Writers do NOT timeout or degrade catastrophically
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_mvcc_long_snapshot_fairness_10sec(ctx: &mut StressContext) {
+    const INTERNAL_WARMUP_DURATION: Duration = Duration::from_secs(2);
     const LONG_SNAPSHOT_DURATION: Duration = Duration::from_secs(10);
-    const NUM_WRITERS: usize = 4;
-    const NUM_OPS: usize = 20_000;
+    const LONG_SNAPSHOT_HOLD_DURATION: Duration = Duration::from_secs(12);
+    const NUM_WRITERS: usize = 1;
+    const NUM_KEYS: usize = 1_000;
 
     ctx.tag("scenario", "long_snapshot_fairness");
     ctx.tag("snapshot_hold_secs", "10");
-    ctx.set_elements(NUM_OPS as u64);
+    ctx.tag("writer_warmup_secs", "2");
+    ctx.tag("measured_writer_secs", "10");
+    ctx.tag("writers", NUM_WRITERS.to_string().as_str());
+    ctx.tag("key_count", NUM_KEYS.to_string().as_str());
 
-    let engine = Arc::new(cntryl_midge::testkit::stress::open_engine_no_compaction(
-        cntryl_midge::testkit::opts_for_mode("memory"),
-    ));
+    let engine = Arc::new(open_mvcc_bench_engine());
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
+    prepopulate_snapshot_bench(&engine, cf_id, NUM_KEYS);
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let writer_latencies = Arc::new(Mutex::new(Vec::new()));
@@ -259,57 +369,42 @@ fn tier4_mvcc_long_snapshot_fairness_10sec(ctx: &mut StressContext) {
                 .unwrap();
 
             let start = std::time::Instant::now();
-            while start.elapsed() < LONG_SNAPSHOT_DURATION {
+            while !stop_flag.load(Ordering::Relaxed)
+                && start.elapsed() < LONG_SNAPSHOT_HOLD_DURATION
+            {
                 // Periodically read to keep snapshot alive
                 let k = cntryl_midge::testkit::stress::key16_u64_be(0);
                 let _ = snap_tx.get(&k); // Ignore result, just keeping snapshot open
                 thread::sleep(Duration::from_millis(500));
             }
-
-            stop_flag.store(true, Ordering::Relaxed);
         })
     };
 
-    // Measure writer throughput under long-running snapshot
-    stress_config::measure_external(ctx, NUM_OPS as u64, || {
-        let mut handles = vec![];
+    let _warmup_window = measure_long_snapshot_writers(
+        &engine,
+        cf_id,
+        &writer_latencies,
+        NUM_WRITERS,
+        INTERNAL_WARMUP_DURATION,
+        NUM_KEYS,
+    );
+    writer_latencies.lock().unwrap().clear();
 
-        for writer_id in 0..NUM_WRITERS {
-            let engine = Arc::clone(&engine);
-            let stop_flag = Arc::clone(&stop_flag);
-            let writer_latencies = Arc::clone(&writer_latencies);
-            let handle = thread::spawn(move || {
-                let mut ops = 0;
-                let write_opts = cntryl_midge::WriteOptions::buffered();
-                while ops < NUM_OPS / NUM_WRITERS && !stop_flag.load(Ordering::Relaxed) {
-                    let k = cntryl_midge::testkit::stress::key16_u64_be((writer_id + ops) as u64);
-                    let v = vec![
-                        u8::try_from(ops % 256).expect("modulo result fits in u8");
-                        VALUE_SIZE
-                    ];
+    let writer_window = measure_long_snapshot_writers(
+        &engine,
+        cf_id,
+        &writer_latencies,
+        NUM_WRITERS,
+        LONG_SNAPSHOT_DURATION,
+        NUM_KEYS,
+    );
+    ctx.record_external(
+        "tier4_mvcc_long_snapshot_fairness_10sec",
+        writer_window.elapsed,
+        writer_window.completed_ops,
+    );
 
-                    let start = std::time::Instant::now();
-                    let mut tx = engine
-                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                        .unwrap();
-                    tx.put(k.to_vec(), v, None).unwrap();
-                    tx.commit(write_opts).unwrap();
-                    let elapsed_us =
-                        u64::try_from(start.elapsed().as_micros()).expect("latency fits in u64");
-
-                    writer_latencies.lock().unwrap().push(elapsed_us);
-                    ops += 1;
-                }
-                ops
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            let _ = handle.join();
-        }
-    });
-
+    stop_flag.store(true, Ordering::Relaxed);
     reader_handle.join().unwrap();
 
     // Analyze latencies
@@ -329,12 +424,6 @@ fn tier4_mvcc_long_snapshot_fairness_10sec(ctx: &mut StressContext) {
         ctx.tag("writer_p95_latency_us", format!("{p95_us}").as_str());
         ctx.tag("writer_p99_latency_us", format!("{p99_us}").as_str());
         ctx.tag("writer_max_latency_us", format!("{max_us}").as_str());
-
-        // Sanity check: p99 should not be catastrophically high
-        // (expected range: 10-1000Âµs depending on machine)
-        if p99_us > 10_000 {
-            eprintln!("Warning: writer p99 latency is very high: {p99_us}Âµs");
-        }
     }
 
     drop(engine);

@@ -16,7 +16,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_stress::{stress_main, stress_test, StressContext};
+use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
@@ -25,7 +25,7 @@ use cntryl_midge::testkit::MidgeOptions;
 const VALUE_SIZE: usize = 128;
 const PUT_BATCH_SIZE: usize = 64;
 
-fn run_single_put_case(ctx: &mut StressContext, opts: MidgeOptions) {
+fn run_single_put_case(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOptions) {
     ctx.set_elements(50_000); // cheap (Âµs-scale)
     ctx.parameter("put_batch_size", PUT_BATCH_SIZE);
 
@@ -40,7 +40,7 @@ fn run_single_put_case(ctx: &mut StressContext, opts: MidgeOptions) {
     let mut key_index = 0usize;
 
     // Measure repeated logical put/commit calls per framework iteration.
-    let _ = ctx.measure_batch(PUT_BATCH_SIZE as u64, || {
+    let _ = ctx.measure_batch(scenario, PUT_BATCH_SIZE as u64, || {
         for _ in 0..PUT_BATCH_SIZE {
             let k = keys[key_index % keys.len()];
             key_index = key_index.wrapping_add(1);
@@ -56,7 +56,7 @@ fn run_single_put_case(ctx: &mut StressContext, opts: MidgeOptions) {
     drop(engine);
 }
 
-fn run_single_get_case(ctx: &mut StressContext, opts: MidgeOptions) {
+fn run_single_get_case(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOptions) {
     ctx.set_elements(50_000); // cheap (Âµs-scale)
 
     let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
@@ -79,7 +79,7 @@ fn run_single_get_case(ctx: &mut StressContext, opts: MidgeOptions) {
     let k = cntryl_midge::testkit::stress::key16_u64_be(0);
 
     // Measure ONLY one get call
-    let _ = ctx.measure_batch(1, || {
+    let _ = ctx.measure_batch(scenario, 1, || {
         let e = &engine;
         let tx = e
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
@@ -97,40 +97,40 @@ fn run_single_get_case(ctx: &mut StressContext, opts: MidgeOptions) {
 // Stress tests
 // ---------------------------------------------------------------------------
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_engine_put_mem(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
-    run_single_put_case(ctx, opts);
+    run_single_put_case(ctx, "tier3_engine_put_mem", opts);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_engine_put_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_single_put_case(ctx, opts);
+    run_single_put_case(ctx, "tier3_engine_put_local", opts);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_engine_put_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_single_put_case(ctx, opts);
+    run_single_put_case(ctx, "tier3_engine_put_cloud", opts);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_engine_get_mem(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
-    run_single_get_case(ctx, opts);
+    run_single_get_case(ctx, "tier3_engine_get_mem", opts);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_engine_get_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_single_get_case(ctx, opts);
+    run_single_get_case(ctx, "tier3_engine_get_local", opts);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_engine_get_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_single_get_case(ctx, opts);
+    run_single_get_case(ctx, "tier3_engine_get_cloud", opts);
 }
 
 stress_main!();

@@ -6,7 +6,7 @@ use cntryl_midge::sst::compression::{
     compress_block_with_trailer, compress_wal_value, decompress_block_with_trailer,
     decompress_wal_value, CompressionAlgo, CompressionPolicy,
 };
-use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
+use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 const BLOCK_OPERATION_REPEATS: usize = 1024;
 const BLOCK_OPERATION_REPEAT_OPS: u64 = 1024;
@@ -128,14 +128,14 @@ fn run_repeated_block_compress(
         ctx.parameter("data_shape", "mixed");
     }
 
-    let _completed = ctx.measure_counted(|| {
+    let measurement_name = format!("block_compress_{policy_name}_{}k", size / 1024);
+    let _completed = ctx.measure_batch(measurement_name, (size as u64) * repeat_ops, || {
         let mut total = 0usize;
         for _ in 0..repeats {
             let out = compress_block_with_trailer(black_box(&data), policy).unwrap();
             total = total.wrapping_add(out.len());
         }
         black_box(total);
-        (size as u64) * repeat_ops
     });
 }
 
@@ -153,22 +153,25 @@ fn run_zstd9_64k_windowed_compress(ctx: &mut StressContext, policy: &Compression
     ctx.parameter("block_window", ZSTD9_64K_WINDOW_BLOCKS);
     ctx.parameter("window_repeats", ZSTD9_64K_WINDOW_REPEATS);
 
-    let _completed = ctx.measure_counted(|| {
-        let mut total = 0usize;
-        for _ in 0..ZSTD9_64K_WINDOW_REPEATS {
-            for block in &blocks {
-                let out = compress_block_with_trailer(black_box(block), policy).unwrap();
-                total = total.wrapping_add(out.len());
+    let _completed = ctx.measure_batch(
+        "block_compress_zstd9_64k",
+        (bytes_per_window * ZSTD9_64K_WINDOW_REPEATS) as u64,
+        || {
+            let mut total = 0usize;
+            for _ in 0..ZSTD9_64K_WINDOW_REPEATS {
+                for block in &blocks {
+                    let out = compress_block_with_trailer(black_box(block), policy).unwrap();
+                    total = total.wrapping_add(out.len());
+                }
             }
-        }
-        black_box(total);
-        (bytes_per_window * ZSTD9_64K_WINDOW_REPEATS) as u64
-    });
+            black_box(total);
+        },
+    );
 }
 
 macro_rules! block_compress_case {
     ($fn_name:ident, $size:expr, $policy_name:literal, $policy:expr) => {
-        #[stress_test(tier = 2, metadata(component = "compression"))]
+        #[stress(tier = 2, metadata(component = "compression"))]
         fn $fn_name(ctx: &mut StressContext) {
             run_block_compress(ctx, $size, $policy_name, &$policy);
         }
@@ -241,20 +244,20 @@ fn run_block_decompress(
     ctx.parameter("policy", policy_name);
     ctx.parameter("block_repeats", repeats);
 
-    let _completed = ctx.measure_counted(|| {
+    let measurement_name = format!("block_decompress_{policy_name}_{}k", size / 1024);
+    let _completed = ctx.measure_batch(measurement_name, (size as u64) * repeat_ops, || {
         let mut total = 0usize;
         for _ in 0..repeats {
             let out = decompress_block_with_trailer(black_box(compressed.as_ref())).unwrap();
             total = total.wrapping_add(out.len());
         }
         black_box(total);
-        (size as u64) * repeat_ops
     });
 }
 
 macro_rules! block_decompress_case {
     ($fn_name:ident, $size:expr, $policy_name:literal, $policy:expr) => {
-        #[stress_test(tier = 2, metadata(component = "compression"))]
+        #[stress(tier = 2, metadata(component = "compression"))]
         fn $fn_name(ctx: &mut StressContext) {
             run_block_decompress(ctx, $size, $policy_name, &$policy);
         }
@@ -314,18 +317,22 @@ fn run_incompressible(
         prewarm_block_compress(&data, policy, INCOMPRESSIBLE_LZ4_PREWARM_REPEATS);
     }
 
-    let _completed = ctx.measure_counted(|| {
-        let mut total = 0usize;
-        for _ in 0..BLOCK_OPERATION_REPEATS {
-            let out = compress_block_with_trailer(black_box(&data), policy).unwrap();
-            total = total.wrapping_add(out.len());
-        }
-        black_box(total);
-        (size as u64) * BLOCK_OPERATION_REPEAT_OPS
-    });
+    let measurement_name = format!("incompressible_{policy_name}");
+    let _completed = ctx.measure_batch(
+        measurement_name,
+        (size as u64) * BLOCK_OPERATION_REPEAT_OPS,
+        || {
+            let mut total = 0usize;
+            for _ in 0..BLOCK_OPERATION_REPEATS {
+                let out = compress_block_with_trailer(black_box(&data), policy).unwrap();
+                total = total.wrapping_add(out.len());
+            }
+            black_box(total);
+        },
+    );
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "compression", scenario = "incompressible_lz4")
 )]
@@ -333,7 +340,7 @@ fn incompressible_lz4(ctx: &mut StressContext) {
     run_incompressible(ctx, "lz4", &CompressionPolicy::Fixed(CompressionAlgo::Lz4));
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "compression", scenario = "incompressible_zstd3")
 )]
@@ -345,7 +352,7 @@ fn incompressible_zstd3(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "compression", scenario = "incompressible_adaptive")
 )]
@@ -380,20 +387,23 @@ fn run_batch_block_compress(
     }
     black_box(prewarm_total);
 
-    let _completed = ctx.measure_counted(|| {
-        let mut total = 0usize;
-        for _ in 0..BATCH_BLOCK_OPERATION_REPEATS {
-            for block in &blocks {
-                let out = compress_block_with_trailer(black_box(block), policy).unwrap();
-                total += out.len();
+    let _completed = ctx.measure_batch(
+        format!("batch_compress_{policy_name}_32x16k"),
+        (block_size * block_count * BATCH_BLOCK_OPERATION_REPEATS) as u64,
+        || {
+            let mut total = 0usize;
+            for _ in 0..BATCH_BLOCK_OPERATION_REPEATS {
+                for block in &blocks {
+                    let out = compress_block_with_trailer(black_box(block), policy).unwrap();
+                    total += out.len();
+                }
             }
-        }
-        black_box(total);
-        (block_size * block_count * BATCH_BLOCK_OPERATION_REPEATS) as u64
-    });
+            black_box(total);
+        },
+    );
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "compression", scenario = "batch_compress_lz4_32x16k")
 )]
@@ -401,7 +411,7 @@ fn batch_compress_lz4_32x16k(ctx: &mut StressContext) {
     run_batch_block_compress(ctx, "lz4", &CompressionPolicy::Fixed(CompressionAlgo::Lz4));
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "compression", scenario = "batch_compress_zstd3_32x16k")
 )]
@@ -443,20 +453,23 @@ fn run_batch_block_decompress(
     }
     black_box(prewarm_total);
 
-    let _completed = ctx.measure_counted(|| {
-        let mut total = 0usize;
-        for _ in 0..BATCH_BLOCK_OPERATION_REPEATS {
-            for block in &compressed_blocks {
-                let out = decompress_block_with_trailer(black_box(block.as_ref())).unwrap();
-                total += out.len();
+    let _completed = ctx.measure_batch(
+        format!("batch_decompress_{policy_name}_32x16k"),
+        (block_size * block_count * BATCH_BLOCK_OPERATION_REPEATS) as u64,
+        || {
+            let mut total = 0usize;
+            for _ in 0..BATCH_BLOCK_OPERATION_REPEATS {
+                for block in &compressed_blocks {
+                    let out = decompress_block_with_trailer(black_box(block.as_ref())).unwrap();
+                    total += out.len();
+                }
             }
-        }
-        black_box(total);
-        (block_size * block_count * BATCH_BLOCK_OPERATION_REPEATS) as u64
-    });
+            black_box(total);
+        },
+    );
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "compression", scenario = "batch_decompress_lz4_32x16k")
 )]
@@ -464,7 +477,7 @@ fn batch_decompress_lz4_32x16k(ctx: &mut StressContext) {
     run_batch_block_decompress(ctx, "lz4", &CompressionPolicy::Fixed(CompressionAlgo::Lz4));
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "compression", scenario = "batch_decompress_zstd3_32x16k")
 )]
@@ -476,7 +489,7 @@ fn batch_decompress_zstd3_32x16k(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(
         component = "compression",
@@ -493,20 +506,23 @@ fn wal_batch_compress_lz4_100x512b(ctx: &mut StressContext) {
     ctx.parameter("record_size", record_size);
     ctx.parameter("batch_repeats", WAL_BATCH_OPERATION_REPEATS);
 
-    let _completed = ctx.measure_counted(|| {
-        let mut total = 0usize;
-        for _ in 0..WAL_BATCH_OPERATION_REPEATS {
-            for rec in &records {
-                let (out, _) = compress_wal_value(black_box(rec));
-                total += out.len();
+    let _completed = ctx.measure_batch(
+        "wal_batch_compress_lz4_100x512b",
+        (record_count * record_size * WAL_BATCH_OPERATION_REPEATS) as u64,
+        || {
+            let mut total = 0usize;
+            for _ in 0..WAL_BATCH_OPERATION_REPEATS {
+                for rec in &records {
+                    let (out, _) = compress_wal_value(black_box(rec));
+                    total += out.len();
+                }
             }
-        }
-        black_box(total);
-        (record_count * record_size * WAL_BATCH_OPERATION_REPEATS) as u64
-    });
+            black_box(total);
+        },
+    );
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(
         component = "compression",
@@ -526,17 +542,20 @@ fn wal_batch_decompress_lz4_100x512b(ctx: &mut StressContext) {
     ctx.parameter("record_size", record_size);
     ctx.parameter("batch_repeats", WAL_BATCH_OPERATION_REPEATS);
 
-    let _completed = ctx.measure_counted(|| {
-        let mut total = 0usize;
-        for _ in 0..WAL_BATCH_OPERATION_REPEATS {
-            for (data, comp) in &compressed_records {
-                let out = decompress_wal_value(black_box(data.as_ref()), *comp).unwrap();
-                total += out.len();
+    let _completed = ctx.measure_batch(
+        "wal_batch_decompress_lz4_100x512b",
+        (record_count * record_size * WAL_BATCH_OPERATION_REPEATS) as u64,
+        || {
+            let mut total = 0usize;
+            for _ in 0..WAL_BATCH_OPERATION_REPEATS {
+                for (data, comp) in &compressed_records {
+                    let out = decompress_wal_value(black_box(data.as_ref()), *comp).unwrap();
+                    total += out.len();
+                }
             }
-        }
-        black_box(total);
-        (record_count * record_size * WAL_BATCH_OPERATION_REPEATS) as u64
-    });
+            black_box(total);
+        },
+    );
 }
 
 stress_main!();

@@ -7,7 +7,7 @@ mod stress_config;
 
 use cntryl_midge::handler::handle;
 use cntryl_midge::message::MessageKind;
-use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
+use cntryl_stress::{black_box, stress, stress_main, StressContext};
 use std::collections::VecDeque;
 
 const INNER_LOOPS: usize = 128;
@@ -38,11 +38,11 @@ fn build_messages(count: usize) -> Vec<MessageKind> {
     messages
 }
 
-#[stress_test(tier = 1, metadata(component = "event_loop", scenario = "direct_call"))]
+#[stress(tier = 1, metadata(component = "event_loop", scenario = "direct_call"))]
 fn direct_call(ctx: &mut StressContext) {
     ctx.parameter("inner_loops", DIRECT_INNER_LOOPS);
 
-    stress_config::measure_micro_batch(ctx, DIRECT_INNER_LOOPS, || {
+    stress_config::measure_hot_path_batch(ctx, "direct_call", DIRECT_INNER_LOOPS, || {
         let mut counter = 0u64;
         for _ in 0..DIRECT_INNER_LOOPS {
             handle(&mut counter);
@@ -52,7 +52,7 @@ fn direct_call(ctx: &mut StressContext) {
     });
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "event_loop", scenario = "dispatch_only")
 )]
@@ -60,7 +60,7 @@ fn dispatch_only(ctx: &mut StressContext) {
     let messages = build_messages(INNER_LOOPS);
     ctx.parameter("inner_loops", INNER_LOOPS);
 
-    stress_config::measure_micro_batch(ctx, INNER_LOOP_OPS, || {
+    stress_config::measure_hot_path_batch(ctx, "dispatch_only", INNER_LOOP_OPS, || {
         let mut counter = 0u64;
         for kind in &messages {
             dispatch_message(black_box(*kind), &mut counter);
@@ -69,16 +69,17 @@ fn dispatch_only(ctx: &mut StressContext) {
     });
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "event_loop", scenario = "mailbox_vecdeque")
 )]
 fn mailbox_vecdeque(ctx: &mut StressContext) {
     let messages = build_messages(INNER_LOOPS);
+    let mut queue = VecDeque::with_capacity(messages.len());
     ctx.parameter("inner_loops", INNER_LOOPS);
 
-    stress_config::measure_micro_batch(ctx, INNER_LOOP_OPS, || {
-        let mut queue = VecDeque::with_capacity(messages.len());
+    stress_config::measure_hot_path_batch(ctx, "mailbox_vecdeque", INNER_LOOP_OPS, || {
+        queue.clear();
         for kind in &messages {
             queue.push_back(*kind);
         }

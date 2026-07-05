@@ -2,16 +2,14 @@
 //!
 //! Covers exact key lookup, prefix range lookup, and key-shape sensitivity.
 
+use cntryl_midge::sst::trie::{TrieBuilder, TrieReader};
+use cntryl_stress::{black_box, stress, stress_main, StressContext};
+
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::sst::trie::{TrieBuilder, TrieReader};
-use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
-
-const TRIE_FIND_BATCH_SIZE: usize = 2048;
-const TRIE_PREFIX_BATCH_SIZE: usize = 256;
-
-cntryl_stress::stress_allocator!();
+const FIND_BLOCK_BATCH_SIZE: usize = 16_384;
+const PREFIX_RANGE_BATCH_SIZE: usize = 2048;
 
 fn build_profile_trie() -> Vec<u8> {
     let mut builder = TrieBuilder::new();
@@ -24,16 +22,16 @@ fn build_profile_trie() -> Vec<u8> {
 
 fn measure_find_block(
     ctx: &mut StressContext,
+    scenario: &'static str,
     reader: &TrieReader,
     key: &'static [u8],
     expected: Option<u32>,
 ) {
     assert_eq!(reader.find_block(key), expected);
-    ctx.parameter("find_batch_size", TRIE_FIND_BATCH_SIZE);
 
-    stress_config::measure_micro_batch(ctx, TRIE_FIND_BATCH_SIZE as u64, || {
+    stress_config::measure_hot_path_batch(ctx, scenario, FIND_BLOCK_BATCH_SIZE as u64, || {
         let mut found = 0u32;
-        for _ in 0..TRIE_FIND_BATCH_SIZE {
+        for _ in 0..FIND_BLOCK_BATCH_SIZE {
             found = found.wrapping_add(reader.find_block(black_box(key)).unwrap_or(u32::MAX));
         }
         black_box(found);
@@ -49,20 +47,20 @@ fn run_find_block(
     let encoded = build_profile_trie();
     let reader = TrieReader::new(&encoded).unwrap();
     ctx.parameter("scenario", scenario);
-    measure_find_block(ctx, &reader, key, expected);
+    measure_find_block(ctx, scenario, &reader, key, expected);
 }
 
-#[stress_test(tier = 1, metadata(component = "trie", scenario = "find_hit"))]
+#[stress(tier = 1, metadata(component = "trie", scenario = "find_hit"))]
 fn find_hit(ctx: &mut StressContext) {
     run_find_block(ctx, "find_hit", b"user:050:profile", Some(50));
 }
 
-#[stress_test(tier = 1, metadata(component = "trie", scenario = "find_miss"))]
+#[stress(tier = 1, metadata(component = "trie", scenario = "find_miss"))]
 fn find_miss(ctx: &mut StressContext) {
     run_find_block(ctx, "find_miss", b"user:050:profily", None);
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "trie", scenario = "find_partial_match")
 )]
@@ -85,11 +83,10 @@ fn run_prefix_range(ctx: &mut StressContext, scenario: &'static str, prefix: &'s
     let encoded = build_hierarchical_trie();
     let reader = TrieReader::new(&encoded).unwrap();
     ctx.parameter("scenario", scenario);
-    ctx.parameter("prefix_batch_size", TRIE_PREFIX_BATCH_SIZE);
 
-    stress_config::measure_micro_batch(ctx, TRIE_PREFIX_BATCH_SIZE as u64, || {
+    stress_config::measure_hot_path_batch(ctx, scenario, PREFIX_RANGE_BATCH_SIZE as u64, || {
         let mut total = 0usize;
-        for _ in 0..TRIE_PREFIX_BATCH_SIZE {
+        for _ in 0..PREFIX_RANGE_BATCH_SIZE {
             let blocks = reader.find_prefix_range(black_box(prefix));
             total = total.wrapping_add(blocks.len());
         }
@@ -97,7 +94,7 @@ fn run_prefix_range(ctx: &mut StressContext, scenario: &'static str, prefix: &'s
     });
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "trie", scenario = "prefix_single_user")
 )]
@@ -105,14 +102,14 @@ fn prefix_single_user(ctx: &mut StressContext) {
     run_prefix_range(ctx, "prefix_single_user", b"user:05:");
 }
 
-#[stress_test(tier = 1, metadata(component = "trie", scenario = "prefix_all_users"))]
+#[stress(tier = 1, metadata(component = "trie", scenario = "prefix_all_users"))]
 fn prefix_all_users(ctx: &mut StressContext) {
     run_prefix_range(ctx, "prefix_all_users", b"user:");
 }
 
-#[stress_test(tier = 1, metadata(component = "trie", scenario = "prefix_no_match"))]
+#[stress(tier = 1, metadata(component = "trie", scenario = "prefix_no_match"))]
 fn prefix_no_match(ctx: &mut StressContext) {
-    run_prefix_range(ctx, "prefix_no_match", b"admin:");
+    run_prefix_range(ctx, "prefix_no_match", b"user:09:zzzz");
 }
 
 fn build_short_key_trie() -> Vec<u8> {
@@ -133,17 +130,17 @@ fn build_long_key_trie() -> Vec<u8> {
     builder.finish()
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "trie", scenario = "short_keys_high_branch")
 )]
 fn short_keys_high_branch(ctx: &mut StressContext) {
     let encoded = build_short_key_trie();
     let reader = TrieReader::new(&encoded).unwrap();
-    measure_find_block(ctx, &reader, b"k050", Some(50));
+    measure_find_block(ctx, "short_keys_high_branch", &reader, b"k050", Some(50));
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "trie", scenario = "long_keys_shared_prefix")
 )]
@@ -152,6 +149,7 @@ fn long_keys_shared_prefix(ctx: &mut StressContext) {
     let reader = TrieReader::new(&encoded).unwrap();
     measure_find_block(
         ctx,
+        "long_keys_shared_prefix",
         &reader,
         b"very_long_shared_prefix_key_0000000050",
         Some(50),

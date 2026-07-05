@@ -13,7 +13,7 @@
 //! - Realistic patterns: Zipfian key distribution, mixed get/scan operations
 
 use cntryl_midge::Bytes;
-use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
+use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 // ─── Configuration ──────────────────────────────────────────────────────
 
@@ -219,16 +219,12 @@ impl LsmSimulator {
 
     /// Range scan across keys [`start_key`, `start_key+num_keys`)
     /// Returns (`total_blocks_read`, `cache_hits`, `keys_found`)
-    fn scan(&mut self, start_key: usize, num_keys: usize) -> (u32, u32, u32) {
+    fn scan_keys(&mut self, keys: &[Bytes]) -> (u32, u32, u32) {
         let mut blocks_read = 0u32;
         let mut cache_hits = 0u32;
         let mut keys_found = 0u32;
 
-        let keys: Vec<Bytes> = (start_key..start_key + num_keys)
-            .map(|i| Bytes::from(format!("key:{i:010}")))
-            .collect();
-
-        for key in &keys {
+        for key in keys {
             let (br, ch, found) = self.get(key);
             blocks_read += br;
             cache_hits += ch;
@@ -293,7 +289,7 @@ impl ZipfianDistribution {
 
 // ─── Benchmark Scenarios ────────────────────────────────────────────────────
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "read_amplification", scenario = "point_lookups_zipfian")
 )]
@@ -302,7 +298,7 @@ fn point_lookups_zipfian(ctx: &mut StressContext) {
     ctx.parameter("lookup_count", LOOKUPS_PER_ITER);
     ctx.parameter("distribution", "zipfian");
 
-    let _completed = ctx.measure_counted(|| {
+    let _completed = ctx.measure_batch("point_lookups_zipfian", LOOKUPS_PER_ITER as u64, || {
         let mut lsm = LsmSimulator::new_zipfian();
         let mut total_blocks_read = 0u32;
         let mut total_cache_hits = 0u32;
@@ -318,23 +314,26 @@ fn point_lookups_zipfian(ctx: &mut StressContext) {
         }
 
         black_box((total_blocks_read, total_cache_hits, total_found));
-        LOOKUPS_PER_ITER as u64
     });
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "read_amplification", scenario = "mixed_get_scan")
 )]
 fn mixed_get_scan(ctx: &mut StressContext) {
     let get_keys = precompute_zipf_keys(MIXED_GETS_PER_ITER, 40_000, 1.5);
     let scan_starts = precompute_zipf_starts(MIXED_SCANS_PER_ITER, 40_000, 1.5);
+    let scan_keys: Vec<Vec<Bytes>> = scan_starts
+        .iter()
+        .map(|&start| (start..start + SCAN_WIDTH).map(key_from_index).collect())
+        .collect();
     let logical_ops = MIXED_GETS_PER_ITER + (MIXED_SCANS_PER_ITER * SCAN_WIDTH);
     ctx.parameter("gets", MIXED_GETS_PER_ITER);
     ctx.parameter("scans", MIXED_SCANS_PER_ITER);
     ctx.parameter("scan_width", SCAN_WIDTH);
 
-    let _completed = ctx.measure_counted(|| {
+    let _completed = ctx.measure_batch("mixed_get_scan", logical_ops as u64, || {
         let mut lsm = LsmSimulator::new_zipfian();
         let mut total_blocks_read = 0u32;
         let mut total_cache_hits = 0u32;
@@ -349,19 +348,18 @@ fn mixed_get_scan(ctx: &mut StressContext) {
             }
         }
 
-        for &start_key in &scan_starts {
-            let (br, ch, found) = lsm.scan(start_key, SCAN_WIDTH);
+        for keys in &scan_keys {
+            let (br, ch, found) = lsm.scan_keys(keys);
             total_blocks_read += br;
             total_cache_hits += ch;
             total_found += found;
         }
 
         black_box((total_blocks_read, total_cache_hits, total_found));
-        logical_ops as u64
     });
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "read_amplification", scenario = "uniform_distribution")
 )]
@@ -370,7 +368,7 @@ fn uniform_distribution(ctx: &mut StressContext) {
     ctx.parameter("lookup_count", LOOKUPS_PER_ITER);
     ctx.parameter("distribution", "uniform");
 
-    let _completed = ctx.measure_counted(|| {
+    let _completed = ctx.measure_batch("uniform_distribution", LOOKUPS_PER_ITER as u64, || {
         let mut lsm = LsmSimulator::new_zipfian();
         let mut total_blocks_read = 0u32;
         let mut total_cache_hits = 0u32;
@@ -386,7 +384,6 @@ fn uniform_distribution(ctx: &mut StressContext) {
         }
 
         black_box((total_blocks_read, total_cache_hits, total_found));
-        LOOKUPS_PER_ITER as u64
     });
 }
 

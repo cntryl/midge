@@ -6,7 +6,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_stress::{stress_main, stress_test, StressContext};
+use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
@@ -169,7 +169,7 @@ fn run_streaming_phase(
     out
 }
 
-fn run_streaming(ctx: &mut StressContext, opts: MidgeOptions) {
+fn run_streaming(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOptions) {
     let engine = Arc::new(ycsb::open_tier4_engine(opts));
 
     // Shared stream head across warmup + measured (represents the append log).
@@ -185,7 +185,7 @@ fn run_streaming(ctx: &mut StressContext, opts: MidgeOptions) {
     // Measured phase
     // -------------------------------------------------------------------------
 
-    let measured_phase = stress_config::measure_external_counted(ctx, || {
+    let measured_phase = stress_config::measure_external_counted(ctx, scenario, || {
         let phase = run_streaming_phase(&engine, &head, MEASURED, true);
         let total_ops = phase.writes.saturating_add(phase.reads);
         (phase, total_ops)
@@ -231,16 +231,16 @@ fn run_streaming(ctx: &mut StressContext, opts: MidgeOptions) {
     ctx.tag("max_lag_keys", lag_max.to_string());
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_streaming_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_streaming(ctx, opts);
+    run_streaming(ctx, "tier4_streaming_local", opts);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_streaming_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_streaming(ctx, opts);
+    run_streaming(ctx, "tier4_streaming_cloud", opts);
 }
 
 stress_main!();

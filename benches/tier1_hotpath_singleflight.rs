@@ -6,16 +6,14 @@
 mod stress_config;
 
 use cntryl_midge::common::Accumulator;
-use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
+use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
-const SUBMIT_AND_WAIT_BATCH_ROUNDS: usize = 16;
+const SUBMIT_AND_WAIT_BATCH_ROUNDS: usize = 64;
 
-cntryl_stress::stress_allocator!();
-
-fn run_flush_waiters(ctx: &mut StressContext, waiters: usize) {
+fn run_flush_waiters(ctx: &mut StressContext, scenario: &'static str, waiters: usize) {
     ctx.parameter("waiters", waiters);
 
-    ctx.measure_micro(|| {
+    ctx.measure(scenario, || {
         let acc: Accumulator<u64, u64> = Accumulator::new();
         let mut receivers = Vec::with_capacity(waiters);
         for i in 0..waiters {
@@ -30,12 +28,12 @@ fn run_flush_waiters(ctx: &mut StressContext, waiters: usize) {
     });
 }
 
-fn run_submit_and_wait(ctx: &mut StressContext, waiters: usize) {
+fn run_submit_and_wait(ctx: &mut StressContext, scenario: &'static str, waiters: usize) {
     let logical_ops = (waiters * SUBMIT_AND_WAIT_BATCH_ROUNDS) as u64;
     ctx.parameter("waiters", waiters);
     ctx.parameter("rounds", SUBMIT_AND_WAIT_BATCH_ROUNDS);
 
-    stress_config::measure_micro_batch(ctx, logical_ops, || {
+    stress_config::measure_hot_path_batch(ctx, scenario, logical_ops, || {
         let mut total = 0u64;
         for _ in 0..SUBMIT_AND_WAIT_BATCH_ROUNDS {
             let acc: Accumulator<u64, u64> = Accumulator::new();
@@ -55,68 +53,68 @@ fn run_submit_and_wait(ctx: &mut StressContext, waiters: usize) {
     });
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "singleflight", scenario = "flush_waiters_1")
 )]
 fn flush_waiters_1(ctx: &mut StressContext) {
-    run_flush_waiters(ctx, 1);
+    run_flush_waiters(ctx, "flush_waiters_1", 1);
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "singleflight", scenario = "flush_waiters_4")
 )]
 fn flush_waiters_4(ctx: &mut StressContext) {
-    run_flush_waiters(ctx, 4);
+    run_flush_waiters(ctx, "flush_waiters_4", 4);
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "singleflight", scenario = "flush_waiters_16")
 )]
 fn flush_waiters_16(ctx: &mut StressContext) {
-    run_flush_waiters(ctx, 16);
+    run_flush_waiters(ctx, "flush_waiters_16", 16);
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "singleflight", scenario = "flush_waiters_64")
 )]
 fn flush_waiters_64(ctx: &mut StressContext) {
-    run_flush_waiters(ctx, 64);
+    run_flush_waiters(ctx, "flush_waiters_64", 64);
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "singleflight", scenario = "submit_and_wait_1")
 )]
 fn submit_and_wait_1(ctx: &mut StressContext) {
-    run_submit_and_wait(ctx, 1);
+    run_submit_and_wait(ctx, "submit_and_wait_1", 1);
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "singleflight", scenario = "submit_and_wait_4")
 )]
 fn submit_and_wait_4(ctx: &mut StressContext) {
-    run_submit_and_wait(ctx, 4);
+    run_submit_and_wait(ctx, "submit_and_wait_4", 4);
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "singleflight", scenario = "submit_and_wait_16")
 )]
 fn submit_and_wait_16(ctx: &mut StressContext) {
-    run_submit_and_wait(ctx, 16);
+    run_submit_and_wait(ctx, "submit_and_wait_16", 16);
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "singleflight", scenario = "submit_and_wait_64")
 )]
 fn submit_and_wait_64(ctx: &mut StressContext) {
-    run_submit_and_wait(ctx, 64);
+    run_submit_and_wait(ctx, "submit_and_wait_64", 64);
 }
 
 stress_main!();

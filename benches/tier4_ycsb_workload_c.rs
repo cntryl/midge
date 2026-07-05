@@ -5,7 +5,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_stress::{stress_main, stress_test, StressContext};
+use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
@@ -151,6 +151,8 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
 
     // Phase 3: Measured (duration-based; multi-client)
     let cf_id = cf.id();
+    let client_suffix = if clients == 1 { "client" } else { "clients" };
+    let measurement_name = format!("tier4_ycsb_c_{profile}_{clients}_{client_suffix}");
     let measured = if use_fixed_operations {
         ctx.parameter("operations_per_client", MEMORY_16_FIXED_OPS_PER_CLIENT);
         ctx.parameter("worker_threads", MEMORY_16_WORKER_THREADS);
@@ -178,10 +180,10 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
                 }
             },
         );
-        ctx.record_external(elapsed, measured.operations);
+        ctx.record_external(measurement_name, elapsed, measured.operations);
         measured
     } else {
-        stress_config::measure_external_counted(ctx, || {
+        stress_config::measure_external_counted(ctx, measurement_name, || {
             let measured = {
                 let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
                 ycsb::run_multi_client_for_duration_with_stats(
@@ -226,73 +228,73 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     }
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_c_memory_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
     run_workload_c(ctx, opts, "memory", CLIENTS_1);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_c_memory_16_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
     run_workload_c(ctx, opts, "memory", CLIENTS_16);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_c_memory_64_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
     run_workload_c(ctx, opts, "memory", CLIENTS_64);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_c_local_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_workload_c(ctx, opts, "local", CLIENTS_1);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_c_local_16_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_workload_c(ctx, opts, "local", CLIENTS_16);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_c_local_64_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_workload_c(ctx, opts, "local", CLIENTS_64);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_c_cloud_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_workload_c(ctx, opts, "cloud", CLIENTS_1);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_c_cloud_16_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_workload_c(ctx, opts, "cloud", CLIENTS_16);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_c_cloud_64_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_workload_c(ctx, opts, "cloud", CLIENTS_64);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_c_hybrid_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("hybrid");
     run_workload_c(ctx, opts, "hybrid", CLIENTS_1);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_c_hybrid_16_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("hybrid");
     run_workload_c(ctx, opts, "hybrid", CLIENTS_16);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_ycsb_c_hybrid_64_clients(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("hybrid");
     run_workload_c(ctx, opts, "hybrid", CLIENTS_64);

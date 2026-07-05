@@ -9,7 +9,7 @@ mod stress_config;
 
 use std::time::{Duration, Instant};
 
-use cntryl_stress::{stress_main, stress_test, StressContext};
+use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
@@ -170,6 +170,7 @@ fn assert_cloud_guardrails(
 
 fn run_durability_puts_case(
     ctx: &mut StressContext,
+    scenario: &'static str,
     opts: MidgeOptions,
     num_ops: usize,
     mode_name: &str,
@@ -195,7 +196,7 @@ fn run_durability_puts_case(
     let cf_id = cf.id();
     let perf_start = ycsb::capture_runtime_perf_snapshot(&engine);
 
-    let latency = stress_config::measure_external(ctx, num_ops as u64, || {
+    let latency = stress_config::measure_external(ctx, scenario, num_ops as u64, || {
         run_commit_latency_workload(&engine, cf_id, num_ops, write_opts)
     });
 
@@ -219,12 +220,13 @@ fn run_durability_puts_case(
     drop(engine);
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_durability_async_cloud_1000(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     let local_buffered_p99_us = measure_unreported_local_buffered_p99(1_000);
     run_durability_puts_case(
         ctx,
+        "tier4_durability_async_cloud_1000",
         opts,
         1_000,
         "cloud_buffered_async",
@@ -235,11 +237,12 @@ fn tier4_durability_async_cloud_1000(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_durability_sync_seal_cloud_250(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_durability_puts_case(
         ctx,
+        "tier4_durability_sync_seal_cloud_250",
         opts,
         250,
         "cloud_sync_seal",
@@ -248,11 +251,12 @@ fn tier4_durability_sync_seal_cloud_250(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test(tier = 4)]
+#[stress(tier = 4)]
 fn tier4_durability_cloud_strict_100(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_durability_puts_case(
         ctx,
+        "tier4_durability_cloud_strict_100",
         opts,
         100,
         "cloud_strict_ack",

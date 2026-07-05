@@ -3,17 +3,18 @@
 //! Measures fill + drain cycle cost for small and large memtables.
 
 use cntryl_midge::sst::SkipListMemtable;
-use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
+use cntryl_midge::Bytes;
+use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 const PUT_1KB_BATCH_SIZE: usize = 4_096;
 const PUT_4KB_BATCH_SIZE: usize = 65_536;
 
-fn make_kv_pairs(count: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+fn make_kv_pairs(count: usize) -> Vec<(Bytes, Bytes)> {
     (0..count)
         .map(|i| {
             (
-                format!("key_{i:010}").into_bytes(),
-                format!("value_{i:010}").into_bytes(),
+                Bytes::from(format!("key_{i:010}")),
+                Bytes::from(format!("value_{i:010}")),
             )
         })
         .collect()
@@ -23,37 +24,36 @@ fn make_value(size: usize) -> Vec<u8> {
     vec![b'x'; size]
 }
 
-fn make_fixed_value_pairs(count: usize, value_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let value = make_value(value_size);
+fn make_fixed_value_pairs(count: usize, value_size: usize) -> Vec<(Bytes, Bytes)> {
+    let value = Bytes::from(make_value(value_size));
     (0..count)
-        .map(|i| (format!("put_key_{i:010}").into_bytes(), value.clone()))
+        .map(|i| (Bytes::from(format!("put_key_{i:010}")), value.clone()))
         .collect()
 }
 
-fn run_memtable_rotate(ctx: &mut StressContext, count: usize) {
+fn run_memtable_rotate(ctx: &mut StressContext, scenario: &'static str, count: usize) {
     let kv_pairs = make_kv_pairs(count);
     ctx.parameter("entry_count", count);
 
-    let _completed = ctx.measure_counted(|| {
+    let _completed = ctx.measure_batch(scenario, count as u64, || {
         let memtable = SkipListMemtable::new();
-        for (key, value) in &kv_pairs {
+        for (seq, (key, value)) in kv_pairs.iter().enumerate() {
             memtable
-                .put_with_exp(key.clone(), value.clone(), None)
+                .put_bytes_with_seq(key.clone(), value.clone(), seq as u64 + 1, None)
                 .unwrap();
         }
         black_box(memtable.iter_all(u64::MAX));
-        count as u64
     });
 }
 
-#[stress_test(tier = 2, metadata(component = "memtable", scenario = "rotate_small"))]
+#[stress(tier = 2, metadata(component = "memtable", scenario = "rotate_small"))]
 fn rotate_small(ctx: &mut StressContext) {
-    run_memtable_rotate(ctx, 100);
+    run_memtable_rotate(ctx, "rotate_small", 1_000);
 }
 
-#[stress_test(tier = 2, metadata(component = "memtable", scenario = "rotate_large"))]
+#[stress(tier = 2, metadata(component = "memtable", scenario = "rotate_large"))]
 fn rotate_large(ctx: &mut StressContext) {
-    run_memtable_rotate(ctx, 10_000);
+    run_memtable_rotate(ctx, "rotate_large", 10_000);
 }
 
 fn run_put_value_size(ctx: &mut StressContext, scenario: &'static str, value_size: usize) {
@@ -67,32 +67,36 @@ fn run_put_value_size(ctx: &mut StressContext, scenario: &'static str, value_siz
     ctx.parameter("entry_count", batch_size);
     ctx.parameter("value_size", value_size);
 
-    let _completed = ctx.measure_counted(|| {
+    let _completed = ctx.measure_batch(scenario, batch_size as u64, || {
         let memtable = SkipListMemtable::new();
-        for (key, value) in &kv_pairs {
+        for (seq, (key, value)) in kv_pairs.iter().enumerate() {
             memtable
-                .put_with_exp(black_box(key.clone()), black_box(value.clone()), None)
+                .put_bytes_with_seq(
+                    black_box(key.clone()),
+                    black_box(value.clone()),
+                    seq as u64 + 1,
+                    None,
+                )
                 .unwrap();
         }
         black_box(memtable);
-        batch_size as u64
     });
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "memtable", scenario = "put_single_1kb")
 )]
 fn put_single_1kb(ctx: &mut StressContext) {
-    run_put_value_size(ctx, "1kb_value", 1024);
+    run_put_value_size(ctx, "put_single_1kb", 1024);
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "memtable", scenario = "put_single_4kb")
 )]
 fn put_single_4kb(ctx: &mut StressContext) {
-    run_put_value_size(ctx, "4kb_value", 4096);
+    run_put_value_size(ctx, "put_single_4kb", 4096);
 }
 
 stress_main!();

@@ -10,13 +10,11 @@ use cntryl_midge::{
     testkit::{MidgeOptions, StorageMode},
     MidgeEngine,
 };
-use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
-const SINGLE_GET_BATCH_SIZE: usize = 256;
-const SINGLE_PUT_BATCH_SIZE: usize = 32;
-
-cntryl_stress::stress_allocator!();
+const BATCH_PUT_ROUNDS: usize = 16;
+const SINGLE_GET_BATCH_SIZE: usize = 2048;
+const SINGLE_PUT_BATCH_SIZE: usize = 512;
 
 fn make_fixed_kv(size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
     let mut keys = Vec::with_capacity(size);
@@ -48,37 +46,48 @@ fn setup_db() -> MidgeEngine {
     MidgeEngine::open_with_options(&opts).unwrap()
 }
 
-fn run_batch_put(ctx: &mut StressContext, batch_size: usize) {
+fn run_batch_put(ctx: &mut StressContext, scenario: &'static str, batch_size: usize) {
     let engine = setup_db();
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
     let write_opts = cntryl_midge::WriteOptions::buffered();
-    let (keys, vals) = make_fixed_kv(batch_size);
+    let (keys, vals) = make_fixed_kv(batch_size * BATCH_PUT_ROUNDS);
     ctx.parameter("batch_size", batch_size);
+    ctx.parameter("rounds", BATCH_PUT_ROUNDS);
     ctx.parameter("storage_profile", "memory");
 
-    stress_config::measure_micro_batch(ctx, batch_size as u64, || {
-        let mut tx = engine
-            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        for i in 0..batch_size {
-            tx.put(keys[i].to_vec(), vals[i].to_vec(), None).unwrap();
-        }
-        tx.commit(write_opts).unwrap();
-        black_box(());
-    });
+    stress_config::measure_hot_path_batch(
+        ctx,
+        scenario,
+        (batch_size * BATCH_PUT_ROUNDS) as u64,
+        || {
+            for round in 0..BATCH_PUT_ROUNDS {
+                let offset = round * batch_size;
+                let mut tx = engine
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                    .unwrap();
+                for i in 0..batch_size {
+                    let idx = offset + i;
+                    tx.put(keys[idx].to_vec(), vals[idx].to_vec(), None)
+                        .unwrap();
+                }
+                tx.commit(write_opts).unwrap();
+            }
+            black_box(());
+        },
+    );
 
     let _ = engine.flush_cf(&cf);
 }
 
-#[stress_test(tier = 1, metadata(component = "api", scenario = "batch_put_100"))]
+#[stress(tier = 1, metadata(component = "api", scenario = "batch_put_100"))]
 fn batch_put_100(ctx: &mut StressContext) {
-    run_batch_put(ctx, 100);
+    run_batch_put(ctx, "batch_put_100", 100);
 }
 
-#[stress_test(tier = 1, metadata(component = "api", scenario = "batch_put_1000"))]
+#[stress(tier = 1, metadata(component = "api", scenario = "batch_put_1000"))]
 fn batch_put_1000(ctx: &mut StressContext) {
-    run_batch_put(ctx, 1_000);
+    run_batch_put(ctx, "batch_put_1000", 1_000);
 }
 
 fn setup_get_fixture() -> (
@@ -101,32 +110,38 @@ fn setup_get_fixture() -> (
     (engine, cf.id(), keys, vals)
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "api", scenario = "single_get_hit_memtable")
 )]
 fn single_get_hit_memtable(ctx: &mut StressContext) {
     let (engine, cf_id, keys, _vals) = setup_get_fixture();
-    let counter = AtomicUsize::new(0);
+    let mut key_index = 0usize;
     ctx.parameter("batch_size", SINGLE_GET_BATCH_SIZE);
     ctx.parameter("key_count", keys.len());
 
-    stress_config::measure_micro_batch(ctx, SINGLE_GET_BATCH_SIZE as u64, || {
-        let mut hits = 0usize;
-        for _ in 0..SINGLE_GET_BATCH_SIZE {
-            let idx = counter.fetch_add(1, Ordering::Relaxed) % keys.len();
-            let tx = engine
-                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                .expect("begin");
-            if tx.get(black_box(&keys[idx])).unwrap().is_some() {
-                hits += 1;
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "single_get_hit_memtable",
+        SINGLE_GET_BATCH_SIZE as u64,
+        || {
+            let mut hits = 0usize;
+            for _ in 0..SINGLE_GET_BATCH_SIZE {
+                let idx = key_index % keys.len();
+                key_index = key_index.wrapping_add(1);
+                let tx = engine
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                    .expect("begin");
+                if tx.get(black_box(&keys[idx])).unwrap().is_some() {
+                    hits += 1;
+                }
             }
-        }
-        black_box(hits);
-    });
+            black_box(hits);
+        },
+    );
 }
 
-#[stress_test(tier = 1, metadata(component = "api", scenario = "single_get_miss"))]
+#[stress(tier = 1, metadata(component = "api", scenario = "single_get_miss"))]
 fn single_get_miss(ctx: &mut StressContext) {
     let (engine, cf_id, keys, _vals) = setup_get_fixture();
     let num_keys = keys.len();
@@ -137,39 +152,46 @@ fn single_get_miss(ctx: &mut StressContext) {
             Bytes::copy_from_slice(&key)
         })
         .collect();
-    let counter = AtomicUsize::new(0);
+    let mut key_index = 0usize;
     ctx.parameter("batch_size", SINGLE_GET_BATCH_SIZE);
     ctx.parameter("key_count", num_keys);
 
-    stress_config::measure_micro_batch(ctx, SINGLE_GET_BATCH_SIZE as u64, || {
-        let mut misses = 0usize;
-        for _ in 0..SINGLE_GET_BATCH_SIZE {
-            let idx = counter.fetch_add(1, Ordering::Relaxed) % num_keys;
-            let tx = engine
-                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                .expect("begin");
-            if tx.get(black_box(&miss_keys[idx])).unwrap().is_none() {
-                misses += 1;
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "single_get_miss",
+        SINGLE_GET_BATCH_SIZE as u64,
+        || {
+            let mut misses = 0usize;
+            for _ in 0..SINGLE_GET_BATCH_SIZE {
+                let idx = key_index % num_keys;
+                key_index = key_index.wrapping_add(1);
+                let tx = engine
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                    .expect("begin");
+                if tx.get(black_box(&miss_keys[idx])).unwrap().is_none() {
+                    misses += 1;
+                }
             }
-        }
-        black_box(misses);
-    });
+            black_box(misses);
+        },
+    );
 }
 
-#[stress_test(tier = 1, metadata(component = "api", scenario = "single_put"))]
+#[stress(tier = 1, metadata(component = "api", scenario = "single_put"))]
 fn single_put(ctx: &mut StressContext) {
     let engine = setup_db();
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
-    let num_ops = 10_000;
+    let num_ops = 65_536;
     let (keys, vals) = make_fixed_kv(num_ops);
-    let counter = AtomicUsize::new(0);
+    let mut key_index = 0usize;
     ctx.parameter("batch_size", SINGLE_PUT_BATCH_SIZE);
     ctx.parameter("key_count", num_ops);
 
-    stress_config::measure_micro_batch(ctx, SINGLE_PUT_BATCH_SIZE as u64, || {
+    stress_config::measure_hot_path_batch(ctx, "single_put", SINGLE_PUT_BATCH_SIZE as u64, || {
         for _ in 0..SINGLE_PUT_BATCH_SIZE {
-            let idx = counter.fetch_add(1, Ordering::Relaxed) % num_ops;
+            let idx = key_index % num_ops;
+            key_index = key_index.wrapping_add(1);
             let mut tx = engine
                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin");
@@ -177,7 +199,7 @@ fn single_put(ctx: &mut StressContext) {
                 .unwrap();
             tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
         }
-        black_box(counter.load(Ordering::Relaxed));
+        black_box(key_index);
     });
 }
 

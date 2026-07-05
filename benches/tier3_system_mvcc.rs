@@ -6,7 +6,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_stress::{stress_main, stress_test, StressContext};
+use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
@@ -19,7 +19,11 @@ fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
     cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
 }
 
-fn run_single_version_write_case(ctx: &mut StressContext, opts: MidgeOptions) {
+fn run_single_version_write_case(
+    ctx: &mut StressContext,
+    scenario: &'static str,
+    opts: MidgeOptions,
+) {
     ctx.set_elements(50_000); // cheap (Âµs-scale)
 
     let engine = setup_engine(opts);
@@ -31,7 +35,7 @@ fn run_single_version_write_case(ctx: &mut StressContext, opts: MidgeOptions) {
     let v = vec![1u8; VALUE_SIZE];
 
     // Measure ONLY one single overwrite call
-    let _ = ctx.measure_batch(1, || {
+    let _ = ctx.measure_batch(scenario, 1, || {
         let e = &engine;
         let mut tx = e
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
@@ -43,7 +47,12 @@ fn run_single_version_write_case(ctx: &mut StressContext, opts: MidgeOptions) {
     drop(engine);
 }
 
-fn run_read_old_version_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize) {
+fn run_read_old_version_case(
+    ctx: &mut StressContext,
+    scenario: &'static str,
+    opts: MidgeOptions,
+    num_keys: usize,
+) {
     ctx.set_elements(10_000); // moderate (compaction + lookup)
 
     let engine = setup_engine(opts);
@@ -87,7 +96,7 @@ fn run_read_old_version_case(ctx: &mut StressContext, opts: MidgeOptions, num_ke
     engine.compact_all().unwrap();
 
     // Measure reading ONE old version via snapshot transaction
-    let _ = ctx.measure_batch(1, || {
+    let _ = ctx.measure_batch(scenario, 1, || {
         let s = &snap_tx;
         let v = s.get(&keys[0][..]).unwrap();
         let visible = if let Some(bytes) = v {
@@ -101,34 +110,34 @@ fn run_read_old_version_case(ctx: &mut StressContext, opts: MidgeOptions, num_ke
     drop(engine);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_mvcc_single_version_write_mem(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
-    run_single_version_write_case(ctx, opts);
+    run_single_version_write_case(ctx, "tier3_mvcc_single_version_write_mem", opts);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_mvcc_single_version_write_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_single_version_write_case(ctx, opts);
+    run_single_version_write_case(ctx, "tier3_mvcc_single_version_write_local", opts);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_mvcc_single_version_write_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_single_version_write_case(ctx, opts);
+    run_single_version_write_case(ctx, "tier3_mvcc_single_version_write_cloud", opts);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_mvcc_read_old_version_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_read_old_version_case(ctx, opts, 1_000);
+    run_read_old_version_case(ctx, "tier3_mvcc_read_old_version_local", opts, 1_000);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_mvcc_read_old_version_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_read_old_version_case(ctx, opts, 1_000);
+    run_read_old_version_case(ctx, "tier3_mvcc_read_old_version_cloud", opts, 1_000);
 }
 
 stress_main!();

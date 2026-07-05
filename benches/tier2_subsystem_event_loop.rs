@@ -4,7 +4,7 @@
 
 use cntryl_midge::handler::handle;
 use cntryl_midge::message::MessageKind;
-use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
+use cntryl_stress::{black_box, stress, stress_main, StressContext};
 use crossbeam::channel;
 
 const INNER_LOOPS: usize = 32_768;
@@ -33,22 +33,21 @@ fn build_messages(count: usize) -> Vec<MessageKind> {
     messages
 }
 
-#[stress_test(tier = 2, metadata(component = "event_loop", scenario = "direct_call"))]
+#[stress(tier = 2, metadata(component = "event_loop", scenario = "direct_call"))]
 fn direct_call(ctx: &mut StressContext) {
     ctx.parameter("inner_loops", DIRECT_INNER_LOOPS);
 
-    let _completed = ctx.measure_counted(|| {
+    let _completed = ctx.measure_batch("direct_call", DIRECT_INNER_LOOPS, || {
         let mut counter = 0u64;
         for _ in 0..DIRECT_INNER_LOOPS {
             handle(&mut counter);
             black_box(counter);
         }
         black_box(counter);
-        DIRECT_INNER_LOOPS
     });
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "event_loop", scenario = "channel_cross_thread")
 )]
@@ -57,7 +56,7 @@ fn channel_cross_thread(ctx: &mut StressContext) {
     let message_count = messages.len();
     ctx.parameter("message_count", message_count);
 
-    let _completed = ctx.measure_counted(|| {
+    let _completed = ctx.measure_batch("channel_cross_thread", INNER_LOOP_OPS, || {
         let (msg_tx, msg_rx) = channel::bounded(1024);
         let (start_tx, start_rx) = channel::bounded(1);
         let (done_tx, done_rx) = channel::bounded(1);
@@ -79,17 +78,16 @@ fn channel_cross_thread(ctx: &mut StressContext) {
         }
         let _ = done_rx.recv();
         let _ = consumer.join();
-        INNER_LOOP_OPS
     });
 }
 
-#[stress_test(tier = 2, metadata(component = "event_loop", scenario = "park_wake"))]
+#[stress(tier = 2, metadata(component = "event_loop", scenario = "park_wake"))]
 fn park_wake(ctx: &mut StressContext) {
     let messages = build_messages(INNER_LOOPS);
     let message_count = messages.len();
     ctx.parameter("message_count", message_count);
 
-    let _completed = ctx.measure_counted(|| {
+    let _completed = ctx.measure_batch("park_wake", INNER_LOOP_OPS, || {
         let (msg_tx, msg_rx) = channel::bounded(0);
         let (start_tx, start_rx) = channel::bounded(1);
         let (done_tx, done_rx) = channel::bounded(1);
@@ -111,7 +109,6 @@ fn park_wake(ctx: &mut StressContext) {
         }
         let _ = done_rx.recv();
         let _ = consumer.join();
-        INNER_LOOP_OPS
     });
 }
 

@@ -75,7 +75,7 @@ hex = "0.4"
 hostname = "0.4"
 num_cpus = "1.17"
 once_cell = "1.21"
-sysinfo = "0.39"
+sysinfo = "0.38"
 tempfile = "3.27"
 
 # Cloud Backend Support (optional)
@@ -264,8 +264,8 @@ path = "benches/tier2_subsystem_event_loop.rs"
 harness = false
 
 [[bench]]
-name = "tier2_subsystem_local_throughput_regression"
-path = "benches/tier2_subsystem_local_throughput_regression.rs"
+name = "tier4_system_local_throughput_regression"
+path = "benches/tier4_system_local_throughput_regression.rs"
 harness = false
 
 [[bench]]

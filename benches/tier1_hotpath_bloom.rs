@@ -13,10 +13,11 @@ mod stress_config;
 use cntryl_midge::sst::bloom::writer::BloomFilterOps;
 use cntryl_midge::sst::bloom::BloomWriter;
 use cntryl_midge::Bytes;
-use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
+use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
-const PROBE_BATCH_SIZE: usize = 256;
-const HASH_MISS_BATCH_SIZE: usize = 512;
+const PROBE_BATCH_SIZE: usize = 4096;
+const MIXED_LOOKUP_REPEATS: usize = 64;
+const HASH_MISS_BATCH_SIZE: usize = 4096;
 
 cntryl_stress::stress_allocator!();
 
@@ -31,7 +32,7 @@ fn build_filter(expected_keys: usize) -> (cntryl_midge::sst::bloom::BloomReader,
     (builder.finish(), keys)
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "bloom", scenario = "maybe_contains_hit")
 )]
@@ -40,17 +41,22 @@ fn maybe_contains_hit(ctx: &mut StressContext) {
     let hit_key = keys[42].as_ref();
     ctx.parameter("probe_batch_size", PROBE_BATCH_SIZE);
 
-    stress_config::measure_micro_batch(ctx, PROBE_BATCH_SIZE as u64, || {
-        let mut matches = 0usize;
-        for _ in 0..PROBE_BATCH_SIZE {
-            let result = filter.contains(black_box(hit_key));
-            matches += usize::from(result.might_be_present());
-        }
-        black_box(matches);
-    });
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "maybe_contains_hit",
+        PROBE_BATCH_SIZE as u64,
+        || {
+            let mut matches = 0usize;
+            for _ in 0..PROBE_BATCH_SIZE {
+                let result = filter.contains(black_box(hit_key));
+                matches += usize::from(result.might_be_present());
+            }
+            black_box(matches);
+        },
+    );
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "bloom", scenario = "maybe_contains_miss")
 )]
@@ -59,17 +65,22 @@ fn maybe_contains_miss(ctx: &mut StressContext) {
     let miss_key = b"key_00001000";
     ctx.parameter("probe_batch_size", PROBE_BATCH_SIZE);
 
-    stress_config::measure_micro_batch(ctx, PROBE_BATCH_SIZE as u64, || {
-        let mut misses = 0usize;
-        for _ in 0..PROBE_BATCH_SIZE {
-            let result = filter.contains(black_box(miss_key));
-            misses += usize::from(result.definitely_not_present());
-        }
-        black_box(misses);
-    });
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "maybe_contains_miss",
+        PROBE_BATCH_SIZE as u64,
+        || {
+            let mut misses = 0usize;
+            for _ in 0..PROBE_BATCH_SIZE {
+                let result = filter.contains(black_box(miss_key));
+                misses += usize::from(result.definitely_not_present());
+            }
+            black_box(misses);
+        },
+    );
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "bloom", scenario = "batch_mixed_lookup")
 )]
@@ -85,19 +96,27 @@ fn batch_100_lookups_mixed(ctx: &mut StressContext) {
         })
         .collect();
     ctx.parameter("lookup_count", lookup_keys.len());
+    ctx.parameter("lookup_repeats", MIXED_LOOKUP_REPEATS);
 
-    stress_config::measure_micro_batch(ctx, lookup_keys.len() as u64, || {
-        let mut count = 0u32;
-        for (_is_hit, key) in &lookup_keys {
-            if filter.contains(black_box(key)).might_be_present() {
-                count += 1;
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "batch_100_lookups_mixed",
+        (lookup_keys.len() * MIXED_LOOKUP_REPEATS) as u64,
+        || {
+            let mut count = 0u32;
+            for _ in 0..MIXED_LOOKUP_REPEATS {
+                for (_is_hit, key) in &lookup_keys {
+                    if filter.contains(black_box(key)).might_be_present() {
+                        count += 1;
+                    }
+                }
             }
-        }
-        black_box(count);
-    });
+            black_box(count);
+        },
+    );
 }
 
-#[stress_test(tier = 1, metadata(component = "bloom", scenario = "hashes_via_miss"))]
+#[stress(tier = 1, metadata(component = "bloom", scenario = "hashes_via_miss"))]
 fn compute_hashes_via_miss(ctx: &mut StressContext) {
     let (filter, _keys) = build_filter(100);
     let miss_keys: Vec<Vec<u8>> = (0..HASH_MISS_BATCH_SIZE)
@@ -105,14 +124,19 @@ fn compute_hashes_via_miss(ctx: &mut StressContext) {
         .collect();
     ctx.parameter("probe_batch_size", HASH_MISS_BATCH_SIZE);
 
-    stress_config::measure_micro_batch(ctx, HASH_MISS_BATCH_SIZE as u64, || {
-        let mut misses = 0usize;
-        for key in &miss_keys {
-            let result = filter.contains(black_box(key.as_slice()));
-            misses += usize::from(result.definitely_not_present());
-        }
-        black_box(misses);
-    });
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "compute_hashes_via_miss",
+        HASH_MISS_BATCH_SIZE as u64,
+        || {
+            let mut misses = 0usize;
+            for key in &miss_keys {
+                let result = filter.contains(black_box(key.as_slice()));
+                misses += usize::from(result.definitely_not_present());
+            }
+            black_box(misses);
+        },
+    );
 }
 
 stress_main!();

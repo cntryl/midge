@@ -7,14 +7,12 @@ mod stress_config;
 
 use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
 use cntryl_midge::Bytes;
-use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
+use cntryl_stress::{black_box, stress, stress_main, StressContext};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const INSERT_BATCH_ROUNDS: usize = 4;
-const HOT_GET_BATCH_SIZE: usize = 1024;
-
-cntryl_stress::stress_allocator!();
+const INSERT_BATCH_ROUNDS: usize = 128;
+const HOT_GET_BATCH_SIZE: usize = 16_384;
 
 #[inline]
 fn make_cache_key(block_offset: u64) -> CacheKey {
@@ -58,7 +56,7 @@ fn precompute_keys_and_blocks(num_blocks: usize, block_size: usize) -> (Vec<Cach
     (keys, blocks)
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "block_cache", scenario = "get_hot_single_4k")
 )]
@@ -75,16 +73,21 @@ fn get_hot_single_4k(ctx: &mut StressContext) {
     ctx.parameter("block_size", 4096);
     ctx.parameter("batch_size", HOT_GET_BATCH_SIZE);
 
-    stress_config::measure_micro_batch(ctx, HOT_GET_BATCH_SIZE as u64, || {
-        let mut hits = 0usize;
-        for _ in 0..HOT_GET_BATCH_SIZE {
-            hits += usize::from(cache.get(black_box(&hot_key)).is_some());
-        }
-        black_box(hits);
-    });
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "get_hot_single_4k",
+        HOT_GET_BATCH_SIZE as u64,
+        || {
+            let mut hits = 0usize;
+            for _ in 0..HOT_GET_BATCH_SIZE {
+                hits += usize::from(cache.get(black_box(&hot_key)).is_some());
+            }
+            black_box(hits);
+        },
+    );
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "block_cache", scenario = "get_batch_hit_1000")
 )]
@@ -107,7 +110,7 @@ fn get_batch_hit_1000(ctx: &mut StressContext) {
     ctx.parameter("block_size", block_size);
     ctx.parameter("lookup_batch_size", num_blocks);
 
-    stress_config::measure_micro_batch(ctx, num_blocks as u64, || {
+    stress_config::measure_hot_path_batch(ctx, "get_batch_hit_1000", num_blocks as u64, || {
         let mut count = 0;
         for key in keys.iter().take(num_blocks) {
             if cache.get(key).is_some() {
@@ -118,7 +121,7 @@ fn get_batch_hit_1000(ctx: &mut StressContext) {
     });
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "block_cache", scenario = "get_batch_miss_1000")
 )]
@@ -141,7 +144,7 @@ fn get_batch_miss_1000(ctx: &mut StressContext) {
     ctx.parameter("block_size", block_size);
     ctx.parameter("lookup_batch_size", num_blocks);
 
-    stress_config::measure_micro_batch(ctx, num_blocks as u64, || {
+    stress_config::measure_hot_path_batch(ctx, "get_batch_miss_1000", num_blocks as u64, || {
         let mut count = 0;
         for key in &miss_keys {
             if cache.get(black_box(key)).is_some() {
@@ -152,29 +155,30 @@ fn get_batch_miss_1000(ctx: &mut StressContext) {
     });
 }
 
-#[stress_test(
+#[stress(
     tier = 1,
     metadata(component = "block_cache", scenario = "insert_batch_100")
 )]
 fn insert_batch_100(ctx: &mut StressContext) {
-    let cache_size = 10 * 1024 * 1024;
+    let cache_size = 256 * 1024 * 1024;
     let block_size = 4 * 1024;
     let num_blocks = 100;
-    let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
+    let insert_window = num_blocks * INSERT_BATCH_ROUNDS;
+    let (keys, blocks) = precompute_keys_and_blocks(insert_window, block_size);
+    let cache = BlockCache::new(cache_size, 1, CachePolicyType::Lru);
+    let mut key_index = 0usize;
     let logical_ops = (num_blocks * INSERT_BATCH_ROUNDS) as u64;
     ctx.parameter("block_size", block_size);
     ctx.parameter("num_blocks", num_blocks);
     ctx.parameter("rounds", INSERT_BATCH_ROUNDS);
 
-    stress_config::measure_micro_batch(ctx, logical_ops, || {
-        let cache = create_cache(cache_size);
-        for round in 0..INSERT_BATCH_ROUNDS {
-            for i in 0..num_blocks {
-                let idx = (i + round) % num_blocks;
-                cache.put(keys[idx], &blocks[idx]);
-            }
+    stress_config::measure_hot_path_batch(ctx, "insert_batch_100", logical_ops, || {
+        for _ in 0..logical_ops {
+            let idx = key_index % insert_window;
+            key_index = key_index.wrapping_add(1);
+            cache.put(keys[idx], &blocks[idx]);
         }
-        black_box(cache);
+        black_box(key_index);
     });
 }
 

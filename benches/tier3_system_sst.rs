@@ -6,7 +6,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_stress::{stress_main, stress_test, StressContext};
+use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
@@ -24,7 +24,12 @@ fn precompute_keys(num: usize) -> Vec<[u8; KEY_SIZE]> {
     cntryl_midge::testkit::stress::precompute_keys16_u64_be(num)
 }
 
-fn run_sst_point_seek_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize) {
+fn run_sst_point_seek_case(
+    ctx: &mut StressContext,
+    scenario: &'static str,
+    opts: MidgeOptions,
+    num_keys: usize,
+) {
     ctx.set_elements(10_000); // moderate (seek has I/O)
 
     let engine = setup_engine(opts);
@@ -52,7 +57,7 @@ fn run_sst_point_seek_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
     let k = keys[num_keys / 2];
 
     // Measure ONLY one point get call
-    let _ = ctx.measure_batch(1, || {
+    let _ = ctx.measure_batch(scenario, 1, || {
         let e = &engine;
         let tx = e
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
@@ -63,7 +68,12 @@ fn run_sst_point_seek_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
     drop(engine);
 }
 
-fn run_sst_range_seek_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize) {
+fn run_sst_range_seek_case(
+    ctx: &mut StressContext,
+    scenario: &'static str,
+    opts: MidgeOptions,
+    num_keys: usize,
+) {
     ctx.set_elements(10_000); // moderate (seek has I/O)
 
     let engine = setup_engine(opts);
@@ -92,7 +102,7 @@ fn run_sst_range_seek_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
     let end = keys[keys.len() - 1];
 
     // Measure ONLY iterator construction and first advance (seek)
-    let _ = ctx.measure_batch(1, || {
+    let _ = ctx.measure_batch(scenario, 1, || {
         let e = &engine;
         let tx = e
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
@@ -107,7 +117,11 @@ fn run_sst_range_seek_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
     drop(engine);
 }
 
-fn run_sst_sparse_keyspace_seek_case(ctx: &mut StressContext, opts: MidgeOptions) {
+fn run_sst_sparse_keyspace_seek_case(
+    ctx: &mut StressContext,
+    scenario: &'static str,
+    opts: MidgeOptions,
+) {
     ctx.set_elements(10_000); // moderate (seek has I/O)
 
     let engine = setup_engine(opts);
@@ -139,7 +153,7 @@ fn run_sst_sparse_keyspace_seek_case(ctx: &mut StressContext, opts: MidgeOptions
     let end = keys[keys.len() - 1];
 
     // Measure ONLY iterator construction and first advance across sparse keyspace
-    let _ = ctx.measure_batch(1, || {
+    let _ = ctx.measure_batch(scenario, 1, || {
         let e = &engine;
         let tx = e
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
@@ -154,34 +168,34 @@ fn run_sst_sparse_keyspace_seek_case(ctx: &mut StressContext, opts: MidgeOptions
     drop(engine);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_sst_point_seek_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_sst_point_seek_case(ctx, opts, 5_000);
+    run_sst_point_seek_case(ctx, "tier3_sst_point_seek_local", opts, 5_000);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_sst_point_seek_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_sst_point_seek_case(ctx, opts, 5_000);
+    run_sst_point_seek_case(ctx, "tier3_sst_point_seek_cloud", opts, 5_000);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_sst_range_seek_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_sst_range_seek_case(ctx, opts, 10_000);
+    run_sst_range_seek_case(ctx, "tier3_sst_range_seek_local", opts, 10_000);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_sst_range_seek_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_sst_range_seek_case(ctx, opts, 10_000);
+    run_sst_range_seek_case(ctx, "tier3_sst_range_seek_cloud", opts, 10_000);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_sst_sparse_keyspace_seek_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_sst_sparse_keyspace_seek_case(ctx, opts);
+    run_sst_sparse_keyspace_seek_case(ctx, "tier3_sst_sparse_keyspace_seek_cloud", opts);
 }
 
 stress_main!();

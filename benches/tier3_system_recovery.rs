@@ -8,7 +8,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_stress::{stress_main, stress_test, StressContext};
+use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
@@ -18,7 +18,7 @@ fn setup_engine(opts: MidgeOptions) -> cntryl_midge::MidgeEngine {
     cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
 }
 
-fn run_reopen_clean_case(ctx: &mut StressContext, opts: &MidgeOptions) {
+fn run_reopen_clean_case(ctx: &mut StressContext, scenario: &'static str, opts: &MidgeOptions) {
     // Setup (not measured): create initial metadata, then close.
     {
         let engine = setup_engine(opts.clone());
@@ -28,7 +28,7 @@ fn run_reopen_clean_case(ctx: &mut StressContext, opts: &MidgeOptions) {
     ctx.set_elements(100); // expensive (disk I/O per iteration)
 
     // Measure ONLY one reopen call of a clean engine.
-    stress_config::measure_external(ctx, 100, || {
+    stress_config::measure_external(ctx, scenario, 100, || {
         let engine = setup_engine(opts.clone());
         drop(engine);
     });
@@ -44,16 +44,16 @@ fn run_reopen_clean_case(ctx: &mut StressContext, opts: &MidgeOptions) {
 // These are SYSTEM BEHAVIOR patterns, not primitive costs. Tier 4 measures
 // multi-stage recovery, replay throughput, and degradation under complex states.
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_recovery_reopen_clean_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_reopen_clean_case(ctx, &opts);
+    run_reopen_clean_case(ctx, "tier3_recovery_reopen_clean_local", &opts);
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_recovery_reopen_clean_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_reopen_clean_case(ctx, &opts);
+    run_reopen_clean_case(ctx, "tier3_recovery_reopen_clean_cloud", &opts);
 }
 
 stress_main!();

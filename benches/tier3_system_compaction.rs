@@ -16,7 +16,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_stress::{stress_main, stress_test, StressContext};
+use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
@@ -41,6 +41,7 @@ fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
 
 fn run_flush_case(
     ctx: &mut StressContext,
+    scenario: &'static str,
     opts: MidgeOptions,
     num_keys: usize,
     value_size: usize,
@@ -75,7 +76,7 @@ fn run_flush_case(
 
     // Measure ONLY flush calls. Keep the repeat count bounded; unbounded
     // simulated-cloud flush loops can hit durable-capacity write stalls.
-    stress_config::measure_external(ctx, flush_repeat_ops, || {
+    stress_config::measure_external(ctx, scenario, flush_repeat_ops, || {
         for _ in 0..flush_repeats {
             engine.flush_cf(&cf).expect("flush failed");
         }
@@ -96,11 +97,12 @@ fn run_flush_case(
 // Stress tests (explicit, one datapoint per test)
 // ---------------------------------------------------------------------------
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_compaction_flush_local(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
     run_flush_case(
         ctx,
+        "tier3_compaction_flush_local",
         opts,
         DEFAULT_COMPACTION_KEYS,
         DEFAULT_VALUE_SIZE,
@@ -109,11 +111,12 @@ fn tier3_compaction_flush_local(ctx: &mut StressContext) {
     );
 }
 
-#[stress_test(tier = 3)]
+#[stress(tier = 3)]
 fn tier3_compaction_flush_cloud(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
     run_flush_case(
         ctx,
+        "tier3_compaction_flush_cloud",
         opts,
         DEFAULT_COMPACTION_KEYS,
         DEFAULT_VALUE_SIZE,

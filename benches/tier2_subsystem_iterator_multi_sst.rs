@@ -3,7 +3,7 @@
 //! Measures merge cost across multiple synthetic SST iterators.
 
 use cntryl_midge::Bytes;
-use cntryl_stress::{black_box, stress_main, stress_test, StressContext};
+use cntryl_stress::{black_box, stress, stress_main, StressContext};
 use std::collections::BinaryHeap;
 
 const KEYS_PER_SST: usize = 1000;
@@ -145,13 +145,13 @@ fn partial_overlap_ssts(num_ssts: usize) -> Vec<MockSst> {
         .collect()
 }
 
-fn run_disjoint(ctx: &mut StressContext, num_ssts: usize) {
+fn run_disjoint(ctx: &mut StressContext, scenario: &'static str, num_ssts: usize) {
     let ssts = disjoint_ssts(num_ssts);
     ctx.parameter("pattern", "disjoint");
     ctx.parameter("sst_count", num_ssts);
     ctx.parameter("keys_per_sst", KEYS_PER_SST);
 
-    let _completed = ctx.measure_counted(|| {
+    let _completed = ctx.measure_batch(scenario, (num_ssts * KEYS_PER_SST) as u64, || {
         let iterators: Vec<SstIterator> = ssts.iter().map(|sst| sst.iter_from(0)).collect();
         let mut merge = MergeIterator::new(iterators);
         let mut count = 0;
@@ -159,17 +159,21 @@ fn run_disjoint(ctx: &mut StressContext, num_ssts: usize) {
             count += 1;
         }
         black_box((count, merge.keys_compared()));
-        (num_ssts * KEYS_PER_SST) as u64
     });
 }
 
-fn run_deduping_merge(ctx: &mut StressContext, pattern: &'static str, ssts: &[MockSst]) {
+fn run_deduping_merge(
+    ctx: &mut StressContext,
+    scenario: &'static str,
+    pattern: &'static str,
+    ssts: &[MockSst],
+) {
     let num_ssts = ssts.len();
     ctx.parameter("pattern", pattern);
     ctx.parameter("sst_count", num_ssts);
     ctx.parameter("keys_per_sst", KEYS_PER_SST);
 
-    let _completed = ctx.measure_counted(|| {
+    let _completed = ctx.measure_batch(scenario, (num_ssts * KEYS_PER_SST) as u64, || {
         let iterators: Vec<SstIterator> = ssts.iter().map(|sst| sst.iter_from(0)).collect();
         let mut merge = MergeIterator::new(iterators);
         let mut count = 0;
@@ -183,80 +187,79 @@ fn run_deduping_merge(ctx: &mut StressContext, pattern: &'static str, ssts: &[Mo
         }
 
         black_box((count, merge.keys_compared()));
-        (num_ssts * KEYS_PER_SST) as u64
     });
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "iterator_multi_sst", scenario = "disjoint_2")
 )]
 fn disjoint_2(ctx: &mut StressContext) {
-    run_disjoint(ctx, 2);
+    run_disjoint(ctx, "disjoint_2", 2);
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "iterator_multi_sst", scenario = "disjoint_3")
 )]
 fn disjoint_3(ctx: &mut StressContext) {
-    run_disjoint(ctx, 3);
+    run_disjoint(ctx, "disjoint_3", 3);
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "iterator_multi_sst", scenario = "disjoint_5")
 )]
 fn disjoint_5(ctx: &mut StressContext) {
-    run_disjoint(ctx, 5);
+    run_disjoint(ctx, "disjoint_5", 5);
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "iterator_multi_sst", scenario = "overlapping_2")
 )]
 fn overlapping_2(ctx: &mut StressContext) {
-    run_deduping_merge(ctx, "overlapping", &overlapping_ssts(2));
+    run_deduping_merge(ctx, "overlapping_2", "overlapping", &overlapping_ssts(2));
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "iterator_multi_sst", scenario = "overlapping_3")
 )]
 fn overlapping_3(ctx: &mut StressContext) {
-    run_deduping_merge(ctx, "overlapping", &overlapping_ssts(3));
+    run_deduping_merge(ctx, "overlapping_3", "overlapping", &overlapping_ssts(3));
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "iterator_multi_sst", scenario = "overlapping_5")
 )]
 fn overlapping_5(ctx: &mut StressContext) {
-    run_deduping_merge(ctx, "overlapping", &overlapping_ssts(5));
+    run_deduping_merge(ctx, "overlapping_5", "overlapping", &overlapping_ssts(5));
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "iterator_multi_sst", scenario = "partial_2")
 )]
 fn partial_2(ctx: &mut StressContext) {
-    run_deduping_merge(ctx, "partial_50pct", &partial_overlap_ssts(2));
+    run_deduping_merge(ctx, "partial_2", "partial_50pct", &partial_overlap_ssts(2));
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "iterator_multi_sst", scenario = "partial_3")
 )]
 fn partial_3(ctx: &mut StressContext) {
-    run_deduping_merge(ctx, "partial_50pct", &partial_overlap_ssts(3));
+    run_deduping_merge(ctx, "partial_3", "partial_50pct", &partial_overlap_ssts(3));
 }
 
-#[stress_test(
+#[stress(
     tier = 2,
     metadata(component = "iterator_multi_sst", scenario = "partial_5")
 )]
 fn partial_5(ctx: &mut StressContext) {
-    run_deduping_merge(ctx, "partial_50pct", &partial_overlap_ssts(5));
+    run_deduping_merge(ctx, "partial_5", "partial_50pct", &partial_overlap_ssts(5));
 }
 
 stress_main!();
