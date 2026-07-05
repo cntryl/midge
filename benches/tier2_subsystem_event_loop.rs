@@ -7,8 +7,10 @@ use cntryl_midge::message::MessageKind;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 use crossbeam::channel;
 
-const INNER_LOOPS: usize = 32_768;
-const INNER_LOOP_OPS: u64 = 32_768;
+const CHANNEL_CROSS_THREAD_MESSAGES: usize = 4_194_304;
+const CHANNEL_CROSS_THREAD_OPS: u64 = 4_194_304;
+const PARK_WAKE_MESSAGES: usize = 32_768;
+const PARK_WAKE_OPS: u64 = 32_768;
 const DIRECT_INNER_LOOPS: u64 = 1_000_000;
 
 #[inline]
@@ -52,11 +54,11 @@ fn direct_call(ctx: &mut StressContext) {
     metadata(component = "event_loop", scenario = "channel_cross_thread")
 )]
 fn channel_cross_thread(ctx: &mut StressContext) {
-    let messages = build_messages(INNER_LOOPS);
+    let messages = build_messages(CHANNEL_CROSS_THREAD_MESSAGES);
     let message_count = messages.len();
     ctx.parameter("message_count", message_count);
 
-    let _completed = ctx.measure_batch("channel_cross_thread", INNER_LOOP_OPS, || {
+    let _completed = ctx.measure_batch("channel_cross_thread", CHANNEL_CROSS_THREAD_OPS, || {
         let (msg_tx, msg_rx) = channel::bounded(1024);
         let (start_tx, start_rx) = channel::bounded(1);
         let (done_tx, done_rx) = channel::bounded(1);
@@ -83,11 +85,11 @@ fn channel_cross_thread(ctx: &mut StressContext) {
 
 #[stress(tier = 2, metadata(component = "event_loop", scenario = "park_wake"))]
 fn park_wake(ctx: &mut StressContext) {
-    let messages = build_messages(INNER_LOOPS);
+    let messages = build_messages(PARK_WAKE_MESSAGES);
     let message_count = messages.len();
     ctx.parameter("message_count", message_count);
 
-    let _completed = ctx.measure_batch("park_wake", INNER_LOOP_OPS, || {
+    let _completed = ctx.measure_batch("park_wake", PARK_WAKE_OPS, || {
         let (msg_tx, msg_rx) = channel::bounded(0);
         let (start_tx, start_rx) = channel::bounded(1);
         let (done_tx, done_rx) = channel::bounded(1);

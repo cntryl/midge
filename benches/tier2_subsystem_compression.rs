@@ -10,8 +10,9 @@ use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 const BLOCK_OPERATION_REPEATS: usize = 1024;
 const BLOCK_OPERATION_REPEAT_OPS: u64 = 1024;
-const LZ4_64K_DECOMPRESS_REPEATS: usize = 4096;
-const LZ4_64K_DECOMPRESS_REPEAT_OPS: u64 = 4096;
+const LZ4_64K_DECOMPRESS_WINDOW_BLOCKS: usize = 32;
+const LZ4_64K_DECOMPRESS_WINDOW_REPEATS: usize = 2048;
+const LZ4_64K_DECOMPRESS_PREWARM_WINDOWS: usize = 16;
 const INCOMPRESSIBLE_LZ4_PREWARM_REPEATS: usize = 8192;
 const ZSTD3_64K_OPERATION_REPEATS: usize = 1024;
 const ZSTD3_64K_OPERATION_REPEAT_OPS: u64 = 1024;
@@ -36,6 +37,21 @@ fn mixed_compressible_payload(size: usize) -> Vec<u8> {
                 u8::try_from(state >> 24).expect("shifted LCG byte fits in u8")
             } else {
                 u8::try_from(i % 64).expect("pattern byte fits in u8")
+            }
+        })
+        .collect()
+}
+
+fn seeded_mixed_compressible_payload(size: usize, seed: usize) -> Vec<u8> {
+    let seed = u32::try_from(seed).expect("payload seed fits in u32");
+    let mut state: u32 = 0xC0FF_EE31 ^ seed.wrapping_mul(0x9E37_79B9);
+    (0..size)
+        .map(|i| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            if (i + seed as usize) % 4 == 0 {
+                u8::try_from(state >> 24).expect("shifted LCG byte fits in u8")
+            } else {
+                u8::try_from((i + seed as usize) % 64).expect("pattern byte fits in u8")
             }
         })
         .collect()
@@ -233,13 +249,14 @@ fn run_block_decompress(
     policy_name: &'static str,
     policy: &CompressionPolicy,
 ) {
+    if policy_name == "lz4" && size == 64 * 1024 {
+        run_lz4_64k_windowed_decompress(ctx, policy);
+        return;
+    }
+
     let data = compressible_payload(size);
     let compressed = compress_block_with_trailer(&data, policy).unwrap();
-    let (repeats, repeat_ops) = if policy_name == "lz4" && size == 64 * 1024 {
-        (LZ4_64K_DECOMPRESS_REPEATS, LZ4_64K_DECOMPRESS_REPEAT_OPS)
-    } else {
-        (BLOCK_OPERATION_REPEATS, BLOCK_OPERATION_REPEAT_OPS)
-    };
+    let (repeats, repeat_ops) = (BLOCK_OPERATION_REPEATS, BLOCK_OPERATION_REPEAT_OPS);
     ctx.parameter("block_size", size);
     ctx.parameter("policy", policy_name);
     ctx.parameter("block_repeats", repeats);
@@ -253,6 +270,54 @@ fn run_block_decompress(
         }
         black_box(total);
     });
+}
+
+fn run_lz4_64k_windowed_decompress(ctx: &mut StressContext, policy: &CompressionPolicy) {
+    let size = 64 * 1024;
+    let compressed_blocks: Vec<_> = (0..LZ4_64K_DECOMPRESS_WINDOW_BLOCKS)
+        .map(|i| {
+            let block = seeded_mixed_compressible_payload(size, i);
+            compress_block_with_trailer(&block, policy).unwrap()
+        })
+        .collect();
+    let bytes_per_window = size * compressed_blocks.len();
+    ctx.parameter("block_size", size);
+    ctx.parameter("policy", "lz4");
+    ctx.parameter("data_shape", "mixed_window");
+    ctx.parameter(
+        "block_repeats",
+        LZ4_64K_DECOMPRESS_WINDOW_BLOCKS * LZ4_64K_DECOMPRESS_WINDOW_REPEATS,
+    );
+    ctx.parameter("block_window", LZ4_64K_DECOMPRESS_WINDOW_BLOCKS);
+    ctx.parameter("window_repeats", LZ4_64K_DECOMPRESS_WINDOW_REPEATS);
+    ctx.parameter("prewarm_windows", LZ4_64K_DECOMPRESS_PREWARM_WINDOWS);
+
+    let mut prewarm_total = 0usize;
+    for _ in 0..LZ4_64K_DECOMPRESS_PREWARM_WINDOWS {
+        for block in &compressed_blocks {
+            let out = decompress_block_with_trailer(black_box(block.as_ref())).unwrap();
+            prewarm_total = prewarm_total.wrapping_add(out.len());
+        }
+    }
+    black_box(prewarm_total);
+
+    let _completed = ctx
+        .benchmark("block_decompress_lz4_64k")
+        .samples(10)
+        .warmup(2)
+        .measure_batch(
+            (bytes_per_window * LZ4_64K_DECOMPRESS_WINDOW_REPEATS) as u64,
+            || {
+                let mut total = 0usize;
+                for _ in 0..LZ4_64K_DECOMPRESS_WINDOW_REPEATS {
+                    for block in &compressed_blocks {
+                        let out = decompress_block_with_trailer(black_box(block.as_ref())).unwrap();
+                        total = total.wrapping_add(out.len());
+                    }
+                }
+                black_box(total);
+            },
+        );
 }
 
 macro_rules! block_decompress_case {

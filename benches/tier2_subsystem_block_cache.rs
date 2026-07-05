@@ -6,8 +6,8 @@ use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
 use cntryl_midge::Bytes;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
-const EVICTION_REPEATS: usize = 16;
-const INSERT_SINGLE_REPEATS: usize = 8_192;
+const EVICTION_REPEATS: usize = 64;
+const HOTSET_ROTATION_ROUNDS: usize = 1024;
 
 struct PrecomputedKeys {
     keys: Vec<CacheKey>,
@@ -37,56 +37,36 @@ fn create_cache(capacity: u64) -> BlockCache {
 
 #[stress(
     tier = 2,
-    metadata(component = "block_cache", scenario = "insert_single_4k")
-)]
-fn insert_single_4k(ctx: &mut StressContext) {
-    let warm_keys = PrecomputedKeys::linear(100);
-    let insert_keys = PrecomputedKeys::linear(INSERT_SINGLE_REPEATS + 1_000);
-    let block = make_block_data_static();
-    ctx.parameter("block_size", block.len());
-    ctx.parameter("initial_blocks", 100);
-    ctx.parameter("insert_blocks", INSERT_SINGLE_REPEATS);
-
-    let _completed = ctx.measure_batch("insert_single_4k", INSERT_SINGLE_REPEATS as u64, || {
-        let cache = create_cache(100 * 1024 * 1024);
-        for i in 0..100 {
-            cache.put(warm_keys.get_linear(i), &block);
-        }
-        for i in 0..INSERT_SINGLE_REPEATS {
-            cache.put(insert_keys.get_linear(1_000 + i), black_box(&block));
-        }
-        black_box(cache);
-    });
-}
-
-#[stress(
-    tier = 2,
     metadata(component = "block_cache", scenario = "hotset_rotation")
 )]
 fn rotate_50_entries(ctx: &mut StressContext) {
     let keys = PrecomputedKeys::linear(100);
     let block = make_block_data_static();
     ctx.parameter("entries", 50);
-    ctx.parameter("rounds", 10);
+    ctx.parameter("rounds", HOTSET_ROTATION_ROUNDS);
 
-    let _completed = ctx.measure_batch("hotset_rotation", 10 * 50, || {
-        let cache = create_cache(1024 * 1024);
-        for i in 0..50 {
-            cache.put(keys.get_linear(i), &block);
-        }
-
-        let mut completed = 0u64;
-        for round in 0..10 {
+    let _completed = ctx
+        .benchmark("hotset_rotation")
+        .samples(10)
+        .warmup(3)
+        .measure_batch((HOTSET_ROTATION_ROUNDS * 50) as u64, || {
+            let cache = create_cache(1024 * 1024);
             for i in 0..50 {
-                let key = keys.get_linear((i + round) % 75);
-                if cache.get(&key).is_none() {
-                    cache.put(key, &block);
-                }
-                completed += 1;
+                cache.put(keys.get_linear(i), &block);
             }
-        }
-        black_box((&cache, completed));
-    });
+
+            let mut completed = 0u64;
+            for round in 0..HOTSET_ROTATION_ROUNDS {
+                for i in 0..50 {
+                    let key = keys.get_linear((i + round) % 75);
+                    if cache.get(&key).is_none() {
+                        cache.put(key, &block);
+                    }
+                    completed += 1;
+                }
+            }
+            black_box((&cache, completed));
+        });
 }
 
 #[stress(
@@ -100,10 +80,11 @@ fn evict_10k(ctx: &mut StressContext) {
     ctx.parameter("insert_blocks", 10_000);
     ctx.parameter("eviction_repeats", EVICTION_REPEATS);
 
-    let _completed = ctx.measure_batch(
-        "lru_eviction_10k",
-        (10_000 * EVICTION_REPEATS) as u64,
-        || {
+    let _completed = ctx
+        .benchmark("lru_eviction_10k")
+        .samples(10)
+        .warmup(3)
+        .measure_batch((10_000 * EVICTION_REPEATS) as u64, || {
             let cache = create_cache(2 * 1024 * 1024);
             for i in 0..500 {
                 cache.put(keys.get_linear(i), &block);
@@ -115,8 +96,7 @@ fn evict_10k(ctx: &mut StressContext) {
                 }
             }
             black_box(cache);
-        },
-    );
+        });
 }
 
 stress_main!();
