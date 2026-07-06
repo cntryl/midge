@@ -16,7 +16,7 @@
 //!   should_<behavior>_given_<context>_when_<condition>
 
 mod common;
-use cntryl_midge::{TransactionMode, WriteOptions};
+use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 use common::*;
 use std::sync::Arc;
 use std::thread;
@@ -25,6 +25,23 @@ use std::time::Duration;
 // ============================================================================
 // TEST GROUP: Memory Budget & Eviction Control
 // ============================================================================
+
+#[test]
+fn should_apply_simulated_cloud_local_storage_budget_when_opening_simulated_cloud() {
+    // Arrange
+    let temp_dir = test_temp_dir();
+    let budget_bytes = 8 * 1024 * 1024;
+    let opts = OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "test-prefix")
+        .with_simulated_cloud_local_storage_budget(budget_bytes)
+        .build();
+
+    // Act
+    let engine = Engine::open(opts).expect("open simulated cloud engine");
+    let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+
+    // Assert
+    assert_eq!(metrics.hybrid_max_local_bytes, budget_bytes);
+}
 
 #[test]
 fn should_trigger_eviction_at_high_watermark() {

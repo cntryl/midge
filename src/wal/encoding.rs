@@ -769,6 +769,11 @@ fn decode_txn_batch_records(
     begin_seq: u64,
     op_count: usize,
 ) -> MidgeResult<Vec<TxnBatchRecord>> {
+    if op_count > input.len() / TXN_BATCH_RECORD_FIXED_LEN {
+        return Err(corruption(
+            "transaction batch payload op_count exceeds remaining bytes",
+        ));
+    }
     let mut records = Vec::with_capacity(op_count);
     for index in 0..op_count {
         records.push(decode_txn_batch_record(input, begin_seq, index)?);
@@ -1096,6 +1101,45 @@ mod tests {
         // Act
         // Assert
         assert!(error.to_string().contains("non-contiguous sequence"));
+    }
+
+    #[test]
+    fn should_reject_transaction_batch_payload_when_op_count_exceeds_remaining_bytes() {
+        // Arrange: build a header that is internally consistent (op_count matches
+        // commit_seq - begin_seq - 1) but claims far more records than the truncated
+        // payload actually contains, to guard against an oversized upfront allocation.
+        let txn_id: u64 = 7;
+        let begin_seq: u64 = 0;
+        let op_count: u32 = 10_000_000;
+        let commit_seq: u64 = begin_seq + u64::from(op_count) + 1;
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&TXN_BATCH_MAGIC);
+        payload.push(TXN_BATCH_VERSION);
+        payload.extend_from_slice(&txn_id.to_le_bytes());
+        payload.extend_from_slice(&begin_seq.to_le_bytes());
+        payload.extend_from_slice(&commit_seq.to_le_bytes());
+        payload.extend_from_slice(&op_count.to_le_bytes());
+        // No record bytes follow: the payload is truncated relative to op_count.
+
+        let mut outer = WalRecord::new_cf(
+            0,
+            WalOpKind::TxnBatch,
+            Bytes::from_static(b"txn"),
+            Some(Bytes::from(payload.clone())),
+            commit_seq,
+            9,
+        );
+        outer.txn_id = Some(txn_id);
+
+        // Act
+        let error = decode_txn_batch_payload(&outer, &payload).unwrap_err();
+
+        // Assert
+        match error {
+            MidgeError::Corruption(_) => {}
+            other => panic!("expected corruption error, got: {other:?}"),
+        }
     }
 
     #[test]

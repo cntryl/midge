@@ -97,6 +97,9 @@ impl MidgeOptions {
         if let Some(policy) = self.cloud_write_policy.clone() {
             open_opts = open_opts.cloud_write_policy(policy);
         }
+        if let Some(bytes) = self.simulated_cloud_local_storage_budget_bytes {
+            open_opts = open_opts.with_simulated_cloud_local_storage_budget(bytes);
+        }
         open_opts
     }
 }

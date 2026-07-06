@@ -249,6 +249,9 @@ pub struct OpenOptions {
 
     /// Optional WAL batch configuration (from testkit for batched durability mode)
     pub(crate) wal_batch_config: Option<crate::wal::policy::BatchConfig>,
+
+    /// Internal simulated-cloud local cache budget override.
+    simulated_cloud_local_storage_budget_bytes: Option<u64>,
 }
 
 impl OpenOptions {
@@ -284,6 +287,7 @@ impl OpenOptions {
             l0_compaction_trigger: 4,
             compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
+            simulated_cloud_local_storage_budget_bytes: None,
         }
     }
 
@@ -315,6 +319,7 @@ impl OpenOptions {
             l0_compaction_trigger: 4,
             compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
+            simulated_cloud_local_storage_budget_bytes: None,
         }
     }
 
@@ -359,6 +364,7 @@ impl OpenOptions {
             l0_compaction_trigger: 4,
             compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
+            simulated_cloud_local_storage_budget_bytes: None,
         }
     }
 
@@ -397,6 +403,7 @@ impl OpenOptions {
             l0_compaction_trigger: 4,
             compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
+            simulated_cloud_local_storage_budget_bytes: None,
         }
     }
 
@@ -471,6 +478,14 @@ impl OpenOptions {
     #[must_use]
     pub fn recovery_policy(mut self, policy: RecoveryPolicy) -> Self {
         self.recovery_policy = policy;
+        self
+    }
+
+    /// Override the simulated-cloud local storage budget.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_simulated_cloud_local_storage_budget(mut self, bytes: u64) -> Self {
+        self.simulated_cloud_local_storage_budget_bytes = Some(bytes);
         self
     }
 
@@ -667,6 +682,10 @@ impl OpenOptions {
 
     pub(crate) fn background_compaction_enabled(&self) -> bool {
         self.background_compaction
+    }
+
+    pub(crate) fn simulated_cloud_local_storage_budget_bytes(&self) -> Option<u64> {
+        self.simulated_cloud_local_storage_budget_bytes
     }
 
     fn sanitize_memtable_bytes(bytes: usize) -> usize {

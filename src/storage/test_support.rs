@@ -1,26 +1,15 @@
+#[cfg(test)]
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::{Mutex, OnceLock};
+#[cfg(test)]
+use std::sync::Mutex;
 
 use crate::common::MidgeResult;
 
 use super::filesystem::FileSystem;
 use super::{HybridStorage, StorageEvent};
-
-static SIMULATED_CLOUD_BUDGETS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
-
-fn simulated_cloud_budgets() -> &'static Mutex<HashMap<PathBuf, u64>> {
-    SIMULATED_CLOUD_BUDGETS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn take_simulated_cloud_budget(db_path: &Path) -> Option<u64> {
-    let mut budgets = simulated_cloud_budgets()
-        .lock()
-        .expect("lock simulated cloud budget registry");
-    budgets.remove(db_path)
-}
 
 pub(crate) struct CloudBackedTestSetup {
     pub hybrid_storage: Arc<HybridStorage>,
@@ -35,6 +24,7 @@ pub(crate) struct CloudBackedTestSetup {
 /// resulting `HybridStorage`, event stream, and a recovery directory.
 pub(crate) fn build_cloud_backed_filesystem_simulation(
     db_path: &Path,
+    local_storage_budget_bytes: Option<u64>,
 ) -> MidgeResult<CloudBackedTestSetup> {
     // Simulate cloud with a separate filesystem-backed store under db_path.
     let cloud_root = db_path.join("cloud_store");
@@ -45,7 +35,7 @@ pub(crate) fn build_cloud_backed_filesystem_simulation(
     let cloud_backend = Arc::new(FileSystem::new(cloud_root.clone())?);
 
     let (tx, rx) = crossbeam::channel::unbounded::<StorageEvent>();
-    let hybrid_storage = if let Some(budget_bytes) = take_simulated_cloud_budget(db_path) {
+    let hybrid_storage = if let Some(budget_bytes) = local_storage_budget_bytes {
         Arc::new(HybridStorage::with_policy_and_event_sender(
             local_backend,
             cloud_backend,

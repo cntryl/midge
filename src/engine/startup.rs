@@ -1249,6 +1249,7 @@ impl RuntimeStorageMaterialization {
     ) -> MidgeResult<Self> {
         let cloud = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
             &storage_path.db_path,
+            opts.simulated_cloud_local_storage_budget_bytes(),
         )?;
 
         let state = RuntimeState::try_new_with_recovery_dir(

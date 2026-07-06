@@ -17,19 +17,6 @@ pub trait WalWriter: Send + Sync {
     /// Returns an error when the record cannot be appended to the WAL.
     fn append_record(&self, record: &WalRecord) -> MidgeResult<WalPos>;
 
-    /// Convenience: append a single operation (op kind, key, optional value).
-    /// Returns the position where the operation was appended.
-    ///
-    /// ⚠️ **WARNING**: This method does not take a sequence number and implementations
-    /// may assign an invalid default (e.g., 0), breaking ordering guarantees.
-    /// **DO NOT USE** - prefer `append_op_with_seq()` or `append_record()` instead.
-    /// Many implementations return an error from this method.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the implementation rejects or cannot append the operation.
-    fn append_op(&self, kind: WalOpKind, key: &[u8], value: Option<&[u8]>) -> MidgeResult<WalPos>;
-
     /// Append an operation with an explicit sequence number.
     ///
     /// # Errors

@@ -136,6 +136,14 @@ impl MidgeOptions {
         if let Some(policy) = self.cloud_write_policy.clone() {
             open_opts = open_opts.cloud_write_policy(policy);
         }
+        if let Some(local_storage_budget_bytes) = self
+            .simulated_cloud_overrides
+            .as_ref()
+            .and_then(|overrides| overrides.local_storage_budget_bytes)
+        {
+            open_opts =
+                open_opts.with_simulated_cloud_local_storage_budget(local_storage_budget_bytes);
+        }
 
         open_opts
     }

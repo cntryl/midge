@@ -18,7 +18,7 @@ use crate::common::MidgeResult;
 use crate::io::{Fs, FsPath};
 use crate::wal::encoding;
 use crate::wal::traits::WalWriter;
-use crate::wal::types::{WalOpKind, WalPos, WalRecord};
+use crate::wal::types::{WalPos, WalRecord};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 
@@ -227,18 +227,6 @@ impl WalWriter for FsWalWriterIo {
         self.enqueue_encoded(buf)
     }
 
-    fn append_op(
-        &self,
-        _kind: WalOpKind,
-        _key: &[u8],
-        _value: Option<&[u8]>,
-    ) -> MidgeResult<WalPos> {
-        // Default implementation: error, as we need a sequence number
-        Err(crate::common::MidgeError::NotSupported(
-            "append_op without sequence number not supported".into(),
-        ))
-    }
-
     fn append_batch(&self, records: &[WalRecord]) -> MidgeResult<WalPos> {
         if records.is_empty() {
             return Ok(self.current_pos());
@@ -399,7 +387,7 @@ impl Drop for FsWalWriterIo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wal::types::WalRecord;
+    use crate::wal::types::{WalOpKind, WalRecord};
     use bytes::Bytes;
 
     #[test]

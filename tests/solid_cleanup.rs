@@ -152,6 +152,37 @@ fn should_keep_removed_testkit_api_out_of_public_surface() {
 }
 
 #[test]
+fn should_keep_unsequenced_wal_append_op_out_of_public_writer_trait() {
+    // Arrange
+    let wal_trait = production_source("src/wal/traits.rs");
+    let filesystem_writer = production_source("src/wal/fs/writer_io.rs");
+
+    // Act
+
+    // Assert
+    assert!(
+        wal_trait.contains("fn append_record(&self, record: &WalRecord)"),
+        "WalWriter should expose the prebuilt-record append path"
+    );
+    assert!(
+        wal_trait.contains("fn append_op_with_seq("),
+        "WalWriter should keep the explicit-sequence append path"
+    );
+    assert!(
+        wal_trait.contains("fn append_batch(&self, records: &[WalRecord])"),
+        "WalWriter should keep the batch append path"
+    );
+    assert!(
+        !wal_trait.contains("fn append_op("),
+        "WalWriter should not expose unsequenced append_op"
+    );
+    assert!(
+        !filesystem_writer.contains("fn append_op("),
+        "filesystem WAL writer should not reintroduce unsequenced append_op"
+    );
+}
+
+#[test]
 fn should_not_document_removed_transaction_rollback_api() {
     // Arrange
     let mut docs = Vec::new();
