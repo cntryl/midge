@@ -5,6 +5,7 @@
 
 use super::super::durability::DurabilityWaiter;
 use super::super::{RuntimeMsg, RuntimeResponse, TransactionOp};
+#[cfg(test)]
 use super::snapshot::SnapshotCoordinator;
 use super::wal::ApplyTransactionRequest;
 use super::EventLoop;
@@ -19,10 +20,8 @@ const EXPLICIT_TRANSACTION_COALESCE_BUSY_WINDOW: Duration = Duration::from_micro
 const EXPLICIT_TRANSACTION_COALESCE_IDLE_WAIT: Duration = Duration::from_micros(5);
 
 enum WriteResult {
-    WalAppend {
-        sequence: u64,
-        deferred: bool,
-    },
+    #[cfg(test)]
+    WalAppend { sequence: u64, deferred: bool },
     TransactionApplied {
         last_sequence: u64,
         op_count: usize,
@@ -33,8 +32,9 @@ enum WriteResult {
 impl WriteResult {
     fn deferred(&self) -> bool {
         match self {
-            WriteResult::WalAppend { deferred, .. }
-            | WriteResult::TransactionApplied { deferred, .. } => *deferred,
+            #[cfg(test)]
+            WriteResult::WalAppend { deferred, .. } => *deferred,
+            WriteResult::TransactionApplied { deferred, .. } => *deferred,
         }
     }
 }
@@ -123,6 +123,7 @@ impl EventLoop {
         }
 
         match msg_rx.try_recv() {
+            #[cfg(test)]
             Ok(RuntimeMsg::WalAppend {
                 request_id,
                 cf_id,
@@ -149,6 +150,7 @@ impl EventLoop {
                 );
                 DrainOutcome::WritesHandled(1)
             }
+            #[cfg(test)]
             Ok(RuntimeMsg::WalAppendDeleteRange {
                 request_id,
                 cf_id,
@@ -356,6 +358,7 @@ impl EventLoop {
             // Snapshot bookkeeping is actor-owned but does not observe or advance
             // data/WAL state. Handling it here keeps transaction lifecycle traffic
             // from fragmenting an already ordered ApplyTransaction batch.
+            #[cfg(test)]
             RuntimeMsg::RegisterSnapshot {
                 request_id,
                 snapshot_id,
@@ -371,6 +374,7 @@ impl EventLoop {
                 );
                 true
             }
+            #[cfg(test)]
             RuntimeMsg::UnregisterSnapshot { snapshot_id } => {
                 let _ = SnapshotCoordinator::unregister(self, snapshot_id);
                 true
@@ -532,6 +536,7 @@ impl EventLoop {
             }
 
             match result {
+                #[cfg(test)]
                 WriteResult::WalAppend { sequence, .. } => {
                     self.respond(
                         request_id,
@@ -559,6 +564,7 @@ impl EventLoop {
             }
         } else {
             match result {
+                #[cfg(test)]
                 WriteResult::WalAppend { sequence, .. } => {
                     self.durability.queue_waiter(DurabilityWaiter::WalAppend {
                         request_id,

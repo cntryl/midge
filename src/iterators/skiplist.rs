@@ -87,8 +87,6 @@ struct Node {
     versions_head: Atomic<VersionNode>,
     /// Forward pointers per level (levels 0..level-1 are valid).
     forward: [Atomic<Node>; MAX_LEVEL],
-    #[allow(dead_code)]
-    level: usize,
 }
 
 impl Node {
@@ -101,7 +99,6 @@ impl Node {
             key,
             versions_head: Atomic::from(first_version),
             forward,
-            level,
         }
     }
 

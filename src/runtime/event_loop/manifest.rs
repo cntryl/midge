@@ -1,10 +1,13 @@
 use super::{EventLoop, HandleOutcome};
-use crate::runtime::{FileMeta, RuntimeMsg, RuntimeResponse};
+#[cfg(test)]
+use crate::runtime::FileMeta;
+use crate::runtime::{RuntimeMsg, RuntimeResponse};
 use crossbeam::channel::Receiver;
 
 pub(super) struct ManifestCoordinator;
 
 impl ManifestCoordinator {
+    #[cfg(test)]
     pub(super) fn add_sst(
         event_loop: &mut EventLoop,
         request_id: u64,
@@ -18,6 +21,7 @@ impl ManifestCoordinator {
         HandleOutcome::Continue
     }
 
+    #[cfg(test)]
     pub(super) fn compaction_complete(
         event_loop: &mut EventLoop,
         request_id: u64,

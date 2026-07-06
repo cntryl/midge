@@ -5,9 +5,9 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::testkit::{bench::init_benchmark_telemetry, opts_for_mode};
 use cntryl_midge::{Engine, TransactionMode, WriteOptions};
 use cntryl_stress::{stress, stress_main, StressContext};
+use stress_config::{init_benchmark_telemetry, opts_for_mode};
 
 const NUM_OPS_PER_BATCH: usize = 100;
 const VALUE_SIZE: usize = 128;
@@ -68,7 +68,7 @@ fn run_mode(ctx: &mut StressContext, mode: &'static str) {
         NUM_OPS_PER_BATCH * VALUE_SIZE * BATCH_ITERATIONS,
     );
 
-    let engine = Engine::open_with_options(&opts).expect("failed to open engine");
+    let engine = Engine::open(opts.to_open_options()).expect("failed to open engine");
     let cf = engine
         .create_column_family("test")
         .expect("failed to create column family");

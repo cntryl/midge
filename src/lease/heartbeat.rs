@@ -25,6 +25,7 @@ impl LeaseHeartbeat {
     ///
     /// Does not start the heartbeat loop automatically.
     /// Call `start()` to begin renewal.
+    #[cfg(test)]
     pub fn new(lease: Arc<dyn PrimaryLease>) -> Self {
         Self {
             lease,
@@ -50,10 +51,6 @@ impl LeaseHeartbeat {
     }
 
     /// Return a shared reference to the healthy flag.
-    pub fn healthy_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.healthy)
-    }
-
     /// Start the heartbeat loop.
     ///
     /// Spawns a background thread that renews the lease at intervals
@@ -150,11 +147,6 @@ impl LeaseHeartbeat {
     /// should stop accepting writes.
     pub fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
-    }
-
-    /// Get the lease holder ID.
-    pub fn holder_id(&self) -> String {
-        self.lease.holder_id()
     }
 }
 

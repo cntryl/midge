@@ -5,6 +5,9 @@ use crate::sst::trie::node::{TrieEdge, TrieNode};
 use bytes::{BufMut, BytesMut};
 use std::io::Cursor;
 
+const MIN_ENCODED_NODE_BYTES: usize = 4;
+const MIN_ENCODED_CHILD_BYTES: usize = 2;
+
 /// Encode trie nodes to compact binary format
 ///
 /// Layout:
@@ -73,6 +76,12 @@ pub fn decode_trie(data: &[u8]) -> MidgeResult<Vec<TrieNode>> {
 
     // Read node count
     let node_count = decode_usize(&mut cursor, "Trie node count")?;
+    validate_count_fits_remaining(
+        node_count,
+        MIN_ENCODED_NODE_BYTES,
+        remaining_bytes(&cursor)?,
+        "Trie node count",
+    )?;
     let mut nodes = Vec::with_capacity(node_count);
 
     // Read each node
@@ -91,11 +100,14 @@ fn decode_node(cursor: &mut Cursor<&[u8]>) -> MidgeResult<TrieNode> {
     let key_delta_len = decode_usize(cursor, "Trie key delta length")?;
     let pos = cursor_position(cursor)?;
     let data = cursor.get_ref();
-    if pos + key_delta_len > data.len() {
+    let key_delta_end = pos
+        .checked_add(key_delta_len)
+        .ok_or_else(|| MidgeError::Corruption("Trie key_delta length overflow".into()))?;
+    if key_delta_end > data.len() {
         return Err(MidgeError::Corruption("Trie key_delta truncated".into()));
     }
-    let key_delta = data[pos..pos + key_delta_len].to_vec();
-    cursor.set_position(usize_to_u64(pos + key_delta_len));
+    let key_delta = data[pos..key_delta_end].to_vec();
+    cursor.set_position(usize_to_u64(key_delta_end));
 
     // block_id (0 = None, 1-based for Some)
     let block_id_raw = decode_varint(cursor)?;
@@ -110,6 +122,12 @@ fn decode_node(cursor: &mut Cursor<&[u8]>) -> MidgeResult<TrieNode> {
 
     // child_count
     let child_count = decode_usize(cursor, "Trie child count")?;
+    validate_count_fits_remaining(
+        child_count,
+        MIN_ENCODED_CHILD_BYTES,
+        remaining_bytes(cursor)?,
+        "Trie child count",
+    )?;
 
     // children
     let mut children = Vec::with_capacity(child_count);
@@ -182,6 +200,29 @@ fn decode_u16(cursor: &mut Cursor<&[u8]>, field: &str) -> MidgeResult<u16> {
 fn cursor_position(cursor: &Cursor<&[u8]>) -> MidgeResult<usize> {
     usize::try_from(cursor.position())
         .map_err(|_| MidgeError::Corruption("Cursor position overflow".into()))
+}
+
+fn remaining_bytes(cursor: &Cursor<&[u8]>) -> MidgeResult<usize> {
+    let pos = cursor_position(cursor)?;
+    cursor
+        .get_ref()
+        .len()
+        .checked_sub(pos)
+        .ok_or_else(|| MidgeError::Corruption("Cursor position exceeds input length".into()))
+}
+
+fn validate_count_fits_remaining(
+    count: usize,
+    min_encoded_size: usize,
+    remaining: usize,
+    field: &str,
+) -> MidgeResult<()> {
+    if count > remaining / min_encoded_size {
+        return Err(MidgeError::Corruption(format!(
+            "{field} exceeds remaining trie bytes"
+        )));
+    }
+    Ok(())
 }
 
 fn usize_to_u64(value: usize) -> u64 {
@@ -439,6 +480,36 @@ mod tests {
 
         // Assert
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_reject_declared_node_count_larger_than_remaining_bytes() {
+        // Arrange
+        let mut encoded = BytesMut::new();
+        encode_varint(&mut encoded, u64::MAX);
+
+        // Act
+        let result = decode_trie(&encoded);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Corruption(_))));
+    }
+
+    #[test]
+    fn should_reject_declared_child_count_larger_than_remaining_bytes() {
+        // Arrange
+        let mut encoded = BytesMut::new();
+        encode_varint(&mut encoded, 1);
+        encode_varint(&mut encoded, 0);
+        encode_varint(&mut encoded, 0);
+        encode_varint(&mut encoded, 0);
+        encode_varint(&mut encoded, u64::MAX);
+
+        // Act
+        let result = decode_trie(&encoded);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Corruption(_))));
     }
 
     #[test]

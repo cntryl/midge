@@ -87,6 +87,7 @@ impl LeaseGuard {
     /// Explicitly release the lease.
     ///
     /// After this call, the guard is empty and dropping it is a no-op.
+    #[cfg(test)]
     pub fn release(self) {
         if let Ok(mut guard) = self.release_fn.lock() {
             if let Some(release_fn) = guard.take() {

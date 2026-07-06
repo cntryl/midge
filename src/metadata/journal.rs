@@ -256,6 +256,7 @@ pub fn append_edit(db_path: &Path, edit: &ManifestEdit) -> MidgeResult<()> {
 }
 
 /// Convenience wrapper: replay journal via a `RealFs` created from `db_path` (backwards compatible)
+#[cfg(test)]
 pub fn replay_journal(db_path: &Path) -> MidgeResult<Vec<ManifestEdit>> {
     let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
         std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
@@ -665,6 +666,7 @@ pub fn append_fsync_marker_with_fs(
 }
 
 /// Truncate or rotate journal after snapshot using provided Fs.
+#[cfg(test)]
 pub fn truncate_journal_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> MidgeResult<()> {
     use crate::io::traits::{FsPath, OpenMode, OpenOptions};
 

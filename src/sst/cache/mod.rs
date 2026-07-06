@@ -31,6 +31,9 @@ pub struct BlockCache {
     shards: Vec<Arc<CacheShard>>,
     /// Number of shards
     num_shards: usize,
+    /// Eviction policy used for all shards.
+    #[cfg(test)]
+    policy_type: CachePolicyType,
 }
 
 impl BlockCache {
@@ -48,7 +51,12 @@ impl BlockCache {
             shards.push(CacheShard::new(shard_capacity, policy_type));
         }
 
-        Self { shards, num_shards }
+        Self {
+            shards,
+            num_shards,
+            #[cfg(test)]
+            policy_type,
+        }
     }
 
     /// Create a new block cache with default settings (16 shards, LRU)
@@ -151,6 +159,11 @@ impl BlockCache {
     #[must_use]
     pub fn num_shards(&self) -> usize {
         self.num_shards
+    }
+
+    #[cfg(test)]
+    pub(crate) fn policy_type(&self) -> CachePolicyType {
+        self.policy_type
     }
 }
 
@@ -308,5 +321,40 @@ mod tests {
         assert!(lru_cache.is_empty());
         assert!(tinylfu_cache.is_empty());
         assert!(clockpro_cache.is_empty());
+    }
+
+    #[test]
+    fn should_enforce_capacity_for_each_cache_policy() {
+        // Arrange
+        let policies = [
+            CachePolicyType::Lru,
+            CachePolicyType::TinyLfu,
+            CachePolicyType::ClockPro,
+        ];
+
+        for policy in policies {
+            let cache = BlockCache::new(90, 1, policy);
+
+            // Act
+            for sst_id in 0..6 {
+                let byte = u8::try_from(sst_id).expect("fixture sst id should fit in u8");
+                cache.put_sync(CacheKey::for_data(sst_id, 0), Bytes::from(vec![byte; 32]));
+            }
+
+            // Assert
+            let metrics = cache.metrics();
+            assert!(
+                metrics.memory_bytes() > 0,
+                "{policy:?} should admit cache entries"
+            );
+            assert!(
+                metrics.memory_bytes() <= 90,
+                "{policy:?} should evict until within capacity"
+            );
+            assert!(
+                metrics.eviction_count() > 0,
+                "{policy:?} should record evictions under pressure"
+            );
+        }
     }
 }

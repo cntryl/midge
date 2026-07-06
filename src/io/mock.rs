@@ -29,14 +29,14 @@ impl MockFs {
     }
 
     /// Get file contents for testing
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn get_file(&self, path: &str) -> Option<Vec<u8>> {
         self.files.lock().get(path).map(|f| f.data.clone())
     }
 
     /// Clear all files
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn clear(&self) {
         self.files.lock().clear();
     }

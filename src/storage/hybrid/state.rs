@@ -2,6 +2,7 @@
 //!
 //! Maintains the current disk usage and reservation accounting.
 
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Disk usage accounting
@@ -57,12 +58,11 @@ impl Default for DiskState {
 }
 
 /// Atomic disk state for lock-free reads
-#[allow(dead_code)]
+#[cfg(test)]
 pub struct AtomicDiskState {
     total_committed: AtomicU64,
 }
-
-#[allow(dead_code)]
+#[cfg(test)]
 impl AtomicDiskState {
     pub fn new() -> Self {
         Self {
@@ -102,6 +102,7 @@ fn usage_percent(total_committed: u64, limit: u64) -> u32 {
     u32::try_from(percent).unwrap_or(u32::MAX)
 }
 
+#[cfg(test)]
 impl Default for AtomicDiskState {
     fn default() -> Self {
         Self::new()

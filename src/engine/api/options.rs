@@ -26,8 +26,10 @@
 //! ```
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub use crate::config::{RecoveryPolicy, Storage};
+use crate::sst::cache::CachePolicyType;
 use crate::sst::compression::{CompressionAlgo, CompressionPolicy};
 use crate::storage::providers::CloudProviderConfig;
 #[cfg(test)]
@@ -116,6 +118,65 @@ pub enum WorkloadProfile {
     TtlHeavy,
 }
 
+/// Eviction policy for the block cache used by SST reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlockCachePolicy {
+    /// Least-recently-used eviction. This is the stable default.
+    #[default]
+    Lru,
+    /// Window TinyLFU-style admission/eviction for frequency-biased workloads.
+    TinyLfu,
+    /// CLOCK-Pro eviction for scan-resistant workloads.
+    ClockPro,
+}
+
+impl From<BlockCachePolicy> for CachePolicyType {
+    fn from(policy: BlockCachePolicy) -> Self {
+        match policy {
+            BlockCachePolicy::Lru => Self::Lru,
+            BlockCachePolicy::TinyLfu => Self::TinyLfu,
+            BlockCachePolicy::ClockPro => Self::ClockPro,
+        }
+    }
+}
+
+/// Cloud-backed write tuning used by `OpenOptions`.
+///
+/// Defaults preserve the engine's production behavior:
+/// - flush a WAL-backed memtable after a segment gap of 128
+/// - seal cloud WAL segments after 16 MiB, 500 ms, or 10,000 pending writes
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudWritePolicy {
+    pub eventual_flush_segment_gap: u64,
+    pub wal_seal_min_segment_bytes: usize,
+    pub wal_seal_max_flush_delay: Duration,
+    pub wal_seal_max_pending_writes: usize,
+}
+
+impl Default for CloudWritePolicy {
+    fn default() -> Self {
+        Self {
+            eventual_flush_segment_gap: 128,
+            wal_seal_min_segment_bytes: 16 * 1024 * 1024,
+            wal_seal_max_flush_delay: Duration::from_millis(500),
+            wal_seal_max_pending_writes: 10_000,
+        }
+    }
+}
+
+impl From<CloudWritePolicy> for crate::runtime::CloudRuntimePolicy {
+    fn from(policy: CloudWritePolicy) -> Self {
+        Self {
+            eventual_flush_segment_gap: policy.eventual_flush_segment_gap,
+            wal_seal: crate::runtime::CloudWalSealPolicy {
+                min_segment_bytes: policy.wal_seal_min_segment_bytes,
+                max_flush_delay: policy.wal_seal_max_flush_delay,
+                max_pending_writes: policy.wal_seal_max_pending_writes,
+            },
+        }
+    }
+}
+
 /// Database open options with smart defaults.
 ///
 /// Use the builder pattern to configure high-level knobs, and all low-level
@@ -168,6 +229,15 @@ pub struct OpenOptions {
     /// Block cache size (derived)
     pub(crate) block_cache_size: usize,
 
+    /// Block cache eviction policy.
+    block_cache_policy: BlockCachePolicy,
+
+    /// Cloud write tuning policy.
+    cloud_write_policy: CloudWritePolicy,
+
+    /// Whether automatic background compaction scheduling is enabled.
+    background_compaction: bool,
+
     /// WAL buffer size (derived)
     pub(crate) wal_buffer_size: usize,
 
@@ -179,7 +249,6 @@ pub struct OpenOptions {
 
     /// Optional WAL batch configuration (from testkit for batched durability mode)
     pub(crate) wal_batch_config: Option<crate::wal::policy::BatchConfig>,
-    pub(crate) cloud_runtime_policy: Option<crate::runtime::CloudRuntimePolicy>,
 }
 
 impl OpenOptions {
@@ -208,11 +277,13 @@ impl OpenOptions {
             memtable_flush_threshold: 64 * 1024 * 1024,
             target_sst_size: 256 * 1024 * 1024,
             block_cache_size: 128 * 1024 * 1024,
+            block_cache_policy: BlockCachePolicy::default(),
+            cloud_write_policy: CloudWritePolicy::default(),
+            background_compaction: true,
             wal_buffer_size: 256 * 1024,
             l0_compaction_trigger: 4,
             compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
-            cloud_runtime_policy: None,
         }
     }
 
@@ -237,11 +308,13 @@ impl OpenOptions {
             memtable_flush_threshold: 64 * 1024 * 1024,
             target_sst_size: 256 * 1024 * 1024,
             block_cache_size: 128 * 1024 * 1024,
+            block_cache_policy: BlockCachePolicy::default(),
+            cloud_write_policy: CloudWritePolicy::default(),
+            background_compaction: true,
             wal_buffer_size: 256 * 1024,
             l0_compaction_trigger: 4,
             compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
-            cloud_runtime_policy: None,
         }
     }
 
@@ -279,11 +352,13 @@ impl OpenOptions {
             memtable_flush_threshold: 64 * 1024 * 1024,
             target_sst_size: 256 * 1024 * 1024,
             block_cache_size: 128 * 1024 * 1024,
+            block_cache_policy: BlockCachePolicy::default(),
+            cloud_write_policy: CloudWritePolicy::default(),
+            background_compaction: true,
             wal_buffer_size: 256 * 1024,
             l0_compaction_trigger: 4,
             compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
-            cloud_runtime_policy: None,
         }
     }
 
@@ -315,11 +390,13 @@ impl OpenOptions {
             memtable_flush_threshold: 64 * 1024 * 1024,
             target_sst_size: 256 * 1024 * 1024,
             block_cache_size: 128 * 1024 * 1024,
+            block_cache_policy: BlockCachePolicy::default(),
+            cloud_write_policy: CloudWritePolicy::default(),
+            background_compaction: true,
             wal_buffer_size: 256 * 1024,
             l0_compaction_trigger: 4,
             compression_policy: CompressionPolicy::default(),
             wal_batch_config: None,
-            cloud_runtime_policy: None,
         }
     }
 
@@ -363,6 +440,30 @@ impl OpenOptions {
     #[must_use]
     pub fn workload(mut self, profile: WorkloadProfile) -> Self {
         self.workload = profile;
+        self
+    }
+
+    /// Set the block cache eviction policy.
+    #[must_use]
+    pub fn block_cache_policy(mut self, policy: BlockCachePolicy) -> Self {
+        self.block_cache_policy = policy;
+        self
+    }
+
+    /// Set the cloud write tuning policy.
+    #[must_use]
+    pub fn cloud_write_policy(mut self, policy: CloudWritePolicy) -> Self {
+        self.cloud_write_policy = policy;
+        self
+    }
+
+    /// Enable or disable automatic background compaction scheduling.
+    ///
+    /// Manual `Engine::compact_all()` remains available when background
+    /// scheduling is disabled.
+    #[must_use]
+    pub fn background_compaction(mut self, enabled: bool) -> Self {
+        self.background_compaction = enabled;
         self
     }
 
@@ -512,6 +613,18 @@ impl OpenOptions {
         self.block_cache_size
     }
 
+    /// Get the configured block cache eviction policy.
+    #[must_use]
+    pub fn block_cache_policy_value(&self) -> BlockCachePolicy {
+        self.block_cache_policy
+    }
+
+    /// Get the configured cloud write policy.
+    #[must_use]
+    pub fn cloud_write_policy_value(&self) -> &CloudWritePolicy {
+        &self.cloud_write_policy
+    }
+
     /// Get derived WAL buffer size
     #[must_use]
     pub fn wal_buffer_size(&self) -> usize {
@@ -542,6 +655,18 @@ impl OpenOptions {
 
     pub(crate) fn runtime_memtable_flush_threshold(&self) -> usize {
         self.memtable_flush_threshold
+    }
+
+    pub(crate) fn block_cache_policy_type(&self) -> CachePolicyType {
+        self.block_cache_policy.into()
+    }
+
+    pub(crate) fn cloud_runtime_policy(&self) -> crate::runtime::CloudRuntimePolicy {
+        self.cloud_write_policy.clone().into()
+    }
+
+    pub(crate) fn background_compaction_enabled(&self) -> bool {
+        self.background_compaction
     }
 
     fn sanitize_memtable_bytes(bytes: usize) -> usize {

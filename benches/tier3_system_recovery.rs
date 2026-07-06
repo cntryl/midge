@@ -12,10 +12,10 @@ use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
-use cntryl_midge::testkit::MidgeOptions;
+use stress_config::MidgeOptions;
 
 fn setup_engine(opts: MidgeOptions) -> cntryl_midge::MidgeEngine {
-    cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
+    stress_config::bench_stress::open_engine_no_compaction(opts)
 }
 
 fn run_reopen_clean_case(ctx: &mut StressContext, scenario: &'static str, opts: &MidgeOptions) {
@@ -46,13 +46,13 @@ fn run_reopen_clean_case(ctx: &mut StressContext, scenario: &'static str, opts: 
 
 #[stress(tier = 3)]
 fn tier3_recovery_reopen_clean_local(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    let opts = stress_config::opts_for_mode("local");
     run_reopen_clean_case(ctx, "tier3_recovery_reopen_clean_local", &opts);
 }
 
 #[stress(tier = 3)]
 fn tier3_recovery_reopen_clean_cloud(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    let opts = stress_config::opts_for_mode("cloud");
     run_reopen_clean_case(ctx, "tier3_recovery_reopen_clean_cloud", &opts);
 }
 

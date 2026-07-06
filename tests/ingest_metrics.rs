@@ -9,7 +9,8 @@ use std::time::Duration;
 #[test]
 fn should_measure_concurrent_ingest_coordinator_metrics_when_multiple_threads_write() {
     // Arrange
-    let opts = opts_for_mode("memory");
+    let mut opts = opts_for_mode("memory");
+    opts.memtable_size = 64 * 1024 * 1024;
     let engine = Arc::new(cntryl_midge::Engine::open(opts.to_open_options()).unwrap());
     let cf = engine.create_column_family("test_cf").unwrap();
     let cf_id = cf.id();

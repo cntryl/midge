@@ -3,6 +3,8 @@
 //! This is used by stress/perf workloads that want a stable, deterministic
 //! Zipfian key distribution with a tunable skew parameter.
 
+#![allow(dead_code)]
+
 use rand::Rng;
 
 #[derive(Debug, Clone)]

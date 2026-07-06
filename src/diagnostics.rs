@@ -36,15 +36,6 @@ pub(crate) struct TransactionSubmitTimingSample {
     pub(crate) follower_wait: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ReadTransactionDiagnosticsSnapshot {
-    pub(crate) read_only_begin_tx_count: u64,
-    pub(crate) read_only_snapshot_cache_hits: u64,
-    pub(crate) read_only_snapshot_cache_misses: u64,
-    pub(crate) snapshot_register_count: u64,
-    pub(crate) snapshot_unregister_count: u64,
-}
-
 impl TransactionSubmitTimingSample {
     const ZERO: Self = Self {
         leader_collect: 0,
@@ -56,41 +47,6 @@ impl TransactionSubmitTimingSample {
 thread_local! {
     static CURRENT_TRANSACTION_SUBMIT_TIMING: Cell<TransactionSubmitTimingSample> =
         const { Cell::new(TransactionSubmitTimingSample::ZERO) };
-}
-
-/// Guard that enables collection of internal transaction commit timing samples.
-#[derive(Debug)]
-pub struct TransactionCommitTimingGuard {
-    active: bool,
-}
-
-impl TransactionCommitTimingGuard {
-    /// Enable transaction commit timing collection until the guard is dropped.
-    #[must_use]
-    pub fn start() -> Self {
-        clear_transaction_commit_timings();
-        TRANSACTION_COMMIT_TIMING_ENABLED.store(true, Ordering::Release);
-        Self { active: true }
-    }
-
-    /// Drain all collected commit timing samples.
-    #[must_use]
-    pub fn drain(&self) -> Vec<TransactionCommitTimingSample> {
-        if !self.active {
-            return Vec::new();
-        }
-
-        drain_transaction_commit_timings()
-    }
-}
-
-impl Drop for TransactionCommitTimingGuard {
-    fn drop(&mut self) {
-        if self.active {
-            TRANSACTION_COMMIT_TIMING_ENABLED.store(false, Ordering::Release);
-            self.active = false;
-        }
-    }
 }
 
 #[must_use]
@@ -166,56 +122,8 @@ pub(crate) fn record_snapshot_unregister() {
     SNAPSHOT_UNREGISTER_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
-#[must_use]
-pub(crate) fn read_transaction_diagnostics_snapshot() -> ReadTransactionDiagnosticsSnapshot {
-    ReadTransactionDiagnosticsSnapshot {
-        read_only_begin_tx_count: READ_ONLY_BEGIN_TX_COUNT.load(Ordering::Relaxed),
-        read_only_snapshot_cache_hits: READ_ONLY_SNAPSHOT_CACHE_HITS.load(Ordering::Relaxed),
-        read_only_snapshot_cache_misses: READ_ONLY_SNAPSHOT_CACHE_MISSES.load(Ordering::Relaxed),
-        snapshot_register_count: SNAPSHOT_REGISTER_COUNT.load(Ordering::Relaxed),
-        snapshot_unregister_count: SNAPSHOT_UNREGISTER_COUNT.load(Ordering::Relaxed),
-    }
-}
-
-impl ReadTransactionDiagnosticsSnapshot {
-    pub(crate) fn delta_since(self, start: Self) -> Self {
-        Self {
-            read_only_begin_tx_count: self
-                .read_only_begin_tx_count
-                .saturating_sub(start.read_only_begin_tx_count),
-            read_only_snapshot_cache_hits: self
-                .read_only_snapshot_cache_hits
-                .saturating_sub(start.read_only_snapshot_cache_hits),
-            read_only_snapshot_cache_misses: self
-                .read_only_snapshot_cache_misses
-                .saturating_sub(start.read_only_snapshot_cache_misses),
-            snapshot_register_count: self
-                .snapshot_register_count
-                .saturating_sub(start.snapshot_register_count),
-            snapshot_unregister_count: self
-                .snapshot_unregister_count
-                .saturating_sub(start.snapshot_unregister_count),
-        }
-    }
-}
-
 fn transaction_commit_timing_queue() -> &'static SegQueue<TransactionCommitTimingSample> {
     TRANSACTION_COMMIT_TIMINGS.get_or_init(SegQueue::new)
-}
-
-fn clear_transaction_commit_timings() {
-    let _ = drain_transaction_commit_timings();
-}
-
-fn drain_transaction_commit_timings() -> Vec<TransactionCommitTimingSample> {
-    let queue = transaction_commit_timing_queue();
-    let mut samples = Vec::new();
-
-    while let Some(sample) = queue.pop() {
-        samples.push(sample);
-    }
-
-    samples
 }
 
 fn record_current_transaction_submit_timing(
@@ -234,38 +142,4 @@ fn record_current_transaction_submit_timing(
 
 fn duration_as_nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn should_report_saturating_read_transaction_diagnostic_deltas() {
-        // Arrange
-        let start = ReadTransactionDiagnosticsSnapshot {
-            read_only_begin_tx_count: 10,
-            read_only_snapshot_cache_hits: 8,
-            read_only_snapshot_cache_misses: 2,
-            snapshot_register_count: 10,
-            snapshot_unregister_count: 9,
-        };
-        let end = ReadTransactionDiagnosticsSnapshot {
-            read_only_begin_tx_count: 14,
-            read_only_snapshot_cache_hits: 9,
-            read_only_snapshot_cache_misses: 1,
-            snapshot_register_count: 15,
-            snapshot_unregister_count: 12,
-        };
-
-        // Act
-        let delta = end.delta_since(start);
-
-        // Assert
-        assert_eq!(delta.read_only_begin_tx_count, 4);
-        assert_eq!(delta.read_only_snapshot_cache_hits, 1);
-        assert_eq!(delta.read_only_snapshot_cache_misses, 0);
-        assert_eq!(delta.snapshot_register_count, 5);
-        assert_eq!(delta.snapshot_unregister_count, 3);
-    }
 }

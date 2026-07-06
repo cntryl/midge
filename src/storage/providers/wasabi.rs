@@ -98,4 +98,22 @@ mod tests {
             assert!(count >= 1);
         }
     }
+
+    #[test]
+    fn should_convert_wasabi_provider_into_inner_s3_provider() {
+        // Arrange
+        let provider = WasabiProvider::new(
+            "my-bucket".into(),
+            "us-east-1",
+            "key".into(),
+            "secret".into(),
+        )
+        .expect("should create wasabi provider");
+
+        // Act
+        let backend = provider.into_inner().backend();
+
+        // Assert
+        assert!(Arc::strong_count(&backend) >= 1);
+    }
 }

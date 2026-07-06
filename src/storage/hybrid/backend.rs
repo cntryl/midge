@@ -25,7 +25,6 @@
 
 use super::actor;
 use super::policy;
-use super::state;
 use crate::storage::{
     StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome,
 };
@@ -200,6 +199,7 @@ impl HybridStorage {
     }
 
     /// Create a new hybrid storage with a custom storage budget policy
+    #[cfg(test)]
     pub fn with_policy(
         local: Arc<dyn StorageBackend>,
         cloud: Arc<dyn StorageBackend>,
@@ -516,9 +516,23 @@ impl HybridStorage {
     /// Try to reserve space for an upcoming flush.
     pub fn reserve_for_flush(&self, est_size: u64) -> actor::ReservationResult {
         let mut actor = self.budget_actor.lock();
-        actor
+        let result = actor
             .handle_event(actor::StorageBudgetEvent::ReserveForFlush { est_size })
-            .unwrap_or(actor::ReservationResult::Ok)
+            .unwrap_or(actor::ReservationResult::Ok);
+        drop(actor);
+
+        let event = match result {
+            actor::ReservationResult::Ok => StorageEvent::BackpressureOff,
+            actor::ReservationResult::WaitForCloudUpload
+            | actor::ReservationResult::WaitForCompaction
+            | actor::ReservationResult::RejectNoSpace => StorageEvent::BackpressureOn,
+        };
+        self.event_queue.lock().push_back(event.clone());
+        if let Some(tx) = &self.external_event_tx {
+            let _ = tx.send(event);
+        }
+
+        result
     }
 
     /// Process a single WAL upload inline (fallback when worker thread unavailable)
@@ -669,7 +683,8 @@ impl HybridStorage {
         mut verify_remote: impl FnMut(u64, u64) -> Result<(), String>,
     ) {
         match rx.recv() {
-            Ok(StorageEvent::WriteComplete { result, .. }) if result.is_ok() => {
+            Ok(StorageEvent::WriteComplete { key, result }) if result.is_ok() => {
+                let _ = key;
                 if let Err(error) = verify_remote(upload.segment_id, upload.max_sequence) {
                     if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                         telemetry.metrics().record_cloud_async_wal_upload_failed();
@@ -691,7 +706,8 @@ impl HybridStorage {
                 Self::emit_wal_upload_ack(upload, event_queue, external_event_tx);
                 Self::log_wal_upload_ack(upload);
             }
-            Ok(StorageEvent::WriteComplete { result, .. }) => {
+            Ok(StorageEvent::WriteComplete { key, result }) => {
+                let _ = key;
                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                     telemetry.metrics().record_cloud_async_wal_upload_failed();
                 }
@@ -718,15 +734,6 @@ impl HybridStorage {
         let _ = actor.handle_event(actor::StorageBudgetEvent::FlushCompleted { actual_size });
     }
 
-    /// Signal that a cloud upload completed
-    pub fn cloud_upload_completed(&self, sst_id: u64, actual_size: u64) {
-        let mut actor = self.budget_actor.lock();
-        let _ = actor.handle_event(actor::StorageBudgetEvent::CloudUploadCompleted {
-            sst_id,
-            actual_size,
-        });
-    }
-
     /// Signal that compaction is starting
     pub fn compaction_planned(&self, input_sizes: Vec<u64>) {
         let mut actor = self.budget_actor.lock();
@@ -737,17 +744,6 @@ impl HybridStorage {
     pub fn compaction_completed(&self, output_sizes: Vec<u64>) {
         let mut actor = self.budget_actor.lock();
         let _ = actor.handle_event(actor::StorageBudgetEvent::CompactionCompleted { output_sizes });
-    }
-
-    /// Get current disk state snapshot
-    pub fn disk_state(&self) -> state::DiskState {
-        let actor = self.budget_actor.lock();
-        actor.disk_state()
-    }
-
-    /// Get mutable access to the budget actor for testing and monitoring
-    pub fn budget_actor(&self) -> parking_lot::MutexGuard<'_, actor::StorageBudgetActor> {
-        self.budget_actor.lock()
     }
 
     pub fn budget_snapshot(&self) -> HybridStorageBudgetSnapshot {
@@ -790,10 +786,6 @@ impl HybridStorage {
         }
     }
 
-    fn read_cloud_object_blocking(&self, key: &str) -> Result<Vec<u8>, String> {
-        Self::read_cloud_object_from_backend_blocking(&self.cloud, key)
-    }
-
     fn head_cloud_object_from_backend_blocking(
         cloud: &Arc<dyn StorageBackend>,
         key: &str,
@@ -802,24 +794,26 @@ impl HybridStorage {
         cloud.submit_head(key, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(StorageEvent::HeadComplete {
+                key: returned_key,
                 result: StorageOutcome::Ok(metadata),
-                ..
-            }) => Ok(metadata),
+            }) => {
+                let _ = returned_key;
+                Ok(metadata)
+            }
             Ok(StorageEvent::HeadComplete {
+                key: returned_key,
                 result: StorageOutcome::Err(error),
-                ..
-            }) => Err(format!(
-                "cloud object '{key}' unreadable during cached proof revalidation: {error}"
-            )),
+            }) => {
+                let _ = returned_key;
+                Err(format!(
+                    "cloud object '{key}' unreadable during cached proof revalidation: {error}"
+                ))
+            }
             Ok(other) => Err(format!(
                 "unexpected cloud HEAD response for '{key}': {other:?}"
             )),
             Err(error) => Err(format!("cloud HEAD timed out for '{key}': {error}")),
         }
-    }
-
-    fn head_cloud_object_blocking(&self, key: &str) -> Result<StorageObjectMetadata, String> {
-        Self::head_cloud_object_from_backend_blocking(&self.cloud, key)
     }
 
     fn storage_error_indicates_missing(error: &str) -> bool {
@@ -839,17 +833,26 @@ impl HybridStorage {
         backend.submit_head(key, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(StorageEvent::HeadComplete {
+                key: returned_key,
                 result: StorageOutcome::Ok(_),
-                ..
-            }) => Ok(true),
+            }) => {
+                let _ = returned_key;
+                Ok(true)
+            }
             Ok(StorageEvent::HeadComplete {
+                key: returned_key,
                 result: StorageOutcome::Err(error),
-                ..
-            }) if Self::storage_error_indicates_missing(&error) => Ok(false),
+            }) if Self::storage_error_indicates_missing(&error) => {
+                let _ = returned_key;
+                Ok(false)
+            }
             Ok(StorageEvent::HeadComplete {
+                key: returned_key,
                 result: StorageOutcome::Err(error),
-                ..
-            }) => Err(format!("object '{key}' HEAD failed: {error}")),
+            }) => {
+                let _ = returned_key;
+                Err(format!("object '{key}' HEAD failed: {error}"))
+            }
             Ok(other) => Err(format!(
                 "unexpected storage HEAD response for '{key}': {other:?}"
             )),
@@ -865,17 +868,26 @@ impl HybridStorage {
         backend.submit_delete(key, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(StorageEvent::DeleteComplete {
+                key: returned_key,
                 result: StorageOutcome::Ok(()),
-                ..
-            }) => Ok(true),
+            }) => {
+                let _ = returned_key;
+                Ok(true)
+            }
             Ok(StorageEvent::DeleteComplete {
+                key: returned_key,
                 result: StorageOutcome::Err(error),
-                ..
-            }) if Self::storage_error_indicates_missing(&error) => Ok(false),
+            }) if Self::storage_error_indicates_missing(&error) => {
+                let _ = returned_key;
+                Ok(false)
+            }
             Ok(StorageEvent::DeleteComplete {
+                key: returned_key,
                 result: StorageOutcome::Err(error),
-                ..
-            }) => Err(format!("object '{key}' delete failed: {error}")),
+            }) => {
+                let _ = returned_key;
+                Err(format!("object '{key}' delete failed: {error}"))
+            }
             Ok(other) => Err(format!(
                 "unexpected storage delete response for '{key}': {other:?}"
             )),
@@ -1064,6 +1076,7 @@ impl HybridStorage {
         })
     }
 
+    #[cfg(test)]
     fn is_verified_wal_segment(
         verified_wal_segments: &Arc<Mutex<HashMap<u64, VerifiedWalSegment>>>,
         segment_id: u64,
@@ -1075,6 +1088,7 @@ impl HybridStorage {
             .is_some_and(|proof| proof.max_sequence == expected_max_sequence)
     }
 
+    #[cfg(test)]
     pub fn is_remote_wal_segment_verified(
         &self,
         segment_id: u64,
@@ -1586,82 +1600,22 @@ impl HybridStorage {
         };
 
         for proof in &guard.objects {
-            let (tx, rx) = std::sync::mpsc::channel();
-            guard.cloud.submit_get(&proof.key, tx);
-            match rx.recv_timeout(Duration::from_secs(30)) {
-                Ok(crate::storage::cloud::CloudEvent::Get {
-                    result: crate::storage::cloud::CloudOutcome::Ok(data),
-                    ..
-                }) => {
-                    if data != proof.expected_bytes {
-                        return Err(format!(
-                            "cloud metadata '{}' changed before WAL prune",
-                            proof.key
-                        ));
-                    }
-                    let (head_tx, head_rx) = std::sync::mpsc::channel();
-                    guard.cloud.submit_head(&proof.key, head_tx);
-                    match head_rx.recv_timeout(Duration::from_secs(30)) {
-                        Ok(crate::storage::cloud::CloudEvent::Head {
-                            result: crate::storage::cloud::CloudOutcome::Ok(actual),
-                            ..
-                        }) => {
-                            let actual = StorageObjectMetadata {
-                                size: actual.size,
-                                etag: actual.etag,
-                                generation: actual.generation,
-                            };
-                            if actual != proof.remote {
-                                return Err(format!(
-                                    "cloud metadata '{}' identity changed before WAL prune: expected {:?}, actual {:?}",
-                                    proof.key, proof.remote, actual
-                                ));
-                            }
-                        }
-                        Ok(crate::storage::cloud::CloudEvent::Head {
-                            result: crate::storage::cloud::CloudOutcome::Err(error),
-                            ..
-                        }) => {
-                            return Err(format!(
-                                "cloud metadata '{}' is unreadable before WAL prune: {error}",
-                                proof.key
-                            ));
-                        }
-                        Ok(other) => {
-                            return Err(format!(
-                                "unexpected cloud metadata HEAD response for '{}': {other:?}",
-                                proof.key
-                            ));
-                        }
-                        Err(error) => {
-                            return Err(format!(
-                                "cloud metadata HEAD timed out for '{}': {error}",
-                                proof.key
-                            ));
-                        }
-                    }
-                }
-                Ok(crate::storage::cloud::CloudEvent::Get {
-                    result: crate::storage::cloud::CloudOutcome::Err(error),
-                    ..
-                }) => {
-                    return Err(format!(
-                        "cloud metadata '{}' is unreadable before WAL prune: {error}",
-                        proof.key
-                    ));
-                }
-                Ok(other) => {
-                    return Err(format!(
-                        "unexpected cloud metadata read response for '{}': {other:?}",
-                        proof.key
-                    ));
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "cloud metadata read timed out for '{}': {error}",
-                        proof.key
-                    ));
-                }
+            let actual =
+                crate::storage::cloud::blocking_cloud_object_proof(&guard.cloud, &proof.key)?
+                    .ok_or_else(|| {
+                        format!("cloud metadata '{}' is missing before WAL prune", proof.key)
+                    })?;
+            if actual.bytes != proof.expected_bytes {
+                return Err(format!(
+                    "cloud metadata '{}' changed before WAL prune",
+                    proof.key
+                ));
+            }
+            if actual.metadata != proof.remote {
+                return Err(format!(
+                    "cloud metadata '{}' identity changed before WAL prune: expected {:?}, actual {:?}",
+                    proof.key, proof.remote, actual.metadata
+                ));
             }
         }
 
@@ -1924,6 +1878,7 @@ impl StorageBackend for HybridStorage {
         });
     }
 
+    #[cfg(test)]
     fn submit_list(&self, prefix: &str, callback: StorageCallback) {
         // OBJECT STORAGE ONLY - lists SSTs, metadata, etc.
         // Merge results from both local and cloud

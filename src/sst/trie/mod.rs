@@ -1,4 +1,4 @@
-// == COPILOT MASTER RULES FOR SST TRIE INDEX =========================================
+// == ARCHITECTURE MASTER RULES FOR SST TRIE INDEX =========================================
 // These rules define the *correct* architecture for Midge Trie Index. All completions
 // touching trie building, serialization, or lookup MUST follow these rules exactly.
 //

@@ -124,21 +124,25 @@ impl FileMeta {
 
 impl Manifest {
     /// Create a new manifest
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Get the next WAL sequence
+    #[cfg(test)]
     pub fn next_wal_seq(&self) -> u64 {
         self.next_wal_seq
     }
 
     /// Increment WAL sequence
+    #[cfg(test)]
     pub fn increment_wal_seq(&mut self) {
         self.next_wal_seq += 1;
     }
 
     /// Get all files at a specific level
+    #[cfg(test)]
     pub fn files_at_level(&self, level: u32) -> Vec<&FileMeta> {
         self.files.iter().filter(|f| f.level == level).collect()
     }
@@ -188,6 +192,7 @@ impl Manifest {
     }
 
     /// Get an active column family by ID
+    #[cfg(test)]
     pub fn get_column_family_by_id(&self, id: u32) -> Option<&ColumnFamilyMeta> {
         self.column_families
             .iter()
@@ -195,6 +200,7 @@ impl Manifest {
     }
 
     /// Get all active column families
+    #[cfg(test)]
     pub fn active_column_families(&self) -> Vec<&ColumnFamilyMeta> {
         self.column_families
             .iter()

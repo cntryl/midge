@@ -1,5 +1,5 @@
 //
-// == COPILOT RULES: CLOUD EXECUTOR ==
+// == ARCHITECTURE RULES: CLOUD EXECUTOR ==
 //
 // You MUST implement CloudExecutor as a fully self-contained async engine.
 //

@@ -9,16 +9,23 @@ use crate::telemetry::config::TelemetryConfig;
 #[derive(Debug)]
 pub struct Metrics {
     // Write operations
+    #[cfg(test)]
     pub puts: Arc<AtomicU64>,
+    #[cfg(test)]
     pub deletes: Arc<AtomicU64>,
+    #[cfg(test)]
     pub merges: Arc<AtomicU64>,
 
     // Read operations
+    #[cfg(test)]
     pub gets: Arc<AtomicU64>,
+    #[cfg(test)]
     pub range_scans: Arc<AtomicU64>,
 
     // Latency (microseconds)
+    #[cfg(test)]
     pub write_latency_us: Arc<AtomicU64>,
+    #[cfg(test)]
     pub read_latency_us: Arc<AtomicU64>,
 
     // WAL operations
@@ -42,7 +49,9 @@ pub struct Metrics {
     // Breakdowns
     pub wal_encode_count: Arc<AtomicU64>,
     pub wal_encode_ns_total: Arc<AtomicU64>,
+    #[cfg(test)]
     pub wal_lock_wait_count: Arc<AtomicU64>,
+    #[cfg(test)]
     pub wal_lock_wait_ns_total: Arc<AtomicU64>,
     pub wal_write_syscall_count: Arc<AtomicU64>,
     pub wal_write_syscall_ns_total: Arc<AtomicU64>,
@@ -55,7 +64,9 @@ pub struct Metrics {
     pub cache_inline_fallback_count: Arc<AtomicU64>,
 
     // SST operations
+    #[cfg(test)]
     pub sst_created: Arc<AtomicU64>,
+    #[cfg(test)]
     pub sst_loaded: Arc<AtomicU64>,
 
     // Compaction
@@ -65,8 +76,10 @@ pub struct Metrics {
 
     // Cloud operations
     pub cloud_uploads: Arc<AtomicU64>,
+    #[cfg(test)]
     pub cloud_downloads: Arc<AtomicU64>,
     pub cloud_bytes_uploaded: Arc<AtomicU64>,
+    #[cfg(test)]
     pub cloud_bytes_downloaded: Arc<AtomicU64>,
 
     // CloudAsync WAL durability flow
@@ -97,6 +110,7 @@ pub struct Metrics {
     pub write_conflicts_range: Arc<AtomicU64>,
 
     // Phase 0 guardrails: Idempotency cache telemetry
+    #[cfg(test)]
     pub idempotency_cache_evictions: Arc<AtomicU64>,
 
     // Phase 3 observability: Transaction and sequence metrics
@@ -109,8 +123,10 @@ pub struct Metrics {
 
     // Phase 3 observability: Idempotency cache metrics
     /// Total sequence allocations requested
+    #[cfg(test)]
     pub idempotency_alloc_total: Arc<AtomicU64>,
     /// Cache hits (reused cached sequences)
+    #[cfg(test)]
     pub idempotency_cache_hits: Arc<AtomicU64>,
 
     // Event loop
@@ -125,12 +141,19 @@ impl Metrics {
     #[must_use]
     pub fn new(config: &TelemetryConfig) -> Self {
         Self {
+            #[cfg(test)]
             puts: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             deletes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             merges: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             gets: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             range_scans: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             write_latency_us: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             read_latency_us: Arc::new(AtomicU64::new(0)),
             wal_appends: Arc::new(AtomicU64::new(0)),
             wal_syncs: Arc::new(AtomicU64::new(0)),
@@ -149,7 +172,9 @@ impl Metrics {
 
             wal_encode_count: Arc::new(AtomicU64::new(0)),
             wal_encode_ns_total: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             wal_lock_wait_count: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             wal_lock_wait_ns_total: Arc::new(AtomicU64::new(0)),
             wal_write_syscall_count: Arc::new(AtomicU64::new(0)),
             wal_write_syscall_ns_total: Arc::new(AtomicU64::new(0)),
@@ -158,14 +183,18 @@ impl Metrics {
             wal_buffer_pool_overflow_count: Arc::new(AtomicU64::new(0)),
             thread_spawn_failures: Arc::new(AtomicU64::new(0)),
             cache_inline_fallback_count: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             sst_created: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             sst_loaded: Arc::new(AtomicU64::new(0)),
             compactions_run: Arc::new(AtomicU64::new(0)),
             compaction_bytes_rewritten: Arc::new(AtomicU64::new(0)),
             compaction_failures: Arc::new(AtomicU64::new(0)),
             cloud_uploads: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             cloud_downloads: Arc::new(AtomicU64::new(0)),
             cloud_bytes_uploaded: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             cloud_bytes_downloaded: Arc::new(AtomicU64::new(0)),
 
             cloud_async_wal_segments_sealed: Arc::new(AtomicU64::new(0)),
@@ -189,11 +218,14 @@ impl Metrics {
             write_conflicts: Arc::new(AtomicU64::new(0)),
             write_conflicts_point: Arc::new(AtomicU64::new(0)),
             write_conflicts_range: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             idempotency_cache_evictions: Arc::new(AtomicU64::new(0)),
             pending_txn_started: Arc::new(AtomicU64::new(0)),
             pending_txn_duration_ms_total: Arc::new(AtomicU64::new(0)),
             pending_txn_duration_ms_max: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             idempotency_alloc_total: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
             idempotency_cache_hits: Arc::new(AtomicU64::new(0)),
             event_loop_wakes: Arc::new(AtomicU64::new(0)),
             event_loop_batch_total: Arc::new(AtomicU64::new(0)),
@@ -264,6 +296,7 @@ impl Metrics {
 
     /// Record a put operation
     #[inline]
+    #[cfg(test)]
     pub fn record_put(&self) {
         if self.enabled {
             self.puts.fetch_add(1, Ordering::Relaxed);
@@ -272,6 +305,7 @@ impl Metrics {
 
     /// Record a delete operation
     #[inline]
+    #[cfg(test)]
     pub fn record_delete(&self) {
         if self.enabled {
             self.deletes.fetch_add(1, Ordering::Relaxed);
@@ -280,6 +314,7 @@ impl Metrics {
 
     /// Record a get operation
     #[inline]
+    #[cfg(test)]
     pub fn record_get(&self) {
         if self.enabled {
             self.gets.fetch_add(1, Ordering::Relaxed);
@@ -288,6 +323,7 @@ impl Metrics {
 
     /// Record a range scan operation
     #[inline]
+    #[cfg(test)]
     pub fn record_range_scan(&self) {
         if self.enabled {
             self.range_scans.fetch_add(1, Ordering::Relaxed);
@@ -296,6 +332,7 @@ impl Metrics {
 
     /// Record write operation latency (microseconds)
     #[inline]
+    #[cfg(test)]
     pub fn record_write_latency_us(&self, latency_us: u64) {
         if self.enabled {
             self.write_latency_us
@@ -305,6 +342,7 @@ impl Metrics {
 
     /// Record read operation latency (microseconds)
     #[inline]
+    #[cfg(test)]
     pub fn record_read_latency_us(&self, latency_us: u64) {
         if self.enabled {
             self.read_latency_us
@@ -348,6 +386,7 @@ impl Metrics {
 
     /// Record WAL lock acquisition wait time
     #[inline]
+    #[cfg(test)]
     pub fn record_wal_lock_wait(&self, ns: u64) {
         if self.enabled {
             self.wal_lock_wait_count.fetch_add(1, Ordering::Relaxed);
@@ -378,6 +417,7 @@ impl Metrics {
     pub fn record_wal_fsync_count(&self) {
         if self.enabled {
             self.wal_fsync_count.fetch_add(1, Ordering::Relaxed);
+            #[cfg(test)]
             self.wal_syncs.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -458,6 +498,7 @@ impl Metrics {
 
     /// Record SST creation
     #[inline]
+    #[cfg(test)]
     pub fn record_sst_created(&self) {
         if self.enabled {
             self.sst_created.fetch_add(1, Ordering::Relaxed);
@@ -466,6 +507,7 @@ impl Metrics {
 
     /// Record SST load
     #[inline]
+    #[cfg(test)]
     pub fn record_sst_loaded(&self) {
         if self.enabled {
             self.sst_loaded.fetch_add(1, Ordering::Relaxed);
@@ -501,6 +543,7 @@ impl Metrics {
 
     /// Record cloud download
     #[inline]
+    #[cfg(test)]
     pub fn record_cloud_download(&self, bytes: u64) {
         if self.enabled {
             self.cloud_downloads.fetch_add(1, Ordering::Relaxed);
@@ -527,6 +570,7 @@ impl Metrics {
 
     /// Record write stall
     #[inline]
+    #[cfg(test)]
     pub fn record_write_stall(&self) {
         if self.enabled {
             self.write_stalls.fetch_add(1, Ordering::Relaxed);
@@ -590,6 +634,7 @@ impl Metrics {
 
     /// Record idempotency cache evictions (Phase 0 guardrail telemetry)
     #[inline]
+    #[cfg(test)]
     pub fn record_idempotency_cache_evictions(&self, count: u64) {
         if self.enabled {
             self.idempotency_cache_evictions
@@ -625,6 +670,7 @@ impl Metrics {
 
     /// Record sequence allocation (for cache hit rate calculation)
     #[inline]
+    #[cfg(test)]
     pub fn record_idempotency_alloc(&self) {
         if self.enabled {
             self.idempotency_alloc_total.fetch_add(1, Ordering::Relaxed);
@@ -633,6 +679,7 @@ impl Metrics {
 
     /// Record idempotency cache hit
     #[inline]
+    #[cfg(test)]
     pub fn record_idempotency_cache_hit(&self) {
         if self.enabled {
             self.idempotency_cache_hits.fetch_add(1, Ordering::Relaxed);
@@ -641,6 +688,7 @@ impl Metrics {
 
     /// Get idempotency cache hit rate (hits / total allocations)
     /// Returns None if no allocations have been made
+    #[cfg(test)]
     pub fn idempotency_cache_hit_rate(&self) -> Option<f64> {
         let total = self.idempotency_alloc_total.load(Ordering::Relaxed);
         if total == 0 {
@@ -652,6 +700,7 @@ impl Metrics {
 
     /// Get average pending transaction duration in milliseconds
     /// Returns None if no transactions have been tracked
+    #[cfg(test)]
     pub fn pending_txn_duration_ms_avg(&self) -> Option<f64> {
         let count = self.pending_txn_started.load(Ordering::Relaxed);
         if count == 0 {
@@ -664,24 +713,40 @@ impl Metrics {
     /// Get all metrics as a snapshot
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
+            #[cfg(test)]
             puts: self.puts.load(Ordering::Relaxed),
+            #[cfg(test)]
             deletes: self.deletes.load(Ordering::Relaxed),
+            #[cfg(test)]
             merges: self.merges.load(Ordering::Relaxed),
+            #[cfg(test)]
             gets: self.gets.load(Ordering::Relaxed),
+            #[cfg(test)]
             range_scans: self.range_scans.load(Ordering::Relaxed),
+            #[cfg(test)]
             write_latency_us: self.write_latency_us.load(Ordering::Relaxed),
+            #[cfg(test)]
             read_latency_us: self.read_latency_us.load(Ordering::Relaxed),
+            #[cfg(test)]
             wal_appends: self.wal_appends.load(Ordering::Relaxed),
+            #[cfg(test)]
             wal_syncs: self.wal_syncs.load(Ordering::Relaxed),
+            #[cfg(test)]
             wal_bytes_written: self.wal_bytes_written.load(Ordering::Relaxed),
+            #[cfg(test)]
             sst_created: self.sst_created.load(Ordering::Relaxed),
+            #[cfg(test)]
             sst_loaded: self.sst_loaded.load(Ordering::Relaxed),
             compactions_run: self.compactions_run.load(Ordering::Relaxed),
             compaction_bytes_rewritten: self.compaction_bytes_rewritten.load(Ordering::Relaxed),
             compaction_failures: self.compaction_failures.load(Ordering::Relaxed),
+            #[cfg(test)]
             cloud_uploads: self.cloud_uploads.load(Ordering::Relaxed),
+            #[cfg(test)]
             cloud_downloads: self.cloud_downloads.load(Ordering::Relaxed),
+            #[cfg(test)]
             cloud_bytes_uploaded: self.cloud_bytes_uploaded.load(Ordering::Relaxed),
+            #[cfg(test)]
             cloud_bytes_downloaded: self.cloud_bytes_downloaded.load(Ordering::Relaxed),
             cache_hits: self.cache_hits.load(Ordering::Relaxed),
             cache_misses: self.cache_misses.load(Ordering::Relaxed),
@@ -722,11 +787,15 @@ impl Metrics {
             cloud_async_wal_ack_latency_us: self
                 .cloud_async_wal_ack_latency_us
                 .load(Ordering::Relaxed),
+            #[cfg(test)]
             wal_recovery_records_replayed: self
                 .wal_recovery_records_replayed
                 .load(Ordering::Relaxed),
+            #[cfg(test)]
             wal_recovery_bytes_replayed: self.wal_recovery_bytes_replayed.load(Ordering::Relaxed),
+            #[cfg(test)]
             intent_log_replay_runs: self.intent_log_replay_runs.load(Ordering::Relaxed),
+            #[cfg(test)]
             intent_log_entries_replayed: self.intent_log_entries_replayed.load(Ordering::Relaxed),
         }
     }
@@ -735,24 +804,40 @@ impl Metrics {
 /// Point-in-time metrics snapshot
 #[derive(Debug, Clone)]
 pub struct MetricsSnapshot {
+    #[cfg(test)]
     pub puts: u64,
+    #[cfg(test)]
     pub deletes: u64,
+    #[cfg(test)]
     pub merges: u64,
+    #[cfg(test)]
     pub gets: u64,
+    #[cfg(test)]
     pub range_scans: u64,
+    #[cfg(test)]
     pub write_latency_us: u64,
+    #[cfg(test)]
     pub read_latency_us: u64,
+    #[cfg(test)]
     pub wal_appends: u64,
+    #[cfg(test)]
     pub wal_syncs: u64,
+    #[cfg(test)]
     pub wal_bytes_written: u64,
+    #[cfg(test)]
     pub sst_created: u64,
+    #[cfg(test)]
     pub sst_loaded: u64,
     pub compactions_run: u64,
     pub compaction_bytes_rewritten: u64,
     pub compaction_failures: u64,
+    #[cfg(test)]
     pub cloud_uploads: u64,
+    #[cfg(test)]
     pub cloud_downloads: u64,
+    #[cfg(test)]
     pub cloud_bytes_uploaded: u64,
+    #[cfg(test)]
     pub cloud_bytes_downloaded: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
@@ -779,14 +864,19 @@ pub struct MetricsSnapshot {
     pub cloud_async_wal_uploads_failed: u64,
     pub cloud_async_wal_upload_latency_us: u64,
     pub cloud_async_wal_ack_latency_us: u64,
+    #[cfg(test)]
     pub wal_recovery_records_replayed: u64,
+    #[cfg(test)]
     pub wal_recovery_bytes_replayed: u64,
+    #[cfg(test)]
     pub intent_log_replay_runs: u64,
+    #[cfg(test)]
     pub intent_log_entries_replayed: u64,
 }
 
 impl MetricsSnapshot {
     /// Calculate cache hit ratio (0.0..=1.0)
+    #[cfg(test)]
     pub fn cache_hit_ratio(&self) -> f64 {
         let total = self.cache_hits + self.cache_misses;
         if total == 0 {
@@ -797,16 +887,19 @@ impl MetricsSnapshot {
     }
 
     /// Total write operations
+    #[cfg(test)]
     pub fn total_writes(&self) -> u64 {
         self.puts + self.deletes + self.merges
     }
 
     /// Total cloud bytes transferred
+    #[cfg(test)]
     pub fn total_cloud_bytes(&self) -> u64 {
         self.cloud_bytes_uploaded + self.cloud_bytes_downloaded
     }
 }
 
+#[cfg(test)]
 fn u64_to_f64(value: u64) -> f64 {
     let upper = u32::try_from(value >> 32).unwrap_or(u32::MAX);
     let lower_mask = u64::from(u32::MAX);
@@ -905,5 +998,55 @@ mod tests {
         assert_eq!(snap.write_conflicts, 3);
         assert_eq!(snap.write_conflicts_point, 1);
         assert_eq!(snap.write_conflicts_range, 2);
+    }
+
+    #[test]
+    fn should_record_test_visible_metric_rates() {
+        // Arrange
+        let config = TelemetryConfig::default().with_enabled(true);
+        let metrics = Metrics::new(&config);
+
+        // Act
+        metrics.record_put();
+        metrics.record_delete();
+        metrics.record_get();
+        metrics.record_range_scan();
+        metrics.record_write_latency_us(11);
+        metrics.record_read_latency_us(7);
+        metrics.record_wal_append(128);
+        metrics.record_wal_sync();
+        metrics.record_wal_lock_wait(3);
+        metrics.record_sst_created();
+        metrics.record_sst_loaded();
+        metrics.record_cloud_upload(256);
+        metrics.record_cloud_download(512);
+        metrics.record_write_stall();
+        metrics.record_idempotency_alloc();
+        metrics.record_idempotency_cache_hit();
+        metrics.record_pending_txn_started();
+        metrics.record_pending_txn_duration_ms(9);
+
+        let snap = metrics.snapshot();
+
+        // Assert
+        assert_eq!(snap.total_writes(), 2);
+        assert_eq!(snap.merges, 0);
+        assert_eq!(snap.gets, 1);
+        assert_eq!(snap.range_scans, 1);
+        assert_eq!(snap.write_latency_us, 11);
+        assert_eq!(snap.read_latency_us, 7);
+        assert_eq!(snap.wal_appends, 1);
+        assert_eq!(snap.wal_syncs, 1);
+        assert_eq!(snap.wal_bytes_written, 128);
+        assert_eq!(snap.sst_created, 1);
+        assert_eq!(snap.sst_loaded, 1);
+        assert_eq!(snap.cloud_uploads, 1);
+        assert_eq!(snap.cloud_downloads, 1);
+        assert_eq!(snap.total_cloud_bytes(), 768);
+        assert_eq!(snap.write_stalls, 1);
+        assert_eq!(metrics.wal_lock_wait_count.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.wal_lock_wait_ns_total.load(Ordering::Relaxed), 3);
+        assert_eq!(metrics.idempotency_cache_hit_rate(), Some(1.0));
+        assert_eq!(metrics.pending_txn_duration_ms_avg(), Some(9.0));
     }
 }

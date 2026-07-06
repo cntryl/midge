@@ -241,12 +241,18 @@ impl CloudStartupRecovery {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_list(prefix, tx);
         match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(crate::storage::cloud::CloudEvent::List { result, .. }) => match result {
-                crate::storage::cloud::CloudOutcome::Ok(keys) => Ok(keys),
-                crate::storage::cloud::CloudOutcome::Err(error) => Err(MidgeError::Internal(
-                    format!("cloud list '{prefix}': {error}"),
-                )),
-            },
+            Ok(crate::storage::cloud::CloudEvent::List {
+                prefix: returned_prefix,
+                result,
+            }) => {
+                let _ = returned_prefix;
+                match result {
+                    crate::storage::cloud::CloudOutcome::Ok(keys) => Ok(keys),
+                    crate::storage::cloud::CloudOutcome::Err(error) => Err(MidgeError::Internal(
+                        format!("cloud list '{prefix}': {error}"),
+                    )),
+                }
+            }
             Ok(other) => Err(MidgeError::Internal(format!(
                 "unexpected cloud list response for '{prefix}': {other:?}"
             ))),
@@ -332,6 +338,14 @@ impl CloudStartupRecovery {
         }
     }
 
+    pub(super) fn blocking_cloud_object_proof_optional(
+        cloud: &crate::storage::cloud::CloudStorage,
+        key: &str,
+    ) -> MidgeResult<Option<crate::storage::cloud::CloudObjectProof>> {
+        crate::storage::cloud::blocking_cloud_object_proof(cloud, key).map_err(MidgeError::Internal)
+    }
+
+    #[cfg(test)]
     pub(super) fn blocking_cloud_put(
         cloud: &crate::storage::cloud::CloudStorage,
         key: &str,
@@ -796,27 +810,27 @@ impl CloudStartupRecovery {
         cloud_key: &str,
         file: &crate::metadata::FileMeta,
     ) -> MidgeResult<()> {
-        match Self::blocking_cloud_head_optional(cloud, cloud_key) {
-            Ok(Some(metadata)) if metadata.size == file.size_bytes => {
-                if file.content_crc32c.is_some() {
-                    Self::validate_manifest_sst_cloud_content(state, cloud, cloud_key, file)?;
+        match Self::blocking_cloud_object_proof_optional(cloud, cloud_key) {
+            Ok(Some(proof)) => {
+                if let Err(error) = Self::validate_sst_bytes_against_proof(
+                    &file.name,
+                    &proof.bytes,
+                    Some(file.size_bytes),
+                    file.content_crc32c,
+                ) {
+                    if state.recovery_policy() == RecoveryPolicy::Strict {
+                        return Err(error);
+                    }
+                    state.mark_opened_in_salvage_mode();
+                    state.mark_persistence_anomaly();
+                    tracing::warn!(
+                        %error,
+                        sst_name = %file.name,
+                        cloud_size = proof.metadata.size,
+                        manifest_size = file.size_bytes,
+                        "retaining locally valid manifest SST during salvage despite invalid cloud object"
+                    );
                 }
-            }
-            Ok(Some(metadata)) => {
-                if state.recovery_policy() == RecoveryPolicy::Strict {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "authoritative cloud SST '{}' size {} does not match manifest {}",
-                        file.name, metadata.size, file.size_bytes
-                    )));
-                }
-                state.mark_opened_in_salvage_mode();
-                state.mark_persistence_anomaly();
-                tracing::warn!(
-                    sst_name = %file.name,
-                    cloud_size = metadata.size,
-                    manifest_size = file.size_bytes,
-                    "retaining locally valid manifest SST during salvage despite cloud size mismatch"
-                );
             }
             Ok(None) => {
                 if state.recovery_policy() == RecoveryPolicy::Strict {
@@ -847,52 +861,6 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
-    fn validate_manifest_sst_cloud_content(
-        state: &mut RuntimeState,
-        cloud: &crate::storage::cloud::CloudStorage,
-        cloud_key: &str,
-        file: &crate::metadata::FileMeta,
-    ) -> MidgeResult<()> {
-        match Self::blocking_cloud_get_optional(cloud, cloud_key) {
-            Ok(Some(data)) => {
-                if let Err(error) = Self::validate_sst_bytes_against_proof(
-                    &file.name,
-                    &data,
-                    Some(file.size_bytes),
-                    file.content_crc32c,
-                ) {
-                    if state.recovery_policy() == RecoveryPolicy::Strict {
-                        return Err(error);
-                    }
-                    tracing::warn!(%error, sst_name = %file.name, "retaining locally valid manifest SST during salvage despite invalid cloud object");
-                    state.mark_opened_in_salvage_mode();
-                    state.mark_persistence_anomaly();
-                }
-            }
-            Ok(None) => {
-                if state.recovery_policy() == RecoveryPolicy::Strict {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "authoritative cloud SST '{}' is missing",
-                        file.name
-                    )));
-                }
-                tracing::warn!(
-                    sst_name = %file.name,
-                    "retaining locally valid manifest SST during salvage despite missing cloud object"
-                );
-                state.mark_opened_in_salvage_mode();
-                state.mark_persistence_anomaly();
-            }
-            Err(error) if state.recovery_policy() == RecoveryPolicy::Salvage => {
-                tracing::warn!(%error, sst_name = %file.name, "retaining locally valid manifest SST during salvage despite remote content validation failure");
-                state.mark_opened_in_salvage_mode();
-                state.mark_persistence_anomaly();
-            }
-            Err(error) => return Err(error),
-        }
-        Ok(())
-    }
-
     fn restore_manifest_sst_from_cloud(
         state: &mut RuntimeState,
         cloud: &crate::storage::cloud::CloudStorage,
@@ -901,8 +869,8 @@ impl CloudStartupRecovery {
         file: &crate::metadata::FileMeta,
     ) -> MidgeResult<bool> {
         let local_path = state.sst_dir.join(&file.name);
-        let data = match Self::blocking_cloud_get_optional(cloud, cloud_key) {
-            Ok(Some(data)) => data,
+        let proof = match Self::blocking_cloud_object_proof_optional(cloud, cloud_key) {
+            Ok(Some(proof)) => proof,
             Ok(None) => return Self::drop_manifest_sst_in_salvage(state, &file.name),
             Err(error) if state.recovery_policy() == RecoveryPolicy::Salvage => {
                 tracing::warn!(%error, sst_name = %file.name, "dropping manifest SST during salvage restore");
@@ -918,7 +886,7 @@ impl CloudStartupRecovery {
 
         if let Err(error) = Self::validate_sst_bytes_against_proof(
             &file.name,
-            &data,
+            &proof.bytes,
             Some(file.size_bytes),
             file.content_crc32c,
         ) {
@@ -930,7 +898,7 @@ impl CloudStartupRecovery {
             return Ok(false);
         }
 
-        Self::stage_sst_bytes(staging_fs, &file.name, &data)?;
+        Self::stage_sst_bytes(staging_fs, &file.name, &proof.bytes)?;
         if let Err(error) = crate::sst::fs::SstFileIo::open_with_real_fs(&local_path) {
             if state.recovery_policy() == RecoveryPolicy::Strict {
                 return Err(MidgeError::RecoveryFailed(format!(
@@ -964,29 +932,21 @@ impl CloudStartupRecovery {
         sst_name: &str,
         proof: &CloudSstRecoveryProof,
     ) -> MidgeResult<()> {
-        match Self::blocking_cloud_head_optional(cloud, cloud_key) {
-            Ok(Some(metadata))
-                if proof
-                    .expected_size_bytes
-                    .is_none_or(|expected| metadata.size == expected) =>
-            {
-                if proof.expected_crc32c.is_some() {
-                    Self::validate_named_sst_cloud_content(
-                        state, cloud, cloud_key, sst_name, proof,
-                    )?;
+        match Self::blocking_cloud_object_proof_optional(cloud, cloud_key) {
+            Ok(Some(cloud_proof)) => {
+                if let Err(error) = Self::validate_sst_bytes_against_proof(
+                    sst_name,
+                    &cloud_proof.bytes,
+                    proof.expected_size_bytes,
+                    proof.expected_crc32c,
+                ) {
+                    if state.recovery_policy() == RecoveryPolicy::Strict {
+                        return Err(error);
+                    }
+                    state.mark_opened_in_salvage_mode();
+                    state.mark_persistence_anomaly();
+                    tracing::warn!(%error, sst_name = %sst_name, "skipping cloud SST staging during salvage validation");
                 }
-            }
-            Ok(Some(metadata)) => {
-                let error = MidgeError::RecoveryFailed(format!(
-                    "authoritative cloud SST '{}' size {} does not match expected {:?}",
-                    sst_name, metadata.size, proof.expected_size_bytes
-                ));
-                if state.recovery_policy() == RecoveryPolicy::Strict {
-                    return Err(error);
-                }
-                state.mark_opened_in_salvage_mode();
-                state.mark_persistence_anomaly();
-                tracing::warn!(%error, sst_name = %sst_name, "skipping cloud SST staging during salvage size validation");
             }
             Ok(None) => Self::note_missing_named_sst(state, sst_name)?,
             Err(error) if state.recovery_policy() == RecoveryPolicy::Salvage => {
@@ -1003,40 +963,6 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
-    fn validate_named_sst_cloud_content(
-        state: &mut RuntimeState,
-        cloud: &crate::storage::cloud::CloudStorage,
-        cloud_key: &str,
-        sst_name: &str,
-        proof: &CloudSstRecoveryProof,
-    ) -> MidgeResult<()> {
-        match Self::blocking_cloud_get_optional(cloud, cloud_key) {
-            Ok(Some(data)) => {
-                if let Err(error) = Self::validate_sst_bytes_against_proof(
-                    sst_name,
-                    &data,
-                    proof.expected_size_bytes,
-                    proof.expected_crc32c,
-                ) {
-                    if state.recovery_policy() == RecoveryPolicy::Strict {
-                        return Err(error);
-                    }
-                    state.mark_opened_in_salvage_mode();
-                    state.mark_persistence_anomaly();
-                    tracing::warn!(%error, sst_name = %sst_name, "skipping cloud SST staging during salvage content validation");
-                }
-            }
-            Ok(None) => Self::note_missing_named_sst(state, sst_name)?,
-            Err(error) if state.recovery_policy() == RecoveryPolicy::Salvage => {
-                state.mark_opened_in_salvage_mode();
-                state.mark_persistence_anomaly();
-                tracing::warn!(%error, sst_name = %sst_name, "skipping cloud SST staging during salvage content validation");
-            }
-            Err(error) => return Err(error),
-        }
-        Ok(())
-    }
-
     fn restore_named_sst_from_cloud(
         state: &mut RuntimeState,
         cloud: &crate::storage::cloud::CloudStorage,
@@ -1046,8 +972,8 @@ impl CloudStartupRecovery {
         sst_name: &str,
         proof: &CloudSstRecoveryProof,
     ) -> MidgeResult<()> {
-        let data = match Self::blocking_cloud_get_optional(cloud, cloud_key) {
-            Ok(Some(data)) => data,
+        let cloud_proof = match Self::blocking_cloud_object_proof_optional(cloud, cloud_key) {
+            Ok(Some(proof)) => proof,
             Ok(None) => return Self::note_missing_named_sst(state, sst_name),
             Err(error) if state.recovery_policy() == RecoveryPolicy::Salvage => {
                 state.mark_opened_in_salvage_mode();
@@ -1064,7 +990,7 @@ impl CloudStartupRecovery {
 
         if let Err(error) = Self::validate_sst_bytes_against_proof(
             sst_name,
-            &data,
+            &cloud_proof.bytes,
             proof.expected_size_bytes,
             proof.expected_crc32c,
         ) {
@@ -1077,7 +1003,7 @@ impl CloudStartupRecovery {
             return Ok(());
         }
 
-        Self::stage_sst_bytes(staging_fs, sst_name, &data)?;
+        Self::stage_sst_bytes(staging_fs, sst_name, &cloud_proof.bytes)?;
         if let Err(error) = crate::sst::fs::SstFileIo::open_with_real_fs(local_path) {
             if state.recovery_policy() == RecoveryPolicy::Strict {
                 return Err(MidgeError::RecoveryFailed(format!(
@@ -1292,7 +1218,7 @@ impl RuntimeStorageMaterialization {
         storage_path: &StartupStoragePath,
         startup_lease: &StartupLease,
     ) -> MidgeResult<Self> {
-        let cloud_runtime_policy = opts.cloud_runtime_policy.clone().unwrap_or_default();
+        let cloud_runtime_policy = opts.cloud_runtime_policy();
 
         match &opts.storage {
             Storage::CloudSimulated { .. } => Self::materialize_simulated_cloud(
@@ -1339,6 +1265,9 @@ impl RuntimeStorageMaterialization {
             hybrid_storage_events: Some(cloud.events),
             compression_policy: opts.compression_policy.clone(),
             block_cache_size: opts.block_cache_size(),
+            block_cache_policy: opts.block_cache_policy_type(),
+            l0_compaction_trigger: opts.l0_compaction_trigger(),
+            background_compaction: opts.background_compaction_enabled(),
             writer_epoch: startup_lease.writer_epoch,
             lease_healthy: Some(startup_lease.runtime_lease_health()),
             leader_store: startup_lease.leader_store.clone(),
@@ -1400,6 +1329,9 @@ impl RuntimeStorageMaterialization {
             cloud_metadata_storage: Some(cloud_storage.clone()),
             compression_policy: opts.compression_policy.clone(),
             block_cache_size: opts.block_cache_size(),
+            block_cache_policy: opts.block_cache_policy_type(),
+            l0_compaction_trigger: opts.l0_compaction_trigger(),
+            background_compaction: opts.background_compaction_enabled(),
             writer_epoch: startup_lease.writer_epoch,
             lease_healthy: Some(startup_lease.runtime_lease_health()),
             leader_store: startup_lease.leader_store.clone(),
@@ -1428,6 +1360,9 @@ impl RuntimeStorageMaterialization {
             cloud_runtime_policy,
             compression_policy: opts.compression_policy.clone(),
             block_cache_size: opts.block_cache_size(),
+            block_cache_policy: opts.block_cache_policy_type(),
+            l0_compaction_trigger: opts.l0_compaction_trigger(),
+            background_compaction: opts.background_compaction_enabled(),
             writer_epoch: startup_lease.writer_epoch,
             lease_healthy: Some(startup_lease.runtime_lease_health()),
             leader_store: startup_lease.leader_store.clone(),
@@ -1537,10 +1472,7 @@ impl FacadeAssembly {
         column_families.insert(default_handle.id(), default_handle);
 
         let ingest_coordinators = dashmap::DashMap::new();
-        let default_coordinator = Arc::new(ingest::IngestCoordinator::new(
-            0,
-            started.runtime_handle.clone(),
-        )?);
+        let default_coordinator = Arc::new(ingest::IngestCoordinator::new(0));
         ingest_coordinators.insert(0, default_coordinator);
 
         let lease_heartbeat = startup_lease.start_heartbeat()?;
@@ -1556,10 +1488,7 @@ impl FacadeAssembly {
                 let handle = ColumnFamilyHandle::new(cf_meta.id, cf_meta.name.clone());
                 column_families.insert(cf_meta.id, handle);
 
-                let coordinator = Arc::new(ingest::IngestCoordinator::new(
-                    cf_meta.id,
-                    started.runtime_handle.clone(),
-                )?);
+                let coordinator = Arc::new(ingest::IngestCoordinator::new(cf_meta.id));
                 ingest_coordinators.insert(cf_meta.id, coordinator);
             }
         }
@@ -1573,7 +1502,6 @@ impl FacadeAssembly {
                 &opts.storage,
                 Storage::Cloud { .. } | Storage::CloudSimulated { .. }
             ),
-            recovery_policy: opts.recovery_policy,
             sequence: Arc::new(std::sync::atomic::AtomicU64::new(
                 started.recovered_sequence,
             )),
@@ -1624,7 +1552,7 @@ impl EngineStartup {
                 memtable_size_limit: Some(opts.runtime_memtable_size_limit()),
                 memtable_flush_threshold: Some(opts.runtime_memtable_flush_threshold()),
                 enable_compaction: None,
-                l0_compaction_trigger: Some(opts.l0_compaction_trigger()),
+                l0_compaction_trigger: None,
                 wal_durability_policy: None,
                 wal_batch_config: None,
             })?;
@@ -1636,5 +1564,32 @@ impl EngineStartup {
                 "unexpected response to SetRuntimeConfig".to_string(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_apply_open_options_block_cache_policy_to_runtime_config() -> MidgeResult<()> {
+        // Arrange
+        let opts = OpenOptions::in_memory()
+            .block_cache_policy(crate::engine::BlockCachePolicy::ClockPro)
+            .build();
+        let storage_path = StartupStoragePath::resolve(&opts.storage);
+        storage_path.prepare();
+        let startup_lease = StartupLease::acquire(&opts.storage)?;
+
+        // Act
+        let materialized =
+            RuntimeStorageMaterialization::materialize(&opts, &storage_path, &startup_lease)?;
+
+        // Assert
+        assert_eq!(
+            materialized.runtime_config.block_cache_policy,
+            crate::sst::cache::CachePolicyType::ClockPro
+        );
+        Ok(())
     }
 }

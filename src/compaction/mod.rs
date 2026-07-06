@@ -1,4 +1,5 @@
 pub mod executor;
+#[cfg(test)]
 pub mod merge;
 pub mod strategy;
 

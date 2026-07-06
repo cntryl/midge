@@ -49,6 +49,7 @@ const ENCODE_SET: &AsciiSet = &CONTROLS
 
 /// GCS authentication credentials.
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub enum GcsCredential {
     /// `OAuth2` Bearer token (short-lived, from gcloud CLI or metadata server).
     BearerToken { token: String },
@@ -67,13 +68,17 @@ pub enum GcsCredential {
 /// [`AzureProvider`].
 pub struct GcsProvider {
     backend: Arc<dyn CloudBackend>,
+    #[cfg(test)]
     bucket: String,
+    #[cfg(test)]
     project_id: String,
+    #[cfg(test)]
     credential: GcsCredential,
 }
 
 impl GcsProvider {
     /// Create provider with an `OAuth2` Bearer token.
+    #[cfg(test)]
     pub fn with_bearer_token(
         bucket: String,
         project_id: String,
@@ -89,17 +94,27 @@ impl GcsProvider {
         token: String,
         endpoint: Option<String>,
     ) -> MidgeResult<Self> {
+        #[cfg(test)]
         let credential = GcsCredential::BearerToken {
             token: token.clone(),
         };
+        #[cfg(test)]
+        let backend_bucket = bucket.clone();
+        #[cfg(not(test))]
+        let backend_bucket = bucket;
+        #[cfg(not(test))]
+        drop(project_id);
         let signer: Option<Arc<dyn CloudSigner>> =
             Some(Arc::new(BearerTokenSigner::new_static(token)));
         let executor = CloudExecutor::new(signer)?;
-        let backend = Arc::new(GcsBackend::json(bucket.clone(), endpoint, executor));
+        let backend = Arc::new(GcsBackend::json(backend_bucket, endpoint, executor));
         Ok(Self {
             backend,
+            #[cfg(test)]
             bucket,
+            #[cfg(test)]
             project_id,
+            #[cfg(test)]
             credential,
         })
     }
@@ -111,22 +126,33 @@ impl GcsProvider {
         endpoint: Option<String>,
     ) -> MidgeResult<Self> {
         let provider = GcsTokenProvider::from_source(source)?;
+        #[cfg(test)]
         let credential = GcsCredential::BearerToken {
             token: "<dynamic>".to_string(),
         };
+        #[cfg(test)]
+        let backend_bucket = bucket.clone();
+        #[cfg(not(test))]
+        let backend_bucket = bucket;
+        #[cfg(not(test))]
+        drop(project_id);
         let signer: Option<Arc<dyn CloudSigner>> =
             Some(Arc::new(BearerTokenSigner::new_provider(provider)));
         let executor = CloudExecutor::new(signer)?;
-        let backend = Arc::new(GcsBackend::json(bucket.clone(), endpoint, executor));
+        let backend = Arc::new(GcsBackend::json(backend_bucket, endpoint, executor));
         Ok(Self {
             backend,
+            #[cfg(test)]
             bucket,
+            #[cfg(test)]
             project_id,
+            #[cfg(test)]
             credential,
         })
     }
 
     /// Create provider with a service-account HMAC key pair.
+    #[cfg(test)]
     pub fn with_hmac_key(
         bucket: String,
         project_id: String,
@@ -144,24 +170,35 @@ impl GcsProvider {
         secret: String,
         endpoint: Option<String>,
     ) -> MidgeResult<Self> {
+        #[cfg(test)]
         let credential = GcsCredential::HmacKey {
             access_id: access_id.clone(),
             secret: secret.clone(),
         };
+        #[cfg(test)]
+        let backend_bucket = bucket.clone();
+        #[cfg(not(test))]
+        let backend_bucket = bucket;
+        #[cfg(not(test))]
+        drop(project_id);
         let signer: Option<Arc<dyn CloudSigner>> =
             Some(Arc::new(Goog1HmacSigner::new(access_id, secret)));
         let executor = CloudExecutor::new(signer)?;
-        let backend = Arc::new(GcsBackend::xml(bucket.clone(), endpoint, executor));
+        let backend = Arc::new(GcsBackend::xml(backend_bucket, endpoint, executor));
         Ok(Self {
             backend,
+            #[cfg(test)]
             bucket,
+            #[cfg(test)]
             project_id,
+            #[cfg(test)]
             credential,
         })
     }
 
     /// Legacy constructor — creates a provider with an empty bearer token.
     /// Callers should prefer `with_bearer_token` or `with_hmac_key`.
+    #[cfg(test)]
     pub fn new(bucket: String, project_id: String) -> MidgeResult<Self> {
         Self::with_bearer_token(bucket, project_id, String::new())
     }
@@ -194,14 +231,6 @@ impl Drop for GcsProvider {
     fn drop(&mut self) {
         tracing::trace!("GcsProvider dropping, cleanup will propagate to CloudExecutor");
     }
-}
-
-pub(crate) fn resolve_bearer_token_from_source(
-    source: &super::GcsCredentialSource,
-) -> MidgeResult<String> {
-    Ok(GcsTokenProvider::from_source(source)?
-        .fetch_token()?
-        .access_token)
 }
 
 fn default_gcloud_adc_file() -> Option<std::path::PathBuf> {
@@ -678,6 +707,7 @@ enum GcsBackendMode {
 }
 
 impl GcsBackend {
+    #[cfg(test)]
     fn new(bucket: String, executor: CloudExecutor) -> Self {
         Self::json(bucket, None, executor)
     }
@@ -752,6 +782,7 @@ impl GcsBackend {
     }
 
     /// List URL: `https://storage.googleapis.com/storage/v1/b/{bucket}/o?prefix={prefix}`
+    #[cfg(test)]
     fn list_url(&self, prefix: &str, page_token: Option<&str>) -> String {
         match self.mode {
             GcsBackendMode::Json => {
@@ -889,6 +920,7 @@ impl CloudBackend for GcsBackend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
+    #[cfg(test)]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let key = key.to_string();
         let url = self.download_url(&key);

@@ -15,30 +15,6 @@ use super::traits::{
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-
-/// Global flag to enforce memory-mode constraint at `RealFs` construction time.
-/// Set to true when engine is opened in memory mode, preventing any `RealFs` usage.
-#[allow(dead_code)]
-static MEMORY_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-/// Set the global memory-mode flag. Called by `Engine::open` before runtime init.
-#[allow(dead_code)]
-pub fn set_memory_mode(enabled: bool) {
-    MEMORY_MODE_ACTIVE.store(enabled, Ordering::SeqCst);
-}
-
-/// Check if memory mode is currently active
-#[allow(dead_code)]
-pub fn is_memory_mode() -> bool {
-    MEMORY_MODE_ACTIVE.load(Ordering::SeqCst)
-}
-
-/// Reset memory mode flag (for testing only)
-#[cfg(test)]
-pub fn reset_for_test() {
-    set_memory_mode(false);
-}
 
 /// Real filesystem backend
 pub struct RealFs {

@@ -16,15 +16,16 @@ use std::sync::Barrier;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cntryl_midge::testkit::ycsb;
-use cntryl_midge::testkit::zipfian::ZipfianGenerator;
-use cntryl_midge::testkit::MidgeOptions;
+use stress_config::ycsb;
+use stress_config::zipfian::ZipfianGenerator;
+use stress_config::MidgeOptions;
 
 const DEFAULT_INITIAL_KEYS: usize = 50_000; // Overridable for larger-than-RAM nightly runs
 const WARMUP: Duration = Duration::from_secs(1);
 const MEASURED: Duration = Duration::from_secs(5);
+const MEMORY_1_FIXED_OPS_PER_CLIENT: u64 = 12_000_000;
 const MEMORY_16_FIXED_OPS_PER_CLIENT: u64 = 600_000;
-const MEMORY_16_WORKER_THREADS: usize = 4;
+const MEMORY_FIXED_WORKER_THREADS: usize = 4;
 
 const ZIPFIAN_THETA: f64 = 0.99;
 
@@ -127,18 +128,20 @@ fn measure_fixed_operations(
     cf_id: ColumnFamilyId,
     initial_keys: usize,
     clients: usize,
+    operations_per_client: u64,
     measurement_name: String,
 ) -> ycsb::MultiClientRunStats {
-    ctx.parameter("operations_per_client", MEMORY_16_FIXED_OPS_PER_CLIENT);
-    ctx.parameter("worker_threads", MEMORY_16_WORKER_THREADS);
+    let worker_threads = clients.clamp(1, MEMORY_FIXED_WORKER_THREADS);
+    ctx.parameter("operations_per_client", operations_per_client);
+    ctx.parameter("worker_threads", worker_threads);
     ctx.parameter("logical_clients", clients);
 
     let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
     let (measured, elapsed) = run_logical_clients_for_operations_with_stats(
         engine,
         clients,
-        MEMORY_16_WORKER_THREADS,
-        MEMORY_16_FIXED_OPS_PER_CLIENT,
+        worker_threads,
+        operations_per_client,
         |client_id| {
             let zipf = Arc::clone(&zipf);
             move |e, op_index| {
@@ -152,6 +155,17 @@ fn measure_fixed_operations(
     );
     ctx.record_external(measurement_name, elapsed, measured.operations);
     measured
+}
+
+fn fixed_operations_per_client(profile: &str, clients: usize) -> Option<u64> {
+    if profile != "memory" {
+        return None;
+    }
+    match clients {
+        CLIENTS_1 => Some(MEMORY_1_FIXED_OPS_PER_CLIENT),
+        CLIENTS_16 => Some(MEMORY_16_FIXED_OPS_PER_CLIENT),
+        _ => None,
+    }
 }
 
 fn measure_duration(
@@ -189,10 +203,10 @@ fn measure_duration(
 fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
     ctx.tag("storage_profile", profile);
     let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
-    let use_fixed_operations = profile == "memory" && clients == CLIENTS_16;
+    let fixed_ops_per_client = fixed_operations_per_client(profile, clients);
     ctx.parameter(
         "measurement_mode",
-        if use_fixed_operations {
+        if fixed_ops_per_client.is_some() {
             "fixed_ops"
         } else {
             "duration"
@@ -228,8 +242,16 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     let cf_id = cf.id();
     let client_suffix = if clients == 1 { "client" } else { "clients" };
     let measurement_name = format!("tier4_ycsb_c_{profile}_{clients}_{client_suffix}");
-    let measured = if use_fixed_operations {
-        measure_fixed_operations(ctx, &engine, cf_id, initial_keys, clients, measurement_name)
+    let measured = if let Some(operations_per_client) = fixed_ops_per_client {
+        measure_fixed_operations(
+            ctx,
+            &engine,
+            cf_id,
+            initial_keys,
+            clients,
+            operations_per_client,
+            measurement_name,
+        )
     } else {
         measure_duration(ctx, &engine, cf_id, initial_keys, clients, measurement_name)
     };
@@ -246,73 +268,73 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
 
 #[stress(tier = 4)]
 fn tier4_ycsb_c_memory_1_client(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    let opts = stress_config::opts_for_mode("memory");
     run_workload_c(ctx, opts, "memory", CLIENTS_1);
 }
 
 #[stress(tier = 4)]
 fn tier4_ycsb_c_memory_16_clients(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    let opts = stress_config::opts_for_mode("memory");
     run_workload_c(ctx, opts, "memory", CLIENTS_16);
 }
 
 #[stress(tier = 4)]
 fn tier4_ycsb_c_memory_64_clients(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    let opts = stress_config::opts_for_mode("memory");
     run_workload_c(ctx, opts, "memory", CLIENTS_64);
 }
 
 #[stress(tier = 4)]
 fn tier4_ycsb_c_local_1_client(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    let opts = stress_config::opts_for_mode("local");
     run_workload_c(ctx, opts, "local", CLIENTS_1);
 }
 
 #[stress(tier = 4)]
 fn tier4_ycsb_c_local_16_clients(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    let opts = stress_config::opts_for_mode("local");
     run_workload_c(ctx, opts, "local", CLIENTS_16);
 }
 
 #[stress(tier = 4)]
 fn tier4_ycsb_c_local_64_clients(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    let opts = stress_config::opts_for_mode("local");
     run_workload_c(ctx, opts, "local", CLIENTS_64);
 }
 
 #[stress(tier = 4)]
 fn tier4_ycsb_c_cloud_1_client(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    let opts = stress_config::opts_for_mode("cloud");
     run_workload_c(ctx, opts, "cloud", CLIENTS_1);
 }
 
 #[stress(tier = 4)]
 fn tier4_ycsb_c_cloud_16_clients(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    let opts = stress_config::opts_for_mode("cloud");
     run_workload_c(ctx, opts, "cloud", CLIENTS_16);
 }
 
 #[stress(tier = 4)]
 fn tier4_ycsb_c_cloud_64_clients(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    let opts = stress_config::opts_for_mode("cloud");
     run_workload_c(ctx, opts, "cloud", CLIENTS_64);
 }
 
 #[stress(tier = 4)]
 fn tier4_ycsb_c_hybrid_1_client(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("hybrid");
+    let opts = stress_config::opts_for_mode("hybrid");
     run_workload_c(ctx, opts, "hybrid", CLIENTS_1);
 }
 
 #[stress(tier = 4)]
 fn tier4_ycsb_c_hybrid_16_clients(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("hybrid");
+    let opts = stress_config::opts_for_mode("hybrid");
     run_workload_c(ctx, opts, "hybrid", CLIENTS_16);
 }
 
 #[stress(tier = 4)]
 fn tier4_ycsb_c_hybrid_64_clients(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("hybrid");
+    let opts = stress_config::opts_for_mode("hybrid");
     run_workload_c(ctx, opts, "hybrid", CLIENTS_64);
 }
 

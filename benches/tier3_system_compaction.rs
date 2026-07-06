@@ -20,9 +20,10 @@ use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
-use cntryl_midge::{testkit::MidgeOptions, MidgeEngine};
+use cntryl_midge::MidgeEngine;
+use stress_config::MidgeOptions;
 
-const KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
+const KEY_SIZE: usize = stress_config::bench_stress::KEY_SIZE;
 const DEFAULT_VALUE_SIZE: usize = 100;
 const TARGET_BATCH: usize = 1_000;
 const DEFAULT_COMPACTION_KEYS: usize = 1_000;
@@ -32,11 +33,11 @@ const CLOUD_FLUSH_REPEATS: usize = 1024;
 const CLOUD_FLUSH_REPEAT_OPS: u64 = 1024;
 
 fn precompute_kv(num_keys: usize, value_size: usize) -> (Vec<[u8; KEY_SIZE]>, Vec<Vec<u8>>) {
-    cntryl_midge::testkit::stress::precompute_kv16_u64_be(num_keys, value_size, u8::MAX)
+    stress_config::bench_stress::precompute_kv16_u64_be(num_keys, value_size, u8::MAX)
 }
 
 fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
-    cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
+    stress_config::bench_stress::open_engine_no_compaction(opts)
 }
 
 fn run_flush_case(
@@ -96,7 +97,7 @@ fn run_flush_case(
 
 #[stress(tier = 3)]
 fn tier3_compaction_flush_local(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    let opts = stress_config::opts_for_mode("local");
     run_flush_case(
         ctx,
         "tier3_compaction_flush_local",
@@ -110,7 +111,7 @@ fn tier3_compaction_flush_local(ctx: &mut StressContext) {
 
 #[stress(tier = 3)]
 fn tier3_compaction_flush_cloud(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    let opts = stress_config::opts_for_mode("cloud");
     run_flush_case(
         ctx,
         "tier3_compaction_flush_cloud",

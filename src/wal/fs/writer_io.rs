@@ -3,7 +3,7 @@
 //! This writer uses the base `io::Fs` trait instead of storage abstractions directly,
 //! allowing for swappable implementations (Real, Mock, Chaos) for testing.
 //!
-//! Architectural rules (Copilot: read carefully and DO NOT modify):
+//! Architectural rules (Maintainer: read carefully and DO NOT modify):
 //! ---------------------------------------------------------------
 //! • `FsWalWriterIo` ONLY appends bytes to the active WAL file `wal.log`.
 //! • It NEVER assigns sequence numbers.
@@ -34,11 +34,7 @@ const JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// It does not manage segment rotation, sequence assignment, recovery,
 /// or any other higher-level concerns. Those belong to the WAL actor.
 pub struct FsWalWriterIo {
-    /// Reserved for segment rotation / reopen.
-    #[allow(dead_code)]
-    path: FsPath,
     /// Reserved for segment rotation.
-    #[allow(dead_code)]
     fs: Arc<dyn Fs>,
 
     // Queue of pending encoded record payloads with retry tracking
@@ -88,7 +84,6 @@ impl FsWalWriterIo {
         let current_pos = metadata.len;
 
         let writer = Self {
-            path: path.clone(),
             fs,
             current_pos: Arc::new(std::sync::atomic::AtomicU64::new(current_pos)),
             queue: Arc::new(Mutex::new(Vec::new())),

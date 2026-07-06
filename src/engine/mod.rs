@@ -35,8 +35,9 @@ pub use crate::types::{
     StorageLayoutSnapshot, StorageVerificationReport,
 };
 pub use api::{
-    Direction, Goal, IsolationLevel, Key, MemoryBudget, OpenOptions, Query, RecoveryPolicy,
-    ScanIterator, Storage, Transaction, TransactionMode, Value, WorkloadProfile, WriteOptions,
+    BlockCachePolicy, CloudWritePolicy, Direction, Goal, IsolationLevel, Key, MemoryBudget,
+    OpenOptions, Query, RecoveryPolicy, ScanIterator, Storage, Transaction, TransactionMode, Value,
+    WorkloadProfile, WriteOptions,
 };
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<ColumnFamilyId, ColumnFamilyHandle>;
@@ -65,17 +66,6 @@ impl ColumnFamilyHandle {
     }
 }
 
-/// Snapshot of runtime configuration that can be restored later.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct IngestModeSnapshot {
-    pub memtable_size_limit: usize,
-    pub memtable_flush_threshold: usize,
-    pub enable_compaction: bool,
-    pub l0_compaction_trigger: usize,
-    pub wal_durability_policy: crate::wal::DurabilityPolicy,
-    pub wal_batch_config: crate::wal::policy::BatchConfig,
-}
 /// The main Midge KV store
 ///
 /// This is a thin façade over the runtime. All state and background work
@@ -91,8 +81,6 @@ pub struct Engine {
     memory_mode: bool,
     /// True when opened in cloud-backed mode.
     cloud_mode: bool,
-    /// Recovery policy used for this open.
-    recovery_policy: RecoveryPolicy,
     /// Latest committed sequence observed by the engine.
     ///
     /// Sequence numbers are allocated inside the runtime (at WAL append time) and
@@ -125,12 +113,10 @@ impl Drop for Engine {
             }
         }
 
-        // Shutdown all ingest coordinators
+        // Drop all ingest coordinators
         let ingest_count = self.ingest_coordinators.len();
-        for entry in &self.ingest_coordinators {
-            entry.value().shutdown();
-        }
-        tracing::trace!(count = ingest_count, "Engine: ingest coordinators shutdown");
+        self.ingest_coordinators.clear();
+        tracing::trace!(count = ingest_count, "Engine: ingest coordinators dropped");
 
         // Gracefully shutdown the runtime when engine is dropped
         // Send shutdown message first
@@ -220,14 +206,6 @@ impl Engine {
             intent_entries_loaded: intents.len(),
             health,
         })
-    }
-
-    fn list_obsolete_sst_files(
-        db_path: &Path,
-        manifest: &crate::metadata::Manifest,
-    ) -> Vec<String> {
-        crate::storage::residue::StorageResidueAssessment::scan_sst_dir(db_path, manifest)
-            .orphan_ssts
     }
 
     #[cfg(test)]
@@ -357,85 +335,6 @@ impl Engine {
         false
     }
 
-    /// Open a database with the provided `MidgeOptions`.
-    ///
-    /// Convenience method for testkit and standard testing patterns.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when engine startup fails for the derived open options.
-    pub fn open_with_options(opts: &crate::testkit::MidgeOptions) -> MidgeResult<Self> {
-        let open_opts = opts.to_open_options();
-        Self::open(open_opts)
-    }
-
-    /// Fetch the current runtime configuration snapshot for diagnostics or restoration.
-    pub(crate) fn get_runtime_config(&self) -> MidgeResult<IngestModeSnapshot> {
-        let request_id = crate::runtime::next_request_id()?;
-        let resp = self
-            .runtime_handle
-            .send_and_wait(crate::runtime::RuntimeMsg::GetRuntimeConfig { request_id })?;
-        match resp {
-            crate::runtime::RuntimeResponse::RuntimeConfigSnapshot {
-                memtable_size_limit,
-                memtable_flush_threshold,
-                enable_compaction,
-                l0_compaction_trigger,
-                wal_durability_policy,
-                wal_batch_config,
-                ..
-            } => Ok(IngestModeSnapshot {
-                memtable_size_limit,
-                memtable_flush_threshold,
-                enable_compaction,
-                l0_compaction_trigger,
-                wal_durability_policy,
-                wal_batch_config,
-            }),
-            _ => Err(crate::common::MidgeError::Internal(
-                "unexpected response to GetRuntimeConfig".to_string(),
-            )),
-        }
-    }
-
-    pub(crate) fn set_runtime_compaction_enabled(&self, enabled: bool) -> MidgeResult<()> {
-        let request_id = crate::runtime::next_request_id()?;
-        let resp =
-            self.runtime_handle
-                .send_and_wait(crate::runtime::RuntimeMsg::SetRuntimeConfig {
-                    request_id,
-                    memtable_size_limit: None,
-                    memtable_flush_threshold: None,
-                    enable_compaction: Some(enabled),
-                    l0_compaction_trigger: None,
-                    wal_durability_policy: None,
-                    wal_batch_config: None,
-                })?;
-
-        match resp {
-            crate::runtime::RuntimeResponse::Ok { .. } => Ok(()),
-            crate::runtime::RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(crate::common::MidgeError::Internal(
-                "unexpected response to SetRuntimeConfig".to_string(),
-            )),
-        }
-    }
-
-    pub(crate) fn kick_runtime_compaction_once(&self) -> MidgeResult<()> {
-        let request_id = crate::runtime::next_request_id()?;
-        let resp = self
-            .runtime_handle
-            .send_and_wait(crate::runtime::RuntimeMsg::CheckCompaction { request_id })?;
-
-        match resp {
-            crate::runtime::RuntimeResponse::Ok { .. } => Ok(()),
-            crate::runtime::RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(crate::common::MidgeError::Internal(
-                "unexpected response to CheckCompaction".to_string(),
-            )),
-        }
-    }
-
     /// Check if ingest batching should be used based on durability policy.
     ///
     /// Return whether an ingest barrier is currently active.
@@ -445,103 +344,6 @@ impl Engine {
     /// advances cloud durability later in the background.
     pub(crate) fn is_ingesting(&self) -> bool {
         self.runtime_handle.ingest_active()
-    }
-
-    /// Enter a temporary ingest mode: disable compaction, relax WAL, increase memtable limits.
-    /// Returns the previous configuration snapshot which can be used to restore state.
-    pub(crate) fn enter_ingest_mode(&self) -> MidgeResult<IngestModeSnapshot> {
-        // Capture current runtime config so we can restore it later
-        let prev = self.get_runtime_config()?;
-
-        // Step 1: Apply performance-oriented runtime knobs (larger memtable, batched WAL)
-        let request_id = crate::runtime::next_request_id()?;
-        let target_mem = (prev.memtable_size_limit.max(64 * 1024 * 1024)).saturating_mul(4); // grow 4x
-        let batch_cfg = prev.wal_batch_config;
-        let resp =
-            self.runtime_handle
-                .send_and_wait(crate::runtime::RuntimeMsg::SetRuntimeConfig {
-                    request_id,
-                    memtable_size_limit: Some(target_mem),
-                    memtable_flush_threshold: Some(target_mem),
-                    enable_compaction: Some(false), // also set false here for a fast path
-                    l0_compaction_trigger: None,
-                    wal_durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
-                    wal_batch_config: Some(batch_cfg),
-                })?;
-
-        match resp {
-            crate::runtime::RuntimeResponse::Ok { .. } => {
-                // Step 2: Ensure a hard ingest barrier: begin ingest (blocks until inflight compactions drain)
-                let bid = crate::runtime::next_request_id()?;
-                let br = self
-                    .runtime_handle
-                    .send_and_wait(crate::runtime::RuntimeMsg::BeginIngest { request_id: bid })?;
-                match br {
-                    crate::runtime::RuntimeResponse::Ok { .. } => Ok(prev),
-                    crate::runtime::RuntimeResponse::Error { error, .. } => Err(error),
-                    _ => Err(crate::common::MidgeError::Internal(
-                        "unexpected response to BeginIngest".to_string(),
-                    )),
-                }
-            }
-            crate::runtime::RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(crate::common::MidgeError::Internal(
-                "unexpected response to SetRuntimeConfig".to_string(),
-            )),
-        }
-    }
-
-    /// Restore runtime configuration from a previously-captured snapshot.
-    pub(crate) fn exit_ingest_mode(&self, prev: &IngestModeSnapshot) -> MidgeResult<()> {
-        // Step 1: End ingest barrier (flush outstanding memtables and bump epoch)
-        let bid = crate::runtime::next_request_id()?;
-        let br = self
-            .runtime_handle
-            .send_and_wait(crate::runtime::RuntimeMsg::EndIngest { request_id: bid })?;
-        match br {
-            crate::runtime::RuntimeResponse::Ok { .. } => {
-                // Step 2: Restore previous runtime configuration
-                let request_id = crate::runtime::next_request_id()?;
-                let resp = self.runtime_handle.send_and_wait(
-                    crate::runtime::RuntimeMsg::SetRuntimeConfig {
-                        request_id,
-                        memtable_size_limit: Some(prev.memtable_size_limit),
-                        memtable_flush_threshold: Some(prev.memtable_flush_threshold),
-                        enable_compaction: Some(prev.enable_compaction),
-                        l0_compaction_trigger: Some(prev.l0_compaction_trigger),
-                        wal_durability_policy: Some(prev.wal_durability_policy),
-                        wal_batch_config: Some(prev.wal_batch_config),
-                    },
-                )?;
-
-                match resp {
-                    crate::runtime::RuntimeResponse::Ok { .. } => Ok(()),
-                    crate::runtime::RuntimeResponse::Error { error, .. } => Err(error),
-                    _ => Err(crate::common::MidgeError::Internal(
-                        "unexpected response to SetRuntimeConfig".to_string(),
-                    )),
-                }
-            }
-            crate::runtime::RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(crate::common::MidgeError::Internal(
-                "unexpected response to EndIngest".to_string(),
-            )),
-        }
-    }
-
-    /// Flush all pending writes to disk (used by tests)
-    pub(crate) fn sync(&self) -> MidgeResult<()> {
-        let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalSync {
-            request_id: next_request_id()?,
-        })?;
-
-        match response {
-            RuntimeResponse::Ok { .. } => Ok(()),
-            RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(MidgeError::Internal(
-                "Unexpected response to sync".to_string(),
-            )),
-        }
     }
 
     /// Force a flush of a specific column family
@@ -558,7 +360,7 @@ impl Engine {
             })?;
 
         match response {
-            RuntimeResponse::Ok { .. } | RuntimeResponse::FlushComplete { .. } => Ok(()),
+            RuntimeResponse::Ok { .. } => Ok(()),
             RuntimeResponse::Error { error, .. } => Err(error),
             _ => Err(MidgeError::Internal(
                 "Unexpected response to flush".to_string(),
@@ -597,7 +399,7 @@ impl Engine {
             !self.is_ingesting(),
             "BUG: begin_tx called while ingest mode is active. \
              Violated invariant: transactions must not be started during ingest. \
-             Correct ordering: exit_ingest_mode() BEFORE begin_tx()."
+             Correct ordering: end the ingest barrier before begin_tx()."
         );
 
         let Some(coordinator) = self
@@ -726,61 +528,6 @@ impl Engine {
         }
     }
 
-    // === Internal Transaction Helpers ===
-
-    /// Read a key at a specific sequence (for transaction use)
-    pub(crate) fn read_at_sequence(
-        &self,
-        cf_id: ColumnFamilyId,
-        key: &[u8],
-        sequence: u64,
-    ) -> MidgeResult<Option<bytes::Bytes>> {
-        let response = self.runtime_handle.send_and_wait(RuntimeMsg::Read {
-            request_id: next_request_id()?,
-            cf_id,
-            key: key.to_vec(),
-            sequence,
-            requested_durability: api::Durability::Steady,
-        })?;
-
-        match response {
-            RuntimeResponse::ReadValue { value, .. } => Ok(value.map(bytes::Bytes::from)),
-            RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(MidgeError::Internal(
-                "Unexpected response to read_at_sequence".to_string(),
-            )),
-        }
-    }
-
-    /// Scan a range at a specific sequence (for transaction use)
-    pub(crate) fn scan_at_sequence(
-        &self,
-        cf_id: ColumnFamilyId,
-        start: &[u8],
-        end: &[u8],
-        sequence: u64,
-    ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
-        let response = self.runtime_handle.send_and_wait(RuntimeMsg::RangeScan {
-            request_id: next_request_id()?,
-            cf_id,
-            start: start.to_vec(),
-            end: end.to_vec(),
-            sequence,
-            requested_durability: api::Durability::Steady,
-        })?;
-
-        match response {
-            RuntimeResponse::RangeScanResults { results, .. } => Ok(results
-                .into_iter()
-                .map(|(k, v)| (bytes::Bytes::from(k), bytes::Bytes::from(v)))
-                .collect()),
-            RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(MidgeError::Internal(
-                "Unexpected response to scan_at_sequence".to_string(),
-            )),
-        }
-    }
-
     /// Shutdown the engine gracefully
     ///
     /// # Errors
@@ -818,10 +565,7 @@ impl Engine {
                 self.column_families.insert(cf_id, handle.clone());
 
                 // Start ingest coordinator for new CF
-                let coordinator = Arc::new(ingest::IngestCoordinator::new(
-                    cf_id,
-                    self.runtime_handle.clone(),
-                )?);
+                let coordinator = Arc::new(ingest::IngestCoordinator::new(cf_id));
                 self.ingest_coordinators.insert(cf_id, coordinator);
                 self.runtime_handle
                     .send_and_wait(RuntimeMsg::ManifestPersist {
@@ -859,10 +603,8 @@ impl Engine {
 
         match response {
             RuntimeResponse::Ok { .. } => {
-                // Shutdown coordinator for this CF
-                if let Some((_, coordinator)) = self.ingest_coordinators.remove(&cf_id) {
-                    coordinator.shutdown();
-                }
+                // Drop coordinator for this CF
+                self.ingest_coordinators.remove(&cf_id);
 
                 // Remove from local registry
                 self.column_families.remove(&cf_id);
@@ -1136,29 +878,6 @@ mod tests {
         assert_eq!(map.get(&id), Some(&"value"));
     }
 
-    #[test]
-    fn should_apply_open_options_l0_compaction_trigger_to_runtime() {
-        // Arrange
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let opts = OpenOptions::local(temp_dir.path())
-            .goal(Goal::Throughput)
-            .workload(WorkloadProfile::WriteHeavy)
-            .build();
-        let expected_trigger = opts.l0_compaction_trigger();
-
-        let engine = Engine::open(opts).expect("open engine");
-        let runtime_config = engine
-            .get_runtime_config()
-            .expect("read runtime configuration");
-
-        // Act
-        // Assert
-        assert_eq!(
-            runtime_config.l0_compaction_trigger, expected_trigger,
-            "runtime compaction actor should use the OpenOptions-derived L0 trigger"
-        );
-    }
-
     // ============================================================================
     // Tests for ColumnFamilyHandle invariants
     // ============================================================================
@@ -1271,13 +990,10 @@ mod tests {
     #[test]
     fn should_treat_flush_compact_as_noop_in_memory_mode() {
         // Arrange
-        let opts = crate::testkit::MidgeOptions {
-            storage_mode: crate::testkit::StorageMode::Memory,
-            ..Default::default()
-        };
+        let opts = OpenOptions::in_memory();
 
         // Act
-        let engine = Engine::open_with_options(&opts).expect("open memory engine");
+        let engine = Engine::open(opts).expect("open memory engine");
         let cf = engine
             .create_column_family("test")
             .expect("create column family");

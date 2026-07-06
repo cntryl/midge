@@ -1,4 +1,4 @@
-// == COPILOT MASTER RULES FOR SST COMPRESSION =========================================
+// == ARCHITECTURE MASTER RULES FOR SST COMPRESSION =========================================
 // These rules define the *correct* compression architecture for Midge SST blocks.
 // All completions touching block compression, decompression, or compression policies
 // MUST follow these rules exactly.
@@ -34,7 +34,7 @@
 //   4    | Zlib/Deflate | Max compatibility                | Slower, legacy
 //   5    | Snappy       | RocksDB-style (optional)         | Drop-in if needed
 //
-// COPILOT MUST use these exact codes. Never invent new codes.
+// ARCHITECTURE MUST use these exact codes. Never invent new codes.
 //
 // =====================================================================================
 // 3. BLOCK TRAILER FORMAT (final specification)
@@ -182,7 +182,7 @@
 //   - Break BlockBuilder invariants (sorted keys, restart points)
 //
 // =====================================================================================
-// 11. WHAT COPILOT MUST NEVER DO
+// 11. WHAT ARCHITECTURE MUST NEVER DO
 // -------------------------------------------------------------------------------------
 // ❌ Never invent new compression codes (use exact codes from table)
 // ❌ Never skip CRC32C verification

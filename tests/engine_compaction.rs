@@ -386,9 +386,6 @@ fn should_assign_unique_output_sequences_given_emergent_followup_compaction() {
     // Arrange
     let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("test").expect("create cf");
-    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, false)
-        .expect("disable automatic compaction while seeding L0 files");
-
     let batch_count = 12;
     let keys_per_batch = 20;
     for batch in 0..batch_count {
@@ -407,8 +404,6 @@ fn should_assign_unique_output_sequences_given_emergent_followup_compaction() {
     }
 
     // Act
-    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, true)
-        .expect("enable manual compaction");
     engine.compact_all().expect("compact all seeded L0 files");
 
     // Assert

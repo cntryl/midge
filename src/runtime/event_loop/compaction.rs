@@ -1,5 +1,7 @@
 use super::{EventLoop, HandleOutcome};
-use crate::runtime::{CompactionPlan, RuntimeResponse};
+#[cfg(test)]
+use crate::runtime::CompactionPlan;
+use crate::runtime::RuntimeResponse;
 
 pub(super) struct CompactionCoordinator;
 
@@ -13,6 +15,7 @@ pub(super) struct CompactionCompleteRequest {
 }
 
 impl CompactionCoordinator {
+    #[cfg(test)]
     pub(super) fn check(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
         match event_loop.schedule_one_background_compaction_if_needed("CheckCompaction") {
             Ok(_) => event_loop.respond(request_id, RuntimeResponse::Ok { request_id }),
@@ -23,6 +26,7 @@ impl CompactionCoordinator {
         HandleOutcome::Continue
     }
 
+    #[cfg(test)]
     pub(super) fn run(
         event_loop: &mut EventLoop,
         request_id: u64,
@@ -59,6 +63,7 @@ impl CompactionCoordinator {
 
         let cplan = crate::compaction::CompactionPlan {
             input_files: plan.input_files,
+            #[cfg(test)]
             output_files: Vec::new(),
             source_level: plan.source_level,
             target_level: plan.target_level,
@@ -109,7 +114,7 @@ impl CompactionCoordinator {
         let mut scheduled = 0usize;
         while let Some(plan) = event_loop
             .compaction_actor
-            .check_compaction(&event_loop.state)
+            .check_manual_compaction(&event_loop.state)
         {
             match event_loop.launch_compaction(plan) {
                 Ok(()) => scheduled += 1,
@@ -365,7 +370,7 @@ impl CompactionCoordinator {
         if allow_emergent_followup {
             while let Some(plan) = event_loop
                 .compaction_actor
-                .check_compaction(&event_loop.state)
+                .check_manual_compaction(&event_loop.state)
             {
                 if event_loop.launch_compaction(plan).is_ok() {
                     emergent_scheduled = true;

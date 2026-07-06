@@ -28,10 +28,6 @@ pub struct CloudLeaseConfig {
     pub bucket: String,
     /// Object key prefix (e.g. `"databases/myapp/"`).
     pub prefix: String,
-    /// Optional endpoint override (for S3-compatible providers).
-    pub endpoint: Option<String>,
-    /// Optional region.
-    pub region: Option<String>,
 }
 
 /// Primary lease implementation for cloud-backed storage.
@@ -120,7 +116,6 @@ impl CloudStorageLease {
     /// Logical object key for the lease file. `CloudStorage` applies the
     /// configured namespace/prefix, so remote writes use `LEASE_OBJECT_KEY`
     /// directly and keep this helper for diagnostics.
-    #[allow(dead_code)]
     fn lease_key(&self) -> String {
         if self.config.prefix.is_empty() {
             LEASE_OBJECT_KEY.to_string()
@@ -621,8 +616,6 @@ mod tests {
         CloudLeaseConfig {
             bucket: "test-bucket".to_string(),
             prefix: "test/prefix".to_string(),
-            endpoint: None,
-            region: None,
         }
     }
 
@@ -870,8 +863,6 @@ mod tests {
         let config = CloudLeaseConfig {
             bucket: "bucket".to_string(),
             prefix: String::new(),
-            endpoint: None,
-            region: None,
         };
         let cache_path = temp_cache_path();
         let lease = Arc::new(CloudStorageLease::new(config, cache_path));

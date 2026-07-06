@@ -1,4 +1,4 @@
-//! Tier 3 â€” Scan seek behavior (iterator construction + first advance)
+//! Tier 3 — Scan seek behavior (iterator construction + first advance)
 //!
 //! Measures: cost of seeking and advancing once across different storage layouts.
 //! Value size is IRRELEVANT to the measured primitive (seek behavior independent of payload).
@@ -15,9 +15,18 @@ use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
-use cntryl_midge::{testkit::MidgeOptions, Key, MidgeEngine, Query};
+use cntryl_midge::{Key, MidgeEngine, Query};
+use stress_config::MidgeOptions;
 const VALUE_SIZE: usize = 64; // Irrelevant to measured primitive; used only in setup
 const TARGET_BATCH: usize = 10_000;
+const SCAN_SEEK_BATCH_SIZE: usize = 64;
+const ROTATING_PREFIX_COUNT: usize = 4;
+
+fn rotating_prefixes(first_prefix: u8) -> Vec<u8> {
+    (0..ROTATING_PREFIX_COUNT)
+        .map(|offset| first_prefix.wrapping_add(u8::try_from(offset).expect("prefix offset fits")))
+        .collect()
+}
 
 fn write_prefixed_keys(engine: &MidgeEngine, num_keys: usize, prefix: u8) {
     let cf = engine.create_column_family("cf1").unwrap();
@@ -30,7 +39,7 @@ fn write_prefixed_keys(engine: &MidgeEngine, num_keys: usize, prefix: u8) {
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin");
         for i in start..end {
-            let k = cntryl_midge::testkit::stress::key16_prefix_u64_be(prefix, i as u64);
+            let k = stress_config::bench_stress::key16_prefix_u64_be(prefix, i as u64);
             let v = vec![u8::try_from(i % 251).expect("value byte fits in u8"); VALUE_SIZE];
             tx.put(k.to_vec(), v, None).unwrap();
         }
@@ -44,9 +53,14 @@ fn run_scan_query_case(
     scenario: &'static str,
     opts: MidgeOptions,
     setup: impl FnOnce(&MidgeEngine),
-    query: &Query,
+    first_prefix: u8,
 ) {
-    let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
+    ctx.parameter("logical_batch_size", SCAN_SEEK_BATCH_SIZE);
+    ctx.parameter("operation_surface", "scan_seek_first_row");
+    ctx.parameter("begin_tx_included", "false");
+    ctx.parameter("rotating_prefix_count", ROTATING_PREFIX_COUNT);
+
+    let engine = stress_config::bench_stress::open_engine_no_compaction(opts);
     let cf = engine.create_column_family("cf1").unwrap();
 
     // All setup done outside measurement
@@ -56,11 +70,20 @@ fn run_scan_query_case(
     let tx = engine
         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin");
+    let prefixes: Vec<Key> = rotating_prefixes(first_prefix)
+        .into_iter()
+        .map(|prefix| Key::copy_from_slice(&[prefix]))
+        .collect();
+    let mut prefix_index = 0usize;
 
-    // Measure ONLY iterator construction and first advance
-    let _ = ctx.measure_batch(scenario, 1, || {
-        let mut it = tx.scan(query).expect("scan failed");
-        let _ = it.next();
+    let _ = ctx.measure_batch(scenario, SCAN_SEEK_BATCH_SIZE as u64, || {
+        for _ in 0..SCAN_SEEK_BATCH_SIZE {
+            let prefix = prefixes[prefix_index % prefixes.len()].clone();
+            prefix_index = prefix_index.wrapping_add(1);
+            let query = Query::new().prefix(prefix);
+            let mut it = tx.scan(&query).expect("scan failed");
+            let _ = it.next();
+        }
     });
 
     drop(engine);
@@ -68,30 +91,24 @@ fn run_scan_query_case(
 
 #[stress(tier = 3)]
 fn tier3_scan_seek_memtable_only_mem(ctx: &mut StressContext) {
-    ctx.set_elements(5_000);
-    let opts = cntryl_midge::testkit::opts_for_mode("memory");
-
-    let prefix = Key::copy_from_slice(&[0xAA]);
-    let query = Query::new().prefix(prefix);
+    let opts = stress_config::opts_for_mode("memory");
 
     run_scan_query_case(
         ctx,
         "tier3_scan_seek_memtable_only_mem",
         opts,
         |e| {
-            write_prefixed_keys(e, 5_000, 0xAA);
+            for prefix in rotating_prefixes(0xAA) {
+                write_prefixed_keys(e, 5_000 / ROTATING_PREFIX_COUNT, prefix);
+            }
         },
-        &query,
+        0xAA,
     );
 }
 
 #[stress(tier = 3)]
 fn tier3_scan_seek_l0_only_local(ctx: &mut StressContext) {
-    ctx.set_elements(5_000);
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
-
-    let prefix = Key::copy_from_slice(&[0xAB]);
-    let query = Query::new().prefix(prefix);
+    let opts = stress_config::opts_for_mode("local");
 
     run_scan_query_case(
         ctx,
@@ -99,20 +116,18 @@ fn tier3_scan_seek_l0_only_local(ctx: &mut StressContext) {
         opts,
         |e| {
             let cf = e.create_column_family("cf1").unwrap();
-            write_prefixed_keys(e, 5_000, 0xAB);
+            for prefix in rotating_prefixes(0xAB) {
+                write_prefixed_keys(e, 5_000 / ROTATING_PREFIX_COUNT, prefix);
+            }
             e.flush_cf(&cf).unwrap();
         },
-        &query,
+        0xAB,
     );
 }
 
 #[stress(tier = 3)]
 fn tier3_scan_seek_l0_only_cloud(ctx: &mut StressContext) {
-    ctx.set_elements(5_000);
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-
-    let prefix = Key::copy_from_slice(&[0xAC]);
-    let query = Query::new().prefix(prefix);
+    let opts = stress_config::opts_for_mode("cloud");
 
     run_scan_query_case(
         ctx,
@@ -120,20 +135,18 @@ fn tier3_scan_seek_l0_only_cloud(ctx: &mut StressContext) {
         opts,
         |e| {
             let cf = e.create_column_family("cf1").unwrap();
-            write_prefixed_keys(e, 5_000, 0xAC);
+            for prefix in rotating_prefixes(0xAC) {
+                write_prefixed_keys(e, 5_000 / ROTATING_PREFIX_COUNT, prefix);
+            }
             e.flush_cf(&cf).unwrap();
         },
-        &query,
+        0xAC,
     );
 }
 
 #[stress(tier = 3)]
 fn tier3_scan_seek_multi_level_local(ctx: &mut StressContext) {
-    ctx.set_elements(5_000);
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
-
-    let prefix = Key::copy_from_slice(&[0xAD]);
-    let query = Query::new().prefix(prefix);
+    let opts = stress_config::opts_for_mode("local");
 
     run_scan_query_case(
         ctx,
@@ -142,25 +155,27 @@ fn tier3_scan_seek_multi_level_local(ctx: &mut StressContext) {
         |e| {
             let cf = e.create_column_family("cf1").unwrap();
             // Build L1 via compact_all, then add a fresh L0.
-            write_prefixed_keys(e, 3_000, 0xAD);
+            for prefix in rotating_prefixes(0xAD) {
+                write_prefixed_keys(e, 3_000 / ROTATING_PREFIX_COUNT, prefix);
+            }
             e.flush_cf(&cf).unwrap();
-            write_prefixed_keys(e, 3_000, 0xAD);
+            for prefix in rotating_prefixes(0xAD) {
+                write_prefixed_keys(e, 3_000 / ROTATING_PREFIX_COUNT, prefix);
+            }
             e.flush_cf(&cf).unwrap();
             e.compact_all().unwrap();
-            write_prefixed_keys(e, 1_000, 0xAD);
+            for prefix in rotating_prefixes(0xAD) {
+                write_prefixed_keys(e, 1_000 / ROTATING_PREFIX_COUNT, prefix);
+            }
             e.flush_cf(&cf).unwrap();
         },
-        &query,
+        0xAD,
     );
 }
 
 #[stress(tier = 3)]
 fn tier3_scan_seek_multi_level_cloud(ctx: &mut StressContext) {
-    ctx.set_elements(5_000);
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-
-    let prefix = Key::copy_from_slice(&[0xAE]);
-    let query = Query::new().prefix(prefix);
+    let opts = stress_config::opts_for_mode("cloud");
 
     run_scan_query_case(
         ctx,
@@ -168,25 +183,27 @@ fn tier3_scan_seek_multi_level_cloud(ctx: &mut StressContext) {
         opts,
         |e| {
             let cf = e.create_column_family("cf1").unwrap();
-            write_prefixed_keys(e, 3_000, 0xAE);
+            for prefix in rotating_prefixes(0xAE) {
+                write_prefixed_keys(e, 3_000 / ROTATING_PREFIX_COUNT, prefix);
+            }
             e.flush_cf(&cf).unwrap();
-            write_prefixed_keys(e, 3_000, 0xAE);
+            for prefix in rotating_prefixes(0xAE) {
+                write_prefixed_keys(e, 3_000 / ROTATING_PREFIX_COUNT, prefix);
+            }
             e.flush_cf(&cf).unwrap();
             e.compact_all().unwrap();
-            write_prefixed_keys(e, 1_000, 0xAE);
+            for prefix in rotating_prefixes(0xAE) {
+                write_prefixed_keys(e, 1_000 / ROTATING_PREFIX_COUNT, prefix);
+            }
             e.flush_cf(&cf).unwrap();
         },
-        &query,
+        0xAE,
     );
 }
 
 #[stress(tier = 3)]
 fn tier3_scan_seek_after_compaction_local(ctx: &mut StressContext) {
-    ctx.set_elements(5_000);
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
-
-    let prefix = Key::copy_from_slice(&[0xAF]);
-    let query = Query::new().prefix(prefix);
+    let opts = stress_config::opts_for_mode("local");
 
     run_scan_query_case(
         ctx,
@@ -194,23 +211,23 @@ fn tier3_scan_seek_after_compaction_local(ctx: &mut StressContext) {
         opts,
         |e| {
             let cf = e.create_column_family("cf1").unwrap();
-            write_prefixed_keys(e, 5_000, 0xAF);
+            for prefix in rotating_prefixes(0xAF) {
+                write_prefixed_keys(e, 5_000 / ROTATING_PREFIX_COUNT, prefix);
+            }
             e.flush_cf(&cf).unwrap();
-            write_prefixed_keys(e, 5_000, 0xAF);
+            for prefix in rotating_prefixes(0xAF) {
+                write_prefixed_keys(e, 5_000 / ROTATING_PREFIX_COUNT, prefix);
+            }
             e.flush_cf(&cf).unwrap();
             e.compact_all().unwrap();
         },
-        &query,
+        0xAF,
     );
 }
 
 #[stress(tier = 3)]
 fn tier3_scan_seek_after_compaction_cloud(ctx: &mut StressContext) {
-    ctx.set_elements(5_000);
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-
-    let prefix = Key::copy_from_slice(&[0xB0]);
-    let query = Query::new().prefix(prefix);
+    let opts = stress_config::opts_for_mode("cloud");
 
     run_scan_query_case(
         ctx,
@@ -218,13 +235,17 @@ fn tier3_scan_seek_after_compaction_cloud(ctx: &mut StressContext) {
         opts,
         |e| {
             let cf = e.create_column_family("cf1").unwrap();
-            write_prefixed_keys(e, 5_000, 0xB0);
+            for prefix in rotating_prefixes(0xB0) {
+                write_prefixed_keys(e, 5_000 / ROTATING_PREFIX_COUNT, prefix);
+            }
             e.flush_cf(&cf).unwrap();
-            write_prefixed_keys(e, 5_000, 0xB0);
+            for prefix in rotating_prefixes(0xB0) {
+                write_prefixed_keys(e, 5_000 / ROTATING_PREFIX_COUNT, prefix);
+            }
             e.flush_cf(&cf).unwrap();
             e.compact_all().unwrap();
         },
-        &query,
+        0xB0,
     );
 }
 

@@ -2,7 +2,7 @@
 //!
 //! Receives messages from `RuntimeHandle` and routes them to the correct actor.
 //!
-//! Copilot note:
+//! Maintainer note:
 //! - Per-request routing flows through `respond()`.
 //! - `EventLoop` never touches `pending_responses` directly.
 //! - All read paths are local (memtables → SST later).
@@ -17,6 +17,7 @@
 //! - `cloud_integration` — `CloudAsync` WAL flush, cloud ack/fail handling
 //! - `write_batch` — group commit write draining, backpressure / write stall
 
+#[cfg(test)]
 mod cloud;
 mod cloud_integration;
 mod compaction;
@@ -24,6 +25,7 @@ mod control;
 mod dispatch;
 mod durability_sync;
 mod flush;
+#[cfg(test)]
 mod gc;
 mod ingest;
 mod manifest;
@@ -39,9 +41,9 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::actors::{
-    CloudActor, CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor, WalActor,
-};
+#[cfg(test)]
+use super::actors::CloudActor;
+use super::actors::{CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor, WalActor};
 use super::durability::DurabilityCoordinator;
 use super::read_resources::ReadResources;
 use super::read_snapshot::ReadSnapshot;
@@ -66,6 +68,7 @@ pub struct EventLoop {
     pub(super) flush_actor: FlushActor,
     pub(super) compaction_actor: CompactionActor,
     pub(super) wal_actor: WalActor,
+    #[cfg(test)]
     pub(super) cloud_actor: CloudActor,
     gc_actor: GcActor,
     manifest_actor: ManifestActor,
@@ -159,6 +162,7 @@ impl EventLoop {
                 Arc::clone(&state.fs),
                 sst_path_prefix,
                 config.block_cache_size,
+                config.block_cache_policy,
             )))
         };
 
@@ -190,12 +194,20 @@ impl EventLoop {
 
         state.cloud_eventual_flush_segment_gap =
             config.cloud_runtime_policy.eventual_flush_segment_gap;
+        state.set_compaction_enabled(config.background_compaction);
 
         let mut event_loop = Self {
             state,
             flush_actor,
-            compaction_actor: CompactionActor::new(sst_factory),
+            compaction_actor: {
+                let compaction_config = crate::compaction::LeveledCompactionConfig {
+                    l0_file_count_threshold: config.l0_compaction_trigger.max(1),
+                    ..Default::default()
+                };
+                CompactionActor::new_with_config(sst_factory, compaction_config)
+            },
             wal_actor,
+            #[cfg(test)]
             cloud_actor: CloudActor::new(),
             gc_actor: GcActor::new(),
             manifest_actor: ManifestActor::new(),
@@ -1112,6 +1124,37 @@ pub(super) mod tests {
             crate::runtime::RuntimeConfig::default(),
             None,
         )
+    }
+
+    #[test]
+    fn should_apply_runtime_config_block_cache_policy_to_read_resources_when_initializing_event_loop(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let db_path = unique_test_db_path("midge_event_loop_config");
+        std::fs::create_dir_all(&db_path).expect("create temp runtime config dir");
+        let state = RuntimeState::new(db_path, false);
+        let router = Arc::new(ResponseRouter::new());
+        let config = crate::runtime::RuntimeConfig {
+            block_cache_policy: crate::sst::cache::CachePolicyType::ClockPro,
+            block_cache_size: 512 * 1024,
+            l0_compaction_trigger: 7,
+            ..crate::runtime::RuntimeConfig::default()
+        };
+
+        // Act
+        let event_loop = EventLoop::new(state, false, router, config, None)?;
+
+        // Assert
+        assert_eq!(event_loop.compaction_actor.l0_file_count_threshold(), 7);
+        let read_resources = event_loop
+            .read_resources
+            .as_ref()
+            .expect("local runtime should construct read resources");
+        assert_eq!(
+            read_resources.block_cache().policy_type(),
+            crate::sst::cache::CachePolicyType::ClockPro
+        );
+        Ok(())
     }
 
     fn valid_sst_bytes_for_event_loop_test(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {

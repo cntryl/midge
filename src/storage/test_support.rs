@@ -15,13 +15,6 @@ fn simulated_cloud_budgets() -> &'static Mutex<HashMap<PathBuf, u64>> {
     SIMULATED_CLOUD_BUDGETS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(crate) fn register_simulated_cloud_budget(db_path: &Path, budget_bytes: u64) {
-    let mut budgets = simulated_cloud_budgets()
-        .lock()
-        .expect("lock simulated cloud budget registry");
-    budgets.insert(db_path.to_path_buf(), budget_bytes);
-}
-
 fn take_simulated_cloud_budget(db_path: &Path) -> Option<u64> {
     let mut budgets = simulated_cloud_budgets()
         .lock()
@@ -76,35 +69,85 @@ pub(crate) fn build_cloud_backed_filesystem_simulation(
 }
 
 #[cfg(test)]
+pub(crate) use test_support_impl::MockStorage;
+
+#[cfg(test)]
 mod test_support_impl {
     use super::*;
-    use crate::storage::abstraction::{Storage, StorageError, StorageErrorKind, StoragePath};
-    use crate::storage::LocalFsStorage;
+    use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
 
-    /// Opaque temp local storage for unit tests.
-    ///
-    /// This lives under `storage/` so other layers (e.g. WAL) can test against
-    /// a real backend without directly touching filesystem paths.
-    #[allow(dead_code)]
-    pub(crate) struct TempLocalStorage {
-        _tempdir: tempfile::TempDir,
-        pub storage: Arc<dyn Storage>,
-        pub root: StoragePath,
+    pub(crate) struct MockStorage {
+        data: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn build_temp_local_storage(
-    ) -> crate::storage::abstraction::StorageResult<TempLocalStorage> {
-        let tempdir = tempfile::TempDir::new()
-            .map_err(|e| StorageError::with_source(StorageErrorKind::Io, "TempDir::new", e))?;
+    impl MockStorage {
+        pub(crate) fn new() -> Self {
+            Self {
+                data: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+    }
 
-        let storage: Arc<dyn Storage> = Arc::new(LocalFsStorage::new(tempdir.path())?);
-        let root = StoragePath::new("");
+    impl Default for MockStorage {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
 
-        Ok(TempLocalStorage {
-            _tempdir: tempdir,
-            storage,
-            root,
-        })
+    impl StorageBackend for MockStorage {
+        fn submit_read(&self, key: &str, callback: StorageCallback) {
+            let data = self.data.lock().expect("lock mock storage");
+            let result = data
+                .get(key)
+                .cloned()
+                .ok_or(crate::common::MidgeError::NotFound);
+
+            let event = StorageEvent::ReadComplete {
+                key: key.to_string(),
+                result: match result {
+                    Ok(value) => StorageOutcome::Ok(value),
+                    Err(error) => StorageOutcome::Err(format!("{error:?}")),
+                },
+            };
+            let _ = callback.send(event);
+        }
+
+        fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
+            let mut storage = self.data.lock().expect("lock mock storage");
+            storage.insert(key.to_string(), data);
+
+            let event = StorageEvent::WriteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Ok(()),
+            };
+            let _ = callback.send(event);
+        }
+
+        fn submit_delete(&self, key: &str, callback: StorageCallback) {
+            let mut storage = self.data.lock().expect("lock mock storage");
+            storage.remove(key);
+
+            let event = StorageEvent::DeleteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Ok(()),
+            };
+            let _ = callback.send(event);
+        }
+
+        #[cfg(test)]
+        fn submit_list(&self, prefix: &str, callback: StorageCallback) {
+            let data = self.data.lock().expect("lock mock storage");
+            let results: Vec<_> = data
+                .keys()
+                .filter(|key| key.starts_with(prefix))
+                .cloned()
+                .collect();
+
+            let event = StorageEvent::ListComplete {
+                prefix: prefix.to_string(),
+                result: StorageOutcome::Ok(results),
+            };
+            let _ = callback.send(event);
+        }
     }
 }

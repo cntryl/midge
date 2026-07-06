@@ -23,6 +23,7 @@ pub struct CompactionActor {
 }
 
 impl CompactionActor {
+    #[cfg(test)]
     pub fn new(sst_factory: Arc<dyn SstFactory>) -> Self {
         Self::new_with_config(sst_factory, LeveledCompactionConfig::default())
     }
@@ -42,11 +43,13 @@ impl CompactionActor {
         self.compactor.config.l0_file_count_threshold = threshold.max(1);
     }
 
+    #[cfg(test)]
     pub fn l0_file_count_threshold(&self) -> usize {
         self.compactor.config.l0_file_count_threshold
     }
 
     /// Open an SST reader using the actor's configured `SstFactory`
+    #[cfg(test)]
     pub fn open_sst_reader(
         &self,
         path: &std::path::Path,
@@ -58,8 +61,23 @@ impl CompactionActor {
         &mut self,
         state: &RuntimeState,
     ) -> Option<crate::compaction::CompactionPlan> {
+        self.check_compaction_with_mode(state, true)
+    }
+
+    pub fn check_manual_compaction(
+        &mut self,
+        state: &RuntimeState,
+    ) -> Option<crate::compaction::CompactionPlan> {
+        self.check_compaction_with_mode(state, false)
+    }
+
+    fn check_compaction_with_mode(
+        &mut self,
+        state: &RuntimeState,
+        respect_background_enabled: bool,
+    ) -> Option<crate::compaction::CompactionPlan> {
         // If compaction is disabled via runtime configuration, skip checks
-        if !state.compaction_enabled() {
+        if respect_background_enabled && !state.compaction_enabled() {
             tracing::debug!("compaction disabled in runtime state");
             return None;
         }

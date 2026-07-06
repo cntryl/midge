@@ -18,7 +18,8 @@ flowchart TB
     Compaction["compaction<br/>planning, merge, execution"]
     Lease["lease<br/>single-writer fencing"]
     Telemetry["telemetry<br/>metrics and health"]
-    Testkit["testkit<br/>fixtures, stress, benchmarks"]
+    BenchSupport["benches/bench_support<br/>benchmark-local helpers"]
+    TestSupport["tests/common<br/>integration-test support"]
 
     API --> Engine
     Engine --> Runtime
@@ -38,8 +39,10 @@ flowchart TB
     Metadata --> IO
     Storage --> IO
     Runtime --> Telemetry
-    Testkit --> API
-    Testkit --> Storage
+    BenchSupport -. exercises .-> API
+    BenchSupport -. mocks .-> Storage
+    TestSupport -. exercises .-> API
+    TestSupport -. mocks .-> Storage
 ```
 
 ## Runtime Ownership

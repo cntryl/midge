@@ -282,11 +282,10 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
         opts = opts.memory_budget(512 * 1024); // 512KB instead of 2MB for faster backpressure trigger
 
         // In local mode, the default small memtable can flush fast enough that we never
-        // accumulate enough in-memory state to trip the memory budget, which makes this
-        // test flaky. Force a larger memtable so budget pressure reliably surfaces as
-        // `WriteStall`.
+        // accumulate enough in-memory state to trip the memory budget. Keep the
+        // threshold above the default but inside this test's 512 KiB pressure window.
         if mode == "local" {
-            opts.memtable_size = 32 * 1024 * 1024; // 32MB for more reliable pressure
+            opts.memtable_size = 256 * 1024;
         }
 
         let engine = Arc::new(open_with_mode(&opts, mode));

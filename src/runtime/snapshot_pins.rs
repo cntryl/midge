@@ -81,14 +81,6 @@ impl SnapshotPinRegistry {
             .max()
     }
 
-    pub(crate) fn count_timed_out(&self, max_lifetime: Duration) -> usize {
-        let now = Instant::now();
-        self.active
-            .iter()
-            .filter(|entry| now.duration_since(entry.value().created_at) > max_lifetime)
-            .count()
-    }
-
     pub(crate) fn evict_timed_out(&self, max_lifetime: Duration) -> usize {
         let now = Instant::now();
         let timed_out_ids = self

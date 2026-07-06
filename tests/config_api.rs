@@ -10,7 +10,7 @@
 //! These tests validate the config builder's behavior without requiring an
 //! engine instance, since configuration is orthogonal to storage modes.
 
-use cntryl_midge::{Goal, MemoryBudget, OpenOptions, Storage, WorkloadProfile};
+use cntryl_midge::{BlockCachePolicy, Goal, MemoryBudget, OpenOptions, Storage, WorkloadProfile};
 use std::path::PathBuf;
 
 // ============================================================================
@@ -29,6 +29,20 @@ fn should_build_config_given_minimal_defaults_when_only_path_provided() {
     assert_eq!(opts.goal, Goal::Latency);
     assert_eq!(opts.memory_budget, MemoryBudget::Auto);
     assert_eq!(opts.workload, WorkloadProfile::Mixed);
+    assert_eq!(opts.block_cache_policy_value(), BlockCachePolicy::Lru);
+}
+
+#[test]
+fn should_set_block_cache_policy_given_override_when_building() {
+    // Arrange
+
+    // Act
+    let opts = OpenOptions::in_memory()
+        .block_cache_policy(BlockCachePolicy::TinyLfu)
+        .build();
+
+    // Assert
+    assert_eq!(opts.block_cache_policy_value(), BlockCachePolicy::TinyLfu);
 }
 
 // ============================================================================
@@ -330,6 +344,10 @@ fn should_clone_options_preserving_all_settings_given_configured_opts_when_cloni
     assert_eq!(cloned.workload, original.workload);
     assert_eq!(cloned.block_size(), original.block_size());
     assert_eq!(cloned.memtable_size_limit(), original.memtable_size_limit());
+    assert_eq!(
+        cloned.block_cache_policy_value(),
+        original.block_cache_policy_value()
+    );
 }
 
 #[test]

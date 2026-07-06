@@ -1,6 +1,10 @@
 use bytes::Bytes;
-use cntryl_midge::testkit::{CloudRuntimePolicyOverrides, MidgeOptions, StorageMode};
-use cntryl_midge::{Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions};
+mod common;
+
+use cntryl_midge::{
+    CloudWritePolicy, Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions,
+};
+use common::{MidgeOptions, StorageMode};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -147,16 +151,16 @@ fn child_buffered_eventual_flush_after_publish(db_path: &Path) {
     std::process::abort();
 }
 
-fn buffered_cloud_policy() -> CloudRuntimePolicyOverrides {
-    CloudRuntimePolicyOverrides {
-        eventual_flush_segment_gap: Some(EVENTUAL_FLUSH_GAP),
-        wal_seal_min_segment_bytes: Some(usize::MAX),
-        wal_seal_max_flush_delay: Some(Duration::from_hours(1)),
-        wal_seal_max_pending_writes: Some(1),
+fn buffered_cloud_policy() -> CloudWritePolicy {
+    CloudWritePolicy {
+        eventual_flush_segment_gap: EVENTUAL_FLUSH_GAP,
+        wal_seal_min_segment_bytes: usize::MAX,
+        wal_seal_max_flush_delay: Duration::from_hours(1),
+        wal_seal_max_pending_writes: 1,
     }
 }
 
-fn open_cloud_engine(db_path: &Path, overrides: Option<CloudRuntimePolicyOverrides>) -> Engine {
+fn open_cloud_engine(db_path: &Path, policy: Option<CloudWritePolicy>) -> Engine {
     let opts = MidgeOptions {
         storage_mode: StorageMode::CloudBacked {
             local_cache_path: db_path.to_path_buf(),
@@ -167,8 +171,8 @@ fn open_cloud_engine(db_path: &Path, overrides: Option<CloudRuntimePolicyOverrid
         compression: false,
         enable_compaction: false,
         memory_budget: None,
-        cloud_runtime_policy_overrides: overrides,
-        simulated_cloud_overrides: None,
+        cloud_write_policy: policy,
+        simulated_cloud_local_storage_budget_bytes: None,
     };
 
     Engine::open(

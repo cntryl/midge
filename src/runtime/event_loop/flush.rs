@@ -24,10 +24,7 @@ impl FlushCoordinator {
                 ) {
                     Ok(()) => {
                         event_loop.wake_write_stall_waiters();
-                        RuntimeResponse::FlushComplete {
-                            request_id,
-                            sst_name: flush_output.sst_name,
-                        }
+                        RuntimeResponse::Ok { request_id }
                     }
                     Err(error) => RuntimeResponse::Error { request_id, error },
                 }
@@ -39,6 +36,7 @@ impl FlushCoordinator {
         HandleOutcome::Continue
     }
 
+    #[cfg(test)]
     pub(super) fn flush_complete(
         event_loop: &mut EventLoop,
         request_id: u64,

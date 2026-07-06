@@ -17,28 +17,21 @@ static TELEMETRY: OnceLock<Option<Arc<Telemetry>>> = OnceLock::new();
 
 /// Central telemetry coordinator
 pub struct Telemetry {
-    #[allow(dead_code)]
-    config: TelemetryConfig,
     metrics: Metrics,
-    enabled: bool,
 }
 
 impl Telemetry {
     /// Initialize global telemetry
-    pub fn init(config: TelemetryConfig) -> crate::common::MidgeResult<()> {
+    pub fn init(config: &TelemetryConfig) -> crate::common::MidgeResult<()> {
         let enabled = config.enabled;
-        let metrics = Metrics::new(&config);
+        let metrics = Metrics::new(config);
 
         #[cfg(feature = "telemetry")]
         if enabled {
-            Self::setup_tracing(&config)?;
+            Self::setup_tracing(config)?;
         }
 
-        let telemetry = Arc::new(Telemetry {
-            config,
-            metrics,
-            enabled,
-        });
+        let telemetry = Arc::new(Telemetry { metrics });
 
         TELEMETRY
             .set(if enabled { Some(telemetry) } else { None })
@@ -54,18 +47,12 @@ impl Telemetry {
         TELEMETRY.get_or_init(|| None).clone()
     }
 
-    /// Check if telemetry is enabled
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
     /// Get metrics collector
     pub fn metrics(&self) -> &Metrics {
         &self.metrics
     }
 
     #[cfg(feature = "telemetry")]
-    #[allow(dead_code)]
     fn setup_tracing(config: &TelemetryConfig) -> crate::common::MidgeResult<()> {
         use opentelemetry::global;
         use opentelemetry::trace::TracerProvider as _;
@@ -109,12 +96,6 @@ impl Telemetry {
         }
 
         registry.init();
-        Ok(())
-    }
-
-    #[cfg(not(feature = "telemetry"))]
-    #[allow(dead_code)]
-    fn setup_tracing(_config: &TelemetryConfig) -> crate::common::MidgeResult<()> {
         Ok(())
     }
 }

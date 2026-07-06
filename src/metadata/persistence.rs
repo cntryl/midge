@@ -4,7 +4,9 @@
 //! recovery of LSM structure across restarts.
 
 use crate::metadata::Manifest;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::time::Instant;
 
 /// Manifest persistence operations
@@ -17,14 +19,17 @@ impl ManifestPersistence {
 
     /// Snapshot file name
     const MANIFEST_SNAPSHOT: &'static str = "manifest.snapshot.json";
+    #[cfg(test)]
     const MANIFEST_SNAPSHOT_TEMP: &'static str = "manifest.snapshot.json.tmp";
 
     /// Get the manifest file path
+    #[cfg(test)]
     pub fn manifest_path(db_path: &Path) -> PathBuf {
         db_path.join(Self::MANIFEST_FILE)
     }
 
     /// Get the manifest snapshot path
+    #[cfg(test)]
     pub fn manifest_snapshot_path(db_path: &Path) -> PathBuf {
         db_path.join(Self::MANIFEST_SNAPSHOT)
     }
@@ -65,6 +70,7 @@ impl ManifestPersistence {
         Ok(manifest)
     }
 
+    #[cfg(test)]
     fn remove_file_if_exists(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         path: &crate::io::traits::FsPath,
@@ -76,13 +82,6 @@ impl ManifestPersistence {
                 .map_err(|e| format!("failed to remove file {path:?}: {e:?}")),
             Err(e) => Err(format!("fs exists error for {path:?}: {e:?}")),
         }
-    }
-
-    /// Load manifest, preferring a JSON snapshot plus replaying the journal.
-    pub fn load_with_fs(
-        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
-    ) -> Result<Manifest, String> {
-        Self::load_with_fs_and_policy(fs, crate::config::RecoveryPolicy::Strict)
     }
 
     /// Load manifest using the requested recovery policy.
@@ -179,6 +178,7 @@ impl ManifestPersistence {
 
     /// Save a full manifest snapshot and truncate journal (atomic as possible).
     /// Writes to `manifest.snapshot.json.tmp` then renames into `manifest.snapshot.json`.
+    #[cfg(test)]
     pub fn save_snapshot_and_truncate_journal_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
@@ -215,6 +215,7 @@ impl ManifestPersistence {
     }
 
     /// Load manifest using a `RealFs` (compat wrapper)
+    #[cfg(test)]
     pub fn load(db_path: &Path) -> Result<Manifest, String> {
         Self::load_with_policy(db_path, crate::config::RecoveryPolicy::Strict)
     }
@@ -235,6 +236,7 @@ impl ManifestPersistence {
 
     /// Save a full manifest snapshot and truncate journal (atomic as possible).
     /// This wrapper constructs a `RealFs` and delegates to the fs-backed implementation.
+    #[cfg(test)]
     pub fn save_snapshot_and_truncate_journal(
         db_path: &Path,
         manifest: &Manifest,
@@ -255,6 +257,7 @@ impl ManifestPersistence {
     ///
     /// # Errors
     /// Returns error if delete fails (other than file not existing)
+    #[cfg(test)]
     pub fn delete_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> Result<(), String> {
         use crate::io::traits::FsPath;
 
@@ -288,6 +291,7 @@ impl ManifestPersistence {
     ///
     /// # Errors
     /// Returns error if delete fails (other than file not existing)
+    #[cfg(test)]
     pub fn delete(db_path: &Path) -> Result<(), String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;

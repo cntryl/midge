@@ -1,4 +1,4 @@
-// == COPILOT MASTER RULES FOR STORAGE SUBSYSTEM =====================================
+// == ARCHITECTURE MASTER RULES FOR STORAGE SUBSYSTEM =====================================
 // These rules define the *correct* architecture of the Midge storage layer. You MUST
 // follow them in all completions that touch storage, providers, WAL durability, or
 // cloud persistence.
@@ -55,7 +55,7 @@
 //    - WAL NEVER becomes inconsistent due to partial upload.
 //    - SST writes may be persisted to cloud, but do NOT block memtable visibility.
 //
-// 9. TESTING REQUIREMENTS FOR COPILOT
+// 9. TESTING REQUIREMENTS FOR ARCHITECTURE
 //    When generating tests, enforce:
 //      - HybridStorage WAL pipeline: Pending → InProgress → CloudAck.
 //      - CloudExecutor event delivery.
@@ -64,7 +64,7 @@
 //      - Budget actor watermark behaviors.
 //    Avoid sleeps or timing assumptions; use manual state triggers.
 //
-// 10. WHAT COPILOT MUST NEVER DO
+// 10. WHAT ARCHITECTURE MUST NEVER DO
 //    - Never send WAL through submit_write().
 //    - Never claim cloud durability before CloudAck.
 //    - Never spawn async tasks directly without going through CloudExecutor.rt.
@@ -173,7 +173,7 @@ pub(crate) use local_fs_storage::LocalFsStorage;
 
 pub use hybrid::backend::HybridStorage;
 
-// COPILOT: CLOUD-DURABLE STORAGE RULES
+// ARCHITECTURE: CLOUD-DURABLE STORAGE RULES
 //
 // Storage subsystem must support CloudAsync durability for WAL and SST.
 //
@@ -261,6 +261,7 @@ pub enum StorageEvent {
         result: StorageOutcome<()>,
     },
     /// List operation completed
+    #[cfg(test)]
     ListComplete {
         prefix: String,
         result: StorageOutcome<Vec<String>>,
@@ -306,6 +307,7 @@ impl<T: Clone> StorageOutcome<T> {
     }
 
     /// Check if this is an Err outcome
+    #[cfg(test)]
     pub fn is_err(&self) -> bool {
         matches!(self, StorageOutcome::Err(_))
     }
@@ -382,6 +384,7 @@ pub trait StorageBackend: Send + Sync + 'static {
     }
 
     /// Submit a prefix list operation. Returns immediately.
+    #[cfg(test)]
     fn submit_list(&self, prefix: &str, callback: StorageCallback);
 
     /// Submit an object metadata lookup. Implementations with native HEAD
@@ -410,5 +413,28 @@ pub trait StorageBackend: Send + Sync + 'static {
             key: key.to_string(),
             result,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_preserve_list_complete_prefix_for_test_backends() {
+        // Arrange
+        let event = StorageEvent::ListComplete {
+            prefix: "sst/".to_string(),
+            result: StorageOutcome::Ok(vec!["sst/1.sst".to_string()]),
+        };
+
+        // Act
+        let StorageEvent::ListComplete { prefix, result } = event else {
+            panic!("expected list complete event");
+        };
+
+        // Assert
+        assert_eq!(prefix, "sst/");
+        assert!(matches!(result, StorageOutcome::Ok(keys) if keys == vec!["sst/1.sst"]));
     }
 }

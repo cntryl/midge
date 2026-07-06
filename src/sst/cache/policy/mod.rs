@@ -44,7 +44,7 @@ pub trait CachePolicy: Send + Sync {
 }
 
 /// Factory for creating cache policies
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CachePolicyType {
     Lru,
     TinyLfu,

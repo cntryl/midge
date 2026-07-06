@@ -80,6 +80,9 @@ pub struct RuntimeConfig {
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
     pub compression_policy: crate::sst::compression::CompressionPolicy,
     pub block_cache_size: usize,
+    pub block_cache_policy: crate::sst::cache::CachePolicyType,
+    pub l0_compaction_trigger: usize,
+    pub background_compaction: bool,
     /// Fencing epoch from leader election.  Stamped on every WAL record.
     pub writer_epoch: u64,
     /// Shared lease-health flag.  Set to `false` by the heartbeat thread when
@@ -102,6 +105,9 @@ impl Default for RuntimeConfig {
             cloud_metadata_storage: None,
             compression_policy: crate::sst::compression::CompressionPolicy::default(),
             block_cache_size: 128 * 1024 * 1024,
+            block_cache_policy: crate::sst::cache::CachePolicyType::Lru,
+            l0_compaction_trigger: 4,
+            background_compaction: true,
             writer_epoch: 0,
             lease_healthy: None,
             leader_store: None,
@@ -147,6 +153,7 @@ pub enum PublicationPhase {
 
 /// Simplified compaction plan for message passing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(test)]
 pub struct CompactionPlan {
     pub input_files: Vec<String>,
     pub source_level: u32,
@@ -252,7 +259,7 @@ pub enum IntentLogEntry {
 
 /// Messages that can be sent to the runtime.
 ///
-/// Copilot: each variant that expects a response MUST carry a `request_id: u64`.
+/// Maintainer: each variant that expects a response MUST carry a `request_id: u64`.
 #[derive(Debug)]
 pub enum RuntimeMsg {
     // === Flush Actor ===
@@ -262,6 +269,7 @@ pub enum RuntimeMsg {
         cf_id: crate::types::ColumnFamilyId,
     },
     /// Memtable flush completed.
+    #[cfg(test)]
     FlushComplete {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
@@ -271,8 +279,10 @@ pub enum RuntimeMsg {
 
     // === Compaction Actor ===
     /// Trigger compaction check.
+    #[cfg(test)]
     CheckCompaction { request_id: u64 },
     /// Execute a specific compaction plan.
+    #[cfg(test)]
     RunCompaction {
         request_id: u64,
         plan: CompactionPlan,
@@ -289,6 +299,7 @@ pub enum RuntimeMsg {
 
     // === WAL Actor ===
     /// Append record to WAL.
+    #[cfg(test)]
     WalAppend {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
@@ -299,6 +310,7 @@ pub enum RuntimeMsg {
     },
 
     /// Append delete range tombstone to WAL.
+    #[cfg(test)]
     WalAppendDeleteRange {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
@@ -324,6 +336,7 @@ pub enum RuntimeMsg {
     /// Sync WAL to disk.
     WalSync { request_id: u64 },
     /// Rotate WAL segment.
+    #[cfg(test)]
     WalRotate { request_id: u64 },
     /// Force-seal the current WAL segment for cloud upload and optionally wait for cloud durability.
     SealWalForCloud {
@@ -332,20 +345,26 @@ pub enum RuntimeMsg {
         wait_for_ack: bool,
     },
     /// WAL sync completed.
+    #[cfg(test)]
     WalSyncComplete { request_id: u64, segment_id: u64 },
 
     // === Cloud Actor ===
     /// Upload SST to cloud.
+    #[cfg(test)]
     CloudUploadSst { request_id: u64, sst_name: String },
     /// Upload WAL segment to cloud.
+    #[cfg(test)]
     CloudUploadWal { request_id: u64, segment_id: u64 },
     /// Cloud upload completed.
+    #[cfg(test)]
     CloudUploadComplete { request_id: u64, resource: String },
 
     // === GC Actor ===
     /// Check for garbage collection opportunities.
+    #[cfg(test)]
     CheckGc { request_id: u64 },
     /// Delete obsolete SST files.
+    #[cfg(test)]
     DeleteObsoleteSsts {
         request_id: u64,
         sst_names: Vec<String>,
@@ -353,11 +372,13 @@ pub enum RuntimeMsg {
 
     // === Manifest Actor ===
     /// Update manifest with new SST.
+    #[cfg(test)]
     ManifestAddSst {
         request_id: u64,
         file_meta: FileMeta,
     },
     /// Update manifest after compaction.
+    #[cfg(test)]
     ManifestCompactionComplete {
         request_id: u64,
         removed: Vec<String>,
@@ -377,13 +398,16 @@ pub enum RuntimeMsg {
 
     /// Begin an ingest barrier: prevent new compactions, bump ingest epoch,
     /// and wait until in-flight compactions drain.
+    #[cfg(test)]
     BeginIngest { request_id: u64 },
 
     /// End an ingest barrier: flush outstanding memtables, bump epoch and
     /// re-enable scheduling.
+    #[cfg(test)]
     EndIngest { request_id: u64 },
 
     /// Query whether an ingest barrier is currently active.
+    #[cfg(test)]
     GetIngestState { request_id: u64 },
 
     /// Set runtime configuration atomically. Any field set to `None` will be left unchanged.
@@ -398,6 +422,7 @@ pub enum RuntimeMsg {
     },
 
     /// Get runtime configuration snapshot
+    #[cfg(test)]
     GetRuntimeConfig { request_id: u64 },
 
     // === Read Path ===
@@ -407,6 +432,7 @@ pub enum RuntimeMsg {
     /// If `requested_durability` is Strict/Steady, the read must not return data
     /// with seqno > `local_durable_seq`. Reads at higher seqnos are queued in
     /// `durability_waiters` until the frontier advances.
+    #[cfg(test)]
     Read {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
@@ -419,6 +445,7 @@ pub enum RuntimeMsg {
     /// INVARIANT: Range scans must respect the durability frontier.
     /// Same semantics as Read: if `requested_durability` is Strict/Steady,
     /// the scan must not return data with seqno > `local_durable_seq`.
+    #[cfg(test)]
     RangeScan {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
@@ -446,12 +473,14 @@ pub enum RuntimeMsg {
     ///
     /// This is the sequence maintained by the runtime state and advanced at
     /// WAL append time.
+    #[cfg(test)]
     GetCurrentSequence { request_id: u64 },
 
     /// Capture an immutable read snapshot for transaction execution.
     ///
     /// Returns a snapshot containing references to current memtables and SST metadata,
     /// allowing transactions to execute reads directly without message passing.
+    #[cfg(test)]
     CaptureReadSnapshot {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
@@ -469,6 +498,7 @@ pub enum RuntimeMsg {
     },
 
     /// Register a transaction snapshot so compaction/GC can respect active readers.
+    #[cfg(test)]
     RegisterSnapshot {
         request_id: u64,
         snapshot_id: u64,
@@ -479,6 +509,7 @@ pub enum RuntimeMsg {
     /// Unregister a previously tracked transaction snapshot.
     ///
     /// Fire-and-forget cleanup used on transaction completion/drop.
+    #[cfg(test)]
     UnregisterSnapshot { snapshot_id: u64 },
 
     // === Control ===
@@ -487,8 +518,10 @@ pub enum RuntimeMsg {
     /// Trigger a full compaction sweep and wait for completion.
     CompactAll { request_id: u64 },
     /// No-op for testing.
+    #[cfg(test)]
     Noop { request_id: u64 },
     /// Startup handshake to verify event loop is running.
+    #[cfg(test)]
     StartupPing { request_id: u64 },
 
     /// Check if writes should be stalled for a column family.
@@ -520,132 +553,140 @@ impl RuntimeMsg {
     /// Returns `None` for messages that do not participate in request/response
     /// routing (e.g., `Shutdown`).
     pub fn request_id(&self) -> Option<u64> {
-        use RuntimeMsg::{
-            ApplyTransaction, BeginIngest, BeginTransaction, CancelWaitForWriteStallClear,
-            CaptureReadSnapshot, CheckCompaction, CheckGc, CheckWriteStall, CloudUploadComplete,
-            CloudUploadSst, CloudUploadWal, CompactAll, CompactionComplete, DeleteObsoleteSsts,
-            EndIngest, FlushComplete, FlushMemtable, GetCurrentSequence, GetIngestState,
-            GetReadAmpMetrics, GetRecoveryMetrics, GetRuntimeConfig, GetRuntimeMetrics,
-            GetStorageLayout, ManifestAddSst, ManifestCompactionComplete,
-            ManifestCreateColumnFamily, ManifestDropColumnFamily, ManifestPersist, Noop, RangeScan,
-            Read, RegisterSnapshot, RunCompaction, SealWalForCloud, SetRuntimeConfig, Shutdown,
-            StartupPing, UnregisterSnapshot, WaitForWriteStallClear, WalAppend,
-            WalAppendDeleteRange, WalRotate, WalSync, WalSyncComplete,
-        };
         match self {
-            FlushMemtable { request_id, .. }
-            | FlushComplete { request_id, .. }
-            | CheckCompaction { request_id }
-            | RunCompaction { request_id, .. }
-            | CompactionComplete { request_id, .. }
-            | WalAppend { request_id, .. }
-            | WalAppendDeleteRange { request_id, .. }
-            | ApplyTransaction { request_id, .. }
-            | WalSync { request_id }
-            | WalRotate { request_id }
-            | SealWalForCloud { request_id, .. }
-            | WalSyncComplete { request_id, .. }
-            | CloudUploadSst { request_id, .. }
-            | CloudUploadWal { request_id, .. }
-            | CloudUploadComplete { request_id, .. }
-            | CheckGc { request_id }
-            | DeleteObsoleteSsts { request_id, .. }
-            | ManifestAddSst { request_id, .. }
-            | ManifestCompactionComplete { request_id, .. }
-            | ManifestPersist { request_id }
-            | ManifestCreateColumnFamily { request_id, .. }
-            | ManifestDropColumnFamily { request_id, .. }
-            | Read { request_id, .. }
-            | RangeScan { request_id, .. }
-            | GetReadAmpMetrics { request_id }
-            | GetRecoveryMetrics { request_id }
-            | GetRuntimeMetrics { request_id }
-            | GetStorageLayout { request_id }
-            | GetCurrentSequence { request_id }
-            | CaptureReadSnapshot { request_id, .. }
-            | BeginTransaction { request_id, .. }
-            | RegisterSnapshot { request_id, .. }
-            | SetRuntimeConfig { request_id, .. }
-            | GetRuntimeConfig { request_id }
-            | GetIngestState { request_id }
-            | BeginIngest { request_id }
-            | EndIngest { request_id }
-            | CompactAll { request_id }
-            | Noop { request_id }
-            | StartupPing { request_id }
-            | CheckWriteStall { request_id, .. }
-            | WaitForWriteStallClear { request_id, .. } => Some(*request_id),
+            RuntimeMsg::FlushMemtable { request_id, .. }
+            | RuntimeMsg::CompactionComplete { request_id, .. }
+            | RuntimeMsg::ApplyTransaction { request_id, .. }
+            | RuntimeMsg::WalSync { request_id }
+            | RuntimeMsg::SealWalForCloud { request_id, .. }
+            | RuntimeMsg::ManifestPersist { request_id }
+            | RuntimeMsg::ManifestCreateColumnFamily { request_id, .. }
+            | RuntimeMsg::ManifestDropColumnFamily { request_id, .. }
+            | RuntimeMsg::GetReadAmpMetrics { request_id }
+            | RuntimeMsg::GetRecoveryMetrics { request_id }
+            | RuntimeMsg::GetRuntimeMetrics { request_id }
+            | RuntimeMsg::GetStorageLayout { request_id }
+            | RuntimeMsg::BeginTransaction { request_id, .. }
+            | RuntimeMsg::SetRuntimeConfig { request_id, .. }
+            | RuntimeMsg::CompactAll { request_id }
+            | RuntimeMsg::CheckWriteStall { request_id, .. }
+            | RuntimeMsg::WaitForWriteStallClear { request_id, .. } => Some(*request_id),
 
-            CancelWaitForWriteStallClear { .. } | UnregisterSnapshot { .. } | Shutdown => None,
+            RuntimeMsg::CancelWaitForWriteStallClear { .. } | RuntimeMsg::Shutdown => None,
+
+            #[cfg(test)]
+            RuntimeMsg::FlushComplete { request_id, .. }
+            | RuntimeMsg::CheckCompaction { request_id }
+            | RuntimeMsg::RunCompaction { request_id, .. }
+            | RuntimeMsg::WalAppend { request_id, .. }
+            | RuntimeMsg::WalAppendDeleteRange { request_id, .. }
+            | RuntimeMsg::WalRotate { request_id }
+            | RuntimeMsg::WalSyncComplete { request_id, .. }
+            | RuntimeMsg::CloudUploadSst { request_id, .. }
+            | RuntimeMsg::CloudUploadWal { request_id, .. }
+            | RuntimeMsg::CloudUploadComplete { request_id, .. }
+            | RuntimeMsg::CheckGc { request_id }
+            | RuntimeMsg::DeleteObsoleteSsts { request_id, .. }
+            | RuntimeMsg::ManifestAddSst { request_id, .. }
+            | RuntimeMsg::ManifestCompactionComplete { request_id, .. }
+            | RuntimeMsg::Read { request_id, .. }
+            | RuntimeMsg::RangeScan { request_id, .. }
+            | RuntimeMsg::GetCurrentSequence { request_id }
+            | RuntimeMsg::CaptureReadSnapshot { request_id, .. }
+            | RuntimeMsg::RegisterSnapshot { request_id, .. }
+            | RuntimeMsg::GetRuntimeConfig { request_id }
+            | RuntimeMsg::GetIngestState { request_id }
+            | RuntimeMsg::BeginIngest { request_id }
+            | RuntimeMsg::EndIngest { request_id }
+            | RuntimeMsg::Noop { request_id }
+            | RuntimeMsg::StartupPing { request_id } => Some(*request_id),
+
+            #[cfg(test)]
+            RuntimeMsg::UnregisterSnapshot { .. } => None,
         }
     }
 
     pub fn kind_name(&self) -> &'static str {
-        use RuntimeMsg::{
-            ApplyTransaction, BeginIngest, BeginTransaction, CancelWaitForWriteStallClear,
-            CaptureReadSnapshot, CheckCompaction, CheckGc, CheckWriteStall, CloudUploadComplete,
-            CloudUploadSst, CloudUploadWal, CompactAll, CompactionComplete, DeleteObsoleteSsts,
-            EndIngest, FlushComplete, FlushMemtable, GetCurrentSequence, GetIngestState,
-            GetReadAmpMetrics, GetRecoveryMetrics, GetRuntimeConfig, GetRuntimeMetrics,
-            GetStorageLayout, ManifestAddSst, ManifestCompactionComplete,
-            ManifestCreateColumnFamily, ManifestDropColumnFamily, ManifestPersist, Noop, RangeScan,
-            Read, RegisterSnapshot, RunCompaction, SealWalForCloud, SetRuntimeConfig, Shutdown,
-            StartupPing, UnregisterSnapshot, WaitForWriteStallClear, WalAppend,
-            WalAppendDeleteRange, WalRotate, WalSync, WalSyncComplete,
-        };
         match self {
-            FlushMemtable { .. } => "FlushMemtable",
-            FlushComplete { .. } => "FlushComplete",
-            CheckCompaction { .. } => "CheckCompaction",
-            RunCompaction { .. } => "RunCompaction",
-            CompactionComplete { .. } => "CompactionComplete",
-            WalAppend { .. } => "WalAppend",
-            WalAppendDeleteRange { .. } => "WalAppendDeleteRange",
-            ApplyTransaction { .. } => "ApplyTransaction",
-            WalSync { .. } => "WalSync",
-            WalRotate { .. } => "WalRotate",
-            SealWalForCloud { .. } => "SealWalForCloud",
-            WalSyncComplete { .. } => "WalSyncComplete",
-            CloudUploadSst { .. } => "CloudUploadSst",
-            CloudUploadWal { .. } => "CloudUploadWal",
-            CloudUploadComplete { .. } => "CloudUploadComplete",
-            CheckGc { .. } => "CheckGc",
-            DeleteObsoleteSsts { .. } => "DeleteObsoleteSsts",
-            ManifestAddSst { .. } => "ManifestAddSst",
-            ManifestCompactionComplete { .. } => "ManifestCompactionComplete",
-            ManifestPersist { .. } => "ManifestPersist",
-            ManifestCreateColumnFamily { .. } => "ManifestCreateColumnFamily",
-            ManifestDropColumnFamily { .. } => "ManifestDropColumnFamily",
-            Read { .. } => "Read",
-            RangeScan { .. } => "RangeScan",
-            GetReadAmpMetrics { .. } => "GetReadAmpMetrics",
-            GetRecoveryMetrics { .. } => "GetRecoveryMetrics",
-            GetRuntimeMetrics { .. } => "GetRuntimeMetrics",
-            GetStorageLayout { .. } => "GetStorageLayout",
-            GetCurrentSequence { .. } => "GetCurrentSequence",
-            CaptureReadSnapshot { .. } => "CaptureReadSnapshot",
-            BeginTransaction { .. } => "BeginTransaction",
-            RegisterSnapshot { .. } => "RegisterSnapshot",
-            UnregisterSnapshot { .. } => "UnregisterSnapshot",
-            SetRuntimeConfig { .. } => "SetRuntimeConfig",
-            GetRuntimeConfig { .. } => "GetRuntimeConfig",
-            GetIngestState { .. } => "GetIngestState",
-            BeginIngest { .. } => "BeginIngest",
-            EndIngest { .. } => "EndIngest",
-            CompactAll { .. } => "CompactAll",
-            Shutdown => "Shutdown",
-            Noop { .. } => "Noop",
-            CheckWriteStall { .. } => "CheckWriteStall",
-            WaitForWriteStallClear { .. } => "WaitForWriteStallClear",
-            CancelWaitForWriteStallClear { .. } => "CancelWaitForWriteStallClear",
-            StartupPing { .. } => "StartupPing",
+            RuntimeMsg::FlushMemtable { .. } => "FlushMemtable",
+            RuntimeMsg::CompactionComplete { .. } => "CompactionComplete",
+            RuntimeMsg::ApplyTransaction { .. } => "ApplyTransaction",
+            RuntimeMsg::WalSync { .. } => "WalSync",
+            RuntimeMsg::SealWalForCloud { .. } => "SealWalForCloud",
+            RuntimeMsg::ManifestPersist { .. } => "ManifestPersist",
+            RuntimeMsg::ManifestCreateColumnFamily { .. } => "ManifestCreateColumnFamily",
+            RuntimeMsg::ManifestDropColumnFamily { .. } => "ManifestDropColumnFamily",
+            RuntimeMsg::GetReadAmpMetrics { .. } => "GetReadAmpMetrics",
+            RuntimeMsg::GetRecoveryMetrics { .. } => "GetRecoveryMetrics",
+            RuntimeMsg::GetRuntimeMetrics { .. } => "GetRuntimeMetrics",
+            RuntimeMsg::GetStorageLayout { .. } => "GetStorageLayout",
+            RuntimeMsg::BeginTransaction { .. } => "BeginTransaction",
+            RuntimeMsg::SetRuntimeConfig { .. } => "SetRuntimeConfig",
+            RuntimeMsg::CompactAll { .. } => "CompactAll",
+            RuntimeMsg::Shutdown => "Shutdown",
+            RuntimeMsg::CheckWriteStall { .. } => "CheckWriteStall",
+            RuntimeMsg::WaitForWriteStallClear { .. } => "WaitForWriteStallClear",
+            RuntimeMsg::CancelWaitForWriteStallClear { .. } => "CancelWaitForWriteStallClear",
+
+            #[cfg(test)]
+            RuntimeMsg::FlushComplete { .. } => "FlushComplete",
+            #[cfg(test)]
+            RuntimeMsg::CheckCompaction { .. } => "CheckCompaction",
+            #[cfg(test)]
+            RuntimeMsg::RunCompaction { .. } => "RunCompaction",
+            #[cfg(test)]
+            RuntimeMsg::WalAppend { .. } => "WalAppend",
+            #[cfg(test)]
+            RuntimeMsg::WalAppendDeleteRange { .. } => "WalAppendDeleteRange",
+            #[cfg(test)]
+            RuntimeMsg::WalRotate { .. } => "WalRotate",
+            #[cfg(test)]
+            RuntimeMsg::WalSyncComplete { .. } => "WalSyncComplete",
+            #[cfg(test)]
+            RuntimeMsg::CloudUploadSst { .. } => "CloudUploadSst",
+            #[cfg(test)]
+            RuntimeMsg::CloudUploadWal { .. } => "CloudUploadWal",
+            #[cfg(test)]
+            RuntimeMsg::CloudUploadComplete { .. } => "CloudUploadComplete",
+            #[cfg(test)]
+            RuntimeMsg::CheckGc { .. } => "CheckGc",
+            #[cfg(test)]
+            RuntimeMsg::DeleteObsoleteSsts { .. } => "DeleteObsoleteSsts",
+            #[cfg(test)]
+            RuntimeMsg::ManifestAddSst { .. } => "ManifestAddSst",
+            #[cfg(test)]
+            RuntimeMsg::ManifestCompactionComplete { .. } => "ManifestCompactionComplete",
+            #[cfg(test)]
+            RuntimeMsg::Read { .. } => "Read",
+            #[cfg(test)]
+            RuntimeMsg::RangeScan { .. } => "RangeScan",
+            #[cfg(test)]
+            RuntimeMsg::GetCurrentSequence { .. } => "GetCurrentSequence",
+            #[cfg(test)]
+            RuntimeMsg::CaptureReadSnapshot { .. } => "CaptureReadSnapshot",
+            #[cfg(test)]
+            RuntimeMsg::RegisterSnapshot { .. } => "RegisterSnapshot",
+            #[cfg(test)]
+            RuntimeMsg::UnregisterSnapshot { .. } => "UnregisterSnapshot",
+            #[cfg(test)]
+            RuntimeMsg::GetRuntimeConfig { .. } => "GetRuntimeConfig",
+            #[cfg(test)]
+            RuntimeMsg::GetIngestState { .. } => "GetIngestState",
+            #[cfg(test)]
+            RuntimeMsg::BeginIngest { .. } => "BeginIngest",
+            #[cfg(test)]
+            RuntimeMsg::EndIngest { .. } => "EndIngest",
+            #[cfg(test)]
+            RuntimeMsg::Noop { .. } => "Noop",
+            #[cfg(test)]
+            RuntimeMsg::StartupPing { .. } => "StartupPing",
         }
     }
 }
 
 /// Response from runtime operations.
 ///
-/// Copilot: every response variant MUST carry the originating `request_id`.
+/// Maintainer: every response variant MUST carry the originating `request_id`.
 #[derive(Debug)]
 pub enum RuntimeResponse {
     Ok {
@@ -655,6 +696,7 @@ pub enum RuntimeResponse {
     ///
     /// Note: Sequence numbers are allocated inside the runtime at append time
     /// to preserve a total order under concurrency.
+    #[cfg(test)]
     WalAppended {
         request_id: u64,
         sequence: u64,
@@ -674,18 +716,22 @@ pub enum RuntimeResponse {
         request_id: u64,
         error: crate::common::MidgeError,
     },
+    #[cfg(test)]
     ReadValue {
         request_id: u64,
         value: Option<Vec<u8>>,
     },
+    #[cfg(test)]
     RangeScanResults {
         request_id: u64,
         results: Vec<(Vec<u8>, Vec<u8>)>,
     },
+    #[cfg(test)]
     FlushComplete {
         request_id: u64,
         sst_name: String,
     },
+    #[cfg(test)]
     CompactionComplete {
         request_id: u64,
         output_ssts: Vec<String>,
@@ -729,12 +775,14 @@ pub enum RuntimeResponse {
     },
 
     /// Current authoritative runtime sequence.
+    #[cfg(test)]
     CurrentSequence {
         request_id: u64,
         sequence: u64,
     },
 
     /// Immutable read snapshot for direct transaction execution.
+    #[cfg(test)]
     ReadSnapshot {
         request_id: u64,
         snapshot: Arc<super::runtime::read_snapshot::ReadSnapshot>,
@@ -750,6 +798,7 @@ pub enum RuntimeResponse {
     },
 
     /// Snapshot of runtime configuration for diagnostics and tooling
+    #[cfg(test)]
     RuntimeConfigSnapshot {
         request_id: u64,
         memtable_size_limit: usize,
@@ -760,6 +809,7 @@ pub enum RuntimeResponse {
         wal_batch_config: crate::wal::policy::BatchConfig,
     },
     /// Simple ingest state response
+    #[cfg(test)]
     IngestState {
         request_id: u64,
         ingest_active: bool,
@@ -776,24 +826,25 @@ impl RuntimeResponse {
     pub fn request_id(&self) -> u64 {
         match self {
             RuntimeResponse::Ok { request_id }
-            | RuntimeResponse::WalAppended { request_id, .. }
             | RuntimeResponse::TransactionApplied { request_id, .. }
             | RuntimeResponse::Error { request_id, .. }
-            | RuntimeResponse::ReadValue { request_id, .. }
-            | RuntimeResponse::RangeScanResults { request_id, .. }
-            | RuntimeResponse::FlushComplete { request_id, .. }
-            | RuntimeResponse::CompactionComplete { request_id, .. }
             | RuntimeResponse::ColumnFamilyCreated { request_id, .. }
             | RuntimeResponse::ReadAmpMetricsSnapshot { request_id, .. }
             | RuntimeResponse::RecoveryMetricsSnapshot { request_id, .. }
             | RuntimeResponse::RuntimeMetricsSnapshot { request_id, .. }
             | RuntimeResponse::StorageLayoutSnapshot { request_id, .. }
+            | RuntimeResponse::BeginTransactionResult { request_id, .. }
+            | RuntimeResponse::WriteStallStatus { request_id, .. } => *request_id,
+            #[cfg(test)]
+            RuntimeResponse::WalAppended { request_id, .. }
+            | RuntimeResponse::ReadValue { request_id, .. }
+            | RuntimeResponse::RangeScanResults { request_id, .. }
+            | RuntimeResponse::FlushComplete { request_id, .. }
+            | RuntimeResponse::CompactionComplete { request_id, .. }
             | RuntimeResponse::CurrentSequence { request_id, .. }
             | RuntimeResponse::ReadSnapshot { request_id, .. }
-            | RuntimeResponse::BeginTransactionResult { request_id, .. }
             | RuntimeResponse::RuntimeConfigSnapshot { request_id, .. }
-            | RuntimeResponse::IngestState { request_id, .. }
-            | RuntimeResponse::WriteStallStatus { request_id, .. } => *request_id,
+            | RuntimeResponse::IngestState { request_id, .. } => *request_id,
         }
     }
 }
@@ -849,7 +900,7 @@ impl ResponseRouter {
 
 /// Handle for submitting work to the runtime.
 ///
-/// Copilot:
+/// Maintainer:
 /// - Route responses by `request_id` using `ResponseRouter`.
 /// - Use per-request channels (bounded(1)) created via `ResponseRouter::register`.
 /// - Never use a single shared `response_rx`.
@@ -897,14 +948,6 @@ impl RuntimeHandle {
         self.msg_tx
             .send(msg)
             .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))
-    }
-
-    /// Register a response channel for a `request_id`.
-    ///
-    /// Intended for benchmarks to pre-register receivers and avoid
-    /// per-iteration allocations in hot loops.
-    pub fn register_response(&self, request_id: u64) -> Receiver<RuntimeResponse> {
-        self.router.register(request_id)
     }
 
     /// Submit a message and wait synchronously for its response.
@@ -1147,13 +1190,6 @@ impl Runtime {
         (runtime, handle)
     }
 
-    /// Start the runtime event loop in a background thread.
-    ///
-    /// Returns the Runtime (which owns the thread) and a handle for submitting work.
-    pub fn start(self, state: RuntimeState) -> MidgeResult<(Self, RuntimeHandle)> {
-        self.start_with_config(state, RuntimeConfig::default())
-    }
-
     /// Start the runtime event loop with explicit configuration.
     ///
     /// Returns the Runtime (which owns the thread) and a handle for submitting work.
@@ -1235,6 +1271,7 @@ impl Runtime {
     }
 
     /// Shutdown the runtime and wait for completion.
+    #[cfg(test)]
     pub fn shutdown(mut self) {
         self.shutdown_inner("shutdown");
     }
@@ -1357,55 +1394,128 @@ mod tests {
         assert_eq!(req_id, None);
     }
 
-    #[test]
-    fn should_extract_request_id_from_all_request_response_messages() {
-        // Arrange
-        // (no setup)
-
-        // Act
-        // (none)
-
-        // Assert
-        assert!(RuntimeMsg::FlushMemtable {
-            request_id: 1,
-            cf_id: 0
-        }
-        .request_id()
-        .is_some());
-
-        assert!(RuntimeMsg::CheckCompaction { request_id: 2 }
-            .request_id()
-            .is_some());
-        assert!(RuntimeMsg::CompactAll { request_id: 3 }
-            .request_id()
-            .is_some());
-        assert!(RuntimeMsg::CompactAll { request_id: 4 }.kind_name() == "CompactAll");
-
-        assert!(RuntimeMsg::WalAppend {
-            request_id: 3,
+    fn write_side_request_response_messages() -> Vec<RuntimeMsg> {
+        let file_meta = FileMeta {
+            name: "contract.sst".to_string(),
+            level: 0,
+            size_bytes: 1,
+            content_crc32c: None,
             cf_id: 0,
-            key: vec![],
-            value: None,
-            ttl_seconds: None,
-            insert_only: false
-        }
-        .request_id()
-        .is_some());
+            smallest_key: None,
+            largest_key: None,
+            smallest_seq: None,
+            largest_seq: None,
+        };
+        let compaction_plan = CompactionPlan {
+            input_files: vec!["input.sst".to_string()],
+            source_level: 0,
+            target_level: 1,
+            cf_id: 0,
+        };
+        vec![
+            RuntimeMsg::FlushMemtable {
+                request_id: 1,
+                cf_id: 0,
+            },
+            RuntimeMsg::FlushComplete {
+                request_id: 2,
+                cf_id: 0,
+                sst_name: "flushed.sst".to_string(),
+                sequence: 10,
+            },
+            RuntimeMsg::CheckCompaction { request_id: 3 },
+            RuntimeMsg::RunCompaction {
+                request_id: 4,
+                plan: compaction_plan,
+            },
+            RuntimeMsg::WalAppend {
+                request_id: 5,
+                cf_id: 0,
+                key: b"k".to_vec(),
+                value: Some(b"v".to_vec()),
+                ttl_seconds: None,
+                insert_only: false,
+            },
+            RuntimeMsg::WalAppendDeleteRange {
+                request_id: 6,
+                cf_id: 0,
+                start_key: b"a".to_vec(),
+                end_key: b"z".to_vec(),
+                durability_policy: None,
+            },
+            RuntimeMsg::WalRotate { request_id: 7 },
+            RuntimeMsg::WalSyncComplete {
+                request_id: 8,
+                segment_id: 1,
+            },
+            RuntimeMsg::CloudUploadSst {
+                request_id: 9,
+                sst_name: "remote.sst".to_string(),
+            },
+            RuntimeMsg::CloudUploadWal {
+                request_id: 10,
+                segment_id: 1,
+            },
+            RuntimeMsg::CloudUploadComplete {
+                request_id: 11,
+                resource: "wal/1".to_string(),
+            },
+            RuntimeMsg::CheckGc { request_id: 12 },
+            RuntimeMsg::DeleteObsoleteSsts {
+                request_id: 13,
+                sst_names: vec!["old.sst".to_string()],
+            },
+            RuntimeMsg::ManifestAddSst {
+                request_id: 14,
+                file_meta: file_meta.clone(),
+            },
+            RuntimeMsg::ManifestCompactionComplete {
+                request_id: 15,
+                removed: vec!["old.sst".to_string()],
+                added: vec![file_meta],
+            },
+            RuntimeMsg::BeginIngest { request_id: 16 },
+            RuntimeMsg::EndIngest { request_id: 17 },
+            RuntimeMsg::GetIngestState { request_id: 18 },
+            RuntimeMsg::GetRuntimeConfig { request_id: 19 },
+        ]
+    }
 
-        assert!(RuntimeMsg::CheckGc { request_id: 4 }.request_id().is_some());
+    fn read_side_request_response_messages() -> Vec<RuntimeMsg> {
+        vec![
+            RuntimeMsg::Read {
+                request_id: 20,
+                cf_id: 0,
+                key: b"k".to_vec(),
+                sequence: 1,
+                requested_durability: crate::types::ReadDurability::Strict,
+            },
+            RuntimeMsg::RangeScan {
+                request_id: 21,
+                cf_id: 0,
+                start: b"a".to_vec(),
+                end: b"z".to_vec(),
+                sequence: 1,
+                requested_durability: crate::types::ReadDurability::Strict,
+            },
+            RuntimeMsg::CaptureReadSnapshot {
+                request_id: 22,
+                cf_id: 0,
+                sequence: 1,
+            },
+            RuntimeMsg::UnregisterSnapshot { snapshot_id: 23 },
+            RuntimeMsg::Noop { request_id: 24 },
+            RuntimeMsg::StartupPing { request_id: 25 },
+        ]
+    }
 
-        assert!(RuntimeMsg::Noop { request_id: 5 }.request_id().is_some());
-
-        assert!(RuntimeMsg::StartupPing { request_id: 6 }
-            .request_id()
-            .is_some());
-        // CompactAll should be a recognized message kind
+    fn assert_compact_all_protocol_roundtrip() {
+        assert!(RuntimeMsg::CompactAll { request_id: 4 }.kind_name() == "CompactAll");
         assert!(RuntimeMsg::CompactAll { request_id: 7 }
             .request_id()
             .is_some());
         assert!(RuntimeMsg::CompactAll { request_id: 8 }.kind_name() == "CompactAll");
 
-        // Verify that CompactAll responds correctly when runtime is healthy
         let (runtime, _handle) = Runtime::new();
         let state = RuntimeState::new("/tmp/test_compact_all".into(), true);
         let (_runtime, h) = runtime
@@ -1421,12 +1531,31 @@ mod tests {
             _ => panic!("CompactAll did not return Ok"),
         }
 
-        // Signal runtime to shut down cleanly so Drop won't block waiting for thread join
         h.send(RuntimeMsg::Shutdown).expect("send shutdown");
-
         assert!(RuntimeMsg::GetCurrentSequence { request_id: 7 }
             .request_id()
             .is_some());
+    }
+
+    #[test]
+    fn should_extract_request_id_from_all_request_response_messages() {
+        // Arrange
+        let messages = write_side_request_response_messages()
+            .into_iter()
+            .chain(read_side_request_response_messages())
+            .collect::<Vec<_>>();
+
+        // Act
+        // Assert
+        assert!(messages
+            .iter()
+            .filter(|msg| !matches!(msg, RuntimeMsg::UnregisterSnapshot { .. }))
+            .all(|msg| msg.request_id().is_some()));
+        assert_eq!(
+            RuntimeMsg::UnregisterSnapshot { snapshot_id: 23 }.request_id(),
+            None
+        );
+        assert_compact_all_protocol_roundtrip();
     }
 
     // =========== RuntimeResponse Tests ===========
@@ -1443,90 +1572,124 @@ mod tests {
         assert_eq!(req_id, 42);
     }
 
-    #[test]
-    fn should_extract_request_id_from_all_responses() {
-        // Arrange
-        // (no setup)
-
-        // Act
-        // (none)
-
-        // Assert
-        assert_eq!(RuntimeResponse::Ok { request_id: 1 }.request_id(), 1);
-
-        assert_eq!(
+    fn runtime_response_fixtures() -> Vec<RuntimeResponse> {
+        let snapshot = Arc::new(crate::runtime::read_snapshot::ReadSnapshot::new(
+            Arc::new(crate::sst::SkipListMemtable::new()),
+            vec![],
+            vec![],
+            Arc::new(crate::io::MockFs::new()),
+            std::path::PathBuf::new(),
+            true,
+        ));
+        vec![
+            RuntimeResponse::Ok { request_id: 1 },
             RuntimeResponse::Error {
                 request_id: 2,
-                error: crate::common::MidgeError::Internal("error".to_string())
-            }
-            .request_id(),
-            2
-        );
-
-        assert_eq!(
+                error: crate::common::MidgeError::Internal("error".to_string()),
+            },
             RuntimeResponse::ReadValue {
                 request_id: 3,
-                value: None
-            }
-            .request_id(),
-            3
-        );
-
-        assert_eq!(
+                value: Some(b"value".to_vec()),
+            },
             RuntimeResponse::RangeScanResults {
                 request_id: 4,
-                results: vec![]
-            }
-            .request_id(),
-            4
-        );
-
-        assert_eq!(
+                results: vec![(b"k".to_vec(), b"v".to_vec())],
+            },
             RuntimeResponse::FlushComplete {
                 request_id: 5,
-                sst_name: "sst".to_string()
-            }
-            .request_id(),
-            5
-        );
-
-        assert_eq!(
+                sst_name: "sst".to_string(),
+            },
             RuntimeResponse::CompactionComplete {
                 request_id: 6,
-                output_ssts: vec![]
-            }
-            .request_id(),
-            6
-        );
-
-        assert_eq!(
+                output_ssts: vec!["out.sst".to_string()],
+            },
             RuntimeResponse::ColumnFamilyCreated {
                 request_id: 7,
-                cf_id: 0
-            }
-            .request_id(),
-            7
-        );
-
-        assert_eq!(
+                cf_id: 0,
+            },
             RuntimeResponse::CurrentSequence {
                 request_id: 8,
-                sequence: 123
-            }
-            .request_id(),
-            8
-        );
-
-        assert_eq!(
+                sequence: 123,
+            },
             RuntimeResponse::TransactionApplied {
                 request_id: 9,
                 last_sequence: 200,
                 op_count: 2,
                 write_stall_hint: false,
+            },
+            RuntimeResponse::WalAppended {
+                request_id: 10,
+                sequence: 201,
+            },
+            RuntimeResponse::ReadSnapshot {
+                request_id: 11,
+                snapshot,
+            },
+            RuntimeResponse::RuntimeConfigSnapshot {
+                request_id: 12,
+                memtable_size_limit: 1,
+                memtable_flush_threshold: 1,
+                enable_compaction: true,
+                l0_compaction_trigger: 4,
+                wal_durability_policy: DurabilityPolicy::Batched,
+                wal_batch_config: crate::wal::policy::BatchConfig::default(),
+            },
+            RuntimeResponse::IngestState {
+                request_id: 13,
+                ingest_active: true,
+            },
+        ]
+    }
+
+    fn assert_response_payloads(responses: Vec<RuntimeResponse>) {
+        for response in responses {
+            match response {
+                RuntimeResponse::ReadValue { value, .. } => {
+                    assert_eq!(value, Some(b"value".to_vec()));
+                }
+                RuntimeResponse::RangeScanResults { results, .. } => assert_eq!(results.len(), 1),
+                RuntimeResponse::FlushComplete { sst_name, .. } => assert_eq!(sst_name, "sst"),
+                RuntimeResponse::CompactionComplete { output_ssts, .. } => {
+                    assert_eq!(output_ssts, vec!["out.sst"]);
+                }
+                RuntimeResponse::CurrentSequence { sequence, .. } => assert_eq!(sequence, 123),
+                RuntimeResponse::WalAppended { sequence, .. } => assert_eq!(sequence, 201),
+                RuntimeResponse::ReadSnapshot { snapshot, .. } => assert_eq!(snapshot.cf_id, 0),
+                RuntimeResponse::RuntimeConfigSnapshot {
+                    memtable_size_limit,
+                    memtable_flush_threshold,
+                    enable_compaction,
+                    l0_compaction_trigger,
+                    wal_durability_policy,
+                    wal_batch_config,
+                    ..
+                } => {
+                    assert_eq!(memtable_size_limit, 1);
+                    assert_eq!(memtable_flush_threshold, 1);
+                    assert!(enable_compaction);
+                    assert_eq!(l0_compaction_trigger, 4);
+                    assert_eq!(wal_durability_policy, DurabilityPolicy::Batched);
+                    let default_batch = crate::wal::policy::BatchConfig::default();
+                    assert_eq!(wal_batch_config.max_delay_ms, default_batch.max_delay_ms);
+                    assert_eq!(wal_batch_config.max_bytes, default_batch.max_bytes);
+                }
+                RuntimeResponse::IngestState { ingest_active, .. } => assert!(ingest_active),
+                _ => {}
             }
-            .request_id(),
-            9
-        );
+        }
+    }
+
+    #[test]
+    fn should_extract_request_id_from_all_responses() {
+        // Arrange
+        let responses = runtime_response_fixtures();
+
+        // Act
+        let request_ids: Vec<u64> = responses.iter().map(RuntimeResponse::request_id).collect();
+
+        // Assert
+        assert_eq!(request_ids, (1..=13).collect::<Vec<_>>());
+        assert_response_payloads(responses);
     }
 
     // =========== ResponseRouter Tests ===========

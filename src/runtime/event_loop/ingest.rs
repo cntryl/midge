@@ -1,7 +1,9 @@
 use super::EventLoop;
+#[cfg(test)]
 use crate::runtime::RuntimeResponse;
 
 impl EventLoop {
+    #[cfg(test)]
     pub(super) fn handle_get_ingest_state(&self, request_id: u64) {
         let active = self
             .state
@@ -16,6 +18,7 @@ impl EventLoop {
         );
     }
 
+    #[cfg(test)]
     pub(super) fn handle_begin_ingest(&mut self, request_id: u64) {
         let active = self
             .state
@@ -77,6 +80,7 @@ impl EventLoop {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn handle_end_ingest(&mut self, request_id: u64) {
         tracing::info!("EndIngest: flushing memtables and restoring scheduling");
 

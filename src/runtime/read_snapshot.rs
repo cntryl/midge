@@ -506,6 +506,7 @@ mod tests {
             Arc::new(crate::io::RealFs::new(temp_dir.path())?),
             std::path::PathBuf::new(),
             1024 * 1024,
+            crate::sst::cache::CachePolicyType::Lru,
         ));
         let snapshot = ReadSnapshot::new_with_resources(
             Arc::new(SkipListMemtable::new()),

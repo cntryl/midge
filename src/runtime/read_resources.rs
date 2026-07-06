@@ -3,7 +3,7 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::Fs;
 use crate::metadata::FileMeta;
-use crate::sst::cache::BlockCache;
+use crate::sst::cache::{BlockCache, CachePolicyType};
 use crate::sst::fs::SstFileIo;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -22,12 +22,15 @@ impl ReadResources {
         sst_fs: Arc<dyn Fs>,
         sst_path_prefix: PathBuf,
         block_cache_size: usize,
+        block_cache_policy: CachePolicyType,
     ) -> Self {
         Self {
             sst_fs,
             sst_path_prefix,
-            block_cache: Arc::new(BlockCache::new_default(
+            block_cache: Arc::new(BlockCache::new(
                 u64::try_from(block_cache_size).unwrap_or(u64::MAX),
+                16,
+                block_cache_policy,
             )),
             readers: Mutex::new(HashMap::new()),
         }
@@ -137,6 +140,7 @@ mod tests {
             Arc::new(crate::io::RealFs::new(temp_dir.path())?),
             PathBuf::new(),
             1024 * 1024,
+            CachePolicyType::Lru,
         );
 
         // Act

@@ -76,25 +76,6 @@ pub trait SstReaderExt: SstReader + SstStateReader {}
 
 impl<T> SstReaderExt for T where T: SstReader + SstStateReader {}
 
-/// Writer contract for SST implementations
-pub trait SstWriter: Send {
-    type Reader: SstReaderExt;
-
-    /// Add a key-value entry to the SST
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the key-value pair cannot be appended to the SST.
-    fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()>;
-
-    /// Finalize and produce a reader instance
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the SST cannot be finalized.
-    fn finish(self) -> MidgeResult<Self::Reader>;
-}
-
 /// Object-safe SST writer for polymorphic use
 pub trait DynSstWriter: Send {
     /// Add a simple key-value entry

@@ -14,6 +14,7 @@ use crate::metadata::FileMeta;
 #[derive(Debug, Clone)]
 pub struct CompactionPlan {
     pub input_files: Vec<String>,
+    #[cfg(test)]
     pub output_files: Vec<String>,
     pub source_level: u32,
     pub target_level: u32,
@@ -26,9 +27,11 @@ pub struct CompactionPlan {
 
 impl CompactionPlan {
     /// Create a new compaction plan for the given column family and level range.
+    #[cfg(test)]
     pub fn new(cf_id: u32, source_level: u32, target_level: u32) -> Self {
         Self {
             input_files: Vec::new(),
+            #[cfg(test)]
             output_files: Vec::new(),
             source_level,
             target_level,
@@ -38,11 +41,13 @@ impl CompactionPlan {
         }
     }
 
+    #[cfg(test)]
     pub fn with_output_seq(mut self, output_seq: u64) -> Self {
         self.output_seq = output_seq;
         self
     }
 
+    #[cfg(test)]
     pub fn with_snapshot_horizon(mut self, snapshot_horizon: Option<u64>) -> Self {
         self.snapshot_horizon = snapshot_horizon;
         self
@@ -186,6 +191,7 @@ impl Compactor {
 
         Some(CompactionPlan {
             input_files,
+            #[cfg(test)]
             output_files: Vec::new(),
             source_level: 0,
             target_level: 1,
@@ -216,6 +222,7 @@ impl Compactor {
 
         Some(CompactionPlan {
             input_files,
+            #[cfg(test)]
             output_files: Vec::new(),
             source_level: u32::try_from(level).expect("level index fits in u32"),
             target_level: u32::try_from(level + 1).expect("level index fits in u32"),

@@ -103,4 +103,17 @@ mod tests {
         // Assert
         assert!(Arc::strong_count(&backend) >= 1);
     }
+
+    #[test]
+    fn should_convert_oci_provider_into_inner_s3_provider() {
+        // Arrange
+        let provider = OciProvider::new("mynamespace", "mybucket".to_string(), "us-phoenix-1")
+            .expect("should create oci provider");
+
+        // Act
+        let backend = provider.into_inner().backend();
+
+        // Assert
+        assert!(Arc::strong_count(&backend) >= 1);
+    }
 }

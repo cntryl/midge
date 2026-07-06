@@ -1,11 +1,12 @@
-//! Test configuration primitives and helpers.
+//! Benchmark configuration primitives and helpers.
 //!
-//! This module defines `StorageMode` + `MidgeOptions` (used by `MidgeEngine::open_with_options`)
-//! and provides common helpers for parameterizing integration tests across backends.
+//! This module defines local benchmark storage profiles without exposing a
+//! crate-root testkit API.
+
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 /// Storage mode configuration for the engine.
 #[derive(Clone)]
@@ -23,15 +24,6 @@ pub struct SimulatedCloudOverrides {
     pub local_storage_budget_bytes: Option<u64>,
 }
 
-/// Configuration options for opening a `MidgeEngine` in tests.
-#[derive(Debug, Clone, Default)]
-pub struct CloudRuntimePolicyOverrides {
-    pub eventual_flush_segment_gap: Option<u64>,
-    pub wal_seal_min_segment_bytes: Option<usize>,
-    pub wal_seal_max_flush_delay: Option<Duration>,
-    pub wal_seal_max_pending_writes: Option<usize>,
-}
-
 #[derive(Clone)]
 pub struct MidgeOptions {
     /// Storage mode.
@@ -40,7 +32,7 @@ pub struct MidgeOptions {
     pub wal_sync: bool,
 
     /// Batch config for WAL group commit (optional).
-    pub wal_batch_config: Option<crate::wal::policy::BatchConfig>,
+    pub wal_batch_config: Option<cntryl_midge::wal::policy::BatchConfig>,
     /// Maximum memtable size before flush.
     pub memtable_size: usize,
     /// Compression enabled.
@@ -49,8 +41,8 @@ pub struct MidgeOptions {
     pub enable_compaction: bool,
     /// Memory budget for spilling (in bytes).
     pub memory_budget: Option<usize>,
-    /// Internal cloud runtime tuning used only by tests.
-    pub cloud_runtime_policy_overrides: Option<CloudRuntimePolicyOverrides>,
+    /// Cloud runtime tuning used by benchmark profiles.
+    pub cloud_write_policy: Option<cntryl_midge::CloudWritePolicy>,
     /// Internal simulated-cloud storage tuning used only by tests.
     pub simulated_cloud_overrides: Option<SimulatedCloudOverrides>,
 }
@@ -65,7 +57,7 @@ impl Default for MidgeOptions {
             compression: false,
             enable_compaction: true,
             memory_budget: None,
-            cloud_runtime_policy_overrides: None,
+            cloud_write_policy: None,
             simulated_cloud_overrides: None,
         }
     }
@@ -83,11 +75,8 @@ impl MidgeOptions {
     }
 
     #[must_use]
-    pub fn with_cloud_runtime_policy_overrides(
-        mut self,
-        overrides: CloudRuntimePolicyOverrides,
-    ) -> Self {
-        self.cloud_runtime_policy_overrides = Some(overrides);
+    pub fn with_cloud_write_policy(mut self, policy: cntryl_midge::CloudWritePolicy) -> Self {
+        self.cloud_write_policy = Some(policy);
         self
     }
 
@@ -102,70 +91,50 @@ impl MidgeOptions {
 
     /// Convert `MidgeOptions` to `OpenOptions` for use with `Engine::open`.
     #[must_use]
-    pub fn to_open_options(&self) -> crate::OpenOptions {
+    pub fn to_open_options(&self) -> cntryl_midge::OpenOptions {
         let storage = match &self.storage_mode {
-            StorageMode::Memory => crate::Storage::InMemory,
-            StorageMode::LocalDisk { db_path } => crate::Storage::Local {
+            StorageMode::Memory => cntryl_midge::Storage::InMemory,
+            StorageMode::LocalDisk { db_path } => cntryl_midge::Storage::Local {
                 path: db_path.clone(),
             },
-            StorageMode::CloudBacked { local_cache_path } => crate::Storage::CloudSimulated {
-                local_cache_path: local_cache_path.clone(),
-                bucket: "test-bucket".to_string(),
-                prefix: "test-prefix/".to_string(),
-            },
+            StorageMode::CloudBacked { local_cache_path } => {
+                cntryl_midge::Storage::CloudSimulated {
+                    local_cache_path: local_cache_path.clone(),
+                    bucket: "test-bucket".to_string(),
+                    prefix: "test-prefix/".to_string(),
+                }
+            }
         };
-
-        if let (StorageMode::CloudBacked { local_cache_path }, Some(local_storage_budget_bytes)) = (
-            &self.storage_mode,
-            self.simulated_cloud_overrides
-                .as_ref()
-                .and_then(|overrides| overrides.local_storage_budget_bytes),
-        ) {
-            crate::storage::test_support::register_simulated_cloud_budget(
-                local_cache_path,
-                local_storage_budget_bytes,
-            );
-        }
 
         // Build OpenOptions via constructors so defaults are sensible
         let mut open_opts = match storage {
-            crate::Storage::InMemory => crate::OpenOptions::in_memory(),
-            crate::Storage::Local { path } => crate::OpenOptions::local(path),
-            crate::Storage::CloudSimulated {
+            cntryl_midge::Storage::InMemory => cntryl_midge::OpenOptions::in_memory(),
+            cntryl_midge::Storage::Local { path } => cntryl_midge::OpenOptions::local(path),
+            cntryl_midge::Storage::CloudSimulated {
                 local_cache_path,
                 bucket,
                 prefix,
-            } => crate::OpenOptions::cloud_simulated(local_cache_path, bucket, prefix),
-            crate::Storage::Cloud { .. } => unreachable!("testkit uses simulated cloud storage"),
+            } => cntryl_midge::OpenOptions::cloud_simulated(local_cache_path, bucket, prefix),
+            cntryl_midge::Storage::Cloud { .. } => {
+                unreachable!("bench support uses simulated cloud storage")
+            }
         };
 
         // Apply user-specified high-level knobs
         open_opts = open_opts
             .memory_budget(match self.memory_budget {
-                Some(n) => crate::MemoryBudget::Bytes(n),
-                None => crate::MemoryBudget::Auto,
+                Some(n) => cntryl_midge::MemoryBudget::Bytes(n),
+                None => cntryl_midge::MemoryBudget::Auto,
             })
-            .workload(crate::WorkloadProfile::default())
-            .goal(crate::Goal::default())
+            .workload(cntryl_midge::WorkloadProfile::default())
+            .goal(cntryl_midge::Goal::default())
+            .background_compaction(self.enable_compaction)
+            .with_memtable_size_limit(self.memtable_size)
+            .with_memtable_flush_threshold(self.memtable_size)
             .build();
 
-        // Pass through WAL batch configuration if specified by testkit
-        open_opts.wal_batch_config = self.wal_batch_config;
-        if let Some(overrides) = &self.cloud_runtime_policy_overrides {
-            let mut policy = crate::runtime::CloudRuntimePolicy::default();
-            if let Some(gap) = overrides.eventual_flush_segment_gap {
-                policy.eventual_flush_segment_gap = gap;
-            }
-            if let Some(bytes) = overrides.wal_seal_min_segment_bytes {
-                policy.wal_seal.min_segment_bytes = bytes;
-            }
-            if let Some(delay) = overrides.wal_seal_max_flush_delay {
-                policy.wal_seal.max_flush_delay = delay;
-            }
-            if let Some(max_pending_writes) = overrides.wal_seal_max_pending_writes {
-                policy.wal_seal.max_pending_writes = max_pending_writes;
-            }
-            open_opts.cloud_runtime_policy = Some(policy);
+        if let Some(policy) = self.cloud_write_policy.clone() {
+            open_opts = open_opts.cloud_write_policy(policy);
         }
 
         open_opts
@@ -244,7 +213,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             compression: false,
             enable_compaction: false,
             memory_budget: None,
-            cloud_runtime_policy_overrides: None,
+            cloud_write_policy: None,
             simulated_cloud_overrides: None,
         },
         "local" => {
@@ -266,7 +235,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 compression: false,
                 enable_compaction: false,
                 memory_budget: None,
-                cloud_runtime_policy_overrides: None,
+                cloud_write_policy: None,
                 simulated_cloud_overrides: None,
             }
         }
@@ -295,7 +264,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 compression: false,
                 enable_compaction: false,
                 memory_budget: None,
-                cloud_runtime_policy_overrides: None,
+                cloud_write_policy: None,
                 simulated_cloud_overrides: None,
             }
         }
@@ -325,7 +294,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 compression: false,
                 enable_compaction: false,
                 memory_budget: None,
-                cloud_runtime_policy_overrides: None,
+                cloud_write_policy: None,
                 simulated_cloud_overrides: Some(SimulatedCloudOverrides {
                     local_storage_budget_bytes: Some(local_storage_budget_bytes),
                 }),
@@ -381,7 +350,7 @@ pub fn compaction_test_opts() -> MidgeOptions {
         compression: false,
         enable_compaction: true,
         memory_budget: None,
-        cloud_runtime_policy_overrides: None,
+        cloud_write_policy: None,
         simulated_cloud_overrides: None,
     }
 }
@@ -399,7 +368,7 @@ pub fn manual_compaction_test_opts() -> MidgeOptions {
         compression: false,
         enable_compaction: false,
         memory_budget: None,
-        cloud_runtime_policy_overrides: None,
+        cloud_write_policy: None,
         simulated_cloud_overrides: None,
     }
 }
@@ -417,7 +386,7 @@ pub fn durability_opts() -> MidgeOptions {
         compression: false,
         enable_compaction: false,
         memory_budget: None,
-        cloud_runtime_policy_overrides: None,
+        cloud_write_policy: None,
         simulated_cloud_overrides: None,
     }
 }

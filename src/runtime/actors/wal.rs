@@ -25,11 +25,12 @@
 //! asynchronous unless the caller explicitly waits on the cloud durability frontier.
 
 use super::super::state::RuntimeState;
-use super::cloud_write_queue::{
-    CloudWriteQueue, PendingCloudWrite, TransactionApplyOp, CLOUD_UPLOAD_TIMEOUT,
-};
+use super::cloud_write_queue::TransactionApplyOp;
+#[cfg(test)]
+use super::cloud_write_queue::{CloudWriteQueue, PendingCloudWrite, CLOUD_UPLOAD_TIMEOUT};
 use crate::common::MidgeError;
 use crate::common::MidgeResult;
+use crate::io::traits::FsError;
 use crate::io::{Fs, FsPath, RealFs};
 use crate::sst::Memtable;
 use crate::wal::policy::BatchConfig;
@@ -98,6 +99,7 @@ pub(crate) fn set_txn_append_batch_no_space_failpoint_request_id(request_id: Opt
 }
 
 /// Parameters for WAL append operation
+#[cfg(test)]
 pub struct AppendParams {
     pub request_id: u64,
     pub cf_id: crate::types::ColumnFamilyId,
@@ -119,7 +121,10 @@ pub struct WalActor {
     durability_policy: DurabilityPolicy,
     /// Pending writes waiting for cloud durability (`CloudAsync` mode only)
     /// These writes are in local WAL but NOT in memtable yet
+    #[cfg(test)]
     cloud_write_queue: CloudWriteQueue,
+    #[cfg(not(test))]
+    cloud_pending_writes: bool,
     /// Bytes written since last sync (for batched mode)
     bytes_since_sync: usize,
     /// Highest sequence actually appended to the current WAL segment.
@@ -215,7 +220,10 @@ impl WalActor {
             wal_fs,
             pending_sync_count: 0,
             durability_policy,
+            #[cfg(test)]
             cloud_write_queue: CloudWriteQueue::new(),
+            #[cfg(not(test))]
+            cloud_pending_writes: false,
             bytes_since_sync: 0,
             segment_max_sequence: 0,
             flush_generation: 0,
@@ -280,21 +288,26 @@ impl WalActor {
     }
 
     pub fn has_pending_cloud_writes(&self) -> bool {
-        self.cloud_write_queue.has_pending_writes()
+        #[cfg(test)]
+        {
+            self.cloud_write_queue.has_pending_writes()
+        }
+        #[cfg(not(test))]
+        {
+            self.cloud_pending_writes
+        }
     }
 
+    #[cfg(test)]
     pub fn pending_cloud_writes_len(&self) -> usize {
         self.cloud_write_queue.len()
-    }
-
-    pub fn pending_cloud_write_bytes(&self) -> usize {
-        self.cloud_write_queue.pending_bytes()
     }
 
     pub fn bytes_since_sync(&self) -> usize {
         self.bytes_since_sync
     }
 
+    #[cfg(test)]
     pub fn pending_sync_count(&self) -> usize {
         self.pending_sync_count
     }
@@ -304,27 +317,32 @@ impl WalActor {
     }
 
     /// Number of times `sync_internal` has been called (for tests/diagnostics)
+    #[cfg(test)]
     pub fn sync_calls(&self) -> u64 {
         self.sync_calls
     }
 
     /// Number of physical append calls made by this actor (for tests/diagnostics).
+    #[cfg(test)]
     pub fn append_calls(&self) -> u64 {
         self.append_calls
     }
 
     /// Check if cloud write queue has hit backpressure limits
     /// Returns true if we should reject new writes to prevent memory exhaustion
+    #[cfg(test)]
     pub fn should_apply_backpressure(&self) -> bool {
         self.cloud_write_queue.should_apply_backpressure()
     }
 
     /// Check for timed-out pending cloud writes
     /// Returns number of writes that have exceeded `CLOUD_UPLOAD_TIMEOUT`
+    #[cfg(test)]
     pub fn count_timed_out_writes(&self) -> usize {
         self.cloud_write_queue.count_timed_out_writes()
     }
 
+    #[cfg(test)]
     fn ensure_cloud_async_ready(&self) -> MidgeResult<()> {
         if self.should_apply_backpressure() {
             if let Some(t) = crate::telemetry::Telemetry::global() {
@@ -355,6 +373,7 @@ impl WalActor {
         Ok(())
     }
 
+    #[cfg(test)]
     fn apply_append_policy(
         &mut self,
         state: &mut RuntimeState,
@@ -420,6 +439,7 @@ impl WalActor {
         Ok(())
     }
 
+    #[cfg(test)]
     fn apply_delete_range_policy(
         &mut self,
         state: &mut RuntimeState,
@@ -464,6 +484,7 @@ impl WalActor {
     ///
     /// IDEMPOTENCY: Uses `request_id` to detect retries. If the same `request_id` is seen twice,
     /// returns the same sequence number instead of allocating a new one.
+    #[cfg(test)]
     pub fn append(
         &mut self,
         state: &mut RuntimeState,
@@ -599,6 +620,7 @@ impl WalActor {
     ///
     /// This writes a single `DeleteRange` record covering [`start_key`, `end_key`).
     /// Much more efficient than scanning and deleting each key individually.
+    #[cfg(test)]
     pub fn append_delete_range(
         &mut self,
         state: &mut RuntimeState,
@@ -811,7 +833,16 @@ impl WalActor {
                 last_sequence,
                 sequence_plan.begin_seq,
             )?;
+            #[cfg(test)]
             self.apply_transaction_ops(
+                state,
+                apply_ops,
+                effective_durability,
+                last_sequence,
+                apply_op_count,
+            )?;
+            #[cfg(not(test))]
+            Self::apply_transaction_ops(
                 state,
                 apply_ops,
                 effective_durability,
@@ -1118,6 +1149,7 @@ impl WalActor {
         Ok(())
     }
 
+    #[cfg(test)]
     fn apply_transaction_ops(
         &mut self,
         state: &mut RuntimeState,
@@ -1129,6 +1161,7 @@ impl WalActor {
         if !matches!(effective_durability, DurabilityPolicy::CloudAsync) {
             return Self::apply_ops_to_memtables(state, apply_ops);
         }
+        #[cfg(test)]
         self.validate_cloud_async_transaction_queue(apply_op_count)?;
         for apply_op in apply_ops {
             Self::apply_transaction_op_to_memtable(state, apply_op)?;
@@ -1141,6 +1174,29 @@ impl WalActor {
         Ok(())
     }
 
+    #[cfg(not(test))]
+    fn apply_transaction_ops(
+        state: &mut RuntimeState,
+        apply_ops: Vec<TransactionApplyOp>,
+        effective_durability: DurabilityPolicy,
+        last_sequence: u64,
+        apply_op_count: usize,
+    ) -> MidgeResult<()> {
+        if !matches!(effective_durability, DurabilityPolicy::CloudAsync) {
+            return Self::apply_ops_to_memtables(state, apply_ops);
+        }
+        for apply_op in apply_ops {
+            Self::apply_transaction_op_to_memtable(state, apply_op)?;
+        }
+        tracing::trace!(
+            commit_sequence = last_sequence,
+            apply_op_count,
+            "Applied batch to memtable (CloudAsync)"
+        );
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn validate_cloud_async_transaction_queue(&self, apply_op_count: usize) -> MidgeResult<()> {
         if self.should_apply_backpressure() {
             if let Some(telemetry) = crate::telemetry::Telemetry::global() {
@@ -1233,19 +1289,14 @@ impl WalActor {
                         }
                     }
                 }
-                crate::runtime::TransactionOp::DeleteRange { .. } => {
-                    let (cf_id, start_key, end_key) = match op {
-                        crate::runtime::TransactionOp::DeleteRange {
-                            cf_id,
-                            start_key,
-                            end_key,
-                        } => (*cf_id, start_key, end_key),
-                        _ => unreachable!(),
-                    };
-
+                crate::runtime::TransactionOp::DeleteRange {
+                    cf_id,
+                    start_key,
+                    end_key,
+                } => {
                     if let Some(latest_seq) = Self::latest_range_sequence(
                         state,
-                        cf_id,
+                        *cf_id,
                         start_key.as_ref(),
                         end_key.as_ref(),
                     ) {
@@ -1258,7 +1309,7 @@ impl WalActor {
                     }
 
                     if let Some(range_seq) = state.latest_overlapping_delete_range_sequence(
-                        cf_id,
+                        *cf_id,
                         start_key.as_ref(),
                         end_key.as_ref(),
                     ) {
@@ -1482,7 +1533,14 @@ impl WalActor {
             return false;
         }
 
-        self.cloud_write_queue.contains_key(cf_id, key)
+        #[cfg(test)]
+        {
+            self.cloud_write_queue.contains_key(cf_id, key)
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
     }
 
     /// Apply a write to the memtable
@@ -1739,16 +1797,32 @@ impl WalActor {
         // Close the current writer before renaming
         let _ = self.writer.take();
 
-        if let Some(fs) = &self.wal_fs {
+        if let Some(fs) = self.wal_fs.as_ref().map(Arc::clone) {
             // Rename the mutable active WAL to its immutable sealed segment name.
             let old_path = FsPath::new(crate::wal::ACTIVE_FILE_NAME);
             let new_path = FsPath::new(crate::wal::segment_file_name(old_segment));
 
-            // Rename may fail if file doesn't exist (e.g., in memory mode)
-            let _ = fs.rename_atomic(&old_path, &new_path);
+            match fs.rename_atomic(&old_path, &new_path) {
+                Ok(()) => {}
+                Err(FsError::NotFound(_)) if self.can_ignore_missing_active_segment() => {
+                    tracing::debug!(
+                        old_segment,
+                        "WAL rotate ignored missing empty active segment"
+                    );
+                }
+                Err(error) => {
+                    self.restore_active_writer_after_failed_rotate(&fs);
+                    tracing::error!(
+                        old_segment,
+                        error = ?error,
+                        "WAL rotate failed while sealing active segment"
+                    );
+                    return Err(MidgeError::from(error));
+                }
+            }
 
             // Create new writer for the next segment
-            let factory = FsWalFactoryIo::new(Arc::clone(fs));
+            let factory = FsWalFactoryIo::new(Arc::clone(&fs));
             self.writer = Some(factory.create_writer(crate::wal::ACTIVE_FILE_NAME)?);
         }
 
@@ -1764,10 +1838,28 @@ impl WalActor {
         Ok(())
     }
 
+    fn can_ignore_missing_active_segment(&self) -> bool {
+        self.segment_max_sequence == 0 && !self.has_pending_data()
+    }
+
+    fn restore_active_writer_after_failed_rotate(&mut self, fs: &Arc<dyn Fs>) {
+        let factory = FsWalFactoryIo::new(Arc::clone(fs));
+        match factory.create_writer(crate::wal::ACTIVE_FILE_NAME) {
+            Ok(writer) => self.writer = Some(writer),
+            Err(error) => {
+                tracing::error!(
+                    error = ?error,
+                    "failed to reopen active WAL writer after rotate failure"
+                );
+            }
+        }
+    }
+
     /// Handle cloud upload completion (`CloudAsync` durability)
     ///
     /// Updates `cloud_durable_seq` and completes any pending writes
     /// by applying them to memtable.
+    #[cfg(test)]
     fn apply_pending_cloud_write(
         state: &mut RuntimeState,
         pending: PendingCloudWrite,
@@ -1816,26 +1908,12 @@ impl WalActor {
                 );
                 Self::apply_delete_range_to_memtable(state, sequence, cf_id, &start_key, &end_key)?;
             }
-            PendingCloudWrite::Transaction {
-                commit_sequence,
-                ops,
-                enqueued_at,
-            } => {
-                let wait_time = Instant::now().duration_since(enqueued_at);
-                let op_count = ops.len();
-                tracing::debug!(
-                    commit_sequence,
-                    op_count,
-                    wait_ms = wait_time.as_millis(),
-                    "Applying pending transaction after cloud durability"
-                );
-                Self::apply_ops_to_memtables(state, ops)?;
-            }
         }
 
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn handle_cloud_upload_complete(
         &mut self,
         state: &mut RuntimeState,
@@ -1852,26 +1930,50 @@ impl WalActor {
         );
 
         // Apply pending writes to memtable.
-        let drained_writes = self
-            .cloud_write_queue
-            .drain_until(state.wal.cloud_durable_seq);
+        #[cfg(test)]
+        {
+            let drained_writes = self
+                .cloud_write_queue
+                .drain_until(state.wal.cloud_durable_seq);
 
-        for pending in drained_writes {
-            Self::apply_pending_cloud_write(state, pending)?;
+            for pending in drained_writes {
+                Self::apply_pending_cloud_write(state, pending)?;
+            }
         }
 
         Ok(())
     }
 
+    #[cfg(not(test))]
+    pub fn handle_cloud_upload_complete(
+        &mut self,
+        state: &mut RuntimeState,
+        segment_id: u64,
+        max_seq_in_segment: u64,
+    ) {
+        state.wal.cloud_durable_seq = state.wal.cloud_durable_seq.max(max_seq_in_segment);
+        self.cloud_pending_writes = false;
+
+        tracing::debug!(
+            segment_id,
+            cloud_durable_seq = state.wal.cloud_durable_seq,
+            "Cloud upload complete"
+        );
+    }
+
     pub fn handle_cloud_upload_failed(&mut self, segment_id: u64, error: &str) {
         tracing::error!(segment_id, error, "Cloud upload failed");
 
-        // Conservative behavior: fail all pending CloudAsync requests.
-        // We cannot claim durability for any queued writes.
+        #[cfg(test)]
         self.cloud_write_queue.clear();
+        #[cfg(not(test))]
+        {
+            self.cloud_pending_writes = false;
+        }
     }
 
     /// Handle sync completion notification
+    #[cfg(test)]
     pub fn handle_sync_complete(state: &mut RuntimeState, segment_id: u64) {
         tracing::debug!(segment_id, "WAL sync complete");
 
@@ -1894,6 +1996,11 @@ impl Default for WalActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::traits::{DirEntry, FsError, Metadata};
+    use crate::io::{
+        Durability as FsDurability, File, Fs, FsPath, FsResult, MockFs,
+        OpenOptions as FsOpenOptions,
+    };
     use crate::runtime::RuntimeState;
     use bytes::Bytes;
     use std::path::PathBuf;
@@ -1920,6 +2027,67 @@ mod tests {
         fn drop(&mut self) {
             fail::remove("midge::wal::inject_no_space_on_txn_append_batch");
             set_txn_append_batch_no_space_failpoint_request_id(None);
+        }
+    }
+
+    struct RenameFailingFs {
+        inner: MockFs,
+    }
+
+    impl RenameFailingFs {
+        fn new() -> Self {
+            Self {
+                inner: MockFs::new(),
+            }
+        }
+    }
+
+    impl Fs for RenameFailingFs {
+        fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
+            self.inner.open(path, opts)
+        }
+
+        fn open_persistent_handle(
+            &self,
+            path: &FsPath,
+            opts: FsOpenOptions,
+        ) -> FsResult<Box<dyn File>> {
+            self.inner.open_persistent_handle(path, opts)
+        }
+
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+
+        fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+
+        fn sync_dir(&self, path: &FsPath, dur: FsDurability) -> FsResult<()> {
+            self.inner.sync_dir(path, dur)
+        }
+
+        fn rename_atomic(&self, from: &FsPath, _to: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(format!(
+                "rename failed for {}",
+                from.0
+            )))
         }
     }
 
@@ -2314,6 +2482,40 @@ mod tests {
             !wal_dir.join("1.wal").exists(),
             "newly rotated WAL segments should not use the legacy non-padded name"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_fail_rotate_without_advancing_segment_when_rename_fails() -> MidgeResult<()> {
+        // Arrange
+        let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+        let db_path = temp.path().to_path_buf();
+        let fs: Arc<dyn Fs> = Arc::new(RenameFailingFs::new());
+        let writer =
+            FsWalFactoryIo::new(Arc::clone(&fs)).create_writer(crate::wal::ACTIVE_FILE_NAME)?;
+        let mut state = RuntimeState::new(db_path.clone(), true);
+        state.wal.current_segment_id = 7;
+
+        let mut wal_actor = WalActor::new(
+            db_path.join("unused-wal"),
+            DurabilityPolicy::Strict,
+            BatchConfig::default(),
+            true,
+            1,
+        )?;
+        wal_actor.wal_fs = Some(fs);
+        wal_actor.writer = Some(writer);
+        wal_actor.segment_max_sequence = 42;
+
+        // Act
+        let result = wal_actor.rotate(&mut state);
+
+        // Assert
+        assert!(result.is_err());
+        assert_eq!(state.wal.current_segment_id, 7);
+        assert_eq!(wal_actor.segment_max_sequence, 42);
+        assert!(wal_actor.writer.is_some());
 
         Ok(())
     }

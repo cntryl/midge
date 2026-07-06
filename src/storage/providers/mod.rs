@@ -55,7 +55,7 @@
 //!
 //! ## Example Usage
 
-#[cfg(feature = "cloud-common")]
+#[cfg(all(test, feature = "cloud-common"))]
 pub mod aws;
 #[cfg(feature = "cloud-common")]
 pub mod azure;
@@ -68,9 +68,9 @@ mod factory;
 pub mod gcs;
 #[cfg(feature = "cloud-common")]
 mod gcs_resolver;
-#[cfg(feature = "cloud-common")]
+#[cfg(all(test, feature = "cloud-common"))]
 pub mod minio;
-#[cfg(feature = "cloud-common")]
+#[cfg(all(test, feature = "cloud-common"))]
 pub mod oci;
 #[cfg(all(test, feature = "cloud-common", feature = "peas-tests"))]
 pub mod qualification;
@@ -78,7 +78,7 @@ pub mod qualification;
 pub mod s3;
 #[cfg(feature = "cloud-common")]
 mod s3_resolver;
-#[cfg(feature = "cloud-common")]
+#[cfg(all(test, feature = "cloud-common"))]
 pub mod wasabi;
 
 use std::sync::Arc;

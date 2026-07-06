@@ -101,6 +101,7 @@ impl EventLoop {
     ) {
         for w in waiters {
             match w {
+                #[cfg(test)]
                 DurabilityWaiter::WalAppend {
                     request_id,
                     sequence,
@@ -145,23 +146,23 @@ impl EventLoop {
                 DurabilityWaiter::CloudDurability { request_id } => {
                     self.respond(request_id, RuntimeResponse::Ok { request_id });
                 }
+                #[cfg(test)]
                 DurabilityWaiter::Read {
                     request_id,
                     cf_id,
                     key,
                     sequence,
-                    requested_durability: _,
                 } => {
                     let value = self.handle_read(cf_id, &key, sequence);
                     self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
                 }
+                #[cfg(test)]
                 DurabilityWaiter::RangeScan {
                     request_id,
                     cf_id,
                     start,
                     end,
                     sequence,
-                    requested_durability: _,
                 } => {
                     let results = self.handle_range_scan(cf_id, &start, &end, sequence);
                     self.respond(
@@ -242,23 +243,6 @@ impl EventLoop {
             Err(e) => {
                 tracing::warn!(error = %e, "failed to sync batched WAL");
             }
-        }
-    }
-
-    /// Sync WAL if any durable waiters exist (safety valve for forward-progress).
-    /// This ensures that operations observing durability (reads, ranges, deletes)
-    /// always see a stable state with durability guarantees.
-    /// Without this, tests with patterns like "write → read/range/delete" hang forever.
-    #[allow(dead_code)]
-    pub(super) fn sync_if_waiters_exist(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
-        if self.wal_actor.is_cloud_async() {
-            return; // CloudAsync has separate logic
-        }
-
-        let has_waiters = self.durability.has_pending_waiters();
-
-        if has_waiters {
-            self.force_wal_sync(msg_rx);
         }
     }
 

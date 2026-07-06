@@ -206,8 +206,6 @@ fn child_create_data_and_compact_with_crash_before_persist(db_path: &Path) {
 
     // Write data and trigger compaction
     let engine = open_local_engine(db_path);
-    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, false)
-        .expect("disable automatic compaction during crash setup");
     let default_cf = default_cf(&engine);
 
     // Write multiple batches to create L0 files
@@ -239,8 +237,6 @@ fn child_create_data_and_compact_with_crash_before_persist(db_path: &Path) {
     }
 
     // Trigger compaction - will crash at slice6::after_compaction_update_before_manifest_persist
-    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, true)
-        .expect("enable manual compaction for crash point");
     engine.compact_all().expect("compact_all");
 
     // Should have panicked and aborted before reaching here
@@ -260,8 +256,6 @@ fn child_create_data_and_compact_with_crash_before_publish(db_path: &Path) {
     std::mem::forget(scenario);
 
     let engine = open_local_engine(db_path);
-    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, false)
-        .expect("disable automatic compaction during crash setup");
     let default_cf = default_cf(&engine);
 
     for batch in 0..5 {
@@ -290,8 +284,6 @@ fn child_create_data_and_compact_with_crash_before_publish(db_path: &Path) {
         engine.flush_cf(&default_cf).expect("flush batch");
     }
 
-    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, true)
-        .expect("enable manual compaction for crash point");
     engine.compact_all().expect("compact_all");
 
     panic!("expected crash at manifest publish failpoint");
@@ -309,8 +301,6 @@ fn child_create_data_and_compact_with_crash_before_gc(db_path: &Path) {
 
     // Write data and trigger compaction
     let engine = open_local_engine(db_path);
-    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, false)
-        .expect("disable automatic compaction during crash setup");
     let default_cf = default_cf(&engine);
 
     // Write multiple batches to create L0 files
@@ -342,8 +332,6 @@ fn child_create_data_and_compact_with_crash_before_gc(db_path: &Path) {
     }
 
     // Trigger compaction - will crash at slice6::after_manifest_persist_before_sst_gc
-    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, true)
-        .expect("enable manual compaction for crash point");
     engine.compact_all().expect("compact_all");
 
     // Should have panicked and aborted before reaching here
@@ -430,7 +418,12 @@ fn read_committed_records(db_path: &Path) -> Vec<CommitRecord> {
 }
 
 fn open_local_engine(db_path: &Path) -> Engine {
-    Engine::open(OpenOptions::local(db_path).build()).expect("open engine after crash")
+    Engine::open(
+        OpenOptions::local(db_path)
+            .background_compaction(false)
+            .build(),
+    )
+    .expect("open engine after crash")
 }
 
 fn default_cf(engine: &Engine) -> cntryl_midge::ColumnFamilyHandle {

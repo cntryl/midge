@@ -147,6 +147,20 @@ At return:
 
 Use `best_effort()` only for data that can be rebuilt or safely discarded.
 
+### `WriteOptions::cloud_strict()`
+
+`cloud_strict()` is valid only for cloud-backed storage. Non-cloud storage rejects it with `MidgeError::InvalidArgument`.
+
+For a cloud-backed transaction with writes, `commit()` returns only after the runtime seals and rotates the active WAL segment, uploads that sealed WAL segment, and receives cloud acknowledgment covering the committed sequence.
+
+At return:
+
+- the transaction is visible
+- the transaction is covered by the cloud durability frontier
+- restart after local cache loss should recover the transaction from uploaded WAL or already-published SST state
+
+Empty cloud-backed `cloud_strict()` transactions are allowed and do not invent a WAL record. Empty non-cloud `cloud_strict()` transactions still reject the option.
+
 ## Recovery Policy Contract
 
 ### `RecoveryPolicy::Strict`

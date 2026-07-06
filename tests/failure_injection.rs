@@ -734,8 +734,6 @@ fn should_preserve_compacted_input_state_when_compaction_output_hits_no_space() 
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
-    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, false)
-        .expect("disable automatic compaction during failure-injection setup");
     let cf = default_cf(&engine);
 
     for batch in 0..6 {
@@ -766,8 +764,6 @@ fn should_preserve_compacted_input_state_when_compaction_output_hits_no_space() 
     let scenario = fail::FailScenario::setup();
     fail::cfg("midge::sst::inject_no_space_on_finish_to_path", "return")
         .expect("configure compaction output no-space failpoint");
-    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, true)
-        .expect("enable manual compaction for failure injection");
     engine
         .compact_all()
         .expect("compact_all returns after failure");
@@ -804,8 +800,6 @@ fn should_publish_compaction_output_on_reopen_when_manifest_batch_append_hits_no
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
-    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, false)
-        .expect("disable automatic compaction during failure-injection setup");
     let cf = default_cf(&engine);
 
     for batch in 0..6 {
@@ -839,8 +833,6 @@ fn should_publish_compaction_output_on_reopen_when_manifest_batch_append_hits_no
         "return",
     )
     .expect("configure manifest batch append no-space failpoint");
-    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, true)
-        .expect("enable manual compaction for failure injection");
     engine
         .compact_all()
         .expect("compact_all returns after manifest batch failure");
@@ -880,8 +872,6 @@ fn should_recover_compaction_from_manifest_checkpoint_save_failure_after_batch_j
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
-    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, false)
-        .expect("disable automatic compaction during failure-injection setup");
     let cf = default_cf(&engine);
 
     for batch in 0..6 {
@@ -915,8 +905,6 @@ fn should_recover_compaction_from_manifest_checkpoint_save_failure_after_batch_j
         "return",
     )
     .expect("configure manifest checkpoint no-space failpoint");
-    cntryl_midge::testkit::bench::set_runtime_compaction_enabled(&engine, true)
-        .expect("enable manual compaction for failure injection");
     engine.compact_all().expect("compact_all returns");
     assert_eq!(
         engine
@@ -961,7 +949,12 @@ fn failpoint_test_lock() -> &'static Mutex<()> {
 }
 
 fn open_local_engine(db_path: &Path) -> Engine {
-    Engine::open(OpenOptions::local(db_path).build()).expect("open engine")
+    Engine::open(
+        OpenOptions::local(db_path)
+            .background_compaction(false)
+            .build(),
+    )
+    .expect("open engine")
 }
 
 fn default_cf(engine: &Engine) -> cntryl_midge::ColumnFamilyHandle {

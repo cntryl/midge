@@ -49,9 +49,6 @@ pub struct BloomWriter {
     bits: Vec<u8>,
     /// Number of bits in the filter
     num_bits: usize,
-    /// False positive rate (default 1% = 0.01)
-    #[allow(dead_code)]
-    fpr: f64,
     /// Number of keys added
     key_count: usize,
     /// Number of hash functions (adaptive, clamped to [1, 8])
@@ -73,7 +70,6 @@ impl BloomWriter {
         Self {
             bits: vec![0u8; num_bytes],
             num_bits,
-            fpr: false_positive_rate,
             key_count: 0,
             k,
         }

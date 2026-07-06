@@ -356,10 +356,6 @@ impl Transaction {
         !self.write_set.is_empty()
     }
 
-    pub(crate) fn cf_id(&self) -> ColumnFamilyId {
-        self.cf_id
-    }
-
     #[must_use]
     pub fn isolation_level(&self) -> IsolationLevel {
         self.isolation_level
@@ -388,7 +384,8 @@ impl Transaction {
 
         if !self.has_writes() {
             let durability_started_at = CommitTiming::phase_start(timing.as_ref());
-            let sync_result = if opts.is_sync() { self.sync() } else { Ok(()) };
+            let sync_result = effective_wal_durability_policy(self.cloud_mode, opts)
+                .and_then(|_| if opts.is_sync() { self.sync() } else { Ok(()) });
             CommitTiming::record_durability(&mut timing, durability_started_at);
             let unregister_started_at = CommitTiming::phase_start(timing.as_ref());
             self.unregister_snapshot();
@@ -466,7 +463,7 @@ impl Transaction {
     }
 
     #[must_use]
-    pub fn start_sequence(&self) -> u64 {
+    pub(crate) fn start_sequence(&self) -> u64 {
         self.start_sequence
     }
 

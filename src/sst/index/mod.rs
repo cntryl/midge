@@ -1,4 +1,4 @@
-// == COPILOT MASTER RULES FOR SST AUTO-TUNED INDEX ==================================
+// == ARCHITECTURE MASTER RULES FOR SST AUTO-TUNED INDEX ==================================
 // These rules define the *correct* architecture for Midge auto-tuned SST indexing.
 // All completions touching index profiling, selection, or tuning MUST follow these
 // rules exactly.

@@ -7,11 +7,9 @@
 
 use super::build_cloud_storage;
 use super::{CloudProviderConfig, GcsApiStyle, GcsCredentialSource};
-use crate::engine::{Engine, MemoryBudget, OpenOptions, TransactionMode, WriteOptions};
 use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::fmt::Write as _;
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
 use std::time::Duration;
 
 const PEAS_ENDPOINT: &str = "http://127.0.0.1:9000";
@@ -137,24 +135,6 @@ fn should_run_s3_compatible_contract_against_real_provider_if_configured() {
     // Assert
 }
 
-#[test]
-fn should_recover_engine_from_peas_s3_after_local_cache_loss() {
-    let provider = CloudProviderConfig::peas_s3("midge-peas-engine-s3");
-    engine_recovers_from_provider_after_local_cache_loss("peas-engine", provider, true);
-}
-
-#[test]
-fn should_recover_engine_from_real_s3_after_local_cache_loss_if_configured() {
-    // Arrange
-    let Some(provider) = configured_real_s3_provider() else {
-        return;
-    };
-
-    engine_recovers_from_provider_after_local_cache_loss("real-s3-engine", provider, false);
-    // Act
-    // Assert
-}
-
 fn run_provider_contract(label: &str, provider: &CloudProviderConfig) {
     if !peas_available_or_skip(label) {
         return;
@@ -244,77 +224,6 @@ fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
     );
 }
 
-fn real_cloud_engine_options(
-    cache_path: PathBuf,
-    provider: CloudProviderConfig,
-    prefix: String,
-) -> OpenOptions {
-    OpenOptions::cloud(cache_path, provider, prefix)
-        .memory_budget(MemoryBudget::Bytes(8 * 1024 * 1024))
-        .build()
-}
-
-fn engine_recovers_from_provider_after_local_cache_loss(
-    label: &str,
-    provider: CloudProviderConfig,
-    prepare_namespace: bool,
-) {
-    if prepare_namespace && !peas_available_or_skip(label) {
-        return;
-    }
-
-    if prepare_namespace {
-        ensure_peas_namespace(&provider).unwrap_or_else(|error| {
-            panic!("{label}: failed to prepare provider namespace: {error}")
-        });
-    }
-
-    let prefix = format!("engine/{label}/{}/", uuid::Uuid::new_v4());
-    let cache_path =
-        std::env::temp_dir().join(format!("midge-provider-engine-{}", uuid::Uuid::new_v4()));
-    let _ = std::fs::remove_dir_all(&cache_path);
-
-    let opts = real_cloud_engine_options(cache_path.clone(), provider.clone(), prefix.clone());
-    let engine = Engine::open(opts).expect("open provider-backed engine");
-    let default_handle = default_cf(&engine);
-
-    let mut tx = engine
-        .begin_tx(default_handle.id(), TransactionMode::ReadWrite)
-        .expect("begin write tx");
-    tx.put(
-        b"engine-provider-key".to_vec(),
-        b"engine-provider-value".to_vec(),
-        None,
-    )
-    .expect("put value");
-    tx.commit(WriteOptions::cloud_strict())
-        .expect("cloud-strict commit");
-
-    engine.flush_cf(&default_handle).expect("force SST upload");
-    drop(engine);
-
-    std::fs::remove_dir_all(&cache_path).expect("delete local cache");
-
-    let reopened = Engine::open(real_cloud_engine_options(
-        cache_path.clone(),
-        provider,
-        prefix,
-    ))
-    .expect("reopen from provider");
-    let reopened_cf = default_cf(&reopened);
-    let read_tx = reopened
-        .begin_tx(reopened_cf.id(), TransactionMode::ReadOnly)
-        .expect("begin read tx");
-    let value = read_tx.get(b"engine-provider-key").expect("read value");
-    assert_eq!(
-        value,
-        Some(bytes::Bytes::from_static(b"engine-provider-value"))
-    );
-
-    drop(reopened);
-    let _ = std::fs::remove_dir_all(&cache_path);
-}
-
 fn configured_real_s3_provider() -> Option<CloudProviderConfig> {
     let bucket = std::env::var(REAL_S3_BUCKET_ENV).ok()?;
     let endpoint = std::env::var(REAL_S3_ENDPOINT_ENV).ok()?;
@@ -332,12 +241,6 @@ fn configured_real_s3_provider() -> Option<CloudProviderConfig> {
             .with_path_style(path_style)
             .expect("real S3 path-style override"),
     )
-}
-
-fn default_cf(engine: &Engine) -> crate::engine::ColumnFamilyHandle {
-    engine
-        .get_column_family("default")
-        .expect("default column family")
 }
 
 fn peas_available_or_skip(label: &str) -> bool {

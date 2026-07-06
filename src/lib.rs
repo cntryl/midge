@@ -14,7 +14,6 @@
 //!   - `compaction`  - compaction planning + execution
 //!   - `iterators`   - iterator implementations
 //!   - `metrics`     - performance instrumentation
-//!   - `testkit`     - testing utilities
 //!
 //! # Public API Surface
 //!
@@ -29,9 +28,7 @@ pub mod common;
 pub mod config;
 pub mod types;
 
-// Internal modules — used by engine/runtime; the compiler reports "dead" because
-// no external crate references them. They are exercised by unit tests within each module.
-#[allow(dead_code)]
+// Internal modules used by engine/runtime.
 mod compaction;
 mod diagnostics;
 pub mod handler;
@@ -40,26 +37,17 @@ pub mod io;
 #[cfg(not(test))]
 mod io;
 pub mod iterators;
-#[allow(dead_code)]
 mod lease;
 pub mod message;
-#[allow(dead_code)]
 mod metadata;
-#[allow(dead_code)]
 mod runtime;
 pub mod sst;
-#[allow(dead_code)]
 mod storage;
-#[allow(dead_code)]
 mod telemetry;
 pub mod wal;
 
 // Main engine (canonical public API — re-exported below)
-#[allow(dead_code)]
 mod engine;
-
-// Test support (shared by tests, benches, and optional downstream utilities).
-pub mod testkit;
 
 // ---------------------------------------------------------------------------
 // Public Export Surface
@@ -91,7 +79,8 @@ pub use types::{
 
 // Configuration
 pub use engine::{
-    Goal, MemoryBudget, OpenOptions, RecoveryPolicy, Storage, WorkloadProfile, WriteOptions,
+    BlockCachePolicy, CloudWritePolicy, Goal, MemoryBudget, OpenOptions, RecoveryPolicy, Storage,
+    WorkloadProfile, WriteOptions,
 };
 pub use storage::providers::{
     AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, GcsApiStyle,
@@ -110,13 +99,31 @@ pub use engine::Key as Bytes;
 // Re-export BytesMut directly from the `bytes` crate.
 pub use bytes::BytesMut;
 
+#[doc(hidden)]
+pub fn init_benchmark_telemetry() -> MidgeResult<()> {
+    let mut config = telemetry::TelemetryConfig::new()
+        .with_enabled(true)
+        .with_service_name("midge-bench".to_string());
+    config.features.enable_logging = false;
+    config.features.enable_tracing = false;
+    config.features.enable_metrics = true;
+
+    match telemetry::Telemetry::init(&config) {
+        Ok(()) => Ok(()),
+        Err(MidgeError::Internal(message))
+            if message == "Telemetry already initialized"
+                && telemetry::Telemetry::global().is_some() =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 // Low-level filesystem abstraction exports for advanced/testing use.
 pub use io::{
     Durability as FsDurability, Fs, FsPath, OpenMode as FsOpenMode, OpenOptions as FsOpenOptions,
 };
-
-/// Test support types re-exported for benches/tests and compatibility helpers.
-pub use testkit::{MidgeOptions, StorageMode};
 
 // ---------------------------------------------------------------------------
 // Canonical Prelude

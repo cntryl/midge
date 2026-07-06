@@ -5,41 +5,20 @@
 //! public APIs or semantics.
 //!
 //! Design:
-//! - Each column family has one ingest loop/task
-//! - Concurrent writers enqueue write intents instead of committing immediately
-//! - The ingest loop builds a `WriteBatch` and commits as a SINGLE transaction
-//! - Batching policy: flush when max ops/bytes/deadline reached
-//! - Backpressure: bounded queue enforces `WriteStall` semantics
+//! - Concurrent transactions submit through per-CF write grouping.
+//! - A temporary leader drains follower submissions and commits a merged runtime transaction.
+//! - Backpressure checks stay tied to runtime stall state.
 //! - Correctness: writes are atomic, ordered per CF, errors propagate to caller
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::{next_request_id, RuntimeHandle, RuntimeResponse, TransactionOp};
-use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 /// Maximum operations per batch before forcing a commit
 const MAX_BATCH_OPS: usize = 1024;
-
-/// Maximum bytes per batch before forcing a commit
-const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024; // 4MB
-
-struct BatchMetrics<'a> {
-    cf_id: crate::engine::ColumnFamilyId,
-    batch_count: &'a mut u64,
-    total_batch_size: &'a mut u64,
-    max_batch_size: &'a mut usize,
-    loop_start: &'a Instant,
-}
-
-/// Maximum time to wait before forcing a batch commit
-const MAX_BATCH_DELAY: Duration = Duration::from_micros(500);
-
-/// Bounded queue depth per CF (backpressure limit)
-const INGEST_QUEUE_DEPTH: usize = 4096;
 
 /// Maximum transactions to group together before forcing commit
 const MAX_GROUPED_BATCHES: usize = 64;
@@ -107,11 +86,6 @@ pub(crate) struct PendingBatchRequest {
     pub result_tx: crossbeam::channel::Sender<MidgeResult<u64>>,
 }
 
-/// Response from write grouping leader after committing merged batch
-pub(crate) struct BatchResponse {
-    pub last_sequence: u64,
-}
-
 /// Coordinator for write grouping / leader-based batching
 ///
 /// This mechanism reduces the rate of `ApplyTransaction` messages sent to the runtime
@@ -148,10 +122,6 @@ impl LeaderGuard {
             coord,
             active: true,
         }
-    }
-
-    fn dismiss(&mut self) {
-        self.active = false;
     }
 }
 
@@ -230,158 +200,24 @@ impl WriteGroupCoordinator {
     }
 }
 
-/// Write submitted to the ingest coordinator's point-write queue.
-pub(crate) struct IngestWrite {
-    pub cf_id: crate::engine::ColumnFamilyId,
-    pub key: Bytes,
-    pub value: Option<Bytes>,
-    pub ttl_seconds: Option<u64>,
-    pub insert_only: bool,
-    /// Oneshot channel to send result back to caller
-    pub result_tx: crossbeam::channel::Sender<MidgeResult<u64>>,
-}
-
-impl IngestWrite {
-    fn estimated_size(&self) -> usize {
-        self.key.len() + self.value.as_ref().map_or(0, bytes::Bytes::len) + 64
-    }
-
-    fn to_transaction_op(&self) -> TransactionOp {
-        if let Some(value) = &self.value {
-            TransactionOp::Put {
-                cf_id: self.cf_id,
-                key: self.key.clone(),
-                value: value.clone(),
-                ttl_seconds: self.ttl_seconds,
-                insert_only: self.insert_only,
-            }
-        } else {
-            TransactionOp::Delete {
-                cf_id: self.cf_id,
-                key: self.key.clone(),
-            }
-        }
-    }
-}
-
-/// Accumulated batch of writes
-struct WriteBatch {
-    intents: Vec<IngestWrite>,
-    total_bytes: usize,
-    first_enqueued: Instant,
-}
-
-impl WriteBatch {
-    fn new() -> Self {
-        Self {
-            intents: Vec::new(),
-            total_bytes: 0,
-            first_enqueued: Instant::now(),
-        }
-    }
-
-    fn add(&mut self, intent: IngestWrite) {
-        self.total_bytes += intent.estimated_size();
-        self.intents.push(intent);
-    }
-
-    fn is_empty(&self) -> bool {
-        self.intents.is_empty()
-    }
-
-    fn len(&self) -> usize {
-        self.intents.len()
-    }
-
-    fn clear(&mut self) {
-        self.intents.clear();
-        self.total_bytes = 0;
-        self.first_enqueued = Instant::now();
-    }
-}
-
 /// Per-CF ingest coordinator
 pub(crate) struct IngestCoordinator {
     cf_id: crate::engine::ColumnFamilyId,
-    write_tx: Sender<IngestWrite>,
-    stop_tx: Sender<()>,
-    thread_handle: Option<thread::JoinHandle<()>>,
-    /// Cached write stall status (updated by runtime, read by ingest loop)
-    /// This avoids a round-trip message to runtime on every batch commit.
+    /// Cached write stall status.
     stall_flag: Arc<AtomicBool>,
     /// Write grouping coordinator for batch submissions
     write_group_coord: Arc<WriteGroupCoordinator>,
 }
 
 impl IngestCoordinator {
-    /// Create and start an ingest coordinator for a column family
-    pub fn new(cf_id: crate::engine::ColumnFamilyId, runtime: RuntimeHandle) -> MidgeResult<Self> {
-        let (write_tx, write_rx) = bounded(INGEST_QUEUE_DEPTH);
-        let (stop_tx, stop_rx) = bounded(1);
+    /// Create an ingest coordinator for a column family.
+    pub fn new(cf_id: crate::engine::ColumnFamilyId) -> Self {
         let stall_flag = Arc::new(AtomicBool::new(false));
-        let stall_flag_clone = Arc::clone(&stall_flag);
-
-        let thread_handle = thread::Builder::new()
-            .name(format!("midge-ingest-cf{cf_id}"))
-            .spawn(move || {
-                Self::ingest_loop(&cf_id, &runtime, &write_rx, &stop_rx, &stall_flag_clone);
-            })
-            .map_err(|e| {
-                crate::common::MidgeError::Internal(format!(
-                    "Failed to spawn ingest thread for CF {cf_id}: {e}"
-                ))
-            })?;
-
-        Ok(Self {
+        Self {
             cf_id,
-            write_tx,
-            stop_tx,
-            thread_handle: Some(thread_handle),
             stall_flag,
             write_group_coord: Arc::new(WriteGroupCoordinator::new()),
-        })
-    }
-
-    /// Update the cached stall status (called by engine when runtime notifies)
-    pub fn set_stall_status(&self, stalled: bool) {
-        self.stall_flag.store(stalled, Ordering::Release);
-    }
-
-    /// Submit a point write to the ingest queue.
-    ///
-    /// Returns `WriteStall` if queue is full (backpressure), or the sequence number on success.
-    pub fn submit_write(
-        &self,
-        cf_id: crate::engine::ColumnFamilyId,
-        key: Vec<u8>,
-        value: Option<Vec<u8>>,
-        ttl_seconds: Option<u64>,
-        insert_only: bool,
-    ) -> MidgeResult<u64> {
-        let (result_tx, result_rx) = crossbeam::channel::bounded(1);
-        let intent = IngestWrite {
-            cf_id,
-            key: Bytes::from(key),
-            value: value.map(Bytes::from),
-            ttl_seconds,
-            insert_only,
-            result_tx,
-        };
-
-        self.write_tx.try_send(intent).map_err(|e| match e {
-            crossbeam::channel::TrySendError::Full(_) => MidgeError::WriteStall(format!(
-                "Ingest queue full for CF {}: backpressure active",
-                self.cf_id
-            )),
-            crossbeam::channel::TrySendError::Disconnected(_) => {
-                MidgeError::Internal("Ingest coordinator stopped".to_string())
-            }
-        })?;
-
-        // Wait for result from ingest loop
-        result_rx
-            .recv()
-            .map_err(|_| MidgeError::Internal("Ingest loop died".to_string()))?
+        }
     }
 
     /// Submit a batch with write grouping / leader-based batching.
@@ -764,271 +600,6 @@ impl IngestCoordinator {
             )),
         }
     }
-
-    /// Ingest loop: batches writes and commits them
-    fn ingest_loop(
-        cf_id: &crate::engine::ColumnFamilyId,
-        runtime: &RuntimeHandle,
-        write_rx: &Receiver<IngestWrite>,
-        stop_rx: &Receiver<()>,
-        stall_flag: &Arc<AtomicBool>,
-    ) {
-        let mut batch = WriteBatch::new();
-        let mut batch_count = 0u64;
-        let mut total_batch_size = 0u64;
-        let mut max_batch_size = 0usize;
-        let loop_start = Instant::now();
-
-        loop {
-            // When the batch is empty, block until a write arrives or shutdown is
-            // signalled. This avoids the previous 100µs busy-spin that caused
-            // ~10,000 wakeups/sec per CF when idle.
-            let got_write = if batch.is_empty() {
-                crossbeam::channel::select! {
-                    recv(write_rx) -> msg => match msg {
-                        Ok(intent) => {
-                            batch.add(intent);
-                            true
-                        }
-                        Err(_) => {
-                            // write channel disconnected — exit
-                            break;
-                        }
-                    },
-                    recv(stop_rx) -> _ => {
-                        // Shutdown: drain remaining writes
-                        while let Ok(intent) = write_rx.try_recv() {
-                            batch.add(intent);
-                        }
-                        if !batch.is_empty() {
-                            Self::commit_batch(runtime, *cf_id, &mut batch, stall_flag);
-                        }
-                        break;
-                    },
-                }
-            } else {
-                // Batch has items — use a deadline-bounded select so we flush
-                // within MAX_BATCH_DELAY even if no more writes arrive.
-                let remaining = MAX_BATCH_DELAY.saturating_sub(batch.first_enqueued.elapsed());
-                crossbeam::channel::select! {
-                    recv(write_rx) -> msg => if let Ok(intent) = msg {
-                        batch.add(intent);
-                        true
-                    } else {
-                        // write channel disconnected — flush & exit
-                        Self::commit_batch(runtime, *cf_id, &mut batch, stall_flag);
-                        break;
-                    },
-                    recv(stop_rx) -> _ => {
-                        while let Ok(intent) = write_rx.try_recv() {
-                            batch.add(intent);
-                        }
-                        if !batch.is_empty() {
-                            Self::commit_batch(runtime, *cf_id, &mut batch, stall_flag);
-                        }
-                        break;
-                    },
-                    default(remaining) => {
-                        // Batch deadline expired — commit what we have
-                        Self::commit_batch(runtime, *cf_id, &mut batch, stall_flag);
-                        false
-                    },
-                }
-            };
-
-            if got_write {
-                // Drain additional available writes opportunistically
-                while batch.len() < MAX_BATCH_OPS && batch.total_bytes < MAX_BATCH_BYTES {
-                    match write_rx.try_recv() {
-                        Ok(intent) => batch.add(intent),
-                        Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-                    }
-                }
-
-                // Commit batch immediately after receiving write(s)
-                // This ensures low latency for all commits
-                if !batch.is_empty() {
-                    let batch_len = batch.len();
-                    let batch_bytes = batch.total_bytes;
-                    let commit_start = Instant::now();
-                    Self::commit_batch(runtime, *cf_id, &mut batch, stall_flag);
-                    let commit_time_us =
-                        u64::try_from(commit_start.elapsed().as_micros()).unwrap_or(u64::MAX);
-
-                    let mut metrics = BatchMetrics {
-                        cf_id: *cf_id,
-                        batch_count: &mut batch_count,
-                        total_batch_size: &mut total_batch_size,
-                        max_batch_size: &mut max_batch_size,
-                        loop_start: &loop_start,
-                    };
-                    Self::record_batch_metrics(
-                        &mut metrics,
-                        batch_len,
-                        batch_bytes,
-                        commit_time_us,
-                    );
-                }
-            }
-        }
-
-        Self::log_summary(
-            *cf_id,
-            batch_count,
-            total_batch_size,
-            max_batch_size,
-            loop_start,
-        );
-    }
-
-    fn record_batch_metrics(
-        metrics: &mut BatchMetrics<'_>,
-        batch_len: usize,
-        batch_bytes: usize,
-        commit_time_us: u64,
-    ) {
-        *metrics.batch_count += 1;
-        *metrics.total_batch_size += batch_len as u64;
-        *metrics.max_batch_size = (*metrics.max_batch_size).max(batch_len);
-
-        tracing::debug!(
-            cf_id = metrics.cf_id,
-            batch_len,
-            batch_bytes,
-            commit_time_us,
-            "Committed ingest batch"
-        );
-
-        if (*metrics.batch_count).is_multiple_of(100)
-            || metrics.loop_start.elapsed().as_secs().is_multiple_of(5)
-        {
-            let avg_size = (*metrics.total_batch_size)
-                .checked_div(*metrics.batch_count)
-                .unwrap_or(0);
-            tracing::info!(
-                cf_id = metrics.cf_id,
-                batch_count = *metrics.batch_count,
-                avg_batch_size = avg_size,
-                max_batch_size = *metrics.max_batch_size,
-                last_commit_time_us = commit_time_us,
-                "Ingest batching stats"
-            );
-        }
-    }
-
-    fn log_summary(
-        cf_id: crate::engine::ColumnFamilyId,
-        batch_count: u64,
-        total_batch_size: u64,
-        max_batch_size: usize,
-        loop_start: Instant,
-    ) {
-        let total_elapsed = loop_start.elapsed();
-        let avg_batch_size = total_batch_size.checked_div(batch_count).unwrap_or(0);
-        let batches_per_sec =
-            f64::from(u32::try_from(batch_count).unwrap_or(u32::MAX)) / total_elapsed.as_secs_f64();
-        tracing::info!(
-            cf_id = cf_id,
-            batch_count,
-            total_ops = total_batch_size,
-            avg_batch_size,
-            max_batch_size,
-            batches_per_sec,
-            elapsed_secs = total_elapsed.as_secs_f64(),
-            "Ingest coordinator summary"
-        );
-
-        tracing::info!(cf_id = cf_id, "Ingest coordinator stopped");
-    }
-
-    /// Commit a batch as a single transaction
-    fn commit_batch(
-        runtime: &RuntimeHandle,
-        cf_id: crate::engine::ColumnFamilyId,
-        batch: &mut WriteBatch,
-        stall_flag: &AtomicBool,
-    ) {
-        tracing::debug!(
-            cf_id = cf_id,
-            batch_len = batch.intents.len(),
-            batch_bytes = batch.total_bytes,
-            "commit_batch started"
-        );
-
-        let ops: Vec<TransactionOp> = batch
-            .intents
-            .iter()
-            .map(IngestWrite::to_transaction_op)
-            .collect();
-
-        // Fast path: check cached stall flag (avoids round-trip in common case)
-        // The flag is updated by runtime when memtable pressure changes.
-        // If stalled, do a synchronous check to confirm (flag may be stale).
-        if stall_flag.load(Ordering::Acquire) {
-            // Verify stall is still active via runtime
-            if let Ok(true) = runtime.check_write_stall(cf_id) {
-                let err_msg = format!(
-                    "Memory budget exceeded for CF {cf_id}: immutable queue full or memory threshold exceeded"
-                );
-                for intent in batch.intents.drain(..) {
-                    let _ = intent
-                        .result_tx
-                        .send(Err(MidgeError::WriteStall(err_msg.clone())));
-                }
-                batch.clear();
-                return;
-            }
-            // Stall cleared - update flag and proceed
-            stall_flag.store(false, Ordering::Release);
-        }
-
-        // Send batch as ApplyTransaction
-        let result = Self::send_apply_transaction(
-            runtime,
-            ops,
-            None,
-            ApplyTransactionOptions {
-                start_sequence: None,
-                isolation_policy: crate::runtime::TransactionIsolationPolicy::LastWriteWins,
-                collect_submit_timing: false,
-            },
-            stall_flag,
-            None,
-            Some(batch.intents.len()),
-        );
-
-        // Propagate result to all waiters
-        match result {
-            Ok(last_seq) => {
-                // Success: notify all callers with final sequence
-                for intent in batch.intents.drain(..) {
-                    if intent.result_tx.send(Ok(last_seq)).is_err() {
-                        tracing::debug!("failed to send result to waiter (receiver dropped)");
-                    }
-                }
-            }
-            Err(e) => {
-                // Failure: propagate error to all callers
-                let err_msg = format!("Batch commit failed: {e:?}");
-                for intent in batch.intents.drain(..) {
-                    if intent
-                        .result_tx
-                        .send(Err(MidgeError::Internal(err_msg.clone())))
-                        .is_err()
-                    {
-                        tracing::debug!("failed to send error to waiter (receiver dropped)");
-                    }
-                }
-            }
-        }
-
-        batch.clear();
-    }
-
-    /// Shutdown the ingest coordinator gracefully
-    pub fn shutdown(&self) {
-        let _ = self.stop_tx.send(());
-    }
 }
 
 impl Drop for IngestCoordinator {
@@ -1045,17 +616,6 @@ impl Drop for IngestCoordinator {
                 final_timeout_us,
                 "Write-group coordinator summary"
             );
-        }
-
-        if self.thread_handle.is_some() {
-            tracing::warn!(
-                cf_id = self.cf_id,
-                "IngestCoordinator dropped without explicit shutdown"
-            );
-            let _ = self.stop_tx.send(());
-        }
-        if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
         }
     }
 }
@@ -1082,7 +642,7 @@ mod tests {
                 ..RuntimeConfig::default()
             },
         )?;
-        let coordinator = IngestCoordinator::new(0, runtime_handle.clone())?;
+        let coordinator = IngestCoordinator::new(0);
         let (result_tx, result_rx) = crossbeam::channel::bounded(1);
         let pending = PendingBatchRequest {
             ops: vec![TransactionOp::Put {
@@ -1113,7 +673,6 @@ mod tests {
             .expect("rescue leader should notify queued follower");
         assert!(result.is_ok());
 
-        coordinator.shutdown();
         runtime.shutdown();
         Ok(())
     }

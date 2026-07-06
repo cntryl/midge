@@ -32,6 +32,7 @@ pub enum StorageBudgetEvent {
     /// A flush completed with actual size
     FlushCompleted { actual_size: u64 },
     /// A cloud upload completed; free up reserve
+    #[cfg(test)]
     CloudUploadCompleted { sst_id: u64, actual_size: u64 },
     /// Compaction is about to start
     CompactionPlanned { input_sizes: Vec<u64> },
@@ -77,6 +78,7 @@ impl StorageBudgetActor {
                 self.complete_flush(actual_size);
                 None
             }
+            #[cfg(test)]
             StorageBudgetEvent::CloudUploadCompleted {
                 sst_id,
                 actual_size,
@@ -136,6 +138,7 @@ impl StorageBudgetActor {
     }
 
     /// Complete a cloud upload
+    #[cfg(test)]
     fn complete_cloud_upload(&mut self, sst_id: u64, actual_size: u64) {
         // When cloud upload completes, the SST is stable in cloud.
         // We can now consider it for local eviction.
@@ -202,6 +205,7 @@ impl StorageBudgetActor {
     }
 
     /// Pop the next SST for eviction
+    #[cfg(test)]
     pub fn next_eviction(&mut self) -> Option<(u64, u64)> {
         self.pending_evictions.pop_front()
     }

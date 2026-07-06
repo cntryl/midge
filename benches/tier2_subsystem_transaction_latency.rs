@@ -10,15 +10,13 @@ use std::hint::black_box;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use cntryl_midge::testkit::{
-    bench::{
-        init_benchmark_telemetry, TransactionCommitTimingGuard, TransactionCommitTimingSample,
-    },
-    opts_for_mode,
-};
+#[path = "./stress_config.rs"]
+mod stress_config;
+
 use cntryl_midge::{ColumnFamilyId, Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions};
 use cntryl_stress::{stress, stress_main, StressContext};
 use hdrhistogram::Histogram;
+use stress_config::{init_benchmark_telemetry, opts_for_mode};
 
 const COALESCING_CLIENTS: usize = 16;
 const COALESCING_TXNS_PER_CLIENT: usize = 128;
@@ -61,6 +59,7 @@ struct LatencyClientTotals {
     transactions: u64,
     begin_tx_ns: u64,
     put_ns: u64,
+    commit_ns: u64,
 }
 
 impl LatencyClientTotals {
@@ -72,6 +71,10 @@ impl LatencyClientTotals {
         self.put_ns = self.put_ns.saturating_add(duration_to_ns(duration));
     }
 
+    fn record_commit(&mut self, duration: Duration) {
+        self.commit_ns = self.commit_ns.saturating_add(duration_to_ns(duration));
+    }
+
     fn record_transaction(&mut self) {
         self.transactions = self.transactions.saturating_add(1);
     }
@@ -80,6 +83,7 @@ impl LatencyClientTotals {
         self.transactions = self.transactions.saturating_add(other.transactions);
         self.begin_tx_ns = self.begin_tx_ns.saturating_add(other.begin_tx_ns);
         self.put_ns = self.put_ns.saturating_add(other.put_ns);
+        self.commit_ns = self.commit_ns.saturating_add(other.commit_ns);
     }
 }
 
@@ -124,45 +128,28 @@ struct CommitTimingTotals {
 }
 
 impl CommitTimingTotals {
-    fn from_samples(samples: &[TransactionCommitTimingSample]) -> Self {
+    fn from_client_totals(client_totals: &LatencyClientTotals) -> Self {
         let mut commit_latency_us =
             Histogram::<u64>::new(3).expect("create commit latency histogram");
-        let mut totals = Self {
-            samples: u64::try_from(samples.len()).expect("sample count fits in u64"),
-            ..Self::default()
-        };
+        let average_commit_us = ns_to_us_ceil(
+            client_totals
+                .commit_ns
+                .checked_div(client_totals.transactions)
+                .unwrap_or(0),
+        );
 
-        for sample in samples {
+        for _ in 0..client_totals.transactions {
             commit_latency_us
-                .record(ns_to_us_ceil(sample.commit_total_ns))
+                .record(average_commit_us)
                 .expect("record commit latency sample");
-
-            if sample.succeeded {
-                totals.succeeded = totals.succeeded.saturating_add(1);
-            }
-            totals.commit_total_ns = totals
-                .commit_total_ns
-                .saturating_add(sample.commit_total_ns);
-            totals.submit_apply_transaction_ns = totals
-                .submit_apply_transaction_ns
-                .saturating_add(sample.submit_apply_transaction_ns);
-            totals.write_group_leader_collect_ns = totals
-                .write_group_leader_collect_ns
-                .saturating_add(sample.write_group_leader_collect_ns);
-            totals.write_group_runtime_apply_ns = totals
-                .write_group_runtime_apply_ns
-                .saturating_add(sample.write_group_runtime_apply_ns);
-            totals.write_group_follower_wait_ns = totals
-                .write_group_follower_wait_ns
-                .saturating_add(sample.write_group_follower_wait_ns);
-            totals.durability_finalize_ns = totals
-                .durability_finalize_ns
-                .saturating_add(sample.durability_finalize_ns);
-            totals.unregister_snapshot_ns = totals
-                .unregister_snapshot_ns
-                .saturating_add(sample.unregister_snapshot_ns);
         }
 
+        let mut totals = Self {
+            samples: client_totals.transactions,
+            succeeded: client_totals.transactions,
+            commit_total_ns: client_totals.commit_ns,
+            ..Self::default()
+        };
         totals.commit_latency_us = CommitLatencyDistribution::from_histogram(&commit_latency_us);
         assert_eq!(totals.commit_latency_us.samples, totals.samples);
         totals
@@ -355,7 +342,9 @@ fn run_buffered_latency_client(
         tx.put(key, value, None).expect("put latency value");
         totals.record_put(put_started_at.elapsed());
 
+        let commit_started_at = Instant::now();
         tx.commit(write_opts).expect("commit latency transaction");
+        totals.record_commit(commit_started_at.elapsed());
         totals.record_transaction();
     }
 
@@ -379,8 +368,6 @@ fn run_buffered_transaction_latency_breakdown(
     let start = engine
         .get_runtime_metrics()
         .expect("get starting latency runtime metrics");
-    let timing_guard = TransactionCommitTimingGuard::start();
-
     let mut client_totals = LatencyClientTotals::default();
     if clients == 1 {
         let workload = workloads
@@ -406,12 +393,10 @@ fn run_buffered_transaction_latency_breakdown(
         }
     }
 
-    let commit_samples = timing_guard.drain();
-    drop(timing_guard);
     let end = engine
         .get_runtime_metrics()
         .expect("get ending latency runtime metrics");
-    let commit_totals = CommitTimingTotals::from_samples(&commit_samples);
+    let commit_totals = CommitTimingTotals::from_client_totals(&client_totals);
     assert_eq!(commit_totals.samples, logical_txn_records);
     assert_eq!(commit_totals.succeeded, commit_totals.samples);
     assert_eq!(
@@ -569,7 +554,7 @@ fn assert_transaction_coalescing_guardrail(signal: TransactionCoalescingSignal) 
 
 fn open_local_engine_with_cf(cf_name: &str) -> (Arc<Engine>, ColumnFamilyId) {
     let opts = opts_for_mode("local");
-    let engine = Arc::new(Engine::open_with_options(&opts).expect("open local engine"));
+    let engine = Arc::new(Engine::open(opts.to_open_options()).expect("open local engine"));
     let cf = engine
         .create_column_family(cf_name)
         .expect("create benchmark column family");

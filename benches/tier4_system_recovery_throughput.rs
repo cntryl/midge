@@ -19,13 +19,14 @@ use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
-use cntryl_midge::{testkit::MidgeOptions, MidgeEngine};
+use cntryl_midge::MidgeEngine;
+use stress_config::MidgeOptions;
 
 const VALUE_SIZE: usize = 64;
 const TARGET_BATCH: usize = 1_000;
 
 fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
-    cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
+    stress_config::bench_stress::open_engine_no_compaction(opts)
 }
 
 fn write_some(engine: &MidgeEngine, num_keys: usize) {
@@ -40,7 +41,7 @@ fn write_some(engine: &MidgeEngine, num_keys: usize) {
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin");
         for i in start..end {
-            let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
+            let k = stress_config::bench_stress::key16_u64_be(i as u64);
             let v = vec![u8::try_from(i % 251).expect("value byte fits in u8"); VALUE_SIZE];
             tx.put(k.to_vec(), v, None).unwrap();
         }
@@ -99,25 +100,25 @@ fn run_reopen_after_compaction_case(
 
 #[stress(tier = 4)]
 fn tier4_recovery_reopen_after_flush_local(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    let opts = stress_config::opts_for_mode("local");
     run_reopen_after_flush_case(ctx, "tier4_recovery_reopen_after_flush_local", &opts);
 }
 
 #[stress(tier = 4)]
 fn tier4_recovery_reopen_after_flush_cloud(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    let opts = stress_config::opts_for_mode("cloud");
     run_reopen_after_flush_case(ctx, "tier4_recovery_reopen_after_flush_cloud", &opts);
 }
 
 #[stress(tier = 4)]
 fn tier4_recovery_reopen_after_compaction_local(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    let opts = stress_config::opts_for_mode("local");
     run_reopen_after_compaction_case(ctx, "tier4_recovery_reopen_after_compaction_local", &opts);
 }
 
 #[stress(tier = 4)]
 fn tier4_recovery_reopen_after_compaction_cloud(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    let opts = stress_config::opts_for_mode("cloud");
     run_reopen_after_compaction_case(ctx, "tier4_recovery_reopen_after_compaction_cloud", &opts);
 }
 

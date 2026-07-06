@@ -5,8 +5,25 @@
 //! fixed-operation `measure` or `measure_batch`, and Tiers 3+ use
 //! fixed-duration `measure_batch` or externally timed `record_external`.
 
+#![allow(dead_code, unused_imports)]
+
 use cntryl_stress::StressContext;
 use std::time::Instant;
+
+#[path = "bench_support/stress.rs"]
+pub mod bench_stress;
+#[path = "bench_support/config.rs"]
+pub mod config;
+#[path = "bench_support/ycsb.rs"]
+pub mod ycsb;
+#[path = "bench_support/zipfian.rs"]
+pub mod zipfian;
+
+pub use config::{memory_opts, opts_for_mode, MidgeOptions, StorageMode};
+
+pub fn init_benchmark_telemetry() -> cntryl_midge::MidgeResult<()> {
+    cntryl_midge::init_benchmark_telemetry()
+}
 
 #[allow(dead_code)]
 pub struct BenchConfig;

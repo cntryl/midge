@@ -39,24 +39,6 @@ impl StorageBudgetPolicy {
     pub fn is_emergency_watermark(&self, usage_percent: u32) -> bool {
         usage_percent >= self.emergency_watermark_percent
     }
-
-    /// Bytes remaining before high watermark
-    pub fn bytes_until_high_watermark(&self, used_bytes: u64) -> i64 {
-        let high_threshold = self
-            .max_local_bytes
-            .saturating_mul(u64::from(self.high_watermark_percent))
-            / 100;
-        let remaining = i128::from(high_threshold) - i128::from(used_bytes);
-        i64::try_from(remaining.clamp(i128::from(i64::MIN), i128::from(i64::MAX))).unwrap_or_else(
-            |_| {
-                if remaining.is_negative() {
-                    i64::MIN
-                } else {
-                    i64::MAX
-                }
-            },
-        )
-    }
 }
 
 impl Default for StorageBudgetPolicy {

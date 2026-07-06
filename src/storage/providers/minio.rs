@@ -126,4 +126,22 @@ mod tests {
             assert!(count >= 1);
         }
     }
+
+    #[test]
+    fn should_convert_minio_provider_into_inner_s3_provider() {
+        // Arrange
+        let provider = MinioProvider::new(
+            "my-bucket".into(),
+            "http://localhost:9000".into(),
+            "minioadmin".into(),
+            "minioadmin".into(),
+        )
+        .expect("should create minio provider");
+
+        // Act
+        let backend = provider.into_inner().backend();
+
+        // Assert
+        assert!(Arc::strong_count(&backend) >= 1);
+    }
 }

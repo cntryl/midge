@@ -1,6 +1,6 @@
-//! Tier 3 â€” Engine primitives (single operation measurement)
+//! Tier 3 — Engine primitives
 //!
-//! Measures: cost of individual put/get/commit calls
+//! Measures: cost of repeated put/get/commit primitives
 //! NOT: bulk operations, batch throughput, or volume scaling
 //!
 //! **Measurement Notes:**
@@ -20,21 +20,25 @@ use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
-use cntryl_midge::testkit::MidgeOptions;
+use stress_config::MidgeOptions;
 
 const VALUE_SIZE: usize = 128;
 const PUT_BATCH_SIZE: usize = 64;
+const GET_BATCH_SIZE: usize = 128;
+const GET_KEY_COUNT: usize = 4096;
 
 fn run_single_put_case(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOptions) {
-    ctx.set_elements(50_000); // cheap (Âµs-scale)
     ctx.parameter("put_batch_size", PUT_BATCH_SIZE);
+    ctx.parameter("logical_batch_size", PUT_BATCH_SIZE);
+    ctx.parameter("operation_surface", "engine_put_commit");
+    ctx.parameter("begin_tx_included", "true");
 
-    let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
+    let engine = stress_config::bench_stress::open_engine_no_compaction(opts);
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
 
     let keys: Vec<[u8; 16]> = (0..4096)
-        .map(cntryl_midge::testkit::stress::key16_u64_be)
+        .map(stress_config::bench_stress::key16_u64_be)
         .collect();
     let v = vec![1u8; VALUE_SIZE];
     let mut key_index = 0usize;
@@ -57,34 +61,45 @@ fn run_single_put_case(ctx: &mut StressContext, scenario: &'static str, opts: Mi
 }
 
 fn run_single_get_case(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOptions) {
-    ctx.set_elements(50_000); // cheap (Âµs-scale)
+    ctx.parameter("logical_batch_size", GET_BATCH_SIZE);
+    ctx.parameter("operation_surface", "engine_get");
+    ctx.parameter("begin_tx_included", "true");
+    ctx.parameter("rotating_key_count", GET_KEY_COUNT);
 
-    let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
+    let engine = stress_config::bench_stress::open_engine_no_compaction(opts);
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
 
-    // Setup (not measured): write one key
+    // Setup (not measured): write rotating read keys.
+    let keys: Vec<[u8; 16]> = (0..GET_KEY_COUNT)
+        .map(|index| stress_config::bench_stress::key16_u64_be(index as u64))
+        .collect();
     {
-        let k = cntryl_midge::testkit::stress::key16_u64_be(0);
         let v = vec![1u8; VALUE_SIZE];
-        let mut tx = engine
-            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-            .expect("begin");
-        tx.put(k.to_vec(), v, None).unwrap();
-        tx.commit(cntryl_midge::WriteOptions::best_effort())
-            .unwrap();
+        for chunk in keys.chunks(PUT_BATCH_SIZE) {
+            let mut tx = engine
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin");
+            for key in chunk {
+                tx.put(key.to_vec(), v.clone(), None).unwrap();
+            }
+            tx.commit(cntryl_midge::WriteOptions::best_effort())
+                .unwrap();
+        }
         engine.flush_cf(&cf).unwrap(); // Ensure durability before measurement
     }
 
-    let k = cntryl_midge::testkit::stress::key16_u64_be(0);
+    let mut key_index = 0usize;
 
-    // Measure ONLY one get call
-    let _ = ctx.measure_batch(scenario, 1, || {
-        let e = &engine;
-        let tx = e
-            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-            .expect("begin");
-        let _ = tx.get(&k[..]).unwrap();
+    let _ = ctx.measure_batch(scenario, GET_BATCH_SIZE as u64, || {
+        for _ in 0..GET_BATCH_SIZE {
+            let key = keys[key_index % keys.len()];
+            key_index = key_index.wrapping_add(1);
+            let tx = engine
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin");
+            let _ = tx.get(&key[..]).unwrap();
+        }
     });
 
     drop(engine);
@@ -99,37 +114,37 @@ fn run_single_get_case(ctx: &mut StressContext, scenario: &'static str, opts: Mi
 
 #[stress(tier = 3)]
 fn tier3_engine_put_mem(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    let opts = stress_config::opts_for_mode("memory");
     run_single_put_case(ctx, "tier3_engine_put_mem", opts);
 }
 
 #[stress(tier = 3)]
 fn tier3_engine_put_local(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    let opts = stress_config::opts_for_mode("local");
     run_single_put_case(ctx, "tier3_engine_put_local", opts);
 }
 
 #[stress(tier = 3)]
 fn tier3_engine_put_cloud(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    let opts = stress_config::opts_for_mode("cloud");
     run_single_put_case(ctx, "tier3_engine_put_cloud", opts);
 }
 
 #[stress(tier = 3)]
 fn tier3_engine_get_mem(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    let opts = stress_config::opts_for_mode("memory");
     run_single_get_case(ctx, "tier3_engine_get_mem", opts);
 }
 
 #[stress(tier = 3)]
 fn tier3_engine_get_local(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    let opts = stress_config::opts_for_mode("local");
     run_single_get_case(ctx, "tier3_engine_get_local", opts);
 }
 
 #[stress(tier = 3)]
 fn tier3_engine_get_cloud(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    let opts = stress_config::opts_for_mode("cloud");
     run_single_get_case(ctx, "tier3_engine_get_cloud", opts);
 }
 

@@ -35,6 +35,18 @@ fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+fn collect_files_with_extension(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).expect("directory should be readable") {
+        let entry = entry.expect("directory entry should be readable");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_with_extension(&path, extension, files);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some(extension) {
+            files.push(path);
+        }
+    }
+}
+
 #[test]
 fn should_reexport_shared_public_types_from_crate_root() {
     // Arrange
@@ -60,6 +72,105 @@ fn should_reexport_shared_public_types_from_crate_root() {
             ..
         }
     ));
+}
+
+#[test]
+fn should_keep_source_free_of_assistant_rule_blocks() {
+    // Arrange
+    let mut sources = Vec::new();
+    collect_rust_sources(&source_path("src"), &mut sources);
+    let forbidden = ["COPILOT", "Copilot", "prompt-rule", "prompt rule"];
+
+    // Act
+
+    // Assert
+    for source in sources {
+        let content = fs::read_to_string(&source).expect("rust source should be readable");
+        for pattern in forbidden {
+            assert!(
+                !content.contains(pattern),
+                "{} should not contain assistant-rule marker {pattern}",
+                source.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn should_not_suppress_dead_code_in_production_sources() {
+    // Arrange
+    let mut sources = Vec::new();
+    collect_rust_sources(&source_path("src"), &mut sources);
+    let forbidden = [
+        "#![allow(dead_code",
+        "#![expect(dead_code",
+        "#[allow(dead_code",
+        "#[expect(dead_code",
+    ];
+
+    // Act
+    // Assert
+    for source in sources {
+        let relative = source
+            .strip_prefix(source_path(""))
+            .expect("source should live under repo")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let content = production_source(&relative);
+
+        for pattern in forbidden {
+            assert!(
+                !content.contains(pattern),
+                "{} should not suppress production dead_code with {pattern}",
+                source.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn should_keep_removed_testkit_api_out_of_public_surface() {
+    // Arrange
+    let lib = read_source("src/lib.rs");
+    let engine = read_source("src/engine/mod.rs");
+
+    // Act
+
+    // Assert
+    assert!(
+        !lib.contains("pub mod testkit") && !lib.contains("mod testkit"),
+        "crate root should not expose or compile the old testkit module"
+    );
+    assert!(
+        !lib.contains("pub use testkit"),
+        "crate root should not re-export old testkit helpers"
+    );
+    assert!(
+        !engine.contains("open_with_options"),
+        "Engine should not expose the removed open_with_options testkit API"
+    );
+}
+
+#[test]
+fn should_not_document_removed_transaction_rollback_api() {
+    // Arrange
+    let mut docs = Vec::new();
+    collect_files_with_extension(&source_path("docs"), "md", &mut docs);
+    let forbidden = ["rollback_transaction", "engine.rollback_transaction"];
+
+    // Act
+
+    // Assert
+    for doc in docs {
+        let content = fs::read_to_string(&doc).expect("markdown source should be readable");
+        for pattern in forbidden {
+            assert!(
+                !content.contains(pattern),
+                "{} should not document nonexistent API {pattern}",
+                doc.display()
+            );
+        }
+    }
 }
 
 #[test]
@@ -106,7 +217,11 @@ fn should_construct_runtime_observability_dtos_from_shared_types() {
 #[test]
 fn should_keep_event_loop_message_families_in_owned_coordinators() {
     // Arrange
-    let event_loop = production_source("src/runtime/event_loop/mod.rs");
+    let event_loop_source = read_source("src/runtime/event_loop/mod.rs");
+    let event_loop = event_loop_source
+        .split("pub(super) mod tests")
+        .next()
+        .unwrap_or_default();
     let dispatcher = read_source("src/runtime/event_loop/dispatch.rs");
     let coordinator_files = [
         ("src/runtime/event_loop/wal.rs", "struct WalCoordinator"),
@@ -392,4 +507,88 @@ fn should_keep_filesystem_persistence_out_of_dyn_sst_writer_trait() {
             source.display()
         );
     }
+}
+
+#[test]
+fn should_show_benchmark_support_outside_core_architecture_diagram() {
+    // Arrange
+    let diagrams = read_source("docs/development/architecture-diagrams.md");
+
+    // Act
+    let contains_removed_testkit = diagrams.contains("Testkit[\"testkit");
+    let contains_bench_support = diagrams.contains("BenchSupport[\"benches/bench_support");
+    let contains_benchmark_helpers = diagrams.contains("benchmark-local helpers");
+    let contains_test_support = diagrams.contains("TestSupport[\"tests/common");
+
+    // Assert
+    assert!(
+        !contains_removed_testkit,
+        "architecture diagram should not show removed testkit as a core module"
+    );
+    assert!(contains_bench_support);
+    assert!(contains_benchmark_helpers);
+    assert!(contains_test_support);
+}
+
+#[test]
+fn should_document_cloud_strict_durability_contract() {
+    // Arrange
+    let durability = read_source("docs/user-guides/durability.md");
+    let transaction_contract = read_source("docs/user-guides/transaction-durability-contract.md");
+
+    // Act
+    let docs = [&durability, &transaction_contract];
+
+    // Assert
+    for doc in docs {
+        assert!(doc.contains("WriteOptions::cloud_strict()"));
+        assert!(doc.contains("Non-cloud storage rejects"));
+        assert!(doc.contains("seal"));
+        assert!(doc.contains("upload"));
+        assert!(doc.contains("Empty cloud-backed"));
+    }
+}
+
+#[test]
+fn should_document_manifest_fsync_skip_as_benchmark_only_double_opt_in() {
+    // Arrange
+    let durability = read_source("docs/user-guides/durability.md");
+    let journal = read_source("src/metadata/journal.rs");
+
+    // Act
+    let docs_flag_skip = durability.contains("MIDGE_SKIP_MANIFEST_FSYNC=1");
+    let docs_flag_double_opt_in = durability.contains("MIDGE_ALLOW_MANIFEST_SKIP_FSYNC=1");
+    let docs_flag_benchmark_only = durability.contains("benchmark-only");
+    let docs_flag_double_opt_in_text = durability.contains("double opt-in");
+    let journal_names_skip_flag = journal.contains("MIDGE_SKIP_MANIFEST_FSYNC");
+    let journal_names_guard_flag = journal.contains("MIDGE_ALLOW_MANIFEST_SKIP_FSYNC");
+
+    // Assert
+    assert!(docs_flag_skip);
+    assert!(docs_flag_double_opt_in);
+    assert!(docs_flag_benchmark_only);
+    assert!(docs_flag_double_opt_in_text);
+    assert!(journal_names_skip_flag);
+    assert!(journal_names_guard_flag);
+}
+
+#[test]
+fn should_keep_engine_backed_provider_qualification_out_of_storage_layer() {
+    // Arrange
+    let provider_qualification = read_source("src/storage/providers/qualification.rs");
+    let integration = read_source("tests/cloud_provider_engine_qualification.rs");
+
+    // Act
+    let storage_imports_engine = provider_qualification.contains("crate::engine");
+    let integration_opens_engine = integration.contains("Engine::open");
+
+    // Assert
+    assert!(
+        !storage_imports_engine,
+        "storage provider qualification should not import the engine layer"
+    );
+    assert!(
+        integration_opens_engine,
+        "engine-backed provider qualification should live in integration tests"
+    );
 }

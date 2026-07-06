@@ -79,30 +79,35 @@ impl TelemetryConfig {
     }
 
     /// Set trace sampling rate (0.0 = none, 1.0 = all)
+    #[cfg(test)]
     pub fn with_sample_rate(mut self, rate: f64) -> Self {
         self.trace_sample_rate = rate.clamp(0.0, 1.0);
         self
     }
 
     /// Set OTLP exporter configuration
+    #[cfg(test)]
     pub fn with_otlp(mut self, endpoint: String) -> Self {
         self.otlp_config = Some(OtlpConfig { endpoint });
         self
     }
 
     /// Enable/disable logging
+    #[cfg(test)]
     pub fn with_logging(mut self, enabled: bool) -> Self {
         self.features.enable_logging = enabled;
         self
     }
 
     /// Enable/disable tracing
+    #[cfg(test)]
     pub fn with_tracing(mut self, enabled: bool) -> Self {
         self.features.enable_tracing = enabled;
         self
     }
 
     /// Enable/disable metrics
+    #[cfg(test)]
     pub fn with_metrics(mut self, enabled: bool) -> Self {
         self.features.enable_metrics = enabled;
         self
@@ -145,5 +150,21 @@ mod tests {
         // Assert
         assert!(otlp.is_some());
         assert_eq!(otlp.unwrap().endpoint, endpoint);
+    }
+
+    #[test]
+    fn should_configure_feature_flags_independently() {
+        // Arrange
+
+        // Act
+        let config = TelemetryConfig::new()
+            .with_logging(false)
+            .with_tracing(false)
+            .with_metrics(false);
+
+        // Assert
+        assert!(!config.features.enable_logging);
+        assert!(!config.features.enable_tracing);
+        assert!(!config.features.enable_metrics);
     }
 }

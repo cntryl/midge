@@ -12,10 +12,12 @@ pub(super) struct RuntimeConfigUpdate {
 }
 
 impl EventLoop {
+    #[cfg(test)]
     pub(super) fn handle_noop(&self, request_id: u64) {
         self.respond(request_id, RuntimeResponse::Ok { request_id });
     }
 
+    #[cfg(test)]
     pub(super) fn handle_startup_ping(&self, request_id: u64) {
         self.respond(request_id, RuntimeResponse::Ok { request_id });
     }
@@ -161,6 +163,7 @@ impl EventLoop {
         HandleOutcome::Continue
     }
 
+    #[cfg(test)]
     pub(super) fn handle_get_runtime_config(&self, request_id: u64) {
         self.respond(
             request_id,
@@ -176,6 +179,7 @@ impl EventLoop {
         );
     }
 
+    #[cfg(test)]
     pub(super) fn handle_get_current_sequence(&self, request_id: u64) {
         self.respond(
             request_id,

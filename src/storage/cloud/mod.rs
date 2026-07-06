@@ -27,8 +27,11 @@
 pub mod executor;
 
 use super::{StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome};
+#[cfg(test)]
 use crate::common::MidgeError;
+#[cfg(test)]
 use parking_lot::Mutex;
+#[cfg(test)]
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -37,22 +40,22 @@ pub use executor::{CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 
 /// Cloud operation outcome – cloneable wrapper around Result
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub enum CloudOutcome<T: Clone> {
     Ok(T),
     Err(String),
 }
-
-#[allow(dead_code)]
 impl<T: Clone> CloudOutcome<T> {
+    #[cfg(test)]
     pub fn is_ok(&self) -> bool {
         matches!(self, CloudOutcome::Ok(_))
     }
 
+    #[cfg(test)]
     pub fn is_err(&self) -> bool {
         matches!(self, CloudOutcome::Err(_))
     }
 
+    #[cfg(test)]
     pub fn from_result(result: Result<T, MidgeError>) -> Self {
         match result {
             Ok(value) => CloudOutcome::Ok(value),
@@ -63,7 +66,6 @@ impl<T: Clone> CloudOutcome<T> {
 
 /// Cloud operation completion events sent back via callback.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub enum CloudEvent {
     Put {
         key: String,
@@ -73,6 +75,7 @@ pub enum CloudEvent {
         key: String,
         result: CloudOutcome<Vec<u8>>,
     },
+    #[cfg(test)]
     GetRange {
         key: String,
         start: u64,
@@ -98,20 +101,21 @@ pub type CloudCallback = std::sync::mpsc::Sender<CloudEvent>;
 
 /// Basic metadata emitted by HEAD operations.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct ObjectMetadata {
     pub size: u64,
     pub etag: String,
+    #[cfg(test)]
     pub last_modified: u64,
     pub generation: Option<String>,
 }
-
-#[allow(dead_code)]
 impl ObjectMetadata {
     pub fn new(size: u64, etag: String, last_modified: u64) -> Self {
+        #[cfg(not(test))]
+        let _ = last_modified;
         Self {
             size,
             etag,
+            #[cfg(test)]
             last_modified,
             generation: None,
         }
@@ -123,9 +127,12 @@ impl ObjectMetadata {
         last_modified: u64,
         generation: impl Into<String>,
     ) -> Self {
+        #[cfg(not(test))]
+        let _ = last_modified;
         Self {
             size,
             etag,
+            #[cfg(test)]
             last_modified,
             generation: Some(generation.into()),
         }
@@ -133,7 +140,6 @@ impl ObjectMetadata {
 }
 
 /// Non-blocking cloud backend interface used by the engine.
-#[allow(dead_code)]
 pub trait CloudBackend: Send + Sync + 'static {
     /// Submit a PUT request for `key` with optional HTTP headers. Implementations
     /// MUST honor headers (e.g. `If-None-Match`, `If-Match`) when supported by the
@@ -146,6 +152,7 @@ pub trait CloudBackend: Send + Sync + 'static {
         callback: CloudCallback,
     );
     fn submit_get(&self, key: &str, callback: CloudCallback);
+    #[cfg(test)]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback);
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback);
     fn submit_list(&self, prefix: &str, callback: CloudCallback);
@@ -153,15 +160,14 @@ pub trait CloudBackend: Send + Sync + 'static {
 }
 
 /// Deterministic mock backend for testing (synchronous).
-#[allow(dead_code)]
+#[cfg(test)]
 pub struct MockCloudBackend {
     storage: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     gens: Arc<Mutex<HashMap<String, u64>>>,
     uploads: Arc<Mutex<Vec<(String, u64)>>>,
     downloads: Arc<Mutex<Vec<String>>>,
 }
-
-#[allow(dead_code)]
+#[cfg(test)]
 impl MockCloudBackend {
     pub fn new() -> Self {
         Self {
@@ -170,10 +176,6 @@ impl MockCloudBackend {
             uploads: Arc::new(Mutex::new(Vec::new())),
             downloads: Arc::new(Mutex::new(Vec::new())),
         }
-    }
-
-    pub fn object_count(&self) -> usize {
-        self.storage.lock().len()
     }
 
     pub fn get_uploads(&self) -> Vec<(String, u64)> {
@@ -190,12 +192,14 @@ impl MockCloudBackend {
     }
 }
 
+#[cfg(test)]
 impl Default for MockCloudBackend {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl CloudBackend for MockCloudBackend {
     fn submit_put(
         &self,
@@ -395,11 +399,87 @@ pub(crate) fn cloud_metadata_key(file_name: &str) -> String {
     format!("metadata/{file_name}")
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CloudObjectProof {
+    pub bytes: Vec<u8>,
+    pub metadata: StorageObjectMetadata,
+}
+
+pub(crate) fn storage_object_metadata(metadata: ObjectMetadata) -> StorageObjectMetadata {
+    StorageObjectMetadata {
+        size: metadata.size,
+        etag: metadata.etag,
+        generation: metadata.generation,
+    }
+}
+
+pub(crate) fn blocking_cloud_object_proof(
+    cloud: &CloudStorage,
+    key: &str,
+) -> Result<Option<CloudObjectProof>, String> {
+    let (get_tx, get_rx) = std::sync::mpsc::channel();
+    cloud.submit_get(key, get_tx);
+    let bytes = match get_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(CloudEvent::Get {
+            result: CloudOutcome::Ok(bytes),
+            ..
+        }) => bytes,
+        Ok(CloudEvent::Get {
+            result: CloudOutcome::Err(error),
+            ..
+        }) if is_not_found_error(&error) => return Ok(None),
+        Ok(CloudEvent::Get {
+            result: CloudOutcome::Err(error),
+            ..
+        }) => return Err(format!("cloud object '{key}' is unreadable: {error}")),
+        Ok(other) => {
+            return Err(format!(
+                "unexpected cloud object GET response for '{key}': {other:?}"
+            ))
+        }
+        Err(error) => return Err(format!("cloud object GET timed out for '{key}': {error}")),
+    };
+
+    let (head_tx, head_rx) = std::sync::mpsc::channel();
+    cloud.submit_head(key, head_tx);
+    let metadata = match head_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(CloudEvent::Head {
+            result: CloudOutcome::Ok(metadata),
+            ..
+        }) => storage_object_metadata(metadata),
+        Ok(CloudEvent::Head {
+            result: CloudOutcome::Err(error),
+            ..
+        }) => {
+            return Err(format!(
+                "cloud object '{key}' identity is unreadable after GET: {error}"
+            ))
+        }
+        Ok(other) => {
+            return Err(format!(
+                "unexpected cloud object HEAD response for '{key}': {other:?}"
+            ))
+        }
+        Err(error) => return Err(format!("cloud object HEAD timed out for '{key}': {error}")),
+    };
+
+    let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if metadata.size != bytes_len {
+        return Err(format!(
+            "cloud object '{key}' changed during validation: read={bytes_len}, head={}",
+            metadata.size
+        ));
+    }
+
+    Ok(Some(CloudObjectProof { bytes, metadata }))
+}
+
 impl CloudStorage {
     pub fn new(backend: Arc<dyn CloudBackend>, namespace: String) -> Self {
         Self { backend, namespace }
     }
 
+    #[cfg(test)]
     pub fn with_mock() -> Self {
         let backend = Arc::new(MockCloudBackend::new());
         Self::new(backend, "midge".to_string())
@@ -450,6 +530,7 @@ impl CloudStorage {
         self.backend.submit_get(&full_key, callback);
     }
 
+    #[cfg(test)]
     pub fn submit_get_range(
         &self,
         key: &str,
@@ -545,6 +626,7 @@ pub(crate) fn is_not_found_error(error: &str) -> bool {
         || lowered.contains("blobnotfound")
 }
 
+#[cfg(test)]
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
@@ -641,6 +723,7 @@ impl StorageBackend for CloudStorage {
         }
     }
 
+    #[cfg(test)]
     fn submit_list(&self, prefix: &str, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_list(self, prefix, tx);

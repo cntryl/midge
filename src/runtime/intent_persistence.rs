@@ -4,8 +4,11 @@
 //! actor intent states across restarts.
 
 use crate::runtime::IntentLogEntry;
+#[cfg(test)]
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 pub struct IntentPersistence;
 
@@ -13,14 +16,9 @@ impl IntentPersistence {
     const INTENT_FILE: &'static str = "intent_log.json";
     const INTENT_FILE_TEMP: &'static str = "intent_log.json.tmp";
 
+    #[cfg(test)]
     pub fn intent_path(db_path: &Path) -> PathBuf {
         db_path.join(Self::INTENT_FILE)
-    }
-
-    pub fn load_with_fs(
-        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
-    ) -> Result<Vec<IntentLogEntry>, String> {
-        Self::load_with_fs_and_policy(fs, crate::config::RecoveryPolicy::Strict)
     }
 
     pub fn load_with_fs_and_policy(
@@ -68,6 +66,7 @@ impl IntentPersistence {
         Ok(intents)
     }
 
+    #[cfg(test)]
     pub fn load(db_path: &Path) -> Result<Vec<IntentLogEntry>, String> {
         Self::load_with_policy(db_path, crate::config::RecoveryPolicy::Strict)
     }
@@ -125,33 +124,7 @@ impl IntentPersistence {
         Self::save_with_fs(&fs, intents)
     }
 
-    pub fn delete_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> Result<(), String> {
-        use crate::io::traits::FsPath;
-
-        let p = FsPath::new(Self::INTENT_FILE);
-        let temp = FsPath::new(Self::INTENT_FILE_TEMP);
-        if let Err(e) = fs.exists(&p) {
-            return Err(format!("fs exists error: {e:?}"));
-        }
-
-        if fs
-            .exists(&p)
-            .map_err(|e| format!("fs exists error: {e:?}"))?
-        {
-            fs.remove_file(&p)
-                .map_err(|e| format!("failed to delete intent file: {e:?}"))?;
-        }
-        if fs
-            .exists(&temp)
-            .map_err(|e| format!("fs exists error: {e:?}"))?
-        {
-            fs.remove_file(&temp)
-                .map_err(|e| format!("failed to delete temp intent file: {e:?}"))?;
-        }
-        tracing::debug!(path = ?p, temp_path = ?temp, "intent file deleted");
-        Ok(())
-    }
-
+    #[cfg(test)]
     pub fn delete(db_path: &Path) -> Result<(), String> {
         let p = Self::intent_path(db_path);
         let temp = db_path.join(Self::INTENT_FILE_TEMP);

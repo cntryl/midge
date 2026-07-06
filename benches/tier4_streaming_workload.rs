@@ -15,8 +15,8 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cntryl_midge::testkit::ycsb;
-use cntryl_midge::{testkit::MidgeOptions, MidgeEngine};
+use cntryl_midge::MidgeEngine;
+use stress_config::{ycsb, MidgeOptions};
 
 const VALUE_SIZE: usize = 256;
 
@@ -236,13 +236,13 @@ fn run_streaming(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOpt
 
 #[stress(tier = 4)]
 fn tier4_streaming_local(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    let opts = stress_config::opts_for_mode("local");
     run_streaming(ctx, "tier4_streaming_local", opts);
 }
 
 #[stress(tier = 4)]
 fn tier4_streaming_cloud(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    let opts = stress_config::opts_for_mode("cloud");
     run_streaming(ctx, "tier4_streaming_cloud", opts);
 }
 

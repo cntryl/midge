@@ -130,6 +130,7 @@ impl CloudActor {
     }
 
     /// Get current upload count
+    #[cfg(test)]
     pub fn uploads_in_progress(&self) -> usize {
         self.uploads_in_progress
     }

@@ -27,7 +27,6 @@ struct ChaosCounters {
 }
 
 impl ChaosFs {
-    #[allow(dead_code)]
     /// Create a new chaos wrapper
     ///
     /// # Arguments
@@ -113,7 +112,6 @@ impl ChaosFs {
     }
 
     /// Reset all failure counters
-    #[allow(dead_code)]
     pub fn reset_counters(&self) {
         self.counters.open.store(0, Ordering::Relaxed);
         self.counters.read.store(0, Ordering::Relaxed);

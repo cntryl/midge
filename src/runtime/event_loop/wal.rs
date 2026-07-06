@@ -14,6 +14,7 @@ pub(super) struct ApplyTransactionRequest {
     pub isolation_policy: TransactionIsolationPolicy,
 }
 
+#[cfg(test)]
 pub(super) struct AppendRequest {
     pub request_id: u64,
     pub cf_id: crate::types::ColumnFamilyId,
@@ -121,6 +122,7 @@ impl WalCoordinator {
         HandleOutcome::Continue
     }
 
+    #[cfg(test)]
     pub(super) fn append(
         event_loop: &mut EventLoop,
         msg_rx: &Receiver<RuntimeMsg>,
@@ -170,6 +172,7 @@ impl WalCoordinator {
         HandleOutcome::Continue
     }
 
+    #[cfg(test)]
     pub(super) fn append_delete_range(
         event_loop: &mut EventLoop,
         msg_rx: &Receiver<RuntimeMsg>,
@@ -225,6 +228,7 @@ impl WalCoordinator {
         HandleOutcome::Continue
     }
 
+    #[cfg(test)]
     pub(super) fn rotate(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
         let result = event_loop.wal_actor.rotate(&mut event_loop.state);
         let resp = result.map_or_else(
@@ -322,6 +326,7 @@ impl WalCoordinator {
         HandleOutcome::Continue
     }
 
+    #[cfg(test)]
     pub(super) fn sync_complete(
         event_loop: &mut EventLoop,
         request_id: u64,
@@ -357,6 +362,7 @@ impl WalCoordinator {
         true
     }
 
+    #[cfg(test)]
     fn handle_append_success(
         event_loop: &mut EventLoop,
         request_id: u64,

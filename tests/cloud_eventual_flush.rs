@@ -1,17 +1,21 @@
-use cntryl_midge::testkit::{opts_for_mode, CloudRuntimePolicyOverrides, MidgeOptions};
-use cntryl_midge::{Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions};
+mod common;
+
+use cntryl_midge::{
+    CloudWritePolicy, Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions,
+};
+use common::{opts_for_mode, MidgeOptions};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const LARGE_MEMTABLE_BYTES: usize = 512 * 1024 * 1024;
 const BUFFERED_TEST_GAP: u64 = 4;
 
-fn buffered_cloud_policy() -> CloudRuntimePolicyOverrides {
-    CloudRuntimePolicyOverrides {
-        eventual_flush_segment_gap: Some(BUFFERED_TEST_GAP),
-        wal_seal_min_segment_bytes: Some(usize::MAX),
-        wal_seal_max_flush_delay: Some(Duration::from_hours(1)),
-        wal_seal_max_pending_writes: Some(1),
+fn buffered_cloud_policy() -> CloudWritePolicy {
+    CloudWritePolicy {
+        eventual_flush_segment_gap: BUFFERED_TEST_GAP,
+        wal_seal_min_segment_bytes: usize::MAX,
+        wal_seal_max_flush_delay: Duration::from_hours(1),
+        wal_seal_max_pending_writes: 1,
     }
 }
 
@@ -128,7 +132,7 @@ fn should_eventually_publish_sst_given_many_cloud_strict_writes_when_memtable_ne
 fn should_eventually_publish_sst_given_many_cloud_buffered_writes_when_memtable_never_reaches_size_threshold(
 ) {
     // Arrange
-    let opts = opts_for_mode("cloud").with_cloud_runtime_policy_overrides(buffered_cloud_policy());
+    let opts = opts_for_mode("cloud").with_cloud_write_policy(buffered_cloud_policy());
     let engine = open_large_cloud_engine(&opts);
     let cf = default_cf(&engine);
 
@@ -183,7 +187,7 @@ fn should_eventually_publish_sst_given_many_cloud_buffered_writes_when_memtable_
 fn should_publish_lightly_written_column_family_given_busy_neighbor_when_cloud_segment_gap_flush_runs(
 ) {
     // Arrange
-    let opts = opts_for_mode("cloud").with_cloud_runtime_policy_overrides(buffered_cloud_policy());
+    let opts = opts_for_mode("cloud").with_cloud_write_policy(buffered_cloud_policy());
     let engine = open_large_cloud_engine(&opts);
     let light_cf = engine
         .create_column_family("light")
@@ -250,13 +254,12 @@ fn should_publish_lightly_written_column_family_given_busy_neighbor_when_cloud_s
 #[test]
 fn should_reset_memtable_wal_gap_after_reopen_before_new_segment_churn() {
     // Arrange
-    let opts =
-        opts_for_mode("cloud").with_cloud_runtime_policy_overrides(CloudRuntimePolicyOverrides {
-            eventual_flush_segment_gap: None,
-            wal_seal_min_segment_bytes: Some(usize::MAX),
-            wal_seal_max_flush_delay: Some(Duration::from_hours(1)),
-            wal_seal_max_pending_writes: Some(1),
-        });
+    let opts = opts_for_mode("cloud").with_cloud_write_policy(CloudWritePolicy {
+        eventual_flush_segment_gap: CloudWritePolicy::default().eventual_flush_segment_gap,
+        wal_seal_min_segment_bytes: usize::MAX,
+        wal_seal_max_flush_delay: Duration::from_hours(1),
+        wal_seal_max_pending_writes: 1,
+    });
 
     {
         let engine = open_large_cloud_engine(&opts);

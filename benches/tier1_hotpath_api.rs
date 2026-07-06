@@ -5,12 +5,9 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::Bytes;
-use cntryl_midge::{
-    testkit::{MidgeOptions, StorageMode},
-    MidgeEngine,
-};
+use cntryl_midge::{Bytes, MidgeEngine};
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
+use stress_config::{MidgeOptions, StorageMode};
 
 const BATCH_PUT_ROUNDS: usize = 16;
 const SINGLE_GET_BATCH_SIZE: usize = 2048;
@@ -39,11 +36,11 @@ fn setup_db() -> MidgeEngine {
         compression: false,
         enable_compaction: false,
         memory_budget: Some(4 * 1024 * 1024 * 1024),
-        cloud_runtime_policy_overrides: None,
+        cloud_write_policy: None,
         simulated_cloud_overrides: None,
     };
 
-    MidgeEngine::open_with_options(&opts).unwrap()
+    MidgeEngine::open(opts.to_open_options()).unwrap()
 }
 
 fn run_batch_put(ctx: &mut StressContext, scenario: &'static str, batch_size: usize) {

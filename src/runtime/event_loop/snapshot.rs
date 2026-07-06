@@ -5,6 +5,7 @@ use std::sync::Arc;
 pub(super) struct SnapshotCoordinator;
 
 impl SnapshotCoordinator {
+    #[cfg(test)]
     pub(super) fn capture(
         event_loop: &mut EventLoop,
         request_id: u64,
@@ -51,6 +52,7 @@ impl SnapshotCoordinator {
         HandleOutcome::Continue
     }
 
+    #[cfg(test)]
     pub(super) fn register(
         event_loop: &mut EventLoop,
         request_id: u64,
@@ -77,6 +79,7 @@ impl SnapshotCoordinator {
         HandleOutcome::Continue
     }
 
+    #[cfg(test)]
     pub(super) fn unregister(event_loop: &mut EventLoop, snapshot_id: u64) -> HandleOutcome {
         event_loop.state.unregister_snapshot(snapshot_id);
         HandleOutcome::Continue

@@ -13,19 +13,19 @@ use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
-use cntryl_midge::testkit::MidgeOptions;
+use stress_config::MidgeOptions;
 
 const VALUE_SIZE: usize = 128;
 
 fn run_single_durability_call(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOptions) {
     ctx.set_elements(10_000); // moderate (WAL sync/async)
 
-    let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
+    let engine = stress_config::bench_stress::open_engine_no_compaction(opts);
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
 
     // Precompute one key-value pair outside measurement
-    let k = cntryl_midge::testkit::stress::key16_u64_be(0);
+    let k = stress_config::bench_stress::key16_u64_be(0);
     let v = vec![1u8; VALUE_SIZE];
 
     // Measure ONLY one put/commit call
@@ -43,14 +43,14 @@ fn run_single_durability_call(ctx: &mut StressContext, scenario: &'static str, o
 
 #[stress(tier = 3)]
 fn tier3_durability_sync_call_local(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("local");
+    let mut opts = stress_config::opts_for_mode("local");
     opts.wal_sync = true;
     run_single_durability_call(ctx, "tier3_durability_sync_call_local", opts);
 }
 
 #[stress(tier = 3)]
 fn tier3_durability_async_call_local(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("local");
+    let mut opts = stress_config::opts_for_mode("local");
     opts.wal_sync = false;
     run_single_durability_call(ctx, "tier3_durability_async_call_local", opts);
 }

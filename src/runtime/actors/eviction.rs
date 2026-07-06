@@ -7,67 +7,30 @@
 //! - Update disk state after deletion
 //! - Handle errors gracefully (missing files, permission issues)
 
-use crate::storage::HybridStorage;
 use std::sync::Arc;
-
-/// Events for the Eviction Actor
-#[derive(Debug, Clone)]
-pub enum EvictionEvent {
-    /// Process the next pending eviction
-    ProcessNext,
-    /// Mark eviction as complete and update disk state
-    Complete { sst_id: u64, freed_bytes: u64 },
-}
 
 /// Eviction Actor - manages background local SST deletion
 pub struct EvictionActor {
-    hybrid_storage: Arc<HybridStorage>,
     /// Stats for testing and monitoring
+    #[cfg(test)]
     evictions_processed: u64,
+    #[cfg(test)]
     total_freed: u64,
 }
 
 impl EvictionActor {
     /// Create a new eviction actor
-    pub fn new(hybrid_storage: Arc<HybridStorage>) -> Self {
+    pub fn new(_hybrid_storage: Arc<crate::storage::HybridStorage>) -> Self {
         Self {
-            hybrid_storage,
+            #[cfg(test)]
             evictions_processed: 0,
+            #[cfg(test)]
             total_freed: 0,
         }
     }
 
-    /// Handle an eviction event
-    pub fn handle_event(&mut self, event: &EvictionEvent) {
-        match event {
-            EvictionEvent::ProcessNext => self.process_next_eviction(),
-            EvictionEvent::Complete {
-                sst_id,
-                freed_bytes,
-            } => self.mark_eviction_complete(*sst_id, *freed_bytes),
-        }
-    }
-
-    /// Process the next eviction from the queue
-    fn process_next_eviction(&mut self) {
-        // Get next eviction from SBA
-        let next_eviction = {
-            let mut actor = self.hybrid_storage.budget_actor();
-            actor.next_eviction()
-        };
-
-        if let Some((sst_id, size)) = next_eviction {
-            // In a real implementation, we would:
-            // 1. Construct the local SST file path
-            // 2. Call local backend to delete the replica
-            // 3. Handle errors gracefully
-            //
-            // For now, we track that we processed it and mark as complete
-            self.mark_eviction_complete(sst_id, size);
-        }
-    }
-
     /// Mark an eviction as complete and update disk state
+    #[cfg(test)]
     fn mark_eviction_complete(&mut self, _sst_id: u64, freed_bytes: u64) {
         // Update counters
         self.evictions_processed += 1;
@@ -78,11 +41,13 @@ impl EvictionActor {
     }
 
     /// Get the number of evictions processed
+    #[cfg(test)]
     pub fn evictions_processed(&self) -> u64 {
         self.evictions_processed
     }
 
     /// Get total bytes freed
+    #[cfg(test)]
     pub fn total_freed(&self) -> u64 {
         self.total_freed
     }
@@ -91,11 +56,12 @@ impl EvictionActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::HybridStorage;
 
     fn create_test_eviction_actor() -> (EvictionActor, Arc<HybridStorage>) {
         // Create mock storage backends for testing
-        let local = Arc::new(crate::testkit::MockStorage::new());
-        let cloud = Arc::new(crate::testkit::MockStorage::new());
+        let local = Arc::new(crate::storage::test_support::MockStorage::new());
+        let cloud = Arc::new(crate::storage::test_support::MockStorage::new());
         let hybrid = Arc::new(HybridStorage::with_policy_and_event_sender(
             local,
             cloud,

@@ -4,11 +4,12 @@ This guide explains the exact acknowledgment boundary for each write mode in Mid
 
 ## Trust Boundary
 
-A Midge write has three distinct states:
+A Midge write has four distinct states:
 
 1. visible: the commit has been applied to the memtable and new readers can observe it
 2. locally durable: the write survives restart from local storage
-3. SST-published: the data is represented by manifest-visible SST state instead of WAL replay
+3. cloud durable: the cloud-backed WAL segment upload has been acknowledged
+4. SST-published: the data is represented by manifest-visible SST state instead of WAL replay
 
 `commit()` does not always wait for all three. The write option determines which boundary it waits for.
 
@@ -19,6 +20,7 @@ A Midge write has three distinct states:
 | `WriteOptions::sync()` | WAL append and local fsync complete | Yes | write survives local crash assuming local storage survives | WAL replay or later SST state |
 | `WriteOptions::buffered()` | WAL append barrier and memtable apply complete | Not yet guaranteed | write may be lost if crash happens before the batched fsync | WAL replay only if the later fsync completed |
 | `WriteOptions::best_effort()` | memtable apply complete; WAL skipped | No | write is lost unless a later `flush_cf()` publishes it | SST state only if flush completed successfully |
+| `WriteOptions::cloud_strict()` | cloud-backed WAL seal, rotate, upload, and acknowledgment complete | Cloud durable in cloud mode | write survives local cache loss after cloud acknowledgment | uploaded WAL segment or later SST state |
 
 ## Per-Mode Semantics
 
@@ -31,6 +33,15 @@ Use `sync()` when the caller wants local durability before `commit()` returns.
 - A successful return means the write is in the local durable WAL prefix.
 
 This is the strongest local durability mode and the easiest one to reason about during incident review.
+
+### `cloud_strict()`
+
+Use `cloud_strict()` only when the caller requires cloud durability before `commit()` returns.
+
+- Non-cloud storage rejects `cloud_strict()` with `MidgeError::InvalidArgument`; it is not a stronger local mode.
+- Cloud-backed write commits append the local WAL record, seal and rotate the active WAL segment, upload that sealed segment, and wait for the cloud acknowledgment covering the committed sequence.
+- Empty cloud-backed write transactions are allowed and return without inventing a WAL record; empty non-cloud `cloud_strict()` transactions still reject the option.
+- A successful return means the committed sequence is covered by the cloud durability frontier.
 
 ### `buffered()`
 
@@ -68,6 +79,7 @@ Midge relies on ordered WAL replay and explicit durability frontiers.
 - `sync()` waits for the local fsync boundary.
 - `buffered()` does not wait for fsync; later batched sync makes the write durable.
 - `best_effort()` does not use the WAL durability path.
+- `cloud_strict()` waits for cloud WAL seal, upload, and acknowledgment in cloud-backed mode.
 
 ## Crash Outcomes
 
@@ -92,6 +104,13 @@ Expected result:
 - if no successful flush published the data, the write is lost
 - if `flush_cf()` returned successfully before the crash, the SST-published state is recovered
 
+### Crash after `cloud_strict()`
+
+Expected result in cloud-backed mode:
+
+- after the cloud acknowledgment, losing the local cache should not lose the committed write
+- recovery may rebuild the write from the uploaded WAL segment or from already-published SST state
+
 ### Crash during flush or compaction
 
 Expected result:
@@ -99,6 +118,12 @@ Expected result:
 - output files may exist
 - manifest-visible state remains authoritative until publication completes
 - recovery uses the intent log to publish or discard output idempotently
+
+## Benchmark-Only Fsync Skips
+
+`MIDGE_SKIP_MANIFEST_FSYNC=1` is a benchmark-only escape hatch for manifest journal writes and fsync markers. It is honored only when `MIDGE_ALLOW_MANIFEST_SKIP_FSYNC=1` is also set.
+
+Treat these as a double opt-in for controlled benchmark runs only. They weaken manifest durability and must not be used to evaluate crash safety, recovery behavior, or production-like durability.
 
 ## What To Verify Before Evaluating Midge
 

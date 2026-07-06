@@ -1,4 +1,4 @@
-// == COPILOT MASTER RULES FOR SST SUBSYSTEM ==========================================
+// == ARCHITECTURE MASTER RULES FOR SST SUBSYSTEM ==========================================
 // These rules define the authoritative architecture for Midge SSTs. All completions
 // touching SST encoding, blocks, builders, iterators, index files, filters, or table
 // management MUST follow these rules exactly.
@@ -166,7 +166,7 @@
 // =====================================================================================
 // 9. PERFORMANCE RULES
 // -------------------------------------------------------------------------------------
-// Copilot MUST optimize according to:
+// Maintainer MUST optimize according to:
 //
 //   - Minimal allocations inside BlockBuilder
 //   - Efficient prefix compression
@@ -177,7 +177,7 @@
 //   - Minimized I/O seeks
 //
 // =====================================================================================
-// 10. WHAT COPILOT MUST NEVER DO
+// 10. WHAT ARCHITECTURE MUST NEVER DO
 // -------------------------------------------------------------------------------------
 // ❌ Never allow out-of-order keys.
 // ❌ Never write an SST without a footer.
@@ -620,13 +620,6 @@ impl SkipListMemtable {
         self.size_bytes
             .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
         Ok(())
-    }
-
-    /// Delete (backwards compatible) - tombstone with generated seq
-    #[allow(dead_code)]
-    fn delete(&self, key: Vec<u8>) -> MidgeResult<()> {
-        let seq = self.next_seq();
-        self.delete_with_seq(key, seq)
     }
 }
 

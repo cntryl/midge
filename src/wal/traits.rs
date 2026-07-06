@@ -3,7 +3,6 @@
 //! Clean trait contracts for WAL implementations.
 
 use crate::common::MidgeResult;
-use crate::storage::abstraction::{Storage, StoragePath};
 use crate::wal::types::{WalOpKind, WalPos, WalRecord};
 
 /// Writer contract for a WAL implementation.
@@ -185,42 +184,4 @@ pub trait WalReaderDyn: Send {
     ///
     /// Returns an error when the reader cannot be closed cleanly.
     fn close(&mut self) -> MidgeResult<()>;
-}
-
-/// Factory abstraction to create WAL writers and readers.
-pub trait WalFactory: Send + Sync {
-    /// Create a new WAL writer for the given directory.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the writer cannot be created.
-    fn create_writer(
-        &self,
-        storage: &dyn Storage,
-        dir: &StoragePath,
-    ) -> MidgeResult<Box<dyn WalWriter>>;
-
-    /// Create a new WAL reader for the given directory.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the reader cannot be created.
-    fn create_reader(
-        &self,
-        storage: &dyn Storage,
-        dir: &StoragePath,
-    ) -> MidgeResult<Box<dyn WalReaderDyn>>;
-
-    /// Rotate the active WAL file (e.g., rename active wal.log to `wal-<seq>.log`)
-    /// and return a new writer for the active WAL.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the active WAL cannot be rotated.
-    fn rotate_writer(
-        &self,
-        storage: &dyn Storage,
-        dir: &StoragePath,
-        seq: u64,
-    ) -> MidgeResult<Box<dyn WalWriter>>;
 }

@@ -174,11 +174,23 @@ impl EventLoop {
             return;
         };
 
-        match self.wal_actor.handle_cloud_upload_complete(
+        #[cfg(test)]
+        let upload_complete_result = self.wal_actor.handle_cloud_upload_complete(
             &mut self.state,
             durable_segment_id,
             durable_max_sequence,
-        ) {
+        );
+        #[cfg(not(test))]
+        let upload_complete_result: crate::common::MidgeResult<()> = {
+            self.wal_actor.handle_cloud_upload_complete(
+                &mut self.state,
+                durable_segment_id,
+                durable_max_sequence,
+            );
+            Ok(())
+        };
+
+        match upload_complete_result {
             Ok(()) => {
                 for (ready_segment_id, _) in &ready_segments {
                     self.remove_cloud_durable_local_wal_segment(*ready_segment_id);
@@ -262,15 +274,18 @@ impl EventLoop {
         let waiters = self.durability.drain_all_waiters();
         for w in waiters {
             let request_id = match w {
-                super::super::durability::DurabilityWaiter::WalAppend { request_id, .. }
-                | super::super::durability::DurabilityWaiter::ConfirmWalAppend { request_id }
+                super::super::durability::DurabilityWaiter::ConfirmWalAppend { request_id }
                 | super::super::durability::DurabilityWaiter::TransactionApply {
                     request_id, ..
                 }
                 | super::super::durability::DurabilityWaiter::ConfirmTransactionApply {
                     request_id,
                 }
-                | super::super::durability::DurabilityWaiter::CloudDurability { request_id }
+                | super::super::durability::DurabilityWaiter::CloudDurability { request_id } => {
+                    request_id
+                }
+                #[cfg(test)]
+                super::super::durability::DurabilityWaiter::WalAppend { request_id, .. }
                 | super::super::durability::DurabilityWaiter::Read { request_id, .. }
                 | super::super::durability::DurabilityWaiter::RangeScan { request_id, .. } => {
                     request_id
@@ -454,36 +469,7 @@ impl EventLoop {
         error.contains("does not match committed local metadata")
     }
 
-    fn read_cloud_metadata_head_for_wal_cleanup(
-        cloud: &crate::storage::cloud::CloudStorage,
-        key: &str,
-    ) -> Result<crate::storage::StorageObjectMetadata, String> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_head(key, tx);
-        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(crate::storage::cloud::CloudEvent::Head {
-                result: crate::storage::cloud::CloudOutcome::Ok(metadata),
-                ..
-            }) => Ok(crate::storage::StorageObjectMetadata {
-                size: metadata.size,
-                etag: metadata.etag,
-                generation: metadata.generation,
-            }),
-            Ok(crate::storage::cloud::CloudEvent::Head {
-                result: crate::storage::cloud::CloudOutcome::Err(error),
-                ..
-            }) => Err(format!(
-                "cloud metadata '{key}' is unreadable during cached proof revalidation: {error}"
-            )),
-            Ok(other) => Err(format!(
-                "unexpected cloud metadata HEAD response for '{key}': {other:?}"
-            )),
-            Err(error) => Err(format!(
-                "cloud metadata HEAD timed out for '{key}': {error}"
-            )),
-        }
-    }
-
+    #[cfg(test)]
     fn verify_cloud_metadata_for_wal_cleanup(&mut self) -> Result<(), String> {
         self.cloud_metadata_prune_guard_for_wal_cleanup()
             .map(|_| ())
@@ -515,8 +501,13 @@ impl EventLoop {
             let local_crc32c = crc32c::crc32c(&local_data);
             if let Some(proof) = self.cloud_metadata_cleanup_proofs.get(file_name) {
                 if proof.len == local_len && proof.crc32c == local_crc32c {
-                    let actual = Self::read_cloud_metadata_head_for_wal_cleanup(cloud, &key)?;
-                    if actual == proof.remote {
+                    let actual = crate::storage::cloud::blocking_cloud_object_proof(cloud, &key)?
+                        .ok_or_else(|| {
+                        format!(
+                            "cloud metadata '{key}' disappeared during cached proof revalidation"
+                        )
+                    })?;
+                    if actual.bytes == local_data && actual.metadata == proof.remote {
                         objects.push(crate::storage::hybrid::backend::CloudMetadataPruneProof {
                             key,
                             expected_bytes: local_data,
@@ -524,62 +515,39 @@ impl EventLoop {
                         });
                         continue;
                     }
+                    if actual.bytes != local_data {
+                        return Err(format!(
+                            "cloud metadata '{key}' does not match committed local metadata"
+                        ));
+                    }
                     return Err(format!(
                         "cloud metadata '{key}' changed since validation: expected {:?}, actual {:?}",
-                        proof.remote, actual
+                        proof.remote, actual.metadata
                     ));
                 }
             }
             self.cloud_metadata_cleanup_proofs.remove(file_name);
 
-            let (tx, rx) = std::sync::mpsc::channel();
-            cloud.submit_get(&key, tx);
-            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                Ok(crate::storage::cloud::CloudEvent::Get {
-                    result: crate::storage::cloud::CloudOutcome::Ok(cloud_data),
-                    ..
-                }) => {
-                    if cloud_data != local_data {
-                        return Err(format!(
-                            "cloud metadata '{key}' does not match committed local metadata"
-                        ));
-                    }
-                    let remote = Self::read_cloud_metadata_head_for_wal_cleanup(cloud, &key)?;
-                    if remote.size != local_len {
-                        return Err(format!(
-                            "cloud metadata '{key}' size changed during validation: read={local_len}, head={}",
-                            remote.size
-                        ));
-                    }
-                    self.cloud_metadata_cleanup_proofs.insert(
-                        file_name.to_string(),
-                        super::MetadataCleanupProof {
-                            len: local_len,
-                            crc32c: local_crc32c,
-                            remote: remote.clone(),
-                        },
-                    );
-                    objects.push(crate::storage::hybrid::backend::CloudMetadataPruneProof {
-                        key,
-                        expected_bytes: local_data,
-                        remote,
-                    });
-                }
-                Ok(crate::storage::cloud::CloudEvent::Get {
-                    result: crate::storage::cloud::CloudOutcome::Err(error),
-                    ..
-                }) => return Err(format!("cloud metadata '{key}' is unreadable: {error}")),
-                Ok(other) => {
-                    return Err(format!(
-                        "unexpected cloud metadata read response for '{key}': {other:?}"
-                    ));
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "cloud metadata read timed out for '{key}': {error}"
-                    ));
-                }
+            let cloud_proof = crate::storage::cloud::blocking_cloud_object_proof(cloud, &key)?
+                .ok_or_else(|| format!("cloud metadata '{key}' is missing"))?;
+            if cloud_proof.bytes != local_data {
+                return Err(format!(
+                    "cloud metadata '{key}' does not match committed local metadata"
+                ));
             }
+            self.cloud_metadata_cleanup_proofs.insert(
+                file_name.to_string(),
+                super::MetadataCleanupProof {
+                    len: local_len,
+                    crc32c: local_crc32c,
+                    remote: cloud_proof.metadata.clone(),
+                },
+            );
+            objects.push(crate::storage::hybrid::backend::CloudMetadataPruneProof {
+                key,
+                expected_bytes: local_data,
+                remote: cloud_proof.metadata,
+            });
         }
 
         Ok(Some(
@@ -2728,7 +2696,7 @@ mod tests {
     }
 
     #[test]
-    fn should_not_reread_verified_cloud_metadata_on_repeated_wal_cleanup_check(
+    fn should_revalidate_verified_cloud_metadata_on_repeated_wal_cleanup_check(
     ) -> crate::common::MidgeResult<()> {
         // Arrange
         let mut el = create_test_cloud_event_loop(
@@ -2759,11 +2727,14 @@ mod tests {
         el.verify_cloud_metadata_for_wal_cleanup()
             .expect("second cloud metadata validation");
 
+        let second_downloads = metadata_backend.get_downloads();
         assert_eq!(
-            metadata_backend.get_downloads(),
-            first_downloads,
-            "unchanged metadata proof should avoid repeated cloud metadata reads"
+            second_downloads.len(),
+            first_downloads.len() * 2,
+            "unchanged metadata proof should revalidate object bytes and identity"
         );
+        assert_eq!(&second_downloads[..first_downloads.len()], &first_downloads);
+        assert_eq!(&second_downloads[first_downloads.len()..], &first_downloads);
 
         Ok(())
     }
@@ -2796,7 +2767,9 @@ mod tests {
         // Act
         // Assert
         assert!(
-            error.contains("changed since validation") || error.contains("unreadable"),
+            error.contains("changed since validation")
+                || error.contains("unreadable")
+                || error.contains("disappeared"),
             "unexpected stale metadata proof error: {error}"
         );
 

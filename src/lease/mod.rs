@@ -79,8 +79,6 @@ pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseErr
             let config = CloudLeaseConfig {
                 bucket: provider.bucket_or_container().to_string(),
                 prefix: prefix.clone(),
-                endpoint: None,
-                region: None,
             };
             let cloud = crate::storage::providers::build_cloud_storage(provider, prefix)
                 .map_err(|error| LeaseError::IoError(format!("cloud lease backend: {error}")))?;
@@ -98,8 +96,6 @@ pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseErr
             let config = CloudLeaseConfig {
                 bucket: bucket.clone(),
                 prefix: prefix.clone(),
-                endpoint: None,
-                region: None,
             };
             Ok(Arc::new(CloudStorageLease::new(
                 config,

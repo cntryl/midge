@@ -9,20 +9,26 @@
 //! - Eviction policy (LRU by enqueue time) unchanged
 //! - Memory accounting must be byte-for-byte equivalent
 
+#[cfg(test)]
 use std::collections::VecDeque;
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
 /// Maximum number of pending cloud writes before returning `WriteStall`
+#[cfg(test)]
 pub const MAX_PENDING_CLOUD_WRITES: usize = 100_000;
 
 /// Approximate memory threshold for pending cloud writes (100MB)
+#[cfg(test)]
 pub const MAX_PENDING_CLOUD_WRITE_BYTES: usize = 100 * 1024 * 1024;
 
 /// Maximum time to wait for cloud upload acknowledgment (30 seconds)
+#[cfg(test)]
 pub const CLOUD_UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Pending write waiting for cloud durability
 #[derive(Debug)]
+#[cfg(test)]
 pub enum PendingCloudWrite {
     Single {
         cf_id: crate::types::ColumnFamilyId,
@@ -37,11 +43,6 @@ pub enum PendingCloudWrite {
         start_key: Vec<u8>,
         end_key: Vec<u8>,
         sequence: u64,
-        enqueued_at: Instant,
-    },
-    Transaction {
-        commit_sequence: u64,
-        ops: Vec<TransactionApplyOp>,
         enqueued_at: Instant,
     },
 }
@@ -71,6 +72,7 @@ pub enum TransactionApplyOp {
 }
 
 /// `CloudAsync` write queue with backpressure management
+#[cfg(test)]
 pub struct CloudWriteQueue {
     /// Queue of pending writes
     queue: VecDeque<PendingCloudWrite>,
@@ -78,6 +80,7 @@ pub struct CloudWriteQueue {
     pending_bytes: usize,
 }
 
+#[cfg(test)]
 impl CloudWriteQueue {
     /// Create new empty queue
     pub fn new() -> Self {
@@ -101,8 +104,7 @@ impl CloudWriteQueue {
             .filter(|pw| {
                 let enqueued_at = match pw {
                     PendingCloudWrite::Single { enqueued_at, .. }
-                    | PendingCloudWrite::DeleteRange { enqueued_at, .. }
-                    | PendingCloudWrite::Transaction { enqueued_at, .. } => *enqueued_at,
+                    | PendingCloudWrite::DeleteRange { enqueued_at, .. } => *enqueued_at,
                 };
                 now.duration_since(enqueued_at) > CLOUD_UPLOAD_TIMEOUT
             })
@@ -165,37 +167,6 @@ impl CloudWriteQueue {
         );
     }
 
-    /// Enqueue transaction
-    pub fn enqueue_transaction(&mut self, commit_sequence: u64, ops: Vec<TransactionApplyOp>) {
-        let batch_estimated_bytes: usize = ops
-            .iter()
-            .map(|op| match op {
-                TransactionApplyOp::Put { key, value, .. } => key.len() + value.len() + 64,
-                TransactionApplyOp::Delete { key, .. } => key.len() + 64,
-                TransactionApplyOp::DeleteRange {
-                    start_key, end_key, ..
-                } => start_key.len() + end_key.len() + 64,
-            })
-            .sum();
-
-        self.pending_bytes += batch_estimated_bytes;
-
-        let op_count = ops.len();
-        self.queue.push_back(PendingCloudWrite::Transaction {
-            commit_sequence,
-            ops,
-            enqueued_at: Instant::now(),
-        });
-
-        tracing::trace!(
-            commit_sequence,
-            op_count,
-            pending_count = self.queue.len(),
-            pending_bytes = self.pending_bytes,
-            "Queued transaction for cloud durability"
-        );
-    }
-
     /// Drain writes up to `cloud_durable_seq`
     /// Returns iterator of writes that became durable
     pub fn drain_until(&mut self, cloud_durable_seq: u64) -> Vec<PendingCloudWrite> {
@@ -205,9 +176,6 @@ impl CloudWriteQueue {
             let gate_seq = match pending {
                 PendingCloudWrite::Single { sequence, .. }
                 | PendingCloudWrite::DeleteRange { sequence, .. } => *sequence,
-                PendingCloudWrite::Transaction {
-                    commit_sequence, ..
-                } => *commit_sequence,
             };
 
             if gate_seq > cloud_durable_seq {
@@ -224,16 +192,6 @@ impl CloudWriteQueue {
                 PendingCloudWrite::DeleteRange {
                     start_key, end_key, ..
                 } => start_key.len() + end_key.len() + 64,
-                PendingCloudWrite::Transaction { ops, .. } => ops
-                    .iter()
-                    .map(|op| match op {
-                        TransactionApplyOp::Put { key, value, .. } => key.len() + value.len() + 64,
-                        TransactionApplyOp::Delete { key, .. } => key.len() + 64,
-                        TransactionApplyOp::DeleteRange {
-                            start_key, end_key, ..
-                        } => start_key.len() + end_key.len() + 64,
-                    })
-                    .sum(),
             };
 
             self.pending_bytes = self.pending_bytes.saturating_sub(dequeued_bytes);
@@ -275,29 +233,6 @@ impl CloudWriteQueue {
                     // DeleteRange isn't currently applied to memtable, so it doesn't affect
                     // insert-only existence checks.
                 }
-                PendingCloudWrite::Transaction { ops, .. } => {
-                    for op in ops {
-                        match op {
-                            TransactionApplyOp::Put {
-                                cf_id: p_cf,
-                                key: p_key,
-                                ..
-                            }
-                            | TransactionApplyOp::Delete {
-                                cf_id: p_cf,
-                                key: p_key,
-                                sequence: _,
-                            } => {
-                                if *p_cf == cf_id && &p_key[..] == key {
-                                    return true;
-                                }
-                            }
-                            TransactionApplyOp::DeleteRange { .. } => {
-                                // DeleteRange doesn't affect insert-only existence checks
-                            }
-                        }
-                    }
-                }
             }
         }
         false
@@ -310,6 +245,7 @@ impl CloudWriteQueue {
     }
 }
 
+#[cfg(test)]
 impl Default for CloudWriteQueue {
     fn default() -> Self {
         Self::new()

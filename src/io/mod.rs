@@ -25,6 +25,7 @@
 //!
 //! Higher layers (SST, WAL, storage) depend on this via trait objects:
 
+#[cfg(test)]
 pub mod chaos;
 pub mod mock;
 pub mod real;

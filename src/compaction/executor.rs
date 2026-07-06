@@ -47,12 +47,14 @@ pub struct CompactionVersion {
 /// exactly one entry per unique key—the first one it sees for that key.
 ///
 /// Memory usage: O(deduplicated key count) only for tracking the most recent key.
+#[cfg(test)]
 pub struct StreamDeduplicate<I: Iterator<Item = CompactionVersion>> {
     inner: I,
     last_key: Option<Vec<u8>>,
     now_secs: u64,
 }
 
+#[cfg(test)]
 impl<I: Iterator<Item = CompactionVersion>> StreamDeduplicate<I> {
     pub fn new(inner: I) -> Self {
         let now_secs = SystemTime::now()
@@ -67,6 +69,7 @@ impl<I: Iterator<Item = CompactionVersion>> StreamDeduplicate<I> {
     }
 }
 
+#[cfg(test)]
 impl<I: Iterator<Item = CompactionVersion>> Iterator for StreamDeduplicate<I> {
     type Item = CompactionVersion;
 
@@ -191,15 +194,6 @@ pub fn collect_compaction_input(
     })
 }
 
-/// Collect all point-key versions from the given input SST files.
-pub fn collect_versions(
-    sst_factory: &dyn SstFactory,
-    input_files: &[String],
-    abort_check: Option<&dyn Fn() -> bool>,
-) -> MidgeResult<Vec<CompactionVersion>> {
-    Ok(collect_compaction_input(sst_factory, input_files, abort_check)?.versions)
-}
-
 /// Deduplicate versions, keeping only the newest **non-expired** entry per key.
 ///
 /// Rules:
@@ -249,6 +243,7 @@ pub fn deduplicate_versions(versions: &[CompactionVersion]) -> Vec<CompactionVer
 ///   - This default function removes all tombstones unconditionally (legacy behavior).
 ///   - Prefer `filter_tombstones_with_horizon()` which is snapshot-aware and only
 ///     drops tombstones older than the provided snapshot horizon.
+#[cfg(test)]
 pub fn filter_tombstones(versions: &[CompactionVersion]) -> Vec<CompactionVersion> {
     filter_tombstones_with_horizon(versions, None)
 }
@@ -275,28 +270,6 @@ pub fn filter_tombstones_with_horizon(
             .cloned()
             .collect(),
     }
-}
-
-/// Write versions to a new SST using the provided `SstFactory`.
-///
-/// Semantics:
-///   - Non-tombstone entries become "Put" records.
-///   - Tombstone entries become "Delete" records.
-///   - TTL is preserved in the metadata.
-///   - Sequence numbers are written as provided (no rewriting here).
-///
-/// The writer implementation is responsible for:
-///   - Block construction (e.g. TLV encoding).
-///   - Compression.
-///   - Checksums.
-///   - Index / fence pointer emission.
-pub fn write_versions_to_sst(
-    sst_factory: &dyn SstFactory,
-    output_filename: &str,
-    versions: &[CompactionVersion],
-    abort_check: Option<&dyn Fn() -> bool>,
-) -> MidgeResult<()> {
-    write_compaction_output_to_sst(sst_factory, output_filename, versions, &[], abort_check)
 }
 
 pub fn write_compaction_output_to_sst(

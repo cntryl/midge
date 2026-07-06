@@ -12,20 +12,13 @@ pub enum Direction {
     Reverse,
 }
 
-/// Default batch size for lazy-loading iterators.
-const DEFAULT_LAZY_BATCH_SIZE: usize = 256;
-
 /// A range iterator over key-value pairs
 ///
 /// Iterators provide efficient sequential access to the database.
 /// They can be created with various options (direction, bounds, etc).
 ///
 /// Supports two modes:
-/// - **Eager**: All results are buffered upfront (used by transaction scans
-///   and snapshot-based reads where the full result set is already available).
-/// - **Lazy**: Results are fetched in batches from a `LazySource`, reducing
-///   memory pressure for large range scans. The lazy source is called to
-///   fetch the next batch when the current buffer is exhausted.
+/// Results are buffered upfront by transaction scans and snapshot-based reads.
 pub struct Iterator {
     /// Current position within the current batch
     position: usize,
@@ -35,111 +28,28 @@ pub struct Iterator {
     direction: Direction,
     /// Whether iteration has completed
     exhausted: bool,
-    /// Optional lazy source for fetching additional batches
-    lazy_source: Option<Box<dyn LazySource>>,
-    /// Batch size for lazy loading
-    lazy_batch_size: usize,
-}
-
-/// Trait for lazy-loading scan results in batches.
-///
-/// Implementations fetch the next batch of key-value pairs from the
-/// underlying storage (memtable + SSTs) without loading the entire
-/// result set into memory.
-pub(crate) trait LazySource: Send {
-    /// Fetch the next batch of results.
-    ///
-    /// `resume_key` is the exclusive lower bound: return pairs with keys
-    /// strictly greater than this. If `None`, start from the beginning.
-    ///
-    /// Returns an empty vec when iteration is complete.
-    fn fetch_batch(
-        &mut self,
-        resume_key: Option<&[u8]>,
-        batch_size: usize,
-        direction: Direction,
-    ) -> Vec<(Vec<u8>, Vec<u8>)>;
 }
 
 impl Iterator {
     /// Create a new iterator with the given results (eager mode)
-    #[allow(dead_code)] // Used by engine when creating iterators
     pub(crate) fn new(results: Vec<(Vec<u8>, Vec<u8>)>, direction: Direction) -> Self {
         Self {
             position: 0,
             results,
             direction,
             exhausted: false,
-            lazy_source: None,
-            lazy_batch_size: DEFAULT_LAZY_BATCH_SIZE,
-        }
-    }
-
-    /// Create a lazy-loading iterator with a source for batch fetching.
-    ///
-    /// The first batch is fetched immediately. Subsequent batches are
-    /// fetched on demand when the current buffer is exhausted.
-    #[allow(dead_code)]
-    pub(crate) fn lazy(
-        mut source: Box<dyn LazySource>,
-        direction: Direction,
-        batch_size: usize,
-    ) -> Self {
-        let batch_size = if batch_size == 0 {
-            DEFAULT_LAZY_BATCH_SIZE
-        } else {
-            batch_size
-        };
-        let initial_batch = source.fetch_batch(None, batch_size, direction);
-        let exhausted = initial_batch.is_empty();
-        Self {
-            position: 0,
-            results: initial_batch,
-            direction,
-            exhausted,
-            lazy_source: Some(source),
-            lazy_batch_size: batch_size,
         }
     }
 
     /// Create a forward iterator (eager mode)
-    #[allow(dead_code)] // Used by engine when creating iterators
     pub(crate) fn forward(results: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
         Self::new(results, Direction::Forward)
     }
 
     /// Create a reverse iterator (eager mode)
-    #[allow(dead_code)] // Used by engine when creating iterators
     pub(crate) fn reverse(mut results: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
         results.reverse();
         Self::new(results, Direction::Reverse)
-    }
-
-    /// Try to load the next batch from the lazy source.
-    ///
-    /// Returns `true` if new results were loaded, `false` if source is
-    /// exhausted or no lazy source is configured.
-    fn try_load_next_batch(&mut self) -> bool {
-        let Some(source) = self.lazy_source.as_mut() else {
-            return false;
-        };
-
-        // Determine resume key from the last element in the current batch
-        let resume_key = if self.results.is_empty() {
-            None
-        } else {
-            self.results.last().map(|(k, _)| k.as_slice())
-        };
-
-        let batch = source.fetch_batch(resume_key, self.lazy_batch_size, self.direction);
-
-        if batch.is_empty() {
-            return false;
-        }
-
-        self.results = batch;
-        self.position = 0;
-        true
     }
 
     /// Get the current key-value pair without advancing
@@ -155,7 +65,7 @@ impl Iterator {
     /// Check if iteration is complete
     #[must_use]
     pub fn exhausted(&self) -> bool {
-        self.exhausted || (self.position >= self.results.len() && self.lazy_source.is_none())
+        self.exhausted || self.position >= self.results.len()
     }
 
     /// Get the direction of this iterator
@@ -164,10 +74,7 @@ impl Iterator {
         self.direction
     }
 
-    /// Get the count of items remaining in the current batch.
-    ///
-    /// For lazy iterators this only reflects the current batch, not
-    /// the total remaining in the underlying data source.
+    /// Get the count of items remaining.
     #[must_use]
     pub fn remaining(&self) -> usize {
         if self.exhausted {
@@ -191,7 +98,7 @@ impl std::iter::Iterator for Iterator {
             return None;
         }
 
-        if self.position >= self.results.len() && !self.try_load_next_batch() {
+        if self.position >= self.results.len() {
             self.exhausted = true;
             return None;
         }
@@ -202,115 +109,63 @@ impl std::iter::Iterator for Iterator {
     }
 }
 
-/// Builder for creating iterators with options
-pub struct IteratorBuilder {
-    /// Start key (None = unbounded)
-    start: Option<Vec<u8>>,
-    /// End key (None = unbounded)
-    end: Option<Vec<u8>>,
-    /// Iteration direction
-    direction: Direction,
-    /// Whether to include start key
-    #[allow(dead_code)]
-    include_start: bool,
-    /// Whether to include end key
-    include_end: bool,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl IteratorBuilder {
-    /// Create a new iterator builder
-    pub fn new() -> Self {
-        Self {
-            start: None,
-            end: None,
-            direction: Direction::Forward,
-            include_start: true,
-            include_end: true,
-        }
-    }
-
-    /// Set the start key (inclusive by default)
-    pub fn start(mut self, key: Vec<u8>) -> Self {
-        self.start = Some(key);
-        self
-    }
-
-    /// Set the end key (inclusive by default)
-    pub fn end(mut self, key: Vec<u8>) -> Self {
-        self.end = Some(key);
-        self
-    }
-
-    /// Set range bounds [start, end) (start inclusive, end exclusive)
-    pub fn range(mut self, start: Vec<u8>, end: Vec<u8>) -> Self {
-        self.start = Some(start);
-        self.end = Some(end);
-        self.include_end = false;
-        self
-    }
-
-    /// Set direction to reverse
-    pub fn reverse(mut self) -> Self {
-        self.direction = Direction::Reverse;
-        self
-    }
-
-    /// Build the iterator (takes results, in real impl would fetch from engine)
-    #[allow(dead_code)] // Used by engine when creating iterators
-    pub(crate) fn build(self, results: Vec<(Vec<u8>, Vec<u8>)>) -> Iterator {
-        let filtered = self.filter_results(results);
-        if self.direction == Direction::Forward {
-            Iterator::forward(filtered)
-        } else {
-            Iterator::reverse(filtered)
-        }
-    }
-
-    /// Filter results based on configured bounds
-    #[allow(dead_code)] // Used by build method
-    fn filter_results(&self, results: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<(Vec<u8>, Vec<u8>)> {
-        results
+    fn iterator_with_bounds(
+        results: Vec<(Vec<u8>, Vec<u8>)>,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        include_end: bool,
+        direction: Direction,
+    ) -> Iterator {
+        let filtered = results
             .into_iter()
-            .filter(|(k, _)| {
-                // Check start bound
-                if let Some(ref start) = self.start {
-                    let cmp = k.as_slice().cmp(start.as_slice());
-                    if self.include_start {
-                        if cmp == std::cmp::Ordering::Less {
-                            return false;
-                        }
-                    } else if cmp != std::cmp::Ordering::Greater {
+            .filter(|(key, _)| {
+                if let Some(start_key) = start {
+                    if key.as_slice() < start_key {
                         return false;
                     }
                 }
 
-                // Check end bound
-                if let Some(ref end) = self.end {
-                    let cmp = k.as_slice().cmp(end.as_slice());
-                    if self.include_end {
-                        if cmp == std::cmp::Ordering::Greater {
+                if let Some(end_key) = end {
+                    if include_end {
+                        if key.as_slice() > end_key {
                             return false;
                         }
-                    } else if cmp != std::cmp::Ordering::Less {
+                    } else if key.as_slice() >= end_key {
                         return false;
                     }
                 }
 
                 true
             })
-            .collect()
-    }
-}
+            .collect::<Vec<_>>();
 
-impl Default for IteratorBuilder {
-    fn default() -> Self {
-        Self::new()
+        match direction {
+            Direction::Forward => Iterator::forward(filtered),
+            Direction::Reverse => Iterator::reverse(filtered),
+        }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    fn forward_with_bounds(
+        results: Vec<(Vec<u8>, Vec<u8>)>,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        include_end: bool,
+    ) -> Iterator {
+        iterator_with_bounds(results, start, end, include_end, Direction::Forward)
+    }
+
+    fn reverse_with_bounds(
+        results: Vec<(Vec<u8>, Vec<u8>)>,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        include_end: bool,
+    ) -> Iterator {
+        iterator_with_bounds(results, start, end, include_end, Direction::Reverse)
+    }
 
     // ========== Direction Enum Tests ==========
     // Tests for Direction invariants: equality, copy semantics, debug representation
@@ -805,71 +660,7 @@ mod tests {
         assert_eq!(collected.len(), 3);
     }
 
-    // ========== IteratorBuilder Creation Tests ==========
-    // Tests for IteratorBuilder initialization invariants: defaults set correctly
-
-    #[test]
-    fn should_initialize_builder_with_defaults_when_created() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let builder = IteratorBuilder::new();
-
-        // Assert - verify defaults through behavior
-        let results = vec![(vec![1], vec![10])];
-        let iter = builder.build(results);
-        assert_eq!(iter.direction(), Direction::Forward);
-        assert!(!iter.exhausted());
-    }
-
-    #[test]
-    fn should_use_default_when_calling_default_method() {
-        // Arrange
-        let builder1 = IteratorBuilder::new();
-        let builder2 = IteratorBuilder::default();
-
-        // Act
-        let results = vec![(vec![1], vec![10])];
-        let iter1 = builder1.build(results.clone());
-        let iter2 = builder2.build(results);
-
-        // Assert - both should behave the same
-        assert_eq!(iter1.direction(), iter2.direction());
-        assert_eq!(iter1.remaining(), iter2.remaining());
-    }
-
-    // ========== IteratorBuilder Chaining Tests ==========
-    // Tests for IteratorBuilder fluent API: methods return Self for chaining
-
-    #[test]
-    fn should_support_chaining_when_calling_builder_methods() {
-        // Arrange
-        let results = vec![(vec![1], vec![10]), (vec![2], vec![20])];
-
-        // Act
-        let iter = IteratorBuilder::new()
-            .start(vec![1])
-            .end(vec![2])
-            .build(results);
-
-        // Assert
-        assert!(!iter.exhausted());
-    }
-
-    #[test]
-    fn should_support_reverse_chaining_when_calling_reverse_method() {
-        // Arrange
-        let results = vec![(vec![1], vec![10]), (vec![2], vec![20])];
-
-        // Act
-        let iter = IteratorBuilder::new().reverse().build(results);
-
-        // Assert
-        assert_eq!(iter.direction(), Direction::Reverse);
-    }
-
-    // ========== IteratorBuilder Start Bound Tests ==========
+    // ========== Iterator Bound Tests ==========
     // Tests for start() method: sets start bound, includes start by default
 
     #[test]
@@ -882,7 +673,7 @@ mod tests {
         ];
 
         // Act
-        let mut iter = IteratorBuilder::new().start(vec![2]).build(results);
+        let mut iter = forward_with_bounds(results, Some(&[2]), None, true);
 
         // Assert
         assert_eq!(iter.next(), Some((vec![2], vec![20])));
@@ -900,7 +691,7 @@ mod tests {
         ];
 
         // Act
-        let mut iter = IteratorBuilder::new().start(vec![2]).build(results);
+        let mut iter = forward_with_bounds(results, Some(&[2]), None, true);
 
         // Assert
         assert_eq!(iter.next(), Some((vec![2], vec![20]))); // Start key included
@@ -912,13 +703,13 @@ mod tests {
         let results = vec![(vec![1], vec![10]), (vec![2], vec![20])];
 
         // Act
-        let mut iter = IteratorBuilder::new().start(vec![9]).build(results);
+        let mut iter = forward_with_bounds(results, Some(&[9]), None, true);
 
         // Assert
         assert_eq!(iter.next(), None);
     }
 
-    // ========== IteratorBuilder End Bound Tests ==========
+    // ========== Iterator End Bound Tests ==========
     // Tests for end() method: sets end bound, includes end by default
 
     #[test]
@@ -931,7 +722,7 @@ mod tests {
         ];
 
         // Act
-        let mut iter = IteratorBuilder::new().end(vec![2]).build(results);
+        let mut iter = forward_with_bounds(results, None, Some(&[2]), true);
 
         // Assert
         assert_eq!(iter.next(), Some((vec![1], vec![10])));
@@ -949,7 +740,7 @@ mod tests {
         ];
 
         // Act
-        let mut iter = IteratorBuilder::new().end(vec![2]).build(results);
+        let mut iter = forward_with_bounds(results, None, Some(&[2]), true);
 
         // Assert - end key is inclusive
         let last = iter.collect_all().last().map(|p| p.0.clone());
@@ -962,17 +753,17 @@ mod tests {
         let results = vec![(vec![1], vec![10]), (vec![2], vec![20])];
 
         // Act
-        let mut iter = IteratorBuilder::new().end(vec![0]).build(results);
+        let mut iter = forward_with_bounds(results, None, Some(&[0]), true);
 
         // Assert
         assert_eq!(iter.next(), None);
     }
 
-    // ========== IteratorBuilder Range Tests ==========
+    // ========== Iterator Range Tests ==========
     // Tests for range() method: sets bounds [start, end) with end exclusive
 
     #[test]
-    fn should_build_iterator_with_range_bounds_when_using_builder() {
+    fn should_build_iterator_with_range_bounds() {
         // Arrange
         let results = vec![
             (vec![1], vec![10]),
@@ -983,8 +774,7 @@ mod tests {
         ];
 
         // Act
-        let builder = IteratorBuilder::new().start(vec![2]).end(vec![4]);
-        let mut iter = builder.build(results);
+        let mut iter = forward_with_bounds(results, Some(&[2]), Some(&[4]), true);
 
         // Assert - inclusive on both ends
         assert_eq!(iter.next(), Some((vec![2], vec![20])));
@@ -1005,8 +795,7 @@ mod tests {
         ];
 
         // Act
-        let builder = IteratorBuilder::new().range(vec![2], vec![4]);
-        let mut iter = builder.build(results);
+        let mut iter = forward_with_bounds(results, Some(&[2]), Some(&[4]), false);
 
         // Assert - [2, 4) means 2 inclusive, 4 exclusive
         assert_eq!(iter.next(), Some((vec![2], vec![20])));
@@ -1024,20 +813,18 @@ mod tests {
         ];
 
         // Act
-        let mut iter = IteratorBuilder::new()
-            .range(vec![1], vec![3])
-            .build(results);
+        let mut iter = forward_with_bounds(results, Some(&[1]), Some(&[3]), false);
         let collected = iter.collect_all();
 
         // Assert - 3 should be excluded
         assert!(!collected.iter().any(|(k, _)| k == &vec![3]));
     }
 
-    // ========== IteratorBuilder Complex Composition Tests ==========
+    // ========== Iterator Bound Composition Tests ==========
     // Tests for multiple bounds and direction combinations
 
     #[test]
-    fn should_support_builder_chaining_with_reverse() {
+    fn should_apply_inclusive_bounds_before_reversing() {
         // Arrange
         let results = vec![
             (vec![1], vec![10]),
@@ -1047,11 +834,7 @@ mod tests {
         ];
 
         // Act
-        let mut iter = IteratorBuilder::new()
-            .start(vec![2])
-            .end(vec![4])
-            .reverse()
-            .build(results);
+        let mut iter = reverse_with_bounds(results, Some(&[2]), Some(&[4]), true);
 
         // Assert
         assert_eq!(iter.direction(), Direction::Reverse);
@@ -1072,10 +855,7 @@ mod tests {
         ];
 
         // Act
-        let mut iter = IteratorBuilder::new()
-            .start(vec![2])
-            .end(vec![4])
-            .build(results);
+        let mut iter = forward_with_bounds(results, Some(&[2]), Some(&[4]), true);
 
         // Assert
         let collected = iter.collect_all();
@@ -1095,10 +875,7 @@ mod tests {
         ];
 
         // Act
-        let mut iter = IteratorBuilder::new()
-            .range(vec![2], vec![4])
-            .reverse()
-            .build(results);
+        let mut iter = reverse_with_bounds(results, Some(&[2]), Some(&[4]), false);
 
         // Assert - should have [2, 3] after filtering, reversed to [3, 2]
         assert_eq!(iter.next(), Some((vec![3], vec![30])));
@@ -1210,14 +987,8 @@ mod tests {
         ];
 
         // Act
-        let iter1 = IteratorBuilder::new()
-            .start(vec![1])
-            .end(vec![3])
-            .build(results.clone());
-        let iter2 = IteratorBuilder::new()
-            .start(vec![2])
-            .end(vec![4])
-            .build(results);
+        let iter1 = forward_with_bounds(results.clone(), Some(&[1]), Some(&[3]), true);
+        let iter2 = forward_with_bounds(results, Some(&[2]), Some(&[4]), true);
 
         // Assert - both should work independently
         assert_eq!(iter1.remaining(), 3); // 1, 2, 3

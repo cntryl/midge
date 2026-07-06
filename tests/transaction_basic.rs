@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 mod common;
-use cntryl_midge::{Query, WriteOptions};
+use cntryl_midge::{MidgeError, Query, WriteOptions};
 use common::*;
 use std::sync::Arc;
 
@@ -60,6 +60,40 @@ fn should_succeed_given_empty_transaction_when_committed() {
         // Assert
         assert!(result.is_ok());
     });
+}
+
+#[test]
+fn should_reject_cloud_strict_given_empty_non_cloud_transaction_when_committed() {
+    // Arrange
+    let opts = opts_for_mode("memory");
+    let engine = open_with_mode(&opts, "memory");
+    let cf = engine.create_column_family("test").expect("create cf");
+    let txn = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin tx");
+
+    // Act
+    let result = txn.commit(WriteOptions::cloud_strict());
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+}
+
+#[test]
+fn should_succeed_given_empty_cloud_strict_cloud_transaction_when_committed() {
+    // Arrange
+    let opts = opts_for_mode("cloud");
+    let engine = open_with_mode(&opts, "cloud");
+    let cf = engine.create_column_family("test").expect("create cf");
+    let txn = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin tx");
+
+    // Act
+    let result = txn.commit(WriteOptions::cloud_strict());
+
+    // Assert
+    assert!(result.is_ok());
 }
 
 #[test]

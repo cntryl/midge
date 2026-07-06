@@ -3,6 +3,8 @@
 //! These helpers are intentionally deterministic and "boring": Tier-4 aims to
 //! measure steady-state behavior over time (load → warm-up → measured).
 
+#![allow(dead_code)]
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Barrier;
@@ -12,8 +14,9 @@ use std::time::{Duration, Instant};
 
 use hdrhistogram::Histogram;
 
-use crate::engine::api;
-use crate::{ColumnFamilyHandle, Engine, MidgeEngine, MidgeError, MidgeResult};
+use cntryl_midge::{
+    ColumnFamilyHandle, Engine, MidgeEngine, MidgeError, MidgeResult, TransactionMode, WriteOptions,
+};
 
 use super::config::MidgeOptions;
 
@@ -394,7 +397,7 @@ pub fn open_tier4_engine(mut opts: MidgeOptions) -> Engine {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0);
 
-    Engine::open_with_options(&opts).expect("open tier4 engine")
+    Engine::open(opts.to_open_options()).expect("open tier4 engine")
 }
 
 /// Capture a benchmark runtime performance counter snapshot.
@@ -406,8 +409,6 @@ pub fn capture_runtime_perf_snapshot(engine: &Engine) -> RuntimePerfSnapshot {
     let metrics = engine
         .get_runtime_metrics()
         .expect("capture runtime performance snapshot");
-    let read_tx = crate::diagnostics::read_transaction_diagnostics_snapshot();
-    let sst_read = crate::sst::read_path_metrics::snapshot_global_sst_read_metrics();
     RuntimePerfSnapshot {
         write_stalls_total: metrics.write_stalls_total,
         write_stalls_memory_total: metrics.write_stalls_memory_total,
@@ -427,20 +428,20 @@ pub fn capture_runtime_perf_snapshot(engine: &Engine) -> RuntimePerfSnapshot {
         cloud_async_wal_seal_latency_us: metrics.cloud_async_wal_seal_latency_us,
         cloud_async_wal_upload_latency_us: metrics.cloud_async_wal_upload_latency_us,
         cloud_async_wal_ack_latency_us: metrics.cloud_async_wal_ack_latency_us,
-        read_only_begin_tx_count: read_tx.read_only_begin_tx_count,
-        read_only_snapshot_cache_hits: read_tx.read_only_snapshot_cache_hits,
-        read_only_snapshot_cache_misses: read_tx.read_only_snapshot_cache_misses,
-        snapshot_register_count: read_tx.snapshot_register_count,
-        snapshot_unregister_count: read_tx.snapshot_unregister_count,
-        sst_reader_cache_hits: sst_read.reader_cache_hits,
-        sst_reader_cache_misses: sst_read.reader_cache_misses,
-        sst_block_cache_hits: sst_read.block_cache_hits,
-        sst_block_cache_misses: sst_read.block_cache_misses,
-        candidate_sst_files_checked: sst_read.candidate_sst_files_checked,
-        candidate_blocks_checked: sst_read.candidate_blocks_checked,
-        data_blocks_read: sst_read.data_blocks_read,
-        bloom_rejects: sst_read.bloom_rejects,
-        range_tombstone_scans: sst_read.range_tombstone_scans,
+        read_only_begin_tx_count: 0,
+        read_only_snapshot_cache_hits: 0,
+        read_only_snapshot_cache_misses: 0,
+        snapshot_register_count: 0,
+        snapshot_unregister_count: 0,
+        sst_reader_cache_hits: 0,
+        sst_reader_cache_misses: 0,
+        sst_block_cache_hits: 0,
+        sst_block_cache_misses: 0,
+        candidate_sst_files_checked: 0,
+        candidate_blocks_checked: 0,
+        data_blocks_read: 0,
+        bloom_rejects: 0,
+        range_tombstone_scans: 0,
     }
 }
 
@@ -453,28 +454,6 @@ pub fn runtime_perf_report(engine: &Engine, start: RuntimePerfSnapshot) -> Runti
     let end = engine
         .get_runtime_metrics()
         .expect("capture runtime performance report");
-    let read_tx = crate::diagnostics::read_transaction_diagnostics_snapshot().delta_since(
-        crate::diagnostics::ReadTransactionDiagnosticsSnapshot {
-            read_only_begin_tx_count: start.read_only_begin_tx_count,
-            read_only_snapshot_cache_hits: start.read_only_snapshot_cache_hits,
-            read_only_snapshot_cache_misses: start.read_only_snapshot_cache_misses,
-            snapshot_register_count: start.snapshot_register_count,
-            snapshot_unregister_count: start.snapshot_unregister_count,
-        },
-    );
-    let sst_read = crate::sst::read_path_metrics::snapshot_global_sst_read_metrics().delta_since(
-        crate::sst::read_path_metrics::SstReadMetricsSnapshot {
-            reader_cache_hits: start.sst_reader_cache_hits,
-            reader_cache_misses: start.sst_reader_cache_misses,
-            block_cache_hits: start.sst_block_cache_hits,
-            block_cache_misses: start.sst_block_cache_misses,
-            candidate_sst_files_checked: start.candidate_sst_files_checked,
-            candidate_blocks_checked: start.candidate_blocks_checked,
-            data_blocks_read: start.data_blocks_read,
-            bloom_rejects: start.bloom_rejects,
-            range_tombstone_scans: start.range_tombstone_scans,
-        },
-    );
     RuntimePerfReport {
         end_pending_cloud_uploads: end.pending_cloud_uploads,
         end_wal_local_durable_seq: end.wal_local_durable_seq,
@@ -530,20 +509,20 @@ pub fn runtime_perf_report(engine: &Engine, start: RuntimePerfSnapshot) -> Runti
         cloud_async_wal_ack_latency_us: end
             .cloud_async_wal_ack_latency_us
             .saturating_sub(start.cloud_async_wal_ack_latency_us),
-        read_only_begin_tx_count: read_tx.read_only_begin_tx_count,
-        read_only_snapshot_cache_hits: read_tx.read_only_snapshot_cache_hits,
-        read_only_snapshot_cache_misses: read_tx.read_only_snapshot_cache_misses,
-        snapshot_register_count: read_tx.snapshot_register_count,
-        snapshot_unregister_count: read_tx.snapshot_unregister_count,
-        sst_reader_cache_hits: sst_read.reader_cache_hits,
-        sst_reader_cache_misses: sst_read.reader_cache_misses,
-        sst_block_cache_hits: sst_read.block_cache_hits,
-        sst_block_cache_misses: sst_read.block_cache_misses,
-        candidate_sst_files_checked: sst_read.candidate_sst_files_checked,
-        candidate_blocks_checked: sst_read.candidate_blocks_checked,
-        data_blocks_read: sst_read.data_blocks_read,
-        bloom_rejects: sst_read.bloom_rejects,
-        range_tombstone_scans: sst_read.range_tombstone_scans,
+        read_only_begin_tx_count: 0,
+        read_only_snapshot_cache_hits: 0,
+        read_only_snapshot_cache_misses: 0,
+        snapshot_register_count: 0,
+        snapshot_unregister_count: 0,
+        sst_reader_cache_hits: 0,
+        sst_reader_cache_misses: 0,
+        sst_block_cache_hits: 0,
+        sst_block_cache_misses: 0,
+        candidate_sst_files_checked: 0,
+        candidate_blocks_checked: 0,
+        data_blocks_read: 0,
+        bloom_rejects: 0,
+        range_tombstone_scans: 0,
     }
 }
 
@@ -584,7 +563,7 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
     if threads <= 1 {
         // Single-threaded (original behavior) but with configurable batch size.
         let mut tx = engine
-            .begin_tx(cf_id, api::TransactionMode::ReadWrite)
+            .begin_tx(cf_id, TransactionMode::ReadWrite)
             .expect("begin_tx failed");
         let mut count = 0;
 
@@ -596,20 +575,20 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
             count += 1;
 
             if count >= batch_ops {
-                tx.commit(api::WriteOptions::best_effort())
+                tx.commit(WriteOptions::best_effort())
                     .expect("commit failed");
                 if trace {
                     eprintln!("[midge][ycsb] loaded {} keys", i + 1);
                 }
                 tx = engine
-                    .begin_tx(cf_id, api::TransactionMode::ReadWrite)
+                    .begin_tx(cf_id, TransactionMode::ReadWrite)
                     .expect("begin_tx failed");
                 count = 0;
             }
         }
 
         if count > 0 {
-            tx.commit(api::WriteOptions::best_effort())
+            tx.commit(WriteOptions::best_effort())
                 .expect("commit failed");
             if trace {
                 eprintln!("[midge][ycsb] loaded {initial_keys} keys (final)");
@@ -632,7 +611,7 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
 
                 s.spawn(move || {
                     let mut tx = engine
-                        .begin_tx(cf_id, api::TransactionMode::ReadWrite)
+                        .begin_tx(cf_id, TransactionMode::ReadWrite)
                         .expect("begin_tx failed");
                     let mut count = 0usize;
                     for i in start..end {
@@ -642,7 +621,7 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
                         tx.put(k.to_vec(), v, None).expect("put failed");
                         count += 1;
                         if count >= batch_ops {
-                            tx.commit(api::WriteOptions::best_effort())
+                            tx.commit(WriteOptions::best_effort())
                                 .expect("commit failed");
                             if trace {
                                 eprintln!(
@@ -653,13 +632,13 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
                                 );
                             }
                             tx = engine
-                                .begin_tx(cf_id, api::TransactionMode::ReadWrite)
+                                .begin_tx(cf_id, TransactionMode::ReadWrite)
                                 .expect("begin_tx failed");
                             count = 0;
                         }
                     }
                     if count > 0 {
-                        tx.commit(api::WriteOptions::best_effort())
+                        tx.commit(WriteOptions::best_effort())
                             .expect("commit failed");
                         if trace {
                             eprintln!(
@@ -738,7 +717,7 @@ pub fn deterministic_u64(seed: u64, client_id: usize, op_index: u64, draw_index:
 /// while waiting for backpressure to clear.
 pub fn retry_write_stall<F>(
     engine: &MidgeEngine,
-    cf_id: crate::engine::ColumnFamilyId,
+    cf_id: cntryl_midge::ColumnFamilyId,
     stop: &AtomicBool,
     mut op: F,
 ) -> MidgeResult<()>
@@ -941,6 +920,85 @@ where
         latency_p99_us: latency_us.value_at_percentile(99.0),
         latency_max_us: latency_us.max(),
     }
+}
+
+/// Run concurrent client loops for a fixed number of operations per client.
+///
+/// # Panics
+/// Panics if the expected benchmark column family does not exist, or if a
+/// client thread panics before reporting its completed operation count.
+#[must_use]
+pub fn run_multi_client_for_operations_with_stats<MakeClient, Step>(
+    engine: &Arc<MidgeEngine>,
+    clients: usize,
+    operations_per_client: u64,
+    make_client: MakeClient,
+) -> (MultiClientRunStats, Duration)
+where
+    MakeClient: Fn(usize, Arc<AtomicBool>) -> Step,
+    Step: FnMut(&MidgeEngine, &ColumnFamilyHandle, u64) + Send + 'static,
+{
+    let stop = Arc::new(AtomicBool::new(false));
+    let barrier = Arc::new(Barrier::new(clients + 1));
+    let mut handles = Vec::with_capacity(clients);
+
+    for client_id in 0..clients {
+        let engine = Arc::clone(engine);
+        let stop = Arc::clone(&stop);
+        let barrier = Arc::clone(&barrier);
+        let mut client_step = make_client(client_id, Arc::clone(&stop));
+
+        let cf = engine
+            .get_column_family("cf1")
+            .or_else(|| engine.get_column_family("data"))
+            .expect("CF should exist (tried 'cf1' and 'data')");
+
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            if client_id > 0 {
+                thread::sleep(Duration::from_micros(usize_to_u64(client_id) * 50));
+            }
+
+            let mut stats = ClientRunStats::empty();
+            for op_index in 0..operations_per_client {
+                let start = Instant::now();
+                client_step(engine.as_ref(), &cf, op_index);
+                stats.record_latency(start.elapsed());
+                stats.operations = stats.operations.wrapping_add(1);
+            }
+            stats
+        }));
+    }
+
+    barrier.wait();
+    let started_at = Instant::now();
+
+    let mut total_ops = 0u64;
+    let mut latency_us = Histogram::<u64>::new(3).expect("create aggregate latency histogram");
+    for handle in handles {
+        let result = handle.join().unwrap_or_else(|_| ClientRunStats::empty());
+        total_ops = total_ops.wrapping_add(result.operations);
+        latency_us
+            .add(&result.latency_us)
+            .expect("merge compatible latency histograms");
+    }
+    stop.store(true, Ordering::Release);
+    let elapsed = started_at.elapsed();
+
+    if total_ops == 0 {
+        return (MultiClientRunStats::default(), elapsed);
+    }
+
+    (
+        MultiClientRunStats {
+            operations: total_ops,
+            latency_p50_us: latency_us.value_at_percentile(50.0),
+            latency_p95_us: latency_us.value_at_percentile(95.0),
+            latency_p99_us: latency_us.value_at_percentile(99.0),
+            latency_max_us: latency_us.max(),
+        },
+        elapsed,
+    )
 }
 
 const DEFAULT_BATCH_OPS: usize = 50_000;

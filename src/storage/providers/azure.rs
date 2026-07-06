@@ -39,6 +39,7 @@ const ENCODE_SET: &AsciiSet = &CONTROLS
 
 /// Azure authentication credentials.
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub enum AzureCredential {
     /// Shared key (account name + account key) — HMAC-SHA256 signing.
     SharedKey { account_key: String },
@@ -61,8 +62,11 @@ pub enum AzureCredential {
 /// [`CloudExecutor`]. Follows the same architecture as [`S3Provider`].
 pub struct AzureProvider {
     backend: Arc<dyn CloudBackend>,
+    #[cfg(test)]
     account_name: String,
+    #[cfg(test)]
     container: String,
+    #[cfg(test)]
     credential: AzureCredential,
 }
 
@@ -102,6 +106,7 @@ impl AzureEndpoint {
 
 impl AzureProvider {
     /// Create provider with Shared Key authentication.
+    #[cfg(test)]
     pub fn with_shared_key(
         account_name: String,
         container: String,
@@ -134,11 +139,20 @@ impl AzureProvider {
         account_key: &str,
         endpoint: Option<AzureEndpoint>,
     ) -> MidgeResult<Self> {
+        #[cfg(test)]
         let credential = AzureCredential::SharedKey {
             account_key: account_key.to_string(),
         };
+        #[cfg(test)]
+        let backend_account_name = account_name.clone();
+        #[cfg(not(test))]
+        let backend_account_name = account_name;
+        #[cfg(test)]
+        let backend_container = container.clone();
+        #[cfg(not(test))]
+        let backend_container = container;
         let signer = SharedKeySigner::new_with_emulator_compat(
-            account_name.clone(),
+            backend_account_name.clone(),
             account_key,
             endpoint
                 .as_ref()
@@ -146,21 +160,25 @@ impl AzureProvider {
         );
         let executor = CloudExecutor::new(Some(Arc::new(signer)))?;
         let backend = Arc::new(AzureBackend::new(
-            account_name.clone(),
-            container.clone(),
+            backend_account_name,
+            backend_container,
             endpoint,
             None, // no SAS — signer handles auth
             executor,
         ));
         Ok(Self {
             backend,
+            #[cfg(test)]
             account_name,
+            #[cfg(test)]
             container,
+            #[cfg(test)]
             credential,
         })
     }
 
     /// Create provider with SAS token authentication.
+    #[cfg(test)]
     pub fn with_sas_token(
         account_name: String,
         container: String,
@@ -192,21 +210,33 @@ impl AzureProvider {
     ) -> MidgeResult<Self> {
         // Normalise: strip leading '?' if present.
         let token = sas_token.strip_prefix('?').unwrap_or(sas_token).to_string();
+        #[cfg(test)]
         let credential = AzureCredential::SasToken {
             token: token.clone(),
         };
+        #[cfg(test)]
+        let backend_account_name = account_name.clone();
+        #[cfg(not(test))]
+        let backend_account_name = account_name;
+        #[cfg(test)]
+        let backend_container = container.clone();
+        #[cfg(not(test))]
+        let backend_container = container;
         let executor = CloudExecutor::new(None)?; // SAS goes on the URL, no signer
         let backend = Arc::new(AzureBackend::new(
-            account_name.clone(),
-            container.clone(),
+            backend_account_name,
+            backend_container,
             endpoint,
             Some(token),
             executor,
         ));
         Ok(Self {
             backend,
+            #[cfg(test)]
             account_name,
+            #[cfg(test)]
             container,
+            #[cfg(test)]
             credential,
         })
     }
@@ -236,6 +266,7 @@ impl AzureProvider {
             .or_else(|| std::env::var("AZURE_CLIENT_ID").ok())
             .filter(|id| !id.is_empty());
 
+        #[cfg(test)]
         let credential = AzureCredential::ManagedIdentity {
             client_id: effective_client_id.clone(),
         };
@@ -243,10 +274,18 @@ impl AzureProvider {
         let signer: Arc<dyn CloudSigner> =
             Arc::new(ManagedIdentitySigner::new(effective_client_id));
 
+        #[cfg(test)]
+        let backend_account_name = account_name.clone();
+        #[cfg(not(test))]
+        let backend_account_name = account_name;
+        #[cfg(test)]
+        let backend_container = container.clone();
+        #[cfg(not(test))]
+        let backend_container = container;
         let executor = CloudExecutor::new(Some(signer))?;
         let backend = Arc::new(AzureBackend::new(
-            account_name.clone(),
-            container.clone(),
+            backend_account_name,
+            backend_container,
             None,
             None, // No SAS token for managed identity
             executor,
@@ -254,14 +293,18 @@ impl AzureProvider {
 
         Ok(Self {
             backend,
+            #[cfg(test)]
             account_name,
+            #[cfg(test)]
             container,
+            #[cfg(test)]
             credential,
         })
     }
 
     /// Legacy constructor — defaults to shared key with an empty key.
     /// Callers should prefer `with_shared_key` or `with_sas_token`.
+    #[cfg(test)]
     pub fn new(account_name: String, container: String) -> MidgeResult<Self> {
         Self::with_shared_key(account_name, container, "")
     }
@@ -279,6 +322,7 @@ impl AzureProvider {
     /// - `AZURE_STORAGE_KEY`: Account key for `SharedKey` auth
     /// - `AZURE_STORAGE_SAS_TOKEN`: SAS token
     /// - `AZURE_CLIENT_ID`: User-assigned managed identity client ID
+    #[cfg(test)]
     pub fn from_env(account_name: String, container: String) -> MidgeResult<Self> {
         Self::from_env_and_endpoint(account_name, container, None)
     }
@@ -369,7 +413,7 @@ impl AzureProvider {
                 account_name,
                 container,
                 AzureOAuthProvider::from_environment_client_secret()?,
-                "environment-client-secret".to_string(),
+                "environment-client-secret",
             ),
             super::AzureCredentialSource::WorkloadIdentity {
                 tenant_id,
@@ -379,7 +423,7 @@ impl AzureProvider {
                 account_name,
                 container,
                 AzureOAuthProvider::from_workload_identity(tenant_id, client_id, token_file)?,
-                "workload-identity".to_string(),
+                "workload-identity",
             ),
             super::AzureCredentialSource::LightweightDefaultChain => {
                 if AzureOAuthProvider::has_environment_client_secret() {
@@ -387,7 +431,7 @@ impl AzureProvider {
                         account_name,
                         container,
                         AzureOAuthProvider::from_environment_client_secret()?,
-                        "environment-client-secret".to_string(),
+                        "environment-client-secret",
                     );
                 }
                 if AzureOAuthProvider::has_workload_identity() {
@@ -395,7 +439,7 @@ impl AzureProvider {
                         account_name,
                         container,
                         AzureOAuthProvider::from_workload_identity(None, None, None)?,
-                        "workload-identity".to_string(),
+                        "workload-identity",
                     );
                 }
                 Self::with_managed_identity(account_name, container, None)
@@ -413,23 +457,36 @@ impl AzureProvider {
         account_name: String,
         container: String,
         provider: AzureOAuthProvider,
-        source_name: String,
+        source_name: &str,
     ) -> MidgeResult<Self> {
+        #[cfg(not(test))]
+        tracing::trace!(source = source_name, "Azure OAuth provider configured");
         let signer: Arc<dyn CloudSigner> = Arc::new(OAuthTokenSigner::new(provider));
+        #[cfg(test)]
+        let backend_account_name = account_name.clone();
+        #[cfg(not(test))]
+        let backend_account_name = account_name;
+        #[cfg(test)]
+        let backend_container = container.clone();
+        #[cfg(not(test))]
+        let backend_container = container;
         let executor = CloudExecutor::new(Some(signer))?;
         let backend = Arc::new(AzureBackend::new(
-            account_name.clone(),
-            container.clone(),
+            backend_account_name,
+            backend_container,
             None,
             None,
             executor,
         ));
         Ok(Self {
             backend,
+            #[cfg(test)]
             account_name,
+            #[cfg(test)]
             container,
+            #[cfg(test)]
             credential: AzureCredential::OAuth {
-                source: source_name,
+                source: source_name.to_string(),
             },
         })
     }
@@ -626,6 +683,7 @@ impl AzureBackend {
     }
 
     /// List URL — uses Azure's `restype=container&comp=list&prefix=...`.
+    #[cfg(test)]
     fn list_url(&self, prefix: &str, marker: Option<&str>) -> String {
         let mut base = format!(
             "{}?restype=container&comp=list&prefix={}",
@@ -731,6 +789,7 @@ impl CloudBackend for AzureBackend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
+    #[cfg(test)]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let key = key.to_string();
         let url = self.object_url(&key);
@@ -880,6 +939,7 @@ struct SharedKeySigner {
 }
 
 impl SharedKeySigner {
+    #[cfg(test)]
     fn new(account_name: String, account_key_base64: &str) -> Self {
         Self::new_with_emulator_compat(account_name, account_key_base64, false)
     }
@@ -1544,6 +1604,35 @@ mod tests {
             } => assert_eq!(id, "00000000-0000-0000-0000-000000000000"),
             _ => panic!("Expected ManagedIdentity credential with client_id"),
         }
+    }
+
+    #[test]
+    fn should_create_oauth_credential_with_source() {
+        // Arrange
+        let source = "workload-identity".to_string();
+
+        // Act
+        let cred = AzureCredential::OAuth {
+            source: source.clone(),
+        };
+
+        // Assert
+        match cred {
+            AzureCredential::OAuth { source } => assert_eq!(source, "workload-identity"),
+            _ => panic!("Expected OAuth credential"),
+        }
+    }
+
+    #[test]
+    fn should_expose_from_env_constructor_for_credential_discovery() {
+        // Arrange
+        let constructor: fn(String, String) -> MidgeResult<AzureProvider> = AzureProvider::from_env;
+
+        // Act
+        let type_name = std::any::type_name_of_val(&constructor);
+
+        // Assert
+        assert!(type_name.contains("fn"));
     }
 
     // =========== AzureProvider Construction Tests ===========

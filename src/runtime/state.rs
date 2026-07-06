@@ -17,6 +17,7 @@ use std::time::Instant;
 use crate::io::traits::{Fs, FsError, FsPath};
 
 /// Maximum size of idempotency cache to prevent unbounded growth under cloud stall
+#[cfg(test)]
 const MAX_IDEMPOTENCY_CACHE_SIZE: usize = 100_000;
 const MAX_RECENT_DELETE_RANGES: usize = 4096;
 #[derive(Debug, Clone)]
@@ -29,8 +30,6 @@ pub struct RecentDeleteRange {
 
 /// Column family state
 pub struct ColumnFamilyState {
-    pub id: u32,
-    pub name: String,
     pub memtable: Arc<SkipListMemtable>,
     /// Immutable memtables waiting to be flushed
     pub immutable_memtables: Vec<Arc<SkipListMemtable>>,
@@ -39,10 +38,8 @@ pub struct ColumnFamilyState {
 }
 
 impl ColumnFamilyState {
-    pub fn new(id: u32, name: String) -> Self {
+    pub fn new(_id: u32, _name: String) -> Self {
         Self {
-            id,
-            name,
             memtable: Arc::new(SkipListMemtable::new()),
             immutable_memtables: Vec::new(),
             active_memtable_started_in_segment: 1,
@@ -91,6 +88,7 @@ pub struct CloudState {
     /// SSTs pending upload
     pub pending_uploads: Vec<String>,
     /// Last checkpoint sequence uploaded to cloud
+    #[cfg(test)]
     pub last_cloud_checkpoint_seq: u64,
 }
 
@@ -100,8 +98,6 @@ pub struct CloudState {
 /// while snapshots are reading from those SSTs.
 #[derive(Default)]
 pub struct SnapshotState {
-    /// Active snapshots: `snapshot_id` → (sequence, `created_at`, `ref_count`, `pinned_ssts`)
-    pub active_snapshots: HashMap<u64, (u64, Instant, usize, HashSet<String>)>,
     /// Maximum time to hold a snapshot (1 hour by default)
     pub max_snapshot_lifetime: std::time::Duration,
 }
@@ -119,6 +115,7 @@ pub(crate) struct FlushCandidate {
 }
 
 pub struct RuntimeMode {
+    #[cfg(test)]
     pub read_only: bool,
     pub memory_mode: bool,
 }
@@ -197,10 +194,12 @@ impl RuntimeState {
         self.should_hard_stall_writes(cf_id)
     }
 
+    #[cfg(test)]
     pub fn is_read_only(&self) -> bool {
         self.mode.read_only
     }
 
+    #[cfg(test)]
     pub fn set_read_only(&mut self, read_only: bool) {
         self.mode.read_only = read_only;
     }
@@ -243,13 +242,6 @@ impl RuntimeState {
 
     pub fn set_write_stalled(&mut self, stalled: bool) {
         self.write_pressure.stalled = stalled;
-    }
-
-    pub fn memtable_needs_flush(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
-        if let Some(cf_state) = self.column_families.get(&cf_id) {
-            return cf_state.memtable.size_bytes() >= self.memtable_flush_trigger_bytes();
-        }
-        false
     }
 
     pub(crate) fn active_memtable_wal_segment_gap(
@@ -437,9 +429,6 @@ pub struct RuntimeState {
     /// the running compactions drain.
     pub active_compactions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 
-    /// Condvar used to wait for `active_compactions` == 0.
-    pub active_compactions_notify: std::sync::Arc<(parking_lot::Mutex<()>, parking_lot::Condvar)>,
-
     /// Whether an ingest barrier is currently active. This is set at `BeginIngest`
     /// and cleared at `EndIngest` so tools and tests can detect when ingest mode
     /// is enforced.
@@ -464,6 +453,7 @@ impl RuntimeState {
 
     /// Create new runtime state with the given database path.
     /// If `memory_mode` is true, filesystem is never touched.
+    #[cfg(test)]
     pub fn new(db_path: PathBuf, memory_mode: bool) -> Self {
         Self::try_new(db_path, memory_mode, crate::config::RecoveryPolicy::Strict)
             .expect("runtime state initialization failed")
@@ -476,25 +466,6 @@ impl RuntimeState {
         recovery_policy: crate::config::RecoveryPolicy,
     ) -> MidgeResult<Self> {
         Self::try_new_with_recovery_dir(db_path, memory_mode, None, recovery_policy)
-    }
-
-    /// Create new runtime state with an optional override for WAL recovery.
-    ///
-    /// When `recovery_wal_dir` is provided, recovery replays WAL from that
-    /// directory (instead of `db_path/wal`). This is used for `CloudAsync` mode
-    /// where cloud WAL is the source of truth.
-    pub fn new_with_recovery_dir(
-        db_path: PathBuf,
-        memory_mode: bool,
-        recovery_wal_dir: Option<&PathBuf>,
-    ) -> Self {
-        Self::try_new_with_recovery_dir(
-            db_path,
-            memory_mode,
-            recovery_wal_dir,
-            crate::config::RecoveryPolicy::Strict,
-        )
-        .expect("runtime state initialization with recovery dir failed")
     }
 
     /// Create new runtime state with an optional override for WAL recovery and
@@ -547,13 +518,13 @@ impl RuntimeState {
             compaction: CompactionState::default(),
             cloud: CloudState::default(),
             snapshots: SnapshotState {
-                active_snapshots: HashMap::new(),
                 max_snapshot_lifetime: std::time::Duration::from_hours(1), // 1 hour default
             },
             snapshot_pins: Arc::new(SnapshotPinRegistry::default()),
             recent_delete_ranges: Vec::new(),
             memtable_size_limit: 64 * 1024 * 1024, // 64MB
             mode: RuntimeMode {
+                #[cfg(test)]
                 read_only: false,
                 memory_mode,
             },
@@ -580,10 +551,6 @@ impl RuntimeState {
             intent_log_entries_replayed: 0,
             ingest_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             active_compactions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            active_compactions_notify: std::sync::Arc::new((
-                parking_lot::Mutex::new(()),
-                parking_lot::Condvar::new(),
-            )),
             ingest_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_compaction_waits: parking_lot::Mutex::new(std::collections::HashMap::new()),
         };
@@ -1272,6 +1239,7 @@ impl RuntimeState {
 
     /// Check if we have cached sequences for this `request_id`.
     /// Returns (`first_sequence`, count) if found and not yet confirmed.
+    #[cfg(test)]
     pub fn get_cached_sequences(&self, request_id: u64) -> Option<(u64, usize)> {
         self.sequence_idempotency_cache
             .get(&request_id)
@@ -1285,6 +1253,7 @@ impl RuntimeState {
     /// PHASE 0 GUARDRAIL: Enforces `MAX_IDEMPOTENCY_CACHE_SIZE` to prevent unbounded
     /// memory growth under cloud upload stalls. Evicts oldest confirmed entries
     /// when limit is exceeded.
+    #[cfg(test)]
     pub fn allocate_sequences_idempotent(&mut self, request_id: u64, count: usize) -> (u64, usize) {
         // Record telemetry
         if let Some(t) = crate::telemetry::Telemetry::global() {
@@ -1356,11 +1325,6 @@ impl RuntimeState {
         );
 
         (first_seq, count)
-    }
-
-    /// Get current size of idempotency cache (for telemetry)
-    pub fn idempotency_cache_size(&self) -> usize {
-        self.sequence_idempotency_cache.len()
     }
 
     /// Confirm sequences for a `request_id` (mark as durable).
@@ -1443,13 +1407,6 @@ impl RuntimeState {
                 .map_err(crate::common::MidgeError::Internal)?;
         }
         Ok(())
-    }
-
-    /// Append an intent entry WITHOUT persisting (used for batched writes).
-    /// Caller MUST call `persist_intent_log()` after all batch entries are added.
-    #[inline]
-    pub fn append_intent_deferred(&mut self, entry: crate::runtime::IntentLogEntry) {
-        self.intent_log.push(entry);
     }
 
     /// Persist the intent log to disk (call after batched `append_intent_deferred` calls).
@@ -1920,6 +1877,7 @@ impl RuntimeState {
     ///
     /// Returns true if snapshot was registered successfully.
     /// Returns false if `snapshot_id` already exists (duplicate registration).
+    #[cfg(test)]
     pub fn register_snapshot(
         &mut self,
         snapshot_id: u64,
@@ -1942,6 +1900,7 @@ impl RuntimeState {
     }
 
     /// Unregister a snapshot, allowing SSTs referenced by it to be garbage collected.
+    #[cfg(test)]
     pub fn unregister_snapshot(&mut self, snapshot_id: u64) {
         if self.snapshot_pins.unregister(snapshot_id) {
             self.prune_recent_delete_ranges_by_snapshot_horizon();
@@ -1954,12 +1913,6 @@ impl RuntimeState {
     pub fn get_pinned_sst_names(&self) -> HashSet<String> {
         self.snapshot_pins
             .pinned_sst_names(self.snapshots.max_snapshot_lifetime)
-    }
-
-    /// Check for timed-out snapshots and return count
-    pub fn count_timed_out_snapshots(&self) -> usize {
-        self.snapshot_pins
-            .count_timed_out(self.snapshots.max_snapshot_lifetime)
     }
 
     /// Remove snapshots that exceeded max lifetime and return the number evicted.
@@ -2059,6 +2012,7 @@ impl RuntimeState {
         self.column_families.get_mut(&cf_id)
     }
 
+    #[cfg(test)]
     pub fn create_cf(&mut self, name: String) -> MidgeResult<u32> {
         let id = u32::try_from(self.column_families.len()).map_err(|_| {
             crate::common::MidgeError::Internal("too many column families".to_string())
@@ -2068,6 +2022,7 @@ impl RuntimeState {
         Ok(id)
     }
 
+    #[cfg(test)]
     pub fn needs_flush(&self) -> Option<u32> {
         self.next_flush_candidate(false)
             .map(|candidate| candidate.cf_id)
@@ -2118,18 +2073,18 @@ mod tests {
     // =========== ColumnFamilyState Tests ===========
 
     #[test]
-    fn should_create_column_family_with_unique_id() {
+    fn should_create_column_family_state_with_empty_memtables() {
         // Arrange
         let id = 42;
         let name = "test_cf".to_string();
 
         // Act
-        let cf = ColumnFamilyState::new(id, name.clone());
+        let cf = ColumnFamilyState::new(id, name);
 
         // Assert
-        assert_eq!(cf.id, 42);
-        assert_eq!(cf.name, "test_cf");
+        assert_eq!(cf.memtable.size_bytes(), 0);
         assert!(cf.immutable_memtables.is_empty());
+        assert_eq!(cf.active_memtable_started_in_segment, 1);
     }
 
     #[test]
@@ -2479,8 +2434,8 @@ mod tests {
 
         // Assert
         let cf0 = state.get_cf(0).expect("Default CF should exist");
-        assert_eq!(cf0.id, 0);
-        assert_eq!(cf0.name, "default");
+        assert_eq!(cf0.memtable.size_bytes(), 0);
+        assert!(cf0.immutable_memtables.is_empty());
     }
 
     #[test]
@@ -2613,7 +2568,8 @@ mod tests {
         assert_eq!(cf_id, 1); // After default (0)
         assert!(state.column_families.contains_key(&cf_id));
         let cf = state.get_cf(cf_id).expect("Created CF should exist");
-        assert_eq!(cf.name, "test_cf");
+        assert_eq!(cf.memtable.size_bytes(), 0);
+        assert!(cf.immutable_memtables.is_empty());
     }
 
     #[test]
@@ -2629,7 +2585,7 @@ mod tests {
 
         // Assert
         assert!(cf.is_some());
-        assert_eq!(cf.unwrap().name, "my_cf");
+        assert_eq!(cf.unwrap().memtable.size_bytes(), 0);
     }
 
     #[test]

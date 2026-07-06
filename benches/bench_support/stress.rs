@@ -1,7 +1,8 @@
 #![allow(rustdoc::broken_intra_doc_links)]
+#![allow(dead_code)]
 
-use crate::testkit::config::MidgeOptions;
-use crate::Engine;
+use super::config::MidgeOptions;
+use cntryl_midge::Engine;
 
 pub const KEY_SIZE: usize = 16;
 
@@ -11,7 +12,7 @@ pub const KEY_SIZE: usize = 16;
 /// Panics if the engine cannot be opened with compaction disabled.
 pub fn open_engine_no_compaction(mut opts: MidgeOptions) -> Engine {
     opts.enable_compaction = false;
-    Engine::open_with_options(&opts).expect("open_engine_no_compaction: open engine")
+    Engine::open(opts.to_open_options()).expect("open_engine_no_compaction: open engine")
 }
 
 #[must_use]

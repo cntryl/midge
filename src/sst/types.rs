@@ -333,74 +333,97 @@ pub fn decode_range_tombstones(data: &[u8]) -> crate::common::MidgeResult<Vec<Ra
     }
 
     let mut offset = 0;
-    let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    offset += 4;
+    let count = usize::try_from(read_range_tombstone_u32(
+        data,
+        &mut offset,
+        "Range tombstone count truncated",
+    )?)
+    .map_err(|_| crate::common::MidgeError::Corruption("Range tombstone count overflow".into()))?;
+    let remaining = data.len().saturating_sub(offset);
+    if count > remaining / 16 {
+        return Err(crate::common::MidgeError::Corruption(
+            "Range tombstone count exceeds remaining bytes".into(),
+        ));
+    }
     let mut tombstones = Vec::with_capacity(count);
 
     for _ in 0..count {
-        if offset + 4 > data.len() {
-            return Err(crate::common::MidgeError::Corruption(
-                "Range tombstone start length truncated".into(),
-            ));
-        }
-        let start_len = u32::from_le_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]) as usize;
-        offset += 4;
+        let start_len = usize::try_from(read_range_tombstone_u32(
+            data,
+            &mut offset,
+            "Range tombstone start length truncated",
+        )?)
+        .map_err(|_| {
+            crate::common::MidgeError::Corruption("Range tombstone start length overflow".into())
+        })?;
+        let start = read_range_tombstone_slice(
+            data,
+            &mut offset,
+            start_len,
+            "Range tombstone start bytes truncated",
+        )?
+        .to_vec();
 
-        if offset + start_len > data.len() {
-            return Err(crate::common::MidgeError::Corruption(
-                "Range tombstone start bytes truncated".into(),
-            ));
-        }
-        let start = data[offset..offset + start_len].to_vec();
-        offset += start_len;
+        let end_len = usize::try_from(read_range_tombstone_u32(
+            data,
+            &mut offset,
+            "Range tombstone end length truncated",
+        )?)
+        .map_err(|_| {
+            crate::common::MidgeError::Corruption("Range tombstone end length overflow".into())
+        })?;
+        let end = read_range_tombstone_slice(
+            data,
+            &mut offset,
+            end_len,
+            "Range tombstone end bytes truncated",
+        )?
+        .to_vec();
 
-        if offset + 4 > data.len() {
-            return Err(crate::common::MidgeError::Corruption(
-                "Range tombstone end length truncated".into(),
-            ));
-        }
-        let end_len = u32::from_le_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]) as usize;
-        offset += 4;
-
-        if offset + end_len > data.len() {
-            return Err(crate::common::MidgeError::Corruption(
-                "Range tombstone end bytes truncated".into(),
-            ));
-        }
-        let end = data[offset..offset + end_len].to_vec();
-        offset += end_len;
-
-        if offset + 8 > data.len() {
-            return Err(crate::common::MidgeError::Corruption(
-                "Range tombstone sequence truncated".into(),
-            ));
-        }
-        let seq = u64::from_le_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-            data[offset + 4],
-            data[offset + 5],
-            data[offset + 6],
-            data[offset + 7],
-        ]);
-        offset += 8;
+        let seq =
+            read_range_tombstone_u64(data, &mut offset, "Range tombstone sequence truncated")?;
 
         tombstones.push(RangeTombstone::new(start, end, seq));
     }
 
     Ok(tombstones)
+}
+
+fn read_range_tombstone_slice<'a>(
+    data: &'a [u8],
+    offset: &mut usize,
+    len: usize,
+    message: &str,
+) -> crate::common::MidgeResult<&'a [u8]> {
+    let end = offset.checked_add(len).ok_or_else(|| {
+        crate::common::MidgeError::Corruption(format!("{message}: offset overflow"))
+    })?;
+    if end > data.len() {
+        return Err(crate::common::MidgeError::Corruption(message.into()));
+    }
+    let slice = &data[*offset..end];
+    *offset = end;
+    Ok(slice)
+}
+
+fn read_range_tombstone_u32(
+    data: &[u8],
+    offset: &mut usize,
+    message: &str,
+) -> crate::common::MidgeResult<u32> {
+    let bytes = read_range_tombstone_slice(data, offset, 4, message)?;
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_range_tombstone_u64(
+    data: &[u8],
+    offset: &mut usize,
+    message: &str,
+) -> crate::common::MidgeResult<u64> {
+    let bytes = read_range_tombstone_slice(data, offset, 8, message)?;
+    Ok(u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
 }
 
 /// Parsed entry from SST block
@@ -917,6 +940,21 @@ mod tests {
         assert_eq!(rt1.start, rt2.start);
         assert_eq!(rt1.end, rt2.end);
         assert_eq!(rt1.seq, rt2.seq);
+    }
+
+    #[test]
+    fn should_reject_declared_range_tombstone_count_larger_than_remaining_bytes() {
+        // Arrange
+        let encoded = u32::MAX.to_le_bytes();
+
+        // Act
+        let result = decode_range_tombstones(&encoded);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::Corruption(_))
+        ));
     }
 
     // =========== SstEntry Tests ===========

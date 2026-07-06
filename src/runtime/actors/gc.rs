@@ -7,6 +7,7 @@
 
 use super::super::state::RuntimeState;
 use crate::common::MidgeResult;
+#[cfg(test)]
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,6 +24,7 @@ impl GcActor {
     }
 
     /// Check for garbage collection opportunities
+    #[cfg(test)]
     pub fn check(state: &RuntimeState) {
         // Find SST files that are still referenced in the manifest
         let manifest_ssts: HashSet<String> = state
@@ -177,6 +179,7 @@ impl GcActor {
     }
 
     /// Get timestamp of last GC run
+    #[cfg(test)]
     pub fn last_gc_run(&self) -> Option<std::time::Instant> {
         self.last_gc_run
     }

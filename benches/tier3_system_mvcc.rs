@@ -1,4 +1,4 @@
-//! Tier 3 â€” MVCC primitives (single version operation measurement)
+//! Tier 3 — MVCC primitives
 //!
 //! Measures: cost of version checks and single version lookups
 //! NOT: sustained overwrites, version chain length scaling
@@ -10,13 +10,15 @@ use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
-use cntryl_midge::{testkit::MidgeOptions, MidgeEngine};
+use cntryl_midge::MidgeEngine;
+use stress_config::MidgeOptions;
 
 const VALUE_SIZE: usize = 64;
 const TARGET_BATCH: usize = 1_000;
+const OLD_VERSION_READ_BATCH_SIZE: usize = 64;
 
 fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
-    cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
+    stress_config::bench_stress::open_engine_no_compaction(opts)
 }
 
 fn run_single_version_write_case(
@@ -24,14 +26,16 @@ fn run_single_version_write_case(
     scenario: &'static str,
     opts: MidgeOptions,
 ) {
-    ctx.set_elements(50_000); // cheap (Âµs-scale)
+    ctx.parameter("logical_batch_size", 1);
+    ctx.parameter("operation_surface", "mvcc_single_version_write");
+    ctx.parameter("begin_tx_included", "true");
 
     let engine = setup_engine(opts);
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
 
     // Precompute one key outside measurement
-    let k = cntryl_midge::testkit::stress::key16_u64_be(0);
+    let k = stress_config::bench_stress::key16_u64_be(0);
     let v = vec![1u8; VALUE_SIZE];
 
     // Measure ONLY one single overwrite call
@@ -53,7 +57,10 @@ fn run_read_old_version_case(
     opts: MidgeOptions,
     num_keys: usize,
 ) {
-    ctx.set_elements(10_000); // moderate (compaction + lookup)
+    ctx.parameter("logical_batch_size", OLD_VERSION_READ_BATCH_SIZE);
+    ctx.parameter("operation_surface", "mvcc_old_version_read");
+    ctx.parameter("begin_tx_included", "false");
+    ctx.parameter("rotating_key_count", num_keys);
 
     let engine = setup_engine(opts);
     let cf = engine.create_column_family("cf1").unwrap();
@@ -70,7 +77,7 @@ fn run_read_old_version_case(
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin");
         for i in start..end {
-            let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
+            let k = stress_config::bench_stress::key16_u64_be(i as u64);
             keys.push(k);
             tx.put(k.to_vec(), vec![1u8; VALUE_SIZE], None).unwrap();
         }
@@ -83,28 +90,35 @@ fn run_read_old_version_case(
         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin");
 
-    // Write ONE newer version to demonstrate old-version visibility
-    {
+    // Write newer versions to demonstrate old-version visibility for all rotating keys.
+    for start in (0..total).step_by(TARGET_BATCH) {
+        let end = (start + TARGET_BATCH).min(total);
         let mut tx = engine
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin");
-        tx.put(keys[0].to_vec(), vec![2u8; VALUE_SIZE], None)
-            .unwrap();
+        for key in &keys[start..end] {
+            tx.put(key.to_vec(), vec![2u8; VALUE_SIZE], None).unwrap();
+        }
         tx.commit(write_opts).unwrap();
     }
     engine.flush_cf(&cf).unwrap();
     engine.compact_all().unwrap();
 
-    // Measure reading ONE old version via snapshot transaction
-    let _ = ctx.measure_batch(scenario, 1, || {
-        let s = &snap_tx;
-        let v = s.get(&keys[0][..]).unwrap();
-        let visible = if let Some(bytes) = v {
-            bytes.as_ref() == vec![1u8; VALUE_SIZE].as_slice()
-        } else {
-            false
-        };
-        std::hint::black_box(visible);
+    let expected = vec![1u8; VALUE_SIZE];
+    let mut key_index = 0usize;
+
+    let _ = ctx.measure_batch(scenario, OLD_VERSION_READ_BATCH_SIZE as u64, || {
+        for _ in 0..OLD_VERSION_READ_BATCH_SIZE {
+            let key = keys[key_index % keys.len()];
+            key_index = key_index.wrapping_add(1);
+            let v = snap_tx.get(&key[..]).unwrap();
+            let visible = if let Some(bytes) = v {
+                bytes.as_ref() == expected.as_slice()
+            } else {
+                false
+            };
+            std::hint::black_box(visible);
+        }
     });
 
     drop(engine);
@@ -112,31 +126,31 @@ fn run_read_old_version_case(
 
 #[stress(tier = 3)]
 fn tier3_mvcc_single_version_write_mem(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    let opts = stress_config::opts_for_mode("memory");
     run_single_version_write_case(ctx, "tier3_mvcc_single_version_write_mem", opts);
 }
 
 #[stress(tier = 3)]
 fn tier3_mvcc_single_version_write_local(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    let opts = stress_config::opts_for_mode("local");
     run_single_version_write_case(ctx, "tier3_mvcc_single_version_write_local", opts);
 }
 
 #[stress(tier = 3)]
 fn tier3_mvcc_single_version_write_cloud(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    let opts = stress_config::opts_for_mode("cloud");
     run_single_version_write_case(ctx, "tier3_mvcc_single_version_write_cloud", opts);
 }
 
 #[stress(tier = 3)]
 fn tier3_mvcc_read_old_version_local(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    let opts = stress_config::opts_for_mode("local");
     run_read_old_version_case(ctx, "tier3_mvcc_read_old_version_local", opts, 1_000);
 }
 
 #[stress(tier = 3)]
 fn tier3_mvcc_read_old_version_cloud(ctx: &mut StressContext) {
-    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    let opts = stress_config::opts_for_mode("cloud");
     run_read_old_version_case(ctx, "tier3_mvcc_read_old_version_cloud", opts, 1_000);
 }
 

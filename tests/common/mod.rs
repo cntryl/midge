@@ -1,8 +1,8 @@
 #![allow(dead_code, unused_imports)]
 
 use cntryl_midge::{
-    ColumnFamilyHandle, Engine, Goal, MemoryBudget, MidgeEngine, MidgeResult, OpenOptions, Storage,
-    WorkloadProfile, WriteOptions,
+    CloudWritePolicy, ColumnFamilyHandle, Engine, Goal, MemoryBudget, MidgeEngine, MidgeResult,
+    OpenOptions, Storage, WorkloadProfile, WriteOptions,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +23,8 @@ pub struct MidgeOptions {
     pub compression: bool,
     pub enable_compaction: bool,
     pub memory_budget: Option<usize>,
+    pub cloud_write_policy: Option<CloudWritePolicy>,
+    pub simulated_cloud_local_storage_budget_bytes: Option<u64>,
 }
 
 impl Default for MidgeOptions {
@@ -35,6 +37,8 @@ impl Default for MidgeOptions {
             compression: false,
             enable_compaction: true,
             memory_budget: None,
+            cloud_write_policy: None,
+            simulated_cloud_local_storage_budget_bytes: None,
         }
     }
 }
@@ -42,6 +46,16 @@ impl Default for MidgeOptions {
 impl MidgeOptions {
     pub fn memory_budget(mut self, bytes: usize) -> Self {
         self.memory_budget = Some(bytes);
+        self
+    }
+
+    pub fn with_cloud_write_policy(mut self, policy: CloudWritePolicy) -> Self {
+        self.cloud_write_policy = Some(policy);
+        self
+    }
+
+    pub fn with_simulated_cloud_local_storage_budget(mut self, bytes: u64) -> Self {
+        self.simulated_cloud_local_storage_budget_bytes = Some(bytes);
         self
     }
 
@@ -76,7 +90,13 @@ impl MidgeOptions {
             })
             .workload(WorkloadProfile::default())
             .goal(Goal::default())
+            .background_compaction(self.enable_compaction)
+            .with_memtable_size_limit(self.memtable_size)
+            .with_memtable_flush_threshold(self.memtable_size)
             .build();
+        if let Some(policy) = self.cloud_write_policy.clone() {
+            open_opts = open_opts.cloud_write_policy(policy);
+        }
         open_opts
     }
 }
@@ -111,6 +131,8 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             compression: false,
             enable_compaction: false,
             memory_budget: None,
+            cloud_write_policy: None,
+            simulated_cloud_local_storage_budget_bytes: None,
         },
         "local" => {
             let timestamp = std::time::SystemTime::now()
@@ -131,6 +153,8 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 compression: false,
                 enable_compaction: false,
                 memory_budget: None,
+                cloud_write_policy: None,
+                simulated_cloud_local_storage_budget_bytes: None,
             }
         }
         "cloud" => {
@@ -154,6 +178,8 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 compression: false,
                 enable_compaction: false,
                 memory_budget: None,
+                cloud_write_policy: None,
+                simulated_cloud_local_storage_budget_bytes: None,
             }
         }
         _ => panic!("unknown storage mode: {mode}"),

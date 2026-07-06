@@ -74,11 +74,6 @@ impl FileSystemLease {
             acquired_epoch: AtomicU64::new(0),
         })
     }
-
-    /// Return a reference to the underlying leader store (for injection into `WalActor`).
-    pub fn leader_store(&self) -> &Arc<FsLeaderStore> {
-        &self.leader_store
-    }
 }
 
 /// Write a raw leader-record payload through the `FsLeaderStore`'s underlying Fs.

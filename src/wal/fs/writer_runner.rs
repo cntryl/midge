@@ -300,7 +300,16 @@ impl WriterRunner {
         }
 
         if file_opt.is_none() {
-            *file_opt = self.open_file_handle().ok();
+            match self.open_file_handle() {
+                Ok(file) => *file_opt = Some(file),
+                Err(error) => {
+                    let message =
+                        format!("wal writer could not reopen file handle for fsync: {error}");
+                    tracing::error!(error = ?error, "WAL fsync failed before sync - marking sync as failed");
+                    self.mark_sync_failure(message);
+                    return Err(());
+                }
+            }
         }
         if let Some(file) = file_opt.as_mut() {
             let sync_start = Instant::now();
@@ -390,5 +399,118 @@ impl WriterRunner {
         } else {
             crate::common::MidgeError::Internal(message.to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::traits::{DirEntry, FsError, Metadata};
+    use crate::io::{Fs, FsPath, FsResult, OpenOptions as FsOpenOptions};
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    struct FailingOpenFs;
+
+    impl Fs for FailingOpenFs {
+        fn open(
+            &self,
+            path: &FsPath,
+            _opts: FsOpenOptions,
+        ) -> FsResult<Box<dyn crate::io::File + '_>> {
+            Err(FsError::Unavailable(format!("open failed for {}", path.0)))
+        }
+
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(format!(
+                "remove failed for {}",
+                path.0
+            )))
+        }
+
+        fn exists(&self, _path: &FsPath) -> FsResult<bool> {
+            Ok(false)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            Err(FsError::Unavailable(format!(
+                "metadata failed for {}",
+                path.0
+            )))
+        }
+
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(format!(
+                "create dir failed for {}",
+                path.0
+            )))
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            Err(FsError::Unavailable(format!(
+                "list dir failed for {}",
+                path.0
+            )))
+        }
+
+        fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(format!(
+                "remove dir failed for {}",
+                path.0
+            )))
+        }
+
+        fn sync_dir(&self, path: &FsPath, _dur: Durability) -> FsResult<()> {
+            Err(FsError::Unavailable(format!(
+                "sync dir failed for {}",
+                path.0
+            )))
+        }
+
+        fn rename_atomic(&self, from: &FsPath, _to: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(format!(
+                "rename failed for {}",
+                from.0
+            )))
+        }
+    }
+
+    fn runner_with_sync_state(sync_state: Arc<Mutex<SyncState>>) -> WriterRunner {
+        let fs: Arc<dyn Fs> = Arc::new(FailingOpenFs);
+        WriterRunner::new(WriterConfig {
+            fs,
+            path: FsPath::new("wal.log"),
+            queue: Arc::new(Mutex::new(Vec::new())),
+            queue_cond: Arc::new(Condvar::new()),
+            buf_pool: Arc::new(Mutex::new(Vec::new())),
+            sync_state,
+            sync_cond: Arc::new(Condvar::new()),
+            current_pos: Arc::new(AtomicU64::new(0)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    #[test]
+    fn should_fail_pending_fsync_when_file_handle_cannot_reopen() {
+        // Arrange
+        let sync_state = Arc::new(Mutex::new(SyncState {
+            pending_fsyncs: 1,
+            ..SyncState::default()
+        }));
+        let runner = runner_with_sync_state(Arc::clone(&sync_state));
+        let mut file_opt = None;
+
+        // Act
+        let result = runner.complete_pending_fsyncs(&mut file_opt);
+
+        // Assert
+        assert!(result.is_err());
+        let state = sync_state.lock();
+        assert!(state.sync_failed);
+        assert_eq!(state.completed_fsyncs, 0);
+        assert_eq!(state.pending_fsyncs, 1);
+        assert!(state
+            .last_sync_error
+            .as_deref()
+            .is_some_and(|error| error.contains("could not reopen file handle")));
     }
 }

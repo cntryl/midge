@@ -73,15 +73,15 @@ All ops in a commit become visible atomically. There is no partial visibility.
 | `sync()` | WAL append plus local fsync before returning. |
 | `buffered()` | WAL write, no fsync. Crash between write and fsync loses data. |
 | `best_effort()` | WAL skipped entirely. Data lives only in the memtable until flush. |
-| `cloud_strict()` | Uses the cloud durability path and waits for the cloud durability frontier before returning. |
+| `cloud_strict()` | Uses the cloud durability path and waits for the cloud durability frontier before returning. Empty write-set commits validate cloud-mode compatibility but do not seal or wait for a new cloud sequence. |
 
 ### Rollback behavior
 
 ```rust
-engine.rollback_transaction(tx)?;  // no-op; returns Ok(()) immediately
+tx.rollback()?;  // discards the write_set and unregisters the snapshot
 ```
 
-Because writes are never sent to the engine until `commit`, dropping a `Transaction` without committing it is sufficient to discard all pending writes. There is no WAL abort record, no undo log, no two-phase rollback. `rollback_transaction` exists as an explicit API for clarity but does nothing.
+Because writes are never sent to the engine until `commit`, dropping a `Transaction` without committing it is sufficient to discard all pending writes. There is no WAL abort record, no undo log, no two-phase rollback. `Transaction::rollback()` exists as an explicit API for clarity and unregisters the transaction snapshot.
 
 ### Copy-on-write
 

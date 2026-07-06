@@ -222,6 +222,7 @@ impl StorageBackend for FileSystem {
         });
     }
 
+    #[cfg(test)]
     fn submit_list(&self, prefix: &str, callback: StorageCallback) {
         let full = self.full_path(prefix);
 

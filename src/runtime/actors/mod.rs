@@ -9,6 +9,7 @@
 //! - `cloud` and `cloud_write_queue`: cloud durability and upload coordination
 //! - `gc`: delete obsolete files only after publication makes them safe to remove
 
+#[cfg(test)]
 pub mod cloud;
 pub mod cloud_write_queue;
 pub mod compaction;
@@ -18,6 +19,7 @@ pub mod gc;
 pub mod manifest;
 pub mod wal;
 
+#[cfg(test)]
 pub use cloud::CloudActor;
 pub use compaction::CompactionActor;
 pub use eviction::EvictionActor;

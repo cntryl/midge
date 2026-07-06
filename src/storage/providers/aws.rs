@@ -159,4 +159,17 @@ mod tests {
         // Assert
         assert!(Arc::strong_count(&backend) >= 1);
     }
+
+    #[test]
+    fn should_convert_default_chain_provider_into_inner_backend() {
+        // Arrange
+
+        // Act
+        let provider = AwsS3Provider::from_default_chain("my-bucket".into(), "us-east-1".into())
+            .expect("should create aws provider from default chain");
+        let backend = provider.into_inner().backend();
+
+        // Assert
+        assert!(Arc::strong_count(&backend) >= 1);
+    }
 }

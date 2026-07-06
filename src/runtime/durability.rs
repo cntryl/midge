@@ -4,6 +4,7 @@
 //! Owns the policy-independent parts of durability enforcement.
 
 use crate::common::KeyedGroupCommit;
+#[cfg(test)]
 use crate::types::ReadDurability;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
@@ -18,6 +19,7 @@ pub struct CloudAsyncInflightSegment {
 /// Waiter types for group commit
 #[derive(Debug, Clone)]
 pub enum DurabilityWaiter {
+    #[cfg(test)]
     WalAppend {
         request_id: u64,
         sequence: u64,
@@ -38,22 +40,20 @@ pub enum DurabilityWaiter {
     CloudDurability {
         request_id: u64,
     },
+    #[cfg(test)]
     Read {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
         key: Vec<u8>,
         sequence: u64,
-        #[allow(dead_code)]
-        requested_durability: ReadDurability,
     },
+    #[cfg(test)]
     RangeScan {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
         start: Vec<u8>,
         end: Vec<u8>,
         sequence: u64,
-        #[allow(dead_code)]
-        requested_durability: ReadDurability,
     },
 }
 
@@ -107,6 +107,7 @@ impl DurabilityCoordinator {
     ///
     /// Special case: `u64::MAX` (latest available) always returns true and bypasses durability checks.
     #[inline]
+    #[cfg(test)]
     pub fn is_durable(
         sequence: u64,
         requested_durability: ReadDurability,
@@ -282,11 +283,5 @@ impl DurabilityCoordinator {
     /// Update last flush timestamp (call after `CloudAsync` segment is enqueued).
     pub fn record_cloud_flush(&mut self) {
         self.last_cloud_flush = Instant::now();
-    }
-
-    /// Get reference to waiters for inspection (internal use only).
-    #[allow(dead_code)]
-    pub(super) fn waiters(&self) -> Option<&KeyedGroupCommit<u64, DurabilityWaiter>> {
-        self.waiters.as_ref()
     }
 }

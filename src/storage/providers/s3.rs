@@ -45,6 +45,7 @@ pub struct AwsCredentials {
 }
 
 impl AwsCredentials {
+    #[cfg(test)]
     pub fn new(access_key: String, secret_key: String, region: String) -> Self {
         Self {
             access_key,
@@ -685,6 +686,7 @@ impl S3Provider {
     }
 
     /// Create provider for Wasabi (simple access key/secret)
+    #[cfg(test)]
     pub fn wasabi(
         bucket: String,
         region: String,
@@ -702,6 +704,7 @@ impl S3Provider {
     }
 
     /// Create provider for `MinIO` (access key/secret)
+    #[cfg(test)]
     pub fn minio(
         bucket: String,
         endpoint: String,
@@ -719,6 +722,7 @@ impl S3Provider {
     }
 
     /// Create provider for OCI S3 compatibility
+    #[cfg(test)]
     pub fn oci_s3_compat(
         bucket: String,
         namespace: &str,
@@ -737,6 +741,7 @@ impl S3Provider {
     }
 
     /// Create provider with custom S3-compatible endpoint
+    #[cfg(test)]
     pub fn custom(config: S3Config, access_key: String, secret_key: String) -> MidgeResult<Self> {
         let creds = AwsCredentials {
             access_key,
@@ -767,6 +772,7 @@ impl S3Provider {
     }
 
     /// Legacy constructor (AWS with explicit credentials)
+    #[cfg(test)]
     pub fn new(bucket: String, region: String, creds: AwsCredentials) -> MidgeResult<Self> {
         Self::aws(bucket, region, creds)
     }
@@ -832,6 +838,7 @@ impl S3Backend {
         format!("{}/{}", self.base_url(), Self::canonical_key(key))
     }
 
+    #[cfg(test)]
     fn list_url(&self, prefix: &str, continuation_token: Option<&str>) -> String {
         let mut url = format!("{}?list-type=2&prefix={}", self.base_url(), encode(prefix));
         if let Some(token) = continuation_token {
@@ -921,6 +928,7 @@ impl CloudBackend for S3Backend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
+    #[cfg(test)]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let key = key.to_string();
         let url = self.object_url(&key);
@@ -1261,6 +1269,7 @@ fn decode_xml_entities(value: &str) -> String {
 mod tests {
     use super::*;
     use reqwest::Method;
+    use std::sync::Arc;
 
     #[test]
     fn should_add_security_token_header_when_signing_with_session_credentials() {
@@ -1353,5 +1362,45 @@ mod tests {
         assert!(url.contains("list-type=2"));
         assert!(url.contains("prefix=sst%2F"));
         assert!(url.contains("continuation-token=token%2Fwith%20spaces"));
+    }
+
+    #[test]
+    fn should_create_compatibility_provider_constructors() {
+        // Arrange
+        let creds = AwsCredentials::new("access".into(), "secret".into(), "us-east-1".into());
+
+        // Act
+        let providers = vec![
+            S3Provider::new("aws-bucket".into(), "us-east-1".into(), creds)
+                .expect("create legacy aws provider"),
+            S3Provider::wasabi(
+                "wasabi-bucket".into(),
+                "us-east-1".into(),
+                "access".into(),
+                "secret".into(),
+            )
+            .expect("create wasabi provider"),
+            S3Provider::minio(
+                "minio-bucket".into(),
+                "http://localhost:9000".into(),
+                "access".into(),
+                "secret".into(),
+            )
+            .expect("create minio provider"),
+            S3Provider::oci_s3_compat(
+                "oci-bucket".into(),
+                "namespace",
+                "us-phoenix-1".into(),
+                "access".into(),
+                "secret".into(),
+            )
+            .expect("create oci provider"),
+        ];
+
+        // Assert
+        for provider in providers {
+            let backend = provider.backend();
+            assert!(Arc::strong_count(&backend) >= 1);
+        }
     }
 }
