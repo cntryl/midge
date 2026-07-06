@@ -1532,6 +1532,7 @@ mod tests {
 
     #[test]
     fn should_refresh_expired_authorized_user_token() {
+        // Arrange
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let token_url = format!("http://{}/token", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
@@ -1592,6 +1593,8 @@ mod tests {
             .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
             .map(|(_, value)| value.as_str());
 
+        // Act
+        // Assert
         assert_eq!(first_auth, Some("Bearer token-one"));
         assert_eq!(second_auth, Some("Bearer token-two"));
         server.join().unwrap();
@@ -1600,6 +1603,7 @@ mod tests {
 
     #[test]
     fn should_read_external_account_file_subject_token() {
+        // Arrange
         let token_path = std::env::temp_dir().join(format!(
             "midge_gcs_subject_token_{}_{}.txt",
             std::process::id(),
@@ -1619,6 +1623,8 @@ mod tests {
 
         let token = external_account_subject_token(&json).expect("subject token");
 
+        // Act
+        // Assert
         assert_eq!(token, "subject-token");
         let file = json
             .get("credential_source")
@@ -1630,6 +1636,7 @@ mod tests {
 
     #[test]
     fn should_exchange_external_account_subject_token_with_sts() {
+        // Arrange
         let token_path = std::env::temp_dir().join(format!(
             "midge_gcs_sts_subject_token_{}_{}.txt",
             std::process::id(),
@@ -1644,6 +1651,8 @@ mod tests {
             let mut buf = [0_u8; 4096];
             let n = std::io::Read::read(&mut stream, &mut buf).unwrap();
             let request = String::from_utf8_lossy(&buf[..n]);
+            // Act
+            // Assert
             assert!(request.starts_with("POST /token HTTP/1.1"));
             assert!(request
                 .contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange"));
@@ -1685,6 +1694,7 @@ mod tests {
 
     #[test]
     fn should_reject_executable_external_account_credentials() {
+        // Arrange
         let json = json!({
             "type": "external_account",
             "audience": "audience",
@@ -1697,16 +1707,21 @@ mod tests {
 
         let error = external_account_subject_token(&json).expect_err("should reject executable");
 
+        // Act
+        // Assert
         assert!(error.to_string().contains("process execution"));
     }
 
     #[test]
     fn should_parse_impersonated_access_token() {
+        // Arrange
         let token = parse_impersonated_access_token_json(
             r#"{"accessToken":"impersonated","expireTime":"2099-01-01T00:00:00Z"}"#,
         )
         .expect("parse impersonation token");
 
+        // Act
+        // Assert
         assert_eq!(token.access_token, "impersonated");
         assert!(token.expires_at.unwrap_or_default() > current_unix_secs());
     }
@@ -1750,7 +1765,8 @@ mod tests {
     }
 
     #[test]
-    fn should_extract_gcs_json_list_items_and_next_page_token() {
+    fn should_extract_gcs_json_list_metadata_when_next_page_token_present() {
+        // Arrange
         let body = r#"{
             "items": [
                 {"name": "sst/a.sst"},
@@ -1761,6 +1777,8 @@ mod tests {
 
         let (items, token) = extract_gcs_json_list(body).unwrap();
 
+        // Act
+        // Assert
         assert_eq!(
             items,
             vec!["sst/a.sst".to_string(), "sst/b.sst".to_string()]
@@ -1770,10 +1788,13 @@ mod tests {
 
     #[test]
     fn should_build_gcs_list_url_with_page_token() {
+        // Arrange
         let backend = GcsBackend::new("my-bucket".into(), make_noop_executor());
 
         let url = backend.list_url("sst/", Some("next token"));
 
+        // Act
+        // Assert
         assert!(url.contains("prefix=sst%2F"));
         assert!(url.contains("pageToken=next%20token"));
     }

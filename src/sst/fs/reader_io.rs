@@ -616,17 +616,29 @@ impl SstFileIo {
 
     fn read_cached_data_block(&self, handle: &BlockHandle) -> MidgeResult<bytes::Bytes> {
         let cache_key = CacheKey::for_data(self.sst_id, handle.offset);
+        let read_metrics = crate::sst::read_path_metrics::global_sst_read_metrics();
 
         if let Some(ref cache) = self.block_cache {
             if let Some(cached_value) = cache.get(&cache_key) {
+                read_metrics.record_block_cache_hit();
+                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                    telemetry.metrics().record_cache_hit();
+                }
                 Ok(cached_value.data.as_ref().clone())
             } else {
+                read_metrics.record_block_cache_miss();
+                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                    telemetry.metrics().record_cache_miss();
+                }
                 let bytes = self.read_block(handle)?;
+                read_metrics.record_data_block_read();
                 cache.put(cache_key, &bytes);
                 Ok(bytes)
             }
         } else {
-            self.read_block(handle)
+            let bytes = self.read_block(handle)?;
+            read_metrics.record_data_block_read();
+            Ok(bytes)
         }
     }
 
@@ -711,6 +723,7 @@ impl SstFileIo {
                 BloomTestResult::DefinitelyNotPresent => {
                     self.bloom_metrics.record_negative();
                     self.bloom_metrics.record_block_skipped();
+                    crate::sst::read_path_metrics::global_sst_read_metrics().record_bloom_reject();
                     false
                 }
                 BloomTestResult::MightBePresent => true,
@@ -746,7 +759,11 @@ impl crate::sst::SstReader for SstFileIo {
         // whose key interval can contain this key. Adjacent duplicate-key
         // blocks are included so MVCC versions split across block boundaries
         // remain visible to snapshot reads.
-        for (idx, handle) in self.candidate_data_blocks(index.as_ref(), key) {
+        let candidate_blocks = self.candidate_data_blocks(index.as_ref(), key);
+        crate::sst::read_path_metrics::global_sst_read_metrics()
+            .record_candidate_blocks_checked(candidate_blocks.len());
+
+        for (idx, handle) in candidate_blocks {
             if !self.check_block_bloom(idx, key) {
                 continue;
             }
@@ -816,7 +833,11 @@ impl crate::sst::SstStateReader for SstFileIo {
         let mut best_match: Option<SstEntry> = None;
         let index = self.index_entries()?;
 
-        for (_idx, handle) in self.candidate_data_blocks(index.as_ref(), key) {
+        let candidate_blocks = self.candidate_data_blocks(index.as_ref(), key);
+        crate::sst::read_path_metrics::global_sst_read_metrics()
+            .record_candidate_blocks_checked(candidate_blocks.len());
+
+        for (_idx, handle) in candidate_blocks {
             let block_data = self.read_cached_data_block(&handle)?;
             for entry in self.scan_block_entries_from_bytes(&block_data)? {
                 if entry.key.as_slice() == key
@@ -849,7 +870,11 @@ impl crate::sst::SstStateReader for SstFileIo {
         let index = self.index_entries()?;
         let mut blocks_read = 1u64;
 
-        for (idx, handle) in self.candidate_data_blocks(index.as_ref(), key) {
+        let candidate_blocks = self.candidate_data_blocks(index.as_ref(), key);
+        crate::sst::read_path_metrics::global_sst_read_metrics()
+            .record_candidate_blocks_checked(candidate_blocks.len());
+
+        for (idx, handle) in candidate_blocks {
             if !self.check_block_bloom(idx, key) {
                 continue;
             }
@@ -1231,7 +1256,7 @@ mod tests {
     }
 
     #[test]
-    fn should_get_state_at_preserve_tombstone_and_ttl_semantics() -> MidgeResult<()> {
+    fn should_preserve_tombstone_ttl_semantics_when_get_state_at_reads() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
         let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);

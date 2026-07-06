@@ -1818,6 +1818,7 @@ mod tests {
 
     #[test]
     fn should_build_account_endpoint_base_url() {
+        // Arrange
         let backend = AzureBackend::new(
             "myaccount".into(),
             "mycontainer".into(),
@@ -1829,6 +1830,8 @@ mod tests {
             make_noop_executor(),
         );
 
+        // Act
+        // Assert
         assert_eq!(
             backend.base_url(),
             "https://myaccount.blob.core.usgovcloudapi.net/mycontainer"
@@ -1837,6 +1840,7 @@ mod tests {
 
     #[test]
     fn should_build_path_style_endpoint_base_url() {
+        // Arrange
         let backend = AzureBackend::new(
             "admin".into(),
             "container".into(),
@@ -1847,11 +1851,14 @@ mod tests {
             make_noop_executor(),
         );
 
+        // Act
+        // Assert
         assert_eq!(backend.base_url(), "http://127.0.0.1:9000/admin/container");
     }
 
     #[test]
     fn should_parse_blob_endpoint_connection_string() {
+        // Arrange
         let provider = AzureProvider::from_connection_string_and_endpoint(
             "AccountName=myaccount;AccountKey=dGVzdA==;BlobEndpoint=https://myaccount.blob.core.usgovcloudapi.net",
             "container".to_string(),
@@ -1860,6 +1867,8 @@ mod tests {
         .expect("connection string");
 
         let backend = provider.backend();
+        // Act
+        // Assert
         assert_eq!(provider.account_name(), "myaccount");
         assert_eq!(provider.container(), "container");
         assert!(Arc::strong_count(&backend) >= 1);
@@ -1867,6 +1876,7 @@ mod tests {
 
     #[test]
     fn should_parse_endpoint_suffix_connection_string() {
+        // Arrange
         let parts = AzureConnectionString::parse(
             "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=dGVzdA==;EndpointSuffix=core.usgovcloudapi.net",
         );
@@ -1876,6 +1886,8 @@ mod tests {
 
         match endpoint {
             AzureEndpoint::AccountBase { endpoint, .. } => {
+                // Act
+                // Assert
                 assert_eq!(endpoint, "https://myaccount.blob.core.usgovcloudapi.net");
             }
             AzureEndpoint::PathStyleBase(_) => panic!("expected account endpoint"),
@@ -1884,8 +1896,11 @@ mod tests {
 
     #[test]
     fn should_parse_development_storage_connection_string() {
+        // Arrange
         let parts = AzureConnectionString::parse("UseDevelopmentStorage=true");
 
+        // Act
+        // Assert
         assert_eq!(parts.account_name.as_deref(), Some("devstoreaccount1"));
         assert!(parts.account_key.is_some());
         assert!(matches!(
@@ -1955,6 +1970,7 @@ mod tests {
 
     #[test]
     fn should_build_list_url_with_marker() {
+        // Arrange
         let backend = AzureBackend::new(
             "acct".into(),
             "ctr".into(),
@@ -1965,17 +1981,22 @@ mod tests {
 
         let url = backend.list_url("sst/", Some("next marker"));
 
+        // Act
+        // Assert
         assert!(url.contains("prefix=sst%2F"));
         assert!(url.contains("marker=next%20marker"));
     }
 
     #[test]
     fn should_extract_azure_list_names_from_compact_xml() {
+        // Arrange
         let body = "<EnumerationResults><Blobs><Blob><Name>a</Name></Blob><Blob><Name>b&amp;c</Name></Blob></Blobs><NextMarker>next</NextMarker></EnumerationResults>";
 
         let names = extract_xml_tag_values(body, "Name");
         let marker = extract_xml_tag_values(body, "NextMarker");
 
+        // Act
+        // Assert
         assert_eq!(names, vec!["a".to_string(), "b&c".to_string()]);
         assert_eq!(marker, vec!["next".to_string()]);
     }

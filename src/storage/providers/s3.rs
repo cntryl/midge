@@ -1325,15 +1325,19 @@ mod tests {
 
     #[test]
     fn should_extract_all_s3_list_keys_from_compact_xml() {
+        // Arrange
         let body = "<ListBucketResult><Contents><Key>a</Key></Contents><Contents><Key>b&amp;c</Key></Contents></ListBucketResult>";
 
         let keys = extract_xml_tag_values(body, "Key");
 
+        // Act
+        // Assert
         assert_eq!(keys, vec!["a".to_string(), "b&c".to_string()]);
     }
 
     #[test]
     fn should_build_s3_list_url_with_continuation_token() {
+        // Arrange
         let config = S3Config::custom(
             "bucket".into(),
             "us-east-1".into(),
@@ -1344,6 +1348,8 @@ mod tests {
 
         let url = backend.list_url("sst/", Some("token/with spaces"));
 
+        // Act
+        // Assert
         assert!(url.contains("list-type=2"));
         assert!(url.contains("prefix=sst%2F"));
         assert!(url.contains("continuation-token=token%2Fwith%20spaces"));

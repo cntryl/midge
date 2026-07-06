@@ -27,13 +27,14 @@ const REAL_S3_SECRET_KEY_ENV: &str = "MIDGE_REAL_S3_SECRET_KEY";
 const REAL_S3_PATH_STYLE_ENV: &str = "MIDGE_REAL_S3_PATH_STYLE";
 
 #[test]
-fn s3_compatible_contract_against_peas() {
+fn should_run_s3_compatible_contract_against_peas() {
     let provider = CloudProviderConfig::peas_s3("midge-peas-s3");
     run_provider_contract("s3", &provider);
 }
 
 #[test]
-fn minio_contract_against_peas() {
+fn should_run_minio_contract_against_peas() {
+    // Arrange
     let provider = CloudProviderConfig::minio_static(
         "midge-peas-minio",
         PEAS_ENDPOINT,
@@ -41,10 +42,13 @@ fn minio_contract_against_peas() {
         PEAS_SECRET_KEY,
     );
     run_provider_contract("minio", &provider);
+    // Act
+    // Assert
 }
 
 #[test]
-fn wasabi_contract_against_peas() {
+fn should_run_wasabi_contract_against_peas() {
+    // Arrange
     let provider = CloudProviderConfig::wasabi_static(
         "midge-peas-wasabi",
         "us-east-1",
@@ -54,10 +58,13 @@ fn wasabi_contract_against_peas() {
     .with_endpoint(PEAS_ENDPOINT)
     .expect("Peas Wasabi endpoint override should be supported");
     run_provider_contract("wasabi", &provider);
+    // Act
+    // Assert
 }
 
 #[test]
-fn oci_s3_compatible_contract_against_peas() {
+fn should_run_oci_s3_compatible_contract_against_peas() {
+    // Arrange
     let provider = CloudProviderConfig::oci_s3_compatible_static(
         "peas",
         "midge-peas-oci",
@@ -70,22 +77,25 @@ fn oci_s3_compatible_contract_against_peas() {
     .with_path_style(true)
     .expect("Peas OCI path-style override should be supported");
     run_provider_contract("oci", &provider);
+    // Act
+    // Assert
 }
 
 #[test]
-fn azure_blob_contract_against_peas() {
+fn should_run_azure_blob_contract_against_peas() {
     let provider = CloudProviderConfig::peas_azure("midge-peas-azure");
     run_provider_contract("azure", &provider);
 }
 
 #[test]
-fn gcs_xml_contract_against_peas() {
+fn should_run_gcs_xml_contract_against_peas() {
     let provider = CloudProviderConfig::peas_gcs("midge-peas-gcs");
     run_provider_contract("gcs", &provider);
 }
 
 #[test]
-fn gcs_json_bearer_config_rejects_peas_hmac_contract() {
+fn should_reject_gcs_json_bearer_config_given_peas_hmac_contract() {
+    // Arrange
     if !peas_available_or_skip("gcs-json-bearer") {
         return;
     }
@@ -107,6 +117,8 @@ fn gcs_json_bearer_config_rejects_peas_hmac_contract() {
         b"body".to_vec(),
         vec![],
     );
+    // Act
+    // Assert
     assert!(
         result.is_err(),
         "Peas should reject unsupported GCS bearer credentials"
@@ -114,27 +126,33 @@ fn gcs_json_bearer_config_rejects_peas_hmac_contract() {
 }
 
 #[test]
-fn s3_compatible_contract_against_real_provider_if_configured() {
+fn should_run_s3_compatible_contract_against_real_provider_if_configured() {
+    // Arrange
     let Some(provider) = configured_real_s3_provider() else {
         return;
     };
 
     run_provider_contract_without_namespace_setup("real-s3", &provider);
+    // Act
+    // Assert
 }
 
 #[test]
-fn engine_recovers_from_peas_s3_after_local_cache_loss() {
+fn should_recover_engine_from_peas_s3_after_local_cache_loss() {
     let provider = CloudProviderConfig::peas_s3("midge-peas-engine-s3");
     engine_recovers_from_provider_after_local_cache_loss("peas-engine", provider, true);
 }
 
 #[test]
-fn engine_recovers_from_real_s3_after_local_cache_loss_if_configured() {
+fn should_recover_engine_from_real_s3_after_local_cache_loss_if_configured() {
+    // Arrange
     let Some(provider) = configured_real_s3_provider() else {
         return;
     };
 
     engine_recovers_from_provider_after_local_cache_loss("real-s3-engine", provider, false);
+    // Act
+    // Assert
 }
 
 fn run_provider_contract(label: &str, provider: &CloudProviderConfig) {
@@ -770,6 +788,9 @@ mod tests {
 
     #[test]
     fn should_not_require_peas_when_env_is_unset_or_false() {
+        // Arrange
+        // Act
+        // Assert
         assert!(!peas_required_from_value(None));
         assert!(!peas_required_from_value(Some("0")));
         assert!(!peas_required_from_value(Some("false")));
@@ -778,6 +799,9 @@ mod tests {
 
     #[test]
     fn should_require_peas_for_truthy_env_values() {
+        // Arrange
+        // Act
+        // Assert
         assert!(peas_required_from_value(Some("1")));
         assert!(peas_required_from_value(Some("true")));
         assert!(peas_required_from_value(Some("YES")));

@@ -342,9 +342,12 @@ mod tests {
 
     #[test]
     fn should_range_scan_include_keys_from_ssts() -> crate::common::MidgeResult<()> {
+        // Arrange
         let (_tmp, el, sst_path) = create_event_loop_with_test_sst()?;
         let reader = el.compaction_actor.open_sst_reader(&sst_path)?;
         let sst_pairs = reader.scan_range(Some(b"a"), Some(b"b"))?;
+        // Act
+        // Assert
         assert!(sst_pairs
             .iter()
             .any(|(k, v)| k.as_ref() == b"a" && v.as_ref() == b"va"));

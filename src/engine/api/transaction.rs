@@ -460,11 +460,8 @@ impl Transaction {
             return;
         }
 
-        let _ = self
-            .runtime_handle
-            .send(crate::runtime::RuntimeMsg::UnregisterSnapshot {
-                snapshot_id: self.id,
-            });
+        let _ = self.runtime_handle.unregister_snapshot_pin(self.id);
+        crate::diagnostics::record_snapshot_unregister();
         self.snapshot_registered = false;
     }
 

@@ -585,6 +585,11 @@ impl Engine {
         cf_id: ColumnFamilyId,
         mode: api::TransactionMode,
     ) -> MidgeResult<api::Transaction> {
+        let is_read_only = mode == api::TransactionMode::ReadOnly;
+        if is_read_only {
+            crate::diagnostics::record_read_only_begin_tx();
+        }
+
         // ─────────────────────────────────────────────────────────────────────────
         // HARD INVARIANT: No transactions while ingest is active.
         // ─────────────────────────────────────────────────────────────────────────
@@ -620,8 +625,14 @@ impl Engine {
         // Fall back to the runtime if the published cache is absent or behind a
         // commit this Engine has already observed.
         let (start_sequence, read_snapshot) = if let Some(snapshot) = cached_snapshot {
+            if is_read_only {
+                crate::diagnostics::record_read_only_snapshot_cache_hit();
+            }
             (cached_sequence, snapshot)
         } else {
+            if is_read_only {
+                crate::diagnostics::record_read_only_snapshot_cache_miss();
+            }
             match self
                 .runtime_handle
                 .send_and_wait(RuntimeMsg::BeginTransaction {
@@ -657,22 +668,15 @@ impl Engine {
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        match self
+        if !self
             .runtime_handle
-            .send_and_wait(RuntimeMsg::RegisterSnapshot {
-                request_id: next_request_id()?,
-                snapshot_id: txn_id,
-                sequence: start_sequence,
-                pinned_sst_names,
-            })? {
-            RuntimeResponse::Ok { .. } => {}
-            RuntimeResponse::Error { error, .. } => return Err(error),
-            _ => {
-                return Err(MidgeError::Internal(
-                    "Unexpected response to RegisterSnapshot".to_string(),
-                ))
-            }
+            .register_snapshot_pin(txn_id, start_sequence, pinned_sst_names)
+        {
+            return Err(MidgeError::Internal(format!(
+                "snapshot {txn_id} is already registered"
+            )));
         }
+        crate::diagnostics::record_snapshot_register();
 
         Ok(api::Transaction::new(api::TransactionInit {
             runtime_handle: self.runtime_handle.clone(),
@@ -1134,6 +1138,7 @@ mod tests {
 
     #[test]
     fn should_apply_open_options_l0_compaction_trigger_to_runtime() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let opts = OpenOptions::local(temp_dir.path())
             .goal(Goal::Throughput)
@@ -1146,6 +1151,8 @@ mod tests {
             .get_runtime_config()
             .expect("read runtime configuration");
 
+        // Act
+        // Assert
         assert_eq!(
             runtime_config.l0_compaction_trigger, expected_trigger,
             "runtime compaction actor should use the OpenOptions-derived L0 trigger"
@@ -1381,6 +1388,7 @@ mod tests {
 
     #[test]
     fn should_stage_cloud_wal_segments_with_canonical_padded_names() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
         let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
@@ -1415,6 +1423,8 @@ mod tests {
             .collect();
         staged_files.sort();
 
+        // Act
+        // Assert
         assert_eq!(
             staged_files,
             vec![
@@ -1436,6 +1446,7 @@ mod tests {
 
     #[test]
     fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
         let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
@@ -1459,6 +1470,8 @@ mod tests {
         let error = Engine::mirror_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
             .expect_err("newer remote manifest metadata must reject stale engine mirror");
 
+        // Act
+        // Assert
         assert!(
             error.to_string().contains("newer")
                 || error.to_string().contains("ahead")
@@ -1478,6 +1491,7 @@ mod tests {
 
     #[test]
     fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let inner = Arc::new(crate::storage::cloud::MockCloudBackend::new());
         let backend = Arc::new(ListOmittingCloudBackend::new(
@@ -1501,6 +1515,8 @@ mod tests {
 
         let hydrated = crate::metadata::ManifestPersistence::load(temp_dir.path())
             .expect("load hydrated manifest");
+        // Act
+        // Assert
         assert_eq!(
             hydrated.last_persisted_sequence, 42,
             "metadata hydration must probe known metadata keys directly"
@@ -1509,6 +1525,7 @@ mod tests {
 
     #[test]
     fn should_reject_mixed_cloud_manifest_metadata_without_journal() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
         let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
@@ -1536,6 +1553,8 @@ mod tests {
         let error = Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
             .expect_err("strict hydration must reject mixed manifest metadata without journal");
 
+        // Act
+        // Assert
         assert!(
             error.to_string().contains("mixed")
                 || error.to_string().contains("inconsistent")
@@ -1546,6 +1565,7 @@ mod tests {
 
     #[test]
     fn should_salvage_mixed_cloud_manifest_metadata_by_retaining_highest_sequence() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
         let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
@@ -1575,6 +1595,8 @@ mod tests {
 
         let hydrated = crate::metadata::ManifestPersistence::load(temp_dir.path())
             .expect("load salvaged manifest metadata");
+        // Act
+        // Assert
         assert_eq!(
             hydrated.last_persisted_sequence, 11,
             "salvage hydration must not let a stale snapshot hide a newer manifest"
@@ -1692,6 +1714,7 @@ mod tests {
 
     #[test]
     fn should_restore_manifest_sst_when_cloud_listing_is_stale_but_object_is_readable() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let mut state = crate::runtime::RuntimeState::try_new(
             temp_dir.path().to_path_buf(),
@@ -1720,6 +1743,8 @@ mod tests {
         Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
             .expect("stale list should not make readable manifest SST unrecoverable");
 
+        // Act
+        // Assert
         assert!(
             state.sst_dir.join(&sst_name).exists(),
             "readable cloud SST should be restored despite stale LIST"
@@ -1728,6 +1753,7 @@ mod tests {
 
     #[test]
     fn should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let mut state = crate::runtime::RuntimeState::try_new(
             temp_dir.path().to_path_buf(),
@@ -1738,6 +1764,8 @@ mod tests {
         let sst_name = crate::sst::file_name(0, 0, 3);
         let committed_sst_bytes = test_sst_bytes_with_value(b"manifest-sized-value");
         let wrong_sst_bytes = test_sst_bytes_with_value(b"different-cloud-object-bytes");
+        // Act
+        // Assert
         assert_ne!(
             committed_sst_bytes.len(),
             wrong_sst_bytes.len(),
@@ -1774,6 +1802,7 @@ mod tests {
 
     #[test]
     fn should_reject_manifest_sst_when_same_size_cloud_object_crc_differs() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let mut state = crate::runtime::RuntimeState::try_new(
             temp_dir.path().to_path_buf(),
@@ -1804,6 +1833,8 @@ mod tests {
         let error = Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
             .expect_err("strict recovery must reject wrong-content authoritative cloud SST");
 
+        // Act
+        // Assert
         assert!(
             error.to_string().contains("crc") || error.to_string().contains("content"),
             "unexpected wrong-content cloud SST recovery error: {error}"
@@ -1816,6 +1847,7 @@ mod tests {
 
     #[test]
     fn should_replace_wrong_sized_local_sst_cache_from_authoritative_cloud_object() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let mut state = crate::runtime::RuntimeState::try_new(
             temp_dir.path().to_path_buf(),
@@ -1826,6 +1858,8 @@ mod tests {
         let sst_name = crate::sst::file_name(0, 0, 5);
         let committed_sst_bytes = test_sst_bytes_with_value(b"manifest-sized-value");
         let stale_local_sst_bytes = test_sst_bytes_with_value(b"different-local-cache-bytes");
+        // Act
+        // Assert
         assert_ne!(
             committed_sst_bytes.len(),
             stale_local_sst_bytes.len(),
@@ -1865,6 +1899,7 @@ mod tests {
 
     #[test]
     fn should_replace_same_size_wrong_crc_local_sst_cache_from_authoritative_cloud_object() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let mut state = crate::runtime::RuntimeState::try_new(
             temp_dir.path().to_path_buf(),
@@ -1901,6 +1936,8 @@ mod tests {
         Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
             .expect("same-size wrong local cache should be restored from authoritative cloud SST");
 
+        // Act
+        // Assert
         assert_eq!(
             std::fs::read(state.sst_dir.join(&sst_name)).expect("read restored local SST"),
             committed_sst_bytes,
@@ -1910,6 +1947,7 @@ mod tests {
 
     #[test]
     fn should_salvage_retain_manifest_sst_when_local_cache_is_valid_but_cloud_crc_differs() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let mut state = crate::runtime::RuntimeState::try_new(
             temp_dir.path().to_path_buf(),
@@ -1946,6 +1984,8 @@ mod tests {
         Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
             .expect("salvage should keep a manifest SST when the local cache is valid");
 
+        // Act
+        // Assert
         assert!(
             state
                 .manifest
@@ -1967,6 +2007,7 @@ mod tests {
 
     #[test]
     fn should_stage_intent_replay_sst_when_cloud_listing_is_stale_but_object_is_readable() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let mut state = crate::runtime::RuntimeState::try_new(
             temp_dir.path().to_path_buf(),
@@ -1987,6 +2028,8 @@ mod tests {
         )
         .expect("stale list should not make readable intent SST unstaged");
 
+        // Act
+        // Assert
         assert!(
             state.sst_dir.join(&sst_name).exists(),
             "readable cloud SST should be staged despite stale LIST"
@@ -1995,6 +2038,7 @@ mod tests {
 
     #[test]
     fn should_reject_intent_replay_sst_when_cloud_object_crc_differs_from_intent() {
+        // Arrange
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let mut state = crate::runtime::RuntimeState::try_new(
             temp_dir.path().to_path_buf(),
@@ -2028,6 +2072,8 @@ mod tests {
         let error = Engine::ensure_named_sst_cache_from_cloud_storage(&mut state, &cloud, proofs)
             .expect_err("strict recovery must reject intent SST with mismatched content proof");
 
+        // Act
+        // Assert
         assert!(
             error.to_string().contains("crc") || error.to_string().contains("content"),
             "unexpected intent SST proof error: {error}"

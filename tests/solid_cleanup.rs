@@ -73,6 +73,7 @@ fn should_keep_runtime_free_of_engine_owned_type_imports() {
     for source in sources {
         let content = fs::read_to_string(&source).expect("runtime source should be readable");
         for pattern in forbidden {
+            // Assert
             assert!(
                 !content.contains(pattern),
                 "{} should not depend on engine-owned path {pattern}",
@@ -91,6 +92,7 @@ fn should_construct_runtime_observability_dtos_from_shared_types() {
     let shared = read_source("src/types.rs");
 
     // Act / Assert
+    // Assert
     assert!(state.contains("crate::types::RuntimeMetricsSnapshot"));
     assert!(state.contains("crate::types::StorageLayoutSnapshot"));
     assert!(runtime.contains("Box<crate::types::RuntimeMetricsSnapshot>"));
@@ -134,6 +136,7 @@ fn should_keep_event_loop_message_families_in_owned_coordinators() {
     ];
 
     // Act / Assert
+    // Assert
     assert!(event_loop.contains("RuntimeDispatcher::handle"));
     for pattern in forbidden_inline_handlers {
         assert!(
@@ -159,7 +162,7 @@ fn should_keep_event_loop_message_families_in_owned_coordinators() {
 }
 
 #[test]
-fn should_make_startup_phases_and_cloud_recovery_startup_owned() {
+fn should_make_startup_recovery_phases_owned() {
     // Arrange
     let startup = read_source("src/engine/startup.rs");
     let required_phases = [
@@ -181,6 +184,7 @@ fn should_make_startup_phases_and_cloud_recovery_startup_owned() {
     ];
 
     // Act / Assert
+    // Assert
     assert!(startup.contains("struct CloudStartupRecovery"));
     assert!(startup.contains("StartupStoragePath::resolve"));
     assert!(startup.contains("StartupLease::acquire"));
@@ -212,6 +216,7 @@ fn should_keep_cloud_provider_constructors_on_same_variants() {
     let gcs = CloudProviderConfig::gcs_hmac("bucket", "access", "secret");
 
     // Act / Assert
+    // Assert
     assert!(matches!(
         aws,
         CloudProviderConfig::AwsS3 {
@@ -251,6 +256,7 @@ fn should_own_cloud_provider_config_in_storage_providers() {
     let provider_config = read_source("src/storage/providers/config.rs");
 
     // Act / Assert
+    // Assert
     assert!(!generic_config.contains("pub enum CloudProviderConfig"));
     assert!(!generic_config.contains("pub enum S3CredentialSource"));
     assert!(!generic_config.contains("pub enum AzureCredentialSource"));
@@ -281,6 +287,7 @@ fn should_delegate_provider_construction_to_provider_family_resolvers() {
     ];
 
     // Act / Assert
+    // Assert
     assert!(factory.contains("s3_resolver::try_resolve"));
     assert!(factory.contains("azure_resolver::try_resolve"));
     assert!(factory.contains("gcs_resolver::try_resolve"));
@@ -357,6 +364,7 @@ fn should_keep_moved_config_types_out_of_lower_layers_engine_imports() {
     for file in files {
         let content = read_source(file);
         for pattern in forbidden {
+            // Assert
             assert!(
                 !content.contains(pattern),
                 "{file} should not contain lower-layer engine import {pattern}"
@@ -373,6 +381,7 @@ fn should_keep_filesystem_persistence_out_of_dyn_sst_writer_trait() {
     collect_rust_sources(&source_path("src"), &mut sources);
 
     // Act / Assert
+    // Assert
     assert!(traits.contains("fn finish_bytes"));
     assert!(!traits.contains("finish_to_path"));
     for source in sources {

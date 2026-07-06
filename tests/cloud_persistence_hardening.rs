@@ -126,7 +126,7 @@ fn should_prune_remote_wal_segment_after_cloud_sst_covers_it() {
 }
 
 #[test]
-fn should_recover_delete_range_after_remote_wal_pruned_and_local_cache_lost() {
+fn should_recover_delete_range_when_remote_wal_pruned_after_cache_loss() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
@@ -241,7 +241,7 @@ fn should_keep_remote_wal_segment_when_unflushed_column_family_still_needs_it() 
 }
 
 #[test]
-fn should_recover_after_partial_remote_wal_cleanup_and_local_cache_loss() {
+fn should_recover_when_remote_wal_cleanup_partial_after_cache_loss() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");

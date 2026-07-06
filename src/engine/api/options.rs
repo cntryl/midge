@@ -727,8 +727,11 @@ mod tests {
 
     #[test]
     fn should_create_aws_s3_with_default_chain() {
+        // Arrange
         let provider = CloudProviderConfig::aws_s3("bucket", "us-east-1");
 
+        // Act
+        // Assert
         assert_eq!(
             provider,
             CloudProviderConfig::AwsS3 {
@@ -741,8 +744,11 @@ mod tests {
 
     #[test]
     fn should_create_s3_compatible_env_with_safe_defaults() {
+        // Arrange
         let provider = CloudProviderConfig::s3_compatible_env("bucket", "http://localhost:9000");
 
+        // Act
+        // Assert
         assert_eq!(
             provider,
             CloudProviderConfig::S3Compatible {
@@ -757,6 +763,7 @@ mod tests {
 
     #[test]
     fn should_create_s3_family_static_configs() {
+        // Arrange
         let minio =
             CloudProviderConfig::minio_static("bucket", "http://minio:9000", "key", "secret");
         let wasabi = CloudProviderConfig::wasabi_static("bucket", "us-east-2", "key", "secret");
@@ -768,6 +775,8 @@ mod tests {
             "secret",
         );
 
+        // Act
+        // Assert
         assert!(matches!(minio, CloudProviderConfig::Minio { .. }));
         assert!(matches!(
             wasabi,
@@ -788,7 +797,8 @@ mod tests {
     }
 
     #[test]
-    fn should_create_azure_configs_for_identity_and_storage_credentials() {
+    fn should_create_azure_configs_for_supported_credentials() {
+        // Arrange
         let identity = CloudProviderConfig::azure_blob("account", "container");
         let shared_key =
             CloudProviderConfig::azure_blob_shared_key("account", "container", "account-key");
@@ -798,6 +808,8 @@ mod tests {
             "AccountName=account;AccountKey=key",
         );
 
+        // Act
+        // Assert
         assert!(matches!(
             identity,
             CloudProviderConfig::AzureBlob {
@@ -831,10 +843,13 @@ mod tests {
 
     #[test]
     fn should_create_gcs_configs_with_matching_api_styles() {
+        // Arrange
         let adc = CloudProviderConfig::gcs("bucket");
         let hmac = CloudProviderConfig::gcs_hmac("bucket", "access", "secret");
         let bearer = CloudProviderConfig::gcs_bearer_token("bucket", "token");
 
+        // Act
+        // Assert
         assert!(matches!(
             adc,
             CloudProviderConfig::Gcs {
@@ -863,6 +878,7 @@ mod tests {
 
     #[test]
     fn should_apply_fluent_cloud_modifiers() {
+        // Arrange
         let s3 = CloudProviderConfig::s3_compatible_env("bucket", "http://old")
             .with_endpoint("http://new")
             .expect("endpoint override")
@@ -876,6 +892,8 @@ mod tests {
             .with_gcs_credentials(GcsCredentialSource::application_default())
             .expect("gcs credentials");
 
+        // Act
+        // Assert
         assert_eq!(
             s3,
             CloudProviderConfig::S3Compatible {
@@ -898,14 +916,20 @@ mod tests {
 
     #[test]
     fn should_reject_mismatched_cloud_credentials() {
+        // Arrange
         let result = CloudProviderConfig::gcs("bucket")
             .try_with_credentials(S3CredentialSource::access_key("key", "secret"));
 
+        // Act
+        // Assert
         assert!(result.is_err());
     }
 
     #[test]
     fn should_reject_unsupported_cloud_modifiers() {
+        // Arrange
+        // Act
+        // Assert
         assert!(CloudProviderConfig::aws_s3("bucket", "us-east-1")
             .with_endpoint("http://localhost:9000")
             .is_err());
@@ -921,11 +945,14 @@ mod tests {
 
     #[test]
     fn should_parse_azure_account_from_connection_string_config() {
+        // Arrange
         let provider = CloudProviderConfig::azure_blob_connection_string(
             "container",
             "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=key",
         );
 
+        // Act
+        // Assert
         assert!(matches!(
             provider,
             CloudProviderConfig::AzureBlob { account, .. } if account == "myaccount"
@@ -934,6 +961,7 @@ mod tests {
 
     #[test]
     fn should_reject_connection_string_credential_override_without_account() {
+        // Arrange
         let provider = CloudProviderConfig::AzureBlob {
             account: String::new(),
             container: "container".to_string(),
@@ -943,11 +971,14 @@ mod tests {
 
         let result = provider.with_azure_credentials(AzureCredentialSource::shared_key("key"));
 
+        // Act
+        // Assert
         assert!(result.is_err());
     }
 
     #[test]
     fn should_create_workload_identity_credentials_without_none_annotations() {
+        // Arrange
         let client = AzureCredentialSource::workload_identity_for_client("client-id");
         let file = AzureCredentialSource::workload_identity_from_file("/var/run/token");
         let full = AzureCredentialSource::workload_identity_with(
@@ -956,6 +987,8 @@ mod tests {
             Some(PathBuf::from("/var/run/token")),
         );
 
+        // Act
+        // Assert
         assert!(matches!(
             client,
             AzureCredentialSource::WorkloadIdentity {
@@ -1013,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn should_preserve_explicit_memtable_size_and_flush_threshold_when_both_are_set() {
+    fn should_preserve_explicit_memtable_limits_when_both_are_set() {
         // Arrange
         let size_limit = 256 * 1024;
         let flush_threshold = 128 * 1024;

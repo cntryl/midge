@@ -66,6 +66,7 @@ fn write_until_committed(
 
 #[test]
 fn should_auto_flush_explicit_small_memtable_without_permanent_write_stall() {
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let engine = Engine::open(
         OpenOptions::local(temp_dir.path())
@@ -79,6 +80,8 @@ fn should_auto_flush_explicit_small_memtable_without_permanent_write_stall() {
 
     let _observed_stalls = write_until_committed(&engine, cf.id(), 800, 1024);
 
+    // Act
+    // Assert
     assert!(
         engine
             .wait_for_write_stall_clear(cf.id(), Duration::from_millis(500))
@@ -98,6 +101,7 @@ fn should_auto_flush_explicit_small_memtable_without_permanent_write_stall() {
 
 #[test]
 fn should_auto_flush_when_explicit_flush_threshold_is_lower_than_size_limit() {
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let engine = Engine::open(
         OpenOptions::local(temp_dir.path())
@@ -113,6 +117,8 @@ fn should_auto_flush_when_explicit_flush_threshold_is_lower_than_size_limit() {
     let _observed_stalls = write_until_committed(&engine, cf.id(), 300, 1024);
 
     let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    // Act
+    // Assert
     assert_eq!(metrics.memtable_size_limit, 1024 * 1024);
     assert_eq!(metrics.memtable_flush_threshold, 64 * 1024);
     assert!(

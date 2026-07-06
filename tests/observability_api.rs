@@ -125,7 +125,7 @@ fn should_install_explicit_memtable_size_in_runtime_metrics() {
 }
 
 #[test]
-fn should_install_distinct_explicit_memtable_size_and_flush_threshold_in_runtime_metrics() {
+fn should_install_explicit_memtable_limits_in_runtime_metrics_when_both_are_set() {
     // Arrange
     let memtable_size = 256 * 1024;
     let flush_threshold = 128 * 1024;

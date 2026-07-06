@@ -15,6 +15,7 @@ const EVENTUAL_FLUSH_GAP: u64 = 4;
 
 #[test]
 fn should_abort_in_child_process_when_cloud_crash_scenario_requested() {
+    // Arrange
     let Some(scenario) = std::env::var_os(ENV_SCENARIO) else {
         return;
     };
@@ -28,11 +29,14 @@ fn should_abort_in_child_process_when_cloud_crash_scenario_requested() {
         other => panic!("unknown cloud crash scenario: {other}"),
     }
 
+    // Act
+    // Assert
     panic!("child scenario returned without abort");
 }
 
 #[test]
-fn should_recover_cloud_strict_write_after_child_abort_and_cache_loss() {
+fn should_recover_cloud_strict_write_when_cache_lost_after_child_abort() {
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
@@ -42,6 +46,8 @@ fn should_recover_cloud_strict_write_after_child_abort_and_cache_loss() {
     reset_dir(&db_path.join("sst"));
 
     let reopened = open_cloud_engine(db_path, None);
+    // Act
+    // Assert
     assert_value_visible(
         &reopened,
         b"cloud-strict-crash-key",
@@ -50,7 +56,8 @@ fn should_recover_cloud_strict_write_after_child_abort_and_cache_loss() {
 }
 
 #[test]
-fn should_restore_published_cloud_sst_after_child_abort_and_cache_loss() {
+fn should_restore_published_cloud_sst_when_cache_lost_after_child_abort() {
+    // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
@@ -61,6 +68,8 @@ fn should_restore_published_cloud_sst_after_child_abort_and_cache_loss() {
 
     let reopened = open_cloud_engine(db_path, Some(buffered_cloud_policy()));
     let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
+    // Act
+    // Assert
     assert!(
         metrics.sst_count >= 1,
         "reopen should restore at least one SST from the authoritative cloud object"

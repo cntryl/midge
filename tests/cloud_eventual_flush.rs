@@ -74,6 +74,7 @@ where
 #[test]
 fn should_eventually_publish_sst_given_many_cloud_strict_writes_when_memtable_never_reaches_size_threshold(
 ) {
+    // Arrange
     let engine = open_large_cloud_engine(&opts_for_mode("cloud"));
     let cf = default_cf(&engine);
 
@@ -89,6 +90,8 @@ fn should_eventually_publish_sst_given_many_cloud_strict_writes_when_memtable_ne
     }
 
     let pre_flush_metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    // Act
+    // Assert
     assert!(
         pre_flush_metrics.max_memtable_wal_segment_gap > 0,
         "cloud segment gap metric should grow while WAL segments rotate ahead of SST publication"
@@ -124,6 +127,7 @@ fn should_eventually_publish_sst_given_many_cloud_strict_writes_when_memtable_ne
 #[test]
 fn should_eventually_publish_sst_given_many_cloud_buffered_writes_when_memtable_never_reaches_size_threshold(
 ) {
+    // Arrange
     let opts = opts_for_mode("cloud").with_cloud_runtime_policy_overrides(buffered_cloud_policy());
     let engine = open_large_cloud_engine(&opts);
     let cf = default_cf(&engine);
@@ -140,6 +144,8 @@ fn should_eventually_publish_sst_given_many_cloud_buffered_writes_when_memtable_
     }
 
     let pre_flush_metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    // Act
+    // Assert
     assert_eq!(
         pre_flush_metrics.max_memtable_wal_segment_gap,
         BUFFERED_TEST_GAP - 1,
@@ -176,6 +182,7 @@ fn should_eventually_publish_sst_given_many_cloud_buffered_writes_when_memtable_
 #[test]
 fn should_publish_lightly_written_column_family_given_busy_neighbor_when_cloud_segment_gap_flush_runs(
 ) {
+    // Arrange
     let opts = opts_for_mode("cloud").with_cloud_runtime_policy_overrides(buffered_cloud_policy());
     let engine = open_large_cloud_engine(&opts);
     let light_cf = engine
@@ -218,6 +225,8 @@ fn should_publish_lightly_written_column_family_given_busy_neighbor_when_cloud_s
         }
 
         let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        // Act
+        // Assert
         assert!(
             Instant::now() < deadline,
             "timed out waiting for a lightly written CF SST; last metrics: sst_count={} gap={} segment={}",
@@ -240,6 +249,7 @@ fn should_publish_lightly_written_column_family_given_busy_neighbor_when_cloud_s
 
 #[test]
 fn should_reset_memtable_wal_gap_after_reopen_before_new_segment_churn() {
+    // Arrange
     let opts =
         opts_for_mode("cloud").with_cloud_runtime_policy_overrides(CloudRuntimePolicyOverrides {
             eventual_flush_segment_gap: None,
@@ -265,6 +275,8 @@ fn should_reset_memtable_wal_gap_after_reopen_before_new_segment_churn() {
         let metrics = engine
             .get_runtime_metrics()
             .expect("runtime metrics before reopen");
+        // Act
+        // Assert
         assert_eq!(
             metrics.sst_count, 0,
             "pre-restart workload should remain WAL-backed"

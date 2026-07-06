@@ -1153,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn should_stop_coalescing_and_apply_fallback_when_point_and_range_overlap() -> MidgeResult<()> {
+    fn should_fall_back_from_coalescing_when_point_range_overlap() -> MidgeResult<()> {
         // Arrange
         let mut fixture = EventLoopFixture::batched()?;
         let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -1580,7 +1580,7 @@ mod tests {
     }
 
     #[test]
-    fn should_detect_point_and_range_touches_when_staging_transactions() {
+    fn should_detect_overlapping_point_range_touches_when_staging_transactions() {
         // Arrange
         let mut touches = StagedTransactionTouches::default();
         touches.record_ops(&[
@@ -1598,6 +1598,7 @@ mod tests {
             },
         ]);
 
+        // Act
         // Assert
         assert!(touches.touches_ops(&[TransactionOp::Delete {
             cf_id: 0,

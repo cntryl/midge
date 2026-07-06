@@ -138,6 +138,7 @@ fn should_not_register_snapshot_given_dropped_cf_when_begin_tx_fails() {
             let result = engine.begin_tx(cf_id, tx_mode);
             match result {
                 Err(MidgeError::InvalidArgument(message)) => {
+    // Assert
                     assert_eq!(message, format!("column family {cf_id} does not exist"));
                 }
                 Err(error) => panic!(

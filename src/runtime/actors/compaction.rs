@@ -430,6 +430,7 @@ mod tests {
 
     #[test]
     fn should_use_configured_l0_file_count_threshold_when_picking_compaction() {
+        // Arrange
         let mut actor = create_test_compaction_actor_with_config(LeveledCompactionConfig {
             l0_file_count_threshold: 2,
             ..LeveledCompactionConfig::default()
@@ -445,6 +446,8 @@ mod tests {
             .check_compaction(&state)
             .expect("expected compaction plan at configured file-count threshold");
 
+        // Act
+        // Assert
         assert_eq!(plan.source_level, 0);
         assert_eq!(plan.target_level, 1);
         assert_eq!(plan.input_files.len(), 2);

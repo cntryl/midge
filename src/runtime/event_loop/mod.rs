@@ -1175,6 +1175,7 @@ pub(super) mod tests {
 
     #[test]
     fn should_not_treat_blocked_auto_flush_candidate_as_standalone_actionable_work() {
+        // Arrange
         let mut event_loop = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::new(1_000_000),
         )
@@ -1201,6 +1202,8 @@ pub(super) mod tests {
             .memtable
             .size_bytes();
 
+        // Act
+        // Assert
         assert_eq!(event_loop.drain_auto_flush_memtables(), 0);
 
         assert!(
@@ -1212,6 +1215,7 @@ pub(super) mod tests {
     #[test]
     fn should_schedule_compaction_after_l0_flush_when_threshold_reached(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
         event_loop.worker_msg_tx = Some(worker_tx);
@@ -1225,6 +1229,8 @@ pub(super) mod tests {
         let flushed = write_runtime_l0_sst_for_test(&event_loop, "threshold-crossing.sst", 4);
         event_loop.publish_flushed_sst(0, "threshold-crossing.sst", 4, Some(flushed))?;
 
+        // Act
+        // Assert
         assert_eq!(
             event_loop
                 .state
@@ -1254,6 +1260,7 @@ pub(super) mod tests {
     #[test]
     fn should_not_schedule_auto_compaction_when_compaction_disabled(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
         event_loop.worker_msg_tx = Some(worker_tx);
@@ -1268,6 +1275,8 @@ pub(super) mod tests {
             write_runtime_l0_sst_for_test(&event_loop, "disabled-threshold-crossing.sst", 4);
         event_loop.publish_flushed_sst(0, "disabled-threshold-crossing.sst", 4, Some(flushed))?;
 
+        // Act
+        // Assert
         assert_eq!(
             event_loop
                 .state
@@ -1286,6 +1295,7 @@ pub(super) mod tests {
 
     #[test]
     fn should_skip_post_flush_compaction_check_during_ingest_when_compaction_disabled() {
+        // Arrange
         #[derive(Clone)]
         struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
 
@@ -1337,6 +1347,8 @@ pub(super) mod tests {
 
         let logs = String::from_utf8(captured_logs.0.lock().expect("captured logs lock").clone())
             .expect("captured logs should be utf8");
+        // Act
+        // Assert
         assert!(
             !logs.contains("no_compaction_during_ingest"),
             "disabled post-flush scheduling should not enter the ingest invariant path: {logs}"
@@ -1357,6 +1369,7 @@ pub(super) mod tests {
 
     #[test]
     fn should_apply_l0_compaction_trigger_from_runtime_config() {
+        // Arrange
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         let request_id = 99;
         let response_rx = event_loop.router.register(request_id);
@@ -1375,6 +1388,8 @@ pub(super) mod tests {
             &msg_rx,
         );
 
+        // Act
+        // Assert
         assert!(matches!(
             response_rx
                 .recv_timeout(Duration::from_secs(1))
@@ -1390,6 +1405,7 @@ pub(super) mod tests {
 
     #[test]
     fn should_not_spin_auto_flush_drain_in_memory_mode() {
+        // Arrange
         let mut event_loop = create_test_event_loop().expect("create memory event loop");
         event_loop.state.memtable_flush_threshold = 1024;
         event_loop.state.memtable_size_limit = 1024 * 1024;
@@ -1410,6 +1426,8 @@ pub(super) mod tests {
 
         let flushed = event_loop.drain_auto_flush_memtables();
 
+        // Act
+        // Assert
         assert_eq!(flushed, 0, "memory mode should not loop on no-op flushes");
         assert_eq!(event_loop.state.manifest.files.len(), 0);
         assert_eq!(
@@ -1426,6 +1444,7 @@ pub(super) mod tests {
 
     #[test]
     fn should_drain_all_current_flush_candidates_in_single_auto_flush_pass() {
+        // Arrange
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         event_loop.state.memtable_flush_threshold = 1024;
         event_loop.state.memtable_size_limit = 1024 * 1024;
@@ -1456,6 +1475,8 @@ pub(super) mod tests {
 
         let flushed = event_loop.drain_auto_flush_memtables();
 
+        // Act
+        // Assert
         assert_eq!(
             flushed, 2,
             "one successful auto-flush trigger should drain every currently eligible CF"
@@ -1481,6 +1502,7 @@ pub(super) mod tests {
 
     #[test]
     fn should_publish_all_flushable_cfs_given_local_write_burst_without_further_writes() {
+        // Arrange
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         event_loop.state.memtable_flush_threshold = 2048;
         event_loop.state.memtable_size_limit = 1024 * 1024;
@@ -1535,6 +1557,8 @@ pub(super) mod tests {
         let outcome = event_loop.process_wake_msg(first, &msg_rx, 16);
         drop(msg_tx);
 
+        // Act
+        // Assert
         assert_eq!(outcome, HandleOutcome::Continue);
         assert_eq!(
             event_loop.state.manifest.files.len(),
@@ -1557,12 +1581,15 @@ pub(super) mod tests {
 
     #[test]
     fn should_assign_compaction_output_sequence_when_plan_has_zero() {
+        // Arrange
         let mut event_loop = create_test_event_loop().expect("create event loop");
         event_loop.state.sequence = 41;
         let plan = crate::compaction::CompactionPlan::new(3, 0, 1);
 
         let assigned = event_loop.assign_compaction_output_sequence(plan);
 
+        // Act
+        // Assert
         assert_eq!(assigned.output_seq, 42);
         assert_eq!(
             event_loop.state.sequence, 42,
@@ -1572,12 +1599,15 @@ pub(super) mod tests {
 
     #[test]
     fn should_preserve_existing_compaction_output_sequence() {
+        // Arrange
         let mut event_loop = create_test_event_loop().expect("create event loop");
         event_loop.state.sequence = 41;
         let plan = crate::compaction::CompactionPlan::new(3, 0, 1).with_output_seq(99);
 
         let assigned = event_loop.assign_compaction_output_sequence(plan);
 
+        // Act
+        // Assert
         assert_eq!(assigned.output_seq, 99);
         assert_eq!(
             event_loop.state.sequence, 41,
@@ -1604,9 +1634,12 @@ pub(super) mod tests {
         }
 
         #[test]
-        fn should_assign_identity_and_snapshot_horizon_at_launch_boundary() {
+        fn should_assign_launch_metadata_at_launch_boundary() {
+            // Arrange
             let mut event_loop = create_test_event_loop().expect("create event loop");
             event_loop.state.sequence = 41;
+            // Act
+            // Assert
             assert!(event_loop.state.register_snapshot(100, 37, Vec::new()));
             let plan =
                 crate::compaction::CompactionPlan::new(3, 0, 1).with_snapshot_horizon(Some(99));
@@ -1625,6 +1658,7 @@ pub(super) mod tests {
 
         #[test]
         fn should_preserve_preassigned_identity_at_launch_boundary() {
+            // Arrange
             let mut event_loop = create_test_event_loop().expect("create event loop");
             event_loop.state.sequence = 41;
             let plan = crate::compaction::CompactionPlan::new(3, 0, 1).with_output_seq(99);
@@ -1633,6 +1667,8 @@ pub(super) mod tests {
                 .prepare_compaction_plan_for_launch(plan)
                 .expect("prepare compaction plan");
 
+            // Act
+            // Assert
             assert_eq!(prepared.output_seq, 99);
             assert_eq!(
                 event_loop.state.sequence, 41,
@@ -1642,6 +1678,7 @@ pub(super) mod tests {
 
         #[test]
         fn should_assign_output_sequence_when_compaction_runs_after_end_ingest() {
+            // Arrange
             let mut event_loop = create_test_local_event_loop().expect("create local event loop");
             let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
             event_loop.worker_msg_tx = Some(worker_tx);
@@ -1669,6 +1706,8 @@ pub(super) mod tests {
                 .expect("EndIngest-triggered compaction should complete");
             match msg {
                 RuntimeMsg::CompactionComplete { output_ssts, .. } => {
+                    // Act
+                    // Assert
                     assert!(
                         !output_ssts.is_empty(),
                         "EndIngest-triggered compaction should produce an output SST"
@@ -1686,6 +1725,7 @@ pub(super) mod tests {
 
         #[test]
         fn should_launch_compactions_only_through_event_loop_helper() {
+            // Arrange
             let event_loop_dir =
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime/event_loop");
             let pattern = format!(".run_{}(", "compaction");
@@ -1711,6 +1751,8 @@ pub(super) mod tests {
                 }
             }
 
+            // Act
+            // Assert
             assert_eq!(
                 call_sites.len(),
                 1,

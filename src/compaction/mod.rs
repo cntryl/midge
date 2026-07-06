@@ -107,11 +107,14 @@ mod tests {
 
     #[test]
     fn should_format_compaction_output_with_canonical_lex_sortable_sst_name() {
+        // Arrange
         let plan = CompactionPlan::new(7, 0, 2).with_output_seq(42);
         let output_dir = Path::new("sst");
 
         let filename = output_filename(&plan, output_dir);
 
+        // Act
+        // Assert
         assert_eq!(
             filename,
             PathBuf::from("sst/000007_02_00000000000000000042.sst")

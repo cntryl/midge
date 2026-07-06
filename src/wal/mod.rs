@@ -96,6 +96,7 @@ mod tests {
 
     #[test]
     fn should_format_wal_segment_names_in_lexicographic_sequence_order() {
+        // Arrange
         let names = [1, 2, 10, u64::MAX]
             .into_iter()
             .map(segment_file_name)
@@ -103,6 +104,8 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort();
 
+        // Act
+        // Assert
         assert_eq!(names, sorted);
         assert_eq!(names[0], "00000000000000000001.wal");
         assert_eq!(names[3], "18446744073709551615.wal");
@@ -110,6 +113,9 @@ mod tests {
 
     #[test]
     fn should_parse_segment_ids_from_supported_wal_names() {
+        // Arrange
+        // Act
+        // Assert
         assert_eq!(parse_segment_id("1.wal"), Some(1));
         assert_eq!(parse_segment_id("00000000000000000042.wal"), Some(42));
         assert_eq!(parse_segment_id("wal/00000000000000000099.wal"), Some(99));

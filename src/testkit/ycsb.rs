@@ -51,6 +51,20 @@ pub struct RuntimePerfSnapshot {
     pub cloud_async_wal_seal_latency_us: u64,
     pub cloud_async_wal_upload_latency_us: u64,
     pub cloud_async_wal_ack_latency_us: u64,
+    pub read_only_begin_tx_count: u64,
+    pub read_only_snapshot_cache_hits: u64,
+    pub read_only_snapshot_cache_misses: u64,
+    pub snapshot_register_count: u64,
+    pub snapshot_unregister_count: u64,
+    pub sst_reader_cache_hits: u64,
+    pub sst_reader_cache_misses: u64,
+    pub sst_block_cache_hits: u64,
+    pub sst_block_cache_misses: u64,
+    pub candidate_sst_files_checked: u64,
+    pub candidate_blocks_checked: u64,
+    pub data_blocks_read: u64,
+    pub bloom_rejects: u64,
+    pub range_tombstone_scans: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -81,12 +95,36 @@ pub struct RuntimePerfReport {
     pub cloud_async_wal_seal_latency_us: u64,
     pub cloud_async_wal_upload_latency_us: u64,
     pub cloud_async_wal_ack_latency_us: u64,
+    pub read_only_begin_tx_count: u64,
+    pub read_only_snapshot_cache_hits: u64,
+    pub read_only_snapshot_cache_misses: u64,
+    pub snapshot_register_count: u64,
+    pub snapshot_unregister_count: u64,
+    pub sst_reader_cache_hits: u64,
+    pub sst_reader_cache_misses: u64,
+    pub sst_block_cache_hits: u64,
+    pub sst_block_cache_misses: u64,
+    pub candidate_sst_files_checked: u64,
+    pub candidate_blocks_checked: u64,
+    pub data_blocks_read: u64,
+    pub bloom_rejects: u64,
+    pub range_tombstone_scans: u64,
 }
 
 impl RuntimePerfReport {
     #[must_use]
     pub fn tags(&self) -> Vec<(&'static str, u64)> {
-        let mut tags = vec![
+        let mut tags = Vec::with_capacity(64);
+        self.push_write_wal_cache_tags(&mut tags);
+        self.push_cloud_wal_tags(&mut tags);
+        self.push_read_snapshot_tags(&mut tags);
+        self.push_sst_read_tags(&mut tags);
+        self.push_storage_state_tags(&mut tags);
+        tags
+    }
+
+    fn push_write_wal_cache_tags(&self, tags: &mut Vec<(&'static str, u64)>) {
+        tags.extend([
             ("write_stalls", self.write_stalls_total),
             ("write_stalls_memory", self.write_stalls_memory_total),
             (
@@ -111,6 +149,11 @@ impl RuntimePerfReport {
                 "cache_hit_ratio_ppm",
                 ratio_ppm(self.cache_hits, self.cache_misses),
             ),
+        ]);
+    }
+
+    fn push_cloud_wal_tags(&self, tags: &mut Vec<(&'static str, u64)>) {
+        tags.extend([
             (
                 "cloud_async_wal_segments_sealed",
                 self.cloud_async_wal_segments_sealed,
@@ -148,6 +191,70 @@ impl RuntimePerfReport {
                     self.cloud_async_wal_uploads_completed,
                 ),
             ),
+        ]);
+    }
+
+    fn push_read_snapshot_tags(&self, tags: &mut Vec<(&'static str, u64)>) {
+        tags.extend([
+            ("read_only_begin_tx_count", self.read_only_begin_tx_count),
+            (
+                "read_only_snapshot_cache_hits",
+                self.read_only_snapshot_cache_hits,
+            ),
+            (
+                "read_only_snapshot_cache_misses",
+                self.read_only_snapshot_cache_misses,
+            ),
+            (
+                "read_only_snapshot_cache_hit_ratio_ppm",
+                ratio_ppm(
+                    self.read_only_snapshot_cache_hits,
+                    self.read_only_snapshot_cache_misses,
+                ),
+            ),
+            ("snapshot_register_count", self.snapshot_register_count),
+            ("snapshot_unregister_count", self.snapshot_unregister_count),
+        ]);
+    }
+
+    fn push_sst_read_tags(&self, tags: &mut Vec<(&'static str, u64)>) {
+        tags.extend([
+            ("sst_reader_cache_hits", self.sst_reader_cache_hits),
+            ("sst_reader_cache_misses", self.sst_reader_cache_misses),
+            (
+                "sst_reader_cache_hit_ratio_ppm",
+                ratio_ppm(self.sst_reader_cache_hits, self.sst_reader_cache_misses),
+            ),
+            ("sst_block_cache_hits", self.sst_block_cache_hits),
+            ("sst_block_cache_misses", self.sst_block_cache_misses),
+            (
+                "sst_block_cache_hit_ratio_ppm",
+                ratio_ppm(self.sst_block_cache_hits, self.sst_block_cache_misses),
+            ),
+            (
+                "candidate_sst_files_checked",
+                self.candidate_sst_files_checked,
+            ),
+            ("candidate_blocks_checked", self.candidate_blocks_checked),
+            (
+                "avg_candidate_ssts_per_read",
+                average_u64(
+                    self.candidate_sst_files_checked,
+                    self.read_only_begin_tx_count,
+                ),
+            ),
+            (
+                "avg_candidate_blocks_per_read",
+                average_u64(self.candidate_blocks_checked, self.read_only_begin_tx_count),
+            ),
+            ("data_blocks_read", self.data_blocks_read),
+            ("bloom_rejects", self.bloom_rejects),
+            ("range_tombstone_scans", self.range_tombstone_scans),
+        ]);
+    }
+
+    fn push_storage_state_tags(&self, tags: &mut Vec<(&'static str, u64)>) {
+        tags.extend([
             (
                 "pending_cloud_uploads_end",
                 usize_to_u64(self.end_pending_cloud_uploads),
@@ -173,24 +280,8 @@ impl RuntimePerfReport {
                 "hybrid_pending_evictions",
                 usize_to_u64(self.end_hybrid_pending_evictions),
             ),
-        ];
-        tags.retain(|(name, value)| should_emit_runtime_perf_tag(name, *value));
-        tags
+        ]);
     }
-}
-
-fn should_emit_runtime_perf_tag(name: &str, value: u64) -> bool {
-    value > 0
-        || matches!(
-            name,
-            "pending_cloud_uploads_end"
-                | "wal_cloud_durable_lag_end"
-                | "hybrid_max_local_bytes"
-                | "hybrid_total_committed_bytes"
-                | "hybrid_free_bytes"
-                | "hybrid_usage_percent"
-                | "hybrid_pending_evictions"
-        )
 }
 
 impl MultiClientRunStats {
@@ -315,6 +406,8 @@ pub fn capture_runtime_perf_snapshot(engine: &Engine) -> RuntimePerfSnapshot {
     let metrics = engine
         .get_runtime_metrics()
         .expect("capture runtime performance snapshot");
+    let read_tx = crate::diagnostics::read_transaction_diagnostics_snapshot();
+    let sst_read = crate::sst::read_path_metrics::snapshot_global_sst_read_metrics();
     RuntimePerfSnapshot {
         write_stalls_total: metrics.write_stalls_total,
         write_stalls_memory_total: metrics.write_stalls_memory_total,
@@ -334,6 +427,20 @@ pub fn capture_runtime_perf_snapshot(engine: &Engine) -> RuntimePerfSnapshot {
         cloud_async_wal_seal_latency_us: metrics.cloud_async_wal_seal_latency_us,
         cloud_async_wal_upload_latency_us: metrics.cloud_async_wal_upload_latency_us,
         cloud_async_wal_ack_latency_us: metrics.cloud_async_wal_ack_latency_us,
+        read_only_begin_tx_count: read_tx.read_only_begin_tx_count,
+        read_only_snapshot_cache_hits: read_tx.read_only_snapshot_cache_hits,
+        read_only_snapshot_cache_misses: read_tx.read_only_snapshot_cache_misses,
+        snapshot_register_count: read_tx.snapshot_register_count,
+        snapshot_unregister_count: read_tx.snapshot_unregister_count,
+        sst_reader_cache_hits: sst_read.reader_cache_hits,
+        sst_reader_cache_misses: sst_read.reader_cache_misses,
+        sst_block_cache_hits: sst_read.block_cache_hits,
+        sst_block_cache_misses: sst_read.block_cache_misses,
+        candidate_sst_files_checked: sst_read.candidate_sst_files_checked,
+        candidate_blocks_checked: sst_read.candidate_blocks_checked,
+        data_blocks_read: sst_read.data_blocks_read,
+        bloom_rejects: sst_read.bloom_rejects,
+        range_tombstone_scans: sst_read.range_tombstone_scans,
     }
 }
 
@@ -346,6 +453,28 @@ pub fn runtime_perf_report(engine: &Engine, start: RuntimePerfSnapshot) -> Runti
     let end = engine
         .get_runtime_metrics()
         .expect("capture runtime performance report");
+    let read_tx = crate::diagnostics::read_transaction_diagnostics_snapshot().delta_since(
+        crate::diagnostics::ReadTransactionDiagnosticsSnapshot {
+            read_only_begin_tx_count: start.read_only_begin_tx_count,
+            read_only_snapshot_cache_hits: start.read_only_snapshot_cache_hits,
+            read_only_snapshot_cache_misses: start.read_only_snapshot_cache_misses,
+            snapshot_register_count: start.snapshot_register_count,
+            snapshot_unregister_count: start.snapshot_unregister_count,
+        },
+    );
+    let sst_read = crate::sst::read_path_metrics::snapshot_global_sst_read_metrics().delta_since(
+        crate::sst::read_path_metrics::SstReadMetricsSnapshot {
+            reader_cache_hits: start.sst_reader_cache_hits,
+            reader_cache_misses: start.sst_reader_cache_misses,
+            block_cache_hits: start.sst_block_cache_hits,
+            block_cache_misses: start.sst_block_cache_misses,
+            candidate_sst_files_checked: start.candidate_sst_files_checked,
+            candidate_blocks_checked: start.candidate_blocks_checked,
+            data_blocks_read: start.data_blocks_read,
+            bloom_rejects: start.bloom_rejects,
+            range_tombstone_scans: start.range_tombstone_scans,
+        },
+    );
     RuntimePerfReport {
         end_pending_cloud_uploads: end.pending_cloud_uploads,
         end_wal_local_durable_seq: end.wal_local_durable_seq,
@@ -401,6 +530,20 @@ pub fn runtime_perf_report(engine: &Engine, start: RuntimePerfSnapshot) -> Runti
         cloud_async_wal_ack_latency_us: end
             .cloud_async_wal_ack_latency_us
             .saturating_sub(start.cloud_async_wal_ack_latency_us),
+        read_only_begin_tx_count: read_tx.read_only_begin_tx_count,
+        read_only_snapshot_cache_hits: read_tx.read_only_snapshot_cache_hits,
+        read_only_snapshot_cache_misses: read_tx.read_only_snapshot_cache_misses,
+        snapshot_register_count: read_tx.snapshot_register_count,
+        snapshot_unregister_count: read_tx.snapshot_unregister_count,
+        sst_reader_cache_hits: sst_read.reader_cache_hits,
+        sst_reader_cache_misses: sst_read.reader_cache_misses,
+        sst_block_cache_hits: sst_read.block_cache_hits,
+        sst_block_cache_misses: sst_read.block_cache_misses,
+        candidate_sst_files_checked: sst_read.candidate_sst_files_checked,
+        candidate_blocks_checked: sst_read.candidate_blocks_checked,
+        data_blocks_read: sst_read.data_blocks_read,
+        bloom_rejects: sst_read.bloom_rejects,
+        range_tombstone_scans: sst_read.range_tombstone_scans,
     }
 }
 

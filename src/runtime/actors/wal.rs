@@ -2272,6 +2272,7 @@ mod tests {
             1,
         )?;
 
+        // Act
         // Assert
         assert!(batched_actor.can_coalesce_transaction_append(Some(DurabilityPolicy::Batched)));
         assert!(!batched_actor.can_coalesce_transaction_append(Some(DurabilityPolicy::Strict)));

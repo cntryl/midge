@@ -238,6 +238,7 @@ pub mod encoding;
 pub mod fs;
 pub mod index;
 pub mod read_amp_metrics;
+pub(crate) mod read_path_metrics;
 pub mod sparse_index;
 pub mod traits;
 pub mod trie;

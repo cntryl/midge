@@ -995,6 +995,7 @@ mod tests {
 
     #[test]
     fn should_roundtrip_transaction_batch_payload() {
+        // Arrange
         let mut put = WalRecord::new_cf(
             7,
             WalOpKind::Insert,
@@ -1030,6 +1031,8 @@ mod tests {
 
         let decoded = decode_txn_batch_payload(&outer, &payload).unwrap();
 
+        // Act
+        // Assert
         assert_eq!(decoded.txn_id, 42);
         assert_eq!(decoded.begin_seq, 10);
         assert_eq!(decoded.commit_seq, 13);
@@ -1078,6 +1081,7 @@ mod tests {
 
     #[test]
     fn should_reject_transaction_batch_payload_with_sequence_gap() {
+        // Arrange
         let mut put = WalRecord::new_cf(
             0,
             WalOpKind::Put,
@@ -1089,11 +1093,14 @@ mod tests {
         put.txn_id = Some(77);
 
         let error = encode_txn_batch_payload(77, 10, 12, 5, &[put]).unwrap_err();
+        // Act
+        // Assert
         assert!(error.to_string().contains("non-contiguous sequence"));
     }
 
     #[test]
     fn should_reject_transaction_batch_payload_when_outer_metadata_mismatches() {
+        // Arrange
         let mut put = WalRecord::new_cf(
             0,
             WalOpKind::Put,
@@ -1115,6 +1122,8 @@ mod tests {
         outer.txn_id = Some(6);
 
         let error = decode_txn_batch_payload(&outer, &payload).unwrap_err();
+        // Act
+        // Assert
         assert!(error.to_string().contains("outer txn_id"));
     }
 

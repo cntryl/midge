@@ -17,6 +17,7 @@ pub mod intent_persistence;
 pub(crate) mod read_resources;
 pub mod read_snapshot;
 pub mod snapshot_cache;
+pub(crate) mod snapshot_pins;
 pub mod state;
 
 pub use event_loop::EventLoop;
@@ -862,6 +863,8 @@ pub struct RuntimeHandle {
     ///
     /// Allows `begin_tx` to capture a read snapshot without event loop round-trip.
     pub(crate) snapshot_cache: Arc<snapshot_cache::SnapshotCache>,
+    /// Concurrent snapshot pins observed by GC and compaction.
+    pub(crate) snapshot_pins: Arc<snapshot_pins::SnapshotPinRegistry>,
 }
 
 impl RuntimeHandle {
@@ -871,6 +874,20 @@ impl RuntimeHandle {
     /// message because transaction creation sits on the API hot path.
     pub(crate) fn ingest_active(&self) -> bool {
         self.ingest_active.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn register_snapshot_pin(
+        &self,
+        snapshot_id: u64,
+        sequence: u64,
+        pinned_sst_names: Vec<String>,
+    ) -> bool {
+        self.snapshot_pins
+            .register(snapshot_id, sequence, pinned_sst_names)
+    }
+
+    pub(crate) fn unregister_snapshot_pin(&self, snapshot_id: u64) -> bool {
+        self.snapshot_pins.unregister(snapshot_id)
     }
 
     /// Submit a message to the runtime (fire-and-forget).
@@ -1109,12 +1126,14 @@ impl Runtime {
             .is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
 
         let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
+        let snapshot_pins = Arc::new(snapshot_pins::SnapshotPinRegistry::default());
 
         let handle = RuntimeHandle {
             msg_tx: msg_tx.clone(),
             router: router.clone(),
             ingest_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             snapshot_cache,
+            snapshot_pins,
         };
 
         let runtime = Self {
@@ -1151,6 +1170,7 @@ impl Runtime {
 
         let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
         let ingest_active = Arc::clone(&state.ingest_active);
+        let snapshot_pins = Arc::clone(&state.snapshot_pins);
 
         // Handle for callers to use.
         let handle = RuntimeHandle {
@@ -1158,6 +1178,7 @@ impl Runtime {
             router: router.clone(),
             ingest_active,
             snapshot_cache: snapshot_cache.clone(),
+            snapshot_pins,
         };
 
         let msg_tx_for_loop = self.msg_tx.clone();

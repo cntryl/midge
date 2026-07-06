@@ -192,6 +192,7 @@ impl ReadSnapshot {
 
     fn sst_reader(&self, file_meta: &FileMeta) -> crate::common::MidgeResult<Arc<SstFileIo>> {
         if let Some(reader) = self.sst_readers.get(&file_meta.name) {
+            crate::sst::read_path_metrics::global_sst_read_metrics().record_reader_cache_hit();
             return Ok(Arc::clone(reader));
         }
         if let Some(resources) = &self.read_resources {
@@ -200,6 +201,7 @@ impl ReadSnapshot {
 
         let sst_path = self.sst_path_prefix.join(&file_meta.name);
         let path_str = sst_path.to_string_lossy().to_string();
+        crate::sst::read_path_metrics::global_sst_read_metrics().record_reader_cache_miss();
         Ok(Arc::new(crate::sst::fs::SstFileIo::open(
             &path_str,
             Arc::clone(&self.sst_fs),
@@ -232,11 +234,15 @@ impl ReadSnapshot {
                 }
 
                 file_meta.record_read();
+                crate::sst::read_path_metrics::global_sst_read_metrics()
+                    .record_candidate_sst_file_checked();
                 if let Ok(reader) = self.sst_reader(file_meta) {
                     if let Ok(state) = reader.get_state_at(key, seq) {
                         Self::merge_best_state(&mut best_state, state);
                     }
 
+                    crate::sst::read_path_metrics::global_sst_read_metrics()
+                        .record_range_tombstone_scan();
                     range_tombstones.extend(reader.range_tombstones().into_iter().filter(
                         |tombstone| {
                             (seq == u64::MAX || tombstone.seq <= seq) && tombstone.covers(key)

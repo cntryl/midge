@@ -5,6 +5,7 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::metadata::Manifest;
+use crate::runtime::snapshot_pins::SnapshotPinRegistry;
 use crate::runtime::{IntentLogEntry, PublicationPhase};
 use crate::sst::{Memtable, ReadAmpMetrics, SkipListMemtable};
 
@@ -393,6 +394,7 @@ pub struct RuntimeState {
     pub compaction: CompactionState,
     pub cloud: CloudState,
     pub snapshots: SnapshotState,
+    pub snapshot_pins: Arc<SnapshotPinRegistry>,
     /// Recently committed range deletes for strict write-conflict checks.
     pub recent_delete_ranges: Vec<RecentDeleteRange>,
 
@@ -548,6 +550,7 @@ impl RuntimeState {
                 active_snapshots: HashMap::new(),
                 max_snapshot_lifetime: std::time::Duration::from_hours(1), // 1 hour default
             },
+            snapshot_pins: Arc::new(SnapshotPinRegistry::default()),
             recent_delete_ranges: Vec::new(),
             memtable_size_limit: 64 * 1024 * 1024, // 64MB
             mode: RuntimeMode {
@@ -923,15 +926,7 @@ impl RuntimeState {
 
     fn snapshot_retention_metrics(&self, now: Instant) -> (usize, u64) {
         let pinned_ssts = self.get_pinned_sst_names().len();
-        let oldest_snapshot_age_seconds = self
-            .snapshots
-            .active_snapshots
-            .values()
-            .map(|(_sequence, created_at, _ref_count, _pinned_ssts)| {
-                now.duration_since(*created_at).as_secs()
-            })
-            .max()
-            .unwrap_or(0);
+        let oldest_snapshot_age_seconds = self.snapshot_pins.oldest_age_seconds(now).unwrap_or(0);
         (pinned_ssts, oldest_snapshot_age_seconds)
     }
 
@@ -983,7 +978,7 @@ impl RuntimeState {
                 .active_compactions
                 .load(std::sync::atomic::Ordering::SeqCst),
             pending_cloud_uploads: self.cloud.pending_uploads.len(),
-            active_snapshots: self.snapshots.active_snapshots.len(),
+            active_snapshots: self.snapshot_pins.active_count(),
             pinned_ssts,
             oldest_snapshot_age_seconds,
             sst_count,
@@ -1082,23 +1077,7 @@ impl RuntimeState {
             })
             .collect();
 
-        let now = Instant::now();
-        let mut active_snapshots: Vec<_> = self
-            .snapshots
-            .active_snapshots
-            .iter()
-            .map(
-                |(snapshot_id, (sequence, created_at, ref_count, _pinned_ssts))| {
-                    crate::types::SnapshotPinSnapshot {
-                        snapshot_id: *snapshot_id,
-                        sequence: *sequence,
-                        age_seconds: now.duration_since(*created_at).as_secs(),
-                        ref_count: *ref_count,
-                    }
-                },
-            )
-            .collect();
-        active_snapshots.sort_by_key(|snapshot| snapshot.snapshot_id);
+        let active_snapshots = self.snapshot_pins.snapshots(Instant::now());
         let residue = self.storage_residue_assessment();
 
         crate::types::StorageLayoutSnapshot {
@@ -1947,16 +1926,14 @@ impl RuntimeState {
         sequence: u64,
         pinned_sst_names: Vec<String>,
     ) -> bool {
-        if self.snapshots.active_snapshots.contains_key(&snapshot_id) {
+        if !self
+            .snapshot_pins
+            .register(snapshot_id, sequence, pinned_sst_names)
+        {
             tracing::warn!(snapshot_id, "Attempted to register duplicate snapshot ID");
             return false;
         }
 
-        let pinned_ssts = pinned_sst_names.into_iter().collect::<HashSet<_>>();
-
-        self.snapshots
-            .active_snapshots
-            .insert(snapshot_id, (sequence, Instant::now(), 1, pinned_ssts));
         self.prune_recent_delete_ranges_by_snapshot_horizon();
 
         tracing::trace!(snapshot_id, sequence, "Snapshot registered for SST pinning");
@@ -1966,12 +1943,7 @@ impl RuntimeState {
 
     /// Unregister a snapshot, allowing SSTs referenced by it to be garbage collected.
     pub fn unregister_snapshot(&mut self, snapshot_id: u64) {
-        if self
-            .snapshots
-            .active_snapshots
-            .remove(&snapshot_id)
-            .is_some()
-        {
+        if self.snapshot_pins.unregister(snapshot_id) {
             self.prune_recent_delete_ranges_by_snapshot_horizon();
             tracing::trace!(snapshot_id, "Snapshot unregistered; SSTs eligible for GC");
         }
@@ -1980,64 +1952,21 @@ impl RuntimeState {
     /// Get list of SSTs referenced by active snapshots.
     /// These SSTs must NOT be deleted during garbage collection.
     pub fn get_pinned_sst_names(&self) -> HashSet<String> {
-        let mut pinned = HashSet::new();
-
-        for (snapshot_id, (_snapshot_seq, created_at, _ref_count, pinned_ssts)) in
-            &self.snapshots.active_snapshots
-        {
-            // Check if snapshot has exceeded max lifetime
-            let age = Instant::now().duration_since(*created_at);
-            if age > self.snapshots.max_snapshot_lifetime {
-                tracing::warn!(
-                    snapshot_id,
-                    age_secs = age.as_secs(),
-                    max_secs = self.snapshots.max_snapshot_lifetime.as_secs(),
-                    "Long-lived snapshot exceeds max lifetime (should be auto-closed)"
-                );
-                // Note: we don't auto-close here; that's for the caller to decide
-                // but we log it for alerting
-            }
-
-            pinned.extend(pinned_ssts.iter().cloned());
-        }
-
-        pinned
+        self.snapshot_pins
+            .pinned_sst_names(self.snapshots.max_snapshot_lifetime)
     }
 
     /// Check for timed-out snapshots and return count
     pub fn count_timed_out_snapshots(&self) -> usize {
-        self.snapshots
-            .active_snapshots
-            .iter()
-            .filter(|(_id, (_seq, created_at, _ref_count, _pinned_ssts))| {
-                Instant::now().duration_since(*created_at) > self.snapshots.max_snapshot_lifetime
-            })
-            .count()
+        self.snapshot_pins
+            .count_timed_out(self.snapshots.max_snapshot_lifetime)
     }
 
     /// Remove snapshots that exceeded max lifetime and return the number evicted.
     pub fn evict_timed_out_snapshots(&mut self) -> usize {
-        let now = Instant::now();
-        let max_lifetime = self.snapshots.max_snapshot_lifetime;
-
-        let mut timed_out_ids = Vec::new();
-        for (snapshot_id, (_seq, created_at, _ref_count, _pinned_ssts)) in
-            &self.snapshots.active_snapshots
-        {
-            if now.duration_since(*created_at) > max_lifetime {
-                timed_out_ids.push(*snapshot_id);
-            }
-        }
-
-        let timed_out_count = timed_out_ids.len();
-        for snapshot_id in timed_out_ids {
-            self.snapshots.active_snapshots.remove(&snapshot_id);
-            tracing::warn!(
-                snapshot_id,
-                max_secs = max_lifetime.as_secs(),
-                "Evicted timed-out snapshot"
-            );
-        }
+        let timed_out_count = self
+            .snapshot_pins
+            .evict_timed_out(self.snapshots.max_snapshot_lifetime);
 
         if timed_out_count > 0 {
             self.prune_recent_delete_ranges_by_snapshot_horizon();
@@ -2048,11 +1977,7 @@ impl RuntimeState {
 
     /// Return the oldest active snapshot sequence, if any snapshots are pinned.
     pub fn oldest_active_snapshot_sequence(&self) -> Option<u64> {
-        self.snapshots
-            .active_snapshots
-            .values()
-            .map(|(sequence, _created_at, _ref_count, _pinned_ssts)| *sequence)
-            .min()
+        self.snapshot_pins.oldest_sequence()
     }
 
     pub fn record_delete_range(
@@ -2223,6 +2148,7 @@ mod tests {
 
     #[test]
     fn should_select_size_threshold_flush_candidate_before_cloud_gap_candidate() {
+        // Arrange
         let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.memtable_flush_threshold = 4 * 1024;
         state.memtable_size_limit = 1024 * 1024;
@@ -2248,12 +2174,15 @@ mod tests {
         let candidate = state
             .next_flush_candidate(true)
             .expect("flush candidate should exist");
+        // Act
+        // Assert
         assert_eq!(candidate.cf_id, 0);
         assert_eq!(candidate.reason, FlushReason::SizeThreshold);
     }
 
     #[test]
     fn should_select_cloud_gap_flush_candidate_when_cloud_mode_and_gap_exceeded() {
+        // Arrange
         let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.memtable_flush_threshold = 1024 * 1024;
         state.memtable_size_limit = 1024 * 1024;
@@ -2274,12 +2203,15 @@ mod tests {
         let candidate = state
             .next_flush_candidate(true)
             .expect("cloud gap flush candidate should exist");
+        // Act
+        // Assert
         assert_eq!(candidate.cf_id, 0);
         assert_eq!(candidate.reason, FlushReason::CloudSegmentGap);
     }
 
     #[test]
     fn should_not_select_cloud_gap_flush_candidate_when_gap_mode_disabled() {
+        // Arrange
         let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.memtable_flush_threshold = 1024 * 1024;
         state.memtable_size_limit = 1024 * 1024;
@@ -2297,11 +2229,14 @@ mod tests {
             .expect("default cf")
             .active_memtable_started_in_segment = 1;
 
+        // Act
+        // Assert
         assert!(state.next_flush_candidate(false).is_none());
     }
 
     #[test]
     fn should_report_max_memtable_wal_segment_gap_for_non_empty_memtables() {
+        // Arrange
         let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.wal.current_segment_id = state.cloud_eventual_flush_segment_gap + 20;
 
@@ -2330,6 +2265,8 @@ mod tests {
             .expect("secondary cf")
             .active_memtable_started_in_segment = 1;
 
+        // Act
+        // Assert
         assert_eq!(
             state.max_memtable_wal_segment_gap(),
             state.wal.current_segment_id.saturating_sub(1)
@@ -2338,6 +2275,7 @@ mod tests {
 
     #[test]
     fn should_flush_but_not_hard_stall_when_active_memtable_exceeds_flush_threshold() {
+        // Arrange
         let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.memtable_size_limit = 1024 * 1024;
         state.memtable_flush_threshold = 4 * 1024;
@@ -2345,6 +2283,8 @@ mod tests {
 
         grow_active_memtable(&mut state, 0, 5 * 1024);
 
+        // Act
+        // Assert
         assert_eq!(state.needs_flush(), Some(0));
         assert!(!state.should_hard_stall_writes(0));
         assert!(!state.should_stall_writes(0));
@@ -2353,6 +2293,7 @@ mod tests {
 
     #[test]
     fn should_hard_stall_when_immutable_memtable_queue_is_full() {
+        // Arrange
         let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.max_immutable_memtables = 1;
         state
@@ -2361,6 +2302,8 @@ mod tests {
             .immutable_memtables
             .push(Arc::new(SkipListMemtable::new()));
 
+        // Act
+        // Assert
         assert!(state.is_immutable_memtable_queue_full(0));
         assert!(state.should_hard_stall_writes(0));
         assert!(state.has_any_hard_write_stall());
@@ -2368,10 +2311,13 @@ mod tests {
 
     #[test]
     fn should_hard_stall_when_total_memtable_memory_exceeds_limit() {
+        // Arrange
         let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.memtable_flush_threshold = 1024;
         state.total_memtable_bytes = 2 * 1024;
 
+        // Act
+        // Assert
         assert!(state.is_total_memtable_hard_limit_exceeded());
         assert!(state.should_hard_stall_writes(0));
         assert!(state.has_any_hard_write_stall());
@@ -2379,9 +2325,12 @@ mod tests {
 
     #[test]
     fn should_hard_stall_when_external_backpressure_sets_write_stalled() {
+        // Arrange
         let mut state = RuntimeState::new(isolated_test_db_path(), false);
         state.set_write_stalled(true);
 
+        // Act
+        // Assert
         assert!(state.should_hard_stall_writes(0));
         assert!(state.has_any_hard_write_stall());
         assert!(state.runtime_metrics_snapshot().write_stalled);
@@ -2540,14 +2489,14 @@ mod tests {
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
         state.snapshots.max_snapshot_lifetime = std::time::Duration::from_millis(0);
         assert!(state.register_snapshot(1, 10, vec!["001.sst".to_string()]));
-        assert_eq!(state.snapshots.active_snapshots.len(), 1);
+        assert_eq!(state.snapshot_pins.active_count(), 1);
 
         // Act
         let evicted = state.evict_timed_out_snapshots();
 
         // Assert
         assert_eq!(evicted, 1);
-        assert!(state.snapshots.active_snapshots.is_empty());
+        assert_eq!(state.snapshot_pins.active_count(), 0);
     }
 
     #[test]
@@ -2562,7 +2511,7 @@ mod tests {
 
         // Assert
         assert_eq!(evicted, 0);
-        assert_eq!(state.snapshots.active_snapshots.len(), 1);
+        assert_eq!(state.snapshot_pins.active_count(), 1);
     }
 
     #[test]

@@ -2298,6 +2298,7 @@ mod tests {
 
     #[test]
     fn should_not_reread_verified_manifest_ssts_on_repeated_validation() {
+        // Arrange
         let (mock_cloud, storage) = hybrid_with_mock_cloud();
         let sst_name = "cached.sst";
         let bytes = valid_sst_bytes(b"a", b"v1", 1);
@@ -2309,6 +2310,8 @@ mod tests {
             .verify_manifest_cloud_objects(&manifest)
             .expect("first manifest validation");
         let first_downloads = mock_cloud.get_downloads();
+        // Act
+        // Assert
         assert!(
             first_downloads
                 .iter()
@@ -2329,6 +2332,7 @@ mod tests {
 
     #[test]
     fn should_only_validate_new_manifest_ssts_after_manifest_extends() {
+        // Arrange
         let (mock_cloud, storage) = hybrid_with_mock_cloud();
         let first_name = "first.sst";
         let second_name = "second.sst";
@@ -2383,6 +2387,8 @@ mod tests {
             .expect("extended manifest validation");
         let downloads = mock_cloud.get_downloads();
 
+        // Act
+        // Assert
         assert!(
             downloads.iter().any(|key| key.ends_with("sst/second.sst")),
             "extended validation should read the new SST, got {downloads:?}"
@@ -2395,6 +2401,7 @@ mod tests {
 
     #[test]
     fn should_reject_cached_manifest_sst_proof_when_cloud_object_is_deleted() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let sst_name = "deleted-after-proof.sst";
         let bytes = valid_sst_bytes(b"a", b"v1", 1);
@@ -2410,6 +2417,8 @@ mod tests {
         let error = storage
             .verify_manifest_cloud_objects(&manifest)
             .expect_err("deleted SST must invalidate cached proof");
+        // Act
+        // Assert
         assert!(
             error.contains("changed since validation") || error.contains("unreadable"),
             "unexpected stale SST proof error: {error}"
@@ -2418,6 +2427,7 @@ mod tests {
 
     #[test]
     fn should_validate_legacy_manifest_ssts_before_wal_cleanup() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let mut manifest = crate::metadata::Manifest::default();
         manifest.ssts.push("legacy-missing.sst".to_string());
@@ -2425,6 +2435,8 @@ mod tests {
         let error = storage
             .verify_manifest_cloud_objects(&manifest)
             .expect_err("legacy manifest SST references must be validated");
+        // Act
+        // Assert
         assert!(
             error.contains("legacy-missing.sst") || error.contains("sst/legacy-missing.sst"),
             "unexpected legacy SST validation error: {error}"
@@ -2433,6 +2445,7 @@ mod tests {
 
     #[test]
     fn should_reject_cached_manifest_sst_proof_when_cloud_object_is_overwritten() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let sst_name = "overwritten-after-proof.sst";
         let bytes = valid_sst_bytes(b"a", b"v1", 1);
@@ -2448,6 +2461,8 @@ mod tests {
         let error = storage
             .verify_manifest_cloud_objects(&manifest)
             .expect_err("overwritten SST must invalidate cached proof");
+        // Act
+        // Assert
         assert!(
             error.contains("changed since validation") || error.contains("size mismatch"),
             "unexpected stale SST proof error: {error}"
@@ -2456,6 +2471,7 @@ mod tests {
 
     #[test]
     fn should_reject_manifest_sst_when_content_crc_differs() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let sst_name = "wrong-crc.sst";
         let bytes = valid_sst_bytes(b"a", b"v1", 1);
@@ -2469,6 +2485,8 @@ mod tests {
             .verify_manifest_cloud_objects(&manifest)
             .expect_err("manifest SST with mismatched content CRC must not validate");
 
+        // Act
+        // Assert
         assert!(
             error.contains("crc") || error.contains("content"),
             "unexpected manifest SST CRC validation error: {error}"
@@ -2477,6 +2495,7 @@ mod tests {
 
     #[test]
     fn should_not_reuse_size_only_sst_proof_when_manifest_later_requires_crc() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let sst_name = "crc-after-size-proof.sst";
         let bytes = valid_sst_bytes(b"a", b"v1", 1);
@@ -2494,6 +2513,8 @@ mod tests {
             .verify_manifest_cloud_objects(&crc_manifest)
             .expect_err("cached size-only SST proof must not satisfy later CRC requirement");
 
+        // Act
+        // Assert
         assert!(
             error.contains("crc") || error.contains("content"),
             "unexpected cached SST CRC validation error: {error}"
@@ -2502,6 +2523,7 @@ mod tests {
 
     #[test]
     fn should_not_overwrite_existing_remote_sst_during_authoritative_upload() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let sst_name = "collision.sst";
         let key = crate::sst::object_key(sst_name);
@@ -2513,6 +2535,8 @@ mod tests {
             .write_sst_object(sst_name, upload_bytes)
             .expect_err("existing remote SST object must fail authoritative upload");
 
+        // Act
+        // Assert
         assert!(
             error.to_string().contains("cloud SST upload failed")
                 || error.to_string().contains("precondition failed"),
@@ -2532,6 +2556,7 @@ mod tests {
 
     #[test]
     fn should_not_create_remote_sst_when_local_cache_key_already_exists() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let sst_name = "local-collision.sst";
         let key = crate::sst::object_key(sst_name);
@@ -2543,6 +2568,8 @@ mod tests {
             .write_sst_object(sst_name, upload_bytes)
             .expect_err("existing local SST cache object must fail authoritative upload");
 
+        // Act
+        // Assert
         assert!(
             error.to_string().contains("local SST cache already exists"),
             "unexpected local SST collision error: {error}"
@@ -2557,6 +2584,7 @@ mod tests {
 
     #[test]
     fn should_cache_remote_wal_readback_validation() {
+        // Arrange
         let (mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 7;
         let max_sequence = 11;
@@ -2571,6 +2599,8 @@ mod tests {
             .verify_remote_wal_segment(segment_id, max_sequence)
             .expect("first remote WAL validation");
         let first_downloads = mock_cloud.get_downloads();
+        // Act
+        // Assert
         assert!(
             first_downloads
                 .iter()
@@ -2590,6 +2620,7 @@ mod tests {
 
     #[test]
     fn should_reject_cached_remote_wal_proof_when_cloud_object_is_deleted() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 8;
         let max_sequence = 12;
@@ -2604,6 +2635,8 @@ mod tests {
         let error = storage
             .verify_remote_wal_segment(segment_id, max_sequence)
             .expect_err("deleted WAL must invalidate cached proof");
+        // Act
+        // Assert
         assert!(
             error.contains("changed since validation") || error.contains("unreadable"),
             "unexpected stale WAL proof error: {error}"
@@ -2612,6 +2645,7 @@ mod tests {
 
     #[test]
     fn should_not_prune_remote_wal_when_verified_object_identity_changed() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 11;
         let max_sequence = 21;
@@ -2627,6 +2661,8 @@ mod tests {
             .expect("schedule prune");
 
         let result = wait_for_wal_prune_result(&storage, segment_id);
+        // Act
+        // Assert
         assert!(
             result.is_err(),
             "stale WAL proof must make remote prune fail conservatively"
@@ -2636,6 +2672,7 @@ mod tests {
 
     #[test]
     fn should_not_prune_remote_wal_when_manifest_sst_disappears_after_initial_validation() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 13;
         let max_sequence = 23;
@@ -2660,6 +2697,8 @@ mod tests {
             .expect("schedule prune");
 
         let result = wait_for_wal_prune_result(&storage, segment_id);
+        // Act
+        // Assert
         assert!(
             result.is_err(),
             "worker-side manifest revalidation must fail conservatively"
@@ -2669,6 +2708,7 @@ mod tests {
 
     #[test]
     fn should_not_prune_remote_wal_when_manifest_sst_content_crc_differs() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 16;
         let max_sequence = 26;
@@ -2690,6 +2730,8 @@ mod tests {
             .expect("schedule guarded prune");
 
         let result = wait_for_wal_prune_result(&storage, segment_id);
+        // Act
+        // Assert
         assert!(
             result.is_err(),
             "worker-side manifest CRC revalidation must fail conservatively"
@@ -2699,6 +2741,7 @@ mod tests {
 
     #[test]
     fn should_not_prune_remote_wal_when_cloud_metadata_changes_after_initial_validation() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 14;
         let max_sequence = 24;
@@ -2734,6 +2777,8 @@ mod tests {
             .expect("schedule prune");
 
         let result = wait_for_wal_prune_result(&storage, segment_id);
+        // Act
+        // Assert
         assert!(
             result.is_err(),
             "worker-side metadata revalidation must fail conservatively"
@@ -2743,6 +2788,7 @@ mod tests {
 
     #[test]
     fn should_prune_remote_wal_when_worker_side_guard_remains_valid() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 15;
         let max_sequence = 25;
@@ -2799,6 +2845,8 @@ mod tests {
             .expect("schedule prune");
 
         let result = wait_for_wal_prune_result(&storage, segment_id);
+        // Act
+        // Assert
         assert!(
             result.is_ok(),
             "valid worker-side guard should allow conditional remote WAL deletion"
@@ -2808,6 +2856,7 @@ mod tests {
 
     #[test]
     fn should_reject_remote_wal_segment_with_sequence_beyond_expected_max() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 10;
         let expected_max_sequence = 20;
@@ -2820,6 +2869,8 @@ mod tests {
         let error = storage
             .verify_remote_wal_segment(segment_id, expected_max_sequence)
             .expect_err("WAL segment with records beyond expected max must be rejected");
+        // Act
+        // Assert
         assert!(
             error.contains("exceeds expected"),
             "unexpected WAL max-sequence error: {error}"
@@ -2828,6 +2879,7 @@ mod tests {
 
     #[test]
     fn should_not_overwrite_existing_remote_wal_during_upload() {
+        // Arrange
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let tmp = tempfile::tempdir().expect("create WAL dir");
         let segment_id = 12;
@@ -2864,6 +2916,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
+        // Act
+        // Assert
         assert!(saw_fail, "existing remote WAL object must fail upload");
         assert!(
             !saw_ack,
@@ -2882,6 +2936,7 @@ mod tests {
 
     #[test]
     fn should_readback_remote_wal_before_upload_worker_emits_ack() {
+        // Arrange
         let (mock_cloud, storage) = hybrid_with_mock_cloud();
         let tmp = tempfile::tempdir().expect("create WAL dir");
         let segment_id = 9;
@@ -2906,6 +2961,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
+        // Act
+        // Assert
         assert!(
             events.iter().any(|event| matches!(
                 event,
@@ -2927,6 +2984,7 @@ mod tests {
 
     #[test]
     fn should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted() {
+        // Arrange
         let tmp = tempfile::tempdir().expect("create WAL retry test dir");
         let local = Arc::new(
             crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
@@ -2960,6 +3018,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
+        // Act
+        // Assert
         assert_eq!(
             write_attempts.load(Ordering::SeqCst),
             3,

@@ -1314,6 +1314,7 @@ mod tests {
 
     #[test]
     fn should_apply_txn_batch_atomically_during_recovery() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -1353,6 +1354,8 @@ mod tests {
         let mut memtables = HashMap::new();
         let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
+        // Act
+        // Assert
         assert_eq!(stats.record_count, 1);
         let recovered_memtable = &memtables[&0];
         assert_eq!(
@@ -1407,6 +1410,7 @@ mod tests {
 
     #[test]
     fn should_salvage_valid_prefix_when_txn_batch_frame_is_truncated() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -1463,6 +1467,8 @@ mod tests {
         )
         .unwrap();
 
+        // Act
+        // Assert
         assert!(stats.had_corruption || stats.record_count >= 1);
         let recovered_memtable = &memtables[&0];
         assert_eq!(

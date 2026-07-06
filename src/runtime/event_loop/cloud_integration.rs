@@ -1183,6 +1183,7 @@ mod tests {
     #[test]
     fn should_not_overwrite_newer_remote_manifest_metadata_when_mirroring(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -1210,6 +1211,8 @@ mod tests {
             .mirror_metadata_to_authoritative_cloud()
             .expect_err("newer remote manifest metadata must reject stale local mirror");
 
+        // Act
+        // Assert
         assert!(
             error.to_string().contains("newer")
                 || error.to_string().contains("ahead")
@@ -1231,6 +1234,7 @@ mod tests {
     #[test]
     fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -1264,6 +1268,8 @@ mod tests {
             .mirror_metadata_to_authoritative_cloud()
             .expect_err("manifest advancing after preflight must reject stale metadata mirror");
 
+        // Act
+        // Assert
         assert!(
             error.to_string().contains("ahead") || error.to_string().contains("stale"),
             "unexpected metadata mirror race error: {error}"
@@ -1332,6 +1338,7 @@ mod tests {
     #[test]
     fn should_not_prune_remote_wal_when_manifest_sst_is_missing_from_cloud(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -1343,6 +1350,8 @@ mod tests {
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL must be retained when a manifest-referenced cloud SST is missing"
@@ -1358,6 +1367,7 @@ mod tests {
     #[test]
     fn should_not_prune_remote_wal_when_manifest_sst_is_corrupt_in_cloud(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -1371,6 +1381,8 @@ mod tests {
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL must be retained when a manifest-referenced cloud SST is unreadable"
@@ -1386,6 +1398,7 @@ mod tests {
     #[test]
     fn should_not_prune_remote_wal_when_cloud_metadata_is_missing() -> crate::common::MidgeResult<()>
     {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -1403,6 +1416,8 @@ mod tests {
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL must be retained when committed cloud metadata is missing"
@@ -1418,6 +1433,7 @@ mod tests {
     #[test]
     fn should_converge_stale_intent_metadata_before_remote_wal_prune(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -1457,6 +1473,8 @@ mod tests {
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             !remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL should prune after stale intent metadata is mirrored and revalidated"
@@ -1486,6 +1504,7 @@ mod tests {
     #[test]
     fn should_not_prune_remote_wal_when_cloud_manifest_metadata_is_ahead(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -1517,6 +1536,8 @@ mod tests {
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL must be retained when cloud manifest metadata is ahead of local state"
@@ -1943,6 +1964,7 @@ mod tests {
     #[test]
     fn should_not_prune_remote_wal_when_segment_is_not_cloud_durable(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -1954,6 +1976,8 @@ mod tests {
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL must be retained until the cloud durable frontier covers its max sequence"
@@ -1969,6 +1993,7 @@ mod tests {
     #[test]
     fn should_not_prune_remote_wal_when_manifest_sequence_advances_without_sst_coverage(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -1976,6 +2001,8 @@ mod tests {
         let max_sequence = 10;
         seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
         el.state.wal.cloud_durable_seq = max_sequence;
+        // Act
+        // Assert
         assert!(
             el.state.manifest.files.is_empty(),
             "test requires no manifest SSTs to prove sequence-only metadata is insufficient"
@@ -1999,6 +2026,7 @@ mod tests {
     #[test]
     fn should_not_prune_remote_wal_when_high_sequence_sst_does_not_cover_wal_record_cf(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2040,6 +2068,8 @@ mod tests {
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL must be retained when manifest SST coverage is only for a different CF"
@@ -2055,6 +2085,7 @@ mod tests {
     #[test]
     fn should_not_prune_remote_wal_when_manifest_sst_metadata_does_not_match_actual_sst(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2082,6 +2113,8 @@ mod tests {
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL must be retained when manifest SST metadata does not match actual SST contents"
@@ -2097,6 +2130,7 @@ mod tests {
     #[test]
     fn should_not_prune_remote_wal_when_segment_max_sequence_exceeds_manifest_coverage(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2109,6 +2143,8 @@ mod tests {
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL must be retained when its max sequence exceeds manifest coverage"
@@ -2120,6 +2156,7 @@ mod tests {
     #[test]
     fn should_prune_remote_wal_when_segment_max_sequence_equals_manifest_coverage(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2132,6 +2169,8 @@ mod tests {
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             !remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL may be pruned when cloud durability and manifest coverage both include its max sequence"
@@ -2143,6 +2182,7 @@ mod tests {
     #[test]
     fn should_prune_remote_wal_when_delete_range_record_is_manifest_covered(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2175,6 +2215,8 @@ mod tests {
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             !remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL may be pruned when a delete-range record is physically covered by a manifest SST"
@@ -2186,6 +2228,7 @@ mod tests {
     #[test]
     fn should_not_prune_remote_wal_when_delete_range_record_exceeds_manifest_range(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2218,6 +2261,8 @@ mod tests {
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             remote_wal_path_for_test(&el, segment_id).exists(),
             "remote WAL must be retained when manifest range tombstone coverage is narrower than the WAL record"
@@ -2229,6 +2274,7 @@ mod tests {
     #[test]
     fn should_prune_remote_wal_when_only_transaction_marker_exceeds_data_coverage(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2271,6 +2317,8 @@ mod tests {
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             !remote_wal_path_for_test(&el, segment_id).exists(),
             "transaction marker records must not force retention when all data records are covered"
@@ -2280,8 +2328,9 @@ mod tests {
     }
 
     #[test]
-    fn should_clear_prune_inflight_and_retry_after_worker_guard_failure(
+    fn should_retry_after_clearing_prune_inflight_when_worker_guard_fails(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2310,6 +2359,8 @@ mod tests {
             .expect("schedule guarded prune");
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             el.cloud_wal_prune_inflight.is_empty(),
             "worker-side guard failure must clear prune inflight state"
@@ -2338,6 +2389,7 @@ mod tests {
     #[test]
     fn should_ignore_listing_only_ssts_when_deciding_remote_wal_cleanup(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2354,6 +2406,8 @@ mod tests {
         el.prune_cloud_wal_segments_covered_by_manifest();
         drain_prune_completion_for_test(&mut el);
 
+        // Act
+        // Assert
         assert!(
             remote_wal_path_for_test(&el, segment_id).exists(),
             "uploaded but uncommitted SST objects must not establish WAL cleanup coverage"
@@ -2365,6 +2419,7 @@ mod tests {
     #[test]
     fn should_keep_local_wal_when_remote_wal_readback_fails_after_cloud_ack(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2380,6 +2435,8 @@ mod tests {
             max_sequence: 1,
         });
 
+        // Act
+        // Assert
         assert!(
             local_wal.exists(),
             "local WAL must be retained when the remote WAL cannot be read back after CloudAck"
@@ -2391,6 +2448,7 @@ mod tests {
     #[test]
     fn should_treat_unproven_cloud_ack_as_failure_without_local_wal_removal(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2406,6 +2464,8 @@ mod tests {
                 ttl_seconds: None,
             },
         )?;
+        // Act
+        // Assert
         assert!(deferred, "CloudAsync append should wait for CloudAck");
         el.durability
             .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
@@ -2439,6 +2499,7 @@ mod tests {
     #[test]
     fn should_not_advance_cloud_durability_across_unacked_segment_gap(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2455,6 +2516,8 @@ mod tests {
                 ttl_seconds: None,
             },
         )?;
+        // Act
+        // Assert
         assert!(first_deferred, "CloudAsync first append should defer");
         el.durability
             .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
@@ -2532,6 +2595,7 @@ mod tests {
     #[test]
     fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common::MidgeResult<()>
     {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2548,6 +2612,8 @@ mod tests {
                 ttl_seconds: None,
             },
         )?;
+        // Act
+        // Assert
         assert!(first_deferred, "CloudAsync first append should defer");
         el.durability
             .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
@@ -2610,6 +2676,7 @@ mod tests {
     #[test]
     fn should_keep_local_wal_when_cached_remote_wal_proof_becomes_stale_before_cloud_ack(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2625,6 +2692,8 @@ mod tests {
                 ttl_seconds: None,
             },
         )?;
+        // Act
+        // Assert
         assert!(deferred, "CloudAsync append should wait for CloudAck");
         el.durability
             .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
@@ -2661,6 +2730,7 @@ mod tests {
     #[test]
     fn should_not_reread_verified_cloud_metadata_on_repeated_wal_cleanup_check(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2679,6 +2749,8 @@ mod tests {
         el.verify_cloud_metadata_for_wal_cleanup()
             .expect("first cloud metadata validation");
         let first_downloads = metadata_backend.get_downloads();
+        // Act
+        // Assert
         assert!(
             !first_downloads.is_empty(),
             "first validation should read cloud metadata"
@@ -2699,6 +2771,7 @@ mod tests {
     #[test]
     fn should_reject_cached_cloud_metadata_proof_when_remote_metadata_is_deleted(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2720,6 +2793,8 @@ mod tests {
         let error = el
             .verify_cloud_metadata_for_wal_cleanup()
             .expect_err("deleted metadata must invalidate cached cleanup proof");
+        // Act
+        // Assert
         assert!(
             error.contains("changed since validation") || error.contains("unreadable"),
             "unexpected stale metadata proof error: {error}"
@@ -2730,6 +2805,7 @@ mod tests {
 
     #[test]
     fn should_retry_auto_flush_when_backpressure_releases() -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2752,6 +2828,8 @@ mod tests {
 
         el.handle_storage_event(crate::storage::StorageEvent::BackpressureOff);
 
+        // Act
+        // Assert
         assert!(!el.state.write_stalled());
         assert!(
             el.state.manifest.files.iter().any(|file| file.cf_id == 0),
@@ -2763,6 +2841,7 @@ mod tests {
 
     #[test]
     fn should_cloud_async_ack_confirm_idempotent_request() -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2823,6 +2902,7 @@ mod tests {
     #[test]
     fn should_cloud_async_retry_after_ack_return_same_sequence_without_queueing(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -2982,6 +3062,7 @@ mod tests {
     #[test]
     fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
         let scenario = fail::FailScenario::setup();
         let mut el = create_test_cloud_event_loop(
@@ -3003,6 +3084,8 @@ mod tests {
             None,
             crate::runtime::TransactionIsolationPolicy::LastWriteWins,
         )?;
+        // Act
+        // Assert
         assert!(
             deferred,
             "buffered transaction should defer cloud durability"
@@ -3087,6 +3170,7 @@ mod tests {
     #[test]
     fn should_seal_cloud_wal_with_segment_max_sequence_not_global_sequence(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
@@ -3106,6 +3190,8 @@ mod tests {
             None,
             crate::runtime::TransactionIsolationPolicy::LastWriteWins,
         )?;
+        // Act
+        // Assert
         assert!(
             deferred,
             "CloudAsync transaction should defer cloud durability"
@@ -3221,6 +3307,7 @@ mod tests {
     #[test]
     fn should_retry_seal_wal_for_cloud_after_failpoint_before_rotate(
     ) -> crate::common::MidgeResult<()> {
+        // Arrange
         let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
         let scenario = fail::FailScenario::setup();
         let mut el = create_test_cloud_event_loop(
@@ -3245,6 +3332,8 @@ mod tests {
             },
             &msg_rx,
         );
+        // Act
+        // Assert
         assert_eq!(outcome, super::super::HandleOutcome::Continue);
         expect_failed_seal_response(&fail_rx);
         assert!(

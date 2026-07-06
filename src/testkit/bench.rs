@@ -745,9 +745,12 @@ mod tests {
 
     #[test]
     fn should_parse_comma_separated_memtable_sweep_byte_values() {
+        // Arrange
         let parsed =
             parse_memtable_sweep_sizes(Some("131072, 524288, default")).expect("parse sizes");
 
+        // Act
+        // Assert
         assert_eq!(
             parsed,
             vec![
@@ -774,6 +777,7 @@ mod tests {
 
     #[test]
     fn should_calculate_runtime_counter_deltas() {
+        // Arrange
         let start = RuntimeCounterSnapshot {
             write_stalls_total: 10,
             write_stalls_memory_total: 4,
@@ -795,6 +799,8 @@ mod tests {
             wal_fsync_count: 3,
         };
 
+        // Act
+        // Assert
         assert_eq!(
             RuntimeCounterDeltas::between(start, end),
             RuntimeCounterDeltas {
@@ -812,6 +818,7 @@ mod tests {
 
     #[test]
     fn should_saturate_runtime_counter_deltas_when_snapshot_regresses() {
+        // Arrange
         let start = RuntimeCounterSnapshot {
             write_stalls_total: 10,
             write_stalls_memory_total: 10,
@@ -824,6 +831,8 @@ mod tests {
         };
         let end = RuntimeCounterSnapshot::default();
 
+        // Act
+        // Assert
         assert_eq!(
             RuntimeCounterDeltas::between(start, end),
             RuntimeCounterDeltas::default()

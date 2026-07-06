@@ -42,8 +42,10 @@ impl ReadResources {
             .get(&name)
             .cloned()
         {
+            crate::sst::read_path_metrics::global_sst_read_metrics().record_reader_cache_hit();
             return Ok(reader);
         }
+        crate::sst::read_path_metrics::global_sst_read_metrics().record_reader_cache_miss();
 
         let sst_path = self.sst_path_prefix.join(&name);
         let path_str = sst_path.to_string_lossy().to_string();
@@ -127,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn should_reuse_reader_and_keep_active_arc_after_prune() -> MidgeResult<()> {
+    fn should_keep_active_reader_arc_when_pruned_reader_reused() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
         let file_meta = write_test_sst(&temp_dir, "reader-cache.sst")?;

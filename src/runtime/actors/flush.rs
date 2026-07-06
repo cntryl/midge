@@ -437,6 +437,7 @@ mod tests {
 
     #[test]
     fn should_name_flushed_sst_with_canonical_lex_sortable_format() -> MidgeResult<()> {
+        // Arrange
         let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
         let db_path = temp.path().to_path_buf();
         let mut state = RuntimeState::new(db_path.clone(), false);
@@ -454,6 +455,8 @@ mod tests {
 
         let output = actor.handle_flush(&mut state, 0, None)?;
 
+        // Act
+        // Assert
         assert_eq!(output.sst_name, "000000_00_00000000000000000001.sst");
         assert!(state.sst_dir.join(&output.sst_name).exists());
 
