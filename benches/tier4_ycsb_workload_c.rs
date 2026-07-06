@@ -9,6 +9,7 @@ use cntryl_stress::{stress, stress_main, StressContext};
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
 
+use cntryl_midge::{ColumnFamilyId, MidgeEngine};
 use hdrhistogram::Histogram;
 use std::sync::Arc;
 use std::sync::Barrier;
@@ -105,6 +106,86 @@ where
     )
 }
 
+#[must_use]
+fn workload_c_read_key(
+    zipf: &ZipfianGenerator,
+    client_id: usize,
+    op_index: u64,
+) -> [u8; ycsb::KEY_SIZE] {
+    let mut draw: u64 = 0;
+    let key_idx = zipf.next_from_u64(&mut || {
+        let r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, draw);
+        draw = draw.wrapping_add(1);
+        r
+    });
+    ycsb::make_key(u64::try_from(key_idx).expect("zipfian key index fits in u64"))
+}
+
+fn measure_fixed_operations(
+    ctx: &mut StressContext,
+    engine: &Arc<MidgeEngine>,
+    cf_id: ColumnFamilyId,
+    initial_keys: usize,
+    clients: usize,
+    measurement_name: String,
+) -> ycsb::MultiClientRunStats {
+    ctx.parameter("operations_per_client", MEMORY_16_FIXED_OPS_PER_CLIENT);
+    ctx.parameter("worker_threads", MEMORY_16_WORKER_THREADS);
+    ctx.parameter("logical_clients", clients);
+
+    let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
+    let (measured, elapsed) = run_logical_clients_for_operations_with_stats(
+        engine,
+        clients,
+        MEMORY_16_WORKER_THREADS,
+        MEMORY_16_FIXED_OPS_PER_CLIENT,
+        |client_id| {
+            let zipf = Arc::clone(&zipf);
+            move |e, op_index| {
+                let k = workload_c_read_key(&zipf, client_id, op_index);
+                let tx = e
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                    .expect("begin");
+                let _ = tx.get(&k[..]).expect("measured get");
+            }
+        },
+    );
+    ctx.record_external(measurement_name, elapsed, measured.operations);
+    measured
+}
+
+fn measure_duration(
+    ctx: &mut StressContext,
+    engine: &Arc<MidgeEngine>,
+    cf_id: ColumnFamilyId,
+    initial_keys: usize,
+    clients: usize,
+    measurement_name: String,
+) -> ycsb::MultiClientRunStats {
+    stress_config::measure_external_counted(ctx, measurement_name, || {
+        let measured = {
+            let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
+            ycsb::run_multi_client_for_duration_with_stats(
+                engine,
+                clients,
+                MEASURED,
+                |client_id, _stop| {
+                    let zipf = Arc::clone(&zipf);
+                    move |e, _cf, op_index| {
+                        let k = workload_c_read_key(&zipf, client_id, op_index);
+                        let tx = e
+                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                            .expect("begin");
+                        let _ = tx.get(&k[..]).expect("measured get");
+                    }
+                },
+            )
+        };
+        let operations = measured.operations;
+        (measured, operations)
+    })
+}
+
 fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
     ctx.tag("storage_profile", profile);
     let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
@@ -132,13 +213,7 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
             ycsb::run_multi_client_for_duration(&engine, clients, WARMUP, |client_id, _stop| {
                 let zipf = Arc::clone(&zipf);
                 move |e, _cf, op_index| {
-                    let mut draw: u64 = 0;
-                    let key_idx = zipf.next_from_u64(&mut || {
-                        let r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, draw);
-                        draw = draw.wrapping_add(1);
-                        r
-                    }) as u64;
-                    let k = ycsb::make_key(key_idx);
+                    let k = workload_c_read_key(&zipf, client_id, op_index);
                     let tx = e
                         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
                         .expect("begin");
@@ -154,68 +229,9 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     let client_suffix = if clients == 1 { "client" } else { "clients" };
     let measurement_name = format!("tier4_ycsb_c_{profile}_{clients}_{client_suffix}");
     let measured = if use_fixed_operations {
-        ctx.parameter("operations_per_client", MEMORY_16_FIXED_OPS_PER_CLIENT);
-        ctx.parameter("worker_threads", MEMORY_16_WORKER_THREADS);
-        ctx.parameter("logical_clients", clients);
-        let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
-        let (measured, elapsed) = run_logical_clients_for_operations_with_stats(
-            &engine,
-            clients,
-            MEMORY_16_WORKER_THREADS,
-            MEMORY_16_FIXED_OPS_PER_CLIENT,
-            |client_id| {
-                let zipf = Arc::clone(&zipf);
-                move |e, op_index| {
-                    let mut draw: u64 = 0;
-                    let key_idx = zipf.next_from_u64(&mut || {
-                        let r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, draw);
-                        draw = draw.wrapping_add(1);
-                        r
-                    }) as u64;
-                    let k = ycsb::make_key(key_idx);
-                    let tx = e
-                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                        .expect("begin");
-                    let _ = tx.get(&k[..]).expect("measured get");
-                }
-            },
-        );
-        ctx.record_external(measurement_name, elapsed, measured.operations);
-        measured
+        measure_fixed_operations(ctx, &engine, cf_id, initial_keys, clients, measurement_name)
     } else {
-        stress_config::measure_external_counted(ctx, measurement_name, || {
-            let measured = {
-                let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
-                ycsb::run_multi_client_for_duration_with_stats(
-                    &engine,
-                    clients,
-                    MEASURED,
-                    |client_id, _stop| {
-                        let zipf = Arc::clone(&zipf);
-                        move |e, _cf, op_index| {
-                            let mut draw: u64 = 0;
-                            let key_idx = zipf.next_from_u64(&mut || {
-                                let r = ycsb::deterministic_u64(
-                                    WORKLOAD_SEED,
-                                    client_id,
-                                    op_index,
-                                    draw,
-                                );
-                                draw = draw.wrapping_add(1);
-                                r
-                            }) as u64;
-                            let k = ycsb::make_key(key_idx);
-                            let tx = e
-                                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                                .expect("begin");
-                            let _ = tx.get(&k[..]).expect("measured get");
-                        }
-                    },
-                )
-            };
-            let operations = measured.operations;
-            (measured, operations)
-        })
+        measure_duration(ctx, &engine, cf_id, initial_keys, clients, measurement_name)
     };
 
     ctx.set_elements(measured.operations);

@@ -48,7 +48,7 @@ fn seeded_mixed_compressible_payload(size: usize, seed: usize) -> Vec<u8> {
     (0..size)
         .map(|i| {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            if (i + seed as usize) % 4 == 0 {
+            if (i + seed as usize).is_multiple_of(4) {
                 u8::try_from(state >> 24).expect("shifted LCG byte fits in u8")
             } else {
                 u8::try_from((i + seed as usize) % 64).expect("pattern byte fits in u8")
