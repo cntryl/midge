@@ -195,6 +195,30 @@ impl CacheShard {
         }
     }
 
+    /// Remove every cached block for one SST.
+    pub fn remove_sst(&self, sst_id: u64) -> usize {
+        let _lock = self.lock_mutation();
+        let keys: Vec<CacheKey> = self
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let key = *entry.key();
+                (key.sst_id == sst_id).then_some(key)
+            })
+            .collect();
+
+        let mut removed = 0usize;
+        for key in keys {
+            if let Some((_, value)) = self.entries.remove(&key) {
+                self.metrics
+                    .remove_memory(u64::try_from(value.size_bytes()).unwrap_or(u64::MAX));
+                self.policy.on_remove(key);
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// Clear all entries from the cache
     pub fn clear(&self) {
         let _lock = self.lock_mutation();
@@ -293,6 +317,29 @@ mod tests {
         assert!(!inserted);
         assert!(retrieved.is_none());
         assert_eq!(shard.size_bytes(), 0);
+    }
+
+    #[test]
+    fn should_remove_only_blocks_for_requested_sst() {
+        // Arrange
+        let shard = CacheShard::new(1024, CachePolicyType::Lru);
+        let target_data = CacheKey::for_data(7, 0);
+        let target_index = CacheKey::for_index(7, 64);
+        let other_data = CacheKey::for_data(8, 0);
+        let value = Bytes::from(vec![1u8; 32]);
+        assert!(shard.put(target_data, &value));
+        assert!(shard.put(target_index, &value));
+        assert!(shard.put(other_data, &value));
+
+        // Act
+        let removed = shard.remove_sst(7);
+
+        // Assert
+        assert_eq!(removed, 2);
+        assert!(shard.get(&target_data).is_none());
+        assert!(shard.get(&target_index).is_none());
+        assert!(shard.get(&other_data).is_some());
+        assert_eq!(shard.size_bytes(), 32);
     }
 
     #[test]

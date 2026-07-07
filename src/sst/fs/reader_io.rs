@@ -160,6 +160,10 @@ impl SstFileIo {
         self
     }
 
+    pub(crate) fn sst_id(&self) -> u64 {
+        self.sst_id
+    }
+
     /// Get reference to bloom metrics for this reader
     pub fn bloom_metrics(&self) -> &BloomMetrics {
         &self.bloom_metrics

@@ -49,7 +49,13 @@ impl BlockCache {
     /// `policy_type`: Eviction policy
     #[must_use]
     pub fn new(capacity_bytes: u64, num_shards: usize, policy_type: CachePolicyType) -> Self {
-        let num_shards = num_shards.max(1);
+        let requested_shards = num_shards.max(1);
+        let num_shards = if capacity_bytes == 0 {
+            1
+        } else {
+            let capacity_limited_shards = usize::try_from(capacity_bytes).unwrap_or(usize::MAX);
+            requested_shards.min(capacity_limited_shards.max(1))
+        };
         let shard_capacity = capacity_bytes / num_shards as u64;
         let mut shards = Vec::with_capacity(num_shards);
 
@@ -94,6 +100,14 @@ impl BlockCache {
     #[must_use]
     pub fn remove(&self, key: &CacheKey) -> Option<CacheValue> {
         self.get_shard(key).remove(key)
+    }
+
+    /// Remove all cached blocks belonging to one SST.
+    pub fn remove_sst(&self, sst_id: u64) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| shard.remove_sst(sst_id))
+            .sum()
     }
 
     /// Clear all entries from all shards
@@ -217,6 +231,22 @@ mod tests {
     }
 
     #[test]
+    fn should_not_create_zero_byte_shards_when_capacity_is_less_than_requested_shards() {
+        // Arrange
+        let cache = BlockCache::new(2, 16, CachePolicyType::Lru);
+        let key = CacheKey::for_data(1, 0);
+        let value = Bytes::from(vec![7u8; 1]);
+
+        // Act
+        let inserted = cache.put(key, &value);
+
+        // Assert
+        assert_eq!(cache.num_shards(), 2);
+        assert!(inserted);
+        assert!(cache.get(&key).is_some());
+    }
+
+    #[test]
     fn should_retrieve_value_after_first_data_block_put_without_prior_admission() {
         // Arrange
         let cache = BlockCache::new_default(1024 * 1024);
@@ -246,6 +276,28 @@ mod tests {
         // Assert
         assert!(removed.is_some());
         assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn should_remove_all_blocks_for_sst_from_every_shard() {
+        // Arrange
+        let cache = BlockCache::new(1024 * 1024, 16, CachePolicyType::Lru);
+        let target_data = CacheKey::for_data(42, 0);
+        let target_index = CacheKey::for_index(42, 64);
+        let other_data = CacheKey::for_data(43, 0);
+        let value = Bytes::from(vec![1u8; 128]);
+        assert!(cache.put(target_data, &value));
+        assert!(cache.put(target_index, &value));
+        assert!(cache.put(other_data, &value));
+
+        // Act
+        let removed = cache.remove_sst(42);
+
+        // Assert
+        assert_eq!(removed, 2);
+        assert!(cache.get(&target_data).is_none());
+        assert!(cache.get(&target_index).is_none());
+        assert!(cache.get(&other_data).is_some());
     }
 
     #[test]
