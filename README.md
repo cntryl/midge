@@ -50,14 +50,7 @@ let value = tx.get(b"hello")?;
 
 ## What To Read Before Trying Midge
 
-- [Storage invariants](docs/development/storage-invariants.md)
-- [Storage architecture overview](docs/development/architecture.md)
-- [Durability guarantees](docs/user-guides/durability.md)
-- [Transaction and durability contract](docs/user-guides/transaction-durability-contract.md)
-- [Recovery process](docs/development/recovery-internals.md)
-- [Testing and trust matrix](docs/development/testing.md)
-
-Those documents define what `commit()` means, how restart recovery works, and which tests back the guarantees.
+Use the [documentation reading order](docs/#what-to-read-before-trying-midge) before evaluating Midge. It defines what `commit()` means, how restart recovery works, and which tests back the guarantees.
 
 ## Common operations
 

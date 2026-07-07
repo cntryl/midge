@@ -43,6 +43,12 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 - 1.0 production contract draft
 - support matrix, format compatibility policy, and release policy docs
 - production runbook and release checklist
+- Consolidated durability documentation around the canonical transaction durability contract
+- Trimmed duplicated positioning/readiness documentation and refreshed storage-mode overview language
+
+### Removed
+- Orphaned internal `SeqnoAllocActor` source file that was not compiled into the runtime actor module
+- Empty/redundant integration test files and duplicate engine initialization coverage
 
 ## [0.1.0] - TBD
 

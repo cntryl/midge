@@ -38,10 +38,7 @@ For the single-page external behavior contract, read [user-guides/transaction-du
 
 ## Important Positioning
 
-- Experimental: yes
-- Durability-tested: yes
-- Safe enough for careful evaluation: yes
-- Production-ready: no
+For the current project status, see the [Current Position](../README.md#current-position) section in the root README.
 
 See [development/stability-policy.md](development/stability-policy.md) for the pre-1.0 compatibility contract.
 

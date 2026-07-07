@@ -86,15 +86,15 @@ cargo bench --bench tier3_system_engine -- --runs 5 --warmup 2
 
 Supported flags:
 
-- `--runs <N>` — Number of measurement runs (reports median)
-- `--warmup <N>` — Warmup runs to discard before measuring
-- `--workload <PATTERN>` — Filter tests by glob pattern
-- `--verbose`, `-v` — Verbose output
-- `--list` — List benchmarks without running
-- `--include-ignored` — Include `#[stress_test(ignore)]` tests
-- `--baseline <PATH>` — Compare against baseline JSON
-- `--threshold <FLOAT>` — Regression threshold (default: 0.05)
-- `--output-dir <PATH>` — Custom output directory
+- `--runs <N>`: Number of measurement runs (reports median)
+- `--warmup <N>`: Warmup runs to discard before measuring
+- `--workload <PATTERN>`: Filter tests by glob pattern
+- `--verbose`, `-v`: Verbose output
+- `--list`: List benchmarks without running
+- `--include-ignored`: Include `#[stress_test(ignore)]` tests
+- `--baseline <PATH>`: Compare against baseline JSON
+- `--threshold <FLOAT>`: Regression threshold (default: 0.05)
+- `--output-dir <PATH>`: Custom output directory
 
 Important: The `--` separator is required to pass arguments to the stress harness.
 
@@ -114,12 +114,12 @@ Benchmarks live in `benches/` and are organized by "tiers":
 Tight inner-loop microbenchmarks of critical components. Measure individual operations in isolation.
 
 **Examples:**
-- `tier1_hotpath_api.rs` — Get, Put, Delete operations
-- `tier1_hotpath_memtable.rs` — MemTable writes and reads
-- `tier1_hotpath_bloom.rs` — Bloom filter operations
-- `tier1_hotpath_sst.rs` — SST reads and seeks
-- `tier1_hotpath_compression.rs` — Compression/decompression
-- `tier1_hotpath_wal.rs` — WAL writes
+- `tier1_hotpath_api.rs`: Get, Put, Delete operations
+- `tier1_hotpath_memtable.rs`: MemTable writes and reads
+- `tier1_hotpath_bloom.rs`: Bloom filter operations
+- `tier1_hotpath_sst.rs`: SST reads and seeks
+- `tier1_hotpath_compression.rs`: Compression/decompression
+- `tier1_hotpath_wal.rs`: WAL writes
 
 **Typical runtime:** 1-10 seconds each
 
@@ -128,13 +128,13 @@ Tight inner-loop microbenchmarks of critical components. Measure individual oper
 End-to-end behavior for a subsystem. Measure how components interact.
 
 **Examples:**
-- `tier2_subsystem_block_cache.rs` — Cache performance under load
-- `tier2_subsystem_memtable_rotate.rs` — Flush behavior
-- `tier2_subsystem_iterator_multi_sst.rs` — Range scans across SSTs
-- `tier2_subsystem_bloom_build.rs` — Bloom filter construction
-- `tier2_subsystem_read_amplification.rs` — Read efficiency
-- `tier2_subsystem_local_throughput_regression.rs` — Local buffered throughput regression guard
-- `tier2_subsystem_transaction_latency.rs` — Transaction commit latency and coalescing guard
+- `tier2_subsystem_block_cache.rs`: Cache performance under load
+- `tier2_subsystem_memtable_rotate.rs`: Flush behavior
+- `tier2_subsystem_iterator_multi_sst.rs`: Range scans across SSTs
+- `tier2_subsystem_bloom_build.rs`: Bloom filter construction
+- `tier2_subsystem_read_amplification.rs`: Read efficiency
+- `tier2_subsystem_local_throughput_regression.rs`: Local buffered throughput regression guard
+- `tier2_subsystem_transaction_latency.rs`: Transaction commit latency and coalescing guard
 
 **Typical runtime:** 5-30 seconds each
 
@@ -143,11 +143,11 @@ End-to-end behavior for a subsystem. Measure how components interact.
 Larger scenarios measuring engine behavior under realistic conditions. Stress tests using cntryl-stress.
 
 **Examples:**
-- `tier3_system_engine.rs` — Basic engine operations under sustained load
-- `tier3_system_compaction.rs` — Compaction behavior and efficiency
-- `tier3_system_mvcc.rs` — Snapshot isolation under concurrent load
-- `tier3_system_recovery.rs` — Recovery time and correctness
-- `tier3_system_durability.rs` — Durability guarantees validation
+- `tier3_system_engine.rs`: Basic engine operations under sustained load
+- `tier3_system_compaction.rs`: Compaction behavior and efficiency
+- `tier3_system_mvcc.rs`: Snapshot isolation under concurrent load
+- `tier3_system_recovery.rs`: Recovery time and correctness
+- `tier3_system_durability.rs`: Durability guarantees validation
 
 **Typical runtime:** 5-10 minutes each
 
@@ -158,15 +158,15 @@ Larger scenarios measuring engine behavior under realistic conditions. Stress te
 Full system benchmarks with realistic access patterns. Standard workload suites (YCSB).
 
 **Examples:**
-- `tier4_ycsb_workload_a.rs` — 50% read, 50% update (balanced)
-- `tier4_ycsb_workload_b.rs` — 95% read, 5% update (read-heavy)
-- `tier4_ycsb_workload_c.rs` — 100% read (cache-heavy)
-- `tier4_ycsb_workload_d.rs` — Skewed read/update distribution
-- `tier4_ycsb_workload_e.rs` — Scan-heavy (95% scan, 5% insert)
-- `tier4_ycsb_workload_f.rs` — Read-modify-write operations
-- `tier4_system_engine_batch_throughput.rs` — Batch insert throughput
-- `tier4_streaming_workload.rs` — Streaming data patterns
-- `tier4_system_durability_cloud.rs` — Cloud mode durability
+- `tier4_ycsb_workload_a.rs`: 50% read, 50% update (balanced)
+- `tier4_ycsb_workload_b.rs`: 95% read, 5% update (read-heavy)
+- `tier4_ycsb_workload_c.rs`: 100% read (cache-heavy)
+- `tier4_ycsb_workload_d.rs`: Skewed read/update distribution
+- `tier4_ycsb_workload_e.rs`: Scan-heavy (95% scan, 5% insert)
+- `tier4_ycsb_workload_f.rs`: Read-modify-write operations
+- `tier4_system_engine_batch_throughput.rs`: Batch insert throughput
+- `tier4_streaming_workload.rs`: Streaming data patterns
+- `tier4_system_durability_cloud.rs`: Cloud mode durability
 
 **Typical runtime:** 10-30 minutes each
 
@@ -553,13 +553,13 @@ harness = false  # Important: use cntryl-stress harness, not Criterion
 
 **Key API:**
 
-- `ctx.measure(|| { ... })` — Time one operation, excluding setup/teardown
-- `ctx.set_bytes(n)` — Enable bytes/sec throughput reporting
-- `ctx.set_elements(n)` — Enable ops/sec throughput reporting
-- `ctx.tag(key, val)` — Add metadata (workload name, configuration, etc.)
-- `#[stress_test]` — Mark function as a test
-- `#[stress_test(ignore)]` — Skip test by default
-- `stress_main!()` — Auto-discover and run all `#[stress_test]` functions
+- `ctx.measure(|| { ... })`: Time one operation, excluding setup/teardown
+- `ctx.set_bytes(n)`: Enable bytes/sec throughput reporting
+- `ctx.set_elements(n)`: Enable ops/sec throughput reporting
+- `ctx.tag(key, val)`: Add metadata (workload name, configuration, etc.)
+- `#[stress_test]`: Mark function as a test
+- `#[stress_test(ignore)]`: Skip test by default
+- `stress_main!()`: Auto-discover and run all `#[stress_test]` functions
 
 ## Regression Detection & Signal Discipline
 

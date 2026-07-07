@@ -4,12 +4,12 @@
 
 ## What is Midge?
 
-Midge is a local-first embedded LSM storage engine designed for predictable behavior and explicit control. It runs in-process as a library, with durability guarantees defined by the local-disk contract and explicit write options.
+Midge is an embedded LSM storage engine designed for predictable behavior and explicit control. It runs in-process as a library, with durability guarantees defined by the selected storage mode and explicit write options.
 
 ### Key Features
 
-- **Two core storage modes**: InMemory (ephemeral) and Local (disk)
-- **Explicit durability control**: Choose between sync, buffered, and best-effort modes
+- **Three storage modes**: Memory (ephemeral), Local (disk), and Cloud (cloud-backed local cache)
+- **Explicit durability control**: Choose between sync, buffered, best-effort, and cloud-strict modes
 - **Actor-based architecture**: Single-threaded event loop for predictable state transitions
 - **Transaction support**: ACID transactions with snapshot-based reads
 - **Smart configuration**: Automatically derive tuning parameters from high-level goals
@@ -20,7 +20,7 @@ Midge optimizes for:
 
 - **Predictability**: Bounded latency, deterministic behavior, no surprise thread explosions
 - **Auditability**: Every state transition is explicit, loggable, and reproducible
-- **Local-first**: Clear durable local storage semantics and explicit recovery behavior
+- **Explicit storage modes**: Clear durability contracts for memory, local, and cloud-backed operation
 - **Embeddability**: Synchronous APIs, explicit control, no hidden background threads
 
 ## When to Use Midge
@@ -37,7 +37,7 @@ Midge optimizes for:
 **Choose Midge when you need:**
 
 - Predictable behavior over raw throughput
-- Explicit durability choices for local disk
+- Explicit durability choices for memory, local disk, and cloud-backed storage
 - Explicit control over durability and lifecycle
 - Deterministic state transitions for testing/debugging
 - Synchronous APIs without async/await complexity
@@ -53,13 +53,17 @@ Midge provides standard key-value operations through a transaction API:
 
 ### Storage Modes
 
-**InMemory**
+**Memory**
 - No persistence, data lost on shutdown
 - Use for: testing, caching, ephemeral workloads
 
 **Local**
 - Persists to local filesystem
 - Use for: traditional deployments, single-node databases
+
+**Cloud**
+- Uses a local cache plus cloud WAL/SST durability
+- Use for: cloud-backed experiments and environments that need remote recovery state
 
 ### Durability Levels
 
@@ -70,6 +74,8 @@ All writes require explicit `WriteOptions`:
 | `sync()` | Local fsync completed before return | Highest | Critical data, financial transactions |
 | `buffered()` | Visible after WAL append; fsync follows later | Lower | General workloads |
 | `best_effort()` | WAL skipped; durable only after flush publication | Lowest | Bulk loads, reloadable data |
+| `cloud_strict()` | Cloud WAL upload acknowledged before return | Cloud-dependent | Cloud-backed commits that must survive local cache loss |
+
 See [durability.md](durability.md) for detailed guarantees and recovery behavior.
 
 ## Performance Characteristics
@@ -101,7 +107,7 @@ let engine = MidgeEngine::open(opts)?;
 
 **Configuration levels:**
 
-1. **Storage mode** (required): InMemory or Local
+1. **Storage mode** (required): Memory, Local, or Cloud
 2. **Goal** (optional): Latency, Throughput, or Economy
 3. **Memory budget** (optional): Auto or explicit bytes
 4. **Workload profile** (optional): Mixed, WriteHeavy, ReadMostly, RangeScan, TtlHeavy

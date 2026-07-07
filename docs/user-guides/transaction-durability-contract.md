@@ -111,6 +111,22 @@ This means:
 
 ## Durability Modes
 
+A write can cross several boundaries:
+
+1. visible: the commit has been applied to the memtable and new readers can observe it
+2. locally durable: the write survives restart from local storage
+3. cloud durable: the cloud-backed WAL segment upload has been acknowledged
+4. SST-published: the data is represented by manifest-visible SST state instead of WAL replay
+
+`commit()` does not always wait for all of them. The selected `WriteOptions` define the acknowledgment boundary.
+
+| Write option | `commit()` returns after | Local durability at return | Crash outcome | Recovery source on restart |
+|---|---|---|---|---|
+| `WriteOptions::sync()` | WAL append and local fsync complete | Yes | write survives local crash assuming local storage survives | WAL replay or later SST state |
+| `WriteOptions::buffered()` | WAL append barrier and memtable apply complete | Not yet guaranteed | write may be lost if the process crashes before the batched fsync | WAL replay only if the later fsync completed |
+| `WriteOptions::best_effort()` | memtable apply complete; WAL skipped | No | write is lost unless a later `flush_cf()` publishes it | SST state only if flush completed successfully |
+| `WriteOptions::cloud_strict()` | cloud-backed WAL seal, rotate, upload, and acknowledgment complete | Cloud durable in cloud mode | write survives local cache loss after cloud acknowledgment | uploaded WAL segment or later SST state |
+
 ### `WriteOptions::sync()`
 
 `commit()` returns only after local WAL append and fsync complete.
@@ -164,6 +180,14 @@ At return:
 Empty cloud-backed `cloud_strict()` transactions are allowed and do not invent a WAL record. Empty non-cloud `cloud_strict()` transactions still reject the option.
 
 ## Recovery Policy Contract
+
+### Crash outcomes
+
+- After `sync()`: the write is recovered from the local durable prefix, either by WAL replay or already-published SST state.
+- After `buffered()`: the write is recovered only if the later fsync completed before the crash.
+- After `best_effort()`: the write is recovered only if a later `flush_cf()` successfully published it to SST state.
+- After `cloud_strict()`: in cloud-backed mode, local cache loss after cloud acknowledgment should not lose the committed write.
+- During flush or compaction: output files may exist, but manifest-visible state remains authoritative until publication completes.
 
 ### `RecoveryPolicy::Strict`
 

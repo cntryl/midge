@@ -125,6 +125,76 @@ fn should_allow_lost_update_given_concurrent_writes_when_lost_update_occurs() {
 }
 
 #[test]
+fn should_allow_disjoint_writes_after_shared_read_when_transactions_both_commit() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(&opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+
+        let mut setup = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin setup");
+        setup
+            .put(b"shared".to_vec(), b"base_value".to_vec(), None)
+            .expect("put shared value");
+        setup
+            .put(b"flag1".to_vec(), b"false".to_vec(), None)
+            .expect("put flag1");
+        setup
+            .put(b"flag2".to_vec(), b"false".to_vec(), None)
+            .expect("put flag2");
+        setup
+            .commit(cntryl_midge::WriteOptions::buffered())
+            .expect("commit setup");
+
+        // Act
+        let mut txn1 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin txn1");
+        let mut txn2 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin txn2");
+
+        assert_eq!(
+            txn1.get(b"shared").expect("txn1 read shared"),
+            Some(Bytes::from_static(b"base_value")),
+            "mode: {mode}"
+        );
+        assert_eq!(
+            txn2.get(b"shared").expect("txn2 read shared"),
+            Some(Bytes::from_static(b"base_value")),
+            "mode: {mode}"
+        );
+
+        txn1.put(b"flag1".to_vec(), b"true".to_vec(), None)
+            .expect("txn1 write flag1");
+        txn2.put(b"flag2".to_vec(), b"true".to_vec(), None)
+            .expect("txn2 write flag2");
+
+        txn1.commit(cntryl_midge::WriteOptions::buffered())
+            .expect("commit txn1");
+        txn2.commit(cntryl_midge::WriteOptions::buffered())
+            .expect("commit txn2");
+
+        let reader = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .expect("begin reader");
+
+        // Assert
+        assert_eq!(
+            reader.get(b"flag1").expect("read flag1 after commits"),
+            Some(Bytes::from_static(b"true")),
+            "mode: {mode}"
+        );
+        assert_eq!(
+            reader.get(b"flag2").expect("read flag2 after commits"),
+            Some(Bytes::from_static(b"true")),
+            "mode: {mode}"
+        );
+    });
+}
+
+#[test]
 fn should_abort_second_commit_given_conflicting_writes_when_abort_on_write_conflict_enabled() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
