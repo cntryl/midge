@@ -9,12 +9,10 @@
 
 use super::types::{ColumnFamilyId, WalOpKind, WalRecord};
 use crate::common::{MidgeError, MidgeResult};
+use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
 #[cfg(test)]
 use crate::sst::Memtable;
 use crate::sst::SkipListMemtable;
-use crate::storage::abstraction::{
-    OpenMode, OpenOptions, Storage, StorageError, StorageErrorKind, StoragePath,
-};
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::sync::Arc;
@@ -32,22 +30,16 @@ fn is_salvageable_tail_corruption(message: &str) -> bool {
         && !lower.contains("pos 0 ")
 }
 
-fn map_storage_error(err: StorageError) -> MidgeError {
-    match err.kind {
-        StorageErrorKind::NotFound => MidgeError::NotFound,
-        StorageErrorKind::Unsupported => MidgeError::NotSupported(err.message),
-        StorageErrorKind::Corruption => MidgeError::Corruption(err.message),
-        StorageErrorKind::InvalidInput => MidgeError::InvalidArgument(err.message),
-        _ => MidgeError::Io(std::io::Error::other(err.to_string())),
-    }
+fn map_fs_error(err: FsError) -> MidgeError {
+    err.into()
 }
 
-fn join(dir: &StoragePath, leaf: &str) -> StoragePath {
-    let base = dir.as_str().trim_end_matches('/');
+fn join(dir: &FsPath, leaf: &str) -> FsPath {
+    let base = dir.0.trim_end_matches('/');
     if base.is_empty() {
-        StoragePath::new(leaf)
+        FsPath::new(leaf)
     } else {
-        StoragePath::new(format!("{base}/{leaf}"))
+        FsPath::new(format!("{base}/{leaf}"))
     }
 }
 
@@ -129,8 +121,8 @@ impl RecoveryStats {
 ///
 /// Returns an error if WAL enumeration, decoding, or record application fails.
 pub fn replay_wal<S: BuildHasher>(
-    storage: &dyn Storage,
-    wal_dir: &StoragePath,
+    storage: &dyn Fs,
+    wal_dir: &FsPath,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
 ) -> MidgeResult<RecoveryStats> {
     replay_wal_with_policy(storage, wal_dir, memtables, ReplayPolicy::Strict)
@@ -143,8 +135,8 @@ pub fn replay_wal<S: BuildHasher>(
 /// Returns an error if WAL enumeration, decoding, or record application fails
 /// according to the selected replay policy.
 pub fn replay_wal_with_policy<S: BuildHasher>(
-    storage: &dyn Storage,
-    wal_dir: &StoragePath,
+    storage: &dyn Fs,
+    wal_dir: &FsPath,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     replay_policy: ReplayPolicy,
 ) -> MidgeResult<RecoveryStats> {
@@ -227,18 +219,19 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
     }
 }
 
-fn collect_replay_paths(
-    storage: &dyn Storage,
-    wal_dir: &StoragePath,
-) -> MidgeResult<Vec<StoragePath>> {
-    let mut segment_files: std::collections::BTreeMap<u64, (String, StoragePath)> =
+fn collect_replay_paths(storage: &dyn Fs, wal_dir: &FsPath) -> MidgeResult<Vec<FsPath>> {
+    if !storage.exists(wal_dir).map_err(map_fs_error)? {
+        return Ok(Vec::new());
+    }
+
+    let mut segment_files: std::collections::BTreeMap<u64, (String, FsPath)> =
         std::collections::BTreeMap::new();
-    let mut wal_log_path: Option<StoragePath> = None;
+    let mut wal_log_path: Option<FsPath> = None;
 
     let entries = match storage.list_dir(wal_dir) {
         Ok(v) => v,
-        Err(e) if e.kind == StorageErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(map_storage_error(e)),
+        Err(FsError::NotFound(_)) => return Ok(Vec::new()),
+        Err(e) => return Err(map_fs_error(e)),
     };
 
     for entry in entries {
@@ -256,8 +249,8 @@ fn collect_replay_paths(
                 segment_files
                     .get(&segment_id)
                     .is_none_or(|(existing_name, _)| {
-                        existing_name != &crate::wal::cloud_segment_file_name(segment_id)
-                            && file_name == crate::wal::cloud_segment_file_name(segment_id)
+                        existing_name != &crate::wal::cloud_segment::file_name(segment_id)
+                            && file_name == crate::wal::cloud_segment::file_name(segment_id)
                     });
 
             if prefer_candidate {
@@ -266,8 +259,7 @@ fn collect_replay_paths(
         }
     }
 
-    let mut replay_paths: Vec<StoragePath> =
-        segment_files.into_iter().map(|(_, (_, p))| p).collect();
+    let mut replay_paths: Vec<FsPath> = segment_files.into_iter().map(|(_, (_, p))| p).collect();
     if let Some(wal_log) = wal_log_path {
         replay_paths.push(wal_log);
     }
@@ -285,8 +277,8 @@ struct WalReplayState<'a, S: BuildHasher> {
 }
 
 fn replay_wal_paths<S: BuildHasher>(
-    storage: &dyn Storage,
-    replay_paths: &[StoragePath],
+    storage: &dyn Fs,
+    replay_paths: &[FsPath],
     replay_state: &mut WalReplayState<'_, S>,
 ) -> MidgeResult<()> {
     let mut result: MidgeResult<()> = Ok(());
@@ -350,8 +342,8 @@ impl WriterEpochFrontiers {
 }
 
 fn discover_writer_epoch_frontiers(
-    storage: &dyn Storage,
-    replay_paths: &[StoragePath],
+    storage: &dyn Fs,
+    replay_paths: &[FsPath],
     replay_policy: ReplayPolicy,
 ) -> MidgeResult<(WriterEpochFrontiers, bool)> {
     let mut frontiers = WriterEpochFrontiers::default();
@@ -397,8 +389,8 @@ fn discover_writer_epoch_frontiers(
 }
 
 fn replay_wal_file<S: BuildHasher>(
-    storage: &dyn Storage,
-    file_path: &StoragePath,
+    storage: &dyn Fs,
+    file_path: &FsPath,
     replay_state: &mut WalReplayState<'_, S>,
 ) -> MidgeResult<()> {
     let mut pos: u64 = 0;
@@ -452,7 +444,7 @@ struct ReplayedWalFrame {
 }
 
 struct WalReplayApplyContext<'a, S: BuildHasher> {
-    file_path: &'a StoragePath,
+    file_path: &'a FsPath,
     stats: &'a mut RecoveryStats,
     memtables: &'a mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     open_txns: &'a mut std::collections::HashMap<u64, Vec<WalRecord>>,
@@ -467,34 +459,39 @@ enum NextWalFrame {
 }
 
 fn open_wal_replay_file<'a>(
-    storage: &'a dyn Storage,
-    file_path: &StoragePath,
+    storage: &'a dyn Fs,
+    file_path: &FsPath,
     file_read_ns: &mut u128,
-) -> MidgeResult<Option<Box<dyn crate::storage::abstraction::StorageFile + 'a>>> {
+) -> MidgeResult<Option<Box<dyn File + 'a>>> {
+    if !storage.exists(file_path).map_err(map_fs_error)? {
+        return Ok(None);
+    }
+
     let open_start = std::time::Instant::now();
-    let file = match storage.open_file(
+    let file = match storage.open(
         file_path,
         OpenOptions {
             mode: OpenMode::ReadOnly,
-            disposition: crate::storage::abstraction::OpenDisposition::OpenExisting,
-            append: false,
+            create: false,
+            create_new: false,
+            truncate: false,
         },
     ) {
         Ok(file) => file,
-        Err(e) if e.kind == StorageErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(map_storage_error(e)),
+        Err(FsError::NotFound(_)) => return Ok(None),
+        Err(e) => return Err(map_fs_error(e)),
     };
     *file_read_ns = file_read_ns.saturating_add(open_start.elapsed().as_nanos());
     Ok(Some(file))
 }
 
 fn read_next_wal_frame(
-    file: &dyn crate::storage::abstraction::StorageFile,
-    file_path: &StoragePath,
+    file: &dyn File,
+    file_path: &FsPath,
     pos: u64,
     file_read_ns: &mut u128,
 ) -> MidgeResult<NextWalFrame> {
-    let file_len = file.len().map_err(map_storage_error)?;
+    let file_len = file.len().map_err(map_fs_error)?;
     if pos == file_len {
         return Ok(NextWalFrame::Eof);
     }
@@ -526,26 +523,26 @@ fn read_next_wal_frame(
 }
 
 fn read_wal_frame_header(
-    file: &dyn crate::storage::abstraction::StorageFile,
+    file: &dyn File,
     pos: u64,
     file_read_ns: &mut u128,
 ) -> MidgeResult<(usize, u32)> {
     let header_read_start = std::time::Instant::now();
     let header = file
         .read_at(pos, crate::wal::frame::WAL_FRAME_HEADER_LEN as u64)
-        .map_err(map_storage_error)?;
+        .map_err(map_fs_error)?;
     *file_read_ns = file_read_ns.saturating_add(header_read_start.elapsed().as_nanos());
     crate::wal::frame::decode_frame_header(&header[..])
 }
 
 fn read_wal_frame_payload(
-    file: &dyn crate::storage::abstraction::StorageFile,
-    file_path: &StoragePath,
+    file: &dyn File,
+    file_path: &FsPath,
     pos: u64,
     len: usize,
     file_len: u64,
     file_read_ns: &mut u128,
-) -> MidgeResult<Vec<u8>> {
+) -> MidgeResult<bytes::Bytes> {
     let need_end = pos
         .saturating_add(crate::wal::frame::WAL_FRAME_HEADER_LEN as u64)
         .saturating_add(len as u64);
@@ -561,7 +558,7 @@ fn read_wal_frame_payload(
             pos + crate::wal::frame::WAL_FRAME_HEADER_LEN as u64,
             len as u64,
         )
-        .map_err(map_storage_error)?;
+        .map_err(map_fs_error)?;
     *file_read_ns = file_read_ns.saturating_add(payload_read_start.elapsed().as_nanos());
 
     if payload.len() < len {
@@ -671,7 +668,7 @@ fn apply_wal_record_to_memtables<S: BuildHasher>(
 
 fn finalize_wal_file_replay(
     stats: &mut RecoveryStats,
-    file_path: &StoragePath,
+    file_path: &FsPath,
     file_read_ns: u128,
     file_apply_ns: u128,
 ) {
@@ -749,9 +746,7 @@ fn apply_record<S: BuildHasher>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::RealFs;
-    use crate::storage::abstraction::StoragePath;
-    use crate::storage::LocalFsStorage;
+    use crate::io::{FsPath, RealFs};
     use crate::wal::fs::FsWalWriterIo;
     use crate::wal::types::WalOpKind;
     use crate::wal::WalWriter;
@@ -788,8 +783,8 @@ mod tests {
         // Arrange
         let mut memtables = HashMap::new();
         let dir = TempDir::new().unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let non_existent = StoragePath::new("midge_nonexistent_wal_dir_12345");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let non_existent = FsPath::new("midge_nonexistent_wal_dir_12345");
 
         // Act
         let stats = replay_wal(&storage, &non_existent, &mut memtables).unwrap();
@@ -803,8 +798,8 @@ mod tests {
         // Arrange
         let mut memtables = HashMap::new();
         let dir = TempDir::new().unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let non_existent = StoragePath::new("midge_nonexistent_wal_dir_12345");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let non_existent = FsPath::new("midge_nonexistent_wal_dir_12345");
 
         // Act
         let stats = replay_wal(&storage, &non_existent, &mut memtables).unwrap();
@@ -819,8 +814,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -852,8 +847,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -883,8 +878,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -914,8 +909,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -956,8 +951,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -996,8 +991,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1039,8 +1034,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1083,8 +1078,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1126,8 +1121,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1176,8 +1171,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1226,8 +1221,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1248,8 +1243,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1272,8 +1267,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1323,8 +1318,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1356,8 +1351,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1401,8 +1396,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1458,8 +1453,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1511,8 +1506,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1554,8 +1549,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
         let wal_path = wal_subdir.join("wal.log");
 
         {
@@ -1624,8 +1619,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
         let wal_path = wal_subdir.join("wal.log");
 
         let record = WalRecord::new(
@@ -1660,8 +1655,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
         let wal_path = wal_subdir.join("wal.log");
 
         {
@@ -1715,8 +1710,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
         let wal_path = wal_subdir.join("wal.log");
 
         {
@@ -1770,8 +1765,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1815,8 +1810,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
@@ -1863,8 +1858,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
-        let storage = LocalFsStorage::new(dir.path()).unwrap();
-        let wal_dir = StoragePath::new("wal");
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
 
         {
             let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());

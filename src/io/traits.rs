@@ -11,6 +11,7 @@
 //! - Multiple swappable implementations (Real, Mock, Chaos)
 
 use bytes::Bytes;
+use std::fmt;
 use std::io::{IoSlice, IoSliceMut};
 use std::ops::{BitOr, BitOrAssign};
 use thiserror::Error;
@@ -50,6 +51,12 @@ pub struct FsPath(pub String);
 impl FsPath {
     pub fn new(s: impl Into<String>) -> Self {
         FsPath(s.into())
+    }
+}
+
+impl fmt::Display for FsPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 

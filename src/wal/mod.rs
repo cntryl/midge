@@ -12,6 +12,7 @@
 //! The `io::Fs` abstraction enables better testability with swappable implementations
 //! (Real, Mock, Chaos). All production code has been migrated to this interface.
 
+pub(crate) mod cloud_segment;
 pub mod encoding;
 pub mod frame;
 pub mod fs;

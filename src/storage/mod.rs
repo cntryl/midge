@@ -79,25 +79,15 @@
 //! Provides durability abstractions for SSTs (synchronous local/cloud) and WAL
 //! segments (cloud-backed async with local staging).
 //!
-//! ## Architecture: Two Abstraction Layers
+//! ## Architecture: Callback Storage Orchestration
 //!
-//! **Layer 1: `StorageBackend` Trait (Callback-based)**
+//! **`StorageBackend` Trait (Callback-based)**
 //! - Used by `HybridStorage` and cloud orchestration
 //! - Callback-driven, non-blocking I/O via `StorageCallback` channels
 //! - Implementations: `FileSystem` (local), `CloudStorage` (cloud)
 //! - Modules: [`filesystem`], [`cloud`], [`hybrid`]
 //!
-//! **Layer 2: `Storage` Trait (File handle-based, in `abstraction`)**
-//! - Used by WAL recovery and legacy internal APIs
-//! - Full POSIX-like file interface with handles and explicit sync
-//! - Implementation: `LocalFsStorage` (local filesystem only)
-//! - Module: [`local_fs_storage`]
-//!
 //! ## Module Overview
-//!
-//! - **[`abstraction`]**: High-level `Storage` trait and error types
-//!   - Portable filesystem abstraction (POSIX-like semantics)
-//!   - Not used by hot path; kept for WAL recovery contracts
 //!
 //! - **[`filesystem`]** (`StorageBackend`): Local filesystem via callbacks
 //!   - Synchronous, callback-based operations
@@ -119,11 +109,6 @@
 //!   - Generic S3 (base implementation)
 //!   - AWS S3, Wasabi, `MinIO` (S3-compatible wrappers)
 //!   - Azure Blob Storage, Google Cloud Storage, OCI stubs
-//!
-//! - **[`local_fs_storage`]**: Legacy `Storage` trait implementation
-//!   - Full file handle API with per-handle mutexes
-//!   - Used exclusively by WAL recovery tests
-//!   - Not on hot path; keep for contract compatibility
 //!
 //! - **[`test_support`]**: Test harnesses
 //!   - Pre-configured `HybridStorage` with mocks
@@ -158,18 +143,9 @@
 pub(crate) mod cloud;
 pub(crate) mod filesystem;
 pub(crate) mod hybrid;
-pub(crate) mod local_fs_storage;
 pub(crate) mod providers;
 pub(crate) mod residue;
 pub(crate) mod test_support;
-
-/// Stable, filesystem-oriented storage abstraction.
-///
-/// This is the long-lived API contract intended for WAL recovery compatibility.
-/// Not on the hot path; use `StorageBackend` trait for actual I/O.
-pub mod abstraction;
-
-pub(crate) use local_fs_storage::LocalFsStorage;
 
 pub use hybrid::backend::HybridStorage;
 

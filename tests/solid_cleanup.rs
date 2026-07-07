@@ -23,6 +23,14 @@ fn production_source(relative: &str) -> String {
         .to_string()
 }
 
+fn source_before_test_module(relative: &str) -> String {
+    read_source(relative)
+        .split("\n#[cfg(test)]\nmod tests")
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).expect("source directory should be readable") {
         let entry = entry.expect("source directory entry should be readable");
@@ -262,6 +270,45 @@ fn should_keep_runtime_free_of_engine_owned_type_imports() {
                 source.display()
             );
         }
+    }
+}
+
+#[test]
+fn should_keep_wal_production_free_of_storage_dependencies() {
+    // Arrange
+    let mut sources = Vec::new();
+    collect_rust_sources(&source_path("src/wal"), &mut sources);
+
+    // Act / Assert
+    for source in sources {
+        let relative = source
+            .strip_prefix(source_path(""))
+            .expect("source should live under repo")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let content = source_before_test_module(&relative);
+
+        // Assert
+        assert!(
+            !content.contains("crate::storage"),
+            "{relative} should depend on base io abstractions, not storage"
+        );
+    }
+}
+
+#[test]
+fn should_keep_hybrid_storage_out_of_wal_frame_decoding() {
+    // Arrange
+    let backend = source_before_test_module("src/storage/hybrid/backend.rs");
+    let forbidden = ["crate::wal::frame", "crate::wal::encoding", "WalOpKind"];
+
+    // Act / Assert
+    for pattern in forbidden {
+        // Assert
+        assert!(
+            !backend.contains(pattern),
+            "hybrid storage should use wal::cloud_segment instead of decoding WAL internals with {pattern}"
+        );
     }
 }
 

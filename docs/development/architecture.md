@@ -81,6 +81,13 @@ The WAL is the first durable landing zone for writes in local durable modes.
 - Strict recovery fails open on corruption at byte 0 or invalid corrupted frames.
 - Salvage mode keeps the valid prefix and reports degraded recovery.
 
+### Dependency boundary
+
+- WAL replay depends on the base `io::Fs` and `io::File` abstractions, not `storage`.
+- Hybrid storage owns cloud orchestration for WAL segment upload, readback proof, and pruning.
+- Byte-level WAL segment interpretation, including cloud WAL object-key formatting and transaction-batch expansion, lives in `src/wal/cloud_segment.rs`.
+- Storage policy code consumes WAL-owned coverage records and combines them with manifest/SST proof before pruning remote WAL.
+
 ## Memtable
 
 The memtable is the newest readable state.
@@ -160,16 +167,18 @@ Use this reading order if you are auditing correctness:
 1. `src/engine/mod.rs`
    Engine open, public durability surface, verification APIs
 2. `src/wal/recovery.rs`
-   WAL replay ordering, corruption handling, salvage boundaries
+   WAL replay ordering, corruption handling, salvage boundaries over `io::Fs`
 3. `src/runtime/actors/wal.rs`
    commit-time WAL append and durability frontier handling
-4. `src/runtime/actors/flush.rs`
+4. `src/wal/cloud_segment.rs`
+   cloud WAL segment key formatting, frame validation, and data-coverage extraction
+5. `src/runtime/actors/flush.rs`
    memtable freeze, SST creation, flush publication staging
-5. `src/runtime/event_loop/mod.rs`
+6. `src/runtime/event_loop/mod.rs`
    flush publication, compaction launch identity, and runtime orchestration
-6. `src/runtime/actors/compaction.rs`
+7. `src/runtime/actors/compaction.rs`
    transient compaction execution and completion handoff
-7. `src/metadata/manifest.rs` and `src/runtime/intent_persistence.rs`
+8. `src/metadata/manifest.rs` and `src/runtime/intent_persistence.rs`
    authoritative file-set publication and interrupted publication replay
 
 ## Audit Checklist

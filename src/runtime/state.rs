@@ -751,12 +751,12 @@ impl RuntimeState {
         }
 
         let mut recovery_memtables = HashMap::new();
-        let storage = match crate::storage::LocalFsStorage::new(replay_dir) {
+        let storage = match crate::io::RealFs::new(replay_dir) {
             Ok(storage) => storage,
             Err(error) => {
                 return Self::handle_wal_recovery_failure(
                     recovery_policy,
-                    format!("failed to initialize WAL recovery storage: {error}"),
+                    format!("failed to initialize WAL recovery filesystem: {error}"),
                     column_families,
                 );
             }
@@ -769,7 +769,7 @@ impl RuntimeState {
         };
         let stats = match crate::wal::recovery::replay_wal_with_policy(
             &storage,
-            &crate::storage::abstraction::StoragePath::new(""),
+            &crate::io::FsPath::new(""),
             &mut recovery_memtables,
             replay_policy,
         ) {

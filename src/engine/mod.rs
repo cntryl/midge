@@ -171,13 +171,12 @@ impl Engine {
             })?;
         }
 
-        let wal_storage =
-            crate::storage::LocalFsStorage::new(db_path.join("wal")).map_err(|e| {
-                MidgeError::RecoveryFailed(format!("failed to open WAL directory: {e}"))
-            })?;
+        let wal_storage = crate::io::RealFs::new(db_path.join("wal")).map_err(|e| {
+            MidgeError::RecoveryFailed(format!("failed to open WAL directory: {e}"))
+        })?;
         let wal_stats = crate::wal::recovery::replay_wal_with_policy(
             &wal_storage,
-            &crate::storage::abstraction::StoragePath::new(""),
+            &crate::io::FsPath::new(""),
             &mut std::collections::HashMap::new(),
             crate::wal::recovery::ReplayPolicy::Strict,
         )

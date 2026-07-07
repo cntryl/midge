@@ -60,28 +60,8 @@ pub struct UploadState {
 #[derive(Debug, Clone)]
 struct VerifiedWalSegment {
     max_sequence: u64,
-    data_records: Vec<WalDataCoverageRecord>,
+    data_records: Vec<crate::wal::cloud_segment::DataCoverageRecord>,
     metadata: StorageObjectMetadata,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct WalSegmentValidation {
-    max_sequence: u64,
-}
-
-#[derive(Debug, Clone)]
-struct WalSegmentReadback {
-    validation: WalSegmentValidation,
-    data_records: Vec<WalDataCoverageRecord>,
-}
-
-#[derive(Debug, Clone)]
-struct WalDataCoverageRecord {
-    cf_id: u32,
-    op: crate::wal::WalOpKind,
-    key: Vec<u8>,
-    range_end: Option<Vec<u8>>,
-    seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -488,7 +468,7 @@ impl HybridStorage {
         }
 
         let (tx, rx) = std::sync::mpsc::channel();
-        let cloud_key = crate::wal::cloud_segment_object_key(upload.segment_id);
+        let cloud_key = crate::wal::cloud_segment::object_key(upload.segment_id);
         cloud.submit_write_with_headers(
             &cloud_key,
             data,
@@ -578,7 +558,7 @@ impl HybridStorage {
         }
 
         let (tx, rx) = std::sync::mpsc::channel();
-        let cloud_key = crate::wal::cloud_segment_object_key(upload.segment_id);
+        let cloud_key = crate::wal::cloud_segment::object_key(upload.segment_id);
         self.cloud.submit_write_with_headers(
             &cloud_key,
             data,
@@ -978,104 +958,6 @@ impl HybridStorage {
         ))
     }
 
-    fn validate_wal_segment_bytes(
-        key: &str,
-        data: &[u8],
-        expected_max_sequence: u64,
-    ) -> Result<WalSegmentReadback, String> {
-        if data.is_empty() {
-            return Err(format!("cloud WAL segment '{key}' is empty"));
-        }
-
-        let mut pos = 0usize;
-        let mut records = 0usize;
-        let mut observed_max_sequence = 0u64;
-        let mut data_records = Vec::new();
-        while pos < data.len() {
-            let header_end = pos
-                .checked_add(crate::wal::frame::WAL_FRAME_HEADER_LEN)
-                .ok_or_else(|| format!("cloud WAL segment '{key}' frame offset overflow"))?;
-            if header_end > data.len() {
-                return Err(format!(
-                    "cloud WAL segment '{key}' has incomplete frame header at offset {pos}"
-                ));
-            }
-
-            let (payload_len, expected_crc) =
-                crate::wal::frame::decode_frame_header(&data[pos..header_end])
-                    .map_err(|error| format!("cloud WAL segment '{key}' frame header: {error}"))?;
-            let payload_end = header_end
-                .checked_add(payload_len)
-                .ok_or_else(|| format!("cloud WAL segment '{key}' payload offset overflow"))?;
-            if payload_end > data.len() {
-                return Err(format!(
-                    "cloud WAL segment '{key}' has incomplete record at offset {pos}"
-                ));
-            }
-
-            let payload = &data[header_end..payload_end];
-            crate::wal::frame::verify_frame_crc(payload, expected_crc)
-                .map_err(|error| format!("cloud WAL segment '{key}' frame CRC: {error}"))?;
-            let record = crate::wal::encoding::decode(payload)
-                .map_err(|error| format!("cloud WAL segment '{key}' record decode: {error}"))?;
-            observed_max_sequence = observed_max_sequence.max(record.seq);
-            if matches!(record.op, crate::wal::WalOpKind::TxnBatch) {
-                let payload = record.value.as_ref().ok_or_else(|| {
-                    format!("cloud WAL segment '{key}' txn batch missing payload")
-                })?;
-                let batch = crate::wal::encoding::decode_txn_batch_payload(&record, payload)
-                    .map_err(|error| {
-                        format!("cloud WAL segment '{key}' txn batch decode: {error}")
-                    })?;
-                for batch_record in batch.records {
-                    data_records.push(WalDataCoverageRecord {
-                        cf_id: batch_record.cf_id,
-                        op: batch_record.op,
-                        key: batch_record.key.to_vec(),
-                        range_end: batch_record.range_end.map(|range_end| range_end.to_vec()),
-                        seq: batch_record.seq,
-                    });
-                }
-            } else if !matches!(
-                record.op,
-                crate::wal::WalOpKind::TxnBegin
-                    | crate::wal::WalOpKind::TxnCommit
-                    | crate::wal::WalOpKind::TxnBatch
-            ) {
-                data_records.push(WalDataCoverageRecord {
-                    cf_id: record.cf_id,
-                    op: record.op,
-                    key: record.key.to_vec(),
-                    range_end: record.range_end.map(|range_end| range_end.to_vec()),
-                    seq: record.seq,
-                });
-            }
-            records += 1;
-            pos = payload_end;
-        }
-
-        if records == 0 {
-            return Err(format!("cloud WAL segment '{key}' contains no records"));
-        }
-        if observed_max_sequence < expected_max_sequence {
-            return Err(format!(
-                "cloud WAL segment '{key}' max sequence {observed_max_sequence} is below expected {expected_max_sequence}"
-            ));
-        }
-        if observed_max_sequence > expected_max_sequence {
-            return Err(format!(
-                "cloud WAL segment '{key}' max sequence {observed_max_sequence} exceeds expected {expected_max_sequence}"
-            ));
-        }
-
-        Ok(WalSegmentReadback {
-            validation: WalSegmentValidation {
-                max_sequence: observed_max_sequence,
-            },
-            data_records,
-        })
-    }
-
     #[cfg(test)]
     fn is_verified_wal_segment(
         verified_wal_segments: &Arc<Mutex<HashMap<u64, VerifiedWalSegment>>>,
@@ -1106,7 +988,7 @@ impl HybridStorage {
         segment_id: u64,
         expected_max_sequence: u64,
     ) -> Result<(), String> {
-        let key = crate::wal::cloud_segment_object_key(segment_id);
+        let key = crate::wal::cloud_segment::object_key(segment_id);
         let Some(proof) = self.verified_wal_segments.lock().get(&segment_id).cloned() else {
             return Err(format!(
                 "cloud WAL segment {segment_id} has no prior readback proof for max sequence {expected_max_sequence}"
@@ -1139,7 +1021,7 @@ impl HybridStorage {
         segment_id: u64,
         expected_max_sequence: u64,
     ) -> Result<VerifiedWalSegment, String> {
-        let key = crate::wal::cloud_segment_object_key(segment_id);
+        let key = crate::wal::cloud_segment::object_key(segment_id);
         let Some(proof) = self.verified_wal_segments.lock().get(&segment_id).cloned() else {
             return Err(format!(
                 "cloud WAL segment {segment_id} has no prior readback proof for max sequence {expected_max_sequence}"
@@ -1155,7 +1037,7 @@ impl HybridStorage {
     }
 
     fn wal_data_records_covered_by_manifest(
-        data_records: &[WalDataCoverageRecord],
+        data_records: &[crate::wal::cloud_segment::DataCoverageRecord],
         manifest: &crate::metadata::Manifest,
     ) -> bool {
         data_records
@@ -1165,7 +1047,7 @@ impl HybridStorage {
 
     fn manifest_covers_wal_data_record(
         manifest: &crate::metadata::Manifest,
-        record: &WalDataCoverageRecord,
+        record: &crate::wal::cloud_segment::DataCoverageRecord,
     ) -> bool {
         manifest
             .files
@@ -1175,7 +1057,7 @@ impl HybridStorage {
 
     fn manifest_file_covers_wal_data_record(
         file: &crate::metadata::FileMeta,
-        record: &WalDataCoverageRecord,
+        record: &crate::wal::cloud_segment::DataCoverageRecord,
     ) -> bool {
         if file.cf_id != record.cf_id {
             return false;
@@ -1194,22 +1076,12 @@ impl HybridStorage {
             return false;
         };
 
-        match record.op {
-            crate::wal::WalOpKind::Put
-            | crate::wal::WalOpKind::Insert
-            | crate::wal::WalOpKind::Delete => {
-                smallest_key.as_slice() <= record.key.as_slice()
-                    && record.key.as_slice() <= largest_key.as_slice()
-            }
-            crate::wal::WalOpKind::DeleteRange => {
-                record.range_end.as_ref().is_some_and(|range_end| {
-                    smallest_key.as_slice() <= record.key.as_slice()
-                        && range_end.as_slice() <= largest_key.as_slice()
-                })
-            }
-            crate::wal::WalOpKind::TxnBegin
-            | crate::wal::WalOpKind::TxnCommit
-            | crate::wal::WalOpKind::TxnBatch => true,
+        if let Some(range_end) = record.range_end.as_ref() {
+            smallest_key.as_slice() <= record.key.as_slice()
+                && range_end.as_slice() <= largest_key.as_slice()
+        } else {
+            smallest_key.as_slice() <= record.key.as_slice()
+                && record.key.as_slice() <= largest_key.as_slice()
         }
     }
 
@@ -1219,7 +1091,7 @@ impl HybridStorage {
         segment_id: u64,
         expected_max_sequence: u64,
     ) -> Result<(), String> {
-        let key = crate::wal::cloud_segment_object_key(segment_id);
+        let key = crate::wal::cloud_segment::object_key(segment_id);
         if let Some(proof) = verified_wal_segments.lock().get(&segment_id).cloned() {
             if proof.max_sequence != expected_max_sequence {
                 return Err(format!(
@@ -1231,7 +1103,8 @@ impl HybridStorage {
         }
 
         let data = Self::read_cloud_object_from_backend_blocking(cloud, &key)?;
-        let readback = Self::validate_wal_segment_bytes(&key, &data, expected_max_sequence)?;
+        let readback =
+            crate::wal::cloud_segment::validate_bytes(&key, &data, expected_max_sequence)?;
         let metadata = Self::head_cloud_object_from_backend_blocking(cloud, &key)?;
         if metadata.size != data.len() as u64 {
             return Err(format!(
@@ -1517,7 +1390,7 @@ impl HybridStorage {
         thread::Builder::new()
             .name(format!("midge-wal-pruner-{segment_id}"))
             .spawn(move || {
-                let key = crate::wal::cloud_segment_object_key(segment_id);
+                let key = crate::wal::cloud_segment::object_key(segment_id);
                 let result = match Self::revalidate_cloud_wal_prune_guard(
                     &cloud,
                     &verified_wal_segments,
@@ -2545,7 +2418,7 @@ mod tests {
         let max_sequence = 11;
         write_cloud_object(
             &storage,
-            &crate::wal::cloud_segment_object_key(segment_id),
+            &crate::wal::cloud_segment::object_key(segment_id),
             valid_wal_bytes(max_sequence),
         );
 
@@ -2579,7 +2452,7 @@ mod tests {
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 8;
         let max_sequence = 12;
-        let key = crate::wal::cloud_segment_object_key(segment_id);
+        let key = crate::wal::cloud_segment::object_key(segment_id);
         write_cloud_object(&storage, &key, valid_wal_bytes(max_sequence));
 
         storage
@@ -2604,7 +2477,7 @@ mod tests {
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 11;
         let max_sequence = 21;
-        let key = crate::wal::cloud_segment_object_key(segment_id);
+        let key = crate::wal::cloud_segment::object_key(segment_id);
         write_cloud_object(&storage, &key, valid_wal_bytes(max_sequence));
         storage
             .verify_remote_wal_segment(segment_id, max_sequence)
@@ -2631,7 +2504,7 @@ mod tests {
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 13;
         let max_sequence = 23;
-        let wal_key = crate::wal::cloud_segment_object_key(segment_id);
+        let wal_key = crate::wal::cloud_segment::object_key(segment_id);
         let sst_name = "missing-after-validation.sst";
         let sst_key = crate::sst::object_key(sst_name);
         let sst_bytes = valid_sst_bytes(b"a", b"v1", 1);
@@ -2667,7 +2540,7 @@ mod tests {
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 16;
         let max_sequence = 26;
-        let wal_key = crate::wal::cloud_segment_object_key(segment_id);
+        let wal_key = crate::wal::cloud_segment::object_key(segment_id);
         let sst_name = "wrong-crc-prune-guard.sst";
         let sst_key = crate::sst::object_key(sst_name);
         let sst_bytes = valid_sst_bytes(b"a", b"v1", 1);
@@ -2700,7 +2573,7 @@ mod tests {
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 14;
         let max_sequence = 24;
-        let wal_key = crate::wal::cloud_segment_object_key(segment_id);
+        let wal_key = crate::wal::cloud_segment::object_key(segment_id);
         let metadata_backend = Arc::new(MockCloudBackend::new());
         let metadata_cloud = Arc::new(CloudStorage::new(
             metadata_backend,
@@ -2747,7 +2620,7 @@ mod tests {
         let (_mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 15;
         let max_sequence = 25;
-        let wal_key = crate::wal::cloud_segment_object_key(segment_id);
+        let wal_key = crate::wal::cloud_segment::object_key(segment_id);
         let sst_name = "guard-valid.sst";
         let sst_key = crate::sst::object_key(sst_name);
         let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
@@ -2817,7 +2690,7 @@ mod tests {
         let expected_max_sequence = 20;
         write_cloud_object(
             &storage,
-            &crate::wal::cloud_segment_object_key(segment_id),
+            &crate::wal::cloud_segment::object_key(segment_id),
             valid_wal_bytes(expected_max_sequence + 1),
         );
 
@@ -2839,7 +2712,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create WAL dir");
         let segment_id = 12;
         let upload_max_sequence = 22;
-        let key = crate::wal::cloud_segment_object_key(segment_id);
+        let key = crate::wal::cloud_segment::object_key(segment_id);
         let existing_bytes = valid_wal_bytes(upload_max_sequence + 100);
         write_cloud_object(&storage, &key, existing_bytes.clone());
 
