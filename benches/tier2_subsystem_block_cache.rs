@@ -83,7 +83,7 @@ fn evict_10k(ctx: &mut StressContext) {
     let _completed = ctx
         .benchmark("lru_eviction_10k")
         .samples(10)
-        .warmup(3)
+        .warmup(8)
         .measure_batch((10_000 * EVICTION_REPEATS) as u64, || {
             let cache = create_cache(2 * 1024 * 1024);
             for i in 0..500 {

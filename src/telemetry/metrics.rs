@@ -61,7 +61,6 @@ pub struct Metrics {
 
     // Thread management
     pub thread_spawn_failures: Arc<AtomicU64>,
-    pub cache_inline_fallback_count: Arc<AtomicU64>,
 
     // SST operations
     #[cfg(test)]
@@ -182,7 +181,6 @@ impl Metrics {
             wal_backpressure_wait_attempts_total: Arc::new(AtomicU64::new(0)),
             wal_buffer_pool_overflow_count: Arc::new(AtomicU64::new(0)),
             thread_spawn_failures: Arc::new(AtomicU64::new(0)),
-            cache_inline_fallback_count: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             sst_created: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
@@ -476,15 +474,6 @@ impl Metrics {
     pub fn record_thread_spawn_failure(&self) {
         if self.enabled {
             self.thread_spawn_failures.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// Record cache inline fallback (when admission worker unavailable)
-    #[inline]
-    pub fn record_cache_inline_fallback(&self) {
-        if self.enabled {
-            self.cache_inline_fallback_count
-                .fetch_add(1, Ordering::Relaxed);
         }
     }
 

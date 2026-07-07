@@ -152,6 +152,46 @@ fn should_keep_removed_testkit_api_out_of_public_surface() {
 }
 
 #[test]
+fn should_keep_block_cache_admission_synchronous() {
+    // Arrange
+    let shard = production_source("src/sst/cache/shard.rs");
+    let cache = production_source("src/sst/cache/mod.rs");
+    let combined = format!("{shard}\n{cache}");
+    let forbidden_shard = [
+        "AdmissionCounter",
+        "record_access_for_admission(&self, key:",
+        "fn should_admit(&self",
+    ];
+    let forbidden = [
+        "cache-admission-worker",
+        "AdmissionRequest",
+        "admission_tx",
+        "worker_handle",
+        "spawn_worker",
+        "crossbeam_channel",
+        "handle.join()",
+    ];
+
+    // Act / Assert
+    // Assert
+    assert!(shard.contains("pub fn put(&self, key: CacheKey, value: &Bytes) -> bool"));
+    assert!(shard.contains("self.insert_and_update_metrics(key, cache_value);"));
+    assert!(shard.contains("self.evict_if_needed();"));
+    for pattern in forbidden {
+        assert!(
+            !combined.contains(pattern),
+            "block cache production path should not contain async admission worker artifact {pattern}"
+        );
+    }
+    for pattern in forbidden_shard {
+        assert!(
+            !shard.contains(pattern),
+            "CacheShard should not reference admission gate internals {pattern}"
+        );
+    }
+}
+
+#[test]
 fn should_keep_unsequenced_wal_append_op_out_of_public_writer_trait() {
     // Arrange
     let wal_trait = production_source("src/wal/traits.rs");

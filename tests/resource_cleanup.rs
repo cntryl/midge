@@ -1,16 +1,14 @@
-//! Resource cleanup tests - verify proper thread and memory cleanup
+//! Resource cleanup tests - verify proper memory and handle cleanup
 //!
-//! Tests that components properly clean up threads, memory, and other
-//! resources when dropped, ensuring the engine can run in constrained
-//! environments.
+//! Tests that components properly clean up memory and other resources when
+//! dropped, ensuring the engine can run in constrained environments.
 
 use cntryl_midge::sst::cache::{BlockCache, CachePolicyType};
 use std::sync::Arc;
 
 #[test]
-fn should_cleanup_block_cache_threads_when_dropped() {
-    // Arrange - create many BlockCache instances to stress thread management
-    // Each cache spawns 16 worker threads
+fn should_cleanup_block_cache_resources_when_dropped() {
+    // Arrange - create many BlockCache instances to stress shard cleanup
     let caches: Vec<BlockCache> = (0..10)
         .map(|_| BlockCache::new(1024 * 1024, 16, CachePolicyType::Lru))
         .collect();
@@ -19,9 +17,6 @@ fn should_cleanup_block_cache_threads_when_dropped() {
     drop(caches);
 
     // Assert - test completes without hanging (implicit success)
-    // If threads weren't properly joined, Drop would either:
-    // - Block indefinitely (timeout failure)
-    // - Leak threads (would accumulate over test runs)
 }
 
 #[test]
@@ -30,13 +25,12 @@ fn should_handle_rapid_cache_creation_destruction() {
     const ITERATIONS: usize = 50;
 
     // Act - rapidly create and drop caches
-    // This tests the race condition between thread spawning and cleanup
     for _ in 0..ITERATIONS {
         let cache = BlockCache::new(512 * 1024, 16, CachePolicyType::Lru);
         drop(cache);
     }
 
-    // Assert - test completes without panic or thread exhaustion
+    // Assert - test completes without panic or memory cleanup issues
 }
 
 #[test]
@@ -45,7 +39,7 @@ fn should_cleanup_cache_with_active_operations() {
     let cache = Arc::new(BlockCache::new(1024 * 1024, 16, CachePolicyType::Lru));
     let cache_clone = Arc::clone(&cache);
 
-    // Start worker thread with cache operations
+    // Start a thread with cache operations
     let handle = std::thread::spawn(move || {
         use cntryl_midge::sst::cache::CacheKey;
         for i in 0..100 {

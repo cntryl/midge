@@ -52,7 +52,19 @@ impl CacheMetrics {
 
     /// Remove from memory usage
     pub fn remove_memory(&self, bytes: u64) {
-        self.memory_bytes.fetch_sub(bytes, Ordering::Relaxed);
+        let mut current = self.memory_bytes.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_sub(bytes);
+            match self.memory_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Get hit count
@@ -311,6 +323,19 @@ mod tests {
 
         // Assert
         assert_eq!(metrics.memory_bytes(), 3000);
+    }
+
+    #[test]
+    fn should_saturate_memory_removal() {
+        // Arrange
+        let metrics = CacheMetrics::new();
+        metrics.add_memory(128);
+
+        // Act
+        metrics.remove_memory(u64::MAX);
+
+        // Assert
+        assert_eq!(metrics.memory_bytes(), 0);
     }
 
     #[test]

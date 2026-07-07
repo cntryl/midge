@@ -1,11 +1,16 @@
-//! Admission control to prevent cache pollution
+//! Admission helpers that can be used to gate optional cache policies.
 //!
+//! The production block cache insertion path no longer calls these helpers by default.
+//! They remain available for experiments and alternative cache strategies.
+
 //! Admission control uses a probabilistic counter to track the frequency
 //! of keys. Keys that fail the admission check are not added to the cache.
 
 use std::convert::TryFrom;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+use crate::sst::cache::{BlockType, CacheKey};
 
 /// Probabilistic frequency counter for admission control
 ///
@@ -44,6 +49,18 @@ impl AdmissionCounter {
         h
     }
 
+    fn cache_key_identity(key: &CacheKey) -> [u8; 17] {
+        let mut identity = [0u8; 17];
+        identity[..8].copy_from_slice(&key.sst_id.to_le_bytes());
+        identity[8..16].copy_from_slice(&key.block_offset.to_le_bytes());
+        identity[16] = match key.block_type {
+            BlockType::Index => 0,
+            BlockType::Data => 1,
+            BlockType::Filter => 2,
+        };
+        identity
+    }
+
     /// Estimate if a key should be admitted
     ///
     /// Returns true if the key has been seen before (or randomly with threshold probability)
@@ -59,19 +76,24 @@ impl AdmissionCounter {
     /// Check if a cache key should be admitted based on block type
     ///
     /// Index and filter blocks are always admitted (no check).
-    /// Data blocks use second-access policy (must be seen before).
+    /// Data blocks are checked by full cache key identity.
     pub fn should_admit(&self, key: &crate::sst::cache::CacheKey) -> bool {
-        use crate::sst::cache::BlockType;
         match key.block_type {
             BlockType::Index | BlockType::Filter => {
                 // Always admit index and filter blocks
                 true
             }
             BlockType::Data => {
-                // Data blocks: admit on second access
-                self.estimate(&key.sst_id.to_le_bytes())
+                // Data blocks: use the complete block identity so one hot block
+                // does not admit every other block from the same SST.
+                self.estimate(&Self::cache_key_identity(key))
             }
         }
+    }
+
+    /// Record access to a full cache key identity.
+    pub fn record_access_for_key(&self, key: &CacheKey) {
+        self.record_access(&Self::cache_key_identity(key));
     }
 
     /// Record an access to a key
@@ -313,5 +335,22 @@ mod tests {
 
         // Assert
         assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn should_track_data_blocks_by_full_cache_key_identity() {
+        // Arrange
+        let counter = AdmissionCounter::new(1024, 1000);
+        let recorded = CacheKey::for_data(7, 4096);
+        let same_sst_different_offset = CacheKey::for_data(7, 8192);
+        let same_offset_different_type = CacheKey::for_index(7, 4096);
+
+        // Act
+        counter.record_access_for_key(&recorded);
+
+        // Assert
+        assert!(counter.should_admit(&recorded));
+        assert!(!counter.should_admit(&same_sst_different_offset));
+        assert!(counter.should_admit(&same_offset_different_type));
     }
 }

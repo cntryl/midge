@@ -27,7 +27,6 @@ path = "src/lib.rs"
 # Concurrency & Synchronization
 arc-swap = "1.9"
 crossbeam = "0.8"
-crossbeam-channel = "0.5"
 crossbeam-epoch = "0.9"
 dashmap = "6.2"
 # Note: fail is used for deterministic crash testing in test suites.

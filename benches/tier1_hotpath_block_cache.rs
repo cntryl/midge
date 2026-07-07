@@ -8,8 +8,6 @@ mod stress_config;
 use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
 use cntryl_midge::Bytes;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
-use std::thread;
-use std::time::{Duration, Instant};
 
 const INSERT_BATCH_ROUNDS: usize = 128;
 const HOT_GET_BATCH_SIZE: usize = 16_384;
@@ -30,18 +28,6 @@ fn make_block_data(size: usize) -> Bytes {
 
 fn create_cache(capacity: u64) -> BlockCache {
     BlockCache::new(capacity, 16, CachePolicyType::Lru)
-}
-
-fn wait_for_cache_entries(cache: &BlockCache, expected_len: usize) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while cache.len() < expected_len {
-        assert!(
-            Instant::now() < deadline,
-            "cache admission did not settle: expected {expected_len} entries, got {}",
-            cache.len()
-        );
-        thread::yield_now();
-    }
 }
 
 fn precompute_keys_and_blocks(num_blocks: usize, block_size: usize) -> (Vec<CacheKey>, Vec<Bytes>) {
@@ -65,9 +51,8 @@ fn get_hot_single_4k(ctx: &mut StressContext) {
     for i in 0..1000 {
         let key = make_cache_key(i * 4096);
         let block = make_block_data(4096);
-        cache.put(key, &block);
+        assert!(cache.put(key, &block));
     }
-    wait_for_cache_entries(&cache, 1000);
     let hot_key = make_cache_key(42 * 4096);
     assert!(cache.get(&hot_key).is_some());
     ctx.parameter("block_size", 4096);
@@ -98,9 +83,8 @@ fn get_batch_hit_1000(ctx: &mut StressContext) {
     let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
     let cache = create_cache(cache_size);
     for i in 0..num_blocks {
-        cache.put(keys[i], &blocks[i]);
+        assert!(cache.put(keys[i], &blocks[i]));
     }
-    wait_for_cache_entries(&cache, num_blocks);
     let warmed_hits = keys
         .iter()
         .take(num_blocks)
@@ -132,9 +116,8 @@ fn get_batch_miss_1000(ctx: &mut StressContext) {
     let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
     let cache = create_cache(cache_size);
     for i in 0..num_blocks {
-        cache.put(keys[i], &blocks[i]);
+        assert!(cache.put(keys[i], &blocks[i]));
     }
-    wait_for_cache_entries(&cache, num_blocks);
 
     let miss_keys: Vec<CacheKey> = (0..num_blocks)
         .map(|i| {
@@ -176,7 +159,7 @@ fn insert_batch_100(ctx: &mut StressContext) {
         for _ in 0..logical_ops {
             let idx = key_index % insert_window;
             key_index = key_index.wrapping_add(1);
-            cache.put(keys[idx], &blocks[idx]);
+            let _ = cache.put(keys[idx], &blocks[idx]);
         }
         black_box(key_index);
     });

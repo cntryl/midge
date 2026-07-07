@@ -472,15 +472,6 @@ mod tests {
     use super::*;
     use crate::sst::traits::SstFactory;
 
-    fn wait_for_cache_entry(cache: &crate::sst::cache::BlockCache) {
-        for _ in 0..50 {
-            if !cache.is_empty() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    }
-
     #[test]
     fn should_use_shared_block_cache_for_snapshot_sst_reads() -> crate::common::MidgeResult<()> {
         // Arrange
@@ -521,7 +512,10 @@ mod tests {
 
         // Act
         let first = snapshot.get(b"cache-key", u64::MAX);
-        wait_for_cache_entry(&block_cache);
+        assert!(
+            !block_cache.is_empty(),
+            "first point read should synchronously populate shared block cache"
+        );
         let hits_before = block_cache.metrics().hit_count();
         let second = snapshot.get(b"cache-key", u64::MAX);
         let hits_after = block_cache.metrics().hit_count();

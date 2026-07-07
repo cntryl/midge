@@ -3,8 +3,13 @@
 //! Provides a sharded LRU/TinyLFU/CLOCK-Pro cache for SST blocks with:
 //! - **Sharding**: 16 independent shards to reduce lock contention
 //! - **Pluggable policies**: LRU, `TinyLFU`, CLOCK-Pro eviction
-//! - **Admission control**: Prevent cache pollution from scans
+//! - **Admission utilities**: Optional frequency helpers are available, but the default
+//!   insertion path does not enforce a separate second-access admission gate.
 //! - **Metrics**: Hit/miss/eviction tracking per shard
+//!
+//! Point-read paths populate the block cache synchronously. Range-scan paths
+//! that use contiguous readahead avoid one-pass scan pollution by bypassing
+//! cache insertion entirely.
 
 pub mod admission;
 pub mod key;
@@ -27,7 +32,7 @@ use std::sync::Arc;
 /// Divides cache into independent shards to reduce lock contention.
 /// Each shard manages its own entries with its own eviction policy.
 pub struct BlockCache {
-    /// Array of shards (Arc-wrapped because background worker threads own references)
+    /// Array of shards shared by cache callers
     shards: Vec<Arc<CacheShard>>,
     /// Number of shards
     num_shards: usize,
@@ -77,19 +82,11 @@ impl BlockCache {
         self.get_shard(key).get(key)
     }
 
-    /// Insert a block into the cache
+    /// Insert a block into the cache.
     ///
-    /// Returns true if inserted, false if rejected by admission control
+    /// Returns true if inserted and immediately visible in the cache.
     pub fn put(&self, key: CacheKey, value: &Bytes) -> bool {
         self.get_shard(&key).put(key, value)
-    }
-
-    /// Insert a block into the cache synchronously (for tests)
-    ///
-    /// Performs admission, insert, and eviction synchronously.
-    #[cfg(test)]
-    pub fn put_sync(&self, key: CacheKey, value: Bytes) {
-        self.get_shard(&key).put_sync(key, value);
     }
 
     /// Remove a block from the cache
@@ -175,9 +172,7 @@ impl Drop for BlockCache {
             "BlockCache dropping, cleaning up shards"
         );
 
-        // Explicitly drop shards in sequence to ensure deterministic cleanup
-        // Each shard's drop will join its background worker thread
-        // This prevents thread leak and ensures all 16 worker threads are joined before returning
+        // Explicitly drop shards in sequence to ensure deterministic cleanup.
         self.shards.clear();
 
         tracing::trace!(
@@ -204,14 +199,14 @@ mod tests {
     }
 
     #[test]
-    fn should_retrieve_value_after_put() {
+    fn should_retrieve_value_after_first_data_block_put_without_prior_admission() {
         // Arrange
         let cache = BlockCache::new_default(1024 * 1024);
         let key = CacheKey::for_data(1, 0);
         let value = Bytes::from(&b"test_block"[..]);
 
         // Act
-        cache.put_sync(key, value.clone());
+        assert!(cache.put(key, &value));
         let retrieved = cache.get(&key);
 
         // Assert
@@ -226,7 +221,7 @@ mod tests {
         let key = CacheKey::for_data(1, 0);
 
         // Act
-        cache.put_sync(key, Bytes::from(&b"data"[..]));
+        assert!(cache.put(key, &Bytes::from(&b"data"[..])));
         let removed = cache.remove(&key);
         let retrieved = cache.get(&key);
 
@@ -243,7 +238,7 @@ mod tests {
         // Act
         for sst_id in 0..100 {
             let key = CacheKey::for_data(sst_id, 0);
-            cache.put_sync(key, Bytes::from(vec![1u8; 1024]));
+            assert!(cache.put(key, &Bytes::from(vec![1u8; 1024])));
         }
 
         // Assert - entries should be distributed
@@ -262,7 +257,7 @@ mod tests {
         let cache = BlockCache::new_default(1024 * 1024);
         for i in 0..10 {
             let key = CacheKey::for_data(i, 0);
-            cache.put_sync(key, Bytes::from(vec![1u8; 100]));
+            assert!(cache.put(key, &Bytes::from(vec![1u8; 100])));
         }
 
         // Act
@@ -281,7 +276,7 @@ mod tests {
         let key = CacheKey::for_data(1, 0);
 
         // Act
-        cache.put_sync(key, Bytes::from(&b"test"[..]));
+        assert!(cache.put(key, &Bytes::from(&b"test"[..])));
         let _ = cache.get(&key);
         let _ = cache.get(&key);
         let _ = cache.get(&CacheKey::for_data(999, 999));
@@ -300,8 +295,8 @@ mod tests {
         let data2 = vec![b'y'; 60];
 
         // Act
-        cache.put_sync(CacheKey::for_data(1, 0), Bytes::from(data1));
-        cache.put_sync(CacheKey::for_data(2, 0), Bytes::from(data2));
+        assert!(cache.put(CacheKey::for_data(1, 0), &Bytes::from(data1)));
+        assert!(cache.put(CacheKey::for_data(2, 0), &Bytes::from(data2)));
 
         // Assert - one should be evicted
         let metrics = cache.metrics();
@@ -338,7 +333,7 @@ mod tests {
             // Act
             for sst_id in 0..6 {
                 let byte = u8::try_from(sst_id).expect("fixture sst id should fit in u8");
-                cache.put_sync(CacheKey::for_data(sst_id, 0), Bytes::from(vec![byte; 32]));
+                assert!(cache.put(CacheKey::for_data(sst_id, 0), &Bytes::from(vec![byte; 32])));
             }
 
             // Assert
@@ -356,5 +351,53 @@ mod tests {
                 "{policy:?} should record evictions under pressure"
             );
         }
+    }
+
+    #[test]
+    fn should_remain_safe_under_concurrent_cache_mutations() {
+        // Arrange
+        let capacity = 64 * 1024;
+        let cache = Arc::new(BlockCache::new(capacity, 16, CachePolicyType::Lru));
+        let mut handles = Vec::new();
+        let thread_count = 8u64;
+        let iterations_per_thread = 250u64;
+        let clear_interval = 73u64;
+        let missing_remove_interval = 31u64;
+
+        // Act
+        for thread_id in 0u64..thread_count {
+            let cache = Arc::clone(&cache);
+            handles.push(std::thread::spawn(move || {
+                for offset in 0u64..iterations_per_thread {
+                    let key = CacheKey::for_data(thread_id, offset);
+                    let byte = u8::try_from(thread_id).expect("thread id should fit in u8");
+                    let size = usize::try_from((offset % 7) + 1).expect("size should fit in usize");
+                    let data = Bytes::from(vec![byte; size]);
+                    let _ = cache.put(key, &data);
+                    let _ = cache.get(&key);
+
+                    if offset.is_multiple_of(2) {
+                        let _ =
+                            cache.remove(&CacheKey::for_data(thread_id, offset.saturating_sub(1)));
+                    }
+                    if offset.is_multiple_of(missing_remove_interval) {
+                        let missing_key = CacheKey::for_data(9_999, offset);
+                        let _ = cache.remove(&missing_key);
+                    }
+                    if offset.is_multiple_of(clear_interval) {
+                        cache.clear();
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            handle
+                .join()
+                .expect("cache operation thread should complete");
+        }
+
+        // Assert
+        assert!(cache.size_bytes() <= capacity);
+        assert_eq!(cache.size_bytes(), cache.metrics().memory_bytes());
     }
 }

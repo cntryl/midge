@@ -1,128 +1,49 @@
-//! Single cache shard with lock-free entry management and async admission
+//! Single cache shard with lock-free reads and synchronized writes
 
-use crate::sst::cache::admission::AdmissionCounter;
-use crate::sst::cache::key::CacheKey;
+use crate::sst::cache::key::{BlockType, CacheKey};
 use crate::sst::cache::metrics::CacheMetrics;
 use crate::sst::cache::policy::{CachePolicy, CachePolicyType};
 use crate::sst::cache::value::CacheValue;
 use bytes::Bytes;
-use crossbeam_channel::{bounded, Sender};
 use dashmap::DashMap;
 use std::convert::TryFrom;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-#[cfg(test)]
 use std::sync::Mutex;
-use std::thread::{self, JoinHandle};
-
-#[cfg(test)]
-const TEST_BLOCKING_VALUE: &[u8] = b"__cache_shard_drop_block__";
-
-#[cfg(test)]
-static TEST_WORKER_BLOCKED: AtomicBool = AtomicBool::new(false);
-
-#[cfg(test)]
-static TEST_WORKER_RELEASE: AtomicBool = AtomicBool::new(false);
-
-#[cfg(test)]
-static TEST_WORKER_FINISHED: AtomicBool = AtomicBool::new(false);
-
-#[cfg(test)]
-static TEST_SELF_JOIN_SKIPPED: AtomicBool = AtomicBool::new(false);
-
-#[cfg(test)]
-static TEST_SHARD_HOOK_LOCK: Mutex<()> = Mutex::new(());
-
-/// Message sent to admission worker
-struct AdmissionRequest {
-    key: CacheKey,
-    value: Bytes,
-}
 
 /// A single cache shard (partition) with lock-free access
 ///
 /// Contains a portion of the cache entries using `DashMap` for concurrent access,
-/// with its own eviction policy and metrics. Admission and eviction happen
-/// asynchronously in a background worker thread.
+/// with its own eviction policy and metrics. Insertion and eviction happen
+/// synchronously before `put` returns.
 pub struct CacheShard {
     /// Map of cache key -> value (lock-free concurrent hashmap)
     entries: DashMap<CacheKey, CacheValue>,
     /// Eviction policy
     policy: Box<dyn CachePolicy>,
-    /// Admission control counter
-    admission: AdmissionCounter,
+    /// Serialize cache mutations for consistent policy and metric updates.
+    mutation_lock: Mutex<()>,
     /// Metrics for this shard
     metrics: CacheMetrics,
     /// Maximum size in bytes
     max_bytes: u64,
-    /// Channel for async admission requests
-    admission_tx: Option<Sender<AdmissionRequest>>,
-    /// Fallback to inline admission when worker thread cannot be spawned
-    admission_inline: AtomicBool,
-    /// Background admission worker thread handle
-    worker_handle: Option<JoinHandle<()>>,
 }
 
 impl CacheShard {
-    /// Create a new cache shard with background admission worker
+    /// Create a new cache shard
     ///
     /// `max_bytes`: Maximum capacity in bytes
     /// `policy_type`: Eviction policy to use
     ///
-    /// Returns `Arc<Self>` because the background worker needs a reference
+    /// Returns `Arc<Self>` because `BlockCache` shares shards across callers.
     #[must_use]
     pub fn new(max_bytes: u64, policy_type: CachePolicyType) -> Arc<Self> {
-        let (tx, rx) = bounded(10_000);
-
-        Arc::new_cyclic(|weak_shard| {
-            let worker_handle = Self::spawn_worker(weak_shard.clone(), rx);
-            let inline_mode = worker_handle.is_none();
-            Self {
-                entries: DashMap::new(),
-                policy: policy_type.create(),
-                admission: AdmissionCounter::new(64, 1000),
-                metrics: CacheMetrics::new(),
-                max_bytes,
-                admission_tx: Some(tx),
-                admission_inline: AtomicBool::new(inline_mode),
-                worker_handle,
-            }
+        Arc::new(Self {
+            entries: DashMap::new(),
+            policy: policy_type.create(),
+            mutation_lock: Mutex::new(()),
+            metrics: CacheMetrics::new(),
+            max_bytes,
         })
-    }
-
-    /// Spawn the background admission worker thread
-    ///
-    /// Returns Some(JoinHandle) on success, None on failure (fallback to inline)
-    fn spawn_worker(
-        weak_shard: std::sync::Weak<Self>,
-        rx: crossbeam_channel::Receiver<AdmissionRequest>,
-    ) -> Option<JoinHandle<()>> {
-        let spawn_result = thread::Builder::new()
-            .name("cache-admission-worker".to_string())
-            .spawn(move || {
-                for request in rx {
-                    // Upgrade weak to strong per request so worker does not keep shard alive.
-                    let Some(shard) = weak_shard.upgrade() else {
-                        break;
-                    };
-                    shard.handle_admission_request(request);
-                }
-            });
-
-        match spawn_result {
-            Ok(handle) => Some(handle),
-            Err(err) => {
-                // Log failure but don't panic; inline admission will be used
-                tracing::warn!(
-                    error = %err,
-                    "cache admission worker spawn failed; falling back to inline admission"
-                );
-                if let Some(t) = crate::telemetry::Telemetry::global() {
-                    t.metrics().record_thread_spawn_failure();
-                }
-                None
-            }
-        }
     }
 
     /// Get a cached value (lock-free)
@@ -139,133 +60,29 @@ impl CacheShard {
         }
     }
 
-    /// Insert a value into the cache (non-blocking)
+    /// Insert a value into the cache synchronously.
     ///
-    /// Sends admission request to background worker. Returns immediately
-    /// without blocking on eviction or admission checks.
-    ///
-    /// Returns true if request was queued, false if channel is disconnected.
+    /// Returns true only if the value is admitted by capacity and remains visible
+    /// after eviction completes.
     pub fn put(&self, key: CacheKey, value: &Bytes) -> bool {
-        if self.admission_inline.load(Ordering::Relaxed) {
-            // Track inline fallback usage
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_cache_inline_fallback();
-            }
-            self.put_inline(key, value);
-            return true;
-        }
+        let _lock = self.lock_mutation();
 
-        // Track access for admission control (fast path)
-        self.record_access_for_admission(&key);
-
-        // Send to admission worker (non-blocking)
-        if self.admission_tx.as_ref().is_none_or(|tx| {
-            tx.send(AdmissionRequest {
-                key,
-                value: value.clone(),
-            })
-            .is_err()
-        }) {
-            // If channel is unavailable/disconnected, fall back to inline admission
-            self.admission_inline.store(true, Ordering::Relaxed);
-            self.put_inline(key, value);
-        }
-        true
-    }
-
-    /// Insert a value into the cache (inline admission fallback)
-    ///
-    /// Optimized for constrained environments where background worker thread
-    /// cannot spawn. Uses fast capacity check and adaptive eviction to minimize
-    /// lock contention on the critical path.
-    fn put_inline(&self, key: CacheKey, value: &Bytes) {
-        // Track access for admission control
-        self.record_access_for_admission(&key);
-
-        // Check type-aware admission policy
-        if !self.should_admit(&key) {
-            return;
-        }
-
-        // Wrap in CacheValue
-        let cache_value = CacheValue::new(value.clone());
         let new_size = u64::try_from(value.len()).unwrap_or(u64::MAX);
-
-        // Fast capacity check: if we have plenty of space, skip eviction logic
-        let current_size = self.metrics.memory_bytes();
-        if current_size + new_size < self.max_bytes {
-            // Plenty of room, insert directly without eviction checks
-            self.insert_and_update_metrics(key, cache_value);
-            return;
+        if !self.can_fit_value(&key, new_size) {
+            return false;
         }
 
-        // Tight on space: insert first, then evict if needed
-        // This reduces the number of eviction cycles vs. pre-checking
+        let cache_value = CacheValue::new(value.clone());
         self.insert_and_update_metrics(key, cache_value);
-
-        // Only evict if actually over capacity (not just close)
-        if self.metrics.memory_bytes() > self.max_bytes {
-            self.evict_if_needed();
-        }
-    }
-
-    /// Insert a value into the cache (synchronous, for tests)
-    ///
-    /// Performs admission check, insert, and eviction synchronously.
-    /// Bypasses the background worker for deterministic test behavior.
-    #[cfg(test)]
-    pub fn put_sync(&self, key: CacheKey, value: Bytes) {
-        // Track access for admission control
-        self.record_access_for_admission(&key);
-
-        // Check type-aware admission policy
-        if !self.should_admit(&key) {
-            return;
-        }
-
-        // Wrap in CacheValue
-        let cache_value = CacheValue::new(value);
-
-        // Insert and update metrics
-        self.insert_and_update_metrics(key, cache_value);
-
-        // Evict if over capacity
         self.evict_if_needed();
+        self.entries.contains_key(&key)
     }
 
-    /// Handle one admission request on the background worker.
-    fn handle_admission_request(&self, request: AdmissionRequest) {
-        #[cfg(test)]
-        if request.value == Bytes::from_static(TEST_BLOCKING_VALUE) {
-            TEST_WORKER_BLOCKED.store(true, Ordering::SeqCst);
-            while !TEST_WORKER_RELEASE.load(Ordering::SeqCst) {
-                thread::yield_now();
-            }
-            TEST_WORKER_FINISHED.store(true, Ordering::SeqCst);
-        }
-
-        // Check type-aware admission policy
-        if !self.should_admit(&request.key) {
-            return;
-        }
-
-        // Insert into cache
-        let cache_value = CacheValue::new(request.value);
-        self.insert_and_update_metrics(request.key, cache_value);
-
-        // Evict if over capacity (runs in background)
-        self.evict_if_needed();
-    }
-
-    /// Record access for admission control
-    fn record_access_for_admission(&self, key: &CacheKey) {
-        self.admission
-            .record_access(key.sst_id.to_le_bytes().as_ref());
-    }
-
-    /// Check if a key should be admitted based on type-aware policy
-    fn should_admit(&self, key: &CacheKey) -> bool {
-        self.admission.should_admit(key)
+    /// Data blocks larger than a shard cannot remain visible after eviction.
+    /// Index and filter blocks are allowed through so the eviction policy can
+    /// continue to protect metadata blocks under ordinary pressure.
+    fn can_fit_value(&self, key: &CacheKey, value_size: u64) -> bool {
+        key.block_type != BlockType::Data || value_size <= self.max_bytes
     }
 
     /// Insert value and update metrics accordingly
@@ -293,43 +110,32 @@ impl CacheShard {
     fn evict_if_needed(&self) {
         use crate::sst::cache::BlockType;
 
-        // Safeguard: limit eviction iterations to prevent excessive latency
-        // when admission worker thread fails. This prevents pathological cases
-        // where we spend excessive time evicting due to resource constraints.
-        //
-        // Value is adaptive:
-        // - Background worker mode (not used): limit doesn't apply
-        // - Inline fallback mode: smaller limit (50) to avoid blocking hot path
-        const MAX_EVICTION_ATTEMPTS: usize = 50;
-        let mut eviction_count = 0;
-
-        while self.is_over_capacity() && eviction_count < MAX_EVICTION_ATTEMPTS {
-            eviction_count += 1;
-
-            // Try to evict data blocks first (protect index/filter)
+        let mut made_progress = false;
+        while self.is_over_capacity() {
+            // Try to evict data blocks first (protect index/filter blocks).
             if let Some(evicted) = self.try_evict_victim(&[BlockType::Index, BlockType::Filter]) {
                 self.update_metrics_after_eviction(&evicted);
-            } else if self.is_severely_over_capacity() {
-                // Emergency: Cache is severely over capacity, evict anything
-                if let Some(evicted) = self.try_evict_victim(&[]) {
-                    self.update_metrics_after_eviction(&evicted);
-                } else {
-                    break; // Can't evict more
-                }
+                made_progress = true;
+                continue;
+            }
+
+            if !self.is_severely_over_capacity() {
+                break;
+            }
+
+            // Emergency: cache is severely over capacity, evict anything.
+            if let Some(evicted) = self.try_evict_victim(&[]) {
+                self.update_metrics_after_eviction(&evicted);
+                made_progress = true;
             } else {
-                break; // Can't evict more data blocks, stop
+                break;
             }
         }
 
-        // Log if we hit the safeguard limit (only in inline mode where this matters)
-        if eviction_count >= MAX_EVICTION_ATTEMPTS
-            && self.is_over_capacity()
-            && self.admission_inline.load(Ordering::Relaxed)
-        {
+        if !made_progress && self.is_over_capacity() {
             tracing::warn!(
-                "Cache eviction (inline mode) hit safeguard at {} attempts, still over capacity; \
-                     consider increasing cache size or checking memory pressure",
-                MAX_EVICTION_ATTEMPTS
+                "Cache eviction was unable to recover capacity for this shard; \
+                 check policy-state consistency or memory pressure"
             );
         }
     }
@@ -378,6 +184,7 @@ impl CacheShard {
 
     /// Remove a key from the cache
     pub fn remove(&self, key: &CacheKey) -> Option<CacheValue> {
+        let _lock = self.lock_mutation();
         if let Some((_, value)) = self.entries.remove(key) {
             self.metrics
                 .remove_memory(u64::try_from(value.size_bytes()).unwrap_or(u64::MAX));
@@ -390,9 +197,17 @@ impl CacheShard {
 
     /// Clear all entries from the cache
     pub fn clear(&self) {
+        let _lock = self.lock_mutation();
         self.entries.clear();
         self.metrics.set_memory_bytes(0);
         self.policy.clear();
+    }
+
+    fn lock_mutation(&self) -> std::sync::MutexGuard<'_, ()> {
+        match self.mutation_lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 
     /// Get cache metrics
@@ -416,47 +231,93 @@ impl CacheShard {
     }
 }
 
-impl Drop for CacheShard {
-    fn drop(&mut self) {
-        // Close sender first so worker receive loop exits promptly.
-        let _ = self.admission_tx.take();
-
-        // Wait for worker thread to complete if it exists.
-        // Use Option::take() to move the handle out of self.
-        if let Some(handle) = self.worker_handle.take() {
-            let current_id = thread::current().id();
-            let worker_id = handle.thread().id();
-
-            if current_id == worker_id {
-                // If the cache shard is being dropped from the worker thread itself,
-                // joining would deadlock / fail with EDEADLK. In that case, just
-                // allow the thread to exit naturally and drop the handle.
-                #[cfg(test)]
-                TEST_SELF_JOIN_SKIPPED.store(true, Ordering::SeqCst);
-                tracing::trace!(
-                    "cache admission worker drop running on worker thread; skipping self-join"
-                );
-            } else {
-                match handle.join() {
-                    Ok(()) => {
-                        tracing::trace!("cache admission worker exited cleanly");
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = ?e,
-                            "cache admission worker thread panicked during shutdown"
-                        );
-                    }
-                }
-            }
-        }
-        // If worker_handle is None, the thread was never spawned (inline mode)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_make_first_data_block_put_visible_without_prior_admission() {
+        // Arrange
+        let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
+        let key = CacheKey::for_data(1, 0);
+        let value = Bytes::from(&b"visible"[..]);
+
+        // Act
+        let inserted = shard.put(key, &value);
+        let retrieved = shard.get(&key);
+
+        // Assert
+        assert!(inserted);
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().data.to_vec(), value.to_vec());
+    }
+
+    #[test]
+    fn should_keep_large_data_block_after_many_small_evictions() {
+        // Arrange
+        let shard = CacheShard::new(100, CachePolicyType::Lru);
+        let small = Bytes::from(vec![1u8; 1]);
+        let large = Bytes::from(vec![2u8; 100]);
+        let final_key = CacheKey::for_data(999, 0);
+        let before_evictions = shard.metrics().eviction_count();
+
+        // Act
+        for i in 0u64..200 {
+            let key = CacheKey::for_data(i, 0);
+            assert!(shard.put(key, &small));
+        }
+        let inserted = shard.put(final_key, &large);
+        let metrics = shard.metrics();
+        let retrieved = shard.get(&final_key);
+
+        // Assert
+        assert!(inserted);
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().data.to_vec(), large.to_vec());
+        assert!(metrics.eviction_count() - before_evictions > 50);
+        assert!(shard.size_bytes() <= 100);
+    }
+
+    #[test]
+    fn should_report_false_when_data_block_exceeds_shard_capacity() {
+        // Arrange
+        let shard = CacheShard::new(8, CachePolicyType::Lru);
+        let key = CacheKey::for_data(1, 0);
+        let value = Bytes::from(vec![0u8; 16]);
+
+        // Act
+        let inserted = shard.put(key, &value);
+        let retrieved = shard.get(&key);
+
+        // Assert
+        assert!(!inserted);
+        assert!(retrieved.is_none());
+        assert_eq!(shard.size_bytes(), 0);
+    }
+
+    #[test]
+    fn should_preserve_metadata_blocks_when_eviction_overflows() {
+        // Arrange
+        let shard = CacheShard::new(120, CachePolicyType::Lru);
+        let index_key = CacheKey::for_index(1, 0);
+        let filter_key = CacheKey::for_filter(1, 40);
+        let data_key = CacheKey::for_data(1, 80);
+        let next_data_key = CacheKey::for_data(1, 120);
+        let value = Bytes::from(vec![7u8; 40]);
+
+        // Act
+        assert!(shard.put(index_key, &value));
+        assert!(shard.put(filter_key, &value));
+        assert!(shard.put(data_key, &value));
+        assert!(shard.put(next_data_key, &value));
+
+        // Assert
+        assert!(shard.get(&index_key).is_some());
+        assert!(shard.get(&filter_key).is_some());
+        assert!(shard.get(&data_key).is_none());
+        assert!(shard.get(&next_data_key).is_some());
+        assert!(shard.size_bytes() <= 120);
+    }
 
     #[test]
     fn should_retrieve_value_after_store() {
@@ -466,7 +327,7 @@ mod tests {
         let value = Bytes::from(&b"hello world"[..]);
 
         // Act
-        shard.put_sync(key, value.clone());
+        assert!(shard.put(key, &value));
         let retrieved = shard.get(&key);
 
         // Assert
@@ -484,8 +345,8 @@ mod tests {
         let data2 = vec![b'y'; 80];
 
         // Act
-        shard.put_sync(key1, Bytes::from(data1));
-        shard.put_sync(key2, Bytes::from(data2));
+        assert!(shard.put(key1, &Bytes::from(data1)));
+        assert!(shard.put(key2, &Bytes::from(data2)));
 
         // Assert - key1 should be evicted (LRU)
         assert!(shard.get(&key1).is_none());
@@ -500,7 +361,7 @@ mod tests {
         let value = Bytes::from(&b"test_data"[..]);
 
         // Act
-        shard.put_sync(key, value);
+        assert!(shard.put(key, &value));
         shard.get(&key);
         let metrics = shard.metrics();
 
@@ -517,7 +378,7 @@ mod tests {
         // Act
         for i in 0..5 {
             let key = CacheKey::for_data(i, 0);
-            shard.put_sync(key, Bytes::from(format!("value_{i}").into_bytes()));
+            assert!(shard.put(key, &Bytes::from(format!("value_{i}").into_bytes())));
         }
         shard.clear();
 
@@ -563,8 +424,8 @@ mod tests {
         let expected = value2.clone();
 
         // Act
-        shard.put_sync(key, value1);
-        shard.put_sync(key, value2);
+        assert!(shard.put(key, &value1));
+        assert!(shard.put(key, &value2));
         let retrieved = shard.get(&key);
 
         // Assert
@@ -580,7 +441,7 @@ mod tests {
         let value = Bytes::from(&b"data"[..]);
 
         // Act
-        shard.put_sync(key, value.clone());
+        assert!(shard.put(key, &value));
         let removed = shard.remove(&key);
         let retrieved = shard.get(&key);
 
@@ -622,7 +483,7 @@ mod tests {
         let empty = Bytes::new();
 
         // Act
-        shard.put_sync(key, empty);
+        assert!(shard.put(key, &empty));
         let retrieved = shard.get(&key);
 
         // Assert
@@ -638,7 +499,7 @@ mod tests {
         let large = Bytes::from(vec![42u8; 50_000]);
 
         // Act
-        shard.put_sync(key, large.clone());
+        assert!(shard.put(key, &large));
         let retrieved = shard.get(&key);
 
         // Assert
@@ -655,7 +516,7 @@ mod tests {
         let mut lens = Vec::new();
         for i in 0..10 {
             let key = CacheKey::for_data(i, 0);
-            shard.put_sync(key, Bytes::from(format!("data_{i}").into_bytes()));
+            assert!(shard.put(key, &Bytes::from(format!("data_{i}").into_bytes())));
             lens.push(shard.len());
         }
 
@@ -673,9 +534,9 @@ mod tests {
         let key2 = CacheKey::for_data(2, 0);
 
         // Act
-        shard.put_sync(key1, Bytes::from(&b"1000B"[..])); // 5 bytes
+        assert!(shard.put(key1, &Bytes::from(&b"1000B"[..]))); // 5 bytes
         let size_after_first = shard.size_bytes();
-        shard.put_sync(key2, Bytes::from(vec![0u8; 995])); // 995 bytes
+        assert!(shard.put(key2, &Bytes::from(vec![0u8; 995]))); // 995 bytes
         let size_after_second = shard.size_bytes();
 
         // Assert
@@ -692,8 +553,8 @@ mod tests {
         // Act (both should work, just with different eviction strategies)
         for i in 0..5 {
             let key = CacheKey::for_data(i, 0);
-            shard_lru.put_sync(key, Bytes::from(format!("data{i}").into_bytes()));
-            shard_tinyfu.put_sync(key, Bytes::from(format!("data{i}").into_bytes()));
+            assert!(shard_lru.put(key, &Bytes::from(format!("data{i}").into_bytes())));
+            assert!(shard_tinyfu.put(key, &Bytes::from(format!("data{i}").into_bytes())));
         }
         let lru_len = shard_lru.len();
         let tinylfu_len = shard_tinyfu.len();
@@ -709,10 +570,10 @@ mod tests {
         let shard = CacheShard::new(0, CachePolicyType::Lru);
 
         // Act
-        shard.put_sync(CacheKey::for_data(1, 0), Bytes::from(&b"data"[..]));
+        let _ = shard.put(CacheKey::for_data(1, 0), &Bytes::from(&b"data"[..]));
 
-        // Assert (should immediately evict)
-        assert!(shard.is_empty() || shard.len() == 1);
+        // Assert
+        assert!(shard.is_empty());
     }
 
     #[test]
@@ -723,8 +584,8 @@ mod tests {
         let key2 = CacheKey::for_data(2, 0);
 
         // Act
-        shard.put_sync(key1, Bytes::from(&b"12345"[..])); // 5 bytes
-        shard.put_sync(key2, Bytes::from(&b"67890"[..])); // 5 bytes
+        assert!(shard.put(key1, &Bytes::from(&b"12345"[..]))); // 5 bytes
+        assert!(shard.put(key2, &Bytes::from(&b"67890"[..]))); // 5 bytes
         let retrieved = shard.get(&key1);
 
         // Assert - key1 might be evicted
@@ -739,7 +600,7 @@ mod tests {
 
         // Act
         shard.get(&key); // miss
-        shard.put_sync(key, Bytes::from(&b"data"[..]));
+        assert!(shard.put(key, &Bytes::from(&b"data"[..])));
         shard.get(&key); // hit
         shard.get(&key); // hit
         let metrics = shard.metrics();
@@ -750,89 +611,6 @@ mod tests {
     }
 
     #[test]
-    fn should_skip_self_join_when_dropping_on_worker_thread() {
-        // Arrange
-        let _guard = TEST_SHARD_HOOK_LOCK.lock().unwrap();
-        TEST_SELF_JOIN_SKIPPED.store(false, Ordering::SeqCst);
-        TEST_WORKER_BLOCKED.store(false, Ordering::SeqCst);
-        TEST_WORKER_RELEASE.store(false, Ordering::SeqCst);
-        TEST_WORKER_FINISHED.store(false, Ordering::SeqCst);
-
-        let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
-        let key = CacheKey::for_data(42, 0);
-
-        // Act
-        shard.put(key, &Bytes::from_static(TEST_BLOCKING_VALUE));
-
-        let mut attempts = 0;
-        while !TEST_WORKER_BLOCKED.load(Ordering::SeqCst) && attempts < 1000 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            attempts += 1;
-        }
-
-        assert!(TEST_WORKER_BLOCKED.load(Ordering::SeqCst));
-
-        drop(shard);
-        TEST_WORKER_RELEASE.store(true, Ordering::SeqCst);
-
-        attempts = 0;
-        while !TEST_WORKER_FINISHED.load(Ordering::SeqCst) && attempts < 1000 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            attempts += 1;
-        }
-
-        // Assert
-        assert!(TEST_WORKER_FINISHED.load(Ordering::SeqCst));
-
-        attempts = 0;
-        while !TEST_SELF_JOIN_SKIPPED.load(Ordering::SeqCst) && attempts < 1000 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            attempts += 1;
-        }
-
-        assert!(TEST_SELF_JOIN_SKIPPED.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn should_join_worker_thread_when_dropping_on_main_thread() {
-        // Arrange
-        let _guard = TEST_SHARD_HOOK_LOCK.lock().unwrap();
-        TEST_SELF_JOIN_SKIPPED.store(false, Ordering::SeqCst);
-        TEST_WORKER_BLOCKED.store(false, Ordering::SeqCst);
-        TEST_WORKER_RELEASE.store(false, Ordering::SeqCst);
-        TEST_WORKER_FINISHED.store(false, Ordering::SeqCst);
-
-        let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
-        let key = CacheKey::for_data(43, 0);
-
-        // Act
-        shard.put(key, &Bytes::from_static(TEST_BLOCKING_VALUE));
-
-        let mut attempts = 0;
-        while !TEST_WORKER_BLOCKED.load(Ordering::SeqCst) && attempts < 1000 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            attempts += 1;
-        }
-
-        assert!(TEST_WORKER_BLOCKED.load(Ordering::SeqCst));
-
-        TEST_WORKER_RELEASE.store(true, Ordering::SeqCst);
-
-        let mut attempts = 0;
-        while !TEST_WORKER_FINISHED.load(Ordering::SeqCst) && attempts < 1000 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            attempts += 1;
-        }
-
-        // Assert
-        assert!(TEST_WORKER_FINISHED.load(Ordering::SeqCst));
-
-        drop(shard);
-
-        assert!(!TEST_SELF_JOIN_SKIPPED.load(Ordering::SeqCst));
-    }
-
-    #[test]
     fn should_track_eviction_metrics() {
         // Arrange
         let shard = CacheShard::new(50, CachePolicyType::Lru);
@@ -840,7 +618,7 @@ mod tests {
         // Act
         for i in 0..5 {
             let key = CacheKey::for_data(i, 0);
-            shard.put_sync(key, Bytes::from(vec![0u8; 15]));
+            assert!(shard.put(key, &Bytes::from(vec![0u8; 15])));
         }
         let metrics = shard.metrics();
 
