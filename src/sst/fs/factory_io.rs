@@ -179,26 +179,26 @@ impl DynSstWriter for InMemorySstWriter {
         let mut previous_key = Vec::new();
 
         for entry in entries {
-            let encode_entry = |previous_key: &[u8], entry: &PendingEntry| {
-                let shared_len = Self::shared_prefix_len(previous_key, &entry.key);
-                let key_delta = &entry.key[shared_len as usize..];
-                let encoded = crate::sst::encoding::encode_v2(
-                    key_delta,
-                    shared_len,
-                    entry.value.as_deref(),
-                    entry.sequence,
-                    match entry.op_type {
-                        1 => EntryType::Insert,
-                        2 => EntryType::Delete,
-                        3 => EntryType::Merge,
-                        _ => EntryType::Put,
-                    },
-                    entry.expiration,
-                );
-                (shared_len, encoded)
-            };
+            let encode_entry =
+                |previous_key: &[u8], entry: &PendingEntry| -> MidgeResult<Vec<u8>> {
+                    let shared_len = Self::shared_prefix_len(previous_key, &entry.key);
+                    let key_delta = &entry.key[shared_len as usize..];
+                    Ok(crate::sst::encoding::encode_v2(
+                        key_delta,
+                        shared_len,
+                        entry.value.as_deref(),
+                        entry.sequence,
+                        match entry.op_type {
+                            1 => EntryType::Insert,
+                            2 => EntryType::Delete,
+                            3 => EntryType::Merge,
+                            _ => EntryType::Put,
+                        },
+                        entry.expiration,
+                    ))
+                };
 
-            let (_shared_len, mut encoded) = encode_entry(&previous_key, &entry);
+            let mut encoded = encode_entry(&previous_key, &entry)?;
 
             if !current_block.is_empty() && current_block.len() + encoded.len() > target_block_size
             {
@@ -209,9 +209,7 @@ impl DynSstWriter for InMemorySstWriter {
                 }
                 current_block.clear();
                 previous_key.clear();
-                let (_recomputed_shared_len, recomputed_encoded) =
-                    encode_entry(&previous_key, &entry);
-                encoded = recomputed_encoded;
+                encoded = encode_entry(&previous_key, &entry)?;
             }
 
             if current_first_key.is_none() {
@@ -362,6 +360,68 @@ mod tests {
         assert_eq!(reader.range_tombstones()[0].start, b"cat".to_vec());
         assert_eq!(reader.range_tombstones()[0].end, b"cow".to_vec());
 
+        Ok(())
+    }
+
+    #[test]
+    fn should_roundtrip_large_key_when_sst_entry_key_delta_exceeds_inline_limit() -> MidgeResult<()>
+    {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = FsSstFactoryIo::new(fs, 4096);
+        let path = temp_dir.path().join("large-key.sst");
+        let oversized_key = vec![b'k'; 65_536];
+
+        // Act
+        let mut writer = factory.create()?;
+        writer.add_with_meta(&oversized_key, Some(b"value"), 1, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(writer, &path)?;
+        let reader = factory.open(std::path::Path::new("large-key.sst"))?;
+        let states = reader.scan_range_state(None, None)?;
+
+        // Assert
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].0.as_ref(), oversized_key.as_slice());
+        match &states[0].1 {
+            crate::sst::types::KeyState::Value(value, sequence, expiration, op_type) => {
+                assert_eq!(value.as_ref(), b"value");
+                assert_eq!(*sequence, 1);
+                assert_eq!(*expiration, None);
+                assert_eq!(*op_type, 0);
+            }
+            other => panic!("expected value state, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn should_roundtrip_empty_value_when_sst_entry_is_put() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = FsSstFactoryIo::new(fs, 4096);
+        let path = temp_dir.path().join("empty-value.sst");
+
+        // Act
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"empty", Some(b""), 1, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(writer, &path)?;
+        let reader = factory.open(std::path::Path::new("empty-value.sst"))?;
+        let states = reader.scan_range_state(None, None)?;
+
+        // Assert
+        assert_eq!(states.len(), 1);
+        match &states[0].1 {
+            crate::sst::types::KeyState::Value(value, sequence, expiration, op_type) => {
+                assert_eq!(states[0].0.as_ref(), b"empty");
+                assert_eq!(value.as_ref(), b"");
+                assert_eq!(*sequence, 1);
+                assert_eq!(*expiration, None);
+                assert_eq!(*op_type, 0);
+            }
+            other => panic!("expected empty value state, got {other:?}"),
+        }
         Ok(())
     }
 }

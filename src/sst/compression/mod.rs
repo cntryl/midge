@@ -396,13 +396,29 @@ pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult
         }
 
         CompressionAlgo::Zstd3 | CompressionAlgo::Zstd9 => {
-            // Zstd frame header contains the decompressed size; pass a generous
-            // upper-bound capacity as fallback for frames without a content-size
-            // field.  MAX_BLOCK_SIZE is the documented upper limit for a single
-            // block.
-            let decompressed = zstd::bulk::decompress(compressed, MAX_BLOCK_SIZE).map_err(|e| {
-                crate::common::MidgeError::Corruption(format!("Zstd decompression failed: {e}"))
-            })?;
+            // Blocks are normally capped by the target size, but a single SST
+            // entry can be larger than that target and must remain readable.
+            // Frames produced by our zstd compressor include the content size,
+            // so use it as the bound and keep MAX_BLOCK_SIZE as the fallback for
+            // external frames without a declared size.
+            let max_decompressed_size = match zstd::zstd_safe::get_frame_content_size(compressed) {
+                Ok(Some(size)) => usize::try_from(size).map_err(|_| {
+                    crate::common::MidgeError::Corruption(format!(
+                        "Zstd frame content size {size} exceeds addressable memory"
+                    ))
+                })?,
+                Ok(None) => MAX_BLOCK_SIZE,
+                Err(err) => {
+                    return Err(crate::common::MidgeError::Corruption(format!(
+                        "Zstd frame content size unavailable: {err}"
+                    )))
+                }
+            }
+            .max(MAX_BLOCK_SIZE);
+            let decompressed =
+                zstd::bulk::decompress(compressed, max_decompressed_size).map_err(|e| {
+                    crate::common::MidgeError::Corruption(format!("Zstd decompression failed: {e}"))
+                })?;
             Ok(Bytes::from(decompressed))
         }
 

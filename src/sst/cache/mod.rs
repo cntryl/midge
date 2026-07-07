@@ -49,6 +49,7 @@ impl BlockCache {
     /// `policy_type`: Eviction policy
     #[must_use]
     pub fn new(capacity_bytes: u64, num_shards: usize, policy_type: CachePolicyType) -> Self {
+        let num_shards = num_shards.max(1);
         let shard_capacity = capacity_bytes / num_shards as u64;
         let mut shards = Vec::with_capacity(num_shards);
 
@@ -196,6 +197,23 @@ mod tests {
         // Assert
         assert_eq!(cache.num_shards(), 16);
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn should_use_single_shard_when_zero_shards_requested() {
+        // Arrange
+        let cache = BlockCache::new(1024, 0, CachePolicyType::Lru);
+        let key = CacheKey::for_data(1, 0);
+        let value = Bytes::from(&b"data"[..]);
+
+        // Act
+        let inserted = cache.put(key, &value);
+        let retrieved = cache.get(&key);
+
+        // Assert
+        assert!(inserted);
+        assert_eq!(cache.num_shards(), 1);
+        assert!(retrieved.is_some());
     }
 
     #[test]

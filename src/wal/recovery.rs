@@ -72,13 +72,11 @@ pub struct RecoveryStats {
     /// Total nanoseconds spent in overall replay (per call)
     pub total_replay_ns: u128,
 
-    /// Highest writer epoch seen across all replayed WAL records.
-    /// Records with epoch < `max_epoch_seen` are from stale writers and
-    /// are skipped during recovery to prevent zombie writes from
-    /// corrupting the recovered state.
+    /// Highest writer epoch seen across all replayable WAL records.
+    /// Lower-epoch records are skipped when they overlap a newer epoch's
+    /// sequence frontier or appear after a newer epoch in replay order.
     pub max_epoch_seen: u64,
-    /// Number of WAL records skipped because their `writer_epoch` was
-    /// less than the highest epoch observed so far (stale writer).
+    /// Number of WAL records skipped because their `writer_epoch` was stale.
     pub stale_records_skipped: u64,
 }
 
@@ -174,15 +172,17 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
         stats.mark_corruption();
     }
 
-    let result = replay_wal_paths(
-        storage,
-        &replay_paths,
-        &mut stats,
-        memtables,
-        &mut open_txns,
-        &mut begun_txns,
-        &epoch_frontiers,
-    );
+    let result = {
+        let mut replay_state = WalReplayState {
+            stats: &mut stats,
+            memtables,
+            open_txns: &mut open_txns,
+            begun_txns: &mut begun_txns,
+            epoch_frontiers: &epoch_frontiers,
+            replay_ordinal: 0,
+        };
+        replay_wal_paths(storage, &replay_paths, &mut replay_state)
+    };
 
     stats.total_replay_ns = replay_start.elapsed().as_nanos();
 
@@ -275,26 +275,23 @@ fn collect_replay_paths(
     Ok(replay_paths)
 }
 
+struct WalReplayState<'a, S: BuildHasher> {
+    stats: &'a mut RecoveryStats,
+    memtables: &'a mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
+    open_txns: &'a mut std::collections::HashMap<u64, Vec<WalRecord>>,
+    begun_txns: &'a mut std::collections::HashSet<u64>,
+    epoch_frontiers: &'a WriterEpochFrontiers,
+    replay_ordinal: u64,
+}
+
 fn replay_wal_paths<S: BuildHasher>(
     storage: &dyn Storage,
     replay_paths: &[StoragePath],
-    stats: &mut RecoveryStats,
-    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
-    open_txns: &mut std::collections::HashMap<u64, Vec<WalRecord>>,
-    begun_txns: &mut std::collections::HashSet<u64>,
-    epoch_frontiers: &WriterEpochFrontiers,
+    replay_state: &mut WalReplayState<'_, S>,
 ) -> MidgeResult<()> {
     let mut result: MidgeResult<()> = Ok(());
     for file_path in replay_paths {
-        result = replay_wal_file(
-            storage,
-            file_path,
-            stats,
-            memtables,
-            open_txns,
-            begun_txns,
-            epoch_frontiers,
-        );
+        result = replay_wal_file(storage, file_path, replay_state);
         if result.is_err() {
             break;
         }
@@ -306,10 +303,11 @@ fn replay_wal_paths<S: BuildHasher>(
 #[derive(Debug, Default)]
 struct WriterEpochFrontiers {
     first_sequence_by_epoch: std::collections::BTreeMap<u64, u64>,
+    first_ordinal_by_epoch: std::collections::BTreeMap<u64, u64>,
 }
 
 impl WriterEpochFrontiers {
-    fn record(&mut self, record: &WalRecord) {
+    fn record(&mut self, record: &WalRecord, ordinal: u64) {
         if record.writer_epoch == 0 {
             return;
         }
@@ -317,6 +315,10 @@ impl WriterEpochFrontiers {
             .entry(record.writer_epoch)
             .and_modify(|seq| *seq = (*seq).min(record.seq))
             .or_insert(record.seq);
+        self.first_ordinal_by_epoch
+            .entry(record.writer_epoch)
+            .and_modify(|first_ordinal| *first_ordinal = (*first_ordinal).min(ordinal))
+            .or_insert(ordinal);
     }
 
     fn max_epoch_seen(&self) -> u64 {
@@ -327,7 +329,7 @@ impl WriterEpochFrontiers {
             .unwrap_or(0)
     }
 
-    fn is_stale(&self, record: &WalRecord) -> bool {
+    fn is_stale(&self, record: &WalRecord, ordinal: u64) -> bool {
         if record.writer_epoch == 0 {
             return false;
         }
@@ -337,7 +339,13 @@ impl WriterEpochFrontiers {
                 std::ops::Bound::Excluded(record.writer_epoch),
                 std::ops::Bound::Unbounded,
             ))
-            .any(|(_epoch, first_seq)| record.seq >= *first_seq)
+            .any(|(epoch, first_seq)| {
+                record.seq >= *first_seq
+                    || self
+                        .first_ordinal_by_epoch
+                        .get(epoch)
+                        .is_some_and(|first_ordinal| *first_ordinal < ordinal)
+            })
     }
 }
 
@@ -348,6 +356,7 @@ fn discover_writer_epoch_frontiers(
 ) -> MidgeResult<(WriterEpochFrontiers, bool)> {
     let mut frontiers = WriterEpochFrontiers::default();
     let mut had_corruption = false;
+    let mut ordinal = 0_u64;
 
     for file_path in replay_paths {
         let mut pos = 0_u64;
@@ -361,7 +370,8 @@ fn discover_writer_epoch_frontiers(
             match read_next_wal_frame(&*file, file_path, pos, &mut file_read_ns) {
                 Ok(NextWalFrame::Eof) => break,
                 Ok(NextWalFrame::Frame(frame)) => {
-                    frontiers.record(&frame.record);
+                    frontiers.record(&frame.record, ordinal);
+                    ordinal = ordinal.saturating_add(1);
                     pos = frame.next_pos;
                 }
                 Err(MidgeError::Corruption(error)) if is_salvageable_tail_corruption(&error) => {
@@ -389,11 +399,7 @@ fn discover_writer_epoch_frontiers(
 fn replay_wal_file<S: BuildHasher>(
     storage: &dyn Storage,
     file_path: &StoragePath,
-    stats: &mut RecoveryStats,
-    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
-    open_txns: &mut std::collections::HashMap<u64, Vec<WalRecord>>,
-    begun_txns: &mut std::collections::HashSet<u64>,
-    epoch_frontiers: &WriterEpochFrontiers,
+    replay_state: &mut WalReplayState<'_, S>,
 ) -> MidgeResult<()> {
     let mut pos: u64 = 0;
     let mut file_read_ns: u128 = 0;
@@ -401,7 +407,12 @@ fn replay_wal_file<S: BuildHasher>(
 
     loop {
         let Some(file) = open_wal_replay_file(storage, file_path, &mut file_read_ns)? else {
-            finalize_wal_file_replay(stats, file_path, file_read_ns, file_apply_ns);
+            finalize_wal_file_replay(
+                &mut *replay_state.stats,
+                file_path,
+                file_read_ns,
+                file_apply_ns,
+            );
             return Ok(());
         };
 
@@ -409,22 +420,29 @@ fn replay_wal_file<S: BuildHasher>(
             NextWalFrame::Eof => break,
             NextWalFrame::Frame(frame) => {
                 let next_pos = frame.next_pos;
+                let record_ordinal = replay_state.replay_ordinal;
                 let mut apply_ctx = WalReplayApplyContext {
                     file_path,
-                    stats,
-                    memtables,
-                    open_txns,
-                    begun_txns,
-                    epoch_frontiers,
+                    stats: &mut *replay_state.stats,
+                    memtables: &mut *replay_state.memtables,
+                    open_txns: &mut *replay_state.open_txns,
+                    begun_txns: &mut *replay_state.begun_txns,
+                    epoch_frontiers: replay_state.epoch_frontiers,
                     file_apply_ns: &mut file_apply_ns,
                 };
-                apply_replayed_wal_record(frame.record, pos, &mut apply_ctx)?;
+                apply_replayed_wal_record(frame.record, pos, record_ordinal, &mut apply_ctx)?;
+                replay_state.replay_ordinal = replay_state.replay_ordinal.saturating_add(1);
                 pos = next_pos;
             }
         }
     }
 
-    finalize_wal_file_replay(stats, file_path, file_read_ns, file_apply_ns);
+    finalize_wal_file_replay(
+        &mut *replay_state.stats,
+        file_path,
+        file_read_ns,
+        file_apply_ns,
+    );
     Ok(())
 }
 
@@ -562,14 +580,16 @@ fn read_wal_frame_payload(
 fn apply_replayed_wal_record<S: BuildHasher>(
     record: WalRecord,
     pos: u64,
+    record_ordinal: u64,
     ctx: &mut WalReplayApplyContext<'_, S>,
 ) -> MidgeResult<()> {
-    if ctx.epoch_frontiers.is_stale(&record) {
+    if ctx.epoch_frontiers.is_stale(&record, record_ordinal) {
         ctx.stats.stale_records_skipped += 1;
         tracing::warn!(
             epoch = record.writer_epoch,
             max_epoch = ctx.stats.max_epoch_seen,
             seq = record.seq,
+            ordinal = record_ordinal,
             op = ?record.op,
             pos = pos,
             file = %ctx.file_path,
@@ -1835,5 +1855,67 @@ mod tests {
             Some(b"v2".to_vec())
         );
         assert_eq!(memtables[&0].get(b"stale-first").unwrap(), None);
+    }
+
+    #[test]
+    fn should_skip_lower_epoch_record_when_seen_after_fresh_epoch_with_lower_sequence() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = LocalFsStorage::new(dir.path()).unwrap();
+        let wal_dir = StoragePath::new("wal");
+
+        {
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
+
+            let valid_old_epoch = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"valid-old-epoch"),
+                Some(Bytes::from_static(b"v1")),
+                1,
+                1,
+            );
+            writer.append_record(&valid_old_epoch).unwrap();
+
+            let fresh_epoch = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"fresh-epoch"),
+                Some(Bytes::from_static(b"v2")),
+                10,
+                2,
+            );
+            writer.append_record(&fresh_epoch).unwrap();
+
+            let stale_lower_sequence = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"zombie-low-seq"),
+                Some(Bytes::from_static(b"stale")),
+                2,
+                1,
+            );
+            writer.append_record(&stale_lower_sequence).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let mut memtables = HashMap::new();
+
+        // Act
+        let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        assert_eq!(stats.max_epoch_seen, 2);
+        assert_eq!(stats.record_count, 2);
+        assert_eq!(stats.stale_records_skipped, 1);
+        assert_eq!(
+            memtables[&0].get(b"valid-old-epoch").unwrap(),
+            Some(b"v1".to_vec())
+        );
+        assert_eq!(
+            memtables[&0].get(b"fresh-epoch").unwrap(),
+            Some(b"v2".to_vec())
+        );
+        assert_eq!(memtables[&0].get(b"zombie-low-seq").unwrap(), None);
     }
 }
