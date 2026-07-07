@@ -89,7 +89,7 @@ pub trait CloudSigner: Send + Sync {
 pub struct CloudExecutor {
     client: Client,
     signer: Option<Arc<dyn CloudSigner>>,
-    rt: Arc<tokio::runtime::Runtime>,
+    rt: Option<Arc<tokio::runtime::Runtime>>,
 }
 
 impl CloudExecutor {
@@ -105,7 +105,7 @@ impl CloudExecutor {
         Ok(Self {
             client: Client::new(),
             signer,
-            rt: Arc::new(rt),
+            rt: Some(Arc::new(rt)),
         })
     }
 
@@ -134,7 +134,18 @@ impl CloudExecutor {
 
         let client = self.client.clone();
 
-        self.rt.spawn(async move {
+        let Some(rt) = self.rt.as_ref() else {
+            let event = mapper(
+                context,
+                Err(MidgeError::Internal(
+                    "cloud executor runtime is shut down".to_string(),
+                )),
+            );
+            let _ = callback.send(event);
+            return;
+        };
+
+        rt.spawn(async move {
             let result = Self::execute_request(client, request).await;
 
             let event = mapper(context, result);
@@ -159,7 +170,18 @@ impl CloudExecutor {
         let client = self.client.clone();
         let signer = self.signer.clone();
 
-        self.rt.spawn(async move {
+        let Some(rt) = self.rt.as_ref() else {
+            let event = finish(
+                context,
+                Err(MidgeError::Internal(
+                    "cloud executor runtime is shut down".to_string(),
+                )),
+            );
+            let _ = callback.send(event);
+            return;
+        };
+
+        rt.spawn(async move {
             let mut state = initial_state;
             let result = loop {
                 let mut request = match make_request(&state) {
@@ -226,15 +248,9 @@ impl Drop for CloudExecutor {
     fn drop(&mut self) {
         // Try to get exclusive ownership of the runtime for explicit shutdown
         // If we can't (multiple references exist), the runtime will cleanup naturally
-        let rt_arc = std::mem::replace(
-            &mut self.rt,
-            Arc::new(
-                tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(1)
-                    .build()
-                    .expect("Failed to create placeholder runtime"),
-            ),
-        );
+        let Some(rt_arc) = self.rt.take() else {
+            return;
+        };
 
         if let Ok(rt) = Arc::try_unwrap(rt_arc) {
             // We have exclusive ownership - perform explicit shutdown with timeout

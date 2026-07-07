@@ -153,8 +153,6 @@ pub struct Transaction {
     runtime_handle: RuntimeHandle,
     coordinator: Arc<IngestCoordinator>,
     sequence_publisher: Arc<AtomicU64>,
-    /// Unique transaction ID
-    id: u64,
     /// Column family this transaction is bound to
     cf_id: ColumnFamilyId,
     /// Transaction mode (`ReadOnly` or `ReadWrite`)
@@ -169,13 +167,49 @@ pub struct Transaction {
     read_snapshot: Option<Arc<crate::runtime::ReadSnapshot>>,
     /// True when opened against cloud-backed storage.
     cloud_mode: bool,
-    /// Whether this transaction is currently registered as an active snapshot.
-    snapshot_registered: bool,
+    /// Owns the active snapshot registration for this transaction.
+    snapshot_pin: SnapshotPinGuard,
 }
 
 enum WriteSetLookup {
     Present(Vec<u8>),
     Deleted,
+}
+
+struct SnapshotPinGuard {
+    runtime_handle: RuntimeHandle,
+    snapshot_id: u64,
+    active: bool,
+}
+
+impl SnapshotPinGuard {
+    #[must_use]
+    fn new(runtime_handle: RuntimeHandle, snapshot_id: u64) -> Self {
+        Self {
+            runtime_handle,
+            snapshot_id,
+            active: true,
+        }
+    }
+
+    fn unregister(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+
+        let _ = self
+            .runtime_handle
+            .unregister_snapshot_pin(self.snapshot_id);
+        crate::diagnostics::record_snapshot_unregister();
+        self.active = false;
+        true
+    }
+}
+
+impl Drop for SnapshotPinGuard {
+    fn drop(&mut self) {
+        let _ = self.unregister();
+    }
 }
 
 struct CommitTiming {
@@ -248,11 +282,11 @@ pub(crate) struct TransactionInit {
 impl Transaction {
     /// Create a new transaction with the given ID and mode.
     pub(crate) fn new(init: TransactionInit) -> Self {
+        let runtime_handle = init.runtime_handle;
         Self {
-            runtime_handle: init.runtime_handle,
+            runtime_handle: runtime_handle.clone(),
             coordinator: init.coordinator,
             sequence_publisher: init.sequence_publisher,
-            id: init.id,
             cf_id: init.cf_id,
             mode: init.mode,
             isolation_level: IsolationLevel::LastWriteWins,
@@ -260,7 +294,7 @@ impl Transaction {
             start_sequence: init.start_sequence,
             read_snapshot: init.read_snapshot,
             cloud_mode: init.cloud_mode,
-            snapshot_registered: true,
+            snapshot_pin: SnapshotPinGuard::new(runtime_handle, init.id),
         }
     }
 
@@ -453,13 +487,7 @@ impl Transaction {
     }
 
     pub(crate) fn unregister_snapshot(&mut self) {
-        if !self.snapshot_registered {
-            return;
-        }
-
-        let _ = self.runtime_handle.unregister_snapshot_pin(self.id);
-        crate::diagnostics::record_snapshot_unregister();
-        self.snapshot_registered = false;
+        let _ = self.snapshot_pin.unregister();
     }
 
     #[must_use]

@@ -20,7 +20,7 @@ Midge spawns background threads for various subsystems. Understanding the thread
 
 | Component | Threads | Purpose | Spawn Condition |
 |-----------|---------|---------|-----------------|
-| BlockCache (per instance) | 16 | Cache admission workers (1 per shard) | Always |
+| BlockCache (per instance) | 0 | Synchronous shard admission; no worker threads | Always |
 | WAL Writer | 1 | Background write coalescing | Always |
 | Compaction Runtime | 4 | Parallel compaction jobs | Configurable |
 | Metadata Writer | 1 | Manifest persistence | Always |
@@ -41,6 +41,10 @@ let engine3 = Engine::open(opts3)?;  // +30 threads
 When thread spawn fails (typically from OS resource exhaustion), Midge falls back to inline processing:
 
 **BlockCache Admission:**
+
+Block cache admission is synchronous. Point-read cache insertion and eviction
+complete before `put()` returns; range-scan paths bypass insertion for scan
+resistance. The cache no longer owns admission worker threads.
 ```rust
 // Normal: Background worker processes admission queue
 cache.put(key, value);  // Enqueues to admission worker
@@ -57,7 +61,7 @@ Use `engine.get_runtime_metrics()?`, `engine.get_read_amp_metrics()?`, and `engi
 All background threads are explicitly joined on `Drop` with generous timeouts to prevent resource leaks:
 
 **Cleanup Timeouts:**
-- BlockCache workers: 30 seconds
+- BlockCache admission: synchronous; no worker threads to drain
 - WAL writer: 30 seconds
 
 If a thread doesn't join within the timeout, a warning is logged but the Drop continues to prevent hangs.
@@ -159,7 +163,7 @@ When resources are constrained, Midge degrades gracefully:
 
 | Component | Normal Performance | Degraded Performance | Correctness |
 |-----------|-------------------|---------------------|-------------|
-| BlockCache | Async admission, <1µs put() | Inline admission, ~1-5µs put() | ✅ Preserved |
+| BlockCache | Synchronous admission | More inline eviction work | ✅ Preserved |
 
 **Scenario: Memory Pressure**
 

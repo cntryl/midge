@@ -61,7 +61,7 @@ impl SnapshotPinRegistry {
                     snapshot_id,
                     age_secs = age.as_secs(),
                     max_secs = max_lifetime.as_secs(),
-                    "Long-lived snapshot exceeds max lifetime (should be auto-closed)"
+                    "Long-lived snapshot exceeds max lifetime; retaining pin until transaction closes"
                 );
             }
             pinned.extend(snapshot.pinned_ssts.iter().cloned());
@@ -81,29 +81,24 @@ impl SnapshotPinRegistry {
             .max()
     }
 
-    pub(crate) fn evict_timed_out(&self, max_lifetime: Duration) -> usize {
+    pub(crate) fn warn_timed_out(&self, max_lifetime: Duration) -> usize {
         let now = Instant::now();
-        let timed_out_ids = self
-            .active
-            .iter()
-            .filter_map(|entry| {
-                let snapshot = entry.value();
-                (now.duration_since(snapshot.created_at) > max_lifetime).then_some(*entry.key())
-            })
-            .collect::<Vec<_>>();
-
-        let mut evicted = 0usize;
-        for snapshot_id in timed_out_ids {
-            if self.active.remove(&snapshot_id).is_some() {
-                evicted += 1;
+        let mut timed_out = 0usize;
+        for entry in &self.active {
+            let snapshot_id = *entry.key();
+            let snapshot = entry.value();
+            let age = now.duration_since(snapshot.created_at);
+            if age > max_lifetime {
+                timed_out += 1;
                 tracing::warn!(
                     snapshot_id,
+                    age_secs = age.as_secs(),
                     max_secs = max_lifetime.as_secs(),
-                    "Evicted timed-out snapshot"
+                    "Long-lived snapshot exceeds max lifetime; retaining pin until transaction closes"
                 );
             }
         }
-        evicted
+        timed_out
     }
 
     pub(crate) fn snapshots(&self, now: Instant) -> Vec<SnapshotPinSnapshot> {
@@ -173,5 +168,23 @@ mod tests {
         assert!(removed);
         assert_eq!(registry.active_count(), 0);
         assert!(registry.pinned_sst_names(Duration::from_mins(1)).is_empty());
+    }
+
+    #[test]
+    fn should_retain_timed_out_snapshot_pin_until_unregister() {
+        // Arrange
+        let registry = SnapshotPinRegistry::default();
+        assert!(registry.register(7, 42, vec!["a.sst".to_string()]));
+        std::thread::sleep(Duration::from_millis(1));
+
+        // Act
+        let timed_out = registry.warn_timed_out(Duration::from_millis(0));
+
+        // Assert
+        assert_eq!(timed_out, 1);
+        assert_eq!(registry.active_count(), 1);
+        assert_eq!(registry.oldest_sequence(), Some(42));
+        let pinned = registry.pinned_sst_names(Duration::from_mins(1));
+        assert!(pinned.contains("a.sst"));
     }
 }

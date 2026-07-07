@@ -1,4 +1,4 @@
-//! Single cache shard with lock-free reads and synchronized writes
+//! Single cache shard with concurrent reads and synchronized writes
 
 use crate::sst::cache::key::{BlockType, CacheKey};
 use crate::sst::cache::metrics::CacheMetrics;
@@ -10,13 +10,13 @@ use std::convert::TryFrom;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// A single cache shard (partition) with lock-free access
+/// A single cache shard (partition) with concurrent access
 ///
 /// Contains a portion of the cache entries using `DashMap` for concurrent access,
 /// with its own eviction policy and metrics. Insertion and eviction happen
 /// synchronously before `put` returns.
 pub struct CacheShard {
-    /// Map of cache key -> value (lock-free concurrent hashmap)
+    /// Map of cache key -> value.
     entries: DashMap<CacheKey, CacheValue>,
     /// Eviction policy
     policy: Box<dyn CachePolicy>,
@@ -46,7 +46,10 @@ impl CacheShard {
         })
     }
 
-    /// Get a cached value (lock-free)
+    /// Get a cached value.
+    ///
+    /// The entry lookup is concurrent. Policy and metrics updates may use their
+    /// own internal synchronization.
     pub fn get(&self, key: &CacheKey) -> Option<CacheValue> {
         if let Some(value_ref) = self.entries.get(key) {
             let value = value_ref.value().clone();

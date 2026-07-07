@@ -1930,17 +1930,14 @@ impl RuntimeState {
             .pinned_sst_names(self.snapshots.max_snapshot_lifetime)
     }
 
-    /// Remove snapshots that exceeded max lifetime and return the number evicted.
-    pub fn evict_timed_out_snapshots(&mut self) -> usize {
-        let timed_out_count = self
-            .snapshot_pins
-            .evict_timed_out(self.snapshots.max_snapshot_lifetime);
-
-        if timed_out_count > 0 {
-            self.prune_recent_delete_ranges_by_snapshot_horizon();
-        }
-
-        timed_out_count
+    /// Warn about snapshots that exceeded max lifetime and return the number observed.
+    ///
+    /// Timed-out snapshots remain pinned until the owning transaction unregisters.
+    /// Retaining data is safer than allowing compaction or GC to invalidate a live
+    /// transaction snapshot.
+    pub fn warn_timed_out_snapshots(&self) -> usize {
+        self.snapshot_pins
+            .warn_timed_out(self.snapshots.max_snapshot_lifetime)
     }
 
     /// Return the oldest active snapshot sequence, if any snapshots are pinned.
@@ -2482,19 +2479,22 @@ mod tests {
     }
 
     #[test]
-    fn should_evict_timed_out_snapshots_when_enforcement_runs() {
+    fn should_retain_timed_out_snapshots_when_enforcement_runs() {
         // Arrange
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
         state.snapshots.max_snapshot_lifetime = std::time::Duration::from_millis(0);
         assert!(state.register_snapshot(1, 10, vec!["001.sst".to_string()]));
         assert_eq!(state.snapshot_pins.active_count(), 1);
+        std::thread::sleep(std::time::Duration::from_millis(1));
 
         // Act
-        let evicted = state.evict_timed_out_snapshots();
+        let timed_out = state.warn_timed_out_snapshots();
 
         // Assert
-        assert_eq!(evicted, 1);
-        assert_eq!(state.snapshot_pins.active_count(), 0);
+        assert_eq!(timed_out, 1);
+        assert_eq!(state.snapshot_pins.active_count(), 1);
+        assert_eq!(state.oldest_active_snapshot_sequence(), Some(10));
+        assert!(state.get_pinned_sst_names().contains("001.sst"));
     }
 
     #[test]
@@ -2505,10 +2505,10 @@ mod tests {
         assert!(state.register_snapshot(2, 11, vec!["002.sst".to_string()]));
 
         // Act
-        let evicted = state.evict_timed_out_snapshots();
+        let timed_out = state.warn_timed_out_snapshots();
 
         // Assert
-        assert_eq!(evicted, 0);
+        assert_eq!(timed_out, 0);
         assert_eq!(state.snapshot_pins.active_count(), 1);
     }
 

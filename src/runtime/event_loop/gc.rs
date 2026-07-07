@@ -5,9 +5,12 @@ pub(super) struct GcCoordinator;
 
 impl GcCoordinator {
     pub(super) fn check(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
-        let evicted = event_loop.state.evict_timed_out_snapshots();
-        if evicted > 0 {
-            tracing::warn!(evicted, "Evicted timed-out snapshots before GC check");
+        let timed_out = event_loop.state.warn_timed_out_snapshots();
+        if timed_out > 0 {
+            tracing::warn!(
+                timed_out,
+                "Observed timed-out snapshots before GC check; retaining pins"
+            );
         }
 
         crate::runtime::actors::GcActor::check(&event_loop.state);

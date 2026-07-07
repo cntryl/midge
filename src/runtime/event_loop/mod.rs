@@ -398,12 +398,12 @@ impl EventLoop {
         &mut self,
         operation: &str,
     ) -> crate::common::MidgeResult<bool> {
-        let evicted = self.state.evict_timed_out_snapshots();
-        if evicted > 0 {
+        let timed_out = self.state.warn_timed_out_snapshots();
+        if timed_out > 0 {
             tracing::warn!(
-                evicted,
+                timed_out,
                 operation,
-                "Evicted timed-out snapshots before compaction check"
+                "Observed timed-out snapshots before compaction check; retaining pins"
             );
         }
 

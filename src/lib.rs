@@ -18,32 +18,42 @@
 //! # Public API Surface
 //!
 //! Only types re-exported at the bottom of this file are intended to be
-//! stable for external consumption. Internal modules are hidden by default.
+//! stable for external consumption. Some implementation modules remain public
+//! during the 0.x series for integration tests and diagnostics, but they are
+//! not stable API and may change without compatibility guarantees.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 // Foundation - no dependencies
+#[doc(hidden)]
 pub mod common;
+#[doc(hidden)]
 pub mod config;
+#[doc(hidden)]
 pub mod types;
 
 // Internal modules used by engine/runtime.
 mod compaction;
 mod diagnostics;
+#[doc(hidden)]
 pub mod handler;
 #[cfg(test)]
 pub mod io;
 #[cfg(not(test))]
 mod io;
+#[doc(hidden)]
 pub mod iterators;
 mod lease;
+#[doc(hidden)]
 pub mod message;
 mod metadata;
 mod runtime;
+#[doc(hidden)]
 pub mod sst;
 mod storage;
 mod telemetry;
+#[doc(hidden)]
 pub mod wal;
 
 // Main engine (canonical public API — re-exported below)

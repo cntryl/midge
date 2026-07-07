@@ -31,7 +31,7 @@ let tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite)?;
 let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly)?;
 ```
 
-`begin_tx` starts with a fast-path read from a lock-free `ArcSwap`-backed `SnapshotCache` (published by the event loop after every write), then registers the snapshot with the runtime so compaction and GC can respect it. The returned `Transaction` stores:
+`begin_tx` starts with a fast-path read from a lock-free `ArcSwap`-backed `SnapshotCache` (published by the event loop after every write), then registers the snapshot with the runtime so compaction and GC can respect it. The returned `Transaction` owns a snapshot-pin guard that unregisters on commit, rollback, or drop, and stores:
 
 - `start_sequence: u64` — the global sequence at load time. Used as the read horizon.
 - `read_snapshot: Arc<ReadSnapshot>` — `Arc` references to the current active memtable, immutable memtables, and a `Vec<FileMeta>` cloned from the manifest.
@@ -168,6 +168,8 @@ A `ReadWrite` transaction provides the same read guarantee but offers no protect
 ### Long snapshots and compaction
 
 Transactions are registered as active snapshots on `begin_tx` and unregistered on commit, rollback, or drop. Compaction reads `oldest_active_snapshot_sequence()` and keeps tombstones newer than that horizon. GC also skips SSTs pinned by active snapshots. A long-lived `ReadOnly` transaction can therefore increase retention pressure while it remains open.
+
+The snapshot lifetime threshold is an observability and pressure signal, not an automatic eviction boundary. Timed-out snapshots continue to pin their SST files until the owning `Transaction` unregisters, because retaining old files is safer than invalidating a live point-in-time read.
 
 ---
 

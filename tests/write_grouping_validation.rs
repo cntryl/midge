@@ -62,7 +62,7 @@ fn should_group_concurrent_batch_submissions_when_multiple_threads_submit() {
     }
 
     println!(
-        "âœ“ Write grouping: {} ops from {} threads in {:.3}s, {:.0} ops/sec",
+        "OK: Write grouping: {} ops from {} threads in {:.3}s, {:.0} ops/sec",
         total_ops,
         num_threads,
         elapsed.as_secs_f64(),
@@ -122,7 +122,7 @@ fn should_handle_concurrent_writes_correctly_with_write_grouping() {
         f64::from(u32::try_from(total_ops).expect("test operation count fits in u32"));
     let throughput = total_ops_f64 / elapsed.as_secs_f64();
     println!(
-        "âœ“ Write grouping with backpressure: {total_ops} ops from {num_threads} threads, {throughput:.0} ops/sec"
+        "OK: Write grouping with backpressure: {total_ops} ops from {num_threads} threads, {throughput:.0} ops/sec"
     );
 }
 
@@ -171,5 +171,5 @@ fn should_maintain_ordering_with_write_grouping() {
         );
     }
 
-    println!("âœ“ Ordering maintained across {num_sequential_ops} sequential operations");
+    println!("OK: Ordering maintained across {num_sequential_ops} sequential operations");
 }

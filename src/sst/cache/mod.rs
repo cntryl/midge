@@ -103,6 +103,7 @@ impl BlockCache {
     }
 
     /// Remove all cached blocks belonging to one SST.
+    #[must_use]
     pub fn remove_sst(&self, sst_id: u64) -> usize {
         self.shards
             .iter()

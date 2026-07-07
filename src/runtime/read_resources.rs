@@ -106,7 +106,7 @@ impl ReadResources {
             drop(readers);
 
             for sst_id in stale_sst_ids {
-                self.block_cache.remove_sst(sst_id);
+                let _ = self.block_cache.remove_sst(sst_id);
             }
         }
     }

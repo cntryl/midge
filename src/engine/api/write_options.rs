@@ -114,7 +114,7 @@ impl WriteOptions {
     /// - Sync → Strict (fsync after every write)
     /// - Buffered → Batched (periodic fsync)
     /// - `BestEffort` → `BestEffort` (skip WAL entirely)
-    /// - `CloudStrict` → `CloudAsync` (wait for cloud durability)
+    /// - `CloudStrict` → `CloudAsync` (local apply plus explicit cloud ack wait in commit)
     pub(crate) fn to_wal_durability_policy(self) -> crate::wal::DurabilityPolicy {
         match self.policy {
             DurabilityPolicy::Sync => crate::wal::DurabilityPolicy::Strict,

@@ -151,11 +151,13 @@ Use `best_effort()` only for data that can be rebuilt or safely discarded.
 
 `cloud_strict()` is valid only for cloud-backed storage. Non-cloud storage rejects it with `MidgeError::InvalidArgument`.
 
-For a cloud-backed transaction with writes, `commit()` returns only after the runtime seals and rotates the active WAL segment, uploads that sealed WAL segment, and receives cloud acknowledgment covering the committed sequence.
+For a cloud-backed transaction with writes, `commit()` submits the transaction to the local runtime first, then returns only after the runtime seals and rotates the active WAL segment, uploads that sealed WAL segment, and receives cloud acknowledgment covering the committed sequence.
+
+The transaction may become visible to concurrent readers after local runtime apply and before the committing caller receives the cloud acknowledgment. `cloud_strict()` delays the caller's return until cloud durability is proven; it does not delay local publication until that return point.
 
 At return:
 
-- the transaction is visible
+- the transaction has been atomically published locally
 - the transaction is covered by the cloud durability frontier
 - restart after local cache loss should recover the transaction from uploaded WAL or already-published SST state
 
