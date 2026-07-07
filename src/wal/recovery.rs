@@ -165,63 +165,24 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
 
     tracing::info!(dir = %wal_dir, "starting wal replay");
 
-    // Collect replay files: rotated segments first, then wal.log.
-    let mut segment_files: std::collections::BTreeMap<u64, (String, StoragePath)> =
-        std::collections::BTreeMap::new();
-    let mut wal_log_path: Option<StoragePath> = None;
-
-    let entries = match storage.list_dir(wal_dir) {
-        Ok(v) => v,
-        Err(e) if e.kind == StorageErrorKind::NotFound => return Ok(stats),
-        Err(e) => return Err(map_storage_error(e)),
-    };
-
-    for entry in entries {
-        if entry.is_dir {
-            continue;
-        }
-        let file_name = entry.name;
-        if file_name == crate::wal::ACTIVE_FILE_NAME {
-            wal_log_path = Some(join(wal_dir, crate::wal::ACTIVE_FILE_NAME));
-            continue;
-        }
-
-        if let Some(segment_id) = crate::wal::parse_segment_id(&file_name) {
-            let prefer_candidate =
-                segment_files
-                    .get(&segment_id)
-                    .is_none_or(|(existing_name, _)| {
-                        existing_name != &crate::wal::cloud_segment_file_name(segment_id)
-                            && file_name == crate::wal::cloud_segment_file_name(segment_id)
-                    });
-
-            if prefer_candidate {
-                segment_files.insert(segment_id, (file_name.clone(), join(wal_dir, &file_name)));
-            }
-        }
+    let replay_paths = collect_replay_paths(storage, wal_dir)?;
+    let (epoch_frontiers, max_epoch_scan_had_corruption) =
+        discover_writer_epoch_frontiers(storage, &replay_paths, replay_policy)?;
+    let max_epoch_seen = epoch_frontiers.max_epoch_seen();
+    stats.max_epoch_seen = max_epoch_seen;
+    if max_epoch_scan_had_corruption {
+        stats.mark_corruption();
     }
 
-    let mut replay_paths: Vec<StoragePath> =
-        segment_files.into_iter().map(|(_, (_, p))| p).collect();
-    if let Some(wal_log) = wal_log_path {
-        replay_paths.push(wal_log);
-    }
-
-    // Replay each file in order.
-    let mut result: MidgeResult<()> = Ok(());
-    for file_path in replay_paths {
-        result = replay_wal_file(
-            storage,
-            &file_path,
-            &mut stats,
-            memtables,
-            &mut open_txns,
-            &mut begun_txns,
-        );
-        if result.is_err() {
-            break;
-        }
-    }
+    let result = replay_wal_paths(
+        storage,
+        &replay_paths,
+        &mut stats,
+        memtables,
+        &mut open_txns,
+        &mut begun_txns,
+        &epoch_frontiers,
+    );
 
     stats.total_replay_ns = replay_start.elapsed().as_nanos();
 
@@ -266,6 +227,165 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
     }
 }
 
+fn collect_replay_paths(
+    storage: &dyn Storage,
+    wal_dir: &StoragePath,
+) -> MidgeResult<Vec<StoragePath>> {
+    let mut segment_files: std::collections::BTreeMap<u64, (String, StoragePath)> =
+        std::collections::BTreeMap::new();
+    let mut wal_log_path: Option<StoragePath> = None;
+
+    let entries = match storage.list_dir(wal_dir) {
+        Ok(v) => v,
+        Err(e) if e.kind == StorageErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(map_storage_error(e)),
+    };
+
+    for entry in entries {
+        if entry.is_dir {
+            continue;
+        }
+        let file_name = entry.name;
+        if file_name == crate::wal::ACTIVE_FILE_NAME {
+            wal_log_path = Some(join(wal_dir, crate::wal::ACTIVE_FILE_NAME));
+            continue;
+        }
+
+        if let Some(segment_id) = crate::wal::parse_segment_id(&file_name) {
+            let prefer_candidate =
+                segment_files
+                    .get(&segment_id)
+                    .is_none_or(|(existing_name, _)| {
+                        existing_name != &crate::wal::cloud_segment_file_name(segment_id)
+                            && file_name == crate::wal::cloud_segment_file_name(segment_id)
+                    });
+
+            if prefer_candidate {
+                segment_files.insert(segment_id, (file_name.clone(), join(wal_dir, &file_name)));
+            }
+        }
+    }
+
+    let mut replay_paths: Vec<StoragePath> =
+        segment_files.into_iter().map(|(_, (_, p))| p).collect();
+    if let Some(wal_log) = wal_log_path {
+        replay_paths.push(wal_log);
+    }
+
+    Ok(replay_paths)
+}
+
+fn replay_wal_paths<S: BuildHasher>(
+    storage: &dyn Storage,
+    replay_paths: &[StoragePath],
+    stats: &mut RecoveryStats,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
+    open_txns: &mut std::collections::HashMap<u64, Vec<WalRecord>>,
+    begun_txns: &mut std::collections::HashSet<u64>,
+    epoch_frontiers: &WriterEpochFrontiers,
+) -> MidgeResult<()> {
+    let mut result: MidgeResult<()> = Ok(());
+    for file_path in replay_paths {
+        result = replay_wal_file(
+            storage,
+            file_path,
+            stats,
+            memtables,
+            open_txns,
+            begun_txns,
+            epoch_frontiers,
+        );
+        if result.is_err() {
+            break;
+        }
+    }
+
+    result
+}
+
+#[derive(Debug, Default)]
+struct WriterEpochFrontiers {
+    first_sequence_by_epoch: std::collections::BTreeMap<u64, u64>,
+}
+
+impl WriterEpochFrontiers {
+    fn record(&mut self, record: &WalRecord) {
+        if record.writer_epoch == 0 {
+            return;
+        }
+        self.first_sequence_by_epoch
+            .entry(record.writer_epoch)
+            .and_modify(|seq| *seq = (*seq).min(record.seq))
+            .or_insert(record.seq);
+    }
+
+    fn max_epoch_seen(&self) -> u64 {
+        self.first_sequence_by_epoch
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn is_stale(&self, record: &WalRecord) -> bool {
+        if record.writer_epoch == 0 {
+            return false;
+        }
+
+        self.first_sequence_by_epoch
+            .range((
+                std::ops::Bound::Excluded(record.writer_epoch),
+                std::ops::Bound::Unbounded,
+            ))
+            .any(|(_epoch, first_seq)| record.seq >= *first_seq)
+    }
+}
+
+fn discover_writer_epoch_frontiers(
+    storage: &dyn Storage,
+    replay_paths: &[StoragePath],
+    replay_policy: ReplayPolicy,
+) -> MidgeResult<(WriterEpochFrontiers, bool)> {
+    let mut frontiers = WriterEpochFrontiers::default();
+    let mut had_corruption = false;
+
+    for file_path in replay_paths {
+        let mut pos = 0_u64;
+        let mut file_read_ns = 0_u128;
+
+        loop {
+            let Some(file) = open_wal_replay_file(storage, file_path, &mut file_read_ns)? else {
+                break;
+            };
+
+            match read_next_wal_frame(&*file, file_path, pos, &mut file_read_ns) {
+                Ok(NextWalFrame::Eof) => break,
+                Ok(NextWalFrame::Frame(frame)) => {
+                    frontiers.record(&frame.record);
+                    pos = frame.next_pos;
+                }
+                Err(MidgeError::Corruption(error)) if is_salvageable_tail_corruption(&error) => {
+                    return Ok((frontiers, had_corruption));
+                }
+                Err(MidgeError::Corruption(error))
+                    if replay_policy == ReplayPolicy::SalvageValidPrefix =>
+                {
+                    had_corruption = true;
+                    tracing::warn!(
+                        path = %file_path,
+                        error = %error,
+                        "stopped writer epoch discovery at corrupt WAL prefix boundary"
+                    );
+                    return Ok((frontiers, had_corruption));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    Ok((frontiers, had_corruption))
+}
+
 fn replay_wal_file<S: BuildHasher>(
     storage: &dyn Storage,
     file_path: &StoragePath,
@@ -273,6 +393,7 @@ fn replay_wal_file<S: BuildHasher>(
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     open_txns: &mut std::collections::HashMap<u64, Vec<WalRecord>>,
     begun_txns: &mut std::collections::HashSet<u64>,
+    epoch_frontiers: &WriterEpochFrontiers,
 ) -> MidgeResult<()> {
     let mut pos: u64 = 0;
     let mut file_read_ns: u128 = 0;
@@ -294,6 +415,7 @@ fn replay_wal_file<S: BuildHasher>(
                     memtables,
                     open_txns,
                     begun_txns,
+                    epoch_frontiers,
                     file_apply_ns: &mut file_apply_ns,
                 };
                 apply_replayed_wal_record(frame.record, pos, &mut apply_ctx)?;
@@ -317,6 +439,7 @@ struct WalReplayApplyContext<'a, S: BuildHasher> {
     memtables: &'a mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     open_txns: &'a mut std::collections::HashMap<u64, Vec<WalRecord>>,
     begun_txns: &'a mut std::collections::HashSet<u64>,
+    epoch_frontiers: &'a WriterEpochFrontiers,
     file_apply_ns: &'a mut u128,
 }
 
@@ -441,12 +564,7 @@ fn apply_replayed_wal_record<S: BuildHasher>(
     pos: u64,
     ctx: &mut WalReplayApplyContext<'_, S>,
 ) -> MidgeResult<()> {
-    ctx.stats.record(&record);
-
-    if record.writer_epoch > ctx.stats.max_epoch_seen {
-        ctx.stats.max_epoch_seen = record.writer_epoch;
-    }
-    if record.writer_epoch > 0 && record.writer_epoch < ctx.stats.max_epoch_seen {
+    if ctx.epoch_frontiers.is_stale(&record) {
         ctx.stats.stale_records_skipped += 1;
         tracing::warn!(
             epoch = record.writer_epoch,
@@ -459,6 +577,8 @@ fn apply_replayed_wal_record<S: BuildHasher>(
         );
         return Ok(());
     }
+
+    ctx.stats.record(&record);
 
     match record.op {
         WalOpKind::TxnBatch => {
@@ -1667,5 +1787,53 @@ mod tests {
         assert_eq!(stats.stale_records_skipped, 1);
         assert_eq!(memtables[&0].get(b"fresh").unwrap(), Some(b"v2".to_vec()));
         assert_eq!(memtables[&0].get(b"stale").unwrap(), None);
+    }
+
+    #[test]
+    fn should_skip_stale_writer_epoch_records_seen_before_fresh_epoch() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = LocalFsStorage::new(dir.path()).unwrap();
+        let wal_dir = StoragePath::new("wal");
+
+        {
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
+
+            let stale = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"stale-first"),
+                Some(Bytes::from_static(b"v1")),
+                3,
+                1,
+            );
+            writer.append_record(&stale).unwrap();
+
+            let fresh = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"fresh-second"),
+                Some(Bytes::from_static(b"v2")),
+                2,
+                2,
+            );
+            writer.append_record(&fresh).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let mut memtables = HashMap::new();
+
+        // Act
+        let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        assert_eq!(stats.max_epoch_seen, 2);
+        assert_eq!(stats.stale_records_skipped, 1);
+        assert_eq!(
+            memtables[&0].get(b"fresh-second").unwrap(),
+            Some(b"v2".to_vec())
+        );
+        assert_eq!(memtables[&0].get(b"stale-first").unwrap(), None);
     }
 }

@@ -172,7 +172,7 @@ impl EventLoop {
         seq: u64,
     ) -> Option<Vec<u8>> {
         self.create_read_snapshot(cf_id)
-            .and_then(|snapshot| snapshot.get(key, seq))
+            .and_then(|snapshot| snapshot.get(key, seq).ok().flatten())
     }
 
     /// Range scan: iterate keys in [start, end) from memtables and SSTs
@@ -185,7 +185,7 @@ impl EventLoop {
         snapshot_seq: u64,
     ) -> Vec<(Vec<u8>, Vec<u8>)> {
         self.create_read_snapshot(cf_id)
-            .map(|snapshot| snapshot.range_scan(start, end, snapshot_seq))
+            .and_then(|snapshot| snapshot.range_scan(start, end, snapshot_seq).ok())
             .unwrap_or_default()
     }
 }

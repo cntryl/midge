@@ -166,6 +166,21 @@ impl RuntimeState {
         self.total_memtable_bytes >= self.memtable_flush_threshold.saturating_mul(2)
     }
 
+    pub(crate) fn recompute_total_memtable_bytes(&mut self) {
+        self.total_memtable_bytes = self
+            .column_families
+            .values()
+            .map(|cf_state| {
+                cf_state.memtable.size_bytes()
+                    + cf_state
+                        .immutable_memtables
+                        .iter()
+                        .map(|memtable| memtable.size_bytes())
+                        .sum::<usize>()
+            })
+            .sum();
+    }
+
     /// Check whether writes must be rejected until runtime pressure clears.
     ///
     /// This intentionally excludes active memtable size: active memtable pressure
@@ -2276,6 +2291,34 @@ mod tests {
         assert!(state.is_total_memtable_hard_limit_exceeded());
         assert!(state.should_hard_stall_writes(0));
         assert!(state.has_any_hard_write_stall());
+    }
+
+    #[test]
+    fn should_recompute_total_memtable_bytes_from_all_memtables() {
+        // Arrange
+        let mut state = RuntimeState::new(isolated_test_db_path(), false);
+        let immutable = Arc::new(SkipListMemtable::new());
+        immutable
+            .put_with_seq(b"immutable".to_vec(), b"value".to_vec(), 1, None)
+            .expect("seed immutable memtable");
+        {
+            let cf = state.get_cf_mut(0).expect("default cf");
+            cf.memtable
+                .put_with_seq(b"active".to_vec(), b"value".to_vec(), 2, None)
+                .expect("seed active memtable");
+            cf.immutable_memtables.push(Arc::clone(&immutable));
+        }
+        state.total_memtable_bytes = usize::MAX;
+
+        // Act
+        state.recompute_total_memtable_bytes();
+
+        // Assert
+        let cf = state.get_cf(0).expect("default cf");
+        assert_eq!(
+            state.total_memtable_bytes,
+            cf.memtable.size_bytes() + immutable.size_bytes()
+        );
     }
 
     #[test]

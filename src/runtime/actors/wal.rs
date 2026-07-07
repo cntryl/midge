@@ -1269,7 +1269,7 @@ impl WalActor {
                         continue;
                     }
 
-                    if let Some(latest_seq) = Self::latest_key_sequence(state, *cf_id, key) {
+                    if let Some(latest_seq) = Self::latest_key_sequence(state, *cf_id, key)? {
                         if latest_seq > start_sequence {
                             Self::record_write_conflict_point();
                             return Err(MidgeError::WriteConflict(format!(
@@ -1299,7 +1299,7 @@ impl WalActor {
                         *cf_id,
                         start_key.as_ref(),
                         end_key.as_ref(),
-                    ) {
+                    )? {
                         if latest_seq > start_sequence {
                             Self::record_write_conflict_range();
                             return Err(MidgeError::WriteConflict(format!(
@@ -1331,8 +1331,10 @@ impl WalActor {
         state: &RuntimeState,
         cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
-    ) -> Option<u64> {
-        let cf_state = state.column_families.get(&cf_id)?;
+    ) -> MidgeResult<Option<u64>> {
+        let Some(cf_state) = state.column_families.get(&cf_id) else {
+            return Ok(None);
+        };
         let sst_files: Vec<_> = state
             .manifest
             .files
@@ -1364,8 +1366,10 @@ impl WalActor {
         cf_id: crate::types::ColumnFamilyId,
         start_key: &[u8],
         end_key: &[u8],
-    ) -> Option<u64> {
-        let cf_state = state.column_families.get(&cf_id)?;
+    ) -> MidgeResult<Option<u64>> {
+        let Some(cf_state) = state.column_families.get(&cf_id) else {
+            return Ok(None);
+        };
         let sst_files: Vec<_> = state
             .manifest
             .files
@@ -1570,8 +1574,7 @@ impl WalActor {
             if prev == 0 && new > 0 {
                 cf_state.active_memtable_started_in_segment = current_segment_id;
             }
-            let delta = new.saturating_sub(prev);
-            state.total_memtable_bytes = state.total_memtable_bytes.saturating_add(delta);
+            state.recompute_total_memtable_bytes();
         }
         Ok(())
     }
@@ -1595,8 +1598,7 @@ impl WalActor {
             if prev == 0 && new > 0 {
                 cf_state.active_memtable_started_in_segment = current_segment_id;
             }
-            let delta = new.saturating_sub(prev);
-            state.total_memtable_bytes = state.total_memtable_bytes.saturating_add(delta);
+            state.recompute_total_memtable_bytes();
         }
         state.record_delete_range(cf_id, start_key, end_key, sequence);
         Ok(())

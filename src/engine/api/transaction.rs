@@ -540,7 +540,7 @@ impl Transaction {
         let snapshot = self.read_snapshot.as_ref().ok_or_else(|| {
             MidgeError::Internal("read snapshot not available - this is a bug".to_string())
         })?;
-        let value = snapshot.get(key, self.start_sequence);
+        let value = snapshot.get(key, self.start_sequence)?;
         Ok(value.map(bytes::Bytes::from))
     }
 
@@ -569,7 +569,7 @@ impl Transaction {
             MidgeError::Internal("read snapshot not available - this is a bug".to_string())
         })?;
         let base_results = snapshot
-            .range_scan(start, end, self.start_sequence)
+            .range_scan(start, end, self.start_sequence)?
             .into_iter()
             .map(|(k, v)| (bytes::Bytes::from(k), bytes::Bytes::from(v)))
             .collect::<Vec<_>>();

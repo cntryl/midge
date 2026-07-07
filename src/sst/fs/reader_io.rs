@@ -353,7 +353,7 @@ impl SstFileIo {
         }
 
         let raw = &buffer[4..4 + len];
-        Ok(Self::decompress_raw_block(raw))
+        Self::decompress_raw_block(raw, self.uses_block_trailers())
     }
 
     /// Decompress a raw block payload, stripping the block trailer if present.
@@ -361,20 +361,30 @@ impl SstFileIo {
     /// Blocks with a valid trailer (`[data][algo:u8][crc32c:u32]`) are verified
     /// and decompressed.  Legacy blocks without a trailer (pre-v1.0.0) are
     /// returned as-is for backward compatibility.
-    fn decompress_raw_block(raw: &[u8]) -> bytes::Bytes {
+    fn uses_block_trailers(&self) -> bool {
+        self.footer
+            .as_ref()
+            .is_some_and(|footer| footer.meta_index_handle.size > 0)
+    }
+
+    fn decompress_raw_block(raw: &[u8], strict_trailer: bool) -> MidgeResult<bytes::Bytes> {
         use crate::sst::compression;
 
         // A block must be at least BLOCK_TRAILER_SIZE bytes to contain a
         // trailer.  Shorter payloads are legacy / uncompressed.
         if raw.len() < compression::BLOCK_TRAILER_SIZE {
-            return bytes::Bytes::copy_from_slice(raw);
+            if strict_trailer {
+                return Err(MidgeError::Corruption(
+                    "current-format SST block too short for trailer".into(),
+                ));
+            }
+            return Ok(bytes::Bytes::copy_from_slice(raw));
         }
 
-        // Attempt trailer-based decompression.  If the CRC check fails this
-        // may be a legacy block without a trailer so fall back to raw bytes.
         match compression::decompress_block_with_trailer(raw) {
-            Ok(decompressed) => decompressed,
-            Err(_) => bytes::Bytes::copy_from_slice(raw),
+            Ok(decompressed) => Ok(decompressed),
+            Err(error) if strict_trailer => Err(error),
+            Err(_) => Ok(bytes::Bytes::copy_from_slice(raw)),
         }
     }
 
@@ -424,6 +434,7 @@ impl SstFileIo {
 
         // Extract individual blocks from the buffer
         let mut result = Vec::with_capacity(handles.len());
+        let strict_trailer = self.uses_block_trailers();
         for handle in handles {
             // Compute offset within the buffer
             let buf_offset = usize::try_from(handle.offset - read_start).map_err(|_| {
@@ -459,7 +470,7 @@ impl SstFileIo {
             }
 
             let raw = &block_slice[4..4 + len];
-            result.push(Self::decompress_raw_block(raw));
+            result.push(Self::decompress_raw_block(raw, strict_trailer)?);
         }
 
         Ok(result)
@@ -1280,6 +1291,50 @@ mod tests {
         assert!(matches!(old_dead, KeyState::Value(_, 4, _, _)));
         assert_eq!(deleted_dead, KeyState::Tombstone(9));
         assert_eq!(expired, KeyState::Tombstone(11));
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_current_format_block_with_crc_mismatch() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"crc-key", Some(b"crc-value"), 7, 0, None)?;
+        let path = temp_dir.path().join("crc.sst");
+        crate::sst::fs::finish_writer_to_path(writer, &path)?;
+
+        {
+            use std::io::{Read, Seek, Write};
+
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)?;
+            file.seek(std::io::SeekFrom::Start(4))?;
+            let mut byte = [0_u8; 1];
+            file.read_exact(&mut byte)?;
+            file.seek(std::io::SeekFrom::Start(4))?;
+            file.write_all(&[byte[0] ^ 0x01])?;
+            file.sync_all()?;
+        }
+
+        let reader = SstFileIo::open(
+            "crc.sst",
+            Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        )?;
+
+        // Act
+        let error = reader
+            .get_state_at(b"crc-key", u64::MAX)
+            .expect_err("current-format SST blocks must enforce CRC");
+
+        // Assert
+        assert!(
+            error.to_string().contains("CRC32C mismatch"),
+            "expected CRC mismatch error, got {error}"
+        );
         Ok(())
     }
 }

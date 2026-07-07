@@ -3,6 +3,7 @@
 //! Captures immutable references to memtables and SST metadata
 //! at a specific sequence number, allowing safe parallel reads.
 
+use crate::common::MidgeResult;
 use crate::io::Fs;
 use crate::metadata::FileMeta;
 use crate::runtime::read_resources::ReadResources;
@@ -209,18 +210,16 @@ impl ReadSnapshot {
     }
 
     /// Perform a point read on this snapshot
-    pub fn get(&self, key: &[u8], seq: u64) -> Option<Vec<u8>> {
+    pub fn get(&self, key: &[u8], seq: u64) -> MidgeResult<Option<Vec<u8>>> {
         let mut best_state = None;
         let mut range_tombstones = Vec::new();
 
-        if let Ok(state) = self.memtable.get_key_state_at(key, seq) {
-            Self::merge_best_state(&mut best_state, state);
-        }
+        let state = self.memtable.get_key_state_at(key, seq)?;
+        Self::merge_best_state(&mut best_state, state);
 
         for imm in &self.immutable_memtables {
-            if let Ok(state) = imm.get_key_state_at(key, seq) {
-                Self::merge_best_state(&mut best_state, state);
-            }
+            let state = imm.get_key_state_at(key, seq)?;
+            Self::merge_best_state(&mut best_state, state);
         }
 
         if !self.memory_mode {
@@ -236,49 +235,45 @@ impl ReadSnapshot {
                 file_meta.record_read();
                 crate::sst::read_path_metrics::global_sst_read_metrics()
                     .record_candidate_sst_file_checked();
-                if let Ok(reader) = self.sst_reader(file_meta) {
-                    if let Ok(state) = reader.get_state_at(key, seq) {
-                        Self::merge_best_state(&mut best_state, state);
-                    }
+                let reader = self.sst_reader(file_meta)?;
+                let state = reader.get_state_at(key, seq)?;
+                Self::merge_best_state(&mut best_state, state);
 
-                    crate::sst::read_path_metrics::global_sst_read_metrics()
-                        .record_range_tombstone_scan();
-                    range_tombstones.extend(reader.range_tombstones().into_iter().filter(
-                        |tombstone| {
-                            (seq == u64::MAX || tombstone.seq <= seq) && tombstone.covers(key)
-                        },
-                    ));
-                }
+                crate::sst::read_path_metrics::global_sst_read_metrics()
+                    .record_range_tombstone_scan();
+                range_tombstones.extend(reader.range_tombstones().into_iter().filter(
+                    |tombstone| (seq == u64::MAX || tombstone.seq <= seq) && tombstone.covers(key),
+                ));
             }
         }
 
-        let state = best_state?;
+        let Some(state) = best_state else {
+            return Ok(None);
+        };
         if Self::range_tombstone_covers_state(&range_tombstones, key, &state) {
-            return None;
+            return Ok(None);
         }
 
-        match state {
+        Ok(match state {
             KeyState::Value(value, _, exp, _) if !Self::is_expired(exp) => Some(value.to_vec()),
             _ => None,
-        }
+        })
     }
 
     /// Return the latest sequence touching `key` across memtables + SSTs.
     ///
     /// Includes tombstones and range tombstones so conflict detection can
     /// identify any write after a transaction start snapshot.
-    pub fn latest_state_sequence(&self, key: &[u8]) -> Option<u64> {
+    pub fn latest_state_sequence(&self, key: &[u8]) -> MidgeResult<Option<u64>> {
         let mut best_state = None;
         let mut range_tombstones = Vec::new();
 
-        if let Ok(state) = self.memtable.get_key_state_at(key, u64::MAX) {
-            Self::merge_best_state(&mut best_state, state);
-        }
+        let state = self.memtable.get_key_state_at(key, u64::MAX)?;
+        Self::merge_best_state(&mut best_state, state);
 
         for imm in &self.immutable_memtables {
-            if let Ok(state) = imm.get_key_state_at(key, u64::MAX) {
-                Self::merge_best_state(&mut best_state, state);
-            }
+            let state = imm.get_key_state_at(key, u64::MAX)?;
+            Self::merge_best_state(&mut best_state, state);
         }
 
         if !self.memory_mode {
@@ -291,18 +286,16 @@ impl ReadSnapshot {
                     }
                 }
 
-                if let Ok(reader) = self.sst_reader(file_meta) {
-                    if let Ok(state) = reader.get_state_at(key, u64::MAX) {
-                        Self::merge_best_state(&mut best_state, state);
-                    }
+                let reader = self.sst_reader(file_meta)?;
+                let state = reader.get_state_at(key, u64::MAX)?;
+                Self::merge_best_state(&mut best_state, state);
 
-                    range_tombstones.extend(
-                        reader
-                            .range_tombstones()
-                            .into_iter()
-                            .filter(|tombstone| tombstone.covers(key)),
-                    );
-                }
+                range_tombstones.extend(
+                    reader
+                        .range_tombstones()
+                        .into_iter()
+                        .filter(|tombstone| tombstone.covers(key)),
+                );
             }
         }
 
@@ -314,16 +307,16 @@ impl ReadSnapshot {
         let max_seq = state_seq.max(range_tombstone_seq);
 
         if max_seq == 0 {
-            None
+            Ok(None)
         } else {
-            Some(max_seq)
+            Ok(Some(max_seq))
         }
     }
 
     /// Return the latest sequence touching any key in [start, end).
     ///
     /// Includes value/tombstone state and overlapping range tombstones.
-    pub fn latest_sequence_in_range(&self, start: &[u8], end: &[u8]) -> Option<u64> {
+    pub fn latest_sequence_in_range(&self, start: &[u8], end: &[u8]) -> MidgeResult<Option<u64>> {
         let start_opt = if start.is_empty() { None } else { Some(start) };
         let end_opt = if end.is_empty() { None } else { Some(end) };
 
@@ -355,33 +348,36 @@ impl ReadSnapshot {
                     }
                 }
 
-                if let Ok(reader) = self.sst_reader(file_meta) {
-                    if let Ok(entries) = reader.scan_range_state(start_opt, end_opt) {
-                        for (_key, state) in entries {
-                            if let Some(seq) = Self::state_sequence(&state) {
-                                max_seq = max_seq.max(seq);
-                            }
-                        }
+                let reader = self.sst_reader(file_meta)?;
+                let entries = reader.scan_range_state(start_opt, end_opt)?;
+                for (_key, state) in entries {
+                    if let Some(seq) = Self::state_sequence(&state) {
+                        max_seq = max_seq.max(seq);
                     }
+                }
 
-                    for tombstone in reader.range_tombstones() {
-                        if Self::range_tombstone_overlaps_query(&tombstone, start_opt, end_opt) {
-                            max_seq = max_seq.max(tombstone.seq);
-                        }
+                for tombstone in reader.range_tombstones() {
+                    if Self::range_tombstone_overlaps_query(&tombstone, start_opt, end_opt) {
+                        max_seq = max_seq.max(tombstone.seq);
                     }
                 }
             }
         }
 
         if max_seq == 0 {
-            None
+            Ok(None)
         } else {
-            Some(max_seq)
+            Ok(Some(max_seq))
         }
     }
 
     /// Perform a range scan on this snapshot
-    pub fn range_scan(&self, start: &[u8], end: &[u8], seq: u64) -> Vec<(Vec<u8>, Vec<u8>)> {
+    pub fn range_scan(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        seq: u64,
+    ) -> MidgeResult<Vec<(Vec<u8>, Vec<u8>)>> {
         let mut states: BTreeMap<Vec<u8>, KeyState> = BTreeMap::new();
         let mut range_tombstones = Vec::new();
 
@@ -412,28 +408,24 @@ impl ReadSnapshot {
                 }
 
                 file_meta.record_read();
-                if let Ok(reader) = self.sst_reader(file_meta) {
-                    if let Ok(entries) = reader.scan_range_state(start_opt, end_opt) {
-                        for (key, state) in entries {
-                            if Self::is_visible_state(&state, seq) {
-                                Self::merge_state(&mut states, key.to_vec(), state);
-                            }
-                        }
+                let reader = self.sst_reader(file_meta)?;
+                let entries = reader.scan_range_state(start_opt, end_opt)?;
+                for (key, state) in entries {
+                    if Self::is_visible_state(&state, seq) {
+                        Self::merge_state(&mut states, key.to_vec(), state);
                     }
-
-                    range_tombstones.extend(reader.range_tombstones().into_iter().filter(
-                        |tombstone| {
-                            (seq == u64::MAX || tombstone.seq <= seq)
-                                && Self::range_tombstone_overlaps_query(
-                                    tombstone, start_opt, end_opt,
-                                )
-                        },
-                    ));
                 }
+
+                range_tombstones.extend(reader.range_tombstones().into_iter().filter(
+                    |tombstone| {
+                        (seq == u64::MAX || tombstone.seq <= seq)
+                            && Self::range_tombstone_overlaps_query(tombstone, start_opt, end_opt)
+                    },
+                ));
             }
         }
 
-        states
+        Ok(states
             .into_iter()
             .filter_map(|(key, state)| {
                 if Self::range_tombstone_covers_state(&range_tombstones, &key, &state) {
@@ -447,7 +439,7 @@ impl ReadSnapshot {
                     _ => None,
                 }
             })
-            .collect()
+            .collect())
     }
 }
 
@@ -521,8 +513,8 @@ mod tests {
         let hits_after = block_cache.metrics().hit_count();
 
         // Assert
-        assert_eq!(first, Some(b"cache-value".to_vec()));
-        assert_eq!(second, Some(b"cache-value".to_vec()));
+        assert_eq!(first?, Some(b"cache-value".to_vec()));
+        assert_eq!(second?, Some(b"cache-value".to_vec()));
         assert!(
             hits_after > hits_before,
             "second snapshot read should hit shared block cache"
