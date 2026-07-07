@@ -618,38 +618,6 @@ impl S3Config {
         }
     }
 
-    /// Create config for Wasabi
-    pub fn wasabi(bucket: String, region: &str) -> Self {
-        Self {
-            bucket,
-            region: region.to_string(),
-            endpoint: Some(format!("https://s3.{region}.wasabisys.com")),
-            path_style: false,
-        }
-    }
-
-    /// Create config for `MinIO`
-    pub fn minio(bucket: String, endpoint: String) -> Self {
-        Self {
-            bucket,
-            region: "us-east-1".to_string(),
-            endpoint: Some(endpoint),
-            path_style: true,
-        }
-    }
-
-    /// Create config for OCI S3 compatibility
-    pub fn oci_s3_compat(bucket: String, namespace: &str, region: &str) -> Self {
-        Self {
-            bucket,
-            region: region.to_string(),
-            endpoint: Some(format!(
-                "https://{namespace}.compat.objectstorage.{region}.oraclecloud.com"
-            )),
-            path_style: false,
-        }
-    }
-
     /// Create config for custom S3-compatible endpoint
     pub fn custom(bucket: String, region: String, endpoint: String, path_style: bool) -> Self {
         Self {
@@ -683,61 +651,6 @@ impl S3Provider {
         let config = S3Config::aws(bucket, region.clone());
         let signer: Arc<dyn CloudSigner> = Arc::new(SigV4Signer::new_default_chain(region));
         Self::with_signer(config, Some(signer))
-    }
-
-    /// Create provider for Wasabi (simple access key/secret)
-    #[cfg(test)]
-    pub fn wasabi(
-        bucket: String,
-        region: String,
-        access_key: String,
-        secret_key: String,
-    ) -> MidgeResult<Self> {
-        let config = S3Config::wasabi(bucket, &region);
-        let creds = AwsCredentials {
-            access_key,
-            secret_key,
-            region,
-            session_token: None,
-        };
-        Self::with_config(config, Some(creds))
-    }
-
-    /// Create provider for `MinIO` (access key/secret)
-    #[cfg(test)]
-    pub fn minio(
-        bucket: String,
-        endpoint: String,
-        access_key: String,
-        secret_key: String,
-    ) -> MidgeResult<Self> {
-        let config = S3Config::minio(bucket, endpoint);
-        let creds = AwsCredentials {
-            access_key,
-            secret_key,
-            region: "us-east-1".to_string(),
-            session_token: None,
-        };
-        Self::with_config(config, Some(creds))
-    }
-
-    /// Create provider for OCI S3 compatibility
-    #[cfg(test)]
-    pub fn oci_s3_compat(
-        bucket: String,
-        namespace: &str,
-        region: String,
-        access_key: String,
-        secret_key: String,
-    ) -> MidgeResult<Self> {
-        let config = S3Config::oci_s3_compat(bucket, namespace, &region);
-        let creds = AwsCredentials {
-            access_key,
-            secret_key,
-            region,
-            session_token: None,
-        };
-        Self::with_config(config, Some(creds))
     }
 
     /// Create provider with custom S3-compatible endpoint
@@ -1365,36 +1278,22 @@ mod tests {
     }
 
     #[test]
-    fn should_create_compatibility_provider_constructors() {
+    fn should_create_s3_provider_constructors() {
         // Arrange
         let creds = AwsCredentials::new("access".into(), "secret".into(), "us-east-1".into());
+        let custom_config = S3Config::custom(
+            "custom-bucket".into(),
+            "us-east-1".into(),
+            "http://localhost:9000".into(),
+            true,
+        );
 
         // Act
         let providers = vec![
             S3Provider::new("aws-bucket".into(), "us-east-1".into(), creds)
                 .expect("create legacy aws provider"),
-            S3Provider::wasabi(
-                "wasabi-bucket".into(),
-                "us-east-1".into(),
-                "access".into(),
-                "secret".into(),
-            )
-            .expect("create wasabi provider"),
-            S3Provider::minio(
-                "minio-bucket".into(),
-                "http://localhost:9000".into(),
-                "access".into(),
-                "secret".into(),
-            )
-            .expect("create minio provider"),
-            S3Provider::oci_s3_compat(
-                "oci-bucket".into(),
-                "namespace",
-                "us-phoenix-1".into(),
-                "access".into(),
-                "secret".into(),
-            )
-            .expect("create oci provider"),
+            S3Provider::custom(custom_config, "access".into(), "secret".into())
+                .expect("create custom provider"),
         ];
 
         // Assert

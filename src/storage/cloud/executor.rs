@@ -1,43 +1,11 @@
-//
-// == ARCHITECTURE RULES: CLOUD EXECUTOR ==
-//
-// You MUST implement CloudExecutor as a fully self-contained async engine.
-//
-// Requirements:
-// 1. CloudExecutor MUST embed its own multi-threaded Tokio runtime:
-//      let rt = tokio::runtime::Builder::new_multi_thread()
-//          .worker_threads(4)  // Prevents single-thread starvation
-//          .enable_all()
-//          .build()
-//          .unwrap();
-//
-// 2. spawn_request MUST execute inside that runtime using rt.spawn().
-//    NEVER call tokio::spawn directly, because Midge runtime is synchronous.
-//
-// 3. Every cloud request MUST eventually produce a CloudEvent,
-//    either CloudAck or CloudFail. Dropped futures are forbidden.
-//
-// 4. All HTTP calls MUST use reqwest::Client inside the executor runtime.
-//    If signer is present, call signer.sign(request) BEFORE dispatch.
-//
-// 5. CloudResponse MUST include:
-//      - status code
-//      - headers
-//      - full body bytes
-//
-// 6. Errors MUST be mapped to MidgeError::Internal with full context.
-//
-// 7. CloudExecutor is thread-safe and MUST NOT block the Midge runtime thread.
-//
-// 8. No request may outlive the executor. All pending tasks must complete.
-//
-// FOLLOW THESE RULES EXACTLY.
-
 use crate::common::{MidgeError, MidgeResult};
 use crate::storage::cloud::{CloudCallback, CloudEvent};
 use reqwest::{Client, Method};
 use std::sync::Arc;
 use std::time::Duration;
+
+const MAX_TRANSIENT_RETRIES: u32 = 3;
+const TRANSIENT_BACKOFF_BASE_MS: u64 = 50;
 
 /// Represents a generic HTTP request issued by cloud providers.
 #[derive(Clone)]
@@ -213,6 +181,38 @@ impl CloudExecutor {
     }
 
     async fn execute_request(client: Client, request: CloudRequest) -> MidgeResult<CloudResponse> {
+        let mut attempt = 0u32;
+        loop {
+            match Self::execute_request_once(client.clone(), request.clone()).await {
+                Ok(response) if Self::is_transient_status(response.status) => {
+                    if attempt >= MAX_TRANSIENT_RETRIES {
+                        return Ok(response);
+                    }
+                    tokio::time::sleep(Self::retry_delay(attempt)).await;
+                    attempt += 1;
+                }
+                Ok(response) => return Ok(response),
+                Err(error) if error.transient && attempt < MAX_TRANSIENT_RETRIES => {
+                    tokio::time::sleep(Self::retry_delay(attempt)).await;
+                    attempt += 1;
+                }
+                Err(error) => return Err(MidgeError::Internal(error.message)),
+            }
+        }
+    }
+
+    fn retry_delay(attempt: u32) -> Duration {
+        Duration::from_millis(TRANSIENT_BACKOFF_BASE_MS.saturating_mul(1u64 << attempt.min(4)))
+    }
+
+    fn is_transient_status(status: u16) -> bool {
+        matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504)
+    }
+
+    async fn execute_request_once(
+        client: Client,
+        request: CloudRequest,
+    ) -> Result<CloudResponse, RequestError> {
         let mut builder = client.request(request.method.clone(), &request.url);
         for (k, v) in &request.headers {
             builder = builder.header(k, v);
@@ -236,10 +236,33 @@ impl CloudExecutor {
                         headers,
                         body: bytes.to_vec(),
                     }),
-                    Err(err) => Err(MidgeError::Internal(format!("cloud body error: {err}"))),
+                    Err(err) => Err(RequestError::permanent(format!("cloud body error: {err}"))),
                 }
             }
-            Err(err) => Err(MidgeError::Internal(format!("cloud request failed: {err}"))),
+            Err(err) => Err(RequestError::from_reqwest(&err)),
+        }
+    }
+}
+
+struct RequestError {
+    transient: bool,
+    message: String,
+}
+
+impl RequestError {
+    fn permanent(message: String) -> Self {
+        Self {
+            transient: false,
+            message,
+        }
+    }
+
+    fn from_reqwest(error: &reqwest::Error) -> Self {
+        let transient =
+            error.is_timeout() || error.is_connect() || error.is_request() || error.is_body();
+        Self {
+            transient,
+            message: format!("cloud request failed: {error}"),
         }
     }
 }

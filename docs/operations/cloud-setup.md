@@ -130,21 +130,27 @@ let engine = Engine::open(
 # Ok::<(), cntryl_midge::MidgeError>(())
 ```
 
-For explicit access keys and vendor helpers:
+For explicit access keys and provider-specific endpoints, use `S3Compatible` directly:
 
 ```rust
-let minio = CloudProviderConfig::minio_static(
+let minio = CloudProviderConfig::s3_compatible_static(
     "midge-dev",
     "http://127.0.0.1:9000",
     "minioadmin",
     "minioadmin",
 );
-let wasabi = CloudProviderConfig::wasabi("midge-prod", "us-east-1");
-let oci = CloudProviderConfig::oci_s3_compatible(
-    "oci-namespace",
+let wasabi = CloudProviderConfig::s3_compatible_env(
     "midge-prod",
-    "us-phoenix-1",
-);
+    "https://s3.us-east-1.wasabisys.com",
+)
+.with_s3_region("us-east-1")?;
+let oci = CloudProviderConfig::s3_compatible_env(
+    "midge-prod",
+    "https://oci-namespace.compat.objectstorage.us-phoenix-1.oraclecloud.com",
+)
+.with_s3_region("us-phoenix-1")?
+.with_path_style(false)?;
+# Ok::<(), cntryl_midge::MidgeError>(())
 ```
 
 ### Azure Blob

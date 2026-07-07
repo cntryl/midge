@@ -215,6 +215,22 @@ pub fn open_with_mode(opts: &MidgeOptions, _mode: &str) -> Engine {
     Engine::open(opts.to_open_options()).expect("failed to open engine")
 }
 
+pub fn buffered_write_options(mode: &str) -> WriteOptions {
+    if mode == "cloud" {
+        WriteOptions::cloud_async()
+    } else {
+        WriteOptions::buffered()
+    }
+}
+
+pub fn sync_write_options(mode: &str) -> WriteOptions {
+    if mode == "cloud" {
+        WriteOptions::cloud_strict()
+    } else {
+        WriteOptions::sync()
+    }
+}
+
 pub struct DurabilityTestContext {
     _private: (),
 }

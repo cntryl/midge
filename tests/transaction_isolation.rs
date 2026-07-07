@@ -90,8 +90,8 @@ fn should_allow_dirty_write_given_uncommitted_update_when_serialized() {
             .unwrap();
         txn2.put(b"key".to_vec(), b"value2".to_vec(), None).unwrap();
 
-        txn1.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
-        txn2.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        txn1.commit(buffered_write_options(mode)).unwrap();
+        txn2.commit(buffered_write_options(mode)).unwrap();
 
         // Assert - last write wins
         let read_tx = engine
@@ -164,9 +164,7 @@ fn should_read_latest_committed_value_given_new_reader_after_concurrent_write() 
         setup_tx
             .put(b"key".to_vec(), b"initial".to_vec(), None)
             .unwrap();
-        setup_tx
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        setup_tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         let mut concurrent_tx = engine
@@ -175,9 +173,7 @@ fn should_read_latest_committed_value_given_new_reader_after_concurrent_write() 
         concurrent_tx
             .put(b"key".to_vec(), b"updated".to_vec(), None)
             .unwrap();
-        concurrent_tx
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        concurrent_tx.commit(buffered_write_options(mode)).unwrap();
 
         let read_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -199,9 +195,7 @@ fn should_return_old_value_given_snapshot_before_write_when_reading() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         setup_tx.put(b"key".to_vec(), b"v1".to_vec(), None).unwrap();
-        setup_tx
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        setup_tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act - transaction captures snapshot at start
         let snap_tx = engine
@@ -215,9 +209,7 @@ fn should_return_old_value_given_snapshot_before_write_when_reading() {
         update_tx
             .put(b"key".to_vec(), b"v2".to_vec(), None)
             .unwrap();
-        update_tx
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        update_tx.commit(buffered_write_options(mode)).unwrap();
 
         // Assert - new transaction sees updated value
         let current_tx = engine
@@ -248,9 +240,7 @@ fn should_allow_commit_given_read_key_modified_when_concurrent_write() {
         setup_tx
             .put(b"key".to_vec(), b"initial".to_vec(), None)
             .unwrap();
-        setup_tx
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        setup_tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         let txn = engine
@@ -268,12 +258,10 @@ fn should_allow_commit_given_read_key_modified_when_concurrent_write() {
         concurrent_tx
             .put(b"key".to_vec(), b"concurrent".to_vec(), None)
             .unwrap();
-        concurrent_tx
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        concurrent_tx.commit(buffered_write_options(mode)).unwrap();
 
         // Transaction commit should succeed (LWW semantics)
-        let result = txn.commit(cntryl_midge::WriteOptions::buffered());
+        let result = txn.commit(buffered_write_options(mode));
 
         // Assert
         assert!(result.is_ok());
@@ -292,9 +280,7 @@ fn should_allow_put_commit_given_read_key_modified_when_concurrent_write() {
         setup_tx
             .put(b"key".to_vec(), b"initial".to_vec(), None)
             .unwrap();
-        setup_tx
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        setup_tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         let mut txn = engine
@@ -312,14 +298,12 @@ fn should_allow_put_commit_given_read_key_modified_when_concurrent_write() {
         concurrent_tx
             .put(b"key".to_vec(), b"concurrent".to_vec(), None)
             .unwrap();
-        concurrent_tx
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        concurrent_tx.commit(buffered_write_options(mode)).unwrap();
 
         // Transaction writes new value
         txn.put(b"key".to_vec(), b"txn_value".to_vec(), None)
             .unwrap();
-        txn.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        txn.commit(buffered_write_options(mode)).unwrap();
 
         // Assert - transaction write wins
         let final_tx = engine
@@ -339,22 +323,24 @@ fn should_allow_concurrent_puts_given_different_keys_when_multiple_transactions(
         let engine2 = Arc::clone(&engine);
 
         // Act
+        let write_options = buffered_write_options(mode);
         let handle1 = std::thread::spawn(move || {
             let cf = engine1.create_column_family("test").expect("create cf");
             let mut txn = engine1
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-            txn.commit(cntryl_midge::WriteOptions::buffered())
+            txn.commit(write_options)
         });
 
+        let write_options = buffered_write_options(mode);
         let handle2 = std::thread::spawn(move || {
             let cf = engine2.create_column_family("test").expect("create cf");
             let mut txn = engine2
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             txn.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
-            txn.commit(cntryl_midge::WriteOptions::buffered())
+            txn.commit(write_options)
         });
 
         // Assert
@@ -386,9 +372,7 @@ fn should_allow_commit_after_reading_stale_value_when_lww_semantics_apply() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         setup_tx.put(b"key".to_vec(), b"v1".to_vec(), None).unwrap();
-        setup_tx
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        setup_tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         let mut txn = engine
@@ -404,15 +388,13 @@ fn should_allow_commit_after_reading_stale_value_when_lww_semantics_apply() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         mod_tx.put(b"key".to_vec(), b"v2".to_vec(), None).unwrap();
-        mod_tx
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        mod_tx.commit(buffered_write_options(mode)).unwrap();
 
         // Transaction writes
         txn.put(b"key".to_vec(), b"v3".to_vec(), None).unwrap();
 
         // Assert
-        assert!(txn.commit(cntryl_midge::WriteOptions::buffered()).is_ok());
+        assert!(txn.commit(buffered_write_options(mode)).is_ok());
     });
 }
 
@@ -458,9 +440,7 @@ fn should_read_latest_committed_value_after_multiple_updates() {
         setup_tx
             .put(b"key".to_vec(), b"initial".to_vec(), None)
             .unwrap();
-        setup_tx
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        setup_tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         for i in 1..=5 {
@@ -470,9 +450,7 @@ fn should_read_latest_committed_value_after_multiple_updates() {
             update_tx
                 .put(b"key".to_vec(), format!("v{i}").as_bytes().to_vec(), None)
                 .unwrap();
-            update_tx
-                .commit(cntryl_midge::WriteOptions::buffered())
-                .unwrap();
+            update_tx.commit(buffered_write_options(mode)).unwrap();
         }
 
         // Assert
@@ -500,6 +478,7 @@ fn should_maintain_isolation_under_concurrent_transaction_pressure_when_stressed
         let cf_id = cf.id();
         for i in 0..20 {
             let engine_clone = Arc::clone(&engine);
+            let write_options = buffered_write_options(mode);
             let handle = std::thread::spawn(move || {
                 let mut txn = engine_clone
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
@@ -508,7 +487,7 @@ fn should_maintain_isolation_under_concurrent_transaction_pressure_when_stressed
                 let value = format!("value{i}");
                 txn.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .unwrap();
-                txn.commit(cntryl_midge::WriteOptions::buffered())
+                txn.commit(write_options)
             });
             handles.push(handle);
         }
@@ -549,7 +528,7 @@ fn should_handle_high_concurrency_readers_given_many_transactions_when_active() 
                 .unwrap();
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                 .unwrap();
-            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
         }
 
         let mut handles = vec![];
@@ -590,6 +569,7 @@ fn should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent() {
         // Act - 10 writers
         for i in 0..10 {
             let engine_clone = Arc::clone(&engine);
+            let write_options = buffered_write_options(mode);
             let handle = std::thread::spawn(move || {
                 let mut txn = engine_clone
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
@@ -598,7 +578,7 @@ fn should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent() {
                 let value = format!("value{i}");
                 txn.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .unwrap();
-                txn.commit(cntryl_midge::WriteOptions::buffered())
+                txn.commit(write_options)
             });
             writer_handles.push(handle);
         }

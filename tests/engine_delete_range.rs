@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 mod common;
-use cntryl_midge::{TransactionMode, WriteOptions};
+use cntryl_midge::TransactionMode;
 use common::*;
 use std::sync::Arc;
 
@@ -26,7 +26,7 @@ fn should_delete_keys_in_range_given_delete_range_when_querying() {
                 .unwrap();
             tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                 .expect("seed put");
-            tx.commit(WriteOptions::buffered()).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
         }
 
         // Act
@@ -37,7 +37,7 @@ fn should_delete_keys_in_range_given_delete_range_when_querying() {
             .delete_range(b"key2".to_vec(), b"key4".to_vec())
             .expect("delete_range");
         delete_tx
-            .commit(WriteOptions::buffered())
+            .commit(buffered_write_options(mode))
             .expect("commit delete_range");
 
         // Assert
@@ -76,7 +76,7 @@ fn should_handle_empty_range_given_start_equals_end_when_delete_range() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key".to_vec(), b"val".to_vec(), None).expect("put");
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         let mut delete_tx = engine
@@ -86,7 +86,7 @@ fn should_handle_empty_range_given_start_equals_end_when_delete_range() {
             .delete_range(b"key".to_vec(), b"key".to_vec())
             .expect("delete_range");
         delete_tx
-            .commit(WriteOptions::buffered())
+            .commit(buffered_write_options(mode))
             .expect("commit delete_range");
 
         // Assert
@@ -132,7 +132,7 @@ fn should_delete_key_given_delete_range_with_single_key_when_matching() {
             .unwrap();
         tx.put(b"target".to_vec(), b"value".to_vec(), None)
             .expect("put");
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         let mut delete_tx = engine
@@ -142,7 +142,7 @@ fn should_delete_key_given_delete_range_with_single_key_when_matching() {
             .delete_range(b"target".to_vec(), b"targetZ".to_vec())
             .expect("delete_range");
         delete_tx
-            .commit(WriteOptions::buffered())
+            .commit(buffered_write_options(mode))
             .expect("commit delete_range");
 
         // Assert
@@ -169,7 +169,7 @@ fn should_allow_multiple_delete_ranges_when_called_sequentially() {
                 .unwrap();
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
         }
 
         // Act
@@ -183,7 +183,7 @@ fn should_allow_multiple_delete_ranges_when_called_sequentially() {
             delete_tx
                 .delete_range(start.to_vec(), end.to_vec())
                 .expect(label);
-            delete_tx.commit(WriteOptions::buffered()).expect(label);
+            delete_tx.commit(buffered_write_options(mode)).expect(label);
         }
 
         // Assert
@@ -218,7 +218,7 @@ fn should_persist_keys_across_delete_range_with_restart_when_durable() {
                     .unwrap();
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put seed");
-                tx.commit(WriteOptions::buffered()).unwrap();
+                tx.commit(buffered_write_options(mode)).unwrap();
             }
 
             let mut delete_tx = engine
@@ -228,7 +228,7 @@ fn should_persist_keys_across_delete_range_with_restart_when_durable() {
                 .delete_range(b"key1".to_vec(), b"key3".to_vec())
                 .expect("delete_range");
             delete_tx
-                .commit(WriteOptions::buffered())
+                .commit(buffered_write_options(mode))
                 .expect("commit delete_range");
         }
 
@@ -261,7 +261,7 @@ fn should_handle_concurrent_delete_ranges_when_multiple_threads() {
                 .unwrap();
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
         }
 
         // Act
@@ -269,6 +269,7 @@ fn should_handle_concurrent_delete_ranges_when_multiple_threads() {
         for thread_id in 0..5 {
             let engine_clone = Arc::clone(&engine);
             let cf_clone = cf.clone();
+            let write_options = buffered_write_options(mode);
             handles.push(std::thread::spawn(move || {
                 let start = format!("key{:03}", thread_id * 10);
                 let end = format!("key{:03}", (thread_id + 1) * 10);
@@ -279,7 +280,7 @@ fn should_handle_concurrent_delete_ranges_when_multiple_threads() {
                     .delete_range(start.as_bytes().to_vec(), end.as_bytes().to_vec())
                     .expect("delete_range");
                 delete_tx
-                    .commit(WriteOptions::buffered())
+                    .commit(write_options)
                     .expect("commit delete_range");
             }));
         }

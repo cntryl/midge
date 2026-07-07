@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use cntryl_midge::{Engine, IsolationLevel, OpenOptions, TransactionMode, WriteOptions};
+use cntryl_midge::{ConflictPolicy, Engine, OpenOptions, TransactionMode, WriteOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -196,8 +196,8 @@ fn child_abort_after_strict_conflict_abort(db_path: &Path) {
         .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
         .expect("begin tx2");
 
-    tx1.set_isolation_level(IsolationLevel::AbortOnWriteConflict);
-    tx2.set_isolation_level(IsolationLevel::AbortOnWriteConflict);
+    tx1.set_conflict_policy(ConflictPolicy::AbortOnWriteConflict);
+    tx2.set_conflict_policy(ConflictPolicy::AbortOnWriteConflict);
 
     tx1.put(
         STRICT_CONFLICT_FIRST_COMMIT_RECORD.key.to_vec(),

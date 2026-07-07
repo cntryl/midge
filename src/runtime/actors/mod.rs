@@ -13,7 +13,6 @@
 pub mod cloud;
 pub mod cloud_write_queue;
 pub mod compaction;
-pub mod eviction;
 pub mod flush;
 pub mod gc;
 pub mod manifest;
@@ -22,7 +21,6 @@ pub mod wal;
 #[cfg(test)]
 pub use cloud::CloudActor;
 pub use compaction::CompactionActor;
-pub use eviction::EvictionActor;
 pub use flush::FlushActor;
 pub use gc::GcActor;
 pub use manifest::ManifestActor;

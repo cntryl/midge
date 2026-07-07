@@ -1,6 +1,6 @@
 use super::super::durability::DurabilityWaiter;
 use super::{EventLoop, HandleOutcome};
-use crate::runtime::{RuntimeMsg, RuntimeResponse, TransactionIsolationPolicy, TransactionOp};
+use crate::runtime::{ConflictPolicy, RuntimeMsg, RuntimeResponse, TransactionOp};
 use crate::wal::DurabilityPolicy;
 use crossbeam::channel::{Receiver, Sender};
 
@@ -11,7 +11,7 @@ pub(super) struct ApplyTransactionRequest {
     pub ops: Vec<TransactionOp>,
     pub durability_policy: Option<DurabilityPolicy>,
     pub start_sequence: Option<u64>,
-    pub isolation_policy: TransactionIsolationPolicy,
+    pub conflict_policy: ConflictPolicy,
 }
 
 #[cfg(test)]
@@ -36,7 +36,7 @@ impl WalCoordinator {
             ops,
             durability_policy,
             start_sequence,
-            isolation_policy,
+            conflict_policy,
         } = request;
         if let Some(response_tx) = response_tx {
             event_loop.register_inline_response(request_id, response_tx);
@@ -58,7 +58,7 @@ impl WalCoordinator {
                     ops,
                     durability_policy,
                     start_sequence,
-                    isolation_policy,
+                    conflict_policy,
                 },
                 MAX_COALESCED_TRANSACTIONS_AFTER_WAKE,
             );
@@ -69,7 +69,7 @@ impl WalCoordinator {
                 ops,
                 durability_policy,
                 start_sequence,
-                isolation_policy,
+                conflict_policy,
             ) {
                 Ok((last_sequence, op_count, deferred)) => {
                     event_loop.publish_snapshot();

@@ -178,7 +178,7 @@ impl EventLoop {
                 ops,
                 durability_policy,
                 start_sequence,
-                isolation_policy,
+                conflict_policy,
                 response_tx,
             }) => {
                 if let Some(response_tx) = response_tx {
@@ -192,7 +192,7 @@ impl EventLoop {
                         ops,
                         durability_policy,
                         start_sequence,
-                        isolation_policy,
+                        conflict_policy,
                     },
                     max,
                 );
@@ -317,7 +317,7 @@ impl EventLoop {
                 ops,
                 durability_policy,
                 start_sequence,
-                isolation_policy,
+                conflict_policy,
                 response_tx,
             } => {
                 if let Some(response_tx) = response_tx {
@@ -329,7 +329,7 @@ impl EventLoop {
                     ops,
                     durability_policy,
                     start_sequence,
-                    isolation_policy,
+                    conflict_policy,
                 };
                 match self.prepare_transaction_for_coalescing(request, &mut batch.staged_touches) {
                     PrepareOutcome::Prepared {
@@ -468,7 +468,7 @@ impl EventLoop {
                 ops: request.ops,
                 durability_policy: request.durability_policy,
                 start_sequence: request.start_sequence,
-                isolation_policy: request.isolation_policy,
+                conflict_policy: request.conflict_policy,
             },
         );
 
@@ -487,7 +487,7 @@ impl EventLoop {
             ops,
             durability_policy,
             start_sequence,
-            isolation_policy,
+            conflict_policy,
         } = request;
         let result = self
             .wal_actor
@@ -497,7 +497,7 @@ impl EventLoop {
                 ops,
                 durability_policy,
                 start_sequence,
-                isolation_policy,
+                conflict_policy,
             )
             .map(
                 |(last_sequence, op_count, deferred)| WriteResult::TransactionApplied {
@@ -737,7 +737,7 @@ mod tests {
     use crate::common::{MidgeError, MidgeResult};
     use crate::runtime::event_loop::EventLoop;
     use crate::runtime::state::RuntimeState;
-    use crate::runtime::{ResponseRouter, RuntimeConfig, TransactionIsolationPolicy};
+    use crate::runtime::{ConflictPolicy, ResponseRouter, RuntimeConfig};
     use crate::wal::DurabilityPolicy;
     use bytes::Bytes;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -821,7 +821,7 @@ mod tests {
             ops,
             durability_policy,
             start_sequence: None,
-            isolation_policy: TransactionIsolationPolicy::LastWriteWins,
+            conflict_policy: ConflictPolicy::LastWriteWins,
         }
     }
 
@@ -835,7 +835,7 @@ mod tests {
             ops,
             durability_policy,
             start_sequence: None,
-            isolation_policy: TransactionIsolationPolicy::LastWriteWins,
+            conflict_policy: ConflictPolicy::LastWriteWins,
             response_tx: None,
         }
     }
@@ -852,7 +852,7 @@ mod tests {
                 ops,
                 durability_policy,
                 start_sequence: None,
-                isolation_policy: TransactionIsolationPolicy::LastWriteWins,
+                conflict_policy: ConflictPolicy::LastWriteWins,
                 response_tx: Some(response_tx),
             },
             response_rx,

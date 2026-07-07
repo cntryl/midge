@@ -6,7 +6,7 @@
 
 use bytes::Bytes;
 mod common;
-use cntryl_midge::{TransactionMode, WriteOptions};
+use cntryl_midge::TransactionMode;
 use common::*;
 
 #[test]
@@ -26,7 +26,7 @@ fn should_commit_large_transaction_given_memory_budget_exceeded_when_committed()
         }
 
         // Act
-        tx.commit(WriteOptions::buffered())
+        tx.commit(buffered_write_options(mode))
             .expect("commit large transaction");
 
         // Assert
@@ -63,7 +63,7 @@ fn should_preserve_values_given_two_large_transactions_within_budget_when_read()
             tx1.put(key.as_bytes().to_vec(), vec![65u8; 1024], None)
                 .expect("put batch1 value");
         }
-        tx1.commit(WriteOptions::buffered())
+        tx1.commit(buffered_write_options(mode))
             .expect("commit first transaction");
 
         let mut tx2 = engine
@@ -76,7 +76,7 @@ fn should_preserve_values_given_two_large_transactions_within_budget_when_read()
         }
 
         // Act
-        tx2.commit(WriteOptions::buffered())
+        tx2.commit(buffered_write_options(mode))
             .expect("commit second transaction");
 
         // Assert
@@ -119,7 +119,7 @@ fn should_preserve_sample_keys_given_large_transaction_low_budget_when_committed
         }
 
         // Act
-        tx.commit(WriteOptions::buffered())
+        tx.commit(buffered_write_options(mode))
             .expect("commit low-budget transaction");
 
         // Assert

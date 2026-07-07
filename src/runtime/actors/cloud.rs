@@ -117,7 +117,7 @@ impl CloudActor {
         if let Some(seq) = crate::wal::parse_segment_id(resource) {
             state.cloud.last_cloud_checkpoint_seq = seq;
             // Record cloud checkpoint in manifest journal
-            let cp = crate::metadata::CloudCheckpoint {
+            let cp = crate::metadata::manifest::CloudCheckpoint {
                 checkpoint_sequence: seq,
                 covering_ssts: vec![],
             };

@@ -32,7 +32,7 @@ fn should_read_written_value_given_cloud_mode_when_written_and_read() {
         .expect("begin write transaction");
     tx.put(b"cloud_key".to_vec(), b"cloud_value".to_vec(), None)
         .expect("put cloud value");
-    tx.commit(cntryl_midge::WriteOptions::buffered())
+    tx.commit(cntryl_midge::WriteOptions::cloud_async())
         .expect("commit cloud write");
 
     // Assert
@@ -57,7 +57,7 @@ fn should_read_committed_transaction_value_given_cloud_mode_when_committed() {
         .expect("begin transaction");
     txn.put(b"tx_key1".to_vec(), b"tx_value1".to_vec(), None)
         .expect("put transaction value");
-    txn.commit(cntryl_midge::WriteOptions::buffered())
+    txn.commit(cntryl_midge::WriteOptions::cloud_async())
         .expect("commit cloud transaction");
 
     // Assert
@@ -83,7 +83,7 @@ fn should_scan_inserted_keys_given_cloud_mode_when_range_scanned() {
             .expect("begin scan seed transaction");
         tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
             .expect("put scan seed value");
-        tx.commit(cntryl_midge::WriteOptions::buffered())
+        tx.commit(cntryl_midge::WriteOptions::cloud_async())
             .expect("commit scan seed transaction");
     }
 
@@ -109,7 +109,7 @@ fn should_preserve_snapshot_value_given_cloud_mode_when_overwritten_after_snapsh
         .expect("begin seed transaction");
     tx.put(b"snap_key".to_vec(), b"snap_v1".to_vec(), None)
         .expect("put initial snapshot value");
-    tx.commit(cntryl_midge::WriteOptions::buffered())
+    tx.commit(cntryl_midge::WriteOptions::cloud_async())
         .expect("commit seed transaction");
 
     let snapshot = engine
@@ -122,7 +122,7 @@ fn should_preserve_snapshot_value_given_cloud_mode_when_overwritten_after_snapsh
         .expect("begin overwrite transaction");
     tx2.put(b"snap_key".to_vec(), b"snap_v2".to_vec(), None)
         .expect("put overwrite value");
-    tx2.commit(cntryl_midge::WriteOptions::buffered())
+    tx2.commit(cntryl_midge::WriteOptions::cloud_async())
         .expect("commit overwrite transaction");
 
     // Assert
@@ -150,7 +150,7 @@ fn should_hide_deleted_key_given_cloud_mode_when_deleted() {
         .expect("begin seed transaction");
     tx.put(b"del_key".to_vec(), b"to_delete".to_vec(), None)
         .expect("put delete seed value");
-    tx.commit(cntryl_midge::WriteOptions::buffered())
+    tx.commit(cntryl_midge::WriteOptions::cloud_async())
         .expect("commit seed transaction");
 
     // Act
@@ -158,7 +158,7 @@ fn should_hide_deleted_key_given_cloud_mode_when_deleted() {
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
         .expect("begin delete transaction");
     tx.delete(b"del_key".to_vec()).expect("delete cloud key");
-    tx.commit(cntryl_midge::WriteOptions::buffered())
+    tx.commit(cntryl_midge::WriteOptions::cloud_async())
         .expect("commit delete transaction");
 
     // Assert
@@ -180,7 +180,7 @@ fn should_apply_last_write_wins_given_cloud_mode_when_multiple_writes() {
         .expect("begin first write transaction");
     tx.put(b"lww_key".to_vec(), b"v1".to_vec(), None)
         .expect("put first value");
-    tx.commit(cntryl_midge::WriteOptions::buffered())
+    tx.commit(cntryl_midge::WriteOptions::cloud_async())
         .expect("commit first write");
 
     let mut tx = engine
@@ -188,7 +188,7 @@ fn should_apply_last_write_wins_given_cloud_mode_when_multiple_writes() {
         .expect("begin second write transaction");
     tx.put(b"lww_key".to_vec(), b"v2".to_vec(), None)
         .expect("put second value");
-    tx.commit(cntryl_midge::WriteOptions::buffered())
+    tx.commit(cntryl_midge::WriteOptions::cloud_async())
         .expect("commit second write");
 
     // Assert

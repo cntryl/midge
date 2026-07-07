@@ -23,8 +23,6 @@
 //! not stable API and may change without compatibility guarantees.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
-#![cfg_attr(test, allow(clippy::unwrap_used))]
-
 // Foundation - no dependencies
 #[doc(hidden)]
 pub mod common;
@@ -36,8 +34,6 @@ pub mod types;
 // Internal modules used by engine/runtime.
 mod compaction;
 mod diagnostics;
-#[doc(hidden)]
-pub mod handler;
 #[cfg(test)]
 pub mod io;
 #[cfg(not(test))]
@@ -45,8 +41,6 @@ mod io;
 #[doc(hidden)]
 pub mod iterators;
 mod lease;
-#[doc(hidden)]
-pub mod message;
 mod metadata;
 mod runtime;
 #[doc(hidden)]
@@ -71,7 +65,7 @@ mod engine;
 pub use common::{MidgeError, MidgeResult};
 
 // Engine / Transactions
-pub use engine::{ColumnFamilyHandle, Engine, IsolationLevel, Transaction, TransactionMode};
+pub use engine::{ColumnFamilyHandle, ConflictPolicy, Engine, Transaction, TransactionMode};
 pub use types::ColumnFamilyId;
 
 // Backward-compatible alias
@@ -178,7 +172,7 @@ pub mod prelude {
     /// Use `use midge::prelude::*;` to import the essential types needed
     /// for the standard transaction-based workflow.
     pub use crate::{
-        ColumnFamilyId, Direction, Engine, IsolationLevel, Key, MidgeError, MidgeResult,
+        ColumnFamilyId, ConflictPolicy, Direction, Engine, Key, MidgeError, MidgeResult,
         OpenOptions, Query, ScanIterator, Storage, Transaction, TransactionMode, Value,
         WriteOptions,
     };

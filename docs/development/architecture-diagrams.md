@@ -63,7 +63,6 @@ flowchart LR
         ManifestActor["ManifestActor"]
         GcActor["GcActor"]
         CloudActor["CloudActor"]
-        EvictionActor["EvictionActor"]
     end
 
     State["RuntimeState<br/>memtables, manifest, WAL state, health"]

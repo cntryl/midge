@@ -3,6 +3,8 @@
 use bytes::Bytes;
 use std::fmt;
 
+use crate::sst::index::tuner::IndexKind;
+
 /// Handle to a block in SST file (offset + size)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockHandle {
@@ -47,6 +49,9 @@ pub const SST_FORMAT_V1: u32 = 1;
 
 /// Stateful SST entry format with persisted expiration and metadata blocks.
 pub const SST_FORMAT_V2: u32 = 2;
+
+/// Final pre-1.0 SST format with persisted accelerator metadata.
+pub const SST_FORMAT_V3: u32 = 3;
 
 /// Footer stored at end of SST file
 #[derive(Debug, Clone)]
@@ -213,14 +218,25 @@ impl Footer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SstMetadata {
     pub format_version: u32,
+    pub index_kind: IndexKind,
     pub range_tombstone_handle: Option<BlockHandle>,
+    pub key_range: Option<KeyRangeMetadata>,
+}
+
+/// Persisted key-range metadata for an SST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyRangeMetadata {
+    pub smallest_key: Vec<u8>,
+    pub largest_key: Vec<u8>,
 }
 
 impl Default for SstMetadata {
     fn default() -> Self {
         Self {
             format_version: SST_FORMAT_V1,
+            index_kind: IndexKind::Sparse,
             range_tombstone_handle: None,
+            key_range: None,
         }
     }
 }
@@ -228,14 +244,34 @@ impl Default for SstMetadata {
 impl SstMetadata {
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(4 + 8 + 8);
+        let key_range_len = self.key_range.as_ref().map_or(0, |range| {
+            4 + range.smallest_key.len() + 4 + range.largest_key.len()
+        });
+        let mut buf = Vec::with_capacity(24 + key_range_len);
         buf.extend_from_slice(&self.format_version.to_le_bytes());
+        buf.push(self.index_kind.to_u8());
+        buf.push(u8::from(self.key_range.is_some()));
+        buf.extend_from_slice(&[0u8; 2]);
         if let Some(handle) = self.range_tombstone_handle {
             buf.extend_from_slice(&handle.offset.to_le_bytes());
             buf.extend_from_slice(&handle.size.to_le_bytes());
         } else {
             buf.extend_from_slice(&0u64.to_le_bytes());
             buf.extend_from_slice(&0u64.to_le_bytes());
+        }
+        if let Some(range) = &self.key_range {
+            buf.extend_from_slice(
+                &u32::try_from(range.smallest_key.len())
+                    .unwrap_or(u32::MAX)
+                    .to_le_bytes(),
+            );
+            buf.extend_from_slice(&range.smallest_key);
+            buf.extend_from_slice(
+                &u32::try_from(range.largest_key.len())
+                    .unwrap_or(u32::MAX)
+                    .to_le_bytes(),
+            );
+            buf.extend_from_slice(&range.largest_key);
         }
         buf
     }
@@ -253,22 +289,103 @@ impl SstMetadata {
         }
 
         let format_version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if data.len() == 20 {
+            let offset = u64::from_le_bytes([
+                data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
+            ]);
+            let size = u64::from_le_bytes([
+                data[12], data[13], data[14], data[15], data[16], data[17], data[18], data[19],
+            ]);
+
+            return Ok(Self {
+                format_version,
+                index_kind: IndexKind::Sparse,
+                range_tombstone_handle: if offset == 0 && size == 0 {
+                    None
+                } else {
+                    Some(BlockHandle::new(offset, size))
+                },
+                key_range: None,
+            });
+        }
+
+        if data.len() < 24 {
+            return Err(crate::common::MidgeError::Corruption(
+                "SST metadata block truncated".into(),
+            ));
+        }
+
+        let index_kind = IndexKind::from_u8(data[4]).ok_or_else(|| {
+            crate::common::MidgeError::Corruption("Unknown SST index kind".into())
+        })?;
+        let flags = data[5];
         let offset = u64::from_le_bytes([
-            data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
+            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
         ]);
         let size = u64::from_le_bytes([
-            data[12], data[13], data[14], data[15], data[16], data[17], data[18], data[19],
+            data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
         ]);
+
+        let key_range = if flags & 0x01 == 0 {
+            None
+        } else {
+            let mut cursor = 24usize;
+            let smallest_len = decode_metadata_u32(data, &mut cursor, "smallest key length")?;
+            let smallest_key =
+                decode_metadata_bytes(data, &mut cursor, smallest_len, "smallest key")?;
+            let largest_len = decode_metadata_u32(data, &mut cursor, "largest key length")?;
+            let largest_key = decode_metadata_bytes(data, &mut cursor, largest_len, "largest key")?;
+            Some(KeyRangeMetadata {
+                smallest_key,
+                largest_key,
+            })
+        };
 
         Ok(Self {
             format_version,
+            index_kind,
             range_tombstone_handle: if offset == 0 && size == 0 {
                 None
             } else {
                 Some(BlockHandle::new(offset, size))
             },
+            key_range,
         })
     }
+}
+
+fn decode_metadata_u32(
+    data: &[u8],
+    cursor: &mut usize,
+    field: &str,
+) -> crate::common::MidgeResult<usize> {
+    let end = cursor.checked_add(4).ok_or_else(|| {
+        crate::common::MidgeError::Corruption(format!("{field} overflow in SST metadata"))
+    })?;
+    let bytes = data.get(*cursor..end).ok_or_else(|| {
+        crate::common::MidgeError::Corruption(format!("{field} truncated in SST metadata"))
+    })?;
+    *cursor = end;
+    Ok(
+        usize::try_from(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .unwrap_or(usize::MAX),
+    )
+}
+
+fn decode_metadata_bytes(
+    data: &[u8],
+    cursor: &mut usize,
+    len: usize,
+    field: &str,
+) -> crate::common::MidgeResult<Vec<u8>> {
+    let end = cursor.checked_add(len).ok_or_else(|| {
+        crate::common::MidgeError::Corruption(format!("{field} overflow in SST metadata"))
+    })?;
+    let bytes = data.get(*cursor..end).ok_or_else(|| {
+        crate::common::MidgeError::Corruption(format!("{field} truncated in SST metadata"))
+    })?;
+    *cursor = end;
+    Ok(bytes.to_vec())
 }
 
 /// Range tombstone for covering key ranges

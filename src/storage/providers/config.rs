@@ -272,25 +272,6 @@ pub enum CloudProviderConfig {
         path_style: bool,
         credentials: S3CredentialSource,
     },
-    Minio {
-        bucket: String,
-        endpoint: String,
-        credentials: S3CredentialSource,
-    },
-    Wasabi {
-        bucket: String,
-        region: String,
-        endpoint: Option<String>,
-        credentials: S3CredentialSource,
-    },
-    OciS3Compatible {
-        bucket: String,
-        namespace: String,
-        region: String,
-        endpoint: Option<String>,
-        path_style: bool,
-        credentials: S3CredentialSource,
-    },
     AzureBlob {
         account: String,
         container: String,
@@ -383,7 +364,7 @@ impl CloudProviderConfig {
         }
     }
 
-    /// Backward-compatible S3-compatible constructor with explicit region and keys.
+    /// Create S3-compatible config with explicit region and static credentials.
     pub fn s3_compatible(
         bucket: impl Into<String>,
         region: impl Into<String>,
@@ -396,89 +377,6 @@ impl CloudProviderConfig {
             region: region.into(),
             endpoint: endpoint.into(),
             path_style: true,
-            credentials: S3CredentialSource::access_key(access_key, secret_key),
-        }
-    }
-
-    /// Create `MinIO` config with explicit access keys.
-    pub fn minio_static(
-        bucket: impl Into<String>,
-        endpoint: impl Into<String>,
-        access_key: impl Into<String>,
-        secret_key: impl Into<String>,
-    ) -> Self {
-        Self::Minio {
-            bucket: bucket.into(),
-            endpoint: endpoint.into(),
-            credentials: S3CredentialSource::access_key(access_key, secret_key),
-        }
-    }
-
-    /// Backward-compatible `MinIO` constructor with explicit access keys.
-    pub fn minio(
-        bucket: impl Into<String>,
-        endpoint: impl Into<String>,
-        access_key: impl Into<String>,
-        secret_key: impl Into<String>,
-    ) -> Self {
-        Self::minio_static(bucket, endpoint, access_key, secret_key)
-    }
-
-    /// Create Wasabi config using AWS-style environment credentials.
-    pub fn wasabi(bucket: impl Into<String>, region: impl Into<String>) -> Self {
-        Self::Wasabi {
-            bucket: bucket.into(),
-            region: region.into(),
-            endpoint: None,
-            credentials: S3CredentialSource::environment(),
-        }
-    }
-
-    /// Create Wasabi config with explicit access keys.
-    pub fn wasabi_static(
-        bucket: impl Into<String>,
-        region: impl Into<String>,
-        access_key: impl Into<String>,
-        secret_key: impl Into<String>,
-    ) -> Self {
-        Self::Wasabi {
-            bucket: bucket.into(),
-            region: region.into(),
-            endpoint: None,
-            credentials: S3CredentialSource::access_key(access_key, secret_key),
-        }
-    }
-
-    /// Create OCI Object Storage config through OCI's S3-compatible front door.
-    pub fn oci_s3_compatible(
-        namespace: impl Into<String>,
-        bucket: impl Into<String>,
-        region: impl Into<String>,
-    ) -> Self {
-        Self::OciS3Compatible {
-            bucket: bucket.into(),
-            namespace: namespace.into(),
-            region: region.into(),
-            endpoint: None,
-            path_style: false,
-            credentials: S3CredentialSource::environment(),
-        }
-    }
-
-    /// Create OCI Object Storage S3-compatible config with explicit access keys.
-    pub fn oci_s3_compatible_static(
-        namespace: impl Into<String>,
-        bucket: impl Into<String>,
-        region: impl Into<String>,
-        access_key: impl Into<String>,
-        secret_key: impl Into<String>,
-    ) -> Self {
-        Self::OciS3Compatible {
-            bucket: bucket.into(),
-            namespace: namespace.into(),
-            region: region.into(),
-            endpoint: None,
-            path_style: false,
             credentials: S3CredentialSource::access_key(access_key, secret_key),
         }
     }
@@ -628,17 +526,8 @@ impl CloudProviderConfig {
         match &mut self {
             Self::S3Compatible {
                 endpoint: target, ..
-            }
-            | Self::Minio {
-                endpoint: target, ..
             } => *target = endpoint,
-            Self::Wasabi {
-                endpoint: target, ..
-            }
-            | Self::OciS3Compatible {
-                endpoint: target, ..
-            }
-            | Self::AzureBlob {
+            Self::AzureBlob {
                 endpoint: target, ..
             }
             | Self::Gcs {
@@ -664,15 +553,8 @@ impl CloudProviderConfig {
         match &mut self {
             Self::S3Compatible {
                 path_style: target, ..
-            }
-            | Self::OciS3Compatible {
-                path_style: target, ..
             } => *target = path_style,
-            Self::AwsS3 { .. }
-            | Self::Minio { .. }
-            | Self::Wasabi { .. }
-            | Self::AzureBlob { .. }
-            | Self::Gcs { .. } => {
+            Self::AwsS3 { .. } | Self::AzureBlob { .. } | Self::Gcs { .. } => {
                 return Err(MidgeError::InvalidArgument(format!(
                     "{} provider does not support path-style overrides",
                     self.kind()
@@ -691,11 +573,10 @@ impl CloudProviderConfig {
     pub fn with_s3_region(mut self, region: impl Into<String>) -> MidgeResult<Self> {
         let region = region.into();
         match &mut self {
-            Self::AwsS3 { region: target, .. }
-            | Self::S3Compatible { region: target, .. }
-            | Self::Wasabi { region: target, .. }
-            | Self::OciS3Compatible { region: target, .. } => *target = region,
-            Self::Minio { .. } | Self::AzureBlob { .. } | Self::Gcs { .. } => {
+            Self::AwsS3 { region: target, .. } | Self::S3Compatible { region: target, .. } => {
+                *target = region;
+            }
+            Self::AzureBlob { .. } | Self::Gcs { .. } => {
                 return Err(MidgeError::InvalidArgument(format!(
                     "{} provider does not support S3 region overrides",
                     self.kind()
@@ -784,18 +665,6 @@ impl CloudProviderConfig {
                 | Self::S3Compatible {
                     credentials: target,
                     ..
-                }
-                | Self::Minio {
-                    credentials: target,
-                    ..
-                }
-                | Self::Wasabi {
-                    credentials: target,
-                    ..
-                }
-                | Self::OciS3Compatible {
-                    credentials: target,
-                    ..
                 },
                 CloudCredentialSource::S3(credentials),
             ) => *target = credentials,
@@ -849,9 +718,6 @@ impl CloudProviderConfig {
         match self {
             Self::AwsS3 { bucket, .. }
             | Self::S3Compatible { bucket, .. }
-            | Self::Minio { bucket, .. }
-            | Self::Wasabi { bucket, .. }
-            | Self::OciS3Compatible { bucket, .. }
             | Self::Gcs { bucket, .. } => bucket,
             Self::AzureBlob { container, .. } => container,
         }
@@ -859,11 +725,7 @@ impl CloudProviderConfig {
 
     fn kind(&self) -> &'static str {
         match self {
-            Self::AwsS3 { .. }
-            | Self::S3Compatible { .. }
-            | Self::Minio { .. }
-            | Self::Wasabi { .. }
-            | Self::OciS3Compatible { .. } => "S3-family",
+            Self::AwsS3 { .. } | Self::S3Compatible { .. } => "S3-family",
             Self::AzureBlob { .. } => "Azure",
             Self::Gcs { .. } => "GCS",
         }

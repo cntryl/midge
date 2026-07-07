@@ -13,8 +13,6 @@ use std::sync::Arc;
 pub struct Manifest {
     /// Last persisted sequence number
     pub last_persisted_sequence: u64,
-    /// List of all SST file names
-    pub ssts: Vec<String>,
     /// SST file metadata
     #[serde(default)]
     pub files: Vec<FileMeta>,
@@ -36,7 +34,6 @@ impl Default for Manifest {
     fn default() -> Self {
         Self {
             last_persisted_sequence: 0,
-            ssts: Vec::new(),
             files: Vec::new(),
             column_families: Vec::new(),
             cloud_checkpoint: None,
@@ -285,7 +282,6 @@ mod tests {
 
         // Assert
         assert_eq!(manifest.last_persisted_sequence, 0);
-        assert!(manifest.ssts.is_empty());
         assert!(manifest.files.is_empty());
         assert!(manifest.column_families.is_empty());
         assert!(manifest.cloud_checkpoint.is_none());
@@ -303,7 +299,7 @@ mod tests {
 
         // Assert: same as default
         assert_eq!(manifest.last_persisted_sequence, 0);
-        assert!(manifest.ssts.is_empty());
+        assert!(manifest.files.is_empty());
     }
 
     // ========================================================================

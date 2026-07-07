@@ -11,7 +11,7 @@
 
 use bytes::Bytes;
 mod common;
-use cntryl_midge::{TransactionMode, WriteOptions};
+use cntryl_midge::TransactionMode;
 use common::*;
 use std::thread;
 use std::time::Duration;
@@ -45,7 +45,7 @@ fn should_preserve_flushed_values_when_reopening_after_short_upload_window() {
                 )
                 .expect("put value");
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
 
             engine.flush_cf(&cf).expect("flush");
             thread::sleep(Duration::from_millis(50));
@@ -95,7 +95,7 @@ fn should_preserve_both_flushed_batches_when_reopening_after_compaction_request(
                 tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None)
                     .expect("put first flushed batch");
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             let mut tx = engine
@@ -106,7 +106,7 @@ fn should_preserve_both_flushed_batches_when_reopening_after_compaction_request(
                 tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None)
                     .expect("put second flushed batch");
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             engine.compact_all().ok();
@@ -154,7 +154,7 @@ fn should_preserve_flushed_values_when_reopening_after_background_upload_delay()
                 tx.put(key.as_bytes().to_vec(), b"retry_value".to_vec(), None)
                     .expect("put retry value");
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
 
             engine.flush_cf(&cf).expect("flush");
         }
@@ -198,7 +198,7 @@ fn should_preserve_snapshot_visibility_when_flushing_with_snapshot_open() {
             tx.put(key.as_bytes().to_vec(), b"safe_value".to_vec(), None)
                 .expect("put safe value");
         }
-        tx.commit(WriteOptions::buffered()).expect("commit");
+        tx.commit(buffered_write_options(mode)).expect("commit");
 
         let snapshot = engine
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -236,7 +236,7 @@ fn should_preserve_both_generations_when_reopening_after_compaction_request() {
                 tx.put(key.as_bytes().to_vec(), b"gen1".to_vec(), None)
                     .expect("put generation 1 value");
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             let mut tx = engine
@@ -247,7 +247,7 @@ fn should_preserve_both_generations_when_reopening_after_compaction_request() {
                 tx.put(key.as_bytes().to_vec(), b"gen2".to_vec(), None)
                     .expect("put generation 2 value");
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             engine.compact_all().ok();
@@ -297,7 +297,7 @@ fn should_preserve_values_when_reopening_after_flush_attempt() {
                 tx.put(key.as_bytes().to_vec(), b"offline_value".to_vec(), None)
                     .expect("put offline value");
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
 
             engine.flush_cf(&cf).ok();
         }
@@ -339,7 +339,7 @@ fn should_preserve_multiple_flushed_batches_when_reopening_after_short_upload_wi
                 tx.put(key.as_bytes().to_vec(), b"batch1".to_vec(), None)
                     .expect("put batch1 value");
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             let mut tx = engine
@@ -350,7 +350,7 @@ fn should_preserve_multiple_flushed_batches_when_reopening_after_short_upload_wi
                 tx.put(key.as_bytes().to_vec(), b"batch2".to_vec(), None)
                     .expect("put batch2 value");
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             thread::sleep(Duration::from_millis(50));
@@ -400,7 +400,7 @@ fn should_preserve_flushed_values_when_reopening_after_short_retry_window() {
                 tx.put(key.as_bytes().to_vec(), b"dedup_value".to_vec(), None)
                     .expect("put dedup value");
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
 
             engine.flush_cf(&cf).expect("flush");
             thread::sleep(Duration::from_millis(50));

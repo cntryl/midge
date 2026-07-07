@@ -23,10 +23,10 @@ pub enum DurabilityPolicy {
     /// Best-effort persistence - fastest but no durability on crash before flush
     /// Only use for bulk loads or testing
     BestEffort,
-    /// `CloudAsync` strict mode - force immediate WAL seal + rotate + upload,
-    /// then block until cloud upload completes. Use ONLY when cloud durability
-    /// is explicitly required. Regular `CloudAsync` uses background uploads and
-    /// never blocks commits.
+    /// Local visibility plus asynchronous cloud durability.
+    CloudAsync,
+    /// Force immediate WAL seal + rotate + upload, then block until cloud upload
+    /// completes.
     CloudStrict,
 }
 
@@ -72,6 +72,18 @@ impl WriteOptions {
         }
     }
 
+    /// Create `WriteOptions` with `CloudAsync` policy.
+    ///
+    /// This is the normal cloud-backed durability mode: the commit becomes
+    /// visible once the local WAL/memtable barrier completes, and cloud upload
+    /// continues in the background.
+    #[must_use]
+    pub fn cloud_async() -> Self {
+        Self {
+            policy: DurabilityPolicy::CloudAsync,
+        }
+    }
+
     /// Create `WriteOptions` with `CloudStrict` policy.
     ///
     /// Forces immediate WAL seal + rotate + cloud upload, then blocks until
@@ -102,6 +114,12 @@ impl WriteOptions {
         matches!(self.policy, DurabilityPolicy::BestEffort)
     }
 
+    /// Check if this uses asynchronous cloud durability.
+    #[must_use]
+    pub fn is_cloud_async(&self) -> bool {
+        matches!(self.policy, DurabilityPolicy::CloudAsync)
+    }
+
     /// Check if this requires strict cloud durability
     #[must_use]
     pub fn is_cloud_strict(&self) -> bool {
@@ -114,13 +132,16 @@ impl WriteOptions {
     /// - Sync → Strict (fsync after every write)
     /// - Buffered → Batched (periodic fsync)
     /// - `BestEffort` → `BestEffort` (skip WAL entirely)
-    /// - `CloudStrict` → `CloudAsync` (local apply plus explicit cloud ack wait in commit)
+    /// - `CloudAsync` / `CloudStrict` → `CloudAsync` (commit finalization decides
+    ///   whether to wait for cloud acknowledgment)
     pub(crate) fn to_wal_durability_policy(self) -> crate::wal::DurabilityPolicy {
         match self.policy {
             DurabilityPolicy::Sync => crate::wal::DurabilityPolicy::Strict,
             DurabilityPolicy::Buffered => crate::wal::DurabilityPolicy::Batched,
             DurabilityPolicy::BestEffort => crate::wal::DurabilityPolicy::BestEffort,
-            DurabilityPolicy::CloudStrict => crate::wal::DurabilityPolicy::CloudAsync,
+            DurabilityPolicy::CloudAsync | DurabilityPolicy::CloudStrict => {
+                crate::wal::DurabilityPolicy::CloudAsync
+            }
         }
     }
 }
@@ -130,17 +151,22 @@ pub(crate) fn effective_wal_durability_policy(
     opts: WriteOptions,
 ) -> crate::common::MidgeResult<crate::wal::DurabilityPolicy> {
     if cloud_mode {
-        return Ok(match opts.policy() {
-            DurabilityPolicy::BestEffort => crate::wal::DurabilityPolicy::BestEffort,
-            DurabilityPolicy::Buffered | DurabilityPolicy::Sync | DurabilityPolicy::CloudStrict => {
-                crate::wal::DurabilityPolicy::CloudAsync
+        return match opts.policy() {
+            DurabilityPolicy::BestEffort => Ok(crate::wal::DurabilityPolicy::BestEffort),
+            DurabilityPolicy::CloudAsync | DurabilityPolicy::CloudStrict => {
+                Ok(crate::wal::DurabilityPolicy::CloudAsync)
             }
-        });
+            DurabilityPolicy::Sync | DurabilityPolicy::Buffered => Err(
+                crate::common::MidgeError::InvalidArgument(
+                    "sync() and buffered() are local-only; use cloud_async() or cloud_strict() for cloud-backed storage".to_string(),
+                ),
+            ),
+        };
     }
 
-    if opts.is_cloud_strict() {
+    if opts.is_cloud_async() || opts.is_cloud_strict() {
         return Err(crate::common::MidgeError::InvalidArgument(
-            "cloud_strict requires cloud-backed storage".to_string(),
+            "cloud_async() and cloud_strict() require cloud-backed storage".to_string(),
         ));
     }
 

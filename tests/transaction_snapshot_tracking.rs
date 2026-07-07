@@ -1,6 +1,6 @@
 mod common;
 
-use cntryl_midge::{MidgeError, MidgeResult, Query, TransactionMode, WriteOptions};
+use cntryl_midge::{MidgeError, MidgeResult, Query, TransactionMode};
 use common::*;
 use std::time::{Duration, Instant};
 
@@ -91,7 +91,8 @@ fn should_report_snapshot_retention_pressure_metrics_when_snapshot_pins_ssts() {
             seed.put(key.into_bytes(), b"v".to_vec(), None)
                 .expect("seed put");
         }
-        seed.commit(WriteOptions::buffered()).expect("seed commit");
+        seed.commit(buffered_write_options(mode))
+            .expect("seed commit");
         engine.flush_cf(&cf).expect("seed flush");
 
         // Act
@@ -126,7 +127,8 @@ fn should_not_register_snapshot_given_dropped_cf_when_begin_tx_fails() {
             .expect("begin seed tx");
         seed.put(b"cached_key".to_vec(), b"cached_value".to_vec(), None)
             .expect("seed put");
-        seed.commit(WriteOptions::buffered()).expect("seed commit");
+        seed.commit(buffered_write_options(mode))
+            .expect("seed commit");
         engine.flush_cf(&cf).expect("flush seed data");
 
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
@@ -174,7 +176,7 @@ fn should_unregister_snapshot_when_commit_finishes_transaction() {
             .expect("put value");
         wait_for_active_snapshots(&engine, 1, Duration::from_secs(1))
             .expect("wait for one active snapshot before commit");
-        tx.commit(WriteOptions::buffered()).expect("commit tx");
+        tx.commit(buffered_write_options(mode)).expect("commit tx");
 
         // Assert
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
@@ -236,7 +238,8 @@ fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active(
             .expect("begin seed tx");
         seed.put(b"k".to_vec(), b"v1".to_vec(), None)
             .expect("seed put");
-        seed.commit(WriteOptions::buffered()).expect("seed commit");
+        seed.commit(buffered_write_options(mode))
+            .expect("seed commit");
         engine.flush_cf(&cf).expect("seed flush");
 
         let snapshot = engine
@@ -250,7 +253,7 @@ fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active(
             .expect("begin delete tx");
         deleter.delete(b"k".to_vec()).expect("delete key");
         deleter
-            .commit(WriteOptions::buffered())
+            .commit(buffered_write_options(mode))
             .expect("delete commit");
         engine.flush_cf(&cf).expect("delete flush");
 
@@ -295,7 +298,8 @@ fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_act
             seed.put(key.into_bytes(), b"old".to_vec(), None)
                 .expect("seed put");
         }
-        seed.commit(WriteOptions::buffered()).expect("seed commit");
+        seed.commit(buffered_write_options(mode))
+            .expect("seed commit");
         engine.flush_cf(&cf).expect("seed flush");
 
         let snapshot = engine
@@ -315,7 +319,7 @@ fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_act
                     .expect("overwrite put");
             }
             overwrite
-                .commit(WriteOptions::buffered())
+                .commit(buffered_write_options(mode))
                 .expect("overwrite commit");
             engine.flush_cf(&cf).expect("overwrite flush");
             engine.compact_all().expect("compact all");
@@ -362,7 +366,8 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() {
             seed.put(key.into_bytes(), b"baseline".to_vec(), None)
                 .expect("seed put");
         }
-        seed.commit(WriteOptions::buffered()).expect("seed commit");
+        seed.commit(buffered_write_options(mode))
+            .expect("seed commit");
         engine.flush_cf(&cf).expect("seed flush");
 
         let snapshot = engine
@@ -382,7 +387,7 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() {
                 tx.put(key.into_bytes(), value, None)
                     .expect("overwrite put");
             }
-            tx.commit(WriteOptions::buffered())
+            tx.commit(buffered_write_options(mode))
                 .expect("overwrite commit");
             engine.flush_cf(&cf).expect("overwrite flush");
             engine.compact_all().expect("compact all");

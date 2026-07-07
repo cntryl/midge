@@ -53,9 +53,9 @@ fn should_apply_last_committed_write_given_multiple_commits_when_last_write_wins
         txn2.put(b"key".to_vec(), b"from_txn2".to_vec(), None)
             .expect("put txn2 value");
 
-        txn1.commit(cntryl_midge::WriteOptions::buffered())
+        txn1.commit(buffered_write_options(mode))
             .expect("commit txn1");
-        txn2.commit(cntryl_midge::WriteOptions::buffered())
+        txn2.commit(buffered_write_options(mode))
             .expect("commit txn2");
 
         let reader = engine
@@ -85,7 +85,7 @@ fn should_allow_lost_update_given_concurrent_writes_when_lost_update_occurs() {
             .put(b"counter".to_vec(), b"0".to_vec(), None)
             .expect("put initial counter");
         setup
-            .commit(cntryl_midge::WriteOptions::buffered())
+            .commit(buffered_write_options(mode))
             .expect("commit setup");
 
         // Act
@@ -106,9 +106,9 @@ fn should_allow_lost_update_given_concurrent_writes_when_lost_update_occurs() {
         txn2.put(b"counter".to_vec(), b"1".to_vec(), None)
             .expect("txn2 write increment");
 
-        txn1.commit(cntryl_midge::WriteOptions::buffered())
+        txn1.commit(buffered_write_options(mode))
             .expect("commit txn1");
-        txn2.commit(cntryl_midge::WriteOptions::buffered())
+        txn2.commit(buffered_write_options(mode))
             .expect("commit txn2");
 
         let reader = engine
@@ -144,7 +144,7 @@ fn should_allow_disjoint_writes_after_shared_read_when_transactions_both_commit(
             .put(b"flag2".to_vec(), b"false".to_vec(), None)
             .expect("put flag2");
         setup
-            .commit(cntryl_midge::WriteOptions::buffered())
+            .commit(buffered_write_options(mode))
             .expect("commit setup");
 
         // Act
@@ -171,9 +171,9 @@ fn should_allow_disjoint_writes_after_shared_read_when_transactions_both_commit(
         txn2.put(b"flag2".to_vec(), b"true".to_vec(), None)
             .expect("txn2 write flag2");
 
-        txn1.commit(cntryl_midge::WriteOptions::buffered())
+        txn1.commit(buffered_write_options(mode))
             .expect("commit txn1");
-        txn2.commit(cntryl_midge::WriteOptions::buffered())
+        txn2.commit(buffered_write_options(mode))
             .expect("commit txn2");
 
         let reader = engine
@@ -208,8 +208,8 @@ fn should_abort_second_commit_given_conflicting_writes_when_abort_on_write_confl
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin tx2");
 
-        tx1.set_isolation_level(cntryl_midge::IsolationLevel::AbortOnWriteConflict);
-        tx2.set_isolation_level(cntryl_midge::IsolationLevel::AbortOnWriteConflict);
+        tx1.set_conflict_policy(cntryl_midge::ConflictPolicy::AbortOnWriteConflict);
+        tx2.set_conflict_policy(cntryl_midge::ConflictPolicy::AbortOnWriteConflict);
 
         tx1.put(b"key".to_vec(), b"from_tx1".to_vec(), None)
             .expect("put tx1 value");
@@ -217,9 +217,9 @@ fn should_abort_second_commit_given_conflicting_writes_when_abort_on_write_confl
             .expect("put tx2 value");
 
         // Act
-        tx1.commit(cntryl_midge::WriteOptions::buffered())
+        tx1.commit(buffered_write_options(mode))
             .expect("commit tx1");
-        let second_commit = tx2.commit(cntryl_midge::WriteOptions::buffered());
+        let second_commit = tx2.commit(buffered_write_options(mode));
 
         // Assert
         assert!(
@@ -256,8 +256,8 @@ fn should_abort_delete_range_commit_given_overlapping_recent_writes_when_abort_o
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin tx2");
 
-        tx1.set_isolation_level(cntryl_midge::IsolationLevel::AbortOnWriteConflict);
-        tx2.set_isolation_level(cntryl_midge::IsolationLevel::AbortOnWriteConflict);
+        tx1.set_conflict_policy(cntryl_midge::ConflictPolicy::AbortOnWriteConflict);
+        tx2.set_conflict_policy(cntryl_midge::ConflictPolicy::AbortOnWriteConflict);
 
         tx1.put(b"m".to_vec(), b"v1".to_vec(), None)
             .expect("put tx1 value");
@@ -265,9 +265,9 @@ fn should_abort_delete_range_commit_given_overlapping_recent_writes_when_abort_o
             .expect("tx2 delete range");
 
         // Act
-        tx1.commit(cntryl_midge::WriteOptions::buffered())
+        tx1.commit(buffered_write_options(mode))
             .expect("commit tx1");
-        let second_commit = tx2.commit(cntryl_midge::WriteOptions::buffered());
+        let second_commit = tx2.commit(buffered_write_options(mode));
 
         // Assert
         assert!(
@@ -304,8 +304,8 @@ fn should_abort_point_write_commit_given_recent_overlapping_delete_range_when_ab
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin tx2");
 
-        tx1.set_isolation_level(cntryl_midge::IsolationLevel::AbortOnWriteConflict);
-        tx2.set_isolation_level(cntryl_midge::IsolationLevel::AbortOnWriteConflict);
+        tx1.set_conflict_policy(cntryl_midge::ConflictPolicy::AbortOnWriteConflict);
+        tx2.set_conflict_policy(cntryl_midge::ConflictPolicy::AbortOnWriteConflict);
 
         tx1.delete_range(b"a".to_vec(), b"z".to_vec())
             .expect("tx1 delete range");
@@ -313,9 +313,9 @@ fn should_abort_point_write_commit_given_recent_overlapping_delete_range_when_ab
             .expect("put tx2 value");
 
         // Act
-        tx1.commit(cntryl_midge::WriteOptions::buffered())
+        tx1.commit(buffered_write_options(mode))
             .expect("commit tx1");
-        let second_commit = tx2.commit(cntryl_midge::WriteOptions::buffered());
+        let second_commit = tx2.commit(buffered_write_options(mode));
 
         // Assert
         assert!(

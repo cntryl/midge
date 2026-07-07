@@ -196,90 +196,180 @@ enum ReadRoute {
 pub(super) struct RuntimeDispatcher;
 
 impl RuntimeDispatcher {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the exhaustive RuntimeMsg ownership boundary keeps routing compile-time checked"
-    )]
     pub(super) fn handle(
         event_loop: &mut EventLoop,
         msg: RuntimeMsg,
         msg_rx: &Receiver<RuntimeMsg>,
     ) -> HandleOutcome {
         match msg {
+            RuntimeMsg::Shutdown
+            | RuntimeMsg::CheckWriteStall { .. }
+            | RuntimeMsg::WaitForWriteStallClear { .. }
+            | RuntimeMsg::CancelWaitForWriteStallClear { .. }
+            | RuntimeMsg::GetReadAmpMetrics { .. }
+            | RuntimeMsg::GetRecoveryMetrics { .. }
+            | RuntimeMsg::GetRuntimeMetrics { .. }
+            | RuntimeMsg::GetStorageLayout { .. }
+            | RuntimeMsg::WalSync { .. }
+            | RuntimeMsg::SealWalForCloud { .. }
+            | RuntimeMsg::CompactAll { .. }
+            | RuntimeMsg::ManifestPersist { .. }
+            | RuntimeMsg::SetRuntimeConfig { .. } => Self::handle_control_message(event_loop, &msg),
+            RuntimeMsg::BeginTransaction { .. } => Self::handle_snapshot_message(event_loop, &msg),
+            RuntimeMsg::ApplyTransaction { .. } => {
+                Self::handle_wal_message(event_loop, msg, msg_rx)
+            }
+            RuntimeMsg::FlushMemtable { .. } => Self::handle_flush_message(event_loop, &msg),
+            RuntimeMsg::CompactionComplete { .. } => {
+                Self::handle_compaction_message(event_loop, msg)
+            }
+            RuntimeMsg::ManifestCreateColumnFamily { .. }
+            | RuntimeMsg::ManifestDropColumnFamily { .. } => {
+                Self::handle_manifest_message(event_loop, msg, msg_rx)
+            }
+            #[cfg(test)]
+            RuntimeMsg::Noop { .. } => Self::handle_control_message(event_loop, &msg),
+            #[cfg(test)]
+            RuntimeMsg::StartupPing { .. } => Self::handle_control_message(event_loop, &msg),
+            #[cfg(test)]
+            RuntimeMsg::GetRuntimeConfig { .. } => Self::handle_control_message(event_loop, &msg),
+            #[cfg(test)]
+            RuntimeMsg::GetIngestState { .. } => Self::handle_control_message(event_loop, &msg),
+            #[cfg(test)]
+            RuntimeMsg::BeginIngest { .. } => Self::handle_control_message(event_loop, &msg),
+            #[cfg(test)]
+            RuntimeMsg::EndIngest { .. } => Self::handle_control_message(event_loop, &msg),
+            #[cfg(test)]
+            RuntimeMsg::GetCurrentSequence { .. } => Self::handle_control_message(event_loop, &msg),
+            #[cfg(test)]
+            RuntimeMsg::WalRotate { .. } => Self::handle_control_message(event_loop, &msg),
+            #[cfg(test)]
+            RuntimeMsg::CheckCompaction { .. } => Self::handle_control_message(event_loop, &msg),
+            #[cfg(test)]
+            RuntimeMsg::CheckGc { .. } => Self::handle_control_message(event_loop, &msg),
+            #[cfg(test)]
+            RuntimeMsg::CaptureReadSnapshot { .. } => {
+                Self::handle_snapshot_message(event_loop, &msg)
+            }
+            #[cfg(test)]
+            RuntimeMsg::RegisterSnapshot { .. } => Self::handle_snapshot_message(event_loop, &msg),
+            #[cfg(test)]
+            RuntimeMsg::UnregisterSnapshot { .. } => {
+                Self::handle_snapshot_message(event_loop, &msg)
+            }
+            #[cfg(test)]
+            RuntimeMsg::WalAppend { .. } => Self::handle_wal_message(event_loop, msg, msg_rx),
+            #[cfg(test)]
+            RuntimeMsg::WalAppendDeleteRange { .. } => {
+                Self::handle_wal_message(event_loop, msg, msg_rx)
+            }
+            #[cfg(test)]
+            RuntimeMsg::WalSyncComplete { .. } => Self::handle_wal_message(event_loop, msg, msg_rx),
+            #[cfg(test)]
+            RuntimeMsg::FlushComplete { .. } => Self::handle_flush_message(event_loop, &msg),
+            #[cfg(test)]
+            RuntimeMsg::RunCompaction { .. } => Self::handle_compaction_message(event_loop, msg),
+            #[cfg(test)]
+            RuntimeMsg::CloudUploadSst { .. } => Self::handle_cloud_message(event_loop, msg),
+            #[cfg(test)]
+            RuntimeMsg::CloudUploadWal { .. } => Self::handle_cloud_message(event_loop, msg),
+            #[cfg(test)]
+            RuntimeMsg::CloudUploadComplete { .. } => Self::handle_cloud_message(event_loop, msg),
+            #[cfg(test)]
+            RuntimeMsg::DeleteObsoleteSsts { .. } => Self::handle_gc_message(event_loop, msg),
+            #[cfg(test)]
+            RuntimeMsg::ManifestAddSst { .. } => {
+                Self::handle_manifest_message(event_loop, msg, msg_rx)
+            }
+            #[cfg(test)]
+            RuntimeMsg::ManifestCompactionComplete { .. } => {
+                Self::handle_manifest_message(event_loop, msg, msg_rx)
+            }
+            #[cfg(test)]
+            RuntimeMsg::Read { .. } | RuntimeMsg::RangeScan { .. } => {
+                Self::handle_read_message(event_loop, msg)
+            }
+        }
+    }
+
+    fn handle_control_message(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> HandleOutcome {
+        match msg {
             RuntimeMsg::Shutdown => event_loop.handle_shutdown(),
-            RuntimeMsg::CheckWriteStall { request_id, cf_id } => Self::dispatch_runtime(
+            &RuntimeMsg::CheckWriteStall { request_id, cf_id } => Self::dispatch_runtime(
                 event_loop,
                 RuntimeRoute::CheckWriteStall { request_id, cf_id },
             ),
-            RuntimeMsg::WaitForWriteStallClear { request_id, cf_id } => Self::dispatch_runtime(
+            &RuntimeMsg::WaitForWriteStallClear { request_id, cf_id } => Self::dispatch_runtime(
                 event_loop,
                 RuntimeRoute::WaitForWriteStallClear { request_id, cf_id },
             ),
-            RuntimeMsg::CancelWaitForWriteStallClear { wait_request_id } => Self::dispatch_runtime(
-                event_loop,
-                RuntimeRoute::CancelWaitForWriteStallClear { wait_request_id },
-            ),
-            RuntimeMsg::GetReadAmpMetrics { request_id } => {
+            &RuntimeMsg::CancelWaitForWriteStallClear { wait_request_id } => {
+                Self::dispatch_runtime(
+                    event_loop,
+                    RuntimeRoute::CancelWaitForWriteStallClear { wait_request_id },
+                )
+            }
+            &RuntimeMsg::GetReadAmpMetrics { request_id } => {
                 Self::dispatch_runtime(event_loop, RuntimeRoute::GetReadAmpMetrics { request_id })
             }
-            RuntimeMsg::GetRecoveryMetrics { request_id } => {
+            &RuntimeMsg::GetRecoveryMetrics { request_id } => {
                 Self::dispatch_runtime(event_loop, RuntimeRoute::GetRecoveryMetrics { request_id })
             }
-            RuntimeMsg::GetRuntimeMetrics { request_id } => {
+            &RuntimeMsg::GetRuntimeMetrics { request_id } => {
                 Self::dispatch_runtime(event_loop, RuntimeRoute::GetRuntimeMetrics { request_id })
             }
-            RuntimeMsg::GetStorageLayout { request_id } => {
+            &RuntimeMsg::GetStorageLayout { request_id } => {
                 Self::dispatch_runtime(event_loop, RuntimeRoute::GetStorageLayout { request_id })
             }
             #[cfg(test)]
-            RuntimeMsg::Noop { request_id } => {
+            &RuntimeMsg::Noop { request_id } => {
                 Self::dispatch_runtime(event_loop, RuntimeRoute::Noop { request_id })
             }
             #[cfg(test)]
-            RuntimeMsg::StartupPing { request_id } => {
+            &RuntimeMsg::StartupPing { request_id } => {
                 Self::dispatch_runtime(event_loop, RuntimeRoute::StartupPing { request_id })
             }
             #[cfg(test)]
-            RuntimeMsg::GetRuntimeConfig { request_id } => {
+            &RuntimeMsg::GetRuntimeConfig { request_id } => {
                 Self::dispatch_runtime(event_loop, RuntimeRoute::GetRuntimeConfig { request_id })
             }
             #[cfg(test)]
-            RuntimeMsg::GetIngestState { request_id } => {
+            &RuntimeMsg::GetIngestState { request_id } => {
                 Self::dispatch_runtime(event_loop, RuntimeRoute::GetIngestState { request_id })
             }
             #[cfg(test)]
-            RuntimeMsg::BeginIngest { request_id } => {
+            &RuntimeMsg::BeginIngest { request_id } => {
                 Self::dispatch_runtime(event_loop, RuntimeRoute::BeginIngest { request_id })
             }
             #[cfg(test)]
-            RuntimeMsg::EndIngest { request_id } => {
+            &RuntimeMsg::EndIngest { request_id } => {
                 Self::dispatch_runtime(event_loop, RuntimeRoute::EndIngest { request_id })
             }
             #[cfg(test)]
-            RuntimeMsg::GetCurrentSequence { request_id } => {
+            &RuntimeMsg::GetCurrentSequence { request_id } => {
                 Self::dispatch_runtime(event_loop, RuntimeRoute::GetCurrentSequence { request_id })
             }
-            RuntimeMsg::WalSync { request_id } => WalCoordinator::sync(event_loop, request_id),
+            &RuntimeMsg::WalSync { request_id } => WalCoordinator::sync(event_loop, request_id),
             #[cfg(test)]
-            RuntimeMsg::WalRotate { request_id } => WalCoordinator::rotate(event_loop, request_id),
-            RuntimeMsg::SealWalForCloud {
+            &RuntimeMsg::WalRotate { request_id } => WalCoordinator::rotate(event_loop, request_id),
+            &RuntimeMsg::SealWalForCloud {
                 request_id,
                 sequence,
                 wait_for_ack,
             } => WalCoordinator::seal_for_cloud(event_loop, request_id, sequence, wait_for_ack),
             #[cfg(test)]
-            RuntimeMsg::CheckCompaction { request_id } => {
+            &RuntimeMsg::CheckCompaction { request_id } => {
                 CompactionCoordinator::check(event_loop, request_id)
             }
-            RuntimeMsg::CompactAll { request_id } => {
+            &RuntimeMsg::CompactAll { request_id } => {
                 CompactionCoordinator::compact_all(event_loop, request_id)
             }
-            RuntimeMsg::ManifestPersist { request_id } => {
+            &RuntimeMsg::ManifestPersist { request_id } => {
                 ManifestCoordinator::persist(event_loop, request_id)
             }
             #[cfg(test)]
-            RuntimeMsg::CheckGc { request_id } => GcCoordinator::check(event_loop, request_id),
-            RuntimeMsg::SetRuntimeConfig {
+            &RuntimeMsg::CheckGc { request_id } => GcCoordinator::check(event_loop, request_id),
+            &RuntimeMsg::SetRuntimeConfig {
                 request_id,
                 memtable_size_limit,
                 memtable_flush_threshold,
@@ -299,12 +389,18 @@ impl RuntimeDispatcher {
                 };
                 Self::dispatch_config(event_loop, &update)
             }
-            RuntimeMsg::BeginTransaction { request_id, cf_id } => Self::dispatch_snapshot(
+            _ => unreachable!("non-control message routed to handle_control_message"),
+        }
+    }
+
+    fn handle_snapshot_message(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> HandleOutcome {
+        match msg {
+            &RuntimeMsg::BeginTransaction { request_id, cf_id } => Self::dispatch_snapshot(
                 event_loop,
                 SnapshotRoute::BeginTransaction { request_id, cf_id },
             ),
             #[cfg(test)]
-            RuntimeMsg::CaptureReadSnapshot {
+            &RuntimeMsg::CaptureReadSnapshot {
                 request_id,
                 cf_id,
                 sequence,
@@ -325,23 +421,33 @@ impl RuntimeDispatcher {
             } => Self::dispatch_snapshot(
                 event_loop,
                 SnapshotRoute::RegisterSnapshot {
-                    request_id,
-                    snapshot_id,
-                    sequence,
-                    pinned_sst_names,
+                    request_id: *request_id,
+                    snapshot_id: *snapshot_id,
+                    sequence: *sequence,
+                    pinned_sst_names: pinned_sst_names.clone(),
                 },
             ),
             #[cfg(test)]
-            RuntimeMsg::UnregisterSnapshot { snapshot_id } => Self::dispatch_snapshot(
+            &RuntimeMsg::UnregisterSnapshot { snapshot_id } => Self::dispatch_snapshot(
                 event_loop,
                 SnapshotRoute::UnregisterSnapshot { snapshot_id },
             ),
+            _ => unreachable!("non-snapshot message routed to handle_snapshot_message"),
+        }
+    }
+
+    fn handle_wal_message(
+        event_loop: &mut EventLoop,
+        msg: RuntimeMsg,
+        msg_rx: &Receiver<RuntimeMsg>,
+    ) -> HandleOutcome {
+        match msg {
             RuntimeMsg::ApplyTransaction {
                 request_id,
                 ops,
                 durability_policy,
                 start_sequence,
-                isolation_policy,
+                conflict_policy,
                 response_tx,
             } => Self::dispatch_wal(
                 event_loop,
@@ -351,7 +457,7 @@ impl RuntimeDispatcher {
                         ops,
                         durability_policy,
                         start_sequence,
-                        isolation_policy,
+                        conflict_policy,
                     },
                     response_tx,
                 },
@@ -407,7 +513,13 @@ impl RuntimeDispatcher {
                 },
                 msg_rx,
             ),
-            RuntimeMsg::FlushMemtable { request_id, cf_id } => {
+            _ => unreachable!("non-WAL message routed to handle_wal_message"),
+        }
+    }
+
+    fn handle_flush_message(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> HandleOutcome {
+        match msg {
+            &RuntimeMsg::FlushMemtable { request_id, cf_id } => {
                 Self::dispatch_flush(event_loop, FlushRoute::FlushMemtable { request_id, cf_id })
             }
             #[cfg(test)]
@@ -419,12 +531,18 @@ impl RuntimeDispatcher {
             } => Self::dispatch_flush(
                 event_loop,
                 FlushRoute::FlushComplete {
-                    request_id,
-                    cf_id,
-                    sst_name,
-                    sequence,
+                    request_id: *request_id,
+                    cf_id: *cf_id,
+                    sst_name: sst_name.clone(),
+                    sequence: *sequence,
                 },
             ),
+            _ => unreachable!("non-flush message routed to handle_flush_message"),
+        }
+    }
+
+    fn handle_compaction_message(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
+        match msg {
             RuntimeMsg::CompactionComplete {
                 request_id,
                 input_ssts,
@@ -447,6 +565,13 @@ impl RuntimeDispatcher {
             RuntimeMsg::RunCompaction { request_id, plan } => {
                 Self::dispatch_compaction(event_loop, CompactionRoute::Run { request_id, plan })
             }
+            _ => unreachable!("non-compaction message routed to handle_compaction_message"),
+        }
+    }
+
+    #[cfg(test)]
+    fn handle_cloud_message(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
+        match msg {
             #[cfg(test)]
             RuntimeMsg::CloudUploadSst {
                 request_id,
@@ -480,6 +605,13 @@ impl RuntimeDispatcher {
                     resource,
                 },
             ),
+            _ => unreachable!("non-cloud message routed to handle_cloud_message"),
+        }
+    }
+
+    #[cfg(test)]
+    fn handle_gc_message(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
+        match msg {
             #[cfg(test)]
             RuntimeMsg::DeleteObsoleteSsts {
                 request_id,
@@ -491,6 +623,16 @@ impl RuntimeDispatcher {
                     sst_names,
                 },
             ),
+            _ => unreachable!("non-GC message routed to handle_gc_message"),
+        }
+    }
+
+    fn handle_manifest_message(
+        event_loop: &mut EventLoop,
+        msg: RuntimeMsg,
+        msg_rx: &Receiver<RuntimeMsg>,
+    ) -> HandleOutcome {
+        match msg {
             RuntimeMsg::ManifestCreateColumnFamily { request_id, name } => Self::dispatch_manifest(
                 event_loop,
                 msg_rx,
@@ -527,6 +669,13 @@ impl RuntimeDispatcher {
                     added,
                 },
             ),
+            _ => unreachable!("non-manifest message routed to handle_manifest_message"),
+        }
+    }
+
+    #[cfg(test)]
+    fn handle_read_message(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
+        match msg {
             #[cfg(test)]
             RuntimeMsg::Read {
                 request_id,
@@ -563,6 +712,7 @@ impl RuntimeDispatcher {
                     requested_durability,
                 },
             ),
+            _ => unreachable!("non-read message routed to handle_read_message"),
         }
     }
 

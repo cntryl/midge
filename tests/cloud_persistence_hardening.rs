@@ -204,14 +204,14 @@ fn should_keep_remote_wal_segment_when_unflushed_column_family_still_needs_it() 
         &default_cf,
         b"default-buffered",
         b"default-value",
-        WriteOptions::buffered(),
+        WriteOptions::cloud_async(),
     );
     put_cf(
         &engine,
         &other_cf,
         b"other-buffered",
         b"other-value",
-        WriteOptions::buffered(),
+        WriteOptions::cloud_async(),
     );
     put_cf(
         &engine,
@@ -294,48 +294,30 @@ fn should_recover_when_remote_wal_cleanup_partial_after_cache_loss() {
 }
 
 #[test]
-fn should_keep_sync_write_local_only_when_cloud_wal_upload_fails() {
+fn should_reject_sync_write_option_when_cloud_engine_commits() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
-    let db_path = cloud_db_path(&opts);
-    let scenario = fail::FailScenario::setup();
-    fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
-        .expect("configure wal upload failure failpoint");
-
     let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
 
     // Act
-    put_default(
-        &engine,
-        b"sync-local-only",
-        b"sync-value",
-        WriteOptions::sync(),
-    );
-    let metrics = wait_for_cloud_gap(&engine, 1);
+    let default_cf = default_cf(&engine);
+    let mut tx = engine
+        .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
+        .expect("begin write tx");
+    tx.put(b"sync-local-only".to_vec(), b"sync-value".to_vec(), None)
+        .expect("put sync-local-only value");
+    let error = tx
+        .commit(WriteOptions::sync())
+        .expect_err("sync() should be rejected for cloud-backed storage");
 
     // Assert
-    assert!(metrics.current_sequence >= 1);
     assert!(
-        metrics.wal_cloud_durable_seq < metrics.current_sequence,
-        "cloud durability frontier must not advance on failed upload"
+        matches!(error, MidgeError::InvalidArgument(message) if message.contains("local-only"))
     );
-    assert_eq!(
-        get_default(&engine, b"sync-local-only"),
-        Some(Bytes::from_static(b"sync-value"))
-    );
-    drop(engine);
-
-    fail::remove("midge::cloud::inject_fail_wal_upload");
-    scenario.teardown();
-
-    reset_dir(&db_path.join("wal"));
-    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
-    assert_eq!(get_default(&reopened, b"sync-local-only"), None);
 }
 
 #[test]
-fn should_keep_buffered_write_local_only_when_cloud_wal_upload_fails() {
+fn should_keep_cloud_async_write_local_only_when_cloud_wal_upload_fails() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
@@ -349,7 +331,7 @@ fn should_keep_buffered_write_local_only_when_cloud_wal_upload_fails() {
         &engine,
         b"buffered-local-only",
         b"buffered-value",
-        WriteOptions::buffered(),
+        WriteOptions::cloud_async(),
     );
     thread::sleep(Duration::from_millis(600));
 

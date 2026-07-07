@@ -137,6 +137,34 @@ fn should_not_suppress_dead_code_in_production_sources() {
 }
 
 #[test]
+fn should_keep_production_sources_free_of_allow_expect_suppressions() {
+    // Arrange
+    let mut sources = Vec::new();
+    collect_rust_sources(&source_path("src"), &mut sources);
+    let forbidden = ["#[allow(", "#![allow(", "#[expect(", "#![expect("];
+
+    // Act
+
+    // Assert
+    for source in sources {
+        let relative = source
+            .strip_prefix(source_path(""))
+            .expect("source should live under repo")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let content = production_source(&relative);
+
+        for pattern in forbidden {
+            assert!(
+                !content.contains(pattern),
+                "{} should not suppress production lints with {pattern}",
+                source.display()
+            );
+        }
+    }
+}
+
+#[test]
 fn should_keep_removed_testkit_api_out_of_public_surface() {
     // Arrange
     let lib = read_source("src/lib.rs");
@@ -157,6 +185,65 @@ fn should_keep_removed_testkit_api_out_of_public_surface() {
         !engine.contains("open_with_options"),
         "Engine should not expose the removed open_with_options testkit API"
     );
+}
+
+#[test]
+fn should_remove_legacy_transaction_benchmark_surface_names() {
+    // Arrange
+    let lib = read_source("src/lib.rs");
+    let transaction_api = read_source("src/engine/api/transaction.rs");
+    let runtime = read_source("src/runtime/mod.rs");
+
+    // Act
+
+    // Assert
+    assert!(!lib.contains("pub mod handler"));
+    assert!(!lib.contains("pub mod message"));
+    assert!(!transaction_api.contains("IsolationLevel"));
+    assert!(!transaction_api.contains("set_isolation_level"));
+    assert!(!runtime.contains("TransactionIsolationPolicy"));
+}
+
+#[test]
+fn should_remove_eviction_actor_wrapper_provider_modules() {
+    // Arrange
+    let runtime_actors = read_source("src/runtime/actors/mod.rs");
+    let provider_mod = read_source("src/storage/providers/mod.rs");
+    let diagrams = read_source("docs/development/architecture-diagrams.md");
+
+    // Act
+
+    // Assert
+    assert!(!runtime_actors.contains("EvictionActor"));
+    assert!(!provider_mod.contains("pub mod aws;"));
+    assert!(!provider_mod.contains("pub mod minio;"));
+    assert!(!provider_mod.contains("pub mod wasabi;"));
+    assert!(!provider_mod.contains("pub mod oci;"));
+    assert!(!diagrams.contains("EvictionActor"));
+}
+
+#[test]
+fn should_remove_legacy_manifest_sst_list_from_current_model() {
+    // Arrange
+    let manifest = production_source("src/metadata/manifest.rs");
+    let hybrid = production_source("src/storage/hybrid/backend.rs");
+
+    // Act
+
+    // Assert
+    assert!(!manifest.contains("pub ssts:"));
+    assert!(!hybrid.contains("manifest.ssts"));
+}
+
+#[test]
+fn should_propagate_transaction_encode_errors_without_expect() {
+    // Arrange
+    let wal_actor = production_source("src/runtime/actors/wal.rs");
+
+    // Act
+
+    // Assert
+    assert!(!wal_actor.contains("validated transaction batch should encode"));
 }
 
 #[test]
@@ -512,9 +599,6 @@ fn should_delegate_provider_construction_to_provider_family_resolvers() {
     let forbidden_factory_variants = [
         "CloudProviderConfig::AwsS3",
         "CloudProviderConfig::S3Compatible",
-        "CloudProviderConfig::Minio",
-        "CloudProviderConfig::Wasabi",
-        "CloudProviderConfig::OciS3Compatible",
         "CloudProviderConfig::AzureBlob",
         "CloudProviderConfig::Gcs",
     ];
@@ -532,7 +616,7 @@ fn should_delegate_provider_construction_to_provider_family_resolvers() {
     }
     assert!(s3.contains("pub(super) fn try_resolve"));
     assert!(s3.contains("CloudProviderConfig::AwsS3"));
-    assert!(s3.contains("CloudProviderConfig::OciS3Compatible"));
+    assert!(s3.contains("CloudProviderConfig::S3Compatible"));
     assert!(azure.contains("pub(super) fn try_resolve"));
     assert!(azure.contains("CloudProviderConfig::AzureBlob"));
     assert!(gcs.contains("pub(super) fn try_resolve"));
@@ -659,8 +743,10 @@ fn should_document_cloud_strict_durability_contract() {
 
     // Assert
     for doc in docs {
+        assert!(doc.contains("WriteOptions::cloud_async()"));
         assert!(doc.contains("WriteOptions::cloud_strict()"));
         assert!(doc.contains("Non-cloud storage rejects"));
+        assert!(doc.contains("local-only"));
         assert!(doc.contains("seal"));
         assert!(doc.contains("upload"));
         assert!(doc.contains("Empty cloud-backed"));

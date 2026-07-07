@@ -906,38 +906,30 @@ mod tests {
     }
 
     #[test]
-    fn should_create_s3_family_static_configs() {
+    fn should_create_s3_compatible_config_with_explicit_overrides() {
         // Arrange
-        let minio =
-            CloudProviderConfig::minio_static("bucket", "http://minio:9000", "key", "secret");
-        let wasabi = CloudProviderConfig::wasabi_static("bucket", "us-east-2", "key", "secret");
-        let oci = CloudProviderConfig::oci_s3_compatible_static(
-            "namespace",
+        let provider = CloudProviderConfig::s3_compatible(
             "bucket",
             "us-phoenix-1",
+            "https://object.example.com",
             "key",
             "secret",
-        );
+        )
+        .with_path_style(false)
+        .expect("path-style override");
 
         // Act
         // Assert
-        assert!(matches!(minio, CloudProviderConfig::Minio { .. }));
-        assert!(matches!(
-            wasabi,
-            CloudProviderConfig::Wasabi {
-                credentials: S3CredentialSource::Static { .. },
-                endpoint: None,
-                ..
-            }
-        ));
-        assert!(matches!(
-            oci,
-            CloudProviderConfig::OciS3Compatible {
+        assert_eq!(
+            provider,
+            CloudProviderConfig::S3Compatible {
+                bucket: "bucket".to_string(),
+                region: "us-phoenix-1".to_string(),
+                endpoint: "https://object.example.com".to_string(),
                 path_style: false,
-                credentials: S3CredentialSource::Static { .. },
-                ..
+                credentials: S3CredentialSource::access_key("key", "secret"),
             }
-        ));
+        );
     }
 
     #[test]
@@ -1080,11 +1072,9 @@ mod tests {
         assert!(CloudProviderConfig::gcs("bucket")
             .with_path_style(true)
             .is_err());
-        assert!(
-            CloudProviderConfig::minio_static("bucket", "http://minio:9000", "key", "secret")
-                .with_s3_region("us-west-2")
-                .is_err()
-        );
+        assert!(CloudProviderConfig::azure_blob("account", "container")
+            .with_s3_region("us-west-2")
+            .is_err());
     }
 
     #[test]

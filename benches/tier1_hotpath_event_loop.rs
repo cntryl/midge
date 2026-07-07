@@ -2,12 +2,13 @@
 //!
 //! Measures pure dispatch overhead without coordination or blocking.
 
+#[path = "./bench_support/event_loop.rs"]
+mod event_loop_support;
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::handler::handle;
-use cntryl_midge::message::MessageKind;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
+use event_loop_support::{handle, MessageKind};
 use std::collections::VecDeque;
 
 const INNER_LOOPS: usize = 128;

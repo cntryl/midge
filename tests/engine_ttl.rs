@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 mod common;
-use cntryl_midge::{TransactionMode, WriteOptions};
+use cntryl_midge::TransactionMode;
 use common::*;
 
 // ============================================================================
@@ -24,7 +24,7 @@ fn should_return_value_given_ttl_not_elapsed_when_reading() {
             .unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(3600))
             .unwrap(); // 1 hour TTL
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -46,7 +46,7 @@ fn should_return_none_given_ttl_elapsed_when_reading() {
             .unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(1))
             .unwrap(); // 1 second TTL
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         thread::sleep(Duration::from_millis(1100)); // Wait for expiration
@@ -69,7 +69,7 @@ fn should_not_expire_key_given_zero_ttl_when_zero_means_infinite() {
             .unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(0))
             .unwrap(); // 0 = no expiration (infinite)
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         thread::sleep(Duration::from_millis(100));
@@ -98,7 +98,7 @@ fn should_persist_ttl_metadata_given_restart_when_reopening() {
                 .unwrap();
             tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(3600))
                 .unwrap(); // 1 hour
-            tx.commit(WriteOptions::buffered()).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
             // Engine dropped
         }
 
@@ -125,7 +125,7 @@ fn should_persist_ttl_metadata_given_flush_and_restart_when_reopening() {
                 .unwrap();
             tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(3600))
                 .unwrap();
-            tx.commit(WriteOptions::buffered()).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
             engine.flush_cf(&cf).unwrap();
         }
 
@@ -159,7 +159,7 @@ fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening(
                 .unwrap();
             tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(1))
                 .unwrap(); // 1 second
-            tx.commit(WriteOptions::buffered()).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
             thread::sleep(Duration::from_millis(1100)); // Wait for expiration
                                                         // Engine dropped
         }
@@ -192,7 +192,7 @@ fn should_remove_expired_entries_given_compaction_when_ttl_exceeded() {
             .unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(1))
             .unwrap(); // 1 second
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
         thread::sleep(Duration::from_millis(1100));
 
         // Act - trigger flush
@@ -216,7 +216,7 @@ fn should_preserve_non_expired_entries_given_compaction_when_ttl_not_exceeded() 
             .unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(3600))
             .unwrap(); // 1 hour
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act - trigger flush
         engine.flush_cf(&cf).unwrap();
@@ -243,19 +243,19 @@ fn should_handle_mixed_ttl_keys_given_some_expire_when_reading() {
             .unwrap();
         tx1.put(b"key1".to_vec(), b"value1".to_vec(), Some(1))
             .unwrap(); // Expires
-        tx1.commit(WriteOptions::buffered()).unwrap();
+        tx1.commit(buffered_write_options(mode)).unwrap();
         let mut tx2 = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx2.put(b"key2".to_vec(), b"value2".to_vec(), Some(0))
             .unwrap(); // Never expires
-        tx2.commit(WriteOptions::buffered()).unwrap();
+        tx2.commit(buffered_write_options(mode)).unwrap();
         let mut tx3 = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx3.put(b"key3".to_vec(), b"value3".to_vec(), Some(3600))
             .unwrap(); // Long TTL
-        tx3.commit(WriteOptions::buffered()).unwrap();
+        tx3.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         thread::sleep(Duration::from_millis(1100));
@@ -288,7 +288,7 @@ fn should_update_ttl_given_overwrite_with_new_ttl_when_writing() {
             .unwrap();
         tx1.put(b"key1".to_vec(), b"value1".to_vec(), Some(1))
             .unwrap(); // 1 second
-        tx1.commit(WriteOptions::buffered()).unwrap();
+        tx1.commit(buffered_write_options(mode)).unwrap();
         thread::sleep(Duration::from_millis(500));
 
         // Act - overwrite with longer TTL
@@ -297,7 +297,7 @@ fn should_update_ttl_given_overwrite_with_new_ttl_when_writing() {
             .unwrap();
         tx2.put(b"key1".to_vec(), b"value2".to_vec(), Some(3600))
             .unwrap(); // 1 hour
-        tx2.commit(WriteOptions::buffered()).unwrap();
+        tx2.commit(buffered_write_options(mode)).unwrap();
         thread::sleep(Duration::from_millis(700)); // Original would have expired
 
         // Assert - should still be readable with new TTL
@@ -329,7 +329,7 @@ fn should_expire_keys_covered_by_range_tombstone_during_compaction() {
             tx.put(key.as_bytes().to_vec(), b"ttl_value".to_vec(), Some(1))
                 .unwrap();
         }
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
         engine.flush_cf(&cf).expect("flush");
 
         // Write range tombstone [k3, k8) - covers k3-k7
@@ -339,7 +339,7 @@ fn should_expire_keys_covered_by_range_tombstone_during_compaction() {
         delete_tx
             .delete_range(b"k3".to_vec(), b"k8".to_vec())
             .unwrap();
-        delete_tx.commit(WriteOptions::buffered()).unwrap();
+        delete_tx.commit(buffered_write_options(mode)).unwrap();
         engine.flush_cf(&cf).expect("flush");
 
         // Wait for TTL expiry
@@ -386,7 +386,7 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
             tx.put(key.as_bytes().to_vec(), b"l0_value".to_vec(), Some(1))
                 .unwrap();
         }
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
         engine.flush_cf(&cf).expect("flush L0");
 
         // L1: Write keys with longer TTL
@@ -398,7 +398,7 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
             tx.put(key.as_bytes().to_vec(), b"l1_value".to_vec(), Some(3600))
                 .unwrap();
         }
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
         engine.flush_cf(&cf).expect("flush L1");
 
         // Wait for L0 TTL to expire
@@ -447,14 +447,14 @@ fn should_not_expose_ttl_expired_key_covered_by_range_tombstone() {
             .unwrap();
         tx.put(b"k5".to_vec(), b"ttl_tombstone_value".to_vec(), Some(1))
             .unwrap();
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Immediately write range tombstone [k1, k10)
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.delete_range(b"k1".to_vec(), b"k10".to_vec()).unwrap();
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act: Read k5 after TTL expiry
         thread::sleep(Duration::from_millis(1100));

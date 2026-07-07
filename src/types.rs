@@ -8,6 +8,18 @@ use crate::config::EngineHealth;
 /// Column family identifier.
 pub type ColumnFamilyId = u32;
 
+/// Conflict handling policy for read-write transaction commits.
+///
+/// This type is shared by the public API and the runtime so the engine does not
+/// maintain a parallel internal conflict enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictPolicy {
+    /// Preserve current behavior: overlapping writers resolve by commit order.
+    LastWriteWins,
+    /// Abort when a write-set key or covered range changed after the start snapshot.
+    AbortOnWriteConflict,
+}
+
 /// Durability level for read-path frontier checks.
 ///
 /// This enum is for internal runtime durability tracking. Write-time

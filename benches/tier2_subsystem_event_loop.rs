@@ -2,10 +2,11 @@
 //!
 //! Measures cross-thread channel and park/wake coordination overhead.
 
-use cntryl_midge::handler::handle;
-use cntryl_midge::message::MessageKind;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 use crossbeam::channel;
+#[path = "./bench_support/event_loop.rs"]
+mod event_loop_support;
+use event_loop_support::{handle, MessageKind};
 
 const CHANNEL_CROSS_THREAD_MESSAGES: usize = 4_194_304;
 const CHANNEL_CROSS_THREAD_OPS: u64 = 4_194_304;

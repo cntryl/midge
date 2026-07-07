@@ -35,7 +35,7 @@ pub use crate::types::{
     StorageLayoutSnapshot, StorageVerificationReport,
 };
 pub use api::{
-    BlockCachePolicy, CloudWritePolicy, Direction, Goal, IsolationLevel, Key, MemoryBudget,
+    BlockCachePolicy, CloudWritePolicy, ConflictPolicy, Direction, Goal, Key, MemoryBudget,
     OpenOptions, Query, RecoveryPolicy, ScanIterator, Storage, Transaction, TransactionMode, Value,
     WorkloadProfile, WriteOptions,
 };
@@ -378,9 +378,9 @@ impl Engine {
     /// Returns an error when snapshot registration fails or the column family does
     /// not exist.
     ///
-    /// # Panics
-    /// Panics if called while ingest mode is active. This is a programmer error:
-    /// transactions must not be started during ingest. Complete the ingest first.
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when called while ingest mode is active.
     pub fn begin_tx(
         &self,
         cf_id: ColumnFamilyId,
@@ -391,15 +391,12 @@ impl Engine {
             crate::diagnostics::record_read_only_begin_tx();
         }
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // HARD INVARIANT: No transactions while ingest is active.
-        // ─────────────────────────────────────────────────────────────────────────
-        assert!(
-            !self.is_ingesting(),
-            "BUG: begin_tx called while ingest mode is active. \
-             Violated invariant: transactions must not be started during ingest. \
-             Correct ordering: end the ingest barrier before begin_tx()."
-        );
+        if self.is_ingesting() {
+            return Err(MidgeError::InvalidArgument(
+                "cannot begin a transaction while ingest mode is active; end the ingest barrier first"
+                    .to_string(),
+            ));
+        }
 
         let Some(coordinator) = self
             .ingest_coordinators

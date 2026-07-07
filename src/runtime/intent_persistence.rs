@@ -147,12 +147,16 @@ mod tests {
     use proptest::prelude::*;
 
     fn create_test_dir() -> std::path::PathBuf {
+        static TEST_DIR_COUNTER: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
         use std::time::{SystemTime, UNIX_EPOCH};
         let pid = std::process::id();
+        let counter = TEST_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
-        let test_dir = std::env::temp_dir().join(format!("midge_intent_test_{pid}_{nanos}"));
+        let test_dir =
+            std::env::temp_dir().join(format!("midge_intent_test_{pid}_{counter}_{nanos}"));
         let _ = std::fs::remove_dir_all(&test_dir);
         std::fs::create_dir_all(&test_dir).expect("failed to create test dir");
         test_dir

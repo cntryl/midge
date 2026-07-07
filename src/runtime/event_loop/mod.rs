@@ -43,7 +43,7 @@ use std::time::Duration;
 
 #[cfg(test)]
 use super::actors::CloudActor;
-use super::actors::{CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor, WalActor};
+use super::actors::{CompactionActor, FlushActor, GcActor, ManifestActor, WalActor};
 use super::durability::DurabilityCoordinator;
 use super::read_resources::ReadResources;
 use super::read_snapshot::ReadSnapshot;
@@ -72,8 +72,6 @@ pub struct EventLoop {
     pub(super) cloud_actor: CloudActor,
     gc_actor: GcActor,
     manifest_actor: ManifestActor,
-    pub(super) eviction_actor: Option<EvictionActor>,
-
     pub(super) hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub(super) hybrid_storage_events:
         Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
@@ -211,7 +209,6 @@ impl EventLoop {
             cloud_actor: CloudActor::new(),
             gc_actor: GcActor::new(),
             manifest_actor: ManifestActor::new(),
-            eviction_actor: None,
             hybrid_storage: None,
             hybrid_storage_events: config.hybrid_storage_events.clone(),
             cloud_metadata_storage: config.cloud_metadata_storage.clone(),
@@ -247,7 +244,6 @@ impl EventLoop {
     }
 
     pub fn set_hybrid_storage(&mut self, storage: Arc<crate::storage::HybridStorage>) {
-        self.eviction_actor = Some(EvictionActor::new(storage.clone()));
         self.hybrid_storage = Some(storage);
     }
 
@@ -2009,7 +2005,7 @@ pub(super) mod tests {
         // Assert - All actors should be owned by event loop
         // They're private fields, so we verify through successful construction
         // and that event_loop doesn't expose uninitialized actors
-        assert!(event_loop.eviction_actor.is_none()); // Eviction actor is optional
+        assert!(event_loop.hybrid_storage.is_none()); // Hybrid storage is optional
     }
 
     #[test]

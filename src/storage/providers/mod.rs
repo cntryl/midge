@@ -14,25 +14,13 @@
 //! - `SigV4` signing (optional, can be extended)
 //! - Works with any S3-compatible service
 //!
-//! **AWS**: [aws.rs] - AWS S3 with full `SigV4` signing
-//! - Uses AWS region, access key, secret key
+//! **AWS**: configured through `CloudProviderConfig::AwsS3`
+//! - Uses AWS region, access key, secret key, or the AWS default chain
 //! - Proper AWS `SigV4` request signing
-//! - Extends [`S3Provider`]
 //!
-//! **Wasabi**: [wasabi.rs] - Wasabi Cloud Storage
-//! - S3-compatible API
-//! - Access key + secret key auth
-//! - Extends [`S3Provider`]
-//!
-//! **`MinIO`**: [minio.rs] - `MinIO` S3-compatible storage
-//! - On-premise or cloud-hosted `MinIO`
-//! - Access key + secret key auth
-//! - Extends [`S3Provider`]
-//!
-//! **OCI**: [oci.rs] - Oracle Cloud Infrastructure S3-compatible API
-//! - OCI Namespace + bucket structure
-//! - Custom signing (placeholder)
-//! - Extends [`S3Provider`]
+//! **Other S3-compatible providers**: configured through `CloudProviderConfig::S3Compatible`
+//! - Covers `MinIO`, `Wasabi`, `OCI` S3 front doors, and generic S3-compatible services
+//! - Caller supplies endpoint, region, path-style preference, and credentials
 //!
 //! ### Direct REST APIs
 //!
@@ -55,8 +43,6 @@
 //!
 //! ## Example Usage
 
-#[cfg(all(test, feature = "cloud-common"))]
-pub mod aws;
 #[cfg(feature = "cloud-common")]
 pub mod azure;
 #[cfg(feature = "cloud-common")]
@@ -68,18 +54,12 @@ mod factory;
 pub mod gcs;
 #[cfg(feature = "cloud-common")]
 mod gcs_resolver;
-#[cfg(all(test, feature = "cloud-common"))]
-pub mod minio;
-#[cfg(all(test, feature = "cloud-common"))]
-pub mod oci;
 #[cfg(all(test, feature = "cloud-common", feature = "peas-tests"))]
 pub mod qualification;
 #[cfg(feature = "cloud-common")]
 pub mod s3;
 #[cfg(feature = "cloud-common")]
 mod s3_resolver;
-#[cfg(all(test, feature = "cloud-common"))]
-pub mod wasabi;
 
 use std::sync::Arc;
 

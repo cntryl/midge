@@ -17,10 +17,8 @@ pub struct SyncState {
     pub last_sync_error: Option<String>,
 }
 
-/// Queue entry with retry tracking to prevent unbounded re-queuing
 pub(crate) struct QueuedWrite {
     pub(crate) data: Vec<u8>,
-    pub(crate) attempts: u8,
     pub(crate) ack: std::sync::mpsc::SyncSender<crate::common::MidgeResult<u64>>,
 }
 
@@ -29,16 +27,10 @@ impl QueuedWrite {
         data: Vec<u8>,
         ack: std::sync::mpsc::SyncSender<crate::common::MidgeResult<u64>>,
     ) -> Self {
-        Self {
-            data,
-            attempts: 0,
-            ack,
-        }
+        Self { data, ack }
     }
 }
 
-/// Maximum number of retry attempts before dropping a write
-pub(crate) const MAX_WRITE_ATTEMPTS: u8 = 3;
 /// Maximum queue depth to prevent unbounded memory growth
 /// Increased from 1000 to 5000 to handle high-concurrency workloads:
 /// - Writer drains ~500k-1M items/sec, so 5000 items ≈ 5-10ms of backlog
@@ -108,15 +100,6 @@ impl WriterRunner {
                 break;
             };
 
-            if Self::has_exhausted_write_attempts(&batch) {
-                let msg =
-                    "WAL write batch exceeded max retries; failing writer to preserve ordering"
-                        .to_string();
-                tracing::error!("{msg}");
-                self.fail_writes(&batch, msg);
-                return;
-            }
-
             if !batch.is_empty() {
                 let batch_len = batch.iter().map(|entry| entry.data.len()).sum::<usize>() as u64;
                 let start_pos = match self.write_batch(&mut file_opt, &mut batch) {
@@ -177,12 +160,6 @@ impl WriterRunner {
             && !self.has_pending_sync_or_flush()
     }
 
-    fn has_exhausted_write_attempts(batch: &[QueuedWrite]) -> bool {
-        batch
-            .iter()
-            .any(|entry| entry.attempts >= MAX_WRITE_ATTEMPTS)
-    }
-
     fn write_batch<'a>(
         &'a self,
         file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
@@ -190,7 +167,7 @@ impl WriterRunner {
     ) -> Result<u64, String> {
         let big_bytes = bytes::Bytes::from(Self::coalesce_batch(batch));
         let write_start = Instant::now();
-        let start_pos = self.append_with_retry(file_opt, big_bytes.clone())?;
+        let start_pos = self.append_once(file_opt, big_bytes.clone())?;
         let write_elapsed = write_start.elapsed();
 
         if let Some(t) = crate::telemetry::Telemetry::global() {
@@ -219,7 +196,7 @@ impl WriterRunner {
         big
     }
 
-    fn append_with_retry<'a>(
+    fn append_once<'a>(
         &'a self,
         file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
         big_bytes: bytes::Bytes,
@@ -231,23 +208,16 @@ impl WriterRunner {
         self.ensure_file_handle(file_opt)?;
 
         if let Some(file) = file_opt.as_mut() {
-            match file.write_at(start_pos, big_bytes.clone()) {
-                Ok(()) => return Ok(start_pos),
-                Err(e1) => {
-                    tracing::warn!(error = ?e1, start_pos, "wal writer write_at failed; reopening and retrying");
-                }
-            }
+            return file
+                .write_at(start_pos, big_bytes)
+                .map(|()| start_pos)
+                .map_err(|error| {
+                    tracing::error!(error = ?error, start_pos, "wal writer write_at failed");
+                    format!("wal writer write_at failed: {error}")
+                });
         }
 
-        *file_opt = self.open_file_handle().ok();
-        if let Some(file) = file_opt.as_mut() {
-            return file.write_at(start_pos, big_bytes).map(|()| start_pos).map_err(|e| {
-                tracing::error!(error = ?e, start_pos, "wal writer write_at failed after retry");
-                format!("wal writer write_at failed after retry: {e}")
-            });
-        }
-
-        Err("wal writer could not reopen file handle after write_at failure".to_string())
+        Err("wal writer has no file handle".to_string())
     }
 
     fn ensure_file_handle<'a>(

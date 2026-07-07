@@ -33,8 +33,7 @@ fn should_persist_atomic_transactions_after_restart() {
                 .expect("put");
             tx.put(b"tx_key2".to_vec(), b"tx_value2".to_vec(), None)
                 .expect("put");
-            tx.commit(cntryl_midge::WriteOptions::buffered())
-                .expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             // engine dropped, crash simulation
         }
 
@@ -125,8 +124,7 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
                     .expect("begin_tx");
                 tx.put(key.as_bytes().to_vec(), b"initial_value".to_vec(), None)
                     .expect("put");
-                tx.commit(cntryl_midge::WriteOptions::buffered())
-                    .expect("commit");
+                tx.commit(buffered_write_options(mode)).expect("commit");
             }
         }
 
@@ -141,7 +139,7 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
                 .delete_range(b"key3".to_vec(), b"key7".to_vec()) // [key3, key7)
                 .expect("delete_range");
             delete_tx
-                .commit(cntryl_midge::WriteOptions::buffered())
+                .commit(buffered_write_options(mode))
                 .expect("commit delete_range");
             // crash simulation
         }
@@ -202,8 +200,7 @@ fn should_recover_committed_spill_given_restart_after_commit() {
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
-            tx.commit(cntryl_midge::WriteOptions::buffered())
-                .expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             // crash simulation
         }
 
@@ -298,8 +295,7 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
                 let value = format!("cycle{cycle}_value");
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
-                tx.commit(cntryl_midge::WriteOptions::buffered())
-                    .expect("commit");
+                tx.commit(buffered_write_options(mode)).expect("commit");
             }
 
             {
@@ -344,8 +340,7 @@ fn should_maintain_exactly_once_semantics_given_transaction_with_crash() {
                 .expect("put");
             tx.put(b"idempotent_key".to_vec(), b"value2".to_vec(), None)
                 .expect("put");
-            tx.commit(cntryl_midge::WriteOptions::buffered())
-                .expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
         }
 
         // Assert: Final value should be the last write (value2)
@@ -390,8 +385,7 @@ fn should_recover_large_transaction_given_crash_during_spill() {
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
-            tx.commit(cntryl_midge::WriteOptions::buffered())
-                .expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
         }
 
         // Assert: All data recovered
@@ -429,8 +423,7 @@ fn should_not_lose_transaction_writes_given_incomplete_wal_sync() {
                 .expect("begin_tx");
             tx.put(b"wal_test_key".to_vec(), b"wal_test_value".to_vec(), None)
                 .expect("put");
-            tx.commit(cntryl_midge::WriteOptions::buffered())
-                .expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
         }
 
         // Assert
@@ -475,8 +468,7 @@ fn should_survive_mid_spill_crash_given_transaction_recovery() {
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
-            tx.commit(cntryl_midge::WriteOptions::buffered())
-                .expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
         }
 
         // Assert

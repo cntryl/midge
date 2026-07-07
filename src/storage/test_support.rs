@@ -1,10 +1,6 @@
-#[cfg(test)]
-use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex;
 
 use crate::common::MidgeResult;
 
@@ -56,88 +52,4 @@ pub(crate) fn build_cloud_backed_filesystem_simulation(
         cloud_root,
         recovery_cloud_wal_dir,
     })
-}
-
-#[cfg(test)]
-pub(crate) use test_support_impl::MockStorage;
-
-#[cfg(test)]
-mod test_support_impl {
-    use super::*;
-    use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
-
-    pub(crate) struct MockStorage {
-        data: Arc<Mutex<HashMap<String, Vec<u8>>>>,
-    }
-
-    impl MockStorage {
-        pub(crate) fn new() -> Self {
-            Self {
-                data: Arc::new(Mutex::new(HashMap::new())),
-            }
-        }
-    }
-
-    impl Default for MockStorage {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl StorageBackend for MockStorage {
-        fn submit_read(&self, key: &str, callback: StorageCallback) {
-            let data = self.data.lock().expect("lock mock storage");
-            let result = data
-                .get(key)
-                .cloned()
-                .ok_or(crate::common::MidgeError::NotFound);
-
-            let event = StorageEvent::ReadComplete {
-                key: key.to_string(),
-                result: match result {
-                    Ok(value) => StorageOutcome::Ok(value),
-                    Err(error) => StorageOutcome::Err(format!("{error:?}")),
-                },
-            };
-            let _ = callback.send(event);
-        }
-
-        fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
-            let mut storage = self.data.lock().expect("lock mock storage");
-            storage.insert(key.to_string(), data);
-
-            let event = StorageEvent::WriteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Ok(()),
-            };
-            let _ = callback.send(event);
-        }
-
-        fn submit_delete(&self, key: &str, callback: StorageCallback) {
-            let mut storage = self.data.lock().expect("lock mock storage");
-            storage.remove(key);
-
-            let event = StorageEvent::DeleteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Ok(()),
-            };
-            let _ = callback.send(event);
-        }
-
-        #[cfg(test)]
-        fn submit_list(&self, prefix: &str, callback: StorageCallback) {
-            let data = self.data.lock().expect("lock mock storage");
-            let results: Vec<_> = data
-                .keys()
-                .filter(|key| key.starts_with(prefix))
-                .cloned()
-                .collect();
-
-            let event = StorageEvent::ListComplete {
-                prefix: prefix.to_string(),
-                result: StorageOutcome::Ok(results),
-            };
-            let _ = callback.send(event);
-        }
-    }
 }

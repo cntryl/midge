@@ -11,6 +11,7 @@ use crate::engine::api::write_options::effective_wal_durability_policy;
 use crate::engine::ingest::IngestCoordinator;
 use crate::engine::ColumnFamilyId;
 use crate::runtime::RuntimeHandle;
+use crate::types::ConflictPolicy;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,15 +25,6 @@ pub enum TransactionMode {
     ReadOnly,
     /// Read-write transaction; point writes are allowed
     ReadWrite,
-}
-
-/// Transaction isolation policy for read-write commits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IsolationLevel {
-    /// Current behavior: concurrent write conflicts resolve by commit order.
-    LastWriteWins,
-    /// Abort commit when a write-set key changed after transaction start snapshot.
-    AbortOnWriteConflict,
 }
 
 /// Pending write intent collected within a transaction.
@@ -158,7 +150,7 @@ pub struct Transaction {
     /// Transaction mode (`ReadOnly` or `ReadWrite`)
     mode: TransactionMode,
     /// Isolation behavior used during commit conflict handling.
-    isolation_level: IsolationLevel,
+    conflict_policy: ConflictPolicy,
     /// Write set: sequence of write intents
     write_set: Vec<WriteIntent>,
     /// Start sequence number (snapshot point)
@@ -289,7 +281,7 @@ impl Transaction {
             sequence_publisher: init.sequence_publisher,
             cf_id: init.cf_id,
             mode: init.mode,
-            isolation_level: IsolationLevel::LastWriteWins,
+            conflict_policy: ConflictPolicy::LastWriteWins,
             write_set: Vec::new(),
             start_sequence: init.start_sequence,
             read_snapshot: init.read_snapshot,
@@ -391,12 +383,12 @@ impl Transaction {
     }
 
     #[must_use]
-    pub fn isolation_level(&self) -> IsolationLevel {
-        self.isolation_level
+    pub fn conflict_policy(&self) -> ConflictPolicy {
+        self.conflict_policy
     }
 
-    pub fn set_isolation_level(&mut self, isolation_level: IsolationLevel) {
-        self.isolation_level = isolation_level;
+    pub fn set_conflict_policy(&mut self, conflict_policy: ConflictPolicy) {
+        self.conflict_policy = conflict_policy;
     }
 
     /// Commit this transaction with the provided durability options.
@@ -429,12 +421,10 @@ impl Transaction {
         }
 
         let runtime_ops = self.take_runtime_ops();
-        let isolation_policy = match self.isolation_level() {
-            IsolationLevel::LastWriteWins => {
-                crate::runtime::TransactionIsolationPolicy::LastWriteWins
-            }
-            IsolationLevel::AbortOnWriteConflict => {
-                crate::runtime::TransactionIsolationPolicy::AbortOnWriteConflict
+        let conflict_policy = match self.conflict_policy() {
+            ConflictPolicy::LastWriteWins => crate::runtime::ConflictPolicy::LastWriteWins,
+            ConflictPolicy::AbortOnWriteConflict => {
+                crate::runtime::ConflictPolicy::AbortOnWriteConflict
             }
         };
 
@@ -446,7 +436,7 @@ impl Transaction {
             runtime_ops,
             durability_policy,
             Some(self.start_sequence()),
-            isolation_policy,
+            conflict_policy,
             collect_submit_timing,
         );
         CommitTiming::record_submit(&mut timing, submit_started_at);

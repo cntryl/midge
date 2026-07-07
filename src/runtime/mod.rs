@@ -24,6 +24,7 @@ pub use event_loop::EventLoop;
 pub use intent_persistence::IntentPersistence;
 pub use read_snapshot::ReadSnapshot;
 
+pub use crate::types::ConflictPolicy;
 pub use state::RuntimeState;
 
 use crate::common::{MidgeError, MidgeResult};
@@ -203,15 +204,6 @@ pub enum TransactionOp {
     },
 }
 
-/// Runtime conflict policy used when applying transaction batches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransactionIsolationPolicy {
-    /// Preserve current behavior: last commit wins for overlapping writes.
-    LastWriteWins,
-    /// Abort when a write-set key changed after transaction start sequence.
-    AbortOnWriteConflict,
-}
-
 /// Intent log entry - records all state transitions for deterministic replay
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IntentLogEntry {
@@ -330,7 +322,7 @@ pub enum RuntimeMsg {
         ops: Vec<TransactionOp>,
         durability_policy: Option<DurabilityPolicy>,
         start_sequence: Option<u64>,
-        isolation_policy: TransactionIsolationPolicy,
+        conflict_policy: ConflictPolicy,
         response_tx: Option<Sender<RuntimeResponse>>,
     },
     /// Sync WAL to disk.
@@ -1063,7 +1055,7 @@ impl RuntimeHandle {
         ops: Vec<TransactionOp>,
         durability_policy: Option<DurabilityPolicy>,
         start_sequence: Option<u64>,
-        isolation_policy: TransactionIsolationPolicy,
+        conflict_policy: ConflictPolicy,
     ) -> MidgeResult<RuntimeResponse> {
         let (response_tx, response_rx) = channel::bounded(1);
         self.msg_tx
@@ -1072,7 +1064,7 @@ impl RuntimeHandle {
                 ops,
                 durability_policy,
                 start_sequence,
-                isolation_policy,
+                conflict_policy,
                 response_tx: Some(response_tx),
             })
             .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))?;
@@ -1088,7 +1080,7 @@ impl RuntimeHandle {
         ops: Vec<TransactionOp>,
         durability_policy: Option<DurabilityPolicy>,
         start_sequence: Option<u64>,
-        isolation_policy: TransactionIsolationPolicy,
+        conflict_policy: ConflictPolicy,
         timeout: Duration,
     ) -> MidgeResult<Option<RuntimeResponse>> {
         let (response_tx, response_rx) = channel::bounded(1);
@@ -1098,7 +1090,7 @@ impl RuntimeHandle {
                 ops,
                 durability_policy,
                 start_sequence,
-                isolation_policy,
+                conflict_policy,
                 response_tx: Some(response_tx),
             })
             .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))?;

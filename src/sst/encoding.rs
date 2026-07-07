@@ -186,7 +186,9 @@ pub fn decode_with_format(
 ) -> MidgeResult<(EntryView<'_>, usize)> {
     match format_version {
         crate::sst::types::SST_FORMAT_V1 => decode_v1(data, offset),
-        crate::sst::types::SST_FORMAT_V2 => decode_v2(data, offset),
+        crate::sst::types::SST_FORMAT_V2 | crate::sst::types::SST_FORMAT_V3 => {
+            decode_v2(data, offset)
+        }
         other => Err(MidgeError::Corruption(format!(
             "Unsupported SST entry format version: {other}"
         ))),

@@ -16,7 +16,7 @@
 //!   should_<behavior>_given_<context>_when_<condition>
 
 mod common;
-use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
+use cntryl_midge::{Engine, OpenOptions, TransactionMode};
 use common::*;
 use std::sync::Arc;
 use std::thread;
@@ -66,7 +66,7 @@ fn should_trigger_eviction_at_high_watermark() {
             tx.put(key.as_bytes().to_vec(), large_value.clone(), None)
                 .ok();
         }
-        tx.commit(WriteOptions::buffered()).expect("commit");
+        tx.commit(buffered_write_options(mode)).expect("commit");
 
         // Act: Flush to SST (triggers potential eviction to cloud)
         engine.flush_cf(&cf).expect("flush");
@@ -119,7 +119,7 @@ fn should_block_writes_at_emergency_watermark() {
 
             if let Ok(()) = tx.put(key.as_bytes().to_vec(), large_value.clone(), None) {
                 // Write succeeded in transaction
-                if let Ok(()) = tx.commit(WriteOptions::buffered()) {
+                if let Ok(()) = tx.commit(buffered_write_options(mode)) {
                     writes_completed += 1;
                 } else {
                     // Commit may fail at emergency watermark
@@ -174,7 +174,7 @@ fn should_resume_writes_after_eviction_clears_pressure() {
             tx.put(key.as_bytes().to_vec(), medium_value.clone(), None)
                 .ok();
         }
-        tx.commit(WriteOptions::buffered()).expect("commit");
+        tx.commit(buffered_write_options(mode)).expect("commit");
 
         // Act: Trigger eviction and wait
         engine.flush_cf(&cf).expect("flush");
@@ -190,7 +190,7 @@ fn should_resume_writes_after_eviction_clears_pressure() {
             if tx
                 .put(key.as_bytes().to_vec(), medium_value.clone(), None)
                 .is_ok()
-                && tx.commit(WriteOptions::buffered()).is_ok()
+                && tx.commit(buffered_write_options(mode)).is_ok()
             {
                 resume_writes += 1;
             }
@@ -225,7 +225,7 @@ fn should_prefer_local_reads_before_eviction() {
             tx.put(key.as_bytes().to_vec(), small_value.to_vec(), None)
                 .ok();
         }
-        tx.commit(WriteOptions::buffered()).expect("commit");
+        tx.commit(buffered_write_options(mode)).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Act: Read from cached SST (should be local, not cloud)
@@ -271,7 +271,7 @@ fn should_fetch_from_cloud_after_local_eviction() {
             let key = format!("evict_fetch_key_{i:02}");
             tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
         }
-        tx.commit(WriteOptions::buffered()).expect("commit");
+        tx.commit(buffered_write_options(mode)).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Act: Eviction should happen during flush
@@ -320,7 +320,7 @@ fn should_persist_eviction_state_across_restart() {
                 let key = format!("persist_evict_key_{i:02}");
                 tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             // Eviction occurs
@@ -379,7 +379,7 @@ fn should_handle_cloud_unavailable_during_eviction() {
             tx.put(key.as_bytes().to_vec(), large_value.clone(), None)
                 .ok();
         }
-        tx.commit(WriteOptions::buffered()).expect("commit");
+        tx.commit(buffered_write_options(mode)).expect("commit");
 
         // Act: Flush with cloud down (upload fails)
         engine.flush_cf(&cf).ok(); // May fail, but should handle gracefully
@@ -433,7 +433,7 @@ fn should_not_evict_ssts_with_active_readers() {
             let key = format!("reader_protect_key_{i:02}");
             tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
         }
-        tx.commit(WriteOptions::buffered()).expect("commit");
+        tx.commit(buffered_write_options(mode)).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Create read snapshot (holds reference to SST)

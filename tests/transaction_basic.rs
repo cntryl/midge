@@ -26,7 +26,7 @@ fn should_commit_transaction_given_multiple_operations_when_committed() {
         txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
         txn.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
         txn.delete(b"key3".to_vec()).unwrap();
-        txn.commit(WriteOptions::buffered()).unwrap();
+        txn.commit(buffered_write_options(mode)).unwrap();
 
         // Assert
         let read_tx = engine
@@ -55,7 +55,7 @@ fn should_succeed_given_empty_transaction_when_committed() {
         let txn = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
-        let result = txn.commit(WriteOptions::buffered());
+        let result = txn.commit(buffered_write_options(mode));
 
         // Assert
         assert!(result.is_ok());
@@ -97,6 +97,31 @@ fn should_succeed_given_empty_cloud_strict_cloud_transaction_when_committed() {
 }
 
 #[test]
+fn should_reject_local_only_write_options_given_cloud_transaction_when_committed() {
+    // Arrange
+    let opts = opts_for_mode("cloud");
+    let engine = open_with_mode(&opts, "cloud");
+    let cf = engine.create_column_family("test").expect("create cf");
+
+    // Act
+    let sync_result = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin tx")
+        .commit(WriteOptions::sync());
+    let buffered_result = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin tx")
+        .commit(WriteOptions::buffered());
+
+    // Assert
+    assert!(matches!(sync_result, Err(MidgeError::InvalidArgument(_))));
+    assert!(matches!(
+        buffered_result,
+        Err(MidgeError::InvalidArgument(_))
+    ));
+}
+
+#[test]
 fn should_succeed_given_read_only_transaction_when_committed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -108,14 +133,14 @@ fn should_succeed_given_read_only_transaction_when_committed() {
         write_tx
             .put(b"key1".to_vec(), b"value1".to_vec(), None)
             .unwrap();
-        write_tx.commit(WriteOptions::buffered()).unwrap();
+        write_tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         let txn = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
         let _value = txn.get(b"key1").unwrap();
-        let result = txn.commit(WriteOptions::buffered());
+        let result = txn.commit(buffered_write_options(mode));
 
         // Assert
         assert!(result.is_ok());
@@ -161,7 +186,7 @@ fn should_rollback_all_writes_given_multiple_operations_when_dropped() {
             .unwrap();
         tx.put(b"key1".to_vec(), b"original".to_vec(), None)
             .unwrap();
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         {
@@ -210,7 +235,7 @@ fn should_release_locks_given_aborted_transaction_when_cleanup() {
             .unwrap();
         txn2.put(b"key1".to_vec(), b"value2".to_vec(), None)
             .unwrap();
-        txn2.commit(WriteOptions::buffered()).unwrap();
+        txn2.commit(buffered_write_options(mode)).unwrap();
 
         // Assert
         let read_tx = engine
@@ -237,7 +262,7 @@ fn should_allow_concurrent_writes_with_lww_semantics_given_transaction_when_acti
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act - start transaction (captures snapshot)
         let txn = engine
@@ -249,7 +274,7 @@ fn should_allow_concurrent_writes_with_lww_semantics_given_transaction_when_acti
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx2.put(b"key1".to_vec(), b"v2".to_vec(), None).unwrap();
-        tx2.commit(WriteOptions::buffered()).unwrap();
+        tx2.commit(buffered_write_options(mode)).unwrap();
 
         // Assert - Midge implements Last-Write-Wins (LWW) semantics
         // Transactions see latest committed data (not true snapshot isolation)
@@ -282,7 +307,7 @@ fn should_read_own_writes_given_transaction_when_reading() {
         // Assert - should see own uncommitted write
         assert_eq!(value, Some(Bytes::from_static(b"value1")));
 
-        txn.commit(WriteOptions::buffered()).unwrap();
+        txn.commit(buffered_write_options(mode)).unwrap();
     });
 }
 
@@ -339,7 +364,7 @@ fn should_persist_writes_given_kv_transaction_when_committed_boxed() {
             .unwrap();
         txn.put(b"key_commit".to_vec(), b"value_commit".to_vec(), None)
             .unwrap();
-        txn.commit(WriteOptions::buffered()).unwrap();
+        txn.commit(buffered_write_options(mode)).unwrap();
 
         // Assert
         let read_tx = engine
@@ -405,7 +430,7 @@ fn should_insert_value_given_nonexistent_key_when_insert_in_transaction() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-        txn.commit(WriteOptions::buffered()).unwrap();
+        txn.commit(buffered_write_options(mode)).unwrap();
 
         // Assert
         let read_tx = engine
@@ -430,7 +455,7 @@ fn should_delete_range_given_committed_engine_operation_when_delete_range() {
         tx.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
         tx.put(b"key2".to_vec(), b"v2".to_vec(), None).unwrap();
         tx.put(b"key3".to_vec(), b"v3".to_vec(), None).unwrap();
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act - delete key1, key2 (not key3)
         let mut delete_tx = engine
@@ -439,7 +464,7 @@ fn should_delete_range_given_committed_engine_operation_when_delete_range() {
         delete_tx
             .delete_range(b"key1".to_vec(), b"key3".to_vec())
             .unwrap();
-        delete_tx.commit(WriteOptions::buffered()).unwrap();
+        delete_tx.commit(buffered_write_options(mode)).unwrap();
 
         // Assert
         let read_tx = engine
@@ -466,7 +491,7 @@ fn should_hide_deleted_range_given_scan_after_delete_range_when_scanning() {
         tx.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
         tx.put(b"key2".to_vec(), b"v2".to_vec(), None).unwrap();
         tx.put(b"key3".to_vec(), b"v3".to_vec(), None).unwrap();
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         let mut delete_tx = engine
@@ -475,7 +500,7 @@ fn should_hide_deleted_range_given_scan_after_delete_range_when_scanning() {
         delete_tx
             .delete_range(b"key1".to_vec(), b"key3".to_vec())
             .unwrap();
-        delete_tx.commit(WriteOptions::buffered()).unwrap();
+        delete_tx.commit(buffered_write_options(mode)).unwrap();
 
         // Scan after the delete_range is committed
         let txn = engine
@@ -507,7 +532,7 @@ fn should_commit_atomically_given_mixed_put_and_delete_range_when_committed_in_t
         setup.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
         setup.put(b"key2".to_vec(), b"v2".to_vec(), None).unwrap();
         setup.put(b"key3".to_vec(), b"v3".to_vec(), None).unwrap();
-        setup.commit(WriteOptions::buffered()).unwrap();
+        setup.commit(buffered_write_options(mode)).unwrap();
 
         // Act - put + delete + delete_range all in one transaction
         let mut tx = engine
@@ -516,7 +541,7 @@ fn should_commit_atomically_given_mixed_put_and_delete_range_when_committed_in_t
         tx.put(b"key4".to_vec(), b"v4".to_vec(), None).unwrap();
         tx.delete(b"key3".to_vec()).unwrap();
         tx.delete_range(b"key1".to_vec(), b"key3".to_vec()).unwrap();
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Assert - key1 and key2 gone via range, key3 gone via delete, key4 present
         let read = engine
@@ -606,7 +631,7 @@ fn should_allow_operations_given_previous_commit_failed_when_disk_full() {
             .unwrap();
         txn2.put(b"key2".to_vec(), b"value2".to_vec(), None)
             .unwrap();
-        txn2.commit(WriteOptions::buffered()).unwrap();
+        txn2.commit(buffered_write_options(mode)).unwrap();
 
         // Assert
         let read_tx = engine
@@ -635,7 +660,7 @@ fn should_persist_transaction_given_commit_when_crash_after() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-            txn.commit(WriteOptions::buffered()).unwrap();
+            txn.commit(buffered_write_options(mode)).unwrap();
             // Engine dropped (simulated crash)
         }
 
@@ -696,14 +721,14 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
                 .unwrap();
             txn1.put(b"key1".to_vec(), b"value1".to_vec(), None)
                 .unwrap();
-            txn1.commit(WriteOptions::buffered()).unwrap();
+            txn1.commit(buffered_write_options(mode)).unwrap();
 
             let mut txn2 = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             txn2.put(b"key2".to_vec(), b"value2".to_vec(), None)
                 .unwrap();
-            txn2.commit(WriteOptions::buffered()).unwrap();
+            txn2.commit(buffered_write_options(mode)).unwrap();
 
             // Engine dropped
         }
@@ -740,7 +765,7 @@ fn should_support_best_effort_during_bulk_load_phase_when_followed_by_flush() {
         let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("bulk_test").expect("create cf");
         let best_effort_opts = WriteOptions::best_effort();
-        let buffered_opts = WriteOptions::buffered();
+        let buffered_opts = buffered_write_options(mode);
 
         // Arrange: Fast bulk load with best_effort (setup; data loss on crash acceptable here)
         for i in 0..BULK_COUNT {

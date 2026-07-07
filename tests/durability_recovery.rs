@@ -15,7 +15,7 @@
 
 use bytes::Bytes;
 mod common;
-use cntryl_midge::{IsolationLevel, TransactionMode, WriteOptions};
+use cntryl_midge::{ConflictPolicy, TransactionMode};
 use common::*;
 
 // ============================================================================
@@ -37,13 +37,13 @@ fn should_recover_from_clean_shutdown_when_reopening() {
                 .expect("begin_tx");
             tx.put(b"key1".to_vec(), b"value1".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
             // Clean shutdown (engine dropped normally)
         }
@@ -88,7 +88,7 @@ fn should_recover_after_clean_shutdown_when_writes_include_flushed_and_unflushed
                 .expect("begin_tx");
             tx.put(b"flushed_key".to_vec(), b"flushed_value".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             // Additional writes to memtable (not flushed)
@@ -97,7 +97,7 @@ fn should_recover_after_clean_shutdown_when_writes_include_flushed_and_unflushed
                 .expect("begin_tx");
             tx.put(b"unflushed_key".to_vec(), b"unflushed_value".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             // Engine is dropped without flushing the second write set
         }
 
@@ -143,8 +143,8 @@ fn should_preserve_first_commit_given_conflict_abort_when_reopening() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin tx2");
 
-            tx1.set_isolation_level(IsolationLevel::AbortOnWriteConflict);
-            tx2.set_isolation_level(IsolationLevel::AbortOnWriteConflict);
+            tx1.set_conflict_policy(ConflictPolicy::AbortOnWriteConflict);
+            tx2.set_conflict_policy(ConflictPolicy::AbortOnWriteConflict);
 
             tx1.put(b"key".to_vec(), b"from_tx1".to_vec(), None)
                 .expect("tx1 put");
@@ -152,8 +152,9 @@ fn should_preserve_first_commit_given_conflict_abort_when_reopening() {
                 .expect("tx2 put");
 
             // Act
-            tx1.commit(WriteOptions::buffered()).expect("commit tx1");
-            let conflict = tx2.commit(WriteOptions::buffered());
+            tx1.commit(buffered_write_options(mode))
+                .expect("commit tx1");
+            let conflict = tx2.commit(buffered_write_options(mode));
 
             // Assert
             assert!(
@@ -200,7 +201,7 @@ fn should_recover_unflushed_data_when_reopening_after_clean_shutdown() {
                     .expect("begin_tx");
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
-                tx.commit(WriteOptions::buffered()).expect("commit");
+                tx.commit(buffered_write_options(mode)).expect("commit");
             }
             // Engine is dropped before an explicit flush occurs
         }
@@ -246,7 +247,7 @@ fn should_prefer_wal_given_wal_newer_than_sst_when_recovering() {
                 .expect("begin_tx");
             tx.put(b"key".to_vec(), b"value_v1".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             // Overwrite with v2 (in WAL only)
@@ -255,7 +256,7 @@ fn should_prefer_wal_given_wal_newer_than_sst_when_recovering() {
                 .expect("begin_tx");
             tx.put(b"key".to_vec(), b"value_v2".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             // Engine is dropped before a second flush occurs
         }
 
@@ -292,7 +293,7 @@ fn should_skip_wal_entries_given_already_in_sst_when_recovering() {
                 .expect("begin_tx");
             tx.put(b"key".to_vec(), b"value_v1".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
             // Engine is dropped after a successful flush
         }
@@ -336,7 +337,7 @@ fn should_replay_wal_in_order_given_multiple_writes_when_recovering() {
                     None,
                 )
                 .expect("put");
-                tx.commit(WriteOptions::buffered()).expect("commit");
+                tx.commit(buffered_write_options(mode)).expect("commit");
             }
             // Engine is dropped before an explicit flush occurs
         }
@@ -382,7 +383,7 @@ fn should_recover_deletes_when_reopening_after_clean_shutdown() {
                 .expect("begin_tx");
             tx.put(b"to_delete".to_vec(), b"value".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             // Delete (written to WAL but not yet persisted)
@@ -390,7 +391,7 @@ fn should_recover_deletes_when_reopening_after_clean_shutdown() {
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             tx.delete(b"to_delete".to_vec()).expect("delete");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             // Engine is dropped before persisting the delete via flush
         }
 
@@ -426,19 +427,19 @@ fn should_recover_independent_committed_transactions_when_reopening_after_clean_
                 .expect("begin_tx");
             tx.put(b"key1".to_vec(), b"value1".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             tx.put(b"key3".to_vec(), b"value3".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             // Engine is dropped before an explicit flush occurs
         }
 
@@ -495,7 +496,7 @@ fn should_recover_from_wal_when_reopening_after_clean_shutdown() {
                 .expect("begin_tx");
             tx.put(b"key".to_vec(), b"value".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             // Engine is dropped after the commit
         }
 
@@ -535,7 +536,7 @@ fn should_preserve_consistency_when_reopening_after_clean_shutdown() {
                         .expect("begin_tx");
                     tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                         .expect("put");
-                    tx.commit(WriteOptions::buffered()).expect("commit");
+                    tx.commit(buffered_write_options(mode)).expect("commit");
                 }
             }
             // Engine is dropped after all commits complete
@@ -582,13 +583,13 @@ fn should_be_idempotent_when_reopening_multiple_times_after_clean_shutdown() {
                 .expect("begin_tx");
             tx.put(b"key1".to_vec(), b"value1".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             // Engine is dropped after the committed writes
         }
 
@@ -636,7 +637,7 @@ fn should_maintain_exactly_once_visibility_when_reopening_multiple_times_after_c
                 .expect("begin_tx");
             tx.put(b"key".to_vec(), b"value".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             // Engine is dropped after the committed write
         }
 
@@ -681,13 +682,13 @@ fn should_continue_sequence_numbers_when_new_writes_follow_clean_reopen() {
                 .expect("begin_tx");
             tx.put(b"seq_1".to_vec(), b"value_1".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             tx.put(b"seq_2".to_vec(), b"value_2".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             // Engine is dropped after the committed writes
         }
 
@@ -712,13 +713,13 @@ fn should_continue_sequence_numbers_when_new_writes_follow_clean_reopen() {
                 .expect("begin_tx");
             tx.put(b"seq_3".to_vec(), b"value_3".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             tx.put(b"seq_4".to_vec(), b"value_4".to_vec(), None)
                 .expect("put");
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
         }
 
         // Assert (Phase 3)
@@ -772,7 +773,7 @@ fn should_replay_valid_wal_records_when_reopening_after_clean_shutdown() {
                     .expect("begin_tx");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
-                tx.commit(WriteOptions::buffered()).expect("commit");
+                tx.commit(buffered_write_options(mode)).expect("commit");
             }
             // Engine is dropped after writing valid WAL records
         }

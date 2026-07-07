@@ -162,7 +162,7 @@ fn should_return_write_stall_when_memory_budget_exceeded() {
             txn.put(key.as_bytes().to_vec(), value.clone(), None)
                 .expect("put");
 
-            match txn.commit(WriteOptions::buffered()) {
+            match txn.commit(buffered_write_options(mode)) {
                 Ok(()) => {}
                 Err(MidgeError::WriteStall(_msg)) => {
                     write_stall_observed = true;
@@ -219,7 +219,7 @@ fn should_succeed_after_backoff_when_write_stall_cleared() {
             txn.put(key.as_bytes().to_vec(), value.clone(), None)
                 .expect("put");
 
-            match txn.commit(WriteOptions::buffered()) {
+            match txn.commit(buffered_write_options(mode)) {
                 Ok(()) => {}
                 Err(MidgeError::WriteStall(_)) => {
                     first_stall_observed = true;
@@ -241,7 +241,7 @@ fn should_succeed_after_backoff_when_write_stall_cleared() {
         txn.put(key.as_bytes().to_vec(), value.clone(), None)
             .expect("put");
 
-        let second_write_ok_or_stall = match txn.commit(WriteOptions::buffered()) {
+        let second_write_ok_or_stall = match txn.commit(buffered_write_options(mode)) {
             Ok(()) | Err(MidgeError::WriteStall(_)) => true,
             Err(e) => panic!("unexpected error: {e:?}"),
         };
@@ -302,6 +302,7 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
             let shutdown_clone = shutdown.clone();
             let engine_clone = Arc::clone(&engine);
             let barrier_clone = Arc::clone(&barrier);
+            let write_options = buffered_write_options(mode);
 
             handles.push(std::thread::spawn(move || {
                 let mut total_writes = 0;
@@ -317,7 +318,7 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
                     txn.put(key.as_bytes().to_vec(), value.clone(), None)
                         .expect("put");
 
-                    match txn.commit(WriteOptions::buffered()) {
+                    match txn.commit(write_options) {
                         Ok(()) => total_writes += 1,
                         Err(MidgeError::WriteStall(_)) => {
                             total_stalls += 1;
@@ -383,6 +384,7 @@ fn should_handle_concurrent_writes_with_consistent_backpressure() {
             let engine_clone = Arc::clone(&engine);
             let shutdown_clone = shutdown.clone();
             let cf_id = cf.id();
+            let write_opts = buffered_write_options(mode);
 
             let handle = std::thread::spawn(move || {
                 let mut writes = 0;
@@ -397,7 +399,7 @@ fn should_handle_concurrent_writes_with_consistent_backpressure() {
                     txn.put(key.as_bytes().to_vec(), value.clone(), None)
                         .expect("put");
 
-                    match txn.commit(WriteOptions::buffered()) {
+                    match txn.commit(write_opts) {
                         Ok(()) => writes += 1,
                         Err(MidgeError::WriteStall(_)) => {
                             stalls += 1;

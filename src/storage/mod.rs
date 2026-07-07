@@ -1,79 +1,3 @@
-// == ARCHITECTURE MASTER RULES FOR STORAGE SUBSYSTEM =====================================
-// These rules define the *correct* architecture of the Midge storage layer. You MUST
-// follow them in all completions that touch storage, providers, WAL durability, or
-// cloud persistence.
-//
-// 1. HYBRID STORAGE ARCHITECTURE
-//    HybridStorage has TWO independent responsibilities:
-//    a) Object Storage: SSTs use submit_read/write/delete/list.
-//    b) WAL Durability: WAL segments ONLY use enqueue_wal_segment + process_uploads.
-//    NEVER mix these two paths. WAL NEVER calls submit_write(). SSTs ALWAYS call it.
-//
-// 2. CLOUD-BACKED ASYNC WAL DURABILITY
-//    - Local WAL append is the visibility barrier for ordinary cloud-backed commits.
-//    - CloudAck is emitted by HybridStorage when a sealed segment becomes cloud-durable.
-//    - CloudFail MUST also be emitted if cloud upload fails.
-//    - WAL ordering guarantee: local write → memtable visibility → async cloud upload
-//      → CloudAck / CloudFail frontier update.
-//
-// 3. CLOUD EXECUTOR REQUIREMENTS
-//    - CloudExecutor MUST embed its own single-threaded tokio runtime:
-//          tokio::runtime::Builder::new_current_thread().enable_all().build()
-//    - spawn_request MUST use rt.spawn(), NOT tokio::spawn.
-//    - Every cloud request MUST eventually produce a CloudEvent, no dropped futures.
-//
-// 4. S3 PROVIDER RULES
-//    - S3Provider MUST support AWS, Wasabi, MinIO, and generic S3-compatible vendors.
-//    - AWS uses full SigV4 signing. Others use access key + secret only.
-//    - All object keys MUST be normalized to "sst/<name>" or
-//      "wal/{segment_id:020}.wal".
-//    - LIST operations MUST use prefix semantics.
-//
-// 5. FILESYSTEM BACKEND RULES
-//    - FileSystem MUST be synchronous and callback-driven.
-//    - submit_write MUST create parent dirs before writing.
-//    - Paths MUST be sanitized to avoid directory traversal.
-//    - Used for SSTs + local WAL segments before cloud persistence.
-//
-// 6. HYBRID STORAGE UPLOAD PIPELINE
-//    - enqueue_wal_segment() inserts UploadState { segment_id, local_path, max_sequence }.
-//    - process_uploads() advances Pending → InProgress → Completed/Failed.
-//    - initiate_cloud_upload() MUST run cloud write asynchronously.
-//    - Retry logic: max 3 retries, then emit CloudFail.
-//    - Upload completion MUST push CloudAck{segment_id, max_sequence} to event_queue.
-//
-// 7. STORAGE BUDGET ACTOR INTEGRATION
-//    - HybridStorage MUST call budget_actor for:
-//         reserve_for_flush, flush_completed, compaction_planned, compaction_completed.
-//    - Backpressure events are surfaced to the runtime via StorageEvent::BackpressureOn/Off,
-//      handled in cloud_integration.rs handle_storage_event.
-//
-// 8. CORRECTNESS GUARANTEES
-//    - Local writes MUST complete before cloud uploads begin.
-//    - Ordinary cloud-backed commits become visible after the local WAL append barrier.
-//    - CloudStrict callers wait for CloudAck before returning.
-//    - WAL NEVER becomes inconsistent due to partial upload.
-//    - SST writes may be persisted to cloud, but do NOT block memtable visibility.
-//
-// 9. TESTING REQUIREMENTS FOR ARCHITECTURE
-//    When generating tests, enforce:
-//      - HybridStorage WAL pipeline: Pending → InProgress → CloudAck.
-//      - CloudExecutor event delivery.
-//      - S3 path correctness.
-//      - Retry logic.
-//      - Budget actor watermark behaviors.
-//    Avoid sleeps or timing assumptions; use manual state triggers.
-//
-// 10. WHAT ARCHITECTURE MUST NEVER DO
-//    - Never send WAL through submit_write().
-//    - Never claim cloud durability before CloudAck.
-//    - Never spawn async tasks directly without going through CloudExecutor.rt.
-//    - Never block the main runtime thread.
-//    - Never drop cloud upload results.
-//
-// Follow these rules EXACTLY. They reflect the authoritative storage architecture.
-// ====================================================================================
-
 //! # Storage Subsystem
 //!
 //! Provides durability abstractions for SSTs (synchronous local/cloud) and WAL
@@ -106,9 +30,8 @@
 //!   - Retry logic, backpressure, state tracking
 //!
 //! - **[`providers`]**: Cloud provider implementations
-//!   - Generic S3 (base implementation)
-//!   - AWS S3, Wasabi, `MinIO` (S3-compatible wrappers)
-//!   - Azure Blob Storage, Google Cloud Storage, OCI stubs
+//!   - AWS S3 and generic S3-compatible endpoints
+//!   - Azure Blob Storage and Google Cloud Storage
 //!
 //! - **[`test_support`]**: Test harnesses
 //!   - Pre-configured `HybridStorage` with mocks

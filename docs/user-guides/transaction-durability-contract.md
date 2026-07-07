@@ -13,6 +13,7 @@ This contract describes the current intended semantics for the supported local-f
 
 - single-process embedded deployment
 - local-disk storage mode
+- cloud-backed storage mode with explicit cloud durability options
 - `RecoveryPolicy::Strict`
 
 ## Core Model
@@ -120,14 +121,19 @@ A write can cross several boundaries:
 
 `commit()` does not always wait for all of them. The selected `WriteOptions` define the acknowledgment boundary.
 
+`WriteOptions::sync()` and `WriteOptions::buffered()` are local-only. `WriteOptions::cloud_async()` and `WriteOptions::cloud_strict()` are cloud-only. Non-cloud storage rejects the cloud-only modes, and cloud-backed storage rejects the local-only modes.
+
 | Write option | `commit()` returns after | Local durability at return | Crash outcome | Recovery source on restart |
 |---|---|---|---|---|
-| `WriteOptions::sync()` | WAL append and local fsync complete | Yes | write survives local crash assuming local storage survives | WAL replay or later SST state |
-| `WriteOptions::buffered()` | WAL append barrier and memtable apply complete | Not yet guaranteed | write may be lost if the process crashes before the batched fsync | WAL replay only if the later fsync completed |
+| `WriteOptions::sync()` | local WAL append and local fsync complete | Yes in local mode | local-disk write survives restart assuming local storage survives | WAL replay or later SST state |
+| `WriteOptions::buffered()` | local WAL append barrier and memtable apply complete | Not yet guaranteed in local mode | local-disk write may be lost if the process crashes before the later fsync | WAL replay only if the later fsync completed |
 | `WriteOptions::best_effort()` | memtable apply complete; WAL skipped | No | write is lost unless a later `flush_cf()` publishes it | SST state only if flush completed successfully |
+| `WriteOptions::cloud_async()` | cloud-backed WAL append barrier and memtable apply complete; seal and upload continue asynchronously | Not yet guaranteed | write may be lost if the process crashes before the sealed WAL upload is acknowledged | uploaded WAL segment or later SST state |
 | `WriteOptions::cloud_strict()` | cloud-backed WAL seal, rotate, upload, and acknowledgment complete | Cloud durable in cloud mode | write survives local cache loss after cloud acknowledgment | uploaded WAL segment or later SST state |
 
 ### `WriteOptions::sync()`
+
+`sync()` is valid only for local or in-memory storage. Cloud-backed storage rejects it with `MidgeError::InvalidArgument`.
 
 `commit()` returns only after local WAL append and fsync complete.
 
@@ -141,6 +147,8 @@ Use `sync()` for data that must survive a local crash before the caller continue
 
 ### `WriteOptions::buffered()`
 
+`buffered()` is valid only for local or in-memory storage. Cloud-backed storage rejects it with `MidgeError::InvalidArgument`.
+
 `commit()` returns after WAL append barrier and memtable visibility, but before local fsync is guaranteed.
 
 At return:
@@ -150,6 +158,20 @@ At return:
 - a crash before the later fsync may lose the transaction
 
 Use `buffered()` when lower latency is more important than eliminating the bounded crash window.
+
+### `WriteOptions::cloud_async()`
+
+`cloud_async()` is valid only for cloud-backed storage. Non-cloud storage rejects it with `MidgeError::InvalidArgument`.
+
+For a cloud-backed transaction with writes, `commit()` returns after the local WAL append barrier and memtable apply complete. The runtime still must seal the active WAL segment, upload it, and advance the cloud durability frontier later.
+
+At return:
+
+- the transaction is visible
+- the transaction is not yet guaranteed to survive local cache loss
+- the runtime still owes the cloud `seal` and `upload` work for the covering WAL segment
+
+Use `cloud_async()` when the engine must stage the write for cloud durability but the caller does not need to wait for cloud acknowledgment.
 
 ### `WriteOptions::best_effort()`
 
@@ -186,6 +208,7 @@ Empty cloud-backed `cloud_strict()` transactions are allowed and do not invent a
 - After `sync()`: the write is recovered from the local durable prefix, either by WAL replay or already-published SST state.
 - After `buffered()`: the write is recovered only if the later fsync completed before the crash.
 - After `best_effort()`: the write is recovered only if a later `flush_cf()` successfully published it to SST state.
+- After `cloud_async()`: the write is recovered only if the later WAL `seal` and cloud `upload` completed before the crash or local cache loss event.
 - After `cloud_strict()`: in cloud-backed mode, local cache loss after cloud acknowledgment should not lose the committed write.
 - During flush or compaction: output files may exist, but manifest-visible state remains authoritative until publication completes.
 

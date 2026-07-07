@@ -8,9 +8,10 @@ This matrix defines what Midge supports today and what must be true before a cap
 |---|---|---|
 | Local single-process embedded mode | Evaluation-ready | Production-ready first |
 | Cloud-backed mode | Supported 0.x path | Promote only after durability/recovery, lease, upload, and qualification gates pass |
-| `WriteOptions::sync()` | Supported | Freeze semantics at 1.0 |
-| `WriteOptions::buffered()` | Supported | Freeze semantics at 1.0 |
+| `WriteOptions::sync()` | Supported for local or in-memory mode only | Freeze local-only semantics at 1.0 |
+| `WriteOptions::buffered()` | Supported for local or in-memory mode only | Freeze local-only semantics at 1.0 |
 | `WriteOptions::best_effort()` | Supported with explicit caveats | Supported only for documented reloadable-data workflows |
+| `WriteOptions::cloud_async()` | Supported as the non-blocking cloud-backed durability mode | Production-ready only if cloud-backed mode is promoted |
 | `WriteOptions::cloud_strict()` | Supported as part of the cloud-backed path | Production-ready only if cloud-backed mode is promoted |
 | `RecoveryPolicy::Strict` | Supported | Production recovery default |
 | `RecoveryPolicy::Salvage` | Diagnostic/degraded path | Keep out of production contract unless explicitly promoted |

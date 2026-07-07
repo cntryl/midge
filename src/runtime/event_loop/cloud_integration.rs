@@ -1260,8 +1260,7 @@ mod tests {
         // Act
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
-        // Assert - eviction_actor should be None initially
-        assert!(event_loop.eviction_actor.is_none());
+        // Assert
         assert!(event_loop.hybrid_storage.is_none());
     }
 
@@ -1289,18 +1288,6 @@ mod tests {
         // Assert
         // hybrid_storage starts as None
         assert!(event_loop.hybrid_storage.is_none());
-    }
-
-    #[test]
-    fn should_support_eviction_actor_optional_field() {
-        // Arrange
-        let event_loop = create_test_event_loop().expect("Should create event loop");
-
-        // Act
-
-        // Assert
-        // eviction_actor starts as None
-        assert!(event_loop.eviction_actor.is_none());
     }
 
     #[test]
@@ -3055,7 +3042,7 @@ mod tests {
             ops,
             Some(crate::wal::DurabilityPolicy::CloudAsync),
             None,
-            crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+            crate::runtime::ConflictPolicy::LastWriteWins,
         )?;
         // Act
         // Assert
@@ -3161,7 +3148,7 @@ mod tests {
             ops,
             Some(crate::wal::DurabilityPolicy::CloudAsync),
             None,
-            crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+            crate::runtime::ConflictPolicy::LastWriteWins,
         )?;
         // Act
         // Assert
@@ -3226,7 +3213,7 @@ mod tests {
             ops,
             Some(crate::wal::DurabilityPolicy::CloudAsync),
             None,
-            crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+            crate::runtime::ConflictPolicy::LastWriteWins,
         )?;
         assert!(
             deferred,

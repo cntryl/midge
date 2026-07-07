@@ -8,11 +8,9 @@ pub(super) fn try_resolve(
     provider: &CloudProviderConfig,
 ) -> MidgeResult<Option<Arc<dyn CloudBackend>>> {
     match provider {
-        CloudProviderConfig::AwsS3 { .. }
-        | CloudProviderConfig::S3Compatible { .. }
-        | CloudProviderConfig::Minio { .. }
-        | CloudProviderConfig::Wasabi { .. }
-        | CloudProviderConfig::OciS3Compatible { .. } => Ok(Some(resolve_s3_family(provider)?)),
+        CloudProviderConfig::AwsS3 { .. } | CloudProviderConfig::S3Compatible { .. } => {
+            Ok(Some(resolve_s3_family(provider)?))
+        }
         CloudProviderConfig::AzureBlob { .. } | CloudProviderConfig::Gcs { .. } => Ok(None),
     }
 }
@@ -50,56 +48,6 @@ fn resolve_s3_family(provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn Clou
                 endpoint.clone(),
                 *path_style,
             );
-            let provider = super::s3::S3Provider::custom_with_credentials(config, creds)?;
-            Ok(provider.backend())
-        }
-        CloudProviderConfig::Minio {
-            bucket,
-            endpoint,
-            credentials,
-        } => {
-            let creds = resolve_s3_credentials(credentials, "us-east-1", false)?;
-            let config = super::s3::S3Config::minio(bucket.clone(), endpoint.clone());
-            let provider = super::s3::S3Provider::custom_with_credentials(config, creds)?;
-            Ok(provider.backend())
-        }
-        CloudProviderConfig::Wasabi {
-            bucket,
-            region,
-            endpoint,
-            credentials,
-        } => {
-            let creds = resolve_s3_credentials(credentials, region, false)?;
-            let config = match endpoint {
-                Some(endpoint) => super::s3::S3Config::custom(
-                    bucket.clone(),
-                    region.clone(),
-                    endpoint.clone(),
-                    true,
-                ),
-                None => super::s3::S3Config::wasabi(bucket.clone(), region),
-            };
-            let provider = super::s3::S3Provider::custom_with_credentials(config, creds)?;
-            Ok(provider.backend())
-        }
-        CloudProviderConfig::OciS3Compatible {
-            bucket,
-            namespace,
-            region,
-            endpoint,
-            path_style,
-            credentials,
-        } => {
-            let creds = resolve_s3_credentials(credentials, region, false)?;
-            let config = match endpoint {
-                Some(endpoint) => super::s3::S3Config::custom(
-                    bucket.clone(),
-                    region.clone(),
-                    endpoint.clone(),
-                    *path_style,
-                ),
-                None => super::s3::S3Config::oci_s3_compat(bucket.clone(), namespace, region),
-            };
             let provider = super::s3::S3Provider::custom_with_credentials(config, creds)?;
             Ok(provider.backend())
         }

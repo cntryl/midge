@@ -6,15 +6,17 @@ Midge's canonical transaction and write acknowledgment contract lives in
 Read that page for:
 
 - what each `WriteOptions` mode waits for before `commit()` returns
+- which modes are local-only and which modes are cloud-only
 - which writes survive restart after local crashes or cloud cache loss
 - how visibility, local durability, cloud durability, and SST publication differ
 - how `RecoveryPolicy::Strict` and `RecoveryPolicy::Salvage` should be interpreted
 
-In particular, `WriteOptions::cloud_strict()` is a cloud-backed durability mode,
-not a stronger local mode. Non-cloud storage rejects it. In cloud-backed mode it
-waits for the runtime to seal, rotate, upload, and acknowledge the WAL segment
-covering the committed sequence. Empty cloud-backed transactions are allowed
-without inventing a WAL record.
+In particular:
+
+- `WriteOptions::sync()` and `WriteOptions::buffered()` are local-only; cloud-backed storage rejects them.
+- `WriteOptions::cloud_async()` and `WriteOptions::cloud_strict()` are cloud-only. Non-cloud storage rejects them.
+- `WriteOptions::cloud_strict()` is not a stronger local mode. In cloud-backed mode it waits for the runtime to `seal`, rotate, `upload`, and acknowledge the WAL segment covering the committed sequence.
+- Empty cloud-backed `cloud_strict()` transactions are allowed without inventing a WAL record.
 
 ## Benchmark-Only Fsync Skips
 

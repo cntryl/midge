@@ -143,7 +143,7 @@ fn should_eventually_publish_sst_given_many_cloud_buffered_writes_when_memtable_
             &cf,
             key.as_bytes(),
             b"buffered-gap-value",
-            WriteOptions::buffered(),
+            WriteOptions::cloud_async(),
         );
     }
 
@@ -163,7 +163,7 @@ fn should_eventually_publish_sst_given_many_cloud_buffered_writes_when_memtable_
             &cf,
             key.as_bytes(),
             b"buffered-gap-value",
-            WriteOptions::buffered(),
+            WriteOptions::cloud_async(),
         );
     }
 
@@ -201,7 +201,7 @@ fn should_publish_lightly_written_column_family_given_busy_neighbor_when_cloud_s
             &light_cf,
             key.as_bytes(),
             b"light-gap-value",
-            WriteOptions::buffered(),
+            WriteOptions::cloud_async(),
         );
     }
 
@@ -212,7 +212,7 @@ fn should_publish_lightly_written_column_family_given_busy_neighbor_when_cloud_s
             &busy_cf,
             key.as_bytes(),
             b"busy-gap-value",
-            WriteOptions::buffered(),
+            WriteOptions::cloud_async(),
         );
     }
 
@@ -271,7 +271,7 @@ fn should_reset_memtable_wal_gap_after_reopen_before_new_segment_churn() {
                 &cf,
                 key.as_bytes(),
                 b"reopen-gap-value",
-                WriteOptions::buffered(),
+                WriteOptions::cloud_async(),
             );
         }
 

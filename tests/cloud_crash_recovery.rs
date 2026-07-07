@@ -122,7 +122,7 @@ fn child_buffered_eventual_flush_after_publish(db_path: &Path) {
             &engine,
             key.as_bytes(),
             b"cloud-buffered-crash-value",
-            WriteOptions::buffered(),
+            WriteOptions::cloud_async(),
         );
     }
 

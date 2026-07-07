@@ -68,7 +68,7 @@ pub(crate) struct TransactionAppendParams {
     pub ops: Vec<crate::runtime::TransactionOp>,
     pub durability_policy: Option<DurabilityPolicy>,
     pub start_sequence: Option<u64>,
-    pub isolation_policy: crate::runtime::TransactionIsolationPolicy,
+    pub conflict_policy: crate::runtime::ConflictPolicy,
 }
 
 /// Prepared transaction state that has allocated sequences but has not yet
@@ -734,7 +734,7 @@ impl WalActor {
         ops: Vec<crate::runtime::TransactionOp>,
         durability_policy: Option<DurabilityPolicy>,
         start_sequence: Option<u64>,
-        isolation_policy: crate::runtime::TransactionIsolationPolicy,
+        conflict_policy: crate::runtime::ConflictPolicy,
     ) -> MidgeResult<(u64, usize, bool)> {
         if ops.is_empty() {
             return Ok((state.sequence, 0, false));
@@ -747,7 +747,7 @@ impl WalActor {
                 ops,
                 durability_policy,
                 start_sequence,
-                isolation_policy,
+                conflict_policy,
             },
         )?;
         let last_sequence = prepared.sequence_plan.commit_seq;
@@ -780,7 +780,7 @@ impl WalActor {
             ops,
             durability_policy,
             start_sequence,
-            isolation_policy,
+            conflict_policy,
         } = params;
 
         if ops.is_empty() {
@@ -789,11 +789,11 @@ impl WalActor {
             ));
         }
 
-        self.validate_transaction_preconditions(state, &ops, start_sequence, isolation_policy)?;
+        self.validate_transaction_preconditions(state, &ops, start_sequence, conflict_policy)?;
         let effective_durability = durability_policy.unwrap_or(self.durability_policy);
         let sequence_plan = Self::allocate_transaction_sequences(state, ops.len());
         let (apply_ops, wal_batch) =
-            self.build_transaction_wal_batch(ops, &sequence_plan, effective_durability);
+            self.build_transaction_wal_batch(ops, &sequence_plan, effective_durability)?;
 
         Ok(PreparedTransactionAppend {
             request_id,
@@ -877,11 +877,11 @@ impl WalActor {
         state: &RuntimeState,
         ops: &[crate::runtime::TransactionOp],
         start_sequence: Option<u64>,
-        isolation_policy: crate::runtime::TransactionIsolationPolicy,
+        conflict_policy: crate::runtime::ConflictPolicy,
     ) -> MidgeResult<()> {
         if matches!(
-            isolation_policy,
-            crate::runtime::TransactionIsolationPolicy::AbortOnWriteConflict
+            conflict_policy,
+            crate::runtime::ConflictPolicy::AbortOnWriteConflict
         ) {
             let start_sequence = start_sequence.ok_or_else(|| {
                 MidgeError::InvalidArgument(
@@ -935,7 +935,7 @@ impl WalActor {
         ops: Vec<crate::runtime::TransactionOp>,
         sequence_plan: &TxnSequencePlan,
         effective_durability: DurabilityPolicy,
-    ) -> (Vec<TransactionApplyOp>, TxnWalBatch) {
+    ) -> MidgeResult<(Vec<TransactionApplyOp>, TxnWalBatch)> {
         let skip_wal = matches!(effective_durability, DurabilityPolicy::BestEffort);
         let encode_wal = !skip_wal && self.writer.is_some();
         let apply_ops = Self::build_apply_ops(
@@ -944,17 +944,18 @@ impl WalActor {
             sequence_plan.txn_id,
             self.current_epoch,
         );
-        let wal_record = self.build_transaction_batch_record(sequence_plan, &apply_ops, encode_wal);
+        let wal_record =
+            self.build_transaction_batch_record(sequence_plan, &apply_ops, encode_wal)?;
         let total_wal_bytes = wal_record.as_ref().map_or(0, WalRecord::estimated_size);
         let pending_wal_records = usize::from(!skip_wal);
-        (
+        Ok((
             apply_ops,
             TxnWalBatch {
                 wal_record,
                 total_wal_bytes,
                 pending_wal_records,
             },
-        )
+        ))
     }
 
     fn build_transaction_batch_record(
@@ -962,9 +963,9 @@ impl WalActor {
         sequence_plan: &TxnSequencePlan,
         apply_ops: &[TransactionApplyOp],
         encode_wal: bool,
-    ) -> Option<WalRecord> {
+    ) -> MidgeResult<Option<WalRecord>> {
         if !encode_wal {
-            return None;
+            return Ok(None);
         }
         let mut nested_records = Vec::with_capacity(apply_ops.len());
         for apply_op in apply_ops {
@@ -1029,7 +1030,12 @@ impl WalActor {
             self.current_epoch,
             &nested_records,
         )
-        .expect("validated transaction batch should encode");
+        .map_err(|error| {
+            MidgeError::Corruption(format!(
+                "failed to encode transaction batch {}: {error}",
+                sequence_plan.txn_id
+            ))
+        })?;
 
         let mut batch_record = WalRecord::new_cf(
             0,
@@ -1040,7 +1046,7 @@ impl WalActor {
             self.current_epoch,
         );
         batch_record.txn_id = Some(sequence_plan.txn_id);
-        Some(batch_record)
+        Ok(Some(batch_record))
     }
 
     fn append_prepared_transaction_batches(
@@ -2177,7 +2183,7 @@ mod tests {
             ops,
             None,
             None,
-            crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+            crate::runtime::ConflictPolicy::LastWriteWins,
         )?;
         assert!(deferred);
 
@@ -2228,7 +2234,7 @@ mod tests {
                 }],
                 durability_policy: Some(DurabilityPolicy::Batched),
                 start_sequence: None,
-                isolation_policy: crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+                conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
             },
         )?;
         let second = wal_actor.prepare_transaction_append(
@@ -2244,7 +2250,7 @@ mod tests {
                 }],
                 durability_policy: Some(DurabilityPolicy::Batched),
                 start_sequence: None,
-                isolation_policy: crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+                conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
             },
         )?;
 
@@ -2305,7 +2311,7 @@ mod tests {
                 }],
                 durability_policy: Some(DurabilityPolicy::Batched),
                 start_sequence: None,
-                isolation_policy: crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+                conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
             },
         )?;
         let second = wal_actor.prepare_transaction_append(
@@ -2318,7 +2324,7 @@ mod tests {
                 }],
                 durability_policy: Some(DurabilityPolicy::Batched),
                 start_sequence: None,
-                isolation_policy: crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+                conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
             },
         )?;
         assert!(
@@ -2369,7 +2375,7 @@ mod tests {
                 }],
                 durability_policy: Some(DurabilityPolicy::Batched),
                 start_sequence: None,
-                isolation_policy: crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+                conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
             },
         )?;
         wal_actor.append_prepared_transactions(&mut state, vec![recovery])?;

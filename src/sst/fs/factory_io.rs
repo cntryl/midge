@@ -9,8 +9,13 @@ use crate::io::Fs;
 
 use crate::sst::compression::CompressionPolicy;
 use crate::sst::encoding::EntryType;
+use crate::sst::index::profiler::{KeyStructureProfile, KeyStructureProfiler};
+use crate::sst::index::tuner::{IndexKind, IndexTuner};
+use crate::sst::sparse_index::IndexEntry;
+use crate::sst::trie::writer::TrieWriter;
 use crate::sst::types::{
-    encode_range_tombstones, BlockHandle, Footer, RangeTombstone, SstMetadata, SST_FORMAT_V2,
+    encode_range_tombstones, BlockHandle, Footer, KeyRangeMetadata, RangeTombstone, SstMetadata,
+    SST_FORMAT_V3,
 };
 
 /// SST factory that uses `io::Fs` abstraction
@@ -83,6 +88,14 @@ struct PendingEntry {
     expiration: Option<u64>,
 }
 
+struct FinalizedDataBlocks {
+    file_bytes: Vec<u8>,
+    block_index_entries: Vec<(Vec<u8>, BlockHandle)>,
+    key_profile: KeyStructureProfile,
+    smallest_key: Option<Vec<u8>>,
+    largest_key: Option<Vec<u8>>,
+}
+
 impl InMemorySstWriter {
     fn new(compression_policy: CompressionPolicy, block_size: usize) -> Self {
         Self {
@@ -112,14 +125,17 @@ impl InMemorySstWriter {
         Ok(BlockHandle::new(offset, size))
     }
 
-    fn serialize_index(index_entries: &[(Vec<u8>, BlockHandle)]) -> Vec<u8> {
+    fn serialize_index(index_entries: &[IndexEntry]) -> Vec<u8> {
         let mut index_bytes = Vec::new();
-        for (key, handle) in index_entries {
-            index_bytes
-                .extend_from_slice(&u32::try_from(key.len()).unwrap_or(u32::MAX).to_le_bytes());
-            index_bytes.extend_from_slice(key);
-            index_bytes.extend_from_slice(&handle.offset.to_le_bytes());
-            index_bytes.extend_from_slice(&handle.size.to_le_bytes());
+        for entry in index_entries {
+            index_bytes.extend_from_slice(
+                &u32::try_from(entry.key.len())
+                    .unwrap_or(u32::MAX)
+                    .to_le_bytes(),
+            );
+            index_bytes.extend_from_slice(&entry.key);
+            index_bytes.extend_from_slice(&entry.block_handle.offset.to_le_bytes());
+            index_bytes.extend_from_slice(&entry.block_handle.size.to_le_bytes());
         }
         index_bytes
     }
@@ -131,6 +147,196 @@ impl InMemorySstWriter {
             .take_while(|(left, right)| left == right)
             .count();
         u16::try_from(shared.min(u16::MAX as usize)).unwrap_or(u16::MAX)
+    }
+
+    fn sort_entries(mut entries: Vec<PendingEntry>) -> Vec<PendingEntry> {
+        entries.sort_by(|left, right| {
+            left.key
+                .cmp(&right.key)
+                .then_with(|| right.sequence.cmp(&left.sequence))
+        });
+        entries
+    }
+
+    fn encode_pending_entry(previous_key: &[u8], entry: &PendingEntry) -> Vec<u8> {
+        let shared_len = Self::shared_prefix_len(previous_key, &entry.key);
+        let key_delta = &entry.key[shared_len as usize..];
+        crate::sst::encoding::encode_v2(
+            key_delta,
+            shared_len,
+            entry.value.as_deref(),
+            entry.sequence,
+            match entry.op_type {
+                1 => EntryType::Insert,
+                2 => EntryType::Delete,
+                3 => EntryType::Merge,
+                _ => EntryType::Put,
+            },
+            entry.expiration,
+        )
+    }
+
+    fn update_key_bounds(
+        smallest_key: &mut Option<Vec<u8>>,
+        largest_key: &mut Option<Vec<u8>>,
+        key: &[u8],
+    ) {
+        if smallest_key
+            .as_ref()
+            .is_none_or(|current| key < current.as_slice())
+        {
+            *smallest_key = Some(key.to_vec());
+        }
+        if largest_key
+            .as_ref()
+            .is_none_or(|current| key > current.as_slice())
+        {
+            *largest_key = Some(key.to_vec());
+        }
+    }
+
+    fn flush_current_block(
+        file_bytes: &mut Vec<u8>,
+        current_block: &mut Vec<u8>,
+        current_first_key: &mut Option<Vec<u8>>,
+        block_index_entries: &mut Vec<(Vec<u8>, BlockHandle)>,
+        compression_policy: &CompressionPolicy,
+    ) -> MidgeResult<()> {
+        if current_block.is_empty() {
+            return Ok(());
+        }
+
+        let handle = Self::append_block(file_bytes, current_block, compression_policy)?;
+        if let Some(first_key) = current_first_key.take() {
+            block_index_entries.push((first_key, handle));
+        }
+        current_block.clear();
+        Ok(())
+    }
+
+    fn finalize_data_blocks(&self, entries: Vec<PendingEntry>) -> MidgeResult<FinalizedDataBlocks> {
+        let target_block_size = self.block_size.max(4 * 1024);
+        let mut file_bytes = Vec::new();
+        let mut block_index_entries = Vec::new();
+        let mut key_profiler = KeyStructureProfiler::new();
+        let mut current_block = Vec::new();
+        let mut current_first_key = None;
+        let mut previous_key = Vec::new();
+        let mut smallest_key = self
+            .range_tombstones
+            .iter()
+            .map(|tombstone| tombstone.start.clone())
+            .min();
+        let mut largest_key = self
+            .range_tombstones
+            .iter()
+            .map(|tombstone| tombstone.end.clone())
+            .max();
+
+        for entry in entries {
+            key_profiler.add_key(&entry.key);
+            Self::update_key_bounds(&mut smallest_key, &mut largest_key, &entry.key);
+
+            let mut encoded = Self::encode_pending_entry(&previous_key, &entry);
+            if !current_block.is_empty() && current_block.len() + encoded.len() > target_block_size
+            {
+                Self::flush_current_block(
+                    &mut file_bytes,
+                    &mut current_block,
+                    &mut current_first_key,
+                    &mut block_index_entries,
+                    &self.compression_policy,
+                )?;
+                previous_key.clear();
+                encoded = Self::encode_pending_entry(&previous_key, &entry);
+            }
+
+            if current_first_key.is_none() {
+                current_first_key = Some(entry.key.clone());
+            }
+
+            current_block.extend_from_slice(&encoded);
+            previous_key = entry.key;
+        }
+
+        Self::flush_current_block(
+            &mut file_bytes,
+            &mut current_block,
+            &mut current_first_key,
+            &mut block_index_entries,
+            &self.compression_policy,
+        )?;
+
+        Ok(FinalizedDataBlocks {
+            file_bytes,
+            block_index_entries,
+            key_profile: key_profiler.finish(),
+            smallest_key,
+            largest_key,
+        })
+    }
+
+    fn append_range_tombstone_block(
+        &self,
+        file_bytes: &mut Vec<u8>,
+    ) -> MidgeResult<Option<BlockHandle>> {
+        if self.range_tombstones.is_empty() {
+            return Ok(None);
+        }
+
+        let block_bytes = encode_range_tombstones(&self.range_tombstones);
+        Self::append_block(file_bytes, &block_bytes, &self.compression_policy).map(Some)
+    }
+
+    fn build_sparse_index_entries(
+        block_index_entries: &[(Vec<u8>, BlockHandle)],
+    ) -> Vec<IndexEntry> {
+        let mut sparse_index_entries = Vec::with_capacity(block_index_entries.len());
+        for (block_index, (first_key, handle)) in block_index_entries.iter().enumerate() {
+            sparse_index_entries.push(IndexEntry::new(first_key.clone(), *handle, block_index));
+        }
+        sparse_index_entries
+    }
+
+    fn append_trie_block(
+        file_bytes: &mut Vec<u8>,
+        compression_policy: &CompressionPolicy,
+        index_kind: IndexKind,
+        block_index_entries: &[(Vec<u8>, BlockHandle)],
+    ) -> MidgeResult<Option<BlockHandle>> {
+        if !matches!(index_kind, IndexKind::Trie) {
+            return Ok(None);
+        }
+
+        let mut trie_writer = TrieWriter::new(true);
+        for (block_index, (first_key, _handle)) in block_index_entries.iter().enumerate() {
+            trie_writer.add_block_key(first_key, u32::try_from(block_index).unwrap_or(u32::MAX))?;
+        }
+
+        match trie_writer.finish() {
+            Some(trie_bytes) => {
+                Self::append_block(file_bytes, &trie_bytes, compression_policy).map(Some)
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn append_metadata_index_and_footer(
+        file_bytes: &mut Vec<u8>,
+        compression_policy: &CompressionPolicy,
+        metadata: &SstMetadata,
+        sparse_index_entries: &[IndexEntry],
+        trie_handle: Option<BlockHandle>,
+    ) -> MidgeResult<()> {
+        let meta_handle = Self::append_block(file_bytes, &metadata.encode(), compression_policy)?;
+        let index_bytes = Self::serialize_index(sparse_index_entries);
+        let index_handle = Self::append_block(file_bytes, &index_bytes, compression_policy)?;
+        let footer = trie_handle.map_or_else(
+            || Footer::new(meta_handle, index_handle),
+            |handle| Footer::new(meta_handle, index_handle).with_trie(handle),
+        );
+        file_bytes.extend_from_slice(&footer.encode());
+        Ok(())
     }
 }
 
@@ -164,99 +370,50 @@ impl DynSstWriter for InMemorySstWriter {
     }
 
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
-        let mut entries = self.entries;
-        entries.sort_by(|left, right| {
-            left.key
-                .cmp(&right.key)
-                .then_with(|| right.sequence.cmp(&left.sequence))
-        });
-
-        let target_block_size = self.block_size.max(4 * 1024);
-        let mut file_bytes = Vec::new();
-        let mut index_entries: Vec<(Vec<u8>, BlockHandle)> = Vec::new();
-        let mut current_block = Vec::new();
-        let mut current_first_key: Option<Vec<u8>> = None;
-        let mut previous_key = Vec::new();
-
-        for entry in entries {
-            let encode_entry =
-                |previous_key: &[u8], entry: &PendingEntry| -> MidgeResult<Vec<u8>> {
-                    let shared_len = Self::shared_prefix_len(previous_key, &entry.key);
-                    let key_delta = &entry.key[shared_len as usize..];
-                    Ok(crate::sst::encoding::encode_v2(
-                        key_delta,
-                        shared_len,
-                        entry.value.as_deref(),
-                        entry.sequence,
-                        match entry.op_type {
-                            1 => EntryType::Insert,
-                            2 => EntryType::Delete,
-                            3 => EntryType::Merge,
-                            _ => EntryType::Put,
-                        },
-                        entry.expiration,
-                    ))
-                };
-
-            let mut encoded = encode_entry(&previous_key, &entry)?;
-
-            if !current_block.is_empty() && current_block.len() + encoded.len() > target_block_size
-            {
-                let handle =
-                    Self::append_block(&mut file_bytes, &current_block, &self.compression_policy)?;
-                if let Some(first_key) = current_first_key.take() {
-                    index_entries.push((first_key, handle));
-                }
-                current_block.clear();
-                previous_key.clear();
-                encoded = encode_entry(&previous_key, &entry)?;
-            }
-
-            if current_first_key.is_none() {
-                current_first_key = Some(entry.key.clone());
-            }
-
-            current_block.extend_from_slice(&encoded);
-            previous_key = entry.key;
-        }
-
-        if !current_block.is_empty() {
-            let handle =
-                Self::append_block(&mut file_bytes, &current_block, &self.compression_policy)?;
-            if let Some(first_key) = current_first_key.take() {
-                index_entries.push((first_key, handle));
-            }
-        }
-
-        let range_tombstone_handle = if self.range_tombstones.is_empty() {
-            None
-        } else {
-            let block_bytes = encode_range_tombstones(&self.range_tombstones);
-            Some(Self::append_block(
-                &mut file_bytes,
-                &block_bytes,
-                &self.compression_policy,
-            )?)
+        let InMemorySstWriter {
+            entries,
+            range_tombstones,
+            block_size,
+            compression_policy,
+        } = *self;
+        let writer = Self {
+            entries: Vec::new(),
+            range_tombstones,
+            block_size,
+            compression_policy,
         };
 
-        let metadata = SstMetadata {
-            format_version: SST_FORMAT_V2,
-            range_tombstone_handle,
-        };
-        let meta_handle = Self::append_block(
-            &mut file_bytes,
-            &metadata.encode(),
-            &self.compression_policy,
+        let entries = Self::sort_entries(entries);
+        let mut finalized = writer.finalize_data_blocks(entries)?;
+        let range_tombstone_handle =
+            writer.append_range_tombstone_block(&mut finalized.file_bytes)?;
+        let sparse_index_entries = Self::build_sparse_index_entries(&finalized.block_index_entries);
+        let index_kind = IndexTuner::decide(&finalized.key_profile);
+        let trie_handle = Self::append_trie_block(
+            &mut finalized.file_bytes,
+            &writer.compression_policy,
+            index_kind,
+            &finalized.block_index_entries,
         )?;
-
-        let index_bytes = Self::serialize_index(&index_entries);
-        let index_handle =
-            Self::append_block(&mut file_bytes, &index_bytes, &self.compression_policy)?;
-
-        let footer = Footer::new(meta_handle, index_handle);
-        file_bytes.extend_from_slice(&footer.encode());
-
-        Ok(file_bytes)
+        let metadata = SstMetadata {
+            format_version: SST_FORMAT_V3,
+            index_kind,
+            range_tombstone_handle,
+            key_range: finalized.smallest_key.zip(finalized.largest_key).map(
+                |(smallest_key, largest_key)| KeyRangeMetadata {
+                    smallest_key,
+                    largest_key,
+                },
+            ),
+        };
+        Self::append_metadata_index_and_footer(
+            &mut finalized.file_bytes,
+            &writer.compression_policy,
+            &metadata,
+            &sparse_index_entries,
+            trie_handle,
+        )?;
+        Ok(finalized.file_bytes)
     }
 }
 

@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 /// Well-known filename for the leader record.
 const LEADER_RECORD_FILE: &str = ".midge_leader";
+const LEADER_LOCK_FILE: &str = ".midge_leader.lock";
+const STALE_LOCK_TIMEOUT_SECS: i64 = 30;
 
 /// Filesystem-based `LeaderStore` using temp-write + fsync + atomic rename.
 pub struct FsLeaderStore {
@@ -41,36 +43,115 @@ impl FsLeaderStore {
         let n = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         FsPath::new(format!(".midge_leader.{}.{}.tmp", std::process::id(), n))
     }
+
+    fn lock_contents(holder_id: &str, created_at: &str) -> String {
+        format!("holder_id={holder_id}\ncreated_at={created_at}\n")
+    }
+
+    fn read_lock_contents(&self) -> Result<Option<String>, LeaseError> {
+        let lock_path = FsPath::new(LEADER_LOCK_FILE);
+        match self.fs.exists(&lock_path) {
+            Ok(false) => return Ok(None),
+            Ok(true) => {}
+            Err(error) => {
+                return Err(LeaseError::IoError(format!(
+                    "failed to check leader lock presence: {error}"
+                )))
+            }
+        }
+
+        let file = self
+            .fs
+            .open(
+                &lock_path,
+                OpenOptions {
+                    mode: OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(|error| LeaseError::IoError(format!("failed to open leader lock: {error}")))?;
+        let len = file.len().map_err(|error| {
+            LeaseError::IoError(format!("failed to read leader lock length: {error}"))
+        })?;
+        if len == 0 {
+            return Ok(Some(String::new()));
+        }
+        let data = file
+            .read_at(0, len)
+            .map_err(|error| LeaseError::IoError(format!("failed to read leader lock: {error}")))?;
+        String::from_utf8(data.to_vec())
+            .map(Some)
+            .map_err(|error| LeaseError::IoError(format!("leader lock is not UTF-8: {error}")))
+    }
+
+    fn parse_lock_created_at(content: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        content
+            .lines()
+            .find_map(|line| line.strip_prefix("created_at="))
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&chrono::Utc))
+    }
+
+    fn lock_is_stale(content: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+        Self::parse_lock_created_at(content).is_none_or(|created_at| {
+            now.signed_duration_since(created_at).num_seconds() >= STALE_LOCK_TIMEOUT_SECS
+        })
+    }
+
+    fn acquire_lock(&self, holder_id: &str) -> Result<LockGuard<'_>, LeaseError> {
+        let lock_path = FsPath::new(LEADER_LOCK_FILE);
+        let now = chrono::Utc::now();
+        let payload = Self::lock_contents(holder_id, &now.to_rfc3339());
+
+        for _ in 0..2 {
+            match self.fs.open(
+                &lock_path,
+                OpenOptions {
+                    mode: OpenMode::ReadWrite,
+                    create: true,
+                    create_new: true,
+                    truncate: false,
+                },
+            ) {
+                Ok(mut lock_file) => {
+                    lock_file
+                        .write_at(0, bytes::Bytes::from(payload.clone()))
+                        .map_err(|error| {
+                            LeaseError::IoError(format!(
+                                "failed to initialize leader lock: {error}"
+                            ))
+                        })?;
+                    let _ = lock_file.sync(Durability::Durable);
+                    return Ok(LockGuard { store: self });
+                }
+                Err(error) => {
+                    let content = self.read_lock_contents()?;
+                    if content
+                        .as_deref()
+                        .is_some_and(|existing| Self::lock_is_stale(existing, now))
+                    {
+                        let _ = self.fs.remove_file(&lock_path);
+                        continue;
+                    }
+                    return Err(LeaseError::AcquisitionFailed(format!(
+                        "another acquire is in progress: {error}"
+                    )));
+                }
+            }
+        }
+
+        Err(LeaseError::AcquisitionFailed(
+            "leader acquisition lock remained unavailable after stale-lock cleanup".to_string(),
+        ))
+    }
 }
 
 impl LeaderStore for FsLeaderStore {
     fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
-        let lock_path = FsPath::new(".midge_leader.lock");
-
-        // Attempt to create a lock file exclusively.  `create_new` fails if the
-        // file already exists, giving us cross-thread and cross-process mutual
-        // exclusion for the read-increment-write cycle.
-        let Ok(_lock_file) = self.fs.open(
-            &lock_path,
-            OpenOptions {
-                mode: OpenMode::ReadWrite,
-                create: true,
-                create_new: true,
-                truncate: false,
-            },
-        ) else {
-            return Err(LeaseError::AcquisitionFailed(
-                "another acquire is in progress (lock file exists)".to_string(),
-            ));
-        };
-
-        // Lock acquired — perform the read-increment-write CAS.
-        let result = self.acquire_inner(holder_id);
-
-        // Always release the lock file (best-effort cleanup).
-        let _ = self.fs.remove_file(&lock_path);
-
-        result
+        let _lock = self.acquire_lock(holder_id)?;
+        self.acquire_inner(holder_id)
     }
 
     fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
@@ -119,6 +200,16 @@ impl LeaderStore for FsLeaderStore {
             .map_err(|e| LeaseError::IoError(format!("leader record not UTF-8: {e}")))?;
 
         Ok(parse_leader_record(&content))
+    }
+}
+
+struct LockGuard<'a> {
+    store: &'a FsLeaderStore,
+}
+
+impl Drop for LockGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.store.fs.remove_file(&FsPath::new(LEADER_LOCK_FILE));
     }
 }
 

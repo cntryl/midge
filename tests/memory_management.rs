@@ -1,7 +1,7 @@
 //! Memory-related tests (formerly Phase 1 fixes)
 
 mod common;
-use cntryl_midge::{EngineHealth, MidgeError, TransactionMode, WriteOptions};
+use cntryl_midge::{EngineHealth, MidgeError, TransactionMode};
 use common::*;
 
 #[test]
@@ -26,7 +26,7 @@ fn should_handle_small_memory_budget_without_unexpected_errors() {
                 .unwrap();
             tx.put(key.into_bytes(), value, None).unwrap();
 
-            match tx.commit(WriteOptions::buffered()) {
+            match tx.commit(buffered_write_options(mode)) {
                 Ok(()) => {
                     write_count += 1;
                 }
@@ -77,7 +77,7 @@ fn should_complete_shutdown_when_wal_writer_drops() {
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key".to_vec(), b"value".to_vec(), None).unwrap();
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Assert
         drop(engine);

@@ -31,55 +31,6 @@ fn should_run_s3_compatible_contract_against_peas() {
 }
 
 #[test]
-fn should_run_minio_contract_against_peas() {
-    // Arrange
-    let provider = CloudProviderConfig::minio_static(
-        "midge-peas-minio",
-        PEAS_ENDPOINT,
-        PEAS_ACCESS_KEY,
-        PEAS_SECRET_KEY,
-    );
-    run_provider_contract("minio", &provider);
-    // Act
-    // Assert
-}
-
-#[test]
-fn should_run_wasabi_contract_against_peas() {
-    // Arrange
-    let provider = CloudProviderConfig::wasabi_static(
-        "midge-peas-wasabi",
-        "us-east-1",
-        PEAS_ACCESS_KEY,
-        PEAS_SECRET_KEY,
-    )
-    .with_endpoint(PEAS_ENDPOINT)
-    .expect("Peas Wasabi endpoint override should be supported");
-    run_provider_contract("wasabi", &provider);
-    // Act
-    // Assert
-}
-
-#[test]
-fn should_run_oci_s3_compatible_contract_against_peas() {
-    // Arrange
-    let provider = CloudProviderConfig::oci_s3_compatible_static(
-        "peas",
-        "midge-peas-oci",
-        "us-east-1",
-        PEAS_ACCESS_KEY,
-        PEAS_SECRET_KEY,
-    )
-    .with_endpoint(PEAS_ENDPOINT)
-    .expect("Peas OCI endpoint override should be supported")
-    .with_path_style(true)
-    .expect("Peas OCI path-style override should be supported");
-    run_provider_contract("oci", &provider);
-    // Act
-    // Assert
-}
-
-#[test]
 fn should_run_azure_blob_contract_against_peas() {
     let provider = CloudProviderConfig::peas_azure("midge-peas-azure");
     run_provider_contract("azure", &provider);
@@ -280,10 +231,7 @@ fn peas_required_from_value(value: Option<&str>) -> bool {
 fn ensure_peas_namespace(provider: &CloudProviderConfig) -> Result<(), String> {
     match provider {
         CloudProviderConfig::AwsS3 { .. } => Ok(()),
-        CloudProviderConfig::S3Compatible { bucket, .. }
-        | CloudProviderConfig::Minio { bucket, .. }
-        | CloudProviderConfig::Wasabi { bucket, .. }
-        | CloudProviderConfig::OciS3Compatible { bucket, .. } => ensure_peas_s3_bucket(bucket),
+        CloudProviderConfig::S3Compatible { bucket, .. } => ensure_peas_s3_bucket(bucket),
         CloudProviderConfig::Gcs { bucket, .. } => ensure_peas_gcs_bucket(bucket),
         CloudProviderConfig::AzureBlob { container, .. } => ensure_peas_azure_container(container),
     }

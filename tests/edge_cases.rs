@@ -15,7 +15,7 @@
 
 use bytes::Bytes;
 mod common;
-use cntryl_midge::{TransactionMode, WriteOptions};
+use cntryl_midge::TransactionMode;
 use common::*;
 
 // ============================================================================
@@ -37,7 +37,7 @@ fn should_retrieve_stored_keys_when_megabyte_sized() {
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         tx.put(large_key.clone(), small_value.to_vec(), None)
             .expect("put");
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
         let got = tx.get(&large_key).expect("get");
@@ -67,7 +67,7 @@ fn should_retrieve_stored_values_when_hundred_megabytes() {
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         tx.put(small_key.to_vec(), large_value.clone(), None)
             .expect("put");
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
         let got = tx.get(small_key).expect("get");
@@ -99,7 +99,7 @@ fn should_handle_mixed_size_values_when_ranging_from_bytes_to_megabytes() {
             .expect("put");
         tx.put(b"large".to_vec(), vec![42u8; 1_000_000], None)
             .expect("put");
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Assert: Retrieve all and verify
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -138,7 +138,7 @@ fn should_handle_special_characters_in_keys_when_utf8_and_binary_mixed() {
             let value = format!("value_{i}");
             tx.put(key.to_vec(), value.into_bytes(), None).expect("put");
         }
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Assert: Retrieve all
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -191,7 +191,7 @@ fn should_handle_single_record_database_when_one_key_value_pair() {
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
         tx.put(b"only_key".to_vec(), b"only_value".to_vec(), None)
             .expect("put");
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Assert: Can retrieve it
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -226,7 +226,7 @@ fn should_handle_range_query_at_boundaries_when_first_last_and_missing() {
             tx.put(key.into_bytes(), format!("value_{i}").into_bytes(), None)
                 .expect("put");
         }
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Assert: Boundary keys are retrievable
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -265,7 +265,7 @@ fn should_handle_rapid_operations_when_one_thousand_puts_per_second() {
             tx.put(key.into_bytes(), format!("v_{i}").into_bytes(), None)
                 .expect("put");
         }
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Assert: All retrievable
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -291,7 +291,7 @@ fn should_handle_delete_all_pattern_when_writing_then_deleting_all_keys() {
             tx.put(key.into_bytes(), b"delete_me".to_vec(), None)
                 .expect("put");
         }
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Act: Delete all keys
         let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
@@ -299,7 +299,7 @@ fn should_handle_delete_all_pattern_when_writing_then_deleting_all_keys() {
             let key = format!("del_test_{i:03}");
             tx.delete(key.into_bytes()).expect("delete");
         }
-        tx.commit(WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Assert: All deleted
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
@@ -328,11 +328,11 @@ fn should_handle_tombstone_accumulation_when_many_deletes_create_tombstones() {
                 None,
             )
             .expect("put");
-            tx.commit(WriteOptions::buffered()).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
 
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
             tx.delete(b"tombstone_test".to_vec()).expect("delete");
-            tx.commit(WriteOptions::buffered()).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
         }
 
         // Assert: Final state is deleted (tombstone wins)
@@ -376,7 +376,7 @@ fn should_batch_concurrent_puts_when_cloud_async_mode() {
                             .unwrap();
                         tx.put(key.into_bytes(), b"value".to_vec(), None)
                             .expect("put");
-                        tx.commit(WriteOptions::buffered()).unwrap();
+                        tx.commit(buffered_write_options(mode)).unwrap();
                     }
                 });
             }

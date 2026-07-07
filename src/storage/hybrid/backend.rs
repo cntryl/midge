@@ -1255,22 +1255,6 @@ impl HybridStorage {
             )?;
         }
 
-        for sst_name in &manifest.ssts {
-            if manifest.files.iter().any(|file| file.name == *sst_name) {
-                continue;
-            }
-            let key = crate::sst::object_key(sst_name);
-            Self::verify_sst_cloud_object_with_backend(
-                cloud,
-                verified_sst_objects,
-                &key,
-                sst_name,
-                0,
-                None,
-                None,
-            )?;
-        }
-
         Ok(())
     }
 
@@ -1684,25 +1668,46 @@ impl StorageBackend for HybridStorage {
         local_clone.submit_write(key, data_clone, tx);
 
         match rx.recv() {
-            Ok(StorageEvent::WriteComplete { ref result, .. }) => {
-                // Send result back to caller immediately (local write complete)
-                let event = StorageEvent::WriteComplete {
-                    key: key.to_string(),
-                    result: result.clone(),
-                };
-                let _ = callback.send(event);
-
-                // Schedule cloud write ONLY for SST files (not WAL)
-                // WAL cloud uploads happen via enqueue_wal_segment() + process_uploads()
-                if key.starts_with("sst/") && result.is_ok() {
-                    let (tx_cloud, _) = std::sync::mpsc::channel();
-                    cloud_clone.submit_write_with_headers(
-                        key,
-                        data,
-                        vec![("If-None-Match".into(), "*".into())],
-                        tx_cloud,
-                    );
+            Ok(StorageEvent::WriteComplete { result, .. }) => {
+                if !key.starts_with("sst/") || matches!(result, StorageOutcome::Err(_)) {
+                    let _ = callback.send(StorageEvent::WriteComplete {
+                        key: key.to_string(),
+                        result,
+                    });
+                    return;
                 }
+
+                let (tx_cloud, rx_cloud) = std::sync::mpsc::channel();
+                cloud_clone.submit_write_with_headers(
+                    key,
+                    data,
+                    vec![("If-None-Match".into(), "*".into())],
+                    tx_cloud,
+                );
+
+                let result = match rx_cloud.recv() {
+                    Ok(StorageEvent::WriteComplete {
+                        result: StorageOutcome::Ok(()),
+                        ..
+                    }) => StorageOutcome::Ok(()),
+                    Ok(StorageEvent::WriteComplete {
+                        result: StorageOutcome::Err(error),
+                        ..
+                    }) => StorageOutcome::Err(format!(
+                        "cloud write failed after local write succeeded: {error}"
+                    )),
+                    Ok(other) => StorageOutcome::Err(format!(
+                        "unexpected cloud write completion event: {other:?}"
+                    )),
+                    Err(error) => StorageOutcome::Err(format!(
+                        "cloud write channel closed after local write succeeded: {error}"
+                    )),
+                };
+
+                let _ = callback.send(StorageEvent::WriteComplete {
+                    key: key.to_string(),
+                    result,
+                });
             }
             _ => {
                 let _ = callback.send(StorageEvent::WriteComplete {
@@ -2250,24 +2255,6 @@ mod tests {
         assert!(
             error.contains("changed since validation") || error.contains("unreadable"),
             "unexpected stale SST proof error: {error}"
-        );
-    }
-
-    #[test]
-    fn should_validate_legacy_manifest_ssts_before_wal_cleanup() {
-        // Arrange
-        let (_mock_cloud, storage) = hybrid_with_mock_cloud();
-        let mut manifest = crate::metadata::Manifest::default();
-        manifest.ssts.push("legacy-missing.sst".to_string());
-
-        let error = storage
-            .verify_manifest_cloud_objects(&manifest)
-            .expect_err("legacy manifest SST references must be validated");
-        // Act
-        // Assert
-        assert!(
-            error.contains("legacy-missing.sst") || error.contains("sst/legacy-missing.sst"),
-            "unexpected legacy SST validation error: {error}"
         );
     }
 

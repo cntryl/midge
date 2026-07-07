@@ -109,7 +109,7 @@ fn should_drop_column_family_given_flushed_data_when_requested() {
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
         let cf_id = cf.id();
 
         // Act
@@ -130,7 +130,7 @@ fn should_fail_drop_column_family_given_unflushed_data_when_memtable_not_empty()
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
         let cf_id = cf.id();
 
         // Act - should fail if memtable not flushed
@@ -197,7 +197,7 @@ fn should_delete_cf_data_given_cf_dropped_when_persisted() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
             engine.drop_column_family(cf.id()).unwrap();
             // Engine dropped
         }
@@ -220,7 +220,7 @@ fn should_allow_recreate_cf_with_same_name_given_cf_dropped_when_creating() {
             .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
         engine.drop_column_family(cf1.id()).unwrap();
 
         // Act - recreate with same name
@@ -229,7 +229,7 @@ fn should_allow_recreate_cf_with_same_name_given_cf_dropped_when_creating() {
             .begin_tx(cf2.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx2.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
-        tx2.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        tx2.commit(buffered_write_options(mode)).unwrap();
 
         // Assert - should not see old data
         let tx_read = engine
@@ -323,9 +323,7 @@ fn should_isolate_keys_given_same_key_in_different_cfs_when_reading() {
         tx_default
             .put(b"key1".to_vec(), b"value_default".to_vec(), None)
             .unwrap();
-        tx_default
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx_default.commit(buffered_write_options(mode)).unwrap();
 
         let mut tx_cf1 = engine
             .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -333,9 +331,7 @@ fn should_isolate_keys_given_same_key_in_different_cfs_when_reading() {
         tx_cf1
             .put(b"key1".to_vec(), b"value_cf1".to_vec(), None)
             .unwrap();
-        tx_cf1
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx_cf1.commit(buffered_write_options(mode)).unwrap();
 
         // Assert
         let tx_read_default = engine
@@ -362,22 +358,20 @@ fn should_isolate_deletes_given_delete_in_one_cf_when_other_cf_has_same_key() {
             .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx1.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-        tx1.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        tx1.commit(buffered_write_options(mode)).unwrap();
 
         let mut tx2 = engine
             .begin_tx(cf2.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx2.put(b"key1".to_vec(), b"value2".to_vec(), None).unwrap();
-        tx2.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        tx2.commit(buffered_write_options(mode)).unwrap();
 
         // Act
         let mut tx_del = engine
             .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx_del.delete(b"key1".to_vec()).unwrap();
-        tx_del
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx_del.commit(buffered_write_options(mode)).unwrap();
 
         // Assert
         let tx_read1 = engine
@@ -409,7 +403,7 @@ fn should_isolate_data_given_different_data_volumes_when_reading() {
                 .unwrap();
             tx.put(key.as_bytes().to_vec(), b"value1".to_vec(), None)
                 .unwrap();
-            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
         }
         let mut tx_cf2 = engine
             .begin_tx(cf2.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -417,9 +411,7 @@ fn should_isolate_data_given_different_data_volumes_when_reading() {
         tx_cf2
             .put(b"single_key".to_vec(), b"value2".to_vec(), None)
             .unwrap();
-        tx_cf2
-            .commit(cntryl_midge::WriteOptions::buffered())
-            .unwrap();
+        tx_cf2.commit(buffered_write_options(mode)).unwrap();
 
         // Assert
         let tx_read_cf1 = engine
@@ -456,14 +448,14 @@ fn should_isolate_compaction_given_per_cf_data_when_compacting() {
                 .unwrap();
             tx1.put(key.as_bytes().to_vec(), b"value1".to_vec(), None)
                 .unwrap();
-            tx1.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+            tx1.commit(buffered_write_options(mode)).unwrap();
 
             let mut tx2 = engine
                 .begin_tx(cf2.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx2.put(key.as_bytes().to_vec(), b"value2".to_vec(), None)
                 .unwrap();
-            tx2.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+            tx2.commit(buffered_write_options(mode)).unwrap();
         }
 
         // Act - compact CF1 only
@@ -527,7 +519,7 @@ fn should_persist_cf_data_given_restart_when_data_flushed() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
             // Engine dropped
         }
 
@@ -555,13 +547,13 @@ fn should_persist_multiple_cfs_given_restart_when_all_flushed() {
                 .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx1.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-            tx1.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+            tx1.commit(buffered_write_options(mode)).unwrap();
 
             let mut tx2 = engine
                 .begin_tx(cf2.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx2.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
-            tx2.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+            tx2.commit(buffered_write_options(mode)).unwrap();
             // Engine dropped
         }
 
@@ -586,7 +578,7 @@ fn should_persist_cf_drop_given_restart_when_cf_was_dropped() {
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
             engine.flush_cf(&cf).ok(); // Flush before dropping
             engine.drop_column_family(cf.id()).unwrap();
             engine.flush_cf(&cf).ok(); // Flush after dropping to persist the deletion
@@ -671,13 +663,13 @@ fn should_isolate_cf_after_flush_given_same_key_when_reading() {
             .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx1.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-        tx1.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        tx1.commit(buffered_write_options(mode)).unwrap();
 
         let mut tx2 = engine
             .begin_tx(cf2.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
         tx2.put(b"key1".to_vec(), b"value2".to_vec(), None).unwrap();
-        tx2.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        tx2.commit(buffered_write_options(mode)).unwrap();
         // Flush would happen here if we had flush API
 
         // Assert - isolation maintained even after flush
@@ -713,7 +705,7 @@ fn should_handle_operations_on_default_cf_given_custom_cfs_exist_when_operating(
             .unwrap();
         tx.put(b"key1".to_vec(), b"default_value".to_vec(), None)
             .unwrap();
-        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        tx.commit(buffered_write_options(mode)).unwrap();
 
         // Assert
         let tx_read = engine
@@ -745,7 +737,7 @@ fn should_maintain_cf_isolation_given_many_cfs_when_operating() {
                 .unwrap();
             tx.put(b"shared_key".to_vec(), value.as_bytes().to_vec(), None)
                 .unwrap();
-            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
         }
 
         // Assert - each CF has its own value

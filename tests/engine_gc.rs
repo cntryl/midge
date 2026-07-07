@@ -13,7 +13,7 @@
 //!   should_<behavior>_given_<context>_when_<condition>
 
 mod common;
-use cntryl_midge::{TransactionMode, WriteOptions};
+use cntryl_midge::TransactionMode;
 use common::*;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,7 +55,7 @@ fn should_collect_orphaned_sst_files_after_compaction() {
             let key = format!("key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
         }
-        tx.commit(WriteOptions::buffered()).expect("commit");
+        tx.commit(buffered_write_options(mode)).expect("commit");
         engine.flush_cf(&cf).expect("flush initial");
 
         // Insert more keys and flush again to create second L0 SST
@@ -66,7 +66,7 @@ fn should_collect_orphaned_sst_files_after_compaction() {
             let key = format!("key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
         }
-        tx.commit(WriteOptions::buffered()).expect("commit");
+        tx.commit(buffered_write_options(mode)).expect("commit");
         engine.flush_cf(&cf).expect("flush second");
 
         // Act: Trigger compaction (merge L0 SSTs)
@@ -110,7 +110,7 @@ fn should_not_collect_sst_files_referenced_by_manifest() {
             tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                 .ok();
         }
-        tx.commit(WriteOptions::buffered()).expect("commit");
+        tx.commit(buffered_write_options(mode)).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Act: Don't trigger compaction; SST remains active
@@ -149,7 +149,7 @@ fn should_run_gc_after_configurable_interval() {
             let key = format!("batch1_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
         }
-        tx.commit(WriteOptions::buffered()).expect("commit");
+        tx.commit(buffered_write_options(mode)).expect("commit");
         engine.flush_cf(&cf).expect("flush batch 1");
 
         // Act: Write and flush batch 2 (triggers potential compaction)
@@ -160,7 +160,7 @@ fn should_run_gc_after_configurable_interval() {
             let key = format!("batch2_key_{i:04}");
             tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None).ok();
         }
-        tx.commit(WriteOptions::buffered()).expect("commit");
+        tx.commit(buffered_write_options(mode)).expect("commit");
         engine.flush_cf(&cf).expect("flush batch 2");
 
         // Wait for background compaction/GC (if configured)
@@ -201,7 +201,7 @@ fn should_persist_gc_state_across_restart() {
                 let key = format!("persist_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             // Write batch 2
@@ -212,7 +212,7 @@ fn should_persist_gc_state_across_restart() {
                 let key = format!("persist_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None).ok();
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             // Trigger manual compaction (marks orphans for deletion)
@@ -259,7 +259,7 @@ fn should_handle_gc_with_active_readers() {
             tx.put(key.as_bytes().to_vec(), b"snapshot_value".to_vec(), None)
                 .ok();
         }
-        tx.commit(WriteOptions::buffered()).expect("commit");
+        tx.commit(buffered_write_options(mode)).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
         // Act: Create snapshot (read lock on SSTs)
@@ -326,7 +326,7 @@ fn should_collect_orphaned_wal_segments_after_flush() {
             tx.put(key.as_bytes().to_vec(), b"wal_value".to_vec(), None)
                 .ok();
         }
-        tx.commit(WriteOptions::buffered()).expect("commit");
+        tx.commit(buffered_write_options(mode)).expect("commit");
 
         // Act: Flush to SST (WAL segment becomes obsolete)
         engine.flush_cf(&cf).expect("flush");
@@ -368,7 +368,7 @@ fn should_not_collect_wal_segments_still_needed_for_recovery() {
                 tx.put(key.as_bytes().to_vec(), b"recovery_value".to_vec(), None)
                     .ok();
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(buffered_write_options(mode)).expect("commit");
             // Do NOT flush; simulate crash by dropping engine
         }
 

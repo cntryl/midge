@@ -121,8 +121,8 @@ For unconstrained reads (e.g., event loop's own lookups), `seq = u64::MAX` makes
 
 `ReadWrite` transactions support two commit policies:
 
-- `IsolationLevel::LastWriteWins` (default): concurrent overlapping writers both commit; the higher sequence wins.
-- `IsolationLevel::AbortOnWriteConflict`: commit fails with `MidgeError::WriteConflict` if a write-set key or delete-range target has been modified after `start_sequence`.
+- `ConflictPolicy::LastWriteWins` (default): concurrent overlapping writers both commit; the higher sequence wins.
+- `ConflictPolicy::AbortOnWriteConflict`: commit fails with `MidgeError::WriteConflict` if a write-set key or delete-range target has been modified after `start_sequence`.
 
 In strict mode, conflict checks happen in the runtime apply path before WAL append, so aborted conflicting commits do not publish partial writes.
 
@@ -327,4 +327,4 @@ fn example(engine: &MidgeEngine, cf_id: u32) -> MidgeResult<()> {
 }
 ```
 
-**Note on concurrent `ReadWrite` transactions:** default mode (`LastWriteWins`) allows lost updates under overlap. If that is unacceptable, set `tx.set_isolation_level(IsolationLevel::AbortOnWriteConflict)` before commit.
+**Note on concurrent `ReadWrite` transactions:** default mode (`LastWriteWins`) allows lost updates under overlap. If that is unacceptable, set `tx.set_conflict_policy(ConflictPolicy::AbortOnWriteConflict)` before commit.

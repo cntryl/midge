@@ -14,6 +14,7 @@ mod write_options;
 pub mod iterator;
 pub mod query;
 
+pub use crate::types::ConflictPolicy;
 pub use iterator::{Direction, Iterator as ScanIterator};
 pub use kv::{Key, Value};
 pub use options::{
@@ -22,5 +23,5 @@ pub use options::{
 };
 pub use query::Query;
 pub(crate) use transaction::TransactionInit;
-pub use transaction::{IsolationLevel, Transaction, TransactionMode};
+pub use transaction::{Transaction, TransactionMode};
 pub use write_options::WriteOptions;

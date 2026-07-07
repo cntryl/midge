@@ -50,7 +50,7 @@ const WRITE_GROUP_RESCUE_INTERVAL: Duration = Duration::from_micros(50);
 #[derive(Clone, Copy)]
 struct ApplyTransactionOptions {
     start_sequence: Option<u64>,
-    isolation_policy: crate::runtime::TransactionIsolationPolicy,
+    conflict_policy: crate::runtime::ConflictPolicy,
     collect_submit_timing: bool,
 }
 
@@ -241,7 +241,7 @@ impl IngestCoordinator {
         ops: Vec<TransactionOp>,
         durability_policy: Option<crate::wal::DurabilityPolicy>,
         start_sequence: Option<u64>,
-        isolation_policy: crate::runtime::TransactionIsolationPolicy,
+        conflict_policy: crate::runtime::ConflictPolicy,
         collect_submit_timing: bool,
     ) -> MidgeResult<u64> {
         if ops.is_empty() {
@@ -267,7 +267,7 @@ impl IngestCoordinator {
                 ops,
                 durability_policy,
                 start_sequence,
-                isolation_policy,
+                conflict_policy,
                 collect_submit_timing,
             );
         }
@@ -392,7 +392,7 @@ impl IngestCoordinator {
             durability_policy,
             ApplyTransactionOptions {
                 start_sequence: None,
-                isolation_policy: crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+                conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
                 collect_submit_timing,
             },
             &self.stall_flag,
@@ -457,7 +457,7 @@ impl IngestCoordinator {
                 pending.ops,
                 pending.durability_policy,
                 None,
-                crate::runtime::TransactionIsolationPolicy::LastWriteWins,
+                crate::runtime::ConflictPolicy::LastWriteWins,
                 collect_submit_timing,
             ),
             Err(crossbeam::channel::TrySendError::Disconnected(_)) => Err(MidgeError::Internal(
@@ -512,7 +512,7 @@ impl IngestCoordinator {
         ops: Vec<TransactionOp>,
         durability_policy: Option<crate::wal::DurabilityPolicy>,
         start_sequence: Option<u64>,
-        isolation_policy: crate::runtime::TransactionIsolationPolicy,
+        conflict_policy: crate::runtime::ConflictPolicy,
         collect_submit_timing: bool,
     ) -> MidgeResult<u64> {
         Self::send_apply_transaction(
@@ -521,7 +521,7 @@ impl IngestCoordinator {
             durability_policy,
             ApplyTransactionOptions {
                 start_sequence,
-                isolation_policy,
+                conflict_policy,
                 collect_submit_timing,
             },
             &self.stall_flag,
@@ -549,7 +549,7 @@ impl IngestCoordinator {
                     ops,
                     durability_policy,
                     options.start_sequence,
-                    options.isolation_policy,
+                    options.conflict_policy,
                     timeout,
                 )
                 .and_then(|response| {
@@ -561,7 +561,7 @@ impl IngestCoordinator {
                 ops,
                 durability_policy,
                 options.start_sequence,
-                options.isolation_policy,
+                options.conflict_policy,
             )
         };
         record_submit_runtime_apply(runtime_apply_started_at);
