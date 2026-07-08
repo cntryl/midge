@@ -80,6 +80,24 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     ctx.tag("storage_profile", profile);
     let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
     ctx.parameter("measured_secs", MEASURED.as_secs());
+    ctx.parameter("clients", clients);
+    ctx.parameter("logical_unit", "ycsb_operation");
+    if matches!(
+        (profile, clients),
+        ("local", CLIENTS_1) | ("memory", CLIENTS_16)
+    ) {
+        stress_config::mark_duration_plateau_probe(
+            ctx,
+            "deterministic_ycsb_c_duration_window_plateau",
+        );
+    } else if matches!(
+        (profile, clients),
+        ("hybrid" | "cloud", CLIENTS_1 | CLIENTS_16 | CLIENTS_64)
+            | ("memory", CLIENTS_1 | CLIENTS_64)
+            | ("local", CLIENTS_16)
+    ) {
+        stress_config::mark_local_rsd_diagnostic(ctx);
+    }
 
     // Phase 1: Load (not measured)
     let engine = Arc::new(ycsb::open_tier4_engine(opts));

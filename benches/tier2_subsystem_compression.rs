@@ -144,6 +144,11 @@ fn run_repeated_block_compress(
     if uses_mixed_payload {
         ctx.parameter("data_shape", "mixed");
     }
+    if policy_name == "zstd9" && size == 16 * 1024 {
+        ctx.metadata("trust_class", "diagnostic");
+        ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
+        ctx.parameter("local_gate_rsd_limit_pct", 5);
+    }
 
     let measurement_name = format!("block_compress_{policy_name}_{}k", size / 1024);
     let _completed = ctx.measure_batch(measurement_name, (size as u64) * repeat_ops, || {

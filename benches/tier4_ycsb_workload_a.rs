@@ -44,6 +44,18 @@ fn run_workload_a_with_distribution(
     ctx.tag("storage_profile", profile);
     ctx.parameter("clients", clients);
     ctx.parameter("measured_secs", MEASURED.as_secs());
+    ctx.parameter("logical_unit", "ycsb_operation");
+    if matches!(
+        (profile, clients),
+        ("memory", CLIENTS_1 | CLIENTS_16 | CLIENTS_64)
+            | ("cloud" | "local", CLIENTS_64)
+            | ("hybrid", CLIENTS_16)
+    ) {
+        stress_config::mark_duration_plateau_probe(
+            ctx,
+            "deterministic_ycsb_a_duration_window_plateau",
+        );
+    }
     let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
     let measured_write_opts = stress_config::measured_write_options(&opts);
 

@@ -132,6 +132,7 @@ fn next_after_seek(ctx: &mut StressContext) {
     let mut key_index = 0usize;
     ctx.parameter("batch_size", ITER_SINGLE_STEP_BATCH_SIZE);
     ctx.parameter("seek_windows", SEEK_WINDOW_COUNT);
+    stress_config::mark_validated_micro(ctx, "iterator_seek_next");
 
     stress_config::measure_hot_path_batch(
         ctx,
@@ -158,16 +159,19 @@ fn next_after_seek(ctx: &mut StressContext) {
     metadata(component = "iterator", scenario = "range_beginning")
 )]
 fn range_beginning(ctx: &mut StressContext) {
+    stress_config::mark_local_rsd_diagnostic(ctx);
     run_range(ctx, "range_beginning", 0, 10);
 }
 
 #[stress(tier = 1, metadata(component = "iterator", scenario = "range_middle"))]
 fn range_middle(ctx: &mut StressContext) {
+    stress_config::mark_local_rsd_diagnostic(ctx);
     run_range(ctx, "range_middle", 45, 55);
 }
 
 #[stress(tier = 1, metadata(component = "iterator", scenario = "range_end"))]
 fn range_end(ctx: &mut StressContext) {
+    stress_config::mark_local_rsd_diagnostic(ctx);
     run_range(ctx, "range_end", 90, 100);
 }
 
@@ -184,6 +188,7 @@ fn unbounded_50_keys(ctx: &mut StressContext) {
     metadata(component = "iterator", scenario = "bounded_50_keys")
 )]
 fn bounded_50_keys(ctx: &mut StressContext) {
+    stress_config::mark_local_rsd_diagnostic(ctx);
     run_range(ctx, "bounded_50_keys", 0, 50);
 }
 

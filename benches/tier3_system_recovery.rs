@@ -26,6 +26,8 @@ fn run_reopen_clean_case(ctx: &mut StressContext, scenario: &'static str, opts: 
     }
 
     ctx.set_elements(100); // expensive (disk I/O per iteration)
+    ctx.parameter("logical_unit", "engine_reopen");
+    stress_config::mark_capped_probe(ctx, "fixed_reopen_count_latency_probe");
 
     // Measure ONLY one reopen call of a clean engine.
     stress_config::measure_external(ctx, scenario, 100, || {

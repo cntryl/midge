@@ -206,6 +206,7 @@ fn run_streaming(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOpt
     // -------------------------------------------------------------------------
 
     let total_ops = writes.saturating_add(reads);
+    ctx.parameter("logical_unit", "stream_operation");
     ctx.record_external(scenario, elapsed, total_ops);
     ctx.set_elements(total_ops);
 

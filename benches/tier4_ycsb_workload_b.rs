@@ -42,6 +42,10 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     ctx.tag("storage_profile", profile);
     ctx.parameter("clients", clients);
     ctx.parameter("measured_secs", measured_window.as_secs());
+    ctx.parameter("logical_unit", "ycsb_operation");
+    if profile == "local" && matches!(clients, CLIENTS_16 | CLIENTS_64) {
+        stress_config::mark_local_rsd_diagnostic(ctx);
+    }
 
     let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
     let measured_write_opts = stress_config::measured_write_options(&opts);

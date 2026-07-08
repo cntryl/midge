@@ -62,6 +62,7 @@ fn get_hot_single_4k(ctx: &mut StressContext) {
     assert!(cache.get(&hot_key).is_some());
     ctx.parameter("block_size", 4096);
     ctx.parameter("batch_size", HOT_GET_BATCH_SIZE);
+    stress_config::mark_validated_micro(ctx, "cache_block_hit");
 
     stress_config::measure_hot_path_batch(
         ctx,

@@ -298,6 +298,9 @@ fn point_lookups_zipfian(ctx: &mut StressContext) {
     ctx.parameter("lookup_count", LOOKUPS_PER_ITER);
     ctx.parameter("distribution", "zipfian");
     ctx.parameter("logical_unit", "lsm_key_probe");
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
 
     let _completed = ctx.measure_batch("point_lookups_zipfian", LOOKUPS_PER_ITER as u64, || {
         let mut lsm = LsmSimulator::new_zipfian();
@@ -334,6 +337,9 @@ fn mixed_get_scan(ctx: &mut StressContext) {
     ctx.parameter("scans", MIXED_SCANS_PER_ITER);
     ctx.parameter("scan_width", SCAN_WIDTH);
     ctx.parameter("logical_unit", "lsm_key_probe");
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
 
     let _completed = ctx.measure_batch("mixed_get_scan", logical_ops as u64, || {
         let mut lsm = LsmSimulator::new_zipfian();
@@ -370,6 +376,9 @@ fn uniform_distribution(ctx: &mut StressContext) {
     ctx.parameter("lookup_count", LOOKUPS_PER_ITER);
     ctx.parameter("distribution", "uniform");
     ctx.parameter("logical_unit", "lsm_key_probe");
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
 
     let _completed = ctx.measure_batch("uniform_distribution", LOOKUPS_PER_ITER as u64, || {
         let mut lsm = LsmSimulator::new_zipfian();

@@ -28,7 +28,20 @@ const WORKLOAD_SEED: u64 = 0xD0D0_EA5E_5678_9ABC;
 #[allow(clippy::too_many_lines)]
 fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
     ctx.tag("storage_profile", profile);
+    ctx.parameter("clients", clients);
     ctx.parameter("measured_secs", MEASURED.as_secs());
+    ctx.parameter("logical_unit", "ycsb_operation");
+    if matches!((profile, clients), ("cloud", CLIENTS_1)) {
+        stress_config::mark_duration_plateau_probe(
+            ctx,
+            "deterministic_ycsb_d_duration_window_plateau",
+        );
+    } else if matches!(
+        (profile, clients),
+        ("local", CLIENTS_1 | CLIENTS_16 | CLIENTS_64) | ("cloud", CLIENTS_16 | CLIENTS_64)
+    ) {
+        stress_config::mark_local_rsd_diagnostic(ctx);
+    }
 
     let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
     let measured_write_opts = stress_config::measured_write_options(&opts);

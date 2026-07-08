@@ -20,6 +20,7 @@ const VALUE_SIZE: usize = 128;
 fn run_single_durability_call(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOptions) {
     ctx.set_elements(10_000); // moderate (WAL sync/async)
     ctx.parameter("logical_unit", "transaction");
+    stress_config::mark_capped_probe(ctx, "fixed_operations_hint_single_commit_call");
 
     let engine = stress_config::bench_stress::open_engine_no_compaction(opts);
     let cf = engine.create_column_family("cf1").unwrap();

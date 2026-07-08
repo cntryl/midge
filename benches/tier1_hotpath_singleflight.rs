@@ -12,6 +12,9 @@ const SUBMIT_AND_WAIT_BATCH_ROUNDS: usize = 8192;
 
 fn run_flush_waiters(ctx: &mut StressContext, scenario: &'static str, waiters: usize) {
     ctx.parameter("waiters", waiters);
+    ctx.parameter("logical_unit", "accumulator_flush");
+    ctx.parameter("waiters_per_logical_operation", waiters);
+    ctx.metadata("validated_micro", "true");
 
     ctx.measure(scenario, || {
         let acc: Accumulator<u64, u64> = Accumulator::new();

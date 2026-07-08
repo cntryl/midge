@@ -68,6 +68,7 @@ fn run_mode(ctx: &mut StressContext, mode: &'static str) {
         "logical_bytes",
         NUM_OPS_PER_BATCH * VALUE_SIZE * BATCH_ITERATIONS,
     );
+    stress_config::mark_capped_probe(ctx, "fixed_batch_inventory_regression_probe");
 
     let engine = Engine::open(opts.to_open_options()).expect("failed to open engine");
     let cf = engine

@@ -31,6 +31,16 @@ fn run_single_version_write_case(
     ctx.parameter("operation_surface", "mvcc_single_version_write");
     ctx.parameter("begin_tx_included", "true");
     ctx.parameter("memtable_size_bytes", opts.memtable_size);
+    match scenario {
+        "tier3_mvcc_single_version_write_mem" => stress_config::mark_local_rsd_diagnostic(ctx),
+        "tier3_mvcc_single_version_write_cloud" => {
+            stress_config::mark_capped_probe(ctx, "single_overwrite_duration_window_cloud_commit");
+        }
+        "tier3_mvcc_single_version_write_local" => {
+            stress_config::mark_capped_probe(ctx, "single_overwrite_duration_window_local_commit");
+        }
+        _ => {}
+    }
 
     let write_opts = stress_config::measured_write_options(&opts);
     let engine = setup_engine(opts);
@@ -65,6 +75,15 @@ fn run_read_old_version_case(
     ctx.parameter("operation_surface", "mvcc_old_version_read");
     ctx.parameter("begin_tx_included", "false");
     ctx.parameter("rotating_key_count", num_keys);
+    match scenario {
+        "tier3_mvcc_read_old_version_cloud" => {
+            stress_config::mark_capped_probe(ctx, "old_version_cloud_snapshot_read_window");
+        }
+        "tier3_mvcc_read_old_version_local" => {
+            stress_config::mark_capped_probe(ctx, "old_version_local_snapshot_read_window");
+        }
+        _ => {}
+    }
 
     let write_opts = stress_config::measured_write_options(&opts);
     let engine = setup_engine(opts);

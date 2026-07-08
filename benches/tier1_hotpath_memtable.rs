@@ -54,6 +54,7 @@ fn run_put_single(ctx: &mut StressContext, scenario: &'static str, value_size: u
     ctx.parameter("scenario", scenario);
     ctx.parameter("value_size", value_size);
     ctx.parameter("batch_size", PUT_SINGLE_BATCH_SIZE);
+    stress_config::mark_validated_micro(ctx, "memtable_put");
 
     ctx.benchmark(scenario)
         .warmup(2)
@@ -114,6 +115,7 @@ fn get_hit(ctx: &mut StressContext) {
     let hit_keys: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
     ctx.parameter("lookup_batch_size", LOOKUP_HIT_BATCH_SIZE);
     ctx.parameter("lookup_key_count", hit_keys.len());
+    stress_config::mark_validated_micro(ctx, "memtable_get_hit");
 
     ctx.benchmark("get_hit")
         .warmup(2)
@@ -142,6 +144,8 @@ fn get_miss(ctx: &mut StressContext) {
         .collect();
     ctx.parameter("lookup_batch_size", LOOKUP_MISS_BATCH_SIZE);
     ctx.parameter("lookup_key_count", miss_keys.len());
+    stress_config::mark_validated_micro(ctx, "memtable_get_miss");
+    stress_config::mark_local_rsd_diagnostic(ctx);
 
     ctx.benchmark("get_miss")
         .warmup(2)

@@ -121,6 +121,7 @@ fn single_get_hit_memtable(ctx: &mut StressContext) {
     let mut key_index = 0usize;
     ctx.parameter("batch_size", SINGLE_GET_BATCH_SIZE);
     ctx.parameter("key_count", keys.len());
+    stress_config::mark_validated_micro(ctx, "api_point_get_hit");
 
     stress_config::measure_hot_path_batch(
         ctx,
@@ -157,6 +158,7 @@ fn single_get_miss(ctx: &mut StressContext) {
     let mut key_index = 0usize;
     ctx.parameter("batch_size", SINGLE_GET_BATCH_SIZE);
     ctx.parameter("key_count", num_keys);
+    stress_config::mark_validated_micro(ctx, "api_point_get_miss");
 
     stress_config::measure_hot_path_batch(
         ctx,
@@ -189,6 +191,8 @@ fn single_put(ctx: &mut StressContext) {
     let mut key_index = 0usize;
     ctx.parameter("batch_size", SINGLE_PUT_BATCH_SIZE);
     ctx.parameter("key_count", num_ops);
+    stress_config::mark_validated_micro(ctx, "api_put_commit");
+    stress_config::mark_local_rsd_diagnostic(ctx);
 
     ctx.benchmark("single_put")
         .warmup(2)

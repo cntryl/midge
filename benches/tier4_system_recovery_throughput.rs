@@ -65,6 +65,7 @@ fn run_reopen_after_flush_case(
 
     // Measure reopen latency under flushed manifest state
     ctx.set_elements(100);
+    stress_config::mark_capped_probe(ctx, "fixed_reopen_count_latency_probe");
 
     stress_config::measure_external(ctx, scenario, 100, || {
         let engine = setup_engine(opts.clone());
@@ -91,6 +92,7 @@ fn run_reopen_after_compaction_case(
 
     // Measure reopen latency under compacted multi-level state
     ctx.set_elements(100);
+    stress_config::mark_capped_probe(ctx, "fixed_reopen_count_latency_probe");
 
     stress_config::measure_external(ctx, scenario, 100, || {
         let engine = setup_engine(opts.clone());

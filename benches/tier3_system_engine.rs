@@ -34,6 +34,13 @@ fn run_single_put_case(ctx: &mut StressContext, scenario: &'static str, opts: Mi
     ctx.parameter("operation_surface", "engine_put_commit");
     ctx.parameter("begin_tx_included", "true");
     ctx.parameter("memtable_size_bytes", opts.memtable_size);
+    match scenario {
+        "tier3_engine_put_mem" => stress_config::mark_local_rsd_diagnostic(ctx),
+        "tier3_engine_put_local" => {
+            stress_config::mark_capped_probe(ctx, "local_commit_duration_window_fixed_batch");
+        }
+        _ => {}
+    }
     let write_opts = stress_config::measured_write_options(&opts);
 
     let engine = stress_config::bench_stress::open_engine_no_compaction(opts);
@@ -69,6 +76,15 @@ fn run_single_get_case(ctx: &mut StressContext, scenario: &'static str, opts: Mi
     ctx.parameter("operation_surface", "engine_get");
     ctx.parameter("begin_tx_included", "true");
     ctx.parameter("rotating_key_count", GET_KEY_COUNT);
+    match scenario {
+        "tier3_engine_get_mem" => {
+            stress_config::mark_capped_probe(ctx, "memory_point_read_duration_plateau");
+        }
+        "tier3_engine_get_local" => {
+            stress_config::mark_capped_probe(ctx, "local_point_read_duration_plateau");
+        }
+        _ => {}
+    }
 
     let engine = stress_config::bench_stress::open_engine_no_compaction(opts);
     let cf = engine.create_column_family("cf1").unwrap();

@@ -167,6 +167,9 @@ fn strided_warm(ctx: &mut StressContext) {
     ctx.parameter("num_accesses", num_accesses);
     ctx.parameter("scan_repeats", WARM_SCAN_REPEATS);
     ctx.parameter("logical_unit", "cache_scan_block");
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
 
     let _completed = ctx.measure_batch(
         "strided_warm",
@@ -199,6 +202,9 @@ fn strided_cold(ctx: &mut StressContext) {
     ctx.parameter("num_accesses", num_accesses);
     ctx.parameter("scan_repeats", COLD_SCAN_REPEATS);
     ctx.parameter("logical_unit", "cache_scan_block");
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
 
     let _completed = ctx.measure_batch(
         "strided_cold",

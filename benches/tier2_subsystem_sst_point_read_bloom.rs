@@ -116,6 +116,9 @@ fn bloom_enabled(ctx: &mut StressContext) {
     ctx.parameter("hit_ratio_pct", 10);
     ctx.parameter("bloom", "enabled");
     ctx.parameter("logical_unit", "sst_point_lookup");
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
 
     let _completed = ctx.measure_batch("bloom_enabled", 10_000, || {
         let mut bloom_checks = 0u32;
@@ -172,6 +175,9 @@ fn bloom_disabled(ctx: &mut StressContext) {
     ctx.parameter("hit_ratio_pct", 10);
     ctx.parameter("bloom", "disabled");
     ctx.parameter("logical_unit", "sst_point_lookup");
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
 
     let _completed = ctx.measure_batch("bloom_disabled", 10_000, || {
         let mut blocks_read = 0u32;
@@ -213,6 +219,11 @@ fn run_comparison(ctx: &mut StressContext, scenario: &'static str, mode: &'stati
     ctx.parameter("queries", query_keys.len());
     ctx.parameter("comparison_repeats", COMPARISON_REPEATS);
     ctx.parameter("logical_unit", "sst_point_lookup");
+    if mode == "without_bloom" {
+        ctx.metadata("trust_class", "diagnostic");
+        ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
+        ctx.parameter("local_gate_rsd_limit_pct", 5);
+    }
 
     let _completed = ctx.measure_batch(
         scenario,

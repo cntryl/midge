@@ -78,6 +78,38 @@ pub fn parameter(ctx: &mut StressContext, key: &'static str, value: impl ToStrin
 }
 
 #[allow(dead_code)]
+pub fn mark_validated_micro(ctx: &mut StressContext, logical_unit: &'static str) {
+    ctx.parameter("logical_unit", logical_unit);
+    ctx.metadata("validated_micro", "true");
+}
+
+#[allow(dead_code)]
+pub fn mark_diagnostic(ctx: &mut StressContext, reason: &'static str) {
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata("diagnostic_reason", reason);
+}
+
+#[allow(dead_code)]
+pub fn mark_local_rsd_diagnostic(ctx: &mut StressContext) {
+    mark_diagnostic(ctx, "local_rsd_above_5pct");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
+}
+
+#[allow(dead_code)]
+pub fn mark_capped_probe(ctx: &mut StressContext, cap_source: &'static str) {
+    mark_diagnostic(ctx, "intentional_capped_probe");
+    ctx.parameter("capped_probe", "true");
+    ctx.parameter("cap_source", cap_source);
+}
+
+#[allow(dead_code)]
+pub fn mark_duration_plateau_probe(ctx: &mut StressContext, cap_source: &'static str) {
+    mark_diagnostic(ctx, "duration_throughput_plateau_probe");
+    ctx.parameter("capped_probe", "duration_plateau");
+    ctx.parameter("cap_source", cap_source);
+}
+
+#[allow(dead_code)]
 pub fn logical_bytes(ctx: &mut StressContext, bytes: u64) {
     ctx.parameter("logical_bytes", bytes);
 }
