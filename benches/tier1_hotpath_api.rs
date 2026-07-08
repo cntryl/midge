@@ -9,9 +9,13 @@ use cntryl_midge::{Bytes, MidgeEngine};
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 use stress_config::{MidgeOptions, StorageMode};
 
-const BATCH_PUT_ROUNDS: usize = 16;
+const BATCH_PUT_ROUNDS: usize = 128;
 const SINGLE_GET_BATCH_SIZE: usize = 2048;
-const SINGLE_PUT_BATCH_SIZE: usize = 512;
+const SINGLE_PUT_BATCH_SIZE: usize = 32_768;
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).expect("benchmark count fits in u64")
+}
 
 fn make_fixed_kv(size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
     let mut keys = Vec::with_capacity(size);
@@ -51,13 +55,14 @@ fn run_batch_put(ctx: &mut StressContext, scenario: &'static str, batch_size: us
     let (keys, vals) = make_fixed_kv(batch_size * BATCH_PUT_ROUNDS);
     ctx.parameter("batch_size", batch_size);
     ctx.parameter("rounds", BATCH_PUT_ROUNDS);
+    ctx.parameter("logical_unit", "put_transaction_batch");
+    ctx.parameter("items_per_logical_operation", batch_size);
     ctx.parameter("storage_profile", "memory");
 
-    stress_config::measure_hot_path_batch(
-        ctx,
-        scenario,
-        (batch_size * BATCH_PUT_ROUNDS) as u64,
-        || {
+    ctx.benchmark(scenario)
+        .warmup(2)
+        .measure_batch(usize_to_u64(BATCH_PUT_ROUNDS), || {
+            let mut committed_records = 0usize;
             for round in 0..BATCH_PUT_ROUNDS {
                 let offset = round * batch_size;
                 let mut tx = engine
@@ -69,10 +74,10 @@ fn run_batch_put(ctx: &mut StressContext, scenario: &'static str, batch_size: us
                         .unwrap();
                 }
                 tx.commit(write_opts).unwrap();
+                committed_records = committed_records.wrapping_add(batch_size);
             }
-            black_box(());
-        },
-    );
+            black_box(committed_records);
+        });
 
     let _ = engine.flush_cf(&cf);
 }
@@ -185,19 +190,21 @@ fn single_put(ctx: &mut StressContext) {
     ctx.parameter("batch_size", SINGLE_PUT_BATCH_SIZE);
     ctx.parameter("key_count", num_ops);
 
-    stress_config::measure_hot_path_batch(ctx, "single_put", SINGLE_PUT_BATCH_SIZE as u64, || {
-        for _ in 0..SINGLE_PUT_BATCH_SIZE {
-            let idx = key_index % num_ops;
-            key_index = key_index.wrapping_add(1);
-            let mut tx = engine
-                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                .expect("begin");
-            tx.put(keys[idx].to_vec(), vals[idx].to_vec(), None)
-                .unwrap();
-            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
-        }
-        black_box(key_index);
-    });
+    ctx.benchmark("single_put")
+        .warmup(2)
+        .measure_batch(SINGLE_PUT_BATCH_SIZE as u64, || {
+            for _ in 0..SINGLE_PUT_BATCH_SIZE {
+                let idx = key_index % num_ops;
+                key_index = key_index.wrapping_add(1);
+                let mut tx = engine
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                    .expect("begin");
+                tx.put(keys[idx].to_vec(), vals[idx].to_vec(), None)
+                    .unwrap();
+                tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+            }
+            black_box(key_index);
+        });
 }
 
 stress_main!();

@@ -34,6 +34,7 @@ fn make_fixed_value_pairs(count: usize, value_size: usize) -> Vec<(Bytes, Bytes)
 fn run_memtable_rotate(ctx: &mut StressContext, scenario: &'static str, count: usize) {
     let kv_pairs = make_kv_pairs(count);
     ctx.parameter("entry_count", count);
+    ctx.parameter("logical_unit", "memtable_entry_write");
 
     let _completed = ctx.measure_batch(scenario, count as u64, || {
         let memtable = SkipListMemtable::new();
@@ -66,6 +67,7 @@ fn run_put_value_size(ctx: &mut StressContext, scenario: &'static str, value_siz
     ctx.parameter("scenario", scenario);
     ctx.parameter("entry_count", batch_size);
     ctx.parameter("value_size", value_size);
+    ctx.parameter("logical_unit", "memtable_entry_write");
 
     let _completed = ctx.measure_batch(scenario, batch_size as u64, || {
         let memtable = SkipListMemtable::new();

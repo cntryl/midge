@@ -115,6 +115,7 @@ fn bloom_enabled(ctx: &mut StressContext) {
     ctx.parameter("queries", 10_000);
     ctx.parameter("hit_ratio_pct", 10);
     ctx.parameter("bloom", "enabled");
+    ctx.parameter("logical_unit", "sst_point_lookup");
 
     let _completed = ctx.measure_batch("bloom_enabled", 10_000, || {
         let mut bloom_checks = 0u32;
@@ -170,6 +171,7 @@ fn bloom_disabled(ctx: &mut StressContext) {
     ctx.parameter("queries", 10_000);
     ctx.parameter("hit_ratio_pct", 10);
     ctx.parameter("bloom", "disabled");
+    ctx.parameter("logical_unit", "sst_point_lookup");
 
     let _completed = ctx.measure_batch("bloom_disabled", 10_000, || {
         let mut blocks_read = 0u32;
@@ -210,6 +212,7 @@ fn run_comparison(ctx: &mut StressContext, scenario: &'static str, mode: &'stati
     ctx.parameter("comparison_mode", mode);
     ctx.parameter("queries", query_keys.len());
     ctx.parameter("comparison_repeats", COMPARISON_REPEATS);
+    ctx.parameter("logical_unit", "sst_point_lookup");
 
     let _completed = ctx.measure_batch(
         scenario,

@@ -8,15 +8,22 @@ mod stress_config;
 use cntryl_midge::sst::{Memtable, SkipListMemtable};
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
-const LOOKUP_HIT_BATCH_SIZE: usize = 32_768;
-const LOOKUP_HIT_BATCH_OPS: u64 = 32_768;
-const LOOKUP_MISS_BATCH_SIZE: usize = 262_144;
-const LOOKUP_MISS_BATCH_OPS: u64 = 262_144;
-const PUT_SINGLE_BATCH_SIZE: usize = 1024;
-const PUT_SINGLE_BATCH_OPS: u64 = 1024;
-const ROTATING_WRITE_KEYS: usize = 4096;
-const SIZE_BYTES_BATCH_SIZE: usize = 1024;
-const SIZE_BYTES_BATCH_OPS: u64 = 1024;
+const LOOKUP_HIT_BATCH_SIZE: usize = 1_048_576;
+const LOOKUP_HIT_BATCH_OPS: u64 = 1_048_576;
+const LOOKUP_MISS_BATCH_SIZE: usize = 1_048_576;
+const LOOKUP_MISS_BATCH_OPS: u64 = 1_048_576;
+const PUT_SINGLE_BATCH_SIZE: usize = 65_536;
+const PUT_SINGLE_BATCH_OPS: u64 = 65_536;
+const PUT_BATCH_ROUNDS: usize = 128;
+const ROTATING_WRITE_KEYS: usize = 65_536;
+const DELETE_BATCH_SIZE: usize = 65_536;
+const DELETE_KEY_COUNT: usize = 1000;
+const SIZE_BYTES_BATCH_SIZE: usize = 1_048_576;
+const SIZE_BYTES_PER_LOGICAL_OPERATION: usize = 1024;
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).expect("benchmark count fits in u64")
+}
 
 #[inline]
 fn make_key(i: usize) -> Vec<u8> {
@@ -48,13 +55,15 @@ fn run_put_single(ctx: &mut StressContext, scenario: &'static str, value_size: u
     ctx.parameter("value_size", value_size);
     ctx.parameter("batch_size", PUT_SINGLE_BATCH_SIZE);
 
-    stress_config::measure_hot_path_batch(ctx, scenario, PUT_SINGLE_BATCH_OPS, || {
-        for _ in 0..PUT_SINGLE_BATCH_SIZE {
-            let idx = key_index % keys.len();
-            key_index = key_index.wrapping_add(1);
-            let _ = memtable.put(black_box(keys[idx].clone()), black_box(value.clone()));
-        }
-    });
+    ctx.benchmark(scenario)
+        .warmup(2)
+        .measure_batch(PUT_SINGLE_BATCH_OPS, || {
+            for _ in 0..PUT_SINGLE_BATCH_SIZE {
+                let idx = key_index % keys.len();
+                key_index = key_index.wrapping_add(1);
+                let _ = memtable.put(black_box(keys[idx].clone()), black_box(value.clone()));
+            }
+        });
 }
 
 #[stress(
@@ -70,15 +79,28 @@ fn put_batch_100(ctx: &mut StressContext) {
     let keys: Vec<Vec<u8>> = (0..100).map(make_key).collect();
     let value = make_value(128);
     ctx.parameter("batch_size", keys.len());
+    ctx.parameter("rounds", PUT_BATCH_ROUNDS);
     ctx.parameter("value_size", value.len());
+    ctx.parameter("logical_unit", "memtable_put_batch");
+    ctx.parameter("items_per_logical_operation", keys.len());
 
-    stress_config::measure_hot_path_batch(ctx, "put_batch_100", keys.len() as u64, || {
-        let memtable = SkipListMemtable::new();
-        for key in &keys {
-            let _ = memtable.put(black_box(key.clone()), black_box(value.clone()));
-        }
-        black_box(memtable);
-    });
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "put_batch_100",
+        usize_to_u64(PUT_BATCH_ROUNDS),
+        || {
+            let mut inserted = 0usize;
+            for _ in 0..PUT_BATCH_ROUNDS {
+                let memtable = SkipListMemtable::new();
+                for key in &keys {
+                    let _ = memtable.put(black_box(key.clone()), black_box(value.clone()));
+                    inserted = inserted.wrapping_add(1);
+                }
+                black_box(memtable);
+            }
+            black_box(inserted);
+        },
+    );
 }
 
 #[stress(tier = 1, metadata(component = "memtable", scenario = "get_hit"))]
@@ -93,16 +115,18 @@ fn get_hit(ctx: &mut StressContext) {
     ctx.parameter("lookup_batch_size", LOOKUP_HIT_BATCH_SIZE);
     ctx.parameter("lookup_key_count", hit_keys.len());
 
-    stress_config::measure_hot_path_batch(ctx, "get_hit", LOOKUP_HIT_BATCH_OPS, || {
-        let mut hits = 0usize;
-        for i in 0..LOOKUP_HIT_BATCH_SIZE {
-            let hit_key = hit_keys[i % hit_keys.len()];
-            if memtable.get(black_box(hit_key)).unwrap().is_some() {
-                hits += 1;
+    ctx.benchmark("get_hit")
+        .warmup(2)
+        .measure_batch(LOOKUP_HIT_BATCH_OPS, || {
+            let mut hits = 0usize;
+            for i in 0..LOOKUP_HIT_BATCH_SIZE {
+                let hit_key = hit_keys[i % hit_keys.len()];
+                if memtable.get(black_box(hit_key)).unwrap().is_some() {
+                    hits += 1;
+                }
             }
-        }
-        black_box(hits);
-    });
+            black_box(hits);
+        });
 }
 
 #[stress(tier = 1, metadata(component = "memtable", scenario = "get_miss"))]
@@ -119,34 +143,46 @@ fn get_miss(ctx: &mut StressContext) {
     ctx.parameter("lookup_batch_size", LOOKUP_MISS_BATCH_SIZE);
     ctx.parameter("lookup_key_count", miss_keys.len());
 
-    stress_config::measure_hot_path_batch(ctx, "get_miss", LOOKUP_MISS_BATCH_OPS, || {
-        let mut misses = 0usize;
-        for i in 0..LOOKUP_MISS_BATCH_SIZE {
-            let miss_key = &miss_keys[i % miss_keys.len()];
-            if memtable
-                .get(black_box(miss_key.as_slice()))
-                .unwrap()
-                .is_none()
-            {
-                misses += 1;
+    ctx.benchmark("get_miss")
+        .warmup(2)
+        .measure_batch(LOOKUP_MISS_BATCH_OPS, || {
+            let mut misses = 0usize;
+            for i in 0..LOOKUP_MISS_BATCH_SIZE {
+                let miss_key = &miss_keys[i % miss_keys.len()];
+                if memtable
+                    .get(black_box(miss_key.as_slice()))
+                    .unwrap()
+                    .is_none()
+                {
+                    misses += 1;
+                }
             }
-        }
-        black_box(misses);
-    });
+            black_box(misses);
+        });
 }
 
 #[stress(tier = 1, metadata(component = "memtable", scenario = "delete"))]
 fn delete(ctx: &mut StressContext) {
-    let keys: Vec<Vec<u8>> = (0..100).map(make_key).collect();
+    let keys: Vec<Vec<u8>> = (0..DELETE_KEY_COUNT).map(make_key).collect();
     let value = make_value(128);
+    let memtable = SkipListMemtable::new();
+    for key in &keys {
+        let _ = memtable.put(key.clone(), value.clone());
+    }
+    let mut key_index = 0usize;
     ctx.parameter("key_count", keys.len());
+    ctx.parameter("batch_size", DELETE_BATCH_SIZE);
+    ctx.parameter("logical_unit", "memtable_delete");
 
-    ctx.measure("delete", || {
-        let memtable = SkipListMemtable::new();
-        for key in &keys {
-            let _ = memtable.put(key.clone(), value.clone());
+    stress_config::measure_hot_path_batch(ctx, "delete", usize_to_u64(DELETE_BATCH_SIZE), || {
+        let mut deleted = 0usize;
+        for _ in 0..DELETE_BATCH_SIZE {
+            let idx = key_index % keys.len();
+            key_index = key_index.wrapping_add(1);
+            let _ = memtable.delete(black_box(keys[idx].clone()));
+            deleted = deleted.wrapping_add(1);
         }
-        let _ = memtable.delete(black_box(keys[50].clone()));
+        black_box(deleted);
     });
 }
 
@@ -168,14 +204,24 @@ fn size_bytes(ctx: &mut StressContext) {
     ctx.parameter("key_count", keys.len());
     ctx.parameter("value_size", value.len());
     ctx.parameter("batch_size", SIZE_BYTES_BATCH_SIZE);
+    ctx.parameter(
+        "size_reads_per_logical_operation",
+        SIZE_BYTES_PER_LOGICAL_OPERATION,
+    );
+    ctx.parameter("logical_unit", "memtable_size_bytes_batch");
 
-    stress_config::measure_hot_path_batch(ctx, "size_bytes", SIZE_BYTES_BATCH_OPS, || {
-        let mut total = 0usize;
-        for _ in 0..SIZE_BYTES_BATCH_SIZE {
-            total = total.wrapping_add(memtable.size_bytes());
-        }
-        black_box(total);
-    });
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "size_bytes",
+        usize_to_u64(SIZE_BYTES_BATCH_SIZE / SIZE_BYTES_PER_LOGICAL_OPERATION),
+        || {
+            let mut total = 0usize;
+            for _ in 0..SIZE_BYTES_BATCH_SIZE {
+                total = total.wrapping_add(memtable.size_bytes());
+            }
+            black_box(total);
+        },
+    );
 }
 
 stress_main!();

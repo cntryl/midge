@@ -58,6 +58,36 @@ pub(crate) fn record_transaction_commit_timing(sample: TransactionCommitTimingSa
     transaction_commit_timing_queue().push(sample);
 }
 
+/// Enable internal transaction commit timing collection for benchmark crates.
+///
+/// This is not part of the stable user API; benchmarks use it to keep latency
+/// breakdown rows tied to real commit phase timings instead of synthetic totals.
+#[doc(hidden)]
+pub fn enable_transaction_commit_timing_for_benchmarks() {
+    let _ = drain_transaction_commit_timings_for_benchmarks();
+    clear_current_transaction_submit_timing();
+    TRANSACTION_COMMIT_TIMING_ENABLED.store(true, Ordering::Release);
+}
+
+/// Disable internal transaction commit timing collection for benchmark crates.
+#[doc(hidden)]
+pub fn disable_transaction_commit_timing_for_benchmarks() {
+    TRANSACTION_COMMIT_TIMING_ENABLED.store(false, Ordering::Release);
+    clear_current_transaction_submit_timing();
+}
+
+/// Drain collected transaction commit timing samples for benchmark crates.
+#[must_use]
+#[doc(hidden)]
+pub fn drain_transaction_commit_timings_for_benchmarks() -> Vec<TransactionCommitTimingSample> {
+    let queue = transaction_commit_timing_queue();
+    let mut samples = Vec::new();
+    while let Some(sample) = queue.pop() {
+        samples.push(sample);
+    }
+    samples
+}
+
 pub(crate) fn clear_current_transaction_submit_timing() {
     if transaction_commit_timing_enabled() {
         CURRENT_TRANSACTION_SUBMIT_TIMING

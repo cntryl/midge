@@ -140,6 +140,7 @@ fn run_repeated_block_compress(
     ctx.parameter("block_size", size);
     ctx.parameter("policy", policy_name);
     ctx.parameter("block_repeats", repeats);
+    ctx.parameter("logical_unit", "block_byte");
     if uses_mixed_payload {
         ctx.parameter("data_shape", "mixed");
     }
@@ -168,6 +169,7 @@ fn run_zstd9_64k_windowed_compress(ctx: &mut StressContext, policy: &Compression
     );
     ctx.parameter("block_window", ZSTD9_64K_WINDOW_BLOCKS);
     ctx.parameter("window_repeats", ZSTD9_64K_WINDOW_REPEATS);
+    ctx.parameter("logical_unit", "block_byte");
 
     let _completed = ctx.measure_batch(
         "block_compress_zstd9_64k",
@@ -260,6 +262,7 @@ fn run_block_decompress(
     ctx.parameter("block_size", size);
     ctx.parameter("policy", policy_name);
     ctx.parameter("block_repeats", repeats);
+    ctx.parameter("logical_unit", "block_byte");
 
     let measurement_name = format!("block_decompress_{policy_name}_{}k", size / 1024);
     let _completed = ctx.measure_batch(measurement_name, (size as u64) * repeat_ops, || {
@@ -291,6 +294,7 @@ fn run_lz4_64k_windowed_decompress(ctx: &mut StressContext, policy: &Compression
     ctx.parameter("block_window", LZ4_64K_DECOMPRESS_WINDOW_BLOCKS);
     ctx.parameter("window_repeats", LZ4_64K_DECOMPRESS_WINDOW_REPEATS);
     ctx.parameter("prewarm_windows", LZ4_64K_DECOMPRESS_PREWARM_WINDOWS);
+    ctx.parameter("logical_unit", "block_byte");
 
     let mut prewarm_total = 0usize;
     for _ in 0..LZ4_64K_DECOMPRESS_PREWARM_WINDOWS {
@@ -377,6 +381,7 @@ fn run_incompressible(
     ctx.parameter("policy", policy_name);
     ctx.parameter("data_shape", "incompressible");
     ctx.parameter("block_repeats", BLOCK_OPERATION_REPEATS);
+    ctx.parameter("logical_unit", "block_byte");
     if policy_name == "lz4" {
         ctx.parameter("prewarm_repeats", INCOMPRESSIBLE_LZ4_PREWARM_REPEATS);
         prewarm_block_compress(&data, policy, INCOMPRESSIBLE_LZ4_PREWARM_REPEATS);
@@ -443,6 +448,7 @@ fn run_batch_block_compress(
         "batch_prewarm_repeats",
         BATCH_BLOCK_OPERATION_PREWARM_REPEATS,
     );
+    ctx.parameter("logical_unit", "block_byte");
     let mut prewarm_total = 0usize;
     for _ in 0..BATCH_BLOCK_OPERATION_PREWARM_REPEATS {
         for block in &blocks {
@@ -509,6 +515,7 @@ fn run_batch_block_decompress(
         "batch_prewarm_repeats",
         BATCH_BLOCK_OPERATION_PREWARM_REPEATS,
     );
+    ctx.parameter("logical_unit", "block_byte");
     let mut prewarm_total = 0usize;
     for _ in 0..BATCH_BLOCK_OPERATION_PREWARM_REPEATS {
         for block in &compressed_blocks {
@@ -570,6 +577,7 @@ fn wal_batch_compress_lz4_100x512b(ctx: &mut StressContext) {
     ctx.parameter("record_count", record_count);
     ctx.parameter("record_size", record_size);
     ctx.parameter("batch_repeats", WAL_BATCH_OPERATION_REPEATS);
+    ctx.parameter("logical_unit", "wal_value_byte");
 
     let _completed = ctx.measure_batch(
         "wal_batch_compress_lz4_100x512b",
@@ -606,6 +614,7 @@ fn wal_batch_decompress_lz4_100x512b(ctx: &mut StressContext) {
     ctx.parameter("record_count", record_count);
     ctx.parameter("record_size", record_size);
     ctx.parameter("batch_repeats", WAL_BATCH_OPERATION_REPEATS);
+    ctx.parameter("logical_unit", "wal_value_byte");
 
     let _completed = ctx.measure_batch(
         "wal_batch_decompress_lz4_100x512b",

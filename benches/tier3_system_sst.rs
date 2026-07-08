@@ -33,17 +33,18 @@ fn run_sst_point_seek_case(
     num_keys: usize,
 ) {
     ctx.parameter("logical_batch_size", SST_SEEK_BATCH_SIZE);
+    ctx.parameter("logical_unit", "sst_point_seek");
     ctx.parameter("operation_surface", "sst_point_seek");
     ctx.parameter("begin_tx_included", "false");
     ctx.parameter("rotating_key_count", num_keys);
 
+    let write_opts = stress_config::measured_write_options(&opts);
     let engine = setup_engine(opts);
     let cf = engine.create_column_family("cf1").unwrap();
 
     // All setup outside measurement: create an SST
     let keys = precompute_keys(num_keys);
     let cf_id = cf.id();
-    let write_opts = cntryl_midge::WriteOptions::buffered();
     let total = keys.len();
     for start in (0..total).step_by(TARGET_BATCH) {
         let end = (start + TARGET_BATCH).min(total);
@@ -82,17 +83,18 @@ fn run_sst_range_seek_case(
     num_keys: usize,
 ) {
     ctx.parameter("logical_batch_size", SST_SEEK_BATCH_SIZE);
+    ctx.parameter("logical_unit", "sst_range_seek");
     ctx.parameter("operation_surface", "sst_range_seek_first_row");
     ctx.parameter("begin_tx_included", "false");
     ctx.parameter("rotating_key_count", num_keys);
 
+    let write_opts = stress_config::measured_write_options(&opts);
     let engine = setup_engine(opts);
     let cf = engine.create_column_family("cf1").unwrap();
 
     // All setup outside measurement: create an SST
     let keys = precompute_keys(num_keys);
     let cf_id = cf.id();
-    let write_opts = cntryl_midge::WriteOptions::buffered();
     let total = keys.len();
     for start in (0..total).step_by(TARGET_BATCH) {
         let end = (start + TARGET_BATCH).min(total);
@@ -136,17 +138,18 @@ fn run_sst_sparse_keyspace_seek_case(
     opts: MidgeOptions,
 ) {
     ctx.parameter("logical_batch_size", SST_SEEK_BATCH_SIZE);
+    ctx.parameter("logical_unit", "sst_range_seek");
     ctx.parameter("operation_surface", "sst_sparse_range_seek_first_row");
     ctx.parameter("begin_tx_included", "false");
     ctx.parameter("rotating_key_count", 2_000);
 
+    let write_opts = stress_config::measured_write_options(&opts);
     let engine = setup_engine(opts);
     let cf = engine.create_column_family("cf1").unwrap();
 
     // All setup outside measurement: sparse keys (large gaps)
     let mut keys = Vec::with_capacity(2_000);
     let cf_id = cf.id();
-    let write_opts = cntryl_midge::WriteOptions::buffered();
     let total = 2_000usize;
     for start in (0..total).step_by(TARGET_BATCH) {
         let end = (start + TARGET_BATCH).min(total);

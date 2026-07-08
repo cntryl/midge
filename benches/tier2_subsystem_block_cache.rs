@@ -44,6 +44,7 @@ fn rotate_50_entries(ctx: &mut StressContext) {
     let block = make_block_data_static();
     ctx.parameter("entries", 50);
     ctx.parameter("rounds", HOTSET_ROTATION_ROUNDS);
+    ctx.parameter("logical_unit", "cache_block_access");
 
     let _completed = ctx
         .benchmark("hotset_rotation")
@@ -79,6 +80,7 @@ fn evict_10k(ctx: &mut StressContext) {
     ctx.parameter("initial_blocks", 500);
     ctx.parameter("insert_blocks", 10_000);
     ctx.parameter("eviction_repeats", EVICTION_REPEATS);
+    ctx.parameter("logical_unit", "cache_block_insert");
 
     let _completed = ctx
         .benchmark("lru_eviction_10k")

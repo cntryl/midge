@@ -297,6 +297,7 @@ fn point_lookups_zipfian(ctx: &mut StressContext) {
     let lookup_keys = precompute_zipf_keys(LOOKUPS_PER_ITER, 40_000, 1.5);
     ctx.parameter("lookup_count", LOOKUPS_PER_ITER);
     ctx.parameter("distribution", "zipfian");
+    ctx.parameter("logical_unit", "lsm_key_probe");
 
     let _completed = ctx.measure_batch("point_lookups_zipfian", LOOKUPS_PER_ITER as u64, || {
         let mut lsm = LsmSimulator::new_zipfian();
@@ -332,6 +333,7 @@ fn mixed_get_scan(ctx: &mut StressContext) {
     ctx.parameter("gets", MIXED_GETS_PER_ITER);
     ctx.parameter("scans", MIXED_SCANS_PER_ITER);
     ctx.parameter("scan_width", SCAN_WIDTH);
+    ctx.parameter("logical_unit", "lsm_key_probe");
 
     let _completed = ctx.measure_batch("mixed_get_scan", logical_ops as u64, || {
         let mut lsm = LsmSimulator::new_zipfian();
@@ -367,6 +369,7 @@ fn uniform_distribution(ctx: &mut StressContext) {
     let lookup_keys = precompute_uniform_keys(LOOKUPS_PER_ITER, 40_000);
     ctx.parameter("lookup_count", LOOKUPS_PER_ITER);
     ctx.parameter("distribution", "uniform");
+    ctx.parameter("logical_unit", "lsm_key_probe");
 
     let _completed = ctx.measure_batch("uniform_distribution", LOOKUPS_PER_ITER as u64, || {
         let mut lsm = LsmSimulator::new_zipfian();

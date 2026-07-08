@@ -64,6 +64,7 @@ fn run_warm_scan(ctx: &mut StressContext, scenario: &'static str, num_blocks: us
     ctx.parameter("cache_state", "warm");
     ctx.parameter("num_blocks", num_blocks);
     ctx.parameter("scan_repeats", WARM_SCAN_REPEATS);
+    ctx.parameter("logical_unit", "cache_scan_block");
 
     let _completed =
         ctx.measure_batch(scenario, (num_blocks as u64) * WARM_SCAN_REPEAT_OPS, || {
@@ -83,6 +84,7 @@ fn run_cold_scan(ctx: &mut StressContext, scenario: &'static str, num_blocks: us
     ctx.parameter("cache_state", "cold");
     ctx.parameter("num_blocks", num_blocks);
     ctx.parameter("scan_repeats", COLD_SCAN_REPEATS);
+    ctx.parameter("logical_unit", "cache_scan_block");
 
     let _completed =
         ctx.measure_batch(scenario, (num_blocks as u64) * COLD_SCAN_REPEAT_OPS, || {
@@ -164,6 +166,7 @@ fn strided_warm(ctx: &mut StressContext) {
     ctx.parameter("stride", stride);
     ctx.parameter("num_accesses", num_accesses);
     ctx.parameter("scan_repeats", WARM_SCAN_REPEATS);
+    ctx.parameter("logical_unit", "cache_scan_block");
 
     let _completed = ctx.measure_batch(
         "strided_warm",
@@ -195,6 +198,7 @@ fn strided_cold(ctx: &mut StressContext) {
     ctx.parameter("stride", stride);
     ctx.parameter("num_accesses", num_accesses);
     ctx.parameter("scan_repeats", COLD_SCAN_REPEATS);
+    ctx.parameter("logical_unit", "cache_scan_block");
 
     let _completed = ctx.measure_batch(
         "strided_cold",

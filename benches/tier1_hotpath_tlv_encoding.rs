@@ -14,26 +14,80 @@ use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 cntryl_stress::stress_allocator!();
 
-const TLV_PRIMITIVE_BATCH_SIZE: usize = 16_384;
+const TLV_PRIMITIVE_BATCH_SIZE: usize = 1_048_576;
+const TLV_FIELD_DECODE_BATCH_SIZE: usize = 262_144;
+const TLV_PRIMITIVES_PER_LOGICAL_OPERATION: usize = 32;
+
+fn tlv_logical_operation_count() -> u64 {
+    tlv_logical_operation_count_for(TLV_PRIMITIVE_BATCH_SIZE)
+}
+
+fn tlv_logical_operation_count_for(batch_size: usize) -> u64 {
+    let logical_operations = batch_size / TLV_PRIMITIVES_PER_LOGICAL_OPERATION;
+    u64::try_from(logical_operations).expect("TLV logical operation count fits in u64")
+}
+
+fn record_tlv_batch_parameters(ctx: &mut StressContext) {
+    record_tlv_batch_parameters_for(ctx, TLV_PRIMITIVE_BATCH_SIZE);
+}
+
+fn record_tlv_batch_parameters_for(ctx: &mut StressContext, batch_size: usize) {
+    ctx.parameter("batch_size", batch_size);
+    ctx.parameter(
+        "primitives_per_logical_operation",
+        TLV_PRIMITIVES_PER_LOGICAL_OPERATION,
+    );
+    ctx.parameter("logical_unit", "tlv_primitive_batch");
+}
+
+fn varied_varint32_value(base: u32, index: usize) -> u32 {
+    let offset = u32::try_from(index % 16_384).expect("batch index fits in u32");
+    match base {
+        0..=127 => 1 + (base.saturating_sub(1).wrapping_add(offset) % 127),
+        128..=16_383 => 128 + (base.saturating_sub(128).wrapping_add(offset) % 16_256),
+        16_384..=2_097_151 => {
+            16_384 + (base.saturating_sub(16_384).wrapping_add(offset) % 2_080_768)
+        }
+        2_097_152..=268_435_455 => {
+            2_097_152 + (base.saturating_sub(2_097_152).wrapping_add(offset) % 266_338_304)
+        }
+        _ if base > u32::MAX - 16_384 => base.saturating_sub(offset),
+        _ => base.wrapping_add(offset),
+    }
+}
+
+fn varied_payload(data: &[u8], index: usize) -> Vec<u8> {
+    let mut payload = data.to_vec();
+    if let Some(first) = payload.first_mut() {
+        *first = first.wrapping_add(u8::try_from(index % 251).expect("index remainder fits in u8"));
+    }
+    if let Some(last) = payload.last_mut() {
+        *last ^= u8::try_from(index % 239).expect("index remainder fits in u8");
+    }
+    payload
+}
 
 fn run_varint32_encode(ctx: &mut StressContext, name: &'static str, value: u32) {
     let mut buf = BytesMut::with_capacity(5);
     encode_varint32(&mut buf, value);
     assert_eq!(decode_varint32(buf.as_ref()).unwrap(), value);
     buf.clear();
+    let values: Vec<u32> = (0..TLV_PRIMITIVE_BATCH_SIZE)
+        .map(|i| varied_varint32_value(value, i))
+        .collect();
     ctx.parameter("case", name);
-    ctx.parameter("batch_size", TLV_PRIMITIVE_BATCH_SIZE);
+    record_tlv_batch_parameters(ctx);
 
     let measurement_name = format!("varint32_encode_{name}");
     stress_config::measure_hot_path_batch(
         ctx,
         measurement_name,
-        TLV_PRIMITIVE_BATCH_SIZE as u64,
+        tlv_logical_operation_count(),
         || {
             let mut encoded_len = 0usize;
-            for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
+            for value in &values {
                 buf.clear();
-                encode_varint32(&mut buf, black_box(value));
+                encode_varint32(&mut buf, black_box(*value));
                 encoded_len = encoded_len.wrapping_add(buf.len());
                 black_box(buf.as_ref());
             }
@@ -119,18 +173,25 @@ fn run_varint32_decode(ctx: &mut StressContext, name: &'static str, value: u32) 
     encode_varint32(&mut buf, value);
     let data = buf.freeze();
     assert_eq!(decode_varint32(data.as_ref()).unwrap(), value);
+    let encoded_values: Vec<_> = (0..TLV_PRIMITIVE_BATCH_SIZE)
+        .map(|i| {
+            let mut encoded = BytesMut::with_capacity(5);
+            encode_varint32(&mut encoded, varied_varint32_value(value, i));
+            encoded.freeze()
+        })
+        .collect();
     ctx.parameter("case", name);
-    ctx.parameter("batch_size", TLV_PRIMITIVE_BATCH_SIZE);
+    record_tlv_batch_parameters(ctx);
 
     let measurement_name = format!("varint32_decode_{name}");
     stress_config::measure_hot_path_batch(
         ctx,
         measurement_name,
-        TLV_PRIMITIVE_BATCH_SIZE as u64,
+        tlv_logical_operation_count(),
         || {
             let mut decoded = 0u32;
-            for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
-                decoded ^= decode_varint32(black_box(data.as_ref())).unwrap();
+            for data in &encoded_values {
+                decoded = decoded.wrapping_add(decode_varint32(black_box(data.as_ref())).unwrap());
             }
             black_box(decoded);
         },
@@ -218,13 +279,13 @@ fn run_encode_u8_tag(ctx: &mut StressContext, name: &'static str, value: u8) {
     assert_eq!(consumed, buf.len());
     buf.clear();
     ctx.parameter("case", name);
-    ctx.parameter("batch_size", TLV_PRIMITIVE_BATCH_SIZE);
+    record_tlv_batch_parameters(ctx);
 
     let measurement_name = format!("encode_u8_tag_{name}");
     stress_config::measure_hot_path_batch(
         ctx,
         measurement_name,
-        TLV_PRIMITIVE_BATCH_SIZE as u64,
+        tlv_logical_operation_count(),
         || {
             let mut encoded_len = 0usize;
             for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
@@ -295,13 +356,13 @@ fn run_encode_u64_tag(ctx: &mut StressContext, name: &'static str, value: u64) {
     assert_eq!(consumed, buf.len());
     buf.clear();
     ctx.parameter("case", name);
-    ctx.parameter("batch_size", TLV_PRIMITIVE_BATCH_SIZE);
+    record_tlv_batch_parameters(ctx);
 
     let measurement_name = format!("encode_u64_tag_{name}");
     stress_config::measure_hot_path_batch(
         ctx,
         measurement_name,
-        TLV_PRIMITIVE_BATCH_SIZE as u64,
+        tlv_logical_operation_count(),
         || {
             let mut encoded_len = 0usize;
             for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
@@ -373,13 +434,13 @@ fn run_encode_bytes_tag(ctx: &mut StressContext, name: &'static str, data: &[u8]
     buf.clear();
     ctx.parameter("case", name);
     ctx.parameter("payload_size", data.len());
-    ctx.parameter("batch_size", TLV_PRIMITIVE_BATCH_SIZE);
+    record_tlv_batch_parameters(ctx);
 
     let measurement_name = format!("encode_bytes_tag_{name}");
     stress_config::measure_hot_path_batch(
         ctx,
         measurement_name,
-        TLV_PRIMITIVE_BATCH_SIZE as u64,
+        tlv_logical_operation_count(),
         || {
             let mut encoded_len = 0usize;
             for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
@@ -437,22 +498,32 @@ fn run_decode_field(ctx: &mut StressContext, name: &'static str, data: &[u8]) {
     assert_eq!(tag, 11);
     assert_eq!(value, data);
     assert_eq!(consumed, encoded.len());
+    let encoded_fields: Vec<_> = (0..TLV_FIELD_DECODE_BATCH_SIZE)
+        .map(|i| {
+            let payload = varied_payload(data, i);
+            let mut encoded = BytesMut::with_capacity(1 + 5 + payload.len());
+            encode_bytes_with_tag(&mut encoded, 11, payload.as_slice()).unwrap();
+            encoded.freeze()
+        })
+        .collect();
     ctx.parameter("case", name);
     ctx.parameter("payload_size", data.len());
-    ctx.parameter("batch_size", TLV_PRIMITIVE_BATCH_SIZE);
+    record_tlv_batch_parameters_for(ctx, TLV_FIELD_DECODE_BATCH_SIZE);
 
     let measurement_name = format!("decode_field_{name}");
     stress_config::measure_hot_path_batch(
         ctx,
         measurement_name,
-        TLV_PRIMITIVE_BATCH_SIZE as u64,
+        tlv_logical_operation_count_for(TLV_FIELD_DECODE_BATCH_SIZE),
         || {
             let mut total = 0usize;
-            for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
+            for encoded in &encoded_fields {
                 let (tag, value, consumed) = decode_tlv_field(black_box(encoded.as_ref())).unwrap();
                 total = total.wrapping_add(usize::from(tag));
                 total = total.wrapping_add(value.len());
                 total = total.wrapping_add(consumed);
+                total = total.wrapping_add(usize::from(value.first().copied().unwrap_or(0)));
+                total = total.wrapping_add(usize::from(value.last().copied().unwrap_or(0)));
             }
             black_box(total);
         },
@@ -502,16 +573,28 @@ fn sst_entry_full(ctx: &mut StressContext) {
     let seq = black_box(12345u64);
     let entry_type = black_box(0u8);
     let mut buf = BytesMut::with_capacity(256);
+    record_tlv_batch_parameters(ctx);
 
-    ctx.measure("sst_entry_full", || {
-        buf.clear();
-        encode_varint_with_tag(&mut buf, 1, 0);
-        encode_bytes_with_tag(&mut buf, 2, key_delta).unwrap();
-        encode_bytes_with_tag(&mut buf, 3, value).unwrap();
-        encode_u64_with_tag(&mut buf, 4, seq);
-        encode_u8_with_tag(&mut buf, 5, entry_type);
-        black_box(&buf);
-    });
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "sst_entry_full",
+        tlv_logical_operation_count(),
+        || {
+            let mut encoded_len = 0usize;
+            for i in 0..TLV_PRIMITIVE_BATCH_SIZE {
+                buf.clear();
+                encode_varint_with_tag(&mut buf, 1, 0);
+                encode_bytes_with_tag(&mut buf, 2, key_delta).unwrap();
+                encode_bytes_with_tag(&mut buf, 3, value).unwrap();
+                let sequence_offset = u64::try_from(i).expect("batch index fits in u64");
+                encode_u64_with_tag(&mut buf, 4, seq.wrapping_add(sequence_offset));
+                encode_u8_with_tag(&mut buf, 5, entry_type);
+                encoded_len = encoded_len.wrapping_add(buf.len());
+                black_box(buf.as_ref());
+            }
+            black_box(encoded_len);
+        },
+    );
 }
 
 stress_main!();

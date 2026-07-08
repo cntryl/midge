@@ -44,6 +44,7 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     ctx.parameter("measured_secs", measured_window.as_secs());
 
     let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
+    let measured_write_opts = stress_config::measured_write_options(&opts);
 
     // Phase 1: Load (not measured)
     let engine = Arc::new(ycsb::open_tier4_engine(opts));
@@ -100,7 +101,7 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     let measured = stress_config::measure_external_counted(ctx, measurement_name, || {
         let measured = {
             let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
-            let write_opts = cntryl_midge::WriteOptions::buffered(); // Back to buffered for measured phase
+            let write_opts = measured_write_opts;
             ycsb::run_multi_client_for_duration_with_stats(
                 &engine,
                 clients,

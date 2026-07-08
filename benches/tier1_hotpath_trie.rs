@@ -8,8 +8,24 @@ use cntryl_stress::{black_box, stress, stress_main, StressContext};
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-const FIND_BLOCK_BATCH_SIZE: usize = 16_384;
-const PREFIX_RANGE_BATCH_SIZE: usize = 2048;
+const FIND_BLOCK_BATCH_SIZE: usize = 65_536;
+const TRIE_FINDS_PER_LOGICAL_OPERATION: usize = 32;
+const PREFIX_RANGE_BATCH_SIZE: usize = 65_536;
+const TRIE_PREFIX_RANGES_PER_LOGICAL_OPERATION: usize = 32;
+
+type FindCase = (Vec<u8>, Option<u32>);
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).expect("benchmark count fits in u64")
+}
+
+fn find_logical_operation_count() -> u64 {
+    usize_to_u64(FIND_BLOCK_BATCH_SIZE / TRIE_FINDS_PER_LOGICAL_OPERATION)
+}
+
+fn prefix_logical_operation_count() -> u64 {
+    usize_to_u64(PREFIX_RANGE_BATCH_SIZE / TRIE_PREFIX_RANGES_PER_LOGICAL_OPERATION)
+}
 
 fn build_profile_trie() -> Vec<u8> {
     let mut builder = TrieBuilder::new();
@@ -24,40 +40,61 @@ fn measure_find_block(
     ctx: &mut StressContext,
     scenario: &'static str,
     reader: &TrieReader,
-    key: &'static [u8],
-    expected: Option<u32>,
+    cases: &[FindCase],
 ) {
-    assert_eq!(reader.find_block(key), expected);
+    for (key, expected) in cases {
+        assert_eq!(reader.find_block(key), *expected);
+    }
+    ctx.parameter("lookup_key_count", cases.len());
+    ctx.parameter(
+        "finds_per_logical_operation",
+        TRIE_FINDS_PER_LOGICAL_OPERATION,
+    );
+    ctx.parameter("logical_unit", "trie_find_batch");
 
-    stress_config::measure_hot_path_batch(ctx, scenario, FIND_BLOCK_BATCH_SIZE as u64, || {
+    stress_config::measure_hot_path_batch(ctx, scenario, find_logical_operation_count(), || {
         let mut found = 0u32;
-        for _ in 0..FIND_BLOCK_BATCH_SIZE {
-            found = found.wrapping_add(reader.find_block(black_box(key)).unwrap_or(u32::MAX));
+        for i in 0..FIND_BLOCK_BATCH_SIZE {
+            let (key, _) = &cases[i % cases.len()];
+            found = found.wrapping_add(
+                reader
+                    .find_block(black_box(key.as_slice()))
+                    .unwrap_or(u32::MAX),
+            );
         }
         black_box(found);
     });
 }
 
-fn run_find_block(
-    ctx: &mut StressContext,
-    scenario: &'static str,
-    key: &'static [u8],
-    expected: Option<u32>,
-) {
+fn run_find_block(ctx: &mut StressContext, scenario: &'static str, cases: &[FindCase]) {
     let encoded = build_profile_trie();
     let reader = TrieReader::new(&encoded).unwrap();
     ctx.parameter("scenario", scenario);
-    measure_find_block(ctx, scenario, &reader, key, expected);
+    measure_find_block(ctx, scenario, &reader, cases);
+}
+
+fn profile_hit_cases() -> Vec<FindCase> {
+    (0_u32..100)
+        .map(|i| (format!("user:{i:03}:profile").into_bytes(), Some(i)))
+        .collect()
+}
+
+fn profile_miss_cases(suffix: &'static str) -> Vec<FindCase> {
+    (0_u32..100)
+        .map(|i| (format!("user:{i:03}:{suffix}").into_bytes(), None))
+        .collect()
 }
 
 #[stress(tier = 1, metadata(component = "trie", scenario = "find_hit"))]
 fn find_hit(ctx: &mut StressContext) {
-    run_find_block(ctx, "find_hit", b"user:050:profile", Some(50));
+    let cases = profile_hit_cases();
+    run_find_block(ctx, "find_hit", &cases);
 }
 
 #[stress(tier = 1, metadata(component = "trie", scenario = "find_miss"))]
 fn find_miss(ctx: &mut StressContext) {
-    run_find_block(ctx, "find_miss", b"user:050:profily", None);
+    let cases = profile_miss_cases("profily");
+    run_find_block(ctx, "find_miss", &cases);
 }
 
 #[stress(
@@ -65,7 +102,8 @@ fn find_miss(ctx: &mut StressContext) {
     metadata(component = "trie", scenario = "find_partial_match")
 )]
 fn find_partial_match(ctx: &mut StressContext) {
-    run_find_block(ctx, "find_partial_match", b"user:050:prof", None);
+    let cases = profile_miss_cases("prof");
+    run_find_block(ctx, "find_partial_match", &cases);
 }
 
 fn build_hierarchical_trie() -> Vec<u8> {
@@ -79,15 +117,22 @@ fn build_hierarchical_trie() -> Vec<u8> {
     builder.finish()
 }
 
-fn run_prefix_range(ctx: &mut StressContext, scenario: &'static str, prefix: &'static [u8]) {
+fn run_prefix_range(ctx: &mut StressContext, scenario: &'static str, prefixes: &[Vec<u8>]) {
     let encoded = build_hierarchical_trie();
     let reader = TrieReader::new(&encoded).unwrap();
     ctx.parameter("scenario", scenario);
+    ctx.parameter("prefix_key_count", prefixes.len());
+    ctx.parameter(
+        "prefix_ranges_per_logical_operation",
+        TRIE_PREFIX_RANGES_PER_LOGICAL_OPERATION,
+    );
+    ctx.parameter("logical_unit", "trie_prefix_range_batch");
 
-    stress_config::measure_hot_path_batch(ctx, scenario, PREFIX_RANGE_BATCH_SIZE as u64, || {
+    stress_config::measure_hot_path_batch(ctx, scenario, prefix_logical_operation_count(), || {
         let mut total = 0usize;
-        for _ in 0..PREFIX_RANGE_BATCH_SIZE {
-            let blocks = reader.find_prefix_range(black_box(prefix));
+        for i in 0..PREFIX_RANGE_BATCH_SIZE {
+            let prefix = &prefixes[i % prefixes.len()];
+            let blocks = reader.find_prefix_range(black_box(prefix.as_slice()));
             total = total.wrapping_add(blocks.len());
         }
         black_box(total);
@@ -99,17 +144,24 @@ fn run_prefix_range(ctx: &mut StressContext, scenario: &'static str, prefix: &'s
     metadata(component = "trie", scenario = "prefix_single_user")
 )]
 fn prefix_single_user(ctx: &mut StressContext) {
-    run_prefix_range(ctx, "prefix_single_user", b"user:05:");
+    let prefixes: Vec<Vec<u8>> = (0_u32..10)
+        .map(|user_id| format!("user:{user_id:02}:").into_bytes())
+        .collect();
+    run_prefix_range(ctx, "prefix_single_user", &prefixes);
 }
 
 #[stress(tier = 1, metadata(component = "trie", scenario = "prefix_all_users"))]
 fn prefix_all_users(ctx: &mut StressContext) {
-    run_prefix_range(ctx, "prefix_all_users", b"user:");
+    let prefixes = vec![b"user:".to_vec()];
+    run_prefix_range(ctx, "prefix_all_users", &prefixes);
 }
 
 #[stress(tier = 1, metadata(component = "trie", scenario = "prefix_no_match"))]
 fn prefix_no_match(ctx: &mut StressContext) {
-    run_prefix_range(ctx, "prefix_no_match", b"user:09:zzzz");
+    let prefixes: Vec<Vec<u8>> = (0_u32..10)
+        .map(|user_id| format!("user:{user_id:02}:zzzz").into_bytes())
+        .collect();
+    run_prefix_range(ctx, "prefix_no_match", &prefixes);
 }
 
 fn build_short_key_trie() -> Vec<u8> {
@@ -137,7 +189,10 @@ fn build_long_key_trie() -> Vec<u8> {
 fn short_keys_high_branch(ctx: &mut StressContext) {
     let encoded = build_short_key_trie();
     let reader = TrieReader::new(&encoded).unwrap();
-    measure_find_block(ctx, "short_keys_high_branch", &reader, b"k050", Some(50));
+    let cases: Vec<FindCase> = (0_u32..100)
+        .map(|i| (format!("k{i:03}").into_bytes(), Some(i)))
+        .collect();
+    measure_find_block(ctx, "short_keys_high_branch", &reader, &cases);
 }
 
 #[stress(
@@ -147,13 +202,15 @@ fn short_keys_high_branch(ctx: &mut StressContext) {
 fn long_keys_shared_prefix(ctx: &mut StressContext) {
     let encoded = build_long_key_trie();
     let reader = TrieReader::new(&encoded).unwrap();
-    measure_find_block(
-        ctx,
-        "long_keys_shared_prefix",
-        &reader,
-        b"very_long_shared_prefix_key_0000000050",
-        Some(50),
-    );
+    let cases: Vec<FindCase> = (0_u32..100)
+        .map(|i| {
+            (
+                format!("very_long_shared_prefix_key_{i:010}").into_bytes(),
+                Some(i),
+            )
+        })
+        .collect();
+    measure_find_block(ctx, "long_keys_shared_prefix", &reader, &cases);
 }
 
 stress_main!();

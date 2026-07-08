@@ -56,6 +56,7 @@ fn run_scan_query_case(
     first_prefix: u8,
 ) {
     ctx.parameter("logical_batch_size", SCAN_SEEK_BATCH_SIZE);
+    ctx.parameter("logical_unit", "scan_seek");
     ctx.parameter("operation_surface", "scan_seek_first_row");
     ctx.parameter("begin_tx_included", "false");
     ctx.parameter("rotating_prefix_count", ROTATING_PREFIX_COUNT);

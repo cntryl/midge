@@ -27,9 +27,12 @@ fn run_single_version_write_case(
     opts: MidgeOptions,
 ) {
     ctx.parameter("logical_batch_size", 1);
+    ctx.parameter("logical_unit", "transaction");
     ctx.parameter("operation_surface", "mvcc_single_version_write");
     ctx.parameter("begin_tx_included", "true");
+    ctx.parameter("memtable_size_bytes", opts.memtable_size);
 
+    let write_opts = stress_config::measured_write_options(&opts);
     let engine = setup_engine(opts);
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
@@ -45,7 +48,7 @@ fn run_single_version_write_case(
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
             .expect("begin");
         tx.put(k.to_vec(), v.clone(), None).unwrap();
-        tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        tx.commit(write_opts).unwrap();
     });
 
     drop(engine);
@@ -58,16 +61,17 @@ fn run_read_old_version_case(
     num_keys: usize,
 ) {
     ctx.parameter("logical_batch_size", OLD_VERSION_READ_BATCH_SIZE);
+    ctx.parameter("logical_unit", "snapshot_read");
     ctx.parameter("operation_surface", "mvcc_old_version_read");
     ctx.parameter("begin_tx_included", "false");
     ctx.parameter("rotating_key_count", num_keys);
 
+    let write_opts = stress_config::measured_write_options(&opts);
     let engine = setup_engine(opts);
     let cf = engine.create_column_family("cf1").unwrap();
 
     // Setup (not measured): write in TARGET_BATCH-sized transactions
     let cf_id = cf.id();
-    let write_opts = cntryl_midge::WriteOptions::buffered();
     let total = num_keys;
 
     let mut keys = Vec::with_capacity(num_keys);
@@ -126,13 +130,13 @@ fn run_read_old_version_case(
 
 #[stress(tier = 3)]
 fn tier3_mvcc_single_version_write_mem(ctx: &mut StressContext) {
-    let opts = stress_config::opts_for_mode("memory");
+    let opts = stress_config::write_coordination_opts_for_mode("memory");
     run_single_version_write_case(ctx, "tier3_mvcc_single_version_write_mem", opts);
 }
 
 #[stress(tier = 3)]
 fn tier3_mvcc_single_version_write_local(ctx: &mut StressContext) {
-    let opts = stress_config::opts_for_mode("local");
+    let opts = stress_config::write_coordination_opts_for_mode("local");
     run_single_version_write_case(ctx, "tier3_mvcc_single_version_write_local", opts);
 }
 

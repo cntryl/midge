@@ -14,6 +14,7 @@ fn make_test_keys(count: usize) -> Vec<Vec<u8>> {
 fn run_bloom_build(ctx: &mut StressContext, scenario: &'static str, count: usize) {
     let keys = make_test_keys(count);
     ctx.parameter("key_count", count);
+    ctx.parameter("logical_unit", "bloom_key_insert");
 
     let _completed = ctx.measure_batch(scenario, count as u64, || {
         let mut builder = BloomWriter::with_defaults(count);

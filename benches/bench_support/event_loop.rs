@@ -9,7 +9,7 @@ pub enum MessageKind {
 }
 
 /// Benchmark handler with near-zero work.
-#[inline]
+#[inline(never)]
 pub fn handle(counter: &mut u64) {
     *counter = counter.wrapping_add(1);
 }

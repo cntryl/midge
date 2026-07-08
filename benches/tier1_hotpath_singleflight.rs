@@ -8,7 +8,7 @@ mod stress_config;
 use cntryl_midge::common::Accumulator;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
-const SUBMIT_AND_WAIT_BATCH_ROUNDS: usize = 64;
+const SUBMIT_AND_WAIT_BATCH_ROUNDS: usize = 8192;
 
 fn run_flush_waiters(ctx: &mut StressContext, scenario: &'static str, waiters: usize) {
     ctx.parameter("waiters", waiters);
@@ -29,9 +29,12 @@ fn run_flush_waiters(ctx: &mut StressContext, scenario: &'static str, waiters: u
 }
 
 fn run_submit_and_wait(ctx: &mut StressContext, scenario: &'static str, waiters: usize) {
-    let logical_ops = (waiters * SUBMIT_AND_WAIT_BATCH_ROUNDS) as u64;
+    let logical_ops = SUBMIT_AND_WAIT_BATCH_ROUNDS as u64;
+
     ctx.parameter("waiters", waiters);
     ctx.parameter("rounds", SUBMIT_AND_WAIT_BATCH_ROUNDS);
+    ctx.parameter("logical_unit", "submit_flush_wait_cycle");
+    ctx.parameter("waiters_per_logical_operation", waiters);
 
     stress_config::measure_hot_path_batch(ctx, scenario, logical_ops, || {
         let mut total = 0u64;

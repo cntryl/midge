@@ -33,7 +33,8 @@ pub mod types;
 
 // Internal modules used by engine/runtime.
 mod compaction;
-mod diagnostics;
+#[doc(hidden)]
+pub mod diagnostics;
 #[cfg(test)]
 pub mod io;
 #[cfg(not(test))]

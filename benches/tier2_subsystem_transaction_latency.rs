@@ -13,10 +13,11 @@ use std::time::{Duration, Instant};
 #[path = "./stress_config.rs"]
 mod stress_config;
 
+use cntryl_midge::diagnostics::TransactionCommitTimingSample;
 use cntryl_midge::{ColumnFamilyId, Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions};
 use cntryl_stress::{stress, stress_main, StressContext};
 use hdrhistogram::Histogram;
-use stress_config::{init_benchmark_telemetry, opts_for_mode};
+use stress_config::init_benchmark_telemetry;
 
 const COALESCING_CLIENTS: usize = 16;
 const COALESCING_TXNS_PER_CLIENT: usize = 128;
@@ -128,30 +129,41 @@ struct CommitTimingTotals {
 }
 
 impl CommitTimingTotals {
-    fn from_client_totals(client_totals: &LatencyClientTotals) -> Self {
+    fn from_samples(samples: &[TransactionCommitTimingSample]) -> Self {
         let mut commit_latency_us =
             Histogram::<u64>::new(3).expect("create commit latency histogram");
-        let average_commit_us = ns_to_us_ceil(
-            client_totals
-                .commit_ns
-                .checked_div(client_totals.transactions)
-                .unwrap_or(0),
-        );
 
-        for _ in 0..client_totals.transactions {
+        let mut totals = Self::default();
+        for sample in samples {
+            totals.samples = totals.samples.saturating_add(1);
+            totals.succeeded = totals.succeeded.saturating_add(u64::from(sample.succeeded));
+            totals.commit_total_ns = totals
+                .commit_total_ns
+                .saturating_add(sample.commit_total_ns);
+            totals.submit_apply_transaction_ns = totals
+                .submit_apply_transaction_ns
+                .saturating_add(sample.submit_apply_transaction_ns);
+            totals.write_group_leader_collect_ns = totals
+                .write_group_leader_collect_ns
+                .saturating_add(sample.write_group_leader_collect_ns);
+            totals.write_group_runtime_apply_ns = totals
+                .write_group_runtime_apply_ns
+                .saturating_add(sample.write_group_runtime_apply_ns);
+            totals.write_group_follower_wait_ns = totals
+                .write_group_follower_wait_ns
+                .saturating_add(sample.write_group_follower_wait_ns);
+            totals.durability_finalize_ns = totals
+                .durability_finalize_ns
+                .saturating_add(sample.durability_finalize_ns);
+            totals.unregister_snapshot_ns = totals
+                .unregister_snapshot_ns
+                .saturating_add(sample.unregister_snapshot_ns);
             commit_latency_us
-                .record(average_commit_us)
+                .record(ns_to_us_ceil(sample.commit_total_ns))
                 .expect("record commit latency sample");
         }
 
-        let mut totals = Self {
-            samples: client_totals.transactions,
-            succeeded: client_totals.transactions,
-            commit_total_ns: client_totals.commit_ns,
-            ..Self::default()
-        };
         totals.commit_latency_us = CommitLatencyDistribution::from_histogram(&commit_latency_us);
-        assert_eq!(totals.commit_latency_us.samples, totals.samples);
         totals
     }
 }
@@ -368,6 +380,7 @@ fn run_buffered_transaction_latency_breakdown(
     let start = engine
         .get_runtime_metrics()
         .expect("get starting latency runtime metrics");
+    cntryl_midge::diagnostics::enable_transaction_commit_timing_for_benchmarks();
     let mut client_totals = LatencyClientTotals::default();
     if clients == 1 {
         let workload = workloads
@@ -396,7 +409,10 @@ fn run_buffered_transaction_latency_breakdown(
     let end = engine
         .get_runtime_metrics()
         .expect("get ending latency runtime metrics");
-    let commit_totals = CommitTimingTotals::from_client_totals(&client_totals);
+    let timing_samples =
+        cntryl_midge::diagnostics::drain_transaction_commit_timings_for_benchmarks();
+    cntryl_midge::diagnostics::disable_transaction_commit_timing_for_benchmarks();
+    let commit_totals = CommitTimingTotals::from_samples(&timing_samples);
     assert_eq!(commit_totals.samples, logical_txn_records);
     assert_eq!(commit_totals.succeeded, commit_totals.samples);
     assert_eq!(
@@ -553,7 +569,7 @@ fn assert_transaction_coalescing_guardrail(signal: TransactionCoalescingSignal) 
 }
 
 fn open_local_engine_with_cf(cf_name: &str) -> (Arc<Engine>, ColumnFamilyId) {
-    let opts = opts_for_mode("local");
+    let opts = stress_config::write_coordination_opts_for_mode("local");
     let engine = Arc::new(Engine::open(opts.to_open_options()).expect("open local engine"));
     let cf = engine
         .create_column_family(cf_name)
@@ -652,6 +668,7 @@ fn run_latency_breakdown_case(
     ctx.parameter("clients", clients);
     ctx.parameter("txns_per_client", txns_per_client);
     ctx.parameter("sample_repeats", LATENCY_SAMPLE_REPEATS);
+    ctx.parameter("logical_unit", "transaction");
 
     let mut observed = None;
     let logical_ops = (clients * txns_per_client * LATENCY_SAMPLE_REPEATS) as u64;
@@ -722,6 +739,7 @@ fn read_only_begin_tx(ctx: &mut StressContext) {
     ctx.parameter("workload", LatencyWorkloadKind::ReadOnlyBeginTx.label());
     ctx.parameter("transactions", LATENCY_READ_ONLY_TXNS);
     ctx.parameter("sample_repeats", LATENCY_SAMPLE_REPEATS);
+    ctx.parameter("logical_unit", "transaction");
 
     let mut observed = None;
     let logical_ops = (LATENCY_READ_ONLY_TXNS * LATENCY_SAMPLE_REPEATS) as u64;
@@ -750,6 +768,7 @@ fn coalescing_signal(ctx: &mut StressContext) {
     ctx.parameter("clients", COALESCING_CLIENTS);
     ctx.parameter("txns_per_client", COALESCING_TXNS_PER_CLIENT);
     ctx.parameter("sample_repeats", LATENCY_SAMPLE_REPEATS);
+    ctx.parameter("logical_unit", "transaction_record");
 
     let mut observed = None;
     let logical_ops =

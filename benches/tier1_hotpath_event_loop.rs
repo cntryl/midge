@@ -11,9 +11,10 @@ use cntryl_stress::{black_box, stress, stress_main, StressContext};
 use event_loop_support::{handle, MessageKind};
 use std::collections::VecDeque;
 
-const INNER_LOOPS: usize = 128;
-const INNER_LOOP_OPS: u64 = 128;
-const DIRECT_INNER_LOOPS: u64 = 1_000_000;
+const MESSAGE_BATCH_SIZE: usize = 128;
+const MESSAGE_BATCH_REPEATS: usize = 4096;
+const DIRECT_CALLS_PER_BATCH: usize = 256;
+const DIRECT_BATCH_REPEATS: usize = 4096;
 
 cntryl_stress::stress_allocator!();
 
@@ -41,16 +42,36 @@ fn build_messages(count: usize) -> Vec<MessageKind> {
 
 #[stress(tier = 1, metadata(component = "event_loop", scenario = "direct_call"))]
 fn direct_call(ctx: &mut StressContext) {
-    ctx.parameter("inner_loops", DIRECT_INNER_LOOPS);
+    ctx.parameter("calls_per_logical_operation", DIRECT_CALLS_PER_BATCH);
+    ctx.parameter("batch_repeats", DIRECT_BATCH_REPEATS);
+    ctx.parameter("logical_unit", "direct_call_batch");
 
-    stress_config::measure_hot_path_batch(ctx, "direct_call", DIRECT_INNER_LOOPS, || {
-        let mut counter = 0u64;
-        for _ in 0..DIRECT_INNER_LOOPS {
-            handle(&mut counter);
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "direct_call",
+        u64::try_from(DIRECT_BATCH_REPEATS).expect("batch count fits in u64"),
+        || {
+            let mut counter = 0u64;
+            for _ in 0..DIRECT_BATCH_REPEATS {
+                for _ in 0..DIRECT_CALLS_PER_BATCH {
+                    handle(black_box(&mut counter));
+                }
+                black_box(counter);
+            }
             black_box(counter);
+        },
+    );
+}
+
+fn run_message_batches(messages: &[MessageKind]) -> u64 {
+    let mut counter = 0u64;
+    for _ in 0..MESSAGE_BATCH_REPEATS {
+        for kind in messages {
+            dispatch_message(black_box(*kind), &mut counter);
         }
         black_box(counter);
-    });
+    }
+    counter
 }
 
 #[stress(
@@ -58,16 +79,36 @@ fn direct_call(ctx: &mut StressContext) {
     metadata(component = "event_loop", scenario = "dispatch_only")
 )]
 fn dispatch_only(ctx: &mut StressContext) {
-    let messages = build_messages(INNER_LOOPS);
-    ctx.parameter("inner_loops", INNER_LOOPS);
+    let messages = build_messages(MESSAGE_BATCH_SIZE);
+    ctx.parameter("messages_per_logical_operation", MESSAGE_BATCH_SIZE);
+    ctx.parameter("batch_repeats", MESSAGE_BATCH_REPEATS);
+    ctx.parameter("logical_unit", "message_batch");
 
-    stress_config::measure_hot_path_batch(ctx, "dispatch_only", INNER_LOOP_OPS, || {
-        let mut counter = 0u64;
-        for kind in &messages {
-            dispatch_message(black_box(*kind), &mut counter);
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "dispatch_only",
+        u64::try_from(MESSAGE_BATCH_REPEATS).expect("batch count fits in u64"),
+        || {
+            let counter = run_message_batches(&messages);
+            black_box(counter);
+        },
+    );
+}
+
+fn run_mailbox_batches(messages: &[MessageKind], queue: &mut VecDeque<MessageKind>) -> u64 {
+    let mut counter = 0u64;
+    for _ in 0..MESSAGE_BATCH_REPEATS {
+        queue.clear();
+        for kind in messages {
+            queue.push_back(*kind);
+        }
+
+        while let Some(kind) = queue.pop_front() {
+            dispatch_message(black_box(kind), &mut counter);
         }
         black_box(counter);
-    });
+    }
+    counter
 }
 
 #[stress(
@@ -75,22 +116,21 @@ fn dispatch_only(ctx: &mut StressContext) {
     metadata(component = "event_loop", scenario = "mailbox_vecdeque")
 )]
 fn mailbox_vecdeque(ctx: &mut StressContext) {
-    let messages = build_messages(INNER_LOOPS);
+    let messages = build_messages(MESSAGE_BATCH_SIZE);
     let mut queue = VecDeque::with_capacity(messages.len());
-    ctx.parameter("inner_loops", INNER_LOOPS);
+    ctx.parameter("messages_per_logical_operation", MESSAGE_BATCH_SIZE);
+    ctx.parameter("batch_repeats", MESSAGE_BATCH_REPEATS);
+    ctx.parameter("logical_unit", "mailbox_batch");
 
-    stress_config::measure_hot_path_batch(ctx, "mailbox_vecdeque", INNER_LOOP_OPS, || {
-        queue.clear();
-        for kind in &messages {
-            queue.push_back(*kind);
-        }
-
-        let mut counter = 0u64;
-        while let Some(kind) = queue.pop_front() {
-            dispatch_message(black_box(kind), &mut counter);
-        }
-        black_box(counter);
-    });
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "mailbox_vecdeque",
+        u64::try_from(MESSAGE_BATCH_REPEATS).expect("batch count fits in u64"),
+        || {
+            let counter = run_mailbox_batches(&messages, &mut queue);
+            black_box(counter);
+        },
+    );
 }
 
 stress_main!();

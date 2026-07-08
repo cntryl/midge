@@ -30,8 +30,11 @@ const GET_KEY_COUNT: usize = 4096;
 fn run_single_put_case(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOptions) {
     ctx.parameter("put_batch_size", PUT_BATCH_SIZE);
     ctx.parameter("logical_batch_size", PUT_BATCH_SIZE);
+    ctx.parameter("logical_unit", "engine_put_commit");
     ctx.parameter("operation_surface", "engine_put_commit");
     ctx.parameter("begin_tx_included", "true");
+    ctx.parameter("memtable_size_bytes", opts.memtable_size);
+    let write_opts = stress_config::measured_write_options(&opts);
 
     let engine = stress_config::bench_stress::open_engine_no_compaction(opts);
     let cf = engine.create_column_family("cf1").unwrap();
@@ -53,7 +56,7 @@ fn run_single_put_case(ctx: &mut StressContext, scenario: &'static str, opts: Mi
                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                 .expect("begin");
             tx.put(k.to_vec(), v.clone(), None).unwrap();
-            tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+            tx.commit(write_opts).unwrap();
         }
     });
 
@@ -62,6 +65,7 @@ fn run_single_put_case(ctx: &mut StressContext, scenario: &'static str, opts: Mi
 
 fn run_single_get_case(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOptions) {
     ctx.parameter("logical_batch_size", GET_BATCH_SIZE);
+    ctx.parameter("logical_unit", "engine_point_read");
     ctx.parameter("operation_surface", "engine_get");
     ctx.parameter("begin_tx_included", "true");
     ctx.parameter("rotating_key_count", GET_KEY_COUNT);
@@ -114,13 +118,13 @@ fn run_single_get_case(ctx: &mut StressContext, scenario: &'static str, opts: Mi
 
 #[stress(tier = 3)]
 fn tier3_engine_put_mem(ctx: &mut StressContext) {
-    let opts = stress_config::opts_for_mode("memory");
+    let opts = stress_config::write_coordination_opts_for_mode("memory");
     run_single_put_case(ctx, "tier3_engine_put_mem", opts);
 }
 
 #[stress(tier = 3)]
 fn tier3_engine_put_local(ctx: &mut StressContext) {
-    let opts = stress_config::opts_for_mode("local");
+    let opts = stress_config::write_coordination_opts_for_mode("local");
     run_single_put_case(ctx, "tier3_engine_put_local", opts);
 }
 

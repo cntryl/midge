@@ -9,7 +9,8 @@ use cntryl_midge::iterators::skiplist::SkipList;
 use cntryl_midge::Bytes;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
-const ITER_SINGLE_STEP_BATCH_SIZE: usize = 65_536;
+const ITER_SINGLE_STEP_BATCH_SIZE: usize = 1_048_576;
+const RANGE_SCAN_BATCH_SIZE: usize = 512;
 const SEEK_WINDOW_COUNT: usize = 64;
 
 #[inline]
@@ -33,13 +34,31 @@ fn create_populated_skiplist(count: usize) -> SkipList {
     sl
 }
 
+#[inline(never)]
+fn consume_entries(entries: &[(Bytes, Bytes)]) -> usize {
+    let mut checksum = entries.len();
+    for (key, value) in entries {
+        checksum = checksum.wrapping_add(key.len());
+        checksum = checksum.wrapping_add(value.len());
+        checksum = checksum.wrapping_add(usize::from(key.first().copied().unwrap_or_default()));
+        checksum = checksum.wrapping_add(usize::from(value.first().copied().unwrap_or_default()));
+    }
+    checksum
+}
+
 fn run_iter_sequential(ctx: &mut StressContext, scenario: &'static str, count: usize) {
     let sl = create_populated_skiplist(count);
     ctx.parameter("key_count", count);
+    ctx.parameter("range_scan_batch_size", RANGE_SCAN_BATCH_SIZE);
+    ctx.parameter("logical_unit", "range_scan");
 
-    stress_config::measure_hot_path_batch(ctx, scenario, count as u64, || {
-        let entries = sl.range(None, None);
-        black_box(entries.len());
+    stress_config::measure_hot_path_batch(ctx, scenario, RANGE_SCAN_BATCH_SIZE as u64, || {
+        let mut checksum = 0usize;
+        for _ in 0..RANGE_SCAN_BATCH_SIZE {
+            let entries = sl.range(None, None);
+            checksum = checksum.wrapping_add(consume_entries(black_box(&entries)));
+        }
+        black_box(checksum);
     });
 }
 
@@ -73,13 +92,19 @@ fn run_range(ctx: &mut StressContext, scenario: &'static str, start: usize, end:
     let end_key = make_key(end);
     ctx.parameter("scenario", scenario);
     ctx.parameter("range_width", end.saturating_sub(start));
+    ctx.parameter("range_scan_batch_size", RANGE_SCAN_BATCH_SIZE);
+    ctx.parameter("logical_unit", "range_scan");
 
-    stress_config::measure_hot_path_batch(ctx, scenario, end.saturating_sub(start) as u64, || {
-        let entries = sl.range(
-            Some(black_box(start_key.as_ref())),
-            Some(black_box(end_key.as_ref())),
-        );
-        black_box(entries.len());
+    stress_config::measure_hot_path_batch(ctx, scenario, RANGE_SCAN_BATCH_SIZE as u64, || {
+        let mut checksum = 0usize;
+        for _ in 0..RANGE_SCAN_BATCH_SIZE {
+            let entries = sl.range(
+                Some(black_box(start_key.as_ref())),
+                Some(black_box(end_key.as_ref())),
+            );
+            checksum = checksum.wrapping_add(consume_entries(black_box(&entries)));
+        }
+        black_box(checksum);
     });
 }
 
@@ -121,7 +146,7 @@ fn next_after_seek(ctx: &mut StressContext) {
                     Some(black_box(start_keys[idx].as_ref())),
                     Some(black_box(end_keys[idx].as_ref())),
                 );
-                seen += usize::from(!entries.is_empty());
+                seen = seen.wrapping_add(consume_entries(black_box(&entries)));
             }
             black_box(seen);
         },
@@ -151,13 +176,7 @@ fn range_end(ctx: &mut StressContext) {
     metadata(component = "iterator", scenario = "unbounded_50_keys")
 )]
 fn unbounded_50_keys(ctx: &mut StressContext) {
-    let sl = create_populated_skiplist(50);
-    ctx.parameter("key_count", 50);
-
-    stress_config::measure_hot_path_batch(ctx, "unbounded_50_keys", 50, || {
-        let entries = sl.range(None, None);
-        black_box(entries.len());
-    });
+    run_iter_sequential(ctx, "unbounded_50_keys", 50);
 }
 
 #[stress(

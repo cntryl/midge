@@ -8,6 +8,8 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub const WRITE_COORDINATION_MEMTABLE_SIZE_BYTES: usize = 128 * 1024 * 1024;
+
 /// Storage mode configuration for the engine.
 #[derive(Clone)]
 pub enum StorageMode {
@@ -199,6 +201,23 @@ pub fn memory_opts() -> MidgeOptions {
     opts_for_mode("memory")
 }
 
+#[must_use]
+pub fn measured_write_options(opts: &MidgeOptions) -> cntryl_midge::WriteOptions {
+    match &opts.storage_mode {
+        StorageMode::CloudBacked { .. } => cntryl_midge::WriteOptions::cloud_async(),
+        StorageMode::Memory | StorageMode::LocalDisk { .. } => {
+            cntryl_midge::WriteOptions::buffered()
+        }
+    }
+}
+
+#[must_use]
+pub fn write_coordination_opts_for_mode(mode: &str) -> MidgeOptions {
+    let mut opts = opts_for_mode(mode);
+    opts.memtable_size = WRITE_COORDINATION_MEMTABLE_SIZE_BYTES;
+    opts
+}
+
 /// Generate appropriate `MidgeOptions` for the given storage mode (lowercase convention).
 ///
 /// # Arguments
@@ -216,8 +235,10 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             storage_mode: StorageMode::Memory,
             wal_sync: false,
             wal_batch_config: None,
-            // Keep test default small to reduce runtime.
-            memtable_size: 64 * 1024,
+            // Benchmark-safe: Tier-3 memory rows keep one engine alive across
+            // warmup + measured samples, so a test-sized memtable turns normal
+            // benchmark write volume into artificial write stalls.
+            memtable_size: 128 * 1024 * 1024,
             compression: false,
             enable_compaction: false,
             memory_budget: None,

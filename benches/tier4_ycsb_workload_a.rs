@@ -45,6 +45,7 @@ fn run_workload_a_with_distribution(
     ctx.parameter("clients", clients);
     ctx.parameter("measured_secs", MEASURED.as_secs());
     let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
+    let measured_write_opts = stress_config::measured_write_options(&opts);
 
     // Phase 1: Load (not measured)
     let engine = Arc::new(ycsb::open_tier4_engine(opts));
@@ -120,7 +121,7 @@ fn run_workload_a_with_distribution(
                     Some(Arc::new(ZipfianGenerator::new(initial_keys, theta)))
                 }
             };
-            let write_opts = cntryl_midge::WriteOptions::buffered(); // Back to buffered for measured phase
+            let write_opts = measured_write_opts;
             ycsb::run_multi_client_for_duration_with_stats(
                 &engine,
                 clients,

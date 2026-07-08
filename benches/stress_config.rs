@@ -19,7 +19,10 @@ pub mod ycsb;
 #[path = "bench_support/zipfian.rs"]
 pub mod zipfian;
 
-pub use config::{memory_opts, opts_for_mode, MidgeOptions, StorageMode};
+pub use config::{
+    measured_write_options, memory_opts, opts_for_mode, write_coordination_opts_for_mode,
+    MidgeOptions, StorageMode,
+};
 
 pub fn init_benchmark_telemetry() -> cntryl_midge::MidgeResult<()> {
     cntryl_midge::init_benchmark_telemetry()

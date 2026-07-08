@@ -29,7 +29,6 @@ use stress_config::MidgeOptions;
 const DEFAULT_INITIAL_KEYS: usize = 50_000;
 const WARMUP: Duration = Duration::from_secs(1);
 const MEASURED: Duration = Duration::from_secs(5);
-const CLOUD_1_FIXED_OPS_PER_CLIENT: u64 = 1_100;
 
 const SCAN_LEN: u64 = 64;
 
@@ -39,29 +38,13 @@ const CLIENTS_64: usize = 64;
 
 const WORKLOAD_SEED: u64 = 0xE0E0_EA5E_5678_9ABC;
 
-fn fixed_operations_per_client(profile: &str, clients: usize) -> Option<u64> {
-    if profile == "cloud" && clients == CLIENTS_1 {
-        Some(CLOUD_1_FIXED_OPS_PER_CLIENT)
-    } else {
-        None
-    }
-}
-
 #[allow(clippy::too_many_lines)]
 fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
     ctx.tag("storage_profile", profile);
-    let fixed_ops_per_client = fixed_operations_per_client(profile, clients);
-    ctx.parameter(
-        "measurement_mode",
-        if fixed_ops_per_client.is_some() {
-            "fixed_ops"
-        } else {
-            "duration"
-        },
-    );
     ctx.parameter("measured_secs", MEASURED.as_secs());
 
     let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
+    let measured_write_opts = stress_config::measured_write_options(&opts);
 
     // Phase 1: Load (not measured)
     let engine = Arc::new(ycsb::open_tier4_engine(opts));
@@ -127,118 +110,63 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     // Phase 3: Measured (duration-based; multi-client)
     let client_suffix = if clients == 1 { "client" } else { "clients" };
     let measurement_name = format!("tier4_ycsb_e_{profile}_{clients}_{client_suffix}");
-    let measured = if let Some(operations_per_client) = fixed_ops_per_client {
-        ctx.parameter("operations_per_client", operations_per_client);
-        let write_opts = cntryl_midge::WriteOptions::buffered();
-        let (measured, elapsed) = ycsb::run_multi_client_for_operations_with_stats(
-            &engine,
-            clients,
-            operations_per_client,
-            |client_id, stop| {
-                move |e, cf, op_index| {
-                    let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
-                    let is_insert = (r0 % 100) >= 95;
-                    let cf_id = cf.id();
+    let measured = stress_config::measure_external_counted(ctx, measurement_name, || {
+        let measured = {
+            let write_opts = measured_write_opts;
+            ycsb::run_multi_client_for_duration_with_stats(
+                &engine,
+                clients,
+                MEASURED,
+                |client_id, stop| {
+                    move |e, cf, op_index| {
+                        let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
+                        let is_insert = (r0 % 100) >= 95;
+                        let cf_id = cf.id();
 
-                    if is_insert {
-                        let key_id = initial_keys as u64 + ((client_id as u64) << 32) + op_index;
-                        let k = ycsb::make_key(key_id);
-                        let v = ycsb::make_value((op_index % 251) as u8);
-                        ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
-                            let mut tx = e
-                                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                                .expect("measured begin");
-                            tx.put(k.to_vec(), v.clone(), None)
-                                .expect("measured insert");
-                            tx.commit(write_opts)
-                        })
-                        .expect("measured commit");
-                        return;
-                    }
-
-                    let max_start = (initial_keys as u64).saturating_sub(SCAN_LEN + 1).max(1);
-                    let start_id =
-                        ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0) % max_start;
-                    let start = ycsb::make_key(start_id);
-                    let end = ycsb::make_key(start_id.saturating_add(SCAN_LEN));
-
-                    let tx = e
-                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                        .expect("measured begin");
-                    let query = cntryl_midge::Query::new()
-                        .start_key(cntryl_midge::Bytes::copy_from_slice(&start[..]))
-                        .end_key(cntryl_midge::Bytes::copy_from_slice(&end[..]));
-                    let mut iter = tx.scan(&query).expect("measured range");
-                    let mut count = 0;
-                    while iter.next().is_some() {
-                        count += 1;
-                    }
-                    std::hint::black_box(count);
-                }
-            },
-        );
-        ctx.record_external(measurement_name, elapsed, measured.operations);
-        measured
-    } else {
-        stress_config::measure_external_counted(ctx, measurement_name, || {
-            let measured = {
-                let write_opts = cntryl_midge::WriteOptions::buffered(); // Back to buffered for measured phase
-                ycsb::run_multi_client_for_duration_with_stats(
-                    &engine,
-                    clients,
-                    MEASURED,
-                    |client_id, stop| {
-                        move |e, cf, op_index| {
-                            let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
-                            let is_insert = (r0 % 100) >= 95;
-                            let cf_id = cf.id();
-
-                            if is_insert {
-                                let key_id =
-                                    initial_keys as u64 + ((client_id as u64) << 32) + op_index;
-                                let k = ycsb::make_key(key_id);
-                                let v = ycsb::make_value((op_index % 251) as u8);
-                                ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
-                                    let mut tx = e
-                                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                                        .expect("measured begin");
-                                    tx.put(k.to_vec(), v.clone(), None)
-                                        .expect("measured insert");
-                                    tx.commit(write_opts)
-                                })
-                                .expect("measured commit");
-                                return;
-                            }
-
-                            let max_start =
-                                (initial_keys as u64).saturating_sub(SCAN_LEN + 1).max(1);
-                            let start_id =
-                                ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0)
-                                    % max_start;
-                            let start = ycsb::make_key(start_id);
-                            let end = ycsb::make_key(start_id.saturating_add(SCAN_LEN));
-
-                            let tx = e
-                                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                                .expect("measured begin");
-                            let query = cntryl_midge::Query::new()
-                                .start_key(cntryl_midge::Bytes::copy_from_slice(&start[..]))
-                                .end_key(cntryl_midge::Bytes::copy_from_slice(&end[..]));
-                            // Actually consume the iterator to measure scan throughput
-                            let mut iter = tx.scan(&query).expect("measured range");
-                            let mut count = 0;
-                            while iter.next().is_some() {
-                                count += 1;
-                            }
-                            std::hint::black_box(count);
+                        if is_insert {
+                            let key_id =
+                                initial_keys as u64 + ((client_id as u64) << 32) + op_index;
+                            let k = ycsb::make_key(key_id);
+                            let v = ycsb::make_value((op_index % 251) as u8);
+                            ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
+                                let mut tx = e
+                                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                                    .expect("measured begin");
+                                tx.put(k.to_vec(), v.clone(), None)
+                                    .expect("measured insert");
+                                tx.commit(write_opts)
+                            })
+                            .expect("measured commit");
+                            return;
                         }
-                    },
-                )
-            };
-            let operations = measured.operations;
-            (measured, operations)
-        })
-    };
+
+                        let max_start = (initial_keys as u64).saturating_sub(SCAN_LEN + 1).max(1);
+                        let start_id =
+                            ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0)
+                                % max_start;
+                        let start = ycsb::make_key(start_id);
+                        let end = ycsb::make_key(start_id.saturating_add(SCAN_LEN));
+
+                        let tx = e
+                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                            .expect("measured begin");
+                        let query = cntryl_midge::Query::new()
+                            .start_key(cntryl_midge::Bytes::copy_from_slice(&start[..]))
+                            .end_key(cntryl_midge::Bytes::copy_from_slice(&end[..]));
+                        // Actually consume the iterator to measure scan throughput
+                        let mut iter = tx.scan(&query).expect("measured range");
+                        let mut count = 0;
+                        while iter.next().is_some() {
+                            count += 1;
+                        }
+                        std::hint::black_box(count);
+                    }
+                },
+            )
+        };
+        let operations = measured.operations;
+        (measured, operations)
+    });
 
     // Approximate bytes touched: 95% scans of length SCAN_LEN, 5% inserts.
     let bytes_per_kv = ycsb::logical_entry_size_bytes() as u64;

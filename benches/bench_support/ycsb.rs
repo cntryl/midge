@@ -18,12 +18,13 @@ use cntryl_midge::{
     ColumnFamilyHandle, Engine, MidgeEngine, MidgeError, MidgeResult, TransactionMode, WriteOptions,
 };
 
-use super::config::MidgeOptions;
+use super::config::{MidgeOptions, StorageMode};
 
 pub const KEY_SIZE: usize = 16;
 pub const DEFAULT_VALUE_SIZE: usize = 128;
 
 pub const TIER4_MEMTABLE_SIZE_BYTES: usize = 4 * 1024 * 1024;
+pub const TIER4_MEMORY_MEMTABLE_SIZE_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MultiClientRunStats {
@@ -386,12 +387,17 @@ pub fn make_value(fill: u8) -> Vec<u8> {
 pub fn open_tier4_engine(mut opts: MidgeOptions) -> Engine {
     // Tier-4 workloads should exercise the full system shape.
     opts.enable_compaction = true;
+    let default_memtable_size = if matches!(opts.storage_mode, StorageMode::Memory) {
+        TIER4_MEMORY_MEMTABLE_SIZE_BYTES
+    } else {
+        TIER4_MEMTABLE_SIZE_BYTES
+    };
     // Avoid tiny testkit memtables causing constant flush.
     opts.memtable_size = std::env::var("MIDGE_BENCH_MEMTABLE_SIZE_BYTES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(TIER4_MEMTABLE_SIZE_BYTES);
+        .unwrap_or(default_memtable_size);
     opts.memory_budget = std::env::var("MIDGE_BENCH_MEMORY_BUDGET_BYTES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())

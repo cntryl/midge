@@ -152,6 +152,7 @@ fn run_disjoint(ctx: &mut StressContext, scenario: &'static str, num_ssts: usize
     ctx.parameter("sst_count", num_ssts);
     ctx.parameter("keys_per_sst", KEYS_PER_SST);
     ctx.parameter("merge_repeats", MERGE_REPEATS);
+    ctx.parameter("logical_unit", "sst_entry_examined");
 
     let _completed = ctx.measure_batch(
         scenario,
@@ -185,6 +186,7 @@ fn run_deduping_merge(
     ctx.parameter("sst_count", num_ssts);
     ctx.parameter("keys_per_sst", KEYS_PER_SST);
     ctx.parameter("merge_repeats", MERGE_REPEATS);
+    ctx.parameter("logical_unit", "sst_entry_examined");
 
     let _completed = ctx.measure_batch(
         scenario,

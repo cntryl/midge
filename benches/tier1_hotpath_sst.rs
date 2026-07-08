@@ -16,8 +16,23 @@ use cntryl_stress::{black_box, stress, stress_main, StressContext};
 use cntryl_midge::sst::encoding::{decode, encode, EntryType};
 
 const ENCODE_BATCH_SIZE: usize = 2048;
-const DECODE_BATCH_SIZE: usize = 4096;
+const DECODE_BATCH_SIZE: usize = 65_536;
 const ROUNDTRIP_BATCH_SIZE: usize = 2048;
+const SST_ENTRIES_PER_LOGICAL_OPERATION: usize = 32;
+
+fn sst_logical_operation_count(entry_count: usize) -> u64 {
+    let logical_operations = entry_count / SST_ENTRIES_PER_LOGICAL_OPERATION;
+    u64::try_from(logical_operations).expect("SST logical operation count fits in u64")
+}
+
+fn record_sst_batch_parameters(ctx: &mut StressContext, entry_count: usize) {
+    ctx.parameter("entry_count_per_sample", entry_count);
+    ctx.parameter(
+        "entries_per_logical_operation",
+        SST_ENTRIES_PER_LOGICAL_OPERATION,
+    );
+    ctx.parameter("logical_unit", "sst_entry_batch");
+}
 
 // ---------------------------------------------------------------------------
 // Shared prefix helper (allocation-free)
@@ -42,16 +57,21 @@ fn encode_small(ctx: &mut StressContext) {
 
     let value = b"value_data";
 
-    ctx.parameter("encode_batch_size", ENCODE_BATCH_SIZE);
+    record_sst_batch_parameters(ctx, ENCODE_BATCH_SIZE);
 
-    stress_config::measure_hot_path_batch(ctx, "encode_small", ENCODE_BATCH_SIZE as u64, || {
-        let mut encoded_len = 0usize;
-        for seq in 0..ENCODE_BATCH_SIZE {
-            let encoded = encode(delta, shared, Some(value), seq as u64 + 1, EntryType::Put);
-            encoded_len = encoded_len.wrapping_add(encoded.len());
-        }
-        black_box(encoded_len);
-    });
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "encode_small",
+        sst_logical_operation_count(ENCODE_BATCH_SIZE),
+        || {
+            let mut encoded_len = 0usize;
+            for seq in 0..ENCODE_BATCH_SIZE {
+                let encoded = encode(delta, shared, Some(value), seq as u64 + 1, EntryType::Put);
+                encoded_len = encoded_len.wrapping_add(encoded.len());
+            }
+            black_box(encoded_len);
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -80,16 +100,30 @@ fn decode_small(ctx: &mut StressContext) {
     assert_eq!(view.key_delta, delta);
     assert_eq!(view.value, Some(b"value".as_slice()));
     assert_eq!(consumed, encoded_entries[0].len());
-    ctx.parameter("decode_batch_size", DECODE_BATCH_SIZE);
+    record_sst_batch_parameters(ctx, DECODE_BATCH_SIZE);
 
-    stress_config::measure_hot_path_batch(ctx, "decode_small", DECODE_BATCH_SIZE as u64, || {
-        let mut consumed_total = 0usize;
-        for encoded in &encoded_entries {
-            let (_view, consumed) = decode(black_box(encoded.as_slice()), 0).unwrap();
-            consumed_total = consumed_total.wrapping_add(consumed);
-        }
-        black_box(consumed_total);
-    });
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "decode_small",
+        sst_logical_operation_count(DECODE_BATCH_SIZE),
+        || {
+            let mut consumed_total = 0usize;
+            for encoded in &encoded_entries {
+                let (view, consumed) = decode(black_box(encoded.as_slice()), 0).unwrap();
+                consumed_total = consumed_total.wrapping_add(consumed);
+                consumed_total = consumed_total.wrapping_add(usize::from(view.shared_len));
+                consumed_total = consumed_total.wrapping_add(view.key_delta.len());
+                consumed_total = consumed_total.wrapping_add(
+                    usize::try_from(view.sequence).expect("benchmark sequence fits in usize"),
+                );
+                if let Some(value) = view.value {
+                    consumed_total = consumed_total
+                        .wrapping_add(usize::from(value.first().copied().unwrap_or(0)));
+                }
+            }
+            black_box(consumed_total);
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -108,12 +142,12 @@ fn roundtrip_small(ctx: &mut StressContext) {
 
     let value = b"value_data";
 
-    ctx.parameter("roundtrip_batch_size", ROUNDTRIP_BATCH_SIZE);
+    record_sst_batch_parameters(ctx, ROUNDTRIP_BATCH_SIZE);
 
     stress_config::measure_hot_path_batch(
         ctx,
         "roundtrip_small",
-        ROUNDTRIP_BATCH_SIZE as u64,
+        sst_logical_operation_count(ROUNDTRIP_BATCH_SIZE),
         || {
             let mut consumed_total = 0usize;
             for seq in 0..ROUNDTRIP_BATCH_SIZE {

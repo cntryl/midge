@@ -7,7 +7,7 @@ mod stress_config;
 
 use cntryl_midge::{Engine, TransactionMode, WriteOptions};
 use cntryl_stress::{stress, stress_main, StressContext};
-use stress_config::{init_benchmark_telemetry, opts_for_mode};
+use stress_config::{init_benchmark_telemetry, write_coordination_opts_for_mode};
 
 const NUM_OPS_PER_BATCH: usize = 100;
 const VALUE_SIZE: usize = 128;
@@ -59,10 +59,11 @@ fn run_batched_write_workload(
 
 fn run_mode(ctx: &mut StressContext, mode: &'static str) {
     init_benchmark_telemetry().expect("initialize benchmark telemetry");
-    let opts = opts_for_mode(mode);
+    let opts = write_coordination_opts_for_mode(mode);
     ctx.parameter("storage_profile", mode);
     ctx.parameter("batch_size", NUM_OPS_PER_BATCH);
     ctx.parameter("batch_iterations", BATCH_ITERATIONS);
+    ctx.parameter("memtable_size_bytes", opts.memtable_size);
     ctx.parameter(
         "logical_bytes",
         NUM_OPS_PER_BATCH * VALUE_SIZE * BATCH_ITERATIONS,

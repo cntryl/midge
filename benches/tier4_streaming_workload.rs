@@ -58,6 +58,7 @@ struct PhaseResult {
 fn run_streaming_phase(
     engine: &Arc<MidgeEngine>,
     cf_id: cntryl_midge::ColumnFamilyId,
+    write_opts: cntryl_midge::WriteOptions,
     head: &Arc<AtomicU64>,
     duration: Duration,
     count: bool,
@@ -86,7 +87,7 @@ fn run_streaming_phase(
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                     .expect("begin");
                 tx.put(key.to_vec(), value.to_vec(), None).ok();
-                let _ = tx.commit(cntryl_midge::WriteOptions::buffered());
+                let _ = tx.commit(write_opts);
 
                 if count {
                     local_writes = local_writes.wrapping_add(1);
@@ -171,6 +172,7 @@ fn run_streaming_phase(
 }
 
 fn run_streaming(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOptions) {
+    let write_opts = stress_config::measured_write_options(&opts);
     let engine = Arc::new(ycsb::open_tier4_engine(opts));
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
@@ -182,13 +184,13 @@ fn run_streaming(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOpt
     // Warmup (unmeasured)
     // -------------------------------------------------------------------------
 
-    let _warmup = run_streaming_phase(&engine, cf_id, &head, WARMUP, false);
+    let _warmup = run_streaming_phase(&engine, cf_id, write_opts, &head, WARMUP, false);
 
     // -------------------------------------------------------------------------
     // Measured phase
     // -------------------------------------------------------------------------
 
-    let measured_phase = run_streaming_phase(&engine, cf_id, &head, MEASURED, true);
+    let measured_phase = run_streaming_phase(&engine, cf_id, write_opts, &head, MEASURED, true);
 
     let PhaseResult {
         elapsed,

@@ -11,6 +11,11 @@ use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 const INSERT_BATCH_ROUNDS: usize = 128;
 const HOT_GET_BATCH_SIZE: usize = 16_384;
+const CACHE_BATCH_LOOKUP_REPEATS: usize = 256;
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).expect("benchmark count fits in u64")
+}
 
 #[inline]
 fn make_cache_key(block_offset: u64) -> CacheKey {
@@ -93,16 +98,26 @@ fn get_batch_hit_1000(ctx: &mut StressContext) {
     assert_eq!(warmed_hits, num_blocks);
     ctx.parameter("block_size", block_size);
     ctx.parameter("lookup_batch_size", num_blocks);
+    ctx.parameter("batch_repeats", CACHE_BATCH_LOOKUP_REPEATS);
+    ctx.parameter("logical_unit", "cache_lookup_batch");
+    ctx.parameter("lookups_per_logical_operation", num_blocks);
 
-    stress_config::measure_hot_path_batch(ctx, "get_batch_hit_1000", num_blocks as u64, || {
-        let mut count = 0;
-        for key in keys.iter().take(num_blocks) {
-            if cache.get(key).is_some() {
-                count += 1;
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "get_batch_hit_1000",
+        usize_to_u64(CACHE_BATCH_LOOKUP_REPEATS),
+        || {
+            let mut count = 0usize;
+            for _ in 0..CACHE_BATCH_LOOKUP_REPEATS {
+                for key in keys.iter().take(num_blocks) {
+                    if let Some(block) = cache.get(black_box(key)) {
+                        count = count.wrapping_add(block.data.len());
+                    }
+                }
             }
-        }
-        black_box(count);
-    });
+            black_box(count);
+        },
+    );
 }
 
 #[stress(
@@ -126,16 +141,24 @@ fn get_batch_miss_1000(ctx: &mut StressContext) {
         .collect();
     ctx.parameter("block_size", block_size);
     ctx.parameter("lookup_batch_size", num_blocks);
+    ctx.parameter("batch_repeats", CACHE_BATCH_LOOKUP_REPEATS);
+    ctx.parameter("logical_unit", "cache_lookup_batch");
+    ctx.parameter("lookups_per_logical_operation", num_blocks);
 
-    stress_config::measure_hot_path_batch(ctx, "get_batch_miss_1000", num_blocks as u64, || {
-        let mut count = 0;
-        for key in &miss_keys {
-            if cache.get(black_box(key)).is_some() {
-                count += 1;
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "get_batch_miss_1000",
+        usize_to_u64(CACHE_BATCH_LOOKUP_REPEATS),
+        || {
+            let mut count = 0usize;
+            for _ in 0..CACHE_BATCH_LOOKUP_REPEATS {
+                for key in &miss_keys {
+                    count = count.wrapping_add(usize::from(cache.get(black_box(key)).is_none()));
+                }
             }
-        }
-        black_box(count);
-    });
+            black_box(count);
+        },
+    );
 }
 
 #[stress(
@@ -150,19 +173,27 @@ fn insert_batch_100(ctx: &mut StressContext) {
     let (keys, blocks) = precompute_keys_and_blocks(insert_window, block_size);
     let cache = BlockCache::new(cache_size, 1, CachePolicyType::Lru);
     let mut key_index = 0usize;
-    let logical_ops = (num_blocks * INSERT_BATCH_ROUNDS) as u64;
     ctx.parameter("block_size", block_size);
     ctx.parameter("num_blocks", num_blocks);
     ctx.parameter("rounds", INSERT_BATCH_ROUNDS);
+    ctx.parameter("logical_unit", "cache_insert_batch");
+    ctx.parameter("inserts_per_logical_operation", num_blocks);
 
-    stress_config::measure_hot_path_batch(ctx, "insert_batch_100", logical_ops, || {
-        for _ in 0..logical_ops {
-            let idx = key_index % insert_window;
-            key_index = key_index.wrapping_add(1);
-            let _ = cache.put(keys[idx], &blocks[idx]);
-        }
-        black_box(key_index);
-    });
+    stress_config::measure_hot_path_batch(
+        ctx,
+        "insert_batch_100",
+        usize_to_u64(INSERT_BATCH_ROUNDS),
+        || {
+            for _ in 0..INSERT_BATCH_ROUNDS {
+                for _ in 0..num_blocks {
+                    let idx = key_index % insert_window;
+                    key_index = key_index.wrapping_add(1);
+                    let _ = cache.put(keys[idx], &blocks[idx]);
+                }
+            }
+            black_box(key_index);
+        },
+    );
 }
 
 stress_main!();

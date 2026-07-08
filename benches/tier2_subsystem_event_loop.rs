@@ -39,6 +39,7 @@ fn build_messages(count: usize) -> Vec<MessageKind> {
 #[stress(tier = 2, metadata(component = "event_loop", scenario = "direct_call"))]
 fn direct_call(ctx: &mut StressContext) {
     ctx.parameter("inner_loops", DIRECT_INNER_LOOPS);
+    ctx.parameter("logical_unit", "event_loop_dispatch");
 
     let _completed = ctx.measure_batch("direct_call", DIRECT_INNER_LOOPS, || {
         let mut counter = 0u64;
@@ -58,6 +59,7 @@ fn channel_cross_thread(ctx: &mut StressContext) {
     let messages = build_messages(CHANNEL_CROSS_THREAD_MESSAGES);
     let message_count = messages.len();
     ctx.parameter("message_count", message_count);
+    ctx.parameter("logical_unit", "event_loop_dispatch");
 
     let _completed = ctx.measure_batch("channel_cross_thread", CHANNEL_CROSS_THREAD_OPS, || {
         let (msg_tx, msg_rx) = channel::bounded(1024);
@@ -89,6 +91,7 @@ fn park_wake(ctx: &mut StressContext) {
     let messages = build_messages(PARK_WAKE_MESSAGES);
     let message_count = messages.len();
     ctx.parameter("message_count", message_count);
+    ctx.parameter("logical_unit", "event_loop_dispatch");
 
     let _completed = ctx.measure_batch("park_wake", PARK_WAKE_OPS, || {
         let (msg_tx, msg_rx) = channel::bounded(0);
