@@ -25,7 +25,8 @@ const BLOCKS_PER_SST: usize = 100;
 const KEYS_PER_BLOCK: usize = 100;
 const TOTAL_KEYS: usize = BLOCKS_PER_SST * KEYS_PER_BLOCK;
 const COMPARISON_REPEATS: usize = 4;
-const COMPARISON_REPEAT_OPS: u64 = 4;
+const COMPARISON_REPEAT_MULTIPLIER: u64 = 4;
+const BLOOM_REPEAT_PER_SAMPLE: usize = 4;
 
 /// Pre-computed SST structure for benchmarking
 struct MockSst {
@@ -112,7 +113,8 @@ fn build_mock_sst(sst_id: u64) -> MockSst {
 fn bloom_enabled(ctx: &mut StressContext) {
     let sst = build_mock_sst(1);
     let (hits, misses) = precompute_query_keys(42);
-    ctx.parameter("queries", 10_000);
+    let query_count = 10_000usize * BLOOM_REPEAT_PER_SAMPLE;
+    ctx.parameter("queries", query_count);
     ctx.parameter("hit_ratio_pct", 10);
     ctx.parameter("bloom", "enabled");
     ctx.parameter("logical_unit", "sst_point_lookup");
@@ -120,43 +122,45 @@ fn bloom_enabled(ctx: &mut StressContext) {
     ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 
-    let _completed = ctx.measure_batch("bloom_enabled", 10_000, || {
+    let _completed = ctx.measure_batch("bloom_enabled", query_count as u64, || {
         let mut bloom_checks = 0u32;
         let mut bloom_rejects = 0u32;
         let mut blocks_read = 0u32;
         let mut cache_hits = 0u32;
 
-        for key in &hits {
-            bloom_checks += 1;
-            if sst.bloom.contains(key).might_be_present() {
-                let range = sst.sparse_index.find_block_range(key);
-                for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
-                    let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
-                    if sst.cache.get(&cache_key).is_some() {
-                        cache_hits += 1;
-                    } else {
-                        blocks_read += 1;
+        for _ in 0..BLOOM_REPEAT_PER_SAMPLE {
+            for key in &hits {
+                bloom_checks += 1;
+                if sst.bloom.contains(key).might_be_present() {
+                    let range = sst.sparse_index.find_block_range(key);
+                    for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
+                        let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
+                        if sst.cache.get(&cache_key).is_some() {
+                            cache_hits += 1;
+                        } else {
+                            blocks_read += 1;
+                        }
                     }
+                } else {
+                    bloom_rejects += 1;
                 }
-            } else {
-                bloom_rejects += 1;
             }
-        }
 
-        for key in &misses {
-            bloom_checks += 1;
-            if sst.bloom.contains(key).might_be_present() {
-                let range = sst.sparse_index.find_block_range(key);
-                for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
-                    let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
-                    if sst.cache.get(&cache_key).is_some() {
-                        cache_hits += 1;
-                    } else {
-                        blocks_read += 1;
+            for key in &misses {
+                bloom_checks += 1;
+                if sst.bloom.contains(key).might_be_present() {
+                    let range = sst.sparse_index.find_block_range(key);
+                    for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
+                        let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
+                        if sst.cache.get(&cache_key).is_some() {
+                            cache_hits += 1;
+                        } else {
+                            blocks_read += 1;
+                        }
                     }
+                } else {
+                    bloom_rejects += 1;
                 }
-            } else {
-                bloom_rejects += 1;
             }
         }
 
@@ -171,7 +175,8 @@ fn bloom_enabled(ctx: &mut StressContext) {
 fn bloom_disabled(ctx: &mut StressContext) {
     let sst = build_mock_sst(2);
     let (hits, misses) = precompute_query_keys(42);
-    ctx.parameter("queries", 10_000);
+    let query_count = 10_000usize * BLOOM_REPEAT_PER_SAMPLE;
+    ctx.parameter("queries", query_count);
     ctx.parameter("hit_ratio_pct", 10);
     ctx.parameter("bloom", "disabled");
     ctx.parameter("logical_unit", "sst_point_lookup");
@@ -179,30 +184,32 @@ fn bloom_disabled(ctx: &mut StressContext) {
     ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 
-    let _completed = ctx.measure_batch("bloom_disabled", 10_000, || {
+    let _completed = ctx.measure_batch("bloom_disabled", query_count as u64, || {
         let mut blocks_read = 0u32;
         let mut cache_hits = 0u32;
 
-        for key in &hits {
-            let range = sst.sparse_index.find_block_range(key);
-            for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
-                let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
-                if sst.cache.get(&cache_key).is_some() {
-                    cache_hits += 1;
-                } else {
-                    blocks_read += 1;
+        for _ in 0..BLOOM_REPEAT_PER_SAMPLE {
+            for key in &hits {
+                let range = sst.sparse_index.find_block_range(key);
+                for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
+                    let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
+                    if sst.cache.get(&cache_key).is_some() {
+                        cache_hits += 1;
+                    } else {
+                        blocks_read += 1;
+                    }
                 }
             }
-        }
 
-        for key in &misses {
-            let range = sst.sparse_index.find_block_range(key);
-            for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
-                let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
-                if sst.cache.get(&cache_key).is_some() {
-                    cache_hits += 1;
-                } else {
-                    blocks_read += 1;
+            for key in &misses {
+                let range = sst.sparse_index.find_block_range(key);
+                for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
+                    let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
+                    if sst.cache.get(&cache_key).is_some() {
+                        cache_hits += 1;
+                    } else {
+                        blocks_read += 1;
+                    }
                 }
             }
         }
@@ -215,8 +222,9 @@ fn run_comparison(ctx: &mut StressContext, scenario: &'static str, mode: &'stati
     let sst = build_mock_sst(3);
     let (hits, misses) = precompute_query_keys(42);
     let query_keys: Vec<Bytes> = hits.iter().chain(misses.iter()).cloned().collect();
+    let query_count = query_keys.len() * BLOOM_REPEAT_PER_SAMPLE;
     ctx.parameter("comparison_mode", mode);
-    ctx.parameter("queries", query_keys.len());
+    ctx.parameter("queries", query_count);
     ctx.parameter("comparison_repeats", COMPARISON_REPEATS);
     ctx.parameter("logical_unit", "sst_point_lookup");
     if mode == "without_bloom" {
@@ -227,15 +235,37 @@ fn run_comparison(ctx: &mut StressContext, scenario: &'static str, mode: &'stati
 
     let _completed = ctx.measure_batch(
         scenario,
-        (query_keys.len() as u64) * COMPARISON_REPEAT_OPS,
+        (query_count as u64) * COMPARISON_REPEAT_MULTIPLIER,
         || {
-            if mode == "with_bloom" {
-                let mut bloom_rejects = 0u32;
-                let mut blocks_read = 0u32;
+            for _ in 0..BLOOM_REPEAT_PER_SAMPLE {
+                if mode == "with_bloom" {
+                    let mut bloom_rejects = 0u32;
+                    let mut blocks_read = 0u32;
 
-                for _ in 0..COMPARISON_REPEATS {
-                    for key in &query_keys {
-                        if sst.bloom.contains(key).might_be_present() {
+                    for _ in 0..COMPARISON_REPEATS {
+                        for key in &query_keys {
+                            if sst.bloom.contains(key).might_be_present() {
+                                let range = sst.sparse_index.find_block_range(key);
+                                for block_idx in
+                                    range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1)
+                                {
+                                    let cache_key =
+                                        CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
+                                    if sst.cache.get(&cache_key).is_none() {
+                                        blocks_read += 1;
+                                    }
+                                }
+                            } else {
+                                bloom_rejects += 1;
+                            }
+                        }
+                    }
+                    black_box((bloom_rejects, blocks_read));
+                } else {
+                    let mut blocks_read = 0u32;
+
+                    for _ in 0..COMPARISON_REPEATS {
+                        for key in &query_keys {
                             let range = sst.sparse_index.find_block_range(key);
                             for block_idx in
                                 range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1)
@@ -246,29 +276,10 @@ fn run_comparison(ctx: &mut StressContext, scenario: &'static str, mode: &'stati
                                     blocks_read += 1;
                                 }
                             }
-                        } else {
-                            bloom_rejects += 1;
                         }
                     }
+                    black_box(blocks_read);
                 }
-                black_box((bloom_rejects, blocks_read));
-            } else {
-                let mut blocks_read = 0u32;
-
-                for _ in 0..COMPARISON_REPEATS {
-                    for key in &query_keys {
-                        let range = sst.sparse_index.find_block_range(key);
-                        for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1)
-                        {
-                            let cache_key =
-                                CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
-                            if sst.cache.get(&cache_key).is_none() {
-                                blocks_read += 1;
-                            }
-                        }
-                    }
-                }
-                black_box(blocks_read);
             }
         },
     );

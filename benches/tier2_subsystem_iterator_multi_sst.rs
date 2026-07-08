@@ -7,7 +7,8 @@ use cntryl_stress::{black_box, stress, stress_main, StressContext};
 use std::collections::BinaryHeap;
 
 const KEYS_PER_SST: usize = 1000;
-const MERGE_REPEATS: usize = 1024;
+const MERGE_REPEATS_PER_SAMPLE: usize = 1024;
+const ITERATOR_MULTI_SST_SAMPLE_COUNT: usize = 6;
 
 #[derive(Clone)]
 struct MockSst {
@@ -151,28 +152,31 @@ fn run_disjoint(ctx: &mut StressContext, scenario: &'static str, num_ssts: usize
     ctx.parameter("pattern", "disjoint");
     ctx.parameter("sst_count", num_ssts);
     ctx.parameter("keys_per_sst", KEYS_PER_SST);
-    ctx.parameter("merge_repeats", MERGE_REPEATS);
+    ctx.parameter("merge_repeats", MERGE_REPEATS_PER_SAMPLE);
     ctx.parameter("logical_unit", "sst_entry_examined");
 
-    let _completed = ctx.measure_batch(
-        scenario,
-        (num_ssts * KEYS_PER_SST * MERGE_REPEATS) as u64,
-        || {
-            let mut total_count = 0usize;
-            let mut total_compared = 0usize;
-            for _ in 0..MERGE_REPEATS {
-                let iterators: Vec<SstIterator> = ssts.iter().map(|sst| sst.iter_from(0)).collect();
-                let mut merge = MergeIterator::new(iterators);
-                let mut count = 0usize;
-                while merge.next().is_some() {
-                    count += 1;
+    let _completed = ctx
+        .benchmark(scenario)
+        .samples(ITERATOR_MULTI_SST_SAMPLE_COUNT)
+        .measure_batch(
+            (num_ssts * KEYS_PER_SST * MERGE_REPEATS_PER_SAMPLE) as u64,
+            || {
+                let mut total_count = 0usize;
+                let mut total_compared = 0usize;
+                for _ in 0..MERGE_REPEATS_PER_SAMPLE {
+                    let iterators: Vec<SstIterator> =
+                        ssts.iter().map(|sst| sst.iter_from(0)).collect();
+                    let mut merge = MergeIterator::new(iterators);
+                    let mut count = 0usize;
+                    while merge.next().is_some() {
+                        count += 1;
+                    }
+                    total_count += count;
+                    total_compared += merge.keys_compared();
                 }
-                total_count += count;
-                total_compared += merge.keys_compared();
-            }
-            black_box((total_count, total_compared));
-        },
-    );
+                black_box((total_count, total_compared));
+            },
+        );
 }
 
 fn run_deduping_merge(
@@ -185,34 +189,37 @@ fn run_deduping_merge(
     ctx.parameter("pattern", pattern);
     ctx.parameter("sst_count", num_ssts);
     ctx.parameter("keys_per_sst", KEYS_PER_SST);
-    ctx.parameter("merge_repeats", MERGE_REPEATS);
+    ctx.parameter("merge_repeats", MERGE_REPEATS_PER_SAMPLE);
     ctx.parameter("logical_unit", "sst_entry_examined");
 
-    let _completed = ctx.measure_batch(
-        scenario,
-        (num_ssts * KEYS_PER_SST * MERGE_REPEATS) as u64,
-        || {
-            let mut total_count = 0usize;
-            let mut total_compared = 0usize;
-            for _ in 0..MERGE_REPEATS {
-                let iterators: Vec<SstIterator> = ssts.iter().map(|sst| sst.iter_from(0)).collect();
-                let mut merge = MergeIterator::new(iterators);
-                let mut count = 0usize;
-                let mut prev_key: Option<Bytes> = None;
+    let _completed = ctx
+        .benchmark(scenario)
+        .samples(ITERATOR_MULTI_SST_SAMPLE_COUNT)
+        .measure_batch(
+            (num_ssts * KEYS_PER_SST * MERGE_REPEATS_PER_SAMPLE) as u64,
+            || {
+                let mut total_count = 0usize;
+                let mut total_compared = 0usize;
+                for _ in 0..MERGE_REPEATS_PER_SAMPLE {
+                    let iterators: Vec<SstIterator> =
+                        ssts.iter().map(|sst| sst.iter_from(0)).collect();
+                    let mut merge = MergeIterator::new(iterators);
+                    let mut count = 0usize;
+                    let mut prev_key: Option<Bytes> = None;
 
-                while let Some((key, _sst_id)) = merge.next() {
-                    if prev_key.as_ref() != Some(&key) {
-                        count += 1;
-                        prev_key = Some(key);
+                    while let Some((key, _sst_id)) = merge.next() {
+                        if prev_key.as_ref() != Some(&key) {
+                            count += 1;
+                            prev_key = Some(key);
+                        }
                     }
-                }
 
-                total_count += count;
-                total_compared += merge.keys_compared();
-            }
-            black_box((total_count, total_compared));
-        },
-    );
+                    total_count += count;
+                    total_compared += merge.keys_compared();
+                }
+                black_box((total_count, total_compared));
+            },
+        );
 }
 
 #[stress(

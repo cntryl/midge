@@ -28,7 +28,9 @@ use stress_config::MidgeOptions;
 
 const DEFAULT_INITIAL_KEYS: usize = 50_000;
 const WARMUP: Duration = Duration::from_secs(1);
-const MEASURED: Duration = Duration::from_secs(5);
+const MEASURED_DURATION_DEFAULT: Duration = Duration::from_secs(5);
+const MEASURED_DURATION_PLATEAU_BASE: Duration = Duration::from_secs(12);
+const MEASURED_DURATION_PLATEAU_LONG: Duration = Duration::from_secs(16);
 
 const SCAN_LEN: u64 = 64;
 
@@ -38,10 +40,21 @@ const CLIENTS_64: usize = 64;
 
 const WORKLOAD_SEED: u64 = 0xE0E0_EA5E_5678_9ABC;
 
+fn measured_duration(profile: &str, clients: usize) -> Duration {
+    if matches!((profile, clients), ("cloud", CLIENTS_1)) {
+        MEASURED_DURATION_PLATEAU_BASE
+    } else if matches!((profile, clients), ("local", CLIENTS_16 | CLIENTS_64)) {
+        MEASURED_DURATION_PLATEAU_LONG
+    } else {
+        MEASURED_DURATION_DEFAULT
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
     ctx.tag("storage_profile", profile);
-    ctx.parameter("measured_secs", MEASURED.as_secs());
+    let measured = measured_duration(profile, clients);
+    ctx.parameter("measured_secs", measured.as_secs());
     ctx.parameter("clients", clients);
     ctx.parameter("logical_unit", "ycsb_operation");
     if matches!(
@@ -129,7 +142,7 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
             ycsb::run_multi_client_for_duration_with_stats(
                 &engine,
                 clients,
-                MEASURED,
+                measured,
                 |client_id, stop| {
                     move |e, cf, op_index| {
                         let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);

@@ -12,7 +12,9 @@ const CHANNEL_CROSS_THREAD_MESSAGES: usize = 4_194_304;
 const CHANNEL_CROSS_THREAD_OPS: u64 = 4_194_304;
 const PARK_WAKE_MESSAGES: usize = 32_768;
 const PARK_WAKE_OPS: u64 = 32_768;
-const DIRECT_INNER_LOOPS: u64 = 1_000_000;
+const DIRECT_CALL_INNER_LOOPS_PER_SAMPLE: u64 = 1_000_000;
+const DIRECT_CALL_SAMPLE_COUNT: usize = 8;
+const DIRECT_CALL_WARMUP_SAMPLE_COUNT: usize = 2;
 
 #[inline]
 fn dispatch_message(kind: MessageKind, counter: &mut u64) {
@@ -38,17 +40,21 @@ fn build_messages(count: usize) -> Vec<MessageKind> {
 
 #[stress(tier = 2, metadata(component = "event_loop", scenario = "direct_call"))]
 fn direct_call(ctx: &mut StressContext) {
-    ctx.parameter("inner_loops", DIRECT_INNER_LOOPS);
+    ctx.parameter("inner_loops", DIRECT_CALL_INNER_LOOPS_PER_SAMPLE);
     ctx.parameter("logical_unit", "event_loop_dispatch");
 
-    let _completed = ctx.measure_batch("direct_call", DIRECT_INNER_LOOPS, || {
-        let mut counter = 0u64;
-        for _ in 0..DIRECT_INNER_LOOPS {
-            handle(&mut counter);
+    let _completed = ctx
+        .benchmark("direct_call")
+        .samples(DIRECT_CALL_SAMPLE_COUNT)
+        .warmup(DIRECT_CALL_WARMUP_SAMPLE_COUNT)
+        .measure_batch(DIRECT_CALL_INNER_LOOPS_PER_SAMPLE, || {
+            let mut counter = 0u64;
+            for _ in 0..DIRECT_CALL_INNER_LOOPS_PER_SAMPLE {
+                handle(&mut counter);
+                black_box(counter);
+            }
             black_box(counter);
-        }
-        black_box(counter);
-    });
+        });
 }
 
 #[stress(

@@ -66,7 +66,7 @@ fn run_find_block(ctx: &mut StressContext, scenario: &'static str, key_base: usi
     tier = 1,
     metadata(
         component = "sparse_index",
-        scenario = "find_beginning",
+        scenario = "find_block_at_beginning",
         trust_class = "diagnostic",
         validated_micro = "true"
     )
@@ -79,7 +79,7 @@ fn find_beginning(ctx: &mut StressContext) {
     tier = 1,
     metadata(
         component = "sparse_index",
-        scenario = "find_middle",
+        scenario = "find_block_at_middle",
         trust_class = "diagnostic",
         validated_micro = "true"
     )
@@ -92,7 +92,7 @@ fn find_middle(ctx: &mut StressContext) {
     tier = 1,
     metadata(
         component = "sparse_index",
-        scenario = "find_end",
+        scenario = "find_block_at_end",
         trust_class = "diagnostic",
         validated_micro = "true"
     )
@@ -105,7 +105,7 @@ fn find_end(ctx: &mut StressContext) {
     tier = 1,
     metadata(
         component = "sparse_index",
-        scenario = "find_after_last",
+        scenario = "find_key_after_last",
         trust_class = "diagnostic",
         validated_micro = "true"
     )
@@ -115,32 +115,57 @@ fn find_after_last(ctx: &mut StressContext) {
 }
 
 fn run_index_size(ctx: &mut StressContext, scenario: &'static str, size: usize) {
+    const SIZE_10_LOOKUP_REPEAT_PER_SAMPLE: usize = 5;
+    const SIZE_10_SAMPLE_COUNT: usize = 5;
+
     let lookup_batch_size = if size >= 1000 {
         SPARSE_INDEX_LOOKUP_BATCH_SIZE_LARGE
     } else {
         SPARSE_INDEX_LOOKUP_BATCH_SIZE_DEFAULT
     };
+    let repeat = if size == 10 {
+        SIZE_10_LOOKUP_REPEAT_PER_SAMPLE
+    } else {
+        1
+    };
+    let logical_ops = lookup_batch_size * repeat;
     let reader = build_sparse_index(size);
     let lookup_key = format!("key_{:010}", (size / 2) * 100);
+
     ctx.parameter("entries", size);
-    ctx.parameter("lookup_batch_size", lookup_batch_size);
+    ctx.parameter("lookup_batch_size", logical_ops);
     ctx.parameter("logical_unit", "sparse_index_probe");
 
-    stress_config::measure_hot_path_batch(ctx, scenario, lookup_batch_size as u64, || {
-        let mut found = 0usize;
-        for _ in 0..lookup_batch_size {
-            let range = reader.find_block_range(black_box(lookup_key.as_bytes()));
-            found = found.wrapping_add(range.start_block);
-        }
-        black_box(found);
-    });
+    if size == 10 {
+        ctx.benchmark(scenario)
+            .samples(SIZE_10_SAMPLE_COUNT)
+            .measure_batch(logical_ops as u64, || {
+                let mut found = 0usize;
+                for _ in 0..repeat {
+                    for _ in 0..lookup_batch_size {
+                        let range = reader.find_block_range(black_box(lookup_key.as_bytes()));
+                        found = found.wrapping_add(range.start_block);
+                    }
+                }
+                black_box(found);
+            });
+    } else {
+        stress_config::measure_hot_path_batch(ctx, scenario, logical_ops as u64, || {
+            let mut found = 0usize;
+            for _ in 0..logical_ops {
+                let range = reader.find_block_range(black_box(lookup_key.as_bytes()));
+                found = found.wrapping_add(range.start_block);
+            }
+            black_box(found);
+        });
+    }
 }
 
 #[stress(
     tier = 1,
     metadata(
         component = "sparse_index",
-        scenario = "size_10",
+        scenario = "size_10_entries",
         trust_class = "diagnostic",
         validated_micro = "true"
     )
@@ -149,12 +174,18 @@ fn size_10_entries(ctx: &mut StressContext) {
     run_index_size(ctx, "size_10_entries", 10);
 }
 
-#[stress(tier = 1, metadata(component = "sparse_index", scenario = "size_100"))]
+#[stress(
+    tier = 1,
+    metadata(component = "sparse_index", scenario = "size_100_entries")
+)]
 fn size_100_entries(ctx: &mut StressContext) {
     run_index_size(ctx, "size_100_entries", 100);
 }
 
-#[stress(tier = 1, metadata(component = "sparse_index", scenario = "size_1000"))]
+#[stress(
+    tier = 1,
+    metadata(component = "sparse_index", scenario = "size_1000_entries")
+)]
 fn size_1000_entries(ctx: &mut StressContext) {
     run_index_size(ctx, "size_1000_entries", 1000);
 }

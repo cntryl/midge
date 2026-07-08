@@ -18,10 +18,14 @@ use cntryl_stress::{black_box, stress, stress_main, StressContext};
 // ─── Configuration ──────────────────────────────────────────────────────
 
 const KEYS_PER_BLOCK: usize = 100;
-const LOOKUPS_PER_ITER: usize = 1000;
-const MIXED_GETS_PER_ITER: usize = 700;
-const MIXED_SCANS_PER_ITER: usize = 30;
+const LOOKUPS_PER_SAMPLE_REPEAT: usize = 1000;
+const POINT_LOOKUP_REPEAT_PER_SAMPLE: usize = 4;
+const MIXED_GET_SCAN_REPEAT_PER_SAMPLE: usize = 16;
+const MIXED_GET_SCAN_SAMPLE_COUNT: usize = 24;
+const MIXED_GETS_PER_SAMPLE_REPEAT: usize = 700;
+const MIXED_SCANS_PER_SAMPLE_REPEAT: usize = 30;
 const SCAN_WIDTH: usize = 10;
+const UNIFORM_LOOKUP_REPEAT_PER_SAMPLE: usize = 4;
 const LCG_SEED: u64 = 0xDEAD_BEEF_CAFE_BABE_u64;
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 
@@ -289,36 +293,46 @@ impl ZipfianDistribution {
 
 // ─── Benchmark Scenarios ────────────────────────────────────────────────────
 
+const LOOKUP_VARIANT_SAMPLE_COUNT: usize = 12;
+
 #[stress(
     tier = 2,
     metadata(component = "read_amplification", scenario = "point_lookups_zipfian")
 )]
 fn point_lookups_zipfian(ctx: &mut StressContext) {
-    let lookup_keys = precompute_zipf_keys(LOOKUPS_PER_ITER, 40_000, 1.5);
-    ctx.parameter("lookup_count", LOOKUPS_PER_ITER);
+    let lookup_keys = precompute_zipf_keys(LOOKUPS_PER_SAMPLE_REPEAT, 40_000, 1.5);
+    ctx.parameter("lookup_count", LOOKUPS_PER_SAMPLE_REPEAT);
     ctx.parameter("distribution", "zipfian");
     ctx.parameter("logical_unit", "lsm_key_probe");
     ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 
-    let _completed = ctx.measure_batch("point_lookups_zipfian", LOOKUPS_PER_ITER as u64, || {
-        let mut lsm = LsmSimulator::new_zipfian();
-        let mut total_blocks_read = 0u32;
-        let mut total_cache_hits = 0u32;
-        let mut total_found = 0u32;
+    let _completed = ctx
+        .benchmark("point_lookups_zipfian")
+        .samples(LOOKUP_VARIANT_SAMPLE_COUNT)
+        .measure_batch(
+            (LOOKUPS_PER_SAMPLE_REPEAT as u64) * POINT_LOOKUP_REPEAT_PER_SAMPLE as u64,
+            || {
+                let mut lsm = LsmSimulator::new_zipfian();
+                let mut total_blocks_read = 0u32;
+                let mut total_cache_hits = 0u32;
+                let mut total_found = 0u32;
 
-        for key in &lookup_keys {
-            let (br, ch, found) = lsm.get(key);
-            total_blocks_read += br;
-            total_cache_hits += ch;
-            if found {
-                total_found += 1;
-            }
-        }
+                for _ in 0..POINT_LOOKUP_REPEAT_PER_SAMPLE {
+                    for key in &lookup_keys {
+                        let (br, ch, found) = lsm.get(key);
+                        total_blocks_read += br;
+                        total_cache_hits += ch;
+                        if found {
+                            total_found += 1;
+                        }
+                    }
+                }
 
-        black_box((total_blocks_read, total_cache_hits, total_found));
-    });
+                black_box((total_blocks_read, total_cache_hits, total_found));
+            },
+        );
 }
 
 #[stress(
@@ -326,45 +340,53 @@ fn point_lookups_zipfian(ctx: &mut StressContext) {
     metadata(component = "read_amplification", scenario = "mixed_get_scan")
 )]
 fn mixed_get_scan(ctx: &mut StressContext) {
-    let get_keys = precompute_zipf_keys(MIXED_GETS_PER_ITER, 40_000, 1.5);
-    let scan_starts = precompute_zipf_starts(MIXED_SCANS_PER_ITER, 40_000, 1.5);
+    let get_keys = precompute_zipf_keys(MIXED_GETS_PER_SAMPLE_REPEAT, 40_000, 1.5);
+    let scan_starts = precompute_zipf_starts(MIXED_SCANS_PER_SAMPLE_REPEAT, 40_000, 1.5);
     let scan_keys: Vec<Vec<Bytes>> = scan_starts
         .iter()
         .map(|&start| (start..start + SCAN_WIDTH).map(key_from_index).collect())
         .collect();
-    let logical_ops = MIXED_GETS_PER_ITER + (MIXED_SCANS_PER_ITER * SCAN_WIDTH);
-    ctx.parameter("gets", MIXED_GETS_PER_ITER);
-    ctx.parameter("scans", MIXED_SCANS_PER_ITER);
+    let logical_ops = MIXED_GETS_PER_SAMPLE_REPEAT + (MIXED_SCANS_PER_SAMPLE_REPEAT * SCAN_WIDTH);
+    ctx.parameter("gets", MIXED_GETS_PER_SAMPLE_REPEAT);
+    ctx.parameter("scans", MIXED_SCANS_PER_SAMPLE_REPEAT);
     ctx.parameter("scan_width", SCAN_WIDTH);
     ctx.parameter("logical_unit", "lsm_key_probe");
     ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 
-    let _completed = ctx.measure_batch("mixed_get_scan", logical_ops as u64, || {
-        let mut lsm = LsmSimulator::new_zipfian();
-        let mut total_blocks_read = 0u32;
-        let mut total_cache_hits = 0u32;
-        let mut total_found = 0u32;
+    let _completed = ctx
+        .benchmark("mixed_get_scan")
+        .samples(MIXED_GET_SCAN_SAMPLE_COUNT)
+        .measure_batch(
+            (logical_ops as u64) * MIXED_GET_SCAN_REPEAT_PER_SAMPLE as u64,
+            || {
+                let mut lsm = LsmSimulator::new_zipfian();
+                let mut total_blocks_read = 0u32;
+                let mut total_cache_hits = 0u32;
+                let mut total_found = 0u32;
 
-        for key in &get_keys {
-            let (br, ch, found) = lsm.get(key);
-            total_blocks_read += br;
-            total_cache_hits += ch;
-            if found {
-                total_found += 1;
-            }
-        }
+                for _ in 0..MIXED_GET_SCAN_REPEAT_PER_SAMPLE {
+                    for key in &get_keys {
+                        let (br, ch, found) = lsm.get(key);
+                        total_blocks_read += br;
+                        total_cache_hits += ch;
+                        if found {
+                            total_found += 1;
+                        }
+                    }
 
-        for keys in &scan_keys {
-            let (br, ch, found) = lsm.scan_keys(keys);
-            total_blocks_read += br;
-            total_cache_hits += ch;
-            total_found += found;
-        }
+                    for keys in &scan_keys {
+                        let (br, ch, found) = lsm.scan_keys(keys);
+                        total_blocks_read += br;
+                        total_cache_hits += ch;
+                        total_found += found;
+                    }
+                }
 
-        black_box((total_blocks_read, total_cache_hits, total_found));
-    });
+                black_box((total_blocks_read, total_cache_hits, total_found));
+            },
+        );
 }
 
 #[stress(
@@ -372,31 +394,39 @@ fn mixed_get_scan(ctx: &mut StressContext) {
     metadata(component = "read_amplification", scenario = "uniform_distribution")
 )]
 fn uniform_distribution(ctx: &mut StressContext) {
-    let lookup_keys = precompute_uniform_keys(LOOKUPS_PER_ITER, 40_000);
-    ctx.parameter("lookup_count", LOOKUPS_PER_ITER);
+    let lookup_keys = precompute_uniform_keys(LOOKUPS_PER_SAMPLE_REPEAT, 40_000);
+    ctx.parameter("lookup_count", LOOKUPS_PER_SAMPLE_REPEAT);
     ctx.parameter("distribution", "uniform");
     ctx.parameter("logical_unit", "lsm_key_probe");
     ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 
-    let _completed = ctx.measure_batch("uniform_distribution", LOOKUPS_PER_ITER as u64, || {
-        let mut lsm = LsmSimulator::new_zipfian();
-        let mut total_blocks_read = 0u32;
-        let mut total_cache_hits = 0u32;
-        let mut total_found = 0u32;
+    let _completed = ctx
+        .benchmark("uniform_distribution")
+        .samples(LOOKUP_VARIANT_SAMPLE_COUNT)
+        .measure_batch(
+            (LOOKUPS_PER_SAMPLE_REPEAT as u64) * UNIFORM_LOOKUP_REPEAT_PER_SAMPLE as u64,
+            || {
+                let mut lsm = LsmSimulator::new_zipfian();
+                let mut total_blocks_read = 0u32;
+                let mut total_cache_hits = 0u32;
+                let mut total_found = 0u32;
 
-        for key in &lookup_keys {
-            let (br, ch, found) = lsm.get(key);
-            total_blocks_read += br;
-            total_cache_hits += ch;
-            if found {
-                total_found += 1;
-            }
-        }
+                for _ in 0..UNIFORM_LOOKUP_REPEAT_PER_SAMPLE {
+                    for key in &lookup_keys {
+                        let (br, ch, found) = lsm.get(key);
+                        total_blocks_read += br;
+                        total_cache_hits += ch;
+                        if found {
+                            total_found += 1;
+                        }
+                    }
+                }
 
-        black_box((total_blocks_read, total_cache_hits, total_found));
-    });
+                black_box((total_blocks_read, total_cache_hits, total_found));
+            },
+        );
 }
 
 stress_main!();

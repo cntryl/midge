@@ -18,6 +18,8 @@ const RAW_ZSTD_COMPRESS_WINDOW_REPEATS: usize =
     RAW_COMPRESS_BATCH_SIZE / RAW_ZSTD_COMPRESS_WINDOW_BLOCKS;
 const ZSTD_COMPRESS_WARMUP_SAMPLES: usize = 8;
 const RAW_NONE_WARMUP_SAMPLES: usize = 3;
+const RAW_NONE_SAMPLE_COUNT: usize = 8;
+const RAW_ZSTD_SAMPLE_COUNT: usize = 4;
 const RAW_DECOMPRESS_BATCH_SIZE: usize = 4096;
 const RAW_NONE_BATCH_SIZE: usize = 262_144;
 const TRAILER_COMPRESS_BATCH_SIZE: usize = 1024;
@@ -85,6 +87,7 @@ fn run_compress_raw_zstd_window(
 
     let measurement_name = format!("compress_raw_{name}");
     ctx.benchmark(measurement_name)
+        .samples(RAW_ZSTD_SAMPLE_COUNT)
         .warmup(ZSTD_COMPRESS_WARMUP_SAMPLES)
         .measure_batch(RAW_COMPRESS_BATCH_SIZE as u64, || {
             let mut bytes = 0usize;
@@ -151,6 +154,7 @@ fn compress_raw_none(ctx: &mut StressContext) {
     black_box(prewarm_bytes);
 
     ctx.benchmark("compress_raw_none")
+        .samples(RAW_NONE_SAMPLE_COUNT)
         .warmup(RAW_NONE_WARMUP_SAMPLES)
         .measure_batch(RAW_NONE_BATCH_SIZE as u64, || {
             let mut bytes = 0usize;
