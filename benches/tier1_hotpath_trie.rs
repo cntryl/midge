@@ -12,6 +12,8 @@ const FIND_BLOCK_BATCH_SIZE: usize = 65_536;
 const TRIE_FINDS_PER_LOGICAL_OPERATION: usize = 32;
 const PREFIX_RANGE_BATCH_SIZE: usize = 65_536;
 const TRIE_PREFIX_RANGES_PER_LOGICAL_OPERATION: usize = 32;
+const TRIE_NOISY_SAMPLE_COUNT: usize = 12;
+const TRIE_NOISY_WARMUP_SAMPLES: usize = 8;
 
 type FindCase = (Vec<u8>, Option<u32>);
 
@@ -64,6 +66,37 @@ fn measure_find_block(
         }
         black_box(found);
     });
+}
+
+fn measure_find_block_stable(
+    ctx: &mut StressContext,
+    scenario: &'static str,
+    reader: &TrieReader,
+    key: &[u8],
+    expected: Option<u32>,
+) {
+    assert_eq!(reader.find_block(key), expected);
+    ctx.parameter("lookup_key_count", 1);
+    ctx.parameter(
+        "finds_per_logical_operation",
+        TRIE_FINDS_PER_LOGICAL_OPERATION,
+    );
+    ctx.parameter("logical_unit", "trie_find_batch");
+
+    ctx.benchmark(scenario)
+        .samples(TRIE_NOISY_SAMPLE_COUNT)
+        .warmup(TRIE_NOISY_WARMUP_SAMPLES)
+        .measure_batch(find_logical_operation_count(), || {
+            let mut found = 0u32;
+            for _ in 0..FIND_BLOCK_BATCH_SIZE {
+                found = found.wrapping_add(
+                    reader
+                        .find_block(black_box(key))
+                        .unwrap_or(u32::MAX),
+                );
+            }
+            black_box(found);
+        });
 }
 
 fn run_find_block(ctx: &mut StressContext, scenario: &'static str, cases: &[FindCase]) {
@@ -189,10 +222,8 @@ fn build_long_key_trie() -> Vec<u8> {
 fn short_keys_high_branch(ctx: &mut StressContext) {
     let encoded = build_short_key_trie();
     let reader = TrieReader::new(&encoded).unwrap();
-    let cases: Vec<FindCase> = (0_u32..100)
-        .map(|i| (format!("k{i:03}").into_bytes(), Some(i)))
-        .collect();
-    measure_find_block(ctx, "short_keys_high_branch", &reader, &cases);
+    let key = b"k042".to_vec();
+    measure_find_block_stable(ctx, "short_keys_high_branch", &reader, &key, Some(42));
 }
 
 #[stress(

@@ -17,6 +17,8 @@ cntryl_stress::stress_allocator!();
 const TLV_PRIMITIVE_BATCH_SIZE: usize = 1_048_576;
 const TLV_FIELD_DECODE_BATCH_SIZE: usize = 262_144;
 const TLV_PRIMITIVES_PER_LOGICAL_OPERATION: usize = 32;
+const TLV_NOISY_SAMPLE_COUNT: usize = 12;
+const TLV_NOISY_WARMUP_SAMPLES: usize = 8;
 
 fn tlv_logical_operation_count() -> u64 {
     tlv_logical_operation_count_for(TLV_PRIMITIVE_BATCH_SIZE)
@@ -198,6 +200,27 @@ fn run_varint32_decode(ctx: &mut StressContext, name: &'static str, value: u32) 
     );
 }
 
+fn run_varint32_decode_stable(ctx: &mut StressContext, name: &'static str, value: u32) {
+    let mut buf = BytesMut::with_capacity(5);
+    encode_varint32(&mut buf, value);
+    let data = buf.freeze();
+    assert_eq!(decode_varint32(data.as_ref()).unwrap(), value);
+    ctx.parameter("case", name);
+    record_tlv_batch_parameters(ctx);
+
+    let measurement_name = format!("varint32_decode_{name}");
+    ctx.benchmark(measurement_name)
+        .samples(TLV_NOISY_SAMPLE_COUNT)
+        .warmup(TLV_NOISY_WARMUP_SAMPLES)
+        .measure_batch(tlv_logical_operation_count(), || {
+            let mut decoded = 0u32;
+            for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
+                decoded = decoded.wrapping_add(decode_varint32(black_box(data.as_ref())).unwrap());
+            }
+            black_box(decoded);
+        });
+}
+
 #[stress(
     tier = 1,
     metadata(
@@ -207,7 +230,7 @@ fn run_varint32_decode(ctx: &mut StressContext, name: &'static str, value: u32) 
     )
 )]
 fn varint32_decode_small_1(ctx: &mut StressContext) {
-    run_varint32_decode(ctx, "small_1", 1);
+    run_varint32_decode_stable(ctx, "small_1", 1);
 }
 
 #[stress(
@@ -219,7 +242,7 @@ fn varint32_decode_small_1(ctx: &mut StressContext) {
     )
 )]
 fn varint32_decode_small_127(ctx: &mut StressContext) {
-    run_varint32_decode(ctx, "small_127", 127);
+    run_varint32_decode_stable(ctx, "small_127", 127);
 }
 
 #[stress(
@@ -454,6 +477,35 @@ fn run_encode_bytes_tag(ctx: &mut StressContext, name: &'static str, data: &[u8]
     );
 }
 
+fn run_encode_bytes_tag_stable(ctx: &mut StressContext, name: &'static str, data: &[u8]) {
+    let mut buf = BytesMut::with_capacity(1 + 5 + data.len());
+    encode_bytes_with_tag(&mut buf, 11, data).unwrap();
+    let (tag, value, consumed) = decode_tlv_field(buf.as_ref()).unwrap();
+    assert_eq!(tag, 11);
+    assert_eq!(value, data);
+    assert_eq!(consumed, buf.len());
+    buf.clear();
+    let fixture = data.to_vec();
+    ctx.parameter("case", name);
+    ctx.parameter("payload_size", data.len());
+    record_tlv_batch_parameters(ctx);
+
+    let measurement_name = format!("encode_bytes_tag_{name}");
+    ctx.benchmark(measurement_name)
+        .samples(TLV_NOISY_SAMPLE_COUNT)
+        .warmup(TLV_NOISY_WARMUP_SAMPLES)
+        .measure_batch(tlv_logical_operation_count(), || {
+            let mut encoded_len = 0usize;
+            for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
+                buf.clear();
+                encode_bytes_with_tag(&mut buf, 11, black_box(fixture.as_slice())).unwrap();
+                encoded_len = encoded_len.wrapping_add(buf.len());
+                black_box(buf.as_ref());
+            }
+            black_box(encoded_len);
+        });
+}
+
 #[stress(
     tier = 1,
     metadata(
@@ -463,7 +515,7 @@ fn run_encode_bytes_tag(ctx: &mut StressContext, name: &'static str, data: &[u8]
     )
 )]
 fn encode_bytes_tag_8b(ctx: &mut StressContext) {
-    run_encode_bytes_tag(ctx, "8b", &[0u8; 8]);
+    run_encode_bytes_tag_stable(ctx, "8b", &[0u8; 8]);
 }
 
 #[stress(
@@ -530,6 +582,41 @@ fn run_decode_field(ctx: &mut StressContext, name: &'static str, data: &[u8]) {
     );
 }
 
+fn run_decode_field_stable(ctx: &mut StressContext, name: &'static str, data: &[u8]) {
+    let mut buf = BytesMut::with_capacity(1 + 5 + data.len());
+    encode_bytes_with_tag(&mut buf, 11, data).unwrap();
+    let encoded = buf.freeze();
+    let (tag, value, consumed) = decode_tlv_field(encoded.as_ref()).unwrap();
+    assert_eq!(tag, 11);
+    assert_eq!(value, data);
+    assert_eq!(consumed, encoded.len());
+    ctx.parameter("case", name);
+    ctx.parameter("payload_size", data.len());
+    record_tlv_batch_parameters_for(ctx, TLV_FIELD_DECODE_BATCH_SIZE);
+
+    let measurement_name = format!("decode_field_{name}");
+    ctx.benchmark(measurement_name)
+        .samples(TLV_NOISY_SAMPLE_COUNT)
+        .warmup(TLV_NOISY_WARMUP_SAMPLES)
+        .measure_batch(
+            tlv_logical_operation_count_for(TLV_FIELD_DECODE_BATCH_SIZE),
+            || {
+                let mut total = 0usize;
+                for _ in 0..TLV_FIELD_DECODE_BATCH_SIZE {
+                    let (tag, value, consumed) = decode_tlv_field(black_box(encoded.as_ref())).unwrap();
+                    total = total.wrapping_add(usize::from(tag));
+                    total = total.wrapping_add(value.len());
+                    total = total.wrapping_add(consumed);
+                    total = total
+                        .wrapping_add(usize::from(value.first().copied().unwrap_or(0)));
+                    total = total
+                        .wrapping_add(usize::from(value.last().copied().unwrap_or(0)));
+                }
+                black_box(total);
+            },
+        );
+}
+
 #[stress(
     tier = 1,
     metadata(
@@ -551,7 +638,7 @@ fn decode_field_8b(ctx: &mut StressContext) {
     )
 )]
 fn decode_field_64b(ctx: &mut StressContext) {
-    run_decode_field(ctx, "64b", &[1u8; 64]);
+    run_decode_field_stable(ctx, "64b", &[1u8; 64]);
 }
 
 #[stress(

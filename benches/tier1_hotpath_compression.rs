@@ -17,9 +17,10 @@ const RAW_ZSTD_COMPRESS_WINDOW_BLOCKS: usize = 32;
 const RAW_ZSTD_COMPRESS_WINDOW_REPEATS: usize =
     RAW_COMPRESS_BATCH_SIZE / RAW_ZSTD_COMPRESS_WINDOW_BLOCKS;
 const ZSTD_COMPRESS_WARMUP_SAMPLES: usize = 8;
-const RAW_NONE_WARMUP_SAMPLES: usize = 3;
-const RAW_NONE_SAMPLE_COUNT: usize = 8;
-const RAW_ZSTD_SAMPLE_COUNT: usize = 4;
+const RAW_NONE_WARMUP_SAMPLES: usize = 8;
+const RAW_LZ4_SAMPLE_COUNT: usize = 12;
+const RAW_NONE_SAMPLE_COUNT: usize = 20;
+const RAW_ZSTD_SAMPLE_COUNT: usize = 16;
 const RAW_DECOMPRESS_BATCH_SIZE: usize = 4096;
 const RAW_NONE_BATCH_SIZE: usize = 262_144;
 const TRAILER_COMPRESS_BATCH_SIZE: usize = 1024;
@@ -57,19 +58,17 @@ fn run_compress_raw(ctx: &mut StressContext, name: &'static str, policy: &Compre
     ctx.parameter("logical_unit", "block_byte");
 
     let measurement_name = format!("compress_raw_{name}");
-    stress_config::measure_hot_path_batch(
-        ctx,
-        measurement_name,
-        RAW_COMPRESS_BATCH_SIZE as u64,
-        || {
+    ctx.benchmark(measurement_name)
+        .samples(RAW_LZ4_SAMPLE_COUNT)
+        .warmup(ZSTD_COMPRESS_WARMUP_SAMPLES)
+        .measure_batch(RAW_COMPRESS_BATCH_SIZE as u64, || {
             let mut bytes = 0usize;
             for _ in 0..RAW_COMPRESS_BATCH_SIZE {
                 let out = compress_block(black_box(&data), black_box(policy)).unwrap();
                 bytes = bytes.wrapping_add(out.0.len());
             }
             black_box(bytes);
-        },
-    );
+        });
 }
 
 fn run_compress_raw_zstd_window(

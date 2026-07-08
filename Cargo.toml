@@ -269,17 +269,12 @@ name = "tier2_subsystem_transaction_latency"
 path = "benches/tier2_subsystem_transaction_latency.rs"
 harness = false
 
+[[bench]]
+name = "tier2_subsystem_durability_commit_latency"
+path = "benches/tier2_subsystem_durability_commit_latency.rs"
+harness = false
+
 # Tier 3
-[[bench]]
-name = "tier3_system_compaction"
-path = "benches/tier3_system_compaction.rs"
-harness = false
-
-[[bench]]
-name = "tier3_system_durability"
-path = "benches/tier3_system_durability.rs"
-harness = false
-
 [[bench]]
 name = "tier3_system_engine"
 path = "benches/tier3_system_engine.rs"
@@ -291,16 +286,6 @@ path = "benches/tier3_system_mvcc.rs"
 harness = false
 
 [[bench]]
-name = "tier3_system_recovery"
-path = "benches/tier3_system_recovery.rs"
-harness = false
-
-[[bench]]
-name = "tier3_system_scan"
-path = "benches/tier3_system_scan.rs"
-harness = false
-
-[[bench]]
 name = "tier3_system_sst"
 path = "benches/tier3_system_sst.rs"
 harness = false
@@ -309,6 +294,11 @@ harness = false
 [[bench]]
 name = "tier4_ycsb_workload_a"
 path = "benches/tier4_ycsb_workload_a.rs"
+harness = false
+
+[[bench]]
+name = "tier4_system_compaction_backpressure"
+path = "benches/tier4_system_compaction_backpressure.rs"
 harness = false
 
 [[bench]]

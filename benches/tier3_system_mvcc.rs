@@ -1,7 +1,7 @@
-//! Tier 3 — MVCC primitives
+//! Tier 3 — MVCC snapshot reads
 //!
-//! Measures: cost of version checks and single version lookups
-//! NOT: sustained overwrites, version chain length scaling
+//! Measures: old-version visibility reads through snapshot transactions.
+//! NOT: single commit call cost or sustained overwrite throughput.
 
 #[path = "./stress_config.rs"]
 mod stress_config;
@@ -19,49 +19,6 @@ const OLD_VERSION_READ_BATCH_SIZE: usize = 64;
 
 fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
     stress_config::bench_stress::open_engine_no_compaction(opts)
-}
-
-fn run_single_version_write_case(
-    ctx: &mut StressContext,
-    scenario: &'static str,
-    opts: MidgeOptions,
-) {
-    ctx.parameter("logical_batch_size", 1);
-    ctx.parameter("logical_unit", "transaction");
-    ctx.parameter("operation_surface", "mvcc_single_version_write");
-    ctx.parameter("begin_tx_included", "true");
-    ctx.parameter("memtable_size_bytes", opts.memtable_size);
-    match scenario {
-        "tier3_mvcc_single_version_write_mem" => stress_config::mark_local_rsd_diagnostic(ctx),
-        "tier3_mvcc_single_version_write_cloud" => {
-            stress_config::mark_capped_probe(ctx, "single_overwrite_duration_window_cloud_commit");
-        }
-        "tier3_mvcc_single_version_write_local" => {
-            stress_config::mark_capped_probe(ctx, "single_overwrite_duration_window_local_commit");
-        }
-        _ => {}
-    }
-
-    let write_opts = stress_config::measured_write_options(&opts);
-    let engine = setup_engine(opts);
-    let cf = engine.create_column_family("cf1").unwrap();
-    let cf_id = cf.id();
-
-    // Precompute one key outside measurement
-    let k = stress_config::bench_stress::key16_u64_be(0);
-    let v = vec![1u8; VALUE_SIZE];
-
-    // Measure ONLY one single overwrite call
-    let _ = ctx.measure_batch(scenario, 1, || {
-        let e = &engine;
-        let mut tx = e
-            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-            .expect("begin");
-        tx.put(k.to_vec(), v.clone(), None).unwrap();
-        tx.commit(write_opts).unwrap();
-    });
-
-    drop(engine);
 }
 
 fn run_read_old_version_case(
@@ -145,24 +102,6 @@ fn run_read_old_version_case(
     });
 
     drop(engine);
-}
-
-#[stress(tier = 3)]
-fn tier3_mvcc_single_version_write_mem(ctx: &mut StressContext) {
-    let opts = stress_config::write_coordination_opts_for_mode("memory");
-    run_single_version_write_case(ctx, "tier3_mvcc_single_version_write_mem", opts);
-}
-
-#[stress(tier = 3)]
-fn tier3_mvcc_single_version_write_local(ctx: &mut StressContext) {
-    let opts = stress_config::write_coordination_opts_for_mode("local");
-    run_single_version_write_case(ctx, "tier3_mvcc_single_version_write_local", opts);
-}
-
-#[stress(tier = 3)]
-fn tier3_mvcc_single_version_write_cloud(ctx: &mut StressContext) {
-    let opts = stress_config::opts_for_mode("cloud");
-    run_single_version_write_case(ctx, "tier3_mvcc_single_version_write_cloud", opts);
 }
 
 #[stress(tier = 3)]

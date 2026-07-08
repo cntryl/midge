@@ -116,6 +116,8 @@ fn find_after_last(ctx: &mut StressContext) {
 
 fn run_index_size(ctx: &mut StressContext, scenario: &'static str, size: usize) {
     const SIZE_10_LOOKUP_REPEAT_PER_SAMPLE: usize = 5;
+    const SIZE_100_LOOKUP_REPEAT_PER_SAMPLE: usize = 32;
+    const SIZE_100_SAMPLE_COUNT: usize = 12;
     const SIZE_10_SAMPLE_COUNT: usize = 5;
 
     let lookup_batch_size = if size >= 1000 {
@@ -125,6 +127,8 @@ fn run_index_size(ctx: &mut StressContext, scenario: &'static str, size: usize) 
     };
     let repeat = if size == 10 {
         SIZE_10_LOOKUP_REPEAT_PER_SAMPLE
+    } else if size == 100 {
+        SIZE_100_LOOKUP_REPEAT_PER_SAMPLE
     } else {
         1
     };
@@ -139,6 +143,19 @@ fn run_index_size(ctx: &mut StressContext, scenario: &'static str, size: usize) 
     if size == 10 {
         ctx.benchmark(scenario)
             .samples(SIZE_10_SAMPLE_COUNT)
+            .measure_batch(logical_ops as u64, || {
+                let mut found = 0usize;
+                for _ in 0..repeat {
+                    for _ in 0..lookup_batch_size {
+                        let range = reader.find_block_range(black_box(lookup_key.as_bytes()));
+                        found = found.wrapping_add(range.start_block);
+                    }
+                }
+                black_box(found);
+            });
+    } else if size == 100 {
+        ctx.benchmark(scenario)
+            .samples(SIZE_100_SAMPLE_COUNT)
             .measure_batch(logical_ops as u64, || {
                 let mut found = 0usize;
                 for _ in 0..repeat {
@@ -176,7 +193,12 @@ fn size_10_entries(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
-    metadata(component = "sparse_index", scenario = "size_100_entries")
+    metadata(
+        component = "sparse_index",
+        scenario = "size_100_entries",
+        trust_class = "diagnostic",
+        validated_micro = "true"
+    )
 )]
 fn size_100_entries(ctx: &mut StressContext) {
     run_index_size(ctx, "size_100_entries", 100);

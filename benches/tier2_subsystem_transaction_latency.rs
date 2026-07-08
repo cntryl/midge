@@ -25,6 +25,9 @@ const COALESCING_VALUE_SIZE: usize = 64;
 const LATENCY_SEQUENTIAL_TXNS: usize = 1024;
 const LATENCY_READ_ONLY_TXNS: usize = 4096;
 const LATENCY_SAMPLE_REPEATS: usize = 16;
+const READ_ONLY_BEGIN_TX_SAMPLE_REPEATS: usize = 64;
+const READ_ONLY_BEGIN_TX_SAMPLE_COUNT: usize = 12;
+const READ_ONLY_BEGIN_TX_WARMUP_SAMPLES: usize = 8;
 const MAX_DIRECT_SUBMIT_FOLLOWER_WAIT_US: f64 = 1.0;
 const MIN_AVG_TXN_RECORDS_PER_APPEND: f64 = 7.0;
 
@@ -431,13 +434,7 @@ fn run_buffered_transaction_latency_breakdown(
     )
 }
 
-fn run_read_only_begin_tx_latency_baseline(
-    engine: &Engine,
-    cf_id: ColumnFamilyId,
-) -> TransactionLatencyBreakdown {
-    let start = engine
-        .get_runtime_metrics()
-        .expect("get starting read-only latency runtime metrics");
+fn run_read_only_begin_tx_sample(engine: &Engine, cf_id: ColumnFamilyId) -> LatencyClientTotals {
     let mut client_totals = LatencyClientTotals::default();
 
     for _ in 0..LATENCY_READ_ONLY_TXNS {
@@ -450,19 +447,7 @@ fn run_read_only_begin_tx_latency_baseline(
         client_totals.record_transaction();
     }
 
-    let end = engine
-        .get_runtime_metrics()
-        .expect("get ending read-only latency runtime metrics");
-
-    latency_breakdown_from_totals(
-        LatencyWorkloadKind::ReadOnlyBeginTx,
-        1,
-        0,
-        client_totals,
-        CommitTimingTotals::default(),
-        &start,
-        &end,
-    )
+    client_totals
 }
 
 fn latency_breakdown_from_totals(
@@ -738,24 +723,56 @@ fn read_only_begin_tx(ctx: &mut StressContext) {
     let (engine, cf_id) = open_local_engine_with_cf("latency_read_only");
     ctx.parameter("workload", LatencyWorkloadKind::ReadOnlyBeginTx.label());
     ctx.parameter("transactions", LATENCY_READ_ONLY_TXNS);
-    ctx.parameter("sample_repeats", LATENCY_SAMPLE_REPEATS);
+    ctx.parameter("sample_repeats", READ_ONLY_BEGIN_TX_SAMPLE_REPEATS);
     ctx.parameter("logical_unit", "transaction");
 
-    let mut observed = None;
-    let logical_ops = (LATENCY_READ_ONLY_TXNS * LATENCY_SAMPLE_REPEATS) as u64;
-    let _completed = ctx.measure_batch("read_only_begin_tx", logical_ops, || {
-        let mut completed = 0u64;
-        for _ in 0..LATENCY_SAMPLE_REPEATS {
-            let breakdown = run_read_only_begin_tx_latency_baseline(&engine, cf_id);
-            assert_transaction_latency_guardrails(breakdown);
-            completed = completed.saturating_add(breakdown.transactions);
-            observed = Some(breakdown);
-        }
-        assert_eq!(completed, logical_ops);
-        black_box(completed);
-    });
+    let mut observed = LatencyClientTotals::default();
+    let logical_ops = (LATENCY_READ_ONLY_TXNS * READ_ONLY_BEGIN_TX_SAMPLE_REPEATS) as u64;
+    let _completed = ctx
+        .benchmark("read_only_begin_tx")
+        .samples(READ_ONLY_BEGIN_TX_SAMPLE_COUNT)
+        .warmup(READ_ONLY_BEGIN_TX_WARMUP_SAMPLES)
+        .measure_batch(logical_ops, || {
+            let mut completed = 0u64;
+            let mut begin_tx_ns = 0u64;
+            for _ in 0..READ_ONLY_BEGIN_TX_SAMPLE_REPEATS {
+                let totals = run_read_only_begin_tx_sample(&engine, cf_id);
+                completed = completed.saturating_add(totals.transactions);
+                begin_tx_ns = begin_tx_ns.saturating_add(totals.begin_tx_ns);
+            }
+            observed.transactions = completed;
+            observed.begin_tx_ns = begin_tx_ns;
+            assert_eq!(completed, logical_ops);
+            black_box(completed);
+        });
 
-    tag_transaction_latency_breakdown(ctx, observed.expect("read-only breakdown recorded"));
+    let breakdown = TransactionLatencyBreakdown {
+        kind: LatencyWorkloadKind::ReadOnlyBeginTx,
+        clients: 1,
+        transactions: observed.transactions,
+        logical_txn_records: 0,
+        begin_tx_us: ns_to_avg_us(observed.begin_tx_ns, observed.transactions),
+        put_us: 0.0,
+        commit_total_us: 0.0,
+        commit_samples: 0,
+        commit_p50_us: 0,
+        commit_p95_us: 0,
+        commit_p99_us: 0,
+        commit_max_us: 0,
+        submit_apply_transaction_us: 0.0,
+        write_group_leader_collect_us: 0.0,
+        write_group_runtime_apply_us: 0.0,
+        write_group_follower_wait_us: 0.0,
+        submit_apply_other_us: 0.0,
+        durability_finalize_us: 0.0,
+        unregister_snapshot_us: 0.0,
+        runtime_submit_ack_non_wal_us: 0.0,
+        physical_wal_appends: 0,
+        avg_wal_append_us: 0.0,
+        avg_txn_records_per_append: 0.0,
+    };
+    assert_transaction_latency_guardrails(breakdown);
+    tag_transaction_latency_breakdown(ctx, breakdown);
 }
 
 #[stress(
