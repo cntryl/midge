@@ -121,7 +121,13 @@ fn average_ns_to_us(total_ns: u64, count: u64) -> String {
     if count == 0 {
         return "0.00".to_string();
     }
-    format!("{:.2}", total_ns as f64 / count as f64 / 1_000.0)
+
+    let divisor = u128::from(count) * 10;
+    let rounded_hundredths = (u128::from(total_ns) + (divisor / 2)) / divisor;
+    let whole = rounded_hundredths / 100;
+    let fraction = rounded_hundredths % 100;
+
+    format!("{whole}.{fraction:02}")
 }
 
 fn run_compaction_backpressure_case(
