@@ -120,7 +120,12 @@ impl Fs for RealFs {
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        Ok(self.full_path(path).exists())
+        let full = self.full_path(path);
+        match fs::metadata(&full) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(io_err("metadata(exists)", &full, &error)),
+        }
     }
 
     fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {

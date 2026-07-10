@@ -93,9 +93,13 @@ impl ManifestPersistence {
 
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
         let manifest_path = FsPath::new(Self::MANIFEST_FILE);
-        let mut manifest = if fs.exists(&snap_path).unwrap_or(false) {
+        let mut manifest = if fs.exists(&snap_path).map_err(|error| {
+            format!("failed to check for manifest snapshot {snap_path:?}: {error:?}")
+        })? {
             Self::load_json_manifest_file(fs, &snap_path, "manifest snapshot")?
-        } else if fs.exists(&manifest_path).unwrap_or(false) {
+        } else if fs.exists(&manifest_path).map_err(|error| {
+            format!("failed to check for manifest file {manifest_path:?}: {error:?}")
+        })? {
             Self::load_json_manifest_file(fs, &manifest_path, "manifest file")?
         } else {
             tracing::debug!(
@@ -106,7 +110,10 @@ impl ManifestPersistence {
         };
 
         let journal_path = FsPath::new("manifest.journal");
-        if !fs.exists(&journal_path).unwrap_or(false) {
+        let journal_exists = fs.exists(&journal_path).map_err(|error| {
+            format!("failed to check for manifest journal {journal_path:?}: {error:?}")
+        })?;
+        if !journal_exists {
             tracing::debug!(path = ?journal_path, "manifest journal not found, skipping replay");
             return Ok(manifest);
         }
@@ -306,8 +313,69 @@ impl ManifestPersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::traits::{
+        DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions,
+    };
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct UnavailableExistsFs;
+
+    impl Fs for UnavailableExistsFs {
+        fn open(&self, _path: &FsPath, _options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn remove_file(&self, _path: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn exists(&self, _path: &FsPath) -> FsResult<bool> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn metadata(&self, _path: &FsPath) -> FsResult<Metadata> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn create_dir_all(&self, _path: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn list_dir(&self, _path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn remove_dir_all(&self, _path: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn sync_dir(&self, _path: &FsPath, _durability: Durability) -> FsResult<()> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn rename_atomic(&self, _from: &FsPath, _to: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+    }
 
     static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -398,6 +466,22 @@ mod tests {
         assert_eq!(loaded.next_wal_seq, 1);
         assert_eq!(loaded.last_persisted_sequence, 0);
         assert_eq!(loaded.column_families.len(), 0);
+    }
+
+    #[test]
+    fn should_fail_strict_load_when_manifest_existence_check_is_unavailable() {
+        // Arrange
+        let fs: std::sync::Arc<dyn Fs> = std::sync::Arc::new(UnavailableExistsFs);
+
+        // Act
+        let error = ManifestPersistence::load_with_fs_and_policy(
+            &fs,
+            crate::config::RecoveryPolicy::Strict,
+        )
+        .expect_err("strict load must not treat unavailable storage as an empty manifest");
+
+        // Assert
+        assert!(error.contains("test filesystem unavailable"));
     }
 
     #[test]
