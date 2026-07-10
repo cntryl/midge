@@ -12,17 +12,26 @@ fn read_workflow(path: impl AsRef<Path>) -> String {
 }
 
 #[test]
-fn should_require_rust_formatting_in_ci_and_publish_workflows() {
+fn should_require_rust_formatting_when_ci_runs() {
     // Arrange
     let ci = read_workflow(".github/workflows/ci.yml");
-    let publish = read_workflow(".github/workflows/publish.yml");
 
     // Act
     let ci_formats = ci.contains("cargo fmt --check");
-    let publish_formats = publish.contains("cargo fmt --check");
 
     // Assert
     assert!(ci_formats, "CI must reject unformatted Rust sources");
+}
+
+#[test]
+fn should_require_rust_formatting_when_publish_runs() {
+    // Arrange
+    let publish = read_workflow(".github/workflows/publish.yml");
+
+    // Act
+    let publish_formats = publish.contains("cargo fmt --check");
+
+    // Assert
     assert!(
         publish_formats,
         "publish must reject unformatted Rust sources"
@@ -30,19 +39,29 @@ fn should_require_rust_formatting_in_ci_and_publish_workflows() {
 }
 
 #[test]
-fn should_trigger_ci_for_benchmark_and_documentation_changes() {
+fn should_trigger_ci_when_benchmark_changes() {
     // Arrange
     let ci = read_workflow(".github/workflows/ci.yml");
 
     // Act
     let benchmark_trigger_count = ci.matches("\"benches/**\"").count();
-    let documentation_trigger_count = ci.matches("\"docs/**\"").count();
 
     // Assert
     assert_eq!(
         benchmark_trigger_count, 2,
         "push and PR must include benches"
     );
+}
+
+#[test]
+fn should_trigger_ci_when_documentation_changes() {
+    // Arrange
+    let ci = read_workflow(".github/workflows/ci.yml");
+
+    // Act
+    let documentation_trigger_count = ci.matches("\"docs/**\"").count();
+
+    // Assert
     assert_eq!(
         documentation_trigger_count, 2,
         "push and PR must include docs"
