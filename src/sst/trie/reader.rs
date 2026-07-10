@@ -49,27 +49,23 @@ impl TrieReader {
             let node = &self.nodes[current_index];
 
             // Try to find matching child
-            if let Some(edge) = node.find_child(remaining[0]) {
-                let child_index = edge.child_index as usize;
-                if child_index >= self.nodes.len() {
-                    return None; // Invalid index
-                }
+            let edge = node.find_child(remaining[0])?;
+            let child_index = edge.child_index as usize;
+            if child_index >= self.nodes.len() {
+                return None; // Invalid index
+            }
 
-                let child = &self.nodes[child_index];
+            let child = &self.nodes[child_index];
 
-                // Check if remaining key matches child's key_delta
-                let child_match_len = lcp(&child.key_delta, remaining);
+            // Check if remaining key matches child's key_delta
+            let child_match_len = lcp(&child.key_delta, remaining);
 
-                if child_match_len == child.key_delta.len() {
-                    // Full match of this node's key
-                    matched_len += child_match_len;
-                    current_index = child_index;
-                } else {
-                    // Partial match, key not in trie
-                    return None;
-                }
+            if child_match_len == child.key_delta.len() {
+                // Full match of this node's key
+                matched_len += child_match_len;
+                current_index = child_index;
             } else {
-                // No matching child
+                // Partial match, key not in trie
                 return None;
             }
         }

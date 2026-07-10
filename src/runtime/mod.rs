@@ -1502,11 +1502,17 @@ mod tests {
     }
 
     fn assert_compact_all_protocol_roundtrip() {
-        assert!(RuntimeMsg::CompactAll { request_id: 4 }.kind_name() == "CompactAll");
+        assert_eq!(
+            RuntimeMsg::CompactAll { request_id: 4 }.kind_name(),
+            "CompactAll"
+        );
         assert!(RuntimeMsg::CompactAll { request_id: 7 }
             .request_id()
             .is_some());
-        assert!(RuntimeMsg::CompactAll { request_id: 8 }.kind_name() == "CompactAll");
+        assert_eq!(
+            RuntimeMsg::CompactAll { request_id: 8 }.kind_name(),
+            "CompactAll"
+        );
 
         let (runtime, _handle) = Runtime::new();
         let state = RuntimeState::new("/tmp/test_compact_all".into(), true);
