@@ -91,12 +91,18 @@ impl PrimaryLease for FileSystemLease {
             ));
         }
 
-        // Check if another holder is currently active (within TTL window).
-        // This prevents a second process from silently superseding a live writer.
-        // If the existing holder crashed (record older than TTL), we allow take-over.
-        if let Ok(Some(existing)) = self.leader_store.read_current() {
-            if existing.holder_id != self.holder_id {
-                // Parse acquired_at to check freshness
+        // Check freshness while holding the acquisition lock so a concurrent
+        // winner cannot publish a live record between validation and CAS.
+        let record = self
+            .leader_store
+            .acquire_leadership_after_validation(&self.holder_id, |existing| {
+                let Some(existing) = existing else {
+                    return Ok(());
+                };
+                if existing.holder_id == self.holder_id {
+                    return Ok(());
+                }
+
                 if let Ok(acquired_at) = chrono::DateTime::parse_from_rfc3339(&existing.acquired_at)
                 {
                     let age = chrono::Utc::now()
@@ -119,13 +125,8 @@ impl PrimaryLease for FileSystemLease {
                         "taking over stale leader record (previous holder likely crashed)"
                     );
                 }
-            }
-        }
-
-        // Acquire leadership through the CAS-via-rename leader store
-        let record = self
-            .leader_store
-            .acquire_leadership(&self.holder_id)
+                Ok(())
+            })
             .map_err(|e| LeaseError::AcquisitionFailed(e.to_string()))?;
 
         let epoch = record.epoch;

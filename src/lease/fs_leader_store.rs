@@ -150,8 +150,7 @@ impl FsLeaderStore {
 
 impl LeaderStore for FsLeaderStore {
     fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
-        let _lock = self.acquire_lock(holder_id)?;
-        self.acquire_inner(holder_id)
+        self.acquire_leadership_after_validation(holder_id, |_| Ok(()))
     }
 
     fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
@@ -214,6 +213,20 @@ impl Drop for LockGuard<'_> {
 }
 
 impl FsLeaderStore {
+    pub(crate) fn acquire_leadership_after_validation<F>(
+        &self,
+        holder_id: &str,
+        validate_current: F,
+    ) -> Result<LeaderRecord, LeaseError>
+    where
+        F: FnOnce(Option<&LeaderRecord>) -> Result<(), LeaseError>,
+    {
+        let _lock = self.acquire_lock(holder_id)?;
+        let current = self.read_current()?;
+        validate_current(current.as_ref())?;
+        self.acquire_inner(holder_id)
+    }
+
     /// Refresh the leader record's `acquired_at` timestamp without changing
     /// the epoch.  Used by the heartbeat to keep the record "fresh" so that
     /// another process can distinguish a live writer from a crashed one.
