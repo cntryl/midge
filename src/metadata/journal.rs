@@ -282,9 +282,13 @@ pub fn replay_journal_with_fs(
         match read_journal_record(&*file, offset, file_len)? {
             JournalRecordStatus::Record(record) => {
                 offset = record.next_offset;
-                if let Some(message) = validate_journal_record_crc(&record, &state) {
-                    state.fatal_prefix_error = Some(message);
-                    break;
+                match validate_journal_record_crc(&record, &state) {
+                    JournalCrcValidation::Valid => {}
+                    JournalCrcValidation::StopAtCorruptTail => break,
+                    JournalCrcValidation::FatalPrefix(message) => {
+                        state.fatal_prefix_error = Some(message);
+                        break;
+                    }
                 }
                 if !handle_journal_record(&record, &mut state) {
                     break;
@@ -331,6 +335,12 @@ enum JournalRecordStatus {
     Record(JournalRecord),
     PartialHeader { record_start: u64 },
     PartialPayload { record_start: u64 },
+}
+
+enum JournalCrcValidation {
+    Valid,
+    StopAtCorruptTail,
+    FatalPrefix(String),
 }
 
 fn open_journal_for_replay(
@@ -398,19 +408,21 @@ fn read_journal_record(
 fn validate_journal_record_crc(
     record: &JournalRecord,
     state: &JournalReplayState,
-) -> Option<String> {
+) -> JournalCrcValidation {
     let mut hasher = Crc32::new();
     hasher.update(&record.payload);
     let calc = hasher.finalize();
     if calc == record.got_crc {
-        return None;
+        return JournalCrcValidation::Valid;
     }
 
     tracing::warn!("journal crc mismatch, stopping at tail");
     if is_fatal_first_journal_record(state, record.record_start) {
-        return Some("manifest journal CRC mismatch at byte 0".to_string());
+        return JournalCrcValidation::FatalPrefix(
+            "manifest journal CRC mismatch at byte 0".to_string(),
+        );
     }
-    None
+    JournalCrcValidation::StopAtCorruptTail
 }
 
 fn handle_journal_record(record: &JournalRecord, state: &mut JournalReplayState) -> bool {
@@ -697,6 +709,40 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
 
+    fn encode_test_record(payload_edit: &ManifestEdit, crc_edit: &ManifestEdit) -> Vec<u8> {
+        let payload = serde_json::to_vec(payload_edit).expect("serialize test journal payload");
+        let crc_payload = serde_json::to_vec(crc_edit).expect("serialize test CRC payload");
+        assert_eq!(
+            payload.len(),
+            crc_payload.len(),
+            "test payloads must have equal lengths"
+        );
+        let mut hasher = Crc32::new();
+        hasher.update(&crc_payload);
+
+        let mut record = Vec::with_capacity(1 + 4 + payload.len() + 4);
+        record.push(payload_edit.record_type());
+        record.extend_from_slice(
+            &u32::try_from(payload.len())
+                .expect("test payload length fits in u32")
+                .to_le_bytes(),
+        );
+        record.extend_from_slice(&payload);
+        record.extend_from_slice(&hasher.finalize().to_le_bytes());
+        record
+    }
+
+    fn write_and_sync_test_journal(db: &Path, bytes: &[u8]) {
+        let path = db.join(JOURNAL_FILE);
+        std::fs::write(&path, bytes).expect("write test manifest journal");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open test manifest journal")
+            .sync_all()
+            .expect("sync test manifest journal");
+    }
+
     #[test]
     fn should_replay_journal_when_valid_records_exist() {
         // Arrange
@@ -778,6 +824,49 @@ mod tests {
         // Assert: replay should only return the first valid record
         let edits = replay_journal(db).expect("replay_journal failed");
         assert_eq!(edits.len(), 1);
+    }
+
+    #[test]
+    fn should_stop_before_valid_json_record_when_crc_is_stale() {
+        // Arrange
+        let td = tempdir().expect("create temp directory");
+        let first = ManifestEdit::BumpWalSeq { seq: 7 };
+        let corrupted_tail = ManifestEdit::RemoveSst {
+            name: "avoid.sst".to_string(),
+        };
+        let stale_crc_source = ManifestEdit::RemoveSst {
+            name: "apply.sst".to_string(),
+        };
+        let mut journal = encode_test_record(&first, &first);
+        journal.extend_from_slice(&encode_test_record(&corrupted_tail, &stale_crc_source));
+        write_and_sync_test_journal(td.path(), &journal);
+
+        // Act
+        let edits = replay_journal(td.path()).expect("replay valid journal prefix");
+
+        // Assert
+        assert_eq!(edits.len(), 1);
+        assert!(matches!(edits[0], ManifestEdit::BumpWalSeq { seq: 7 }));
+    }
+
+    #[test]
+    fn should_fail_when_first_journal_record_crc_is_stale() {
+        // Arrange
+        let td = tempdir().expect("create temp directory");
+        let corrupted_first = ManifestEdit::RemoveSst {
+            name: "avoid.sst".to_string(),
+        };
+        let stale_crc_source = ManifestEdit::RemoveSst {
+            name: "apply.sst".to_string(),
+        };
+        let journal = encode_test_record(&corrupted_first, &stale_crc_source);
+        write_and_sync_test_journal(td.path(), &journal);
+
+        // Act
+        let error = replay_journal(td.path()).expect_err("first CRC mismatch must fail");
+
+        // Assert
+        assert!(matches!(error, crate::common::MidgeError::Corruption(_)));
     }
 
     #[test]
