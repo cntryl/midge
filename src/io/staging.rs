@@ -1,7 +1,7 @@
 //! Atomic staging helpers for filesystem-backed persistence.
 //!
 //! These helpers centralize the common pattern of:
-//! write -> fsync -> atomic rename -> best-effort temp cleanup.
+//! write -> file fsync -> atomic rename -> parent-directory fsync -> best-effort temp cleanup.
 //!
 //! They are intentionally small and generic so metadata, intent logs, leader
 //! records, and cloud recovery bootstrap writes all follow the same lifecycle.
@@ -21,7 +21,7 @@ fn cleanup_temp_file(fs: &Arc<dyn Fs>, temp_path: &FsPath) {
 }
 
 /// Stage a byte buffer to `temp_path`, sync it, rename it into `target_path`,
-/// and remove the temp file on failure.
+/// sync the target's parent directory, and remove the temp file on failure.
 pub(crate) fn stage_bytes<E, M>(
     fs: &Arc<dyn Fs>,
     temp_path: &FsPath,
@@ -87,6 +87,20 @@ where
             ))
         })?;
 
+        let parent_path = std::path::Path::new(&target_path.0)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map_or_else(
+                || FsPath::new("."),
+                |parent| FsPath::new(parent.to_string_lossy()),
+            );
+        fs.sync_dir(&parent_path, Durability::Durable)
+            .map_err(|error| {
+                map_error(format!(
+                    "failed to sync staging target directory {parent_path:?}: {error:?}"
+                ))
+            })?;
+
         Ok(())
     })();
 
@@ -95,4 +109,185 @@ where
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::traits::{DirEntry, File, FileCaps, FsError, FsResult, Metadata};
+    use parking_lot::Mutex;
+
+    struct RecordingFile<'a> {
+        inner: Box<dyn File + 'a>,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl File for RecordingFile<'_> {
+        fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
+            self.inner.read_at(offset, len)
+        }
+
+        fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
+            self.inner.write_at(offset, data)?;
+            self.events.lock().push("write".to_string());
+            Ok(())
+        }
+
+        fn append(&mut self, data: Bytes) -> FsResult<u64> {
+            self.inner.append(data)
+        }
+
+        fn len(&self) -> FsResult<u64> {
+            self.inner.len()
+        }
+
+        fn sync(&mut self, durability: Durability) -> FsResult<()> {
+            self.inner.sync(durability)?;
+            self.events.lock().push("file sync".to_string());
+            Ok(())
+        }
+
+        fn close(self: Box<Self>) -> FsResult<()> {
+            self.inner.close()
+        }
+
+        fn caps(&self) -> FileCaps {
+            self.inner.caps()
+        }
+    }
+
+    struct RecordingFs {
+        inner: crate::io::MockFs,
+        events: Arc<Mutex<Vec<String>>>,
+        fail_directory_sync: bool,
+    }
+
+    impl RecordingFs {
+        fn new(fail_directory_sync: bool) -> Self {
+            Self {
+                inner: crate::io::MockFs::new(),
+                events: Arc::new(Mutex::new(Vec::new())),
+                fail_directory_sync,
+            }
+        }
+    }
+
+    impl Fs for RecordingFs {
+        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            Ok(Box::new(RecordingFile {
+                inner: self.inner.open(path, options)?,
+                events: Arc::clone(&self.events),
+            }))
+        }
+
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+
+        fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+
+        fn sync_dir(&self, path: &FsPath, durability: Durability) -> FsResult<()> {
+            self.events
+                .lock()
+                .push(format!("directory sync {}", path.0));
+            if self.fail_directory_sync {
+                return Err(FsError::Unavailable(
+                    "injected directory sync failure".to_string(),
+                ));
+            }
+            self.inner.sync_dir(path, durability)
+        }
+
+        fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+            self.inner.rename_atomic(from, to)?;
+            self.events.lock().push("rename".to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn should_sync_parent_directory_after_atomic_rename() -> Result<(), String> {
+        // Arrange
+        let fs = Arc::new(RecordingFs::new(false));
+        let events = Arc::clone(&fs.events);
+        let fs: Arc<dyn Fs> = fs;
+
+        // Act
+        stage_bytes(
+            &fs,
+            &FsPath::new("metadata/manifest.json.tmp"),
+            &FsPath::new("metadata/manifest.json"),
+            b"manifest",
+            |message| message,
+        )?;
+
+        // Assert
+        assert_eq!(
+            *events.lock(),
+            ["write", "file sync", "rename", "directory sync metadata"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_sync_current_directory_for_root_level_target() -> Result<(), String> {
+        // Arrange
+        let fs = Arc::new(RecordingFs::new(false));
+        let events = Arc::clone(&fs.events);
+        let fs: Arc<dyn Fs> = fs;
+
+        // Act
+        stage_bytes(
+            &fs,
+            &FsPath::new("FORMAT.tmp"),
+            &FsPath::new("FORMAT"),
+            b"2",
+            |message| message,
+        )?;
+
+        // Assert
+        assert_eq!(
+            events.lock().last().map(String::as_str),
+            Some("directory sync .")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_return_error_when_parent_directory_sync_fails() {
+        // Arrange
+        let fs: Arc<dyn Fs> = Arc::new(RecordingFs::new(true));
+
+        // Act
+        let result = stage_bytes(
+            &fs,
+            &FsPath::new("manifest.json.tmp"),
+            &FsPath::new("manifest.json"),
+            b"manifest",
+            |message| message,
+        );
+
+        // Assert
+        assert!(result
+            .expect_err("directory sync failure must be returned")
+            .contains("injected directory sync failure"));
+    }
 }

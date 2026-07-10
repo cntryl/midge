@@ -7,7 +7,7 @@
 //! - `read_at` / `write_at` use true positional IO when available (no shared cursor):
 //!   - Unix: `std::os::unix::fs::FileExt::{read_at`, `write_at`}
 //!   - Windows: `std::os::windows::fs::FileExt::{seek_read`, `seek_write`}
-//! - `sync_dir` is implemented on Unix (fsync dir). On Windows it remains best-effort/no-op.
+//! - `sync_dir` uses a directory durability barrier on Unix and Windows.
 
 use super::traits::{
     DirEntry, Durability, File, FileCaps, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions,
@@ -172,17 +172,28 @@ impl Fs for RealFs {
             Ok(())
         }
 
-        // Windows: std doesn't reliably support directory handles with fsync semantics.
+        // Windows: open the directory with backup semantics, then flush the handle.
         #[cfg(windows)]
         {
-            let _ = full;
+            use std::os::windows::fs::OpenOptionsExt;
+
+            let mut options = fs::OpenOptions::new();
+            options
+                .read(true)
+                .custom_flags(winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS);
+            let dir = options
+                .open(&full)
+                .map_err(|e| io_err("open_dir", &full, &e))?;
+            dir.sync_all().map_err(|e| io_err("flush_dir", &full, &e))?;
             Ok(())
         }
 
         #[cfg(not(any(unix, windows)))]
         {
-            let _ = full;
-            Ok(())
+            Err(FsError::Unsupported(format!(
+                "durable directory sync is not supported for {}",
+                full.display()
+            )))
         }
     }
 
