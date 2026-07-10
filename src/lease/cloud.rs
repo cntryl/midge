@@ -2,7 +2,8 @@
 //!
 //! Real cloud mode coordinates through a provider-backed lease object using
 //! conditional create/update semantics. The local cache path is still used for
-//! staged diagnostics and the local epoch store.
+//! staged diagnostics only; provider-backed fencing epochs live in the remote
+//! lease document.
 //!
 //! Filesystem-simulated cloud mode can still construct this type without a
 //! provider backend; that path remains local-only for deterministic tests.
@@ -39,6 +40,7 @@ pub struct CloudLeaseConfig {
 ///
 /// The coordination document looks like:
 /// ```text
+/// epoch: <monotonic fencing token>
 /// holder_id: <pid@host>
 /// acquired_at: <rfc3339>
 /// expires_at: <rfc3339>
@@ -56,9 +58,9 @@ pub struct CloudStorageLease {
     acquired: AtomicBool,
     /// Timestamp when lease was last renewed (for local staleness check).
     last_renewal: Mutex<Option<Instant>>,
-    /// Epoch from the leader store, set after successful acquisition.
+    /// Epoch from the active coordination store, set after successful acquisition.
     acquired_epoch: std::sync::atomic::AtomicU64,
-    /// Leader store for epoch-based fencing (backed by local cache path).
+    /// Local leader store used only by filesystem-simulated cloud mode.
     leader_store: Option<Arc<FsLeaderStore>>,
     /// Real cloud object backend for distributed lease coordination.
     cloud: Option<Arc<CloudStorage>>,
@@ -107,6 +109,7 @@ impl CloudStorageLease {
         cloud: Arc<CloudStorage>,
     ) -> Self {
         let mut lease = Self::new(config, local_cache_path);
+        lease.leader_store = None;
         lease.cloud = Some(cloud);
         lease
     }
@@ -197,7 +200,9 @@ impl CloudStorageLease {
                     let content = String::from_utf8(bytes).map_err(|error| {
                         LeaseError::IoError(format!("cloud lease document is not UTF-8: {error}"))
                     })?;
-                    Ok(parse_lease_document(&content))
+                    parse_lease_document(&content).map(Some).ok_or_else(|| {
+                        LeaseError::IoError("cloud lease document is malformed".to_string())
+                    })
                 }
                 CloudOutcome::Err(error) if is_remote_not_found(&error) => Ok(None),
                 CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
@@ -244,46 +249,25 @@ impl CloudStorageLease {
         }
     }
 
-    fn remote_delete_doc(&self, headers: Vec<(String, String)>) -> Result<(), LeaseError> {
-        let Some(cloud) = self.cloud.as_ref() else {
-            return self.remove_lease_file();
-        };
-        let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_delete_with_headers(LEASE_OBJECT_KEY, headers, tx);
-        match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(CloudEvent::Delete { result, .. }) => match result {
-                CloudOutcome::Ok(()) => Ok(()),
-                CloudOutcome::Err(error) if is_remote_not_found(&error) => Ok(()),
-                CloudOutcome::Err(error) if is_remote_precondition_failed(&error) => Ok(()),
-                CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
-                    "cloud lease DELETE failed: {error}"
-                ))),
-            },
-            Ok(other) => Err(LeaseError::IoError(format!(
-                "unexpected cloud lease DELETE response: {other:?}"
-            ))),
-            Err(error) => Err(LeaseError::IoError(format!(
-                "cloud lease DELETE timed out: {error}"
-            ))),
-        }
-    }
-
     fn remote_release_if_still_holder(&self) -> Result<(), LeaseError> {
-        let metadata = self.remote_head()?;
         let current = self.remote_read_doc()?;
         let Some(current) = current else {
             return Ok(());
         };
 
-        if current.holder_id != self.holder_id {
+        let expected_epoch = self.acquired_epoch.load(Ordering::Acquire);
+        if current.holder_id != self.holder_id || current.epoch != Some(expected_epoch) {
             tracing::warn!(
                 holder_id = %self.holder_id,
                 current_holder = %current.holder_id,
-                "skipping cloud lease release because another holder owns the lease"
+                expected_epoch,
+                current_epoch = ?current.epoch,
+                "skipping cloud lease release because the remote holder or epoch changed"
             );
             return Ok(());
         }
 
+        let metadata = self.remote_head()?;
         let Some(metadata) = metadata else {
             tracing::warn!(
                 holder_id = %self.holder_id,
@@ -291,15 +275,19 @@ impl CloudStorageLease {
             );
             return Ok(());
         };
-        let Some(headers) = delete_precondition_headers(&metadata) else {
+        let Some(headers) = mutation_precondition_headers(&metadata) else {
             tracing::warn!(
                 holder_id = %self.holder_id,
-                "skipping cloud lease release because no conditional delete token is available"
+                "skipping cloud lease release because no conditional update token is available"
             );
             return Ok(());
         };
 
-        self.remote_delete_doc(headers)
+        let released = LeaseDocument {
+            expires_at: (chrono::Utc::now() - chrono::Duration::milliseconds(1)).to_rfc3339(),
+            ..current
+        };
+        self.remote_write_doc(&released, headers)
     }
 
     fn read_current_doc(&self) -> Result<Option<LeaseDocument>, LeaseError> {
@@ -353,9 +341,12 @@ impl PrimaryLease for CloudStorageLease {
             None
         };
 
-        // Check if an existing lease is still valid (held by another instance)
-        if let Some(existing) = inner.read_current_doc()? {
-            if existing.holder_id != inner.holder_id && !existing.is_expired() {
+        let existing = inner.read_current_doc()?;
+
+        // Any unexpired document represents a live lease. This also prevents two
+        // instances in the same process from sharing a holder identifier.
+        if let Some(existing) = existing.as_ref() {
+            if !existing.is_expired() {
                 return Err(LeaseError::AcquisitionFailed(format!(
                     "another instance holds the lease (holder: {}, expires: {})",
                     existing.holder_id, existing.expires_at
@@ -363,9 +354,22 @@ impl PrimaryLease for CloudStorageLease {
             }
         }
 
+        let remote_epoch = if inner.cloud.is_some() {
+            let previous_epoch = existing
+                .as_ref()
+                .and_then(|document| document.epoch)
+                .unwrap_or(0);
+            Some(previous_epoch.checked_add(1).ok_or_else(|| {
+                LeaseError::AcquisitionFailed("cloud lease epoch overflow".to_string())
+            })?)
+        } else {
+            None
+        };
+
         // Write our lease
         let now = chrono::Utc::now();
         let doc = LeaseDocument {
+            epoch: remote_epoch,
             holder_id: inner.holder_id.clone(),
             acquired_at: now.to_rfc3339(),
             expires_at: (now + chrono::Duration::seconds(Self::lease_ttl_seconds_i64(inner.ttl)))
@@ -387,8 +391,11 @@ impl PrimaryLease for CloudStorageLease {
         };
         inner.write_current_doc(&doc, headers)?;
 
-        // Acquire epoch from local leader store for fencing.
-        let epoch = if let Some(ref store) = inner.leader_store {
+        // Provider-backed leases fence with the remote document. Simulated cloud
+        // mode retains its filesystem-backed leader store.
+        let epoch = if let Some(epoch) = remote_epoch {
+            epoch
+        } else if let Some(ref store) = inner.leader_store {
             let record = store.acquire_leadership(&inner.holder_id)?;
             record.epoch
         } else {
@@ -417,26 +424,38 @@ impl PrimaryLease for CloudStorageLease {
             return Err(LeaseError::RenewalFailed("lease not acquired".to_string()));
         }
 
-        // Verify we still hold the lease
-        let metadata = self.remote_head()?;
-        if let Some(existing) = self.read_current_doc()? {
-            if existing.holder_id != self.holder_id {
+        // Verify we still hold the lease and fencing epoch.
+        let existing = self.read_current_doc()?;
+        if let Some(existing) = existing.as_ref() {
+            let expected_epoch = self.acquired_epoch.load(Ordering::Acquire);
+            let epoch_changed = self.cloud.is_some() && existing.epoch != Some(expected_epoch);
+            if existing.holder_id != self.holder_id || epoch_changed {
                 self.acquired.store(false, Ordering::Release);
                 return Err(LeaseError::RenewalFailed(format!(
-                    "lease stolen by another instance (holder: {})",
-                    existing.holder_id
+                    "lease stolen by another instance (holder: {}, epoch: {:?})",
+                    existing.holder_id, existing.epoch
                 )));
             }
+        } else if self.cloud.is_some() {
+            self.acquired.store(false, Ordering::Release);
+            return Err(LeaseError::RenewalFailed(
+                "cloud lease document disappeared".to_string(),
+            ));
         } else {
             // Lease file disappeared — write a fresh one
             tracing::warn!("lease file missing during renewal, re-acquiring");
         }
 
+        let metadata = self.remote_head()?;
+
         // Write renewed lease
         let now = chrono::Utc::now();
         let doc = LeaseDocument {
+            epoch: existing.as_ref().and_then(|document| document.epoch),
             holder_id: self.holder_id.clone(),
-            acquired_at: now.to_rfc3339(),
+            acquired_at: existing
+                .as_ref()
+                .map_or_else(|| now.to_rfc3339(), |document| document.acquired_at.clone()),
             expires_at: (now + chrono::Duration::seconds(Self::lease_ttl_seconds_i64(self.ttl)))
                 .to_rfc3339(),
         };
@@ -511,13 +530,15 @@ impl PrimaryLease for CloudStorageLease {
 // - `acquired` uses `AtomicBool` for lock-free thread-safe access.
 // - `acquired_epoch` uses `AtomicU64` for lock-free thread-safe access.
 // - `last_renewal` uses `Mutex` for interior mutability with proper synchronization.
-// - `leader_store` is `Option<Arc<FsLeaderStore>>` — Arc is Send + Sync.
+// - `leader_store` is `Option<Arc<FsLeaderStore>>` — Arc is Send + Sync and is
+//   present only for filesystem-simulated cloud mode.
 unsafe impl Send for CloudStorageLease {}
 unsafe impl Sync for CloudStorageLease {}
 
 /// Parsed lease document.
 #[derive(Debug, Clone)]
 struct LeaseDocument {
+    epoch: Option<u64>,
     holder_id: String,
     acquired_at: String,
     expires_at: String,
@@ -539,20 +560,26 @@ impl LeaseDocument {
 /// Uses a simple line-based format rather than pulling in `serde_json`,
 /// keeping dependencies minimal for the lease subsystem.
 fn format_lease_document(doc: &LeaseDocument) -> String {
+    let epoch = doc
+        .epoch
+        .map_or_else(String::new, |epoch| format!("epoch: {epoch}\n"));
     format!(
-        "holder_id: {}\nacquired_at: {}\nexpires_at: {}\n",
-        doc.holder_id, doc.acquired_at, doc.expires_at
+        "{epoch}holder_id: {}\nacquired_at: {}\nexpires_at: {}\n",
+        doc.holder_id, doc.acquired_at, doc.expires_at,
     )
 }
 
 /// Parse a lease document from the simple key-value text format.
 fn parse_lease_document(content: &str) -> Option<LeaseDocument> {
+    let mut epoch = None;
     let mut holder_id = None;
     let mut acquired_at = None;
     let mut expires_at = None;
 
     for line in content.lines() {
-        if let Some(value) = line.strip_prefix("holder_id: ") {
+        if let Some(value) = line.strip_prefix("epoch: ") {
+            epoch = Some(value.parse::<u64>().ok()?);
+        } else if let Some(value) = line.strip_prefix("holder_id: ") {
             holder_id = Some(value.to_string());
         } else if let Some(value) = line.strip_prefix("acquired_at: ") {
             acquired_at = Some(value.to_string());
@@ -562,6 +589,7 @@ fn parse_lease_document(content: &str) -> Option<LeaseDocument> {
     }
 
     Some(LeaseDocument {
+        epoch,
         holder_id: holder_id?,
         acquired_at: acquired_at?,
         expires_at: expires_at?,
@@ -577,15 +605,7 @@ fn is_remote_not_found(error: &str) -> bool {
         || lowered.contains("blobnotfound")
 }
 
-fn is_remote_precondition_failed(error: &str) -> bool {
-    let lowered = error.to_ascii_lowercase();
-    lowered.contains("precondition")
-        || lowered.contains("412")
-        || lowered.contains("conditionnotmet")
-        || lowered.contains("condition not met")
-}
-
-fn delete_precondition_headers(metadata: &ObjectMetadata) -> Option<Vec<(String, String)>> {
+fn mutation_precondition_headers(metadata: &ObjectMetadata) -> Option<Vec<(String, String)>> {
     if let Some(generation) = metadata
         .generation
         .as_ref()
@@ -670,6 +690,7 @@ mod tests {
         // Simulate another holder's lease
         let now = chrono::Utc::now();
         let other_doc = LeaseDocument {
+            epoch: None,
             holder_id: "other_process@other_host".to_string(),
             acquired_at: now.to_rfc3339(),
             expires_at: (now + chrono::Duration::seconds(60)).to_rfc3339(),
@@ -697,6 +718,7 @@ mod tests {
         // Simulate an expired lease from another holder
         let past = chrono::Utc::now() - chrono::Duration::seconds(120);
         let expired_doc = LeaseDocument {
+            epoch: None,
             holder_id: "old_process@old_host".to_string(),
             acquired_at: (past - chrono::Duration::seconds(60)).to_rfc3339(),
             expires_at: past.to_rfc3339(),
@@ -769,6 +791,7 @@ mod tests {
 
         let now = chrono::Utc::now();
         let new_holder_doc = LeaseDocument {
+            epoch: Some(lease.epoch().saturating_add(1)),
             holder_id: "new-holder@host".to_string(),
             acquired_at: now.to_rfc3339(),
             expires_at: (now + chrono::Duration::seconds(60)).to_rfc3339(),
@@ -799,6 +822,157 @@ mod tests {
         let content = String::from_utf8(bytes).unwrap();
         let doc = parse_lease_document(&content).unwrap();
         assert_eq!(doc.holder_id, "new-holder@host");
+    }
+
+    #[test]
+    fn should_increment_remote_epoch_across_provider_cache_directories() {
+        // Arrange
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+        let first = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            Arc::clone(&cloud),
+        ));
+        let second = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            cloud,
+        ));
+        assert!(first.get_leader_store().is_none());
+        assert!(second.get_leader_store().is_none());
+
+        // Act
+        let _first_guard = Arc::clone(&first)
+            .try_acquire()
+            .expect("acquire first lease");
+        let first_epoch = first.epoch();
+        first.release().expect("release first lease");
+        let _second_guard = Arc::clone(&second)
+            .try_acquire()
+            .expect("acquire second lease");
+
+        // Assert
+        assert_eq!(first_epoch, 1);
+        assert_eq!(second.epoch(), 2);
+    }
+
+    #[test]
+    fn should_not_overwrite_newer_provider_epoch_on_stale_release() {
+        // Arrange
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+        let lease = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            Arc::clone(&cloud),
+        ));
+        let _guard = Arc::clone(&lease)
+            .try_acquire()
+            .expect("acquire provider lease");
+        let now = chrono::Utc::now();
+        let newer = LeaseDocument {
+            epoch: Some(2),
+            holder_id: lease.holder_id(),
+            acquired_at: now.to_rfc3339(),
+            expires_at: (now + chrono::Duration::seconds(60)).to_rfc3339(),
+        };
+        put_remote_lease(&cloud, format_lease_document(&newer));
+
+        // Act
+        lease.release().expect("stale release is harmless");
+
+        // Assert
+        let current = parse_lease_document(&read_remote_lease(&cloud)).expect("parse remote lease");
+        assert_eq!(current.epoch, Some(2));
+        assert!(!current.is_expired());
+    }
+
+    #[test]
+    fn should_increment_expired_remote_epoch_on_provider_failover() {
+        // Arrange
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+        let past = chrono::Utc::now() - chrono::Duration::seconds(60);
+        put_remote_lease(
+            &cloud,
+            format!(
+                "epoch: 41\nholder_id: old-holder@host\nacquired_at: {}\nexpires_at: {}\n",
+                (past - chrono::Duration::seconds(30)).to_rfc3339(),
+                past.to_rfc3339()
+            ),
+        );
+        let lease = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            cloud,
+        ));
+
+        // Act
+        let _guard = Arc::clone(&lease)
+            .try_acquire()
+            .expect("acquire expired provider lease");
+
+        // Assert
+        assert_eq!(lease.epoch(), 42);
+    }
+
+    #[test]
+    fn should_respect_active_legacy_provider_lease_until_expiry() {
+        // Arrange
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+        let now = chrono::Utc::now();
+        put_remote_lease(
+            &cloud,
+            format!(
+                "holder_id: legacy-holder@host\nacquired_at: {}\nexpires_at: {}\n",
+                now.to_rfc3339(),
+                (now + chrono::Duration::seconds(60)).to_rfc3339()
+            ),
+        );
+        let lease = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            Arc::clone(&cloud),
+        ));
+
+        // Act
+        let active_result = Arc::clone(&lease).try_acquire();
+        let past = now - chrono::Duration::seconds(60);
+        put_remote_lease(
+            &cloud,
+            format!(
+                "holder_id: legacy-holder@host\nacquired_at: {}\nexpires_at: {}\n",
+                (past - chrono::Duration::seconds(30)).to_rfc3339(),
+                past.to_rfc3339()
+            ),
+        );
+        let _guard = Arc::clone(&lease)
+            .try_acquire()
+            .expect("acquire expired legacy lease");
+
+        // Assert
+        assert!(active_result.is_err());
+        assert_eq!(lease.epoch(), 1);
+    }
+
+    #[test]
+    fn should_preserve_remote_epoch_when_provider_lease_renews() {
+        // Arrange
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+        let lease = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            Arc::clone(&cloud),
+        ));
+        let _guard = Arc::clone(&lease)
+            .try_acquire()
+            .expect("acquire provider lease");
+
+        // Act
+        lease.renew().expect("renew provider lease");
+        let content = read_remote_lease(&cloud);
+
+        // Assert
+        assert!(content.lines().any(|line| line == "epoch: 1"));
+        assert_eq!(lease.epoch(), 1);
     }
 
     #[test]
@@ -878,6 +1052,7 @@ mod tests {
     fn should_parse_lease_document_roundtrip() {
         // Arrange
         let doc = LeaseDocument {
+            epoch: Some(7),
             holder_id: "123@host".to_string(),
             acquired_at: "2026-02-07T12:00:00Z".to_string(),
             expires_at: "2026-02-07T12:00:30Z".to_string(),
@@ -889,6 +1064,7 @@ mod tests {
 
         // Assert
         let parsed = parsed.unwrap();
+        assert_eq!(parsed.epoch, Some(7));
         assert_eq!(parsed.holder_id, "123@host");
         assert_eq!(parsed.acquired_at, "2026-02-07T12:00:00Z");
         assert_eq!(parsed.expires_at, "2026-02-07T12:00:30Z");
@@ -899,6 +1075,7 @@ mod tests {
         // Arrange
         let past = chrono::Utc::now() - chrono::Duration::seconds(60);
         let doc = LeaseDocument {
+            epoch: None,
             holder_id: "test".to_string(),
             acquired_at: (past - chrono::Duration::seconds(30)).to_rfc3339(),
             expires_at: past.to_rfc3339(),
@@ -916,6 +1093,7 @@ mod tests {
         // Arrange
         let future = chrono::Utc::now() + chrono::Duration::seconds(60);
         let doc = LeaseDocument {
+            epoch: None,
             holder_id: "test".to_string(),
             acquired_at: chrono::Utc::now().to_rfc3339(),
             expires_at: future.to_rfc3339(),
@@ -930,5 +1108,30 @@ mod tests {
 
     fn lease_file_exists(cache_path: &std::path::Path) -> bool {
         cache_path.join(LEASE_OBJECT_KEY).exists()
+    }
+
+    fn put_remote_lease(cloud: &CloudStorage, content: String) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_put(LEASE_OBJECT_KEY, content.into_bytes(), vec![], tx);
+        match rx.recv().expect("receive remote lease put") {
+            CloudEvent::Put {
+                result: CloudOutcome::Ok(()),
+                ..
+            } => {}
+            other => panic!("expected remote lease put, got {other:?}"),
+        }
+    }
+
+    fn read_remote_lease(cloud: &CloudStorage) -> String {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_get(LEASE_OBJECT_KEY, tx);
+        let bytes = match rx.recv().expect("receive remote lease get") {
+            CloudEvent::Get {
+                result: CloudOutcome::Ok(bytes),
+                ..
+            } => bytes,
+            other => panic!("expected remote lease get, got {other:?}"),
+        };
+        String::from_utf8(bytes).expect("remote lease is UTF-8")
     }
 }
