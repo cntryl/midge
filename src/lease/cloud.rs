@@ -9,7 +9,7 @@
 //! provider backend; that path remains local-only for deterministic tests.
 
 use super::fs_leader_store::FsLeaderStore;
-use super::traits::{LeaderStore, LeaseError, LeaseGuard, PrimaryLease};
+use super::traits::{LeaderRecord, LeaderStore, LeaseError, LeaseGuard, PrimaryLease};
 use crate::io::RealFs;
 use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +29,76 @@ pub struct CloudLeaseConfig {
     pub bucket: String,
     /// Object key prefix (e.g. `"databases/myapp/"`).
     pub prefix: String,
+}
+
+/// Provider-backed view of the lease document used by WAL epoch fencing.
+struct ProviderLeaderStore {
+    cloud: Arc<CloudStorage>,
+    ttl: Duration,
+}
+
+impl ProviderLeaderStore {
+    fn new(cloud: Arc<CloudStorage>, ttl: Duration) -> Self {
+        Self { cloud, ttl }
+    }
+}
+
+impl LeaderStore for ProviderLeaderStore {
+    fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
+        let existing_head = provider_head(&self.cloud)?;
+        let existing = provider_read_doc(&self.cloud)?;
+
+        if let Some(existing) = existing.as_ref() {
+            if !existing.is_expired() {
+                return Err(LeaseError::AcquisitionFailed(format!(
+                    "another instance holds the lease (holder: {}, expires: {})",
+                    existing.holder_id, existing.expires_at
+                )));
+            }
+        }
+
+        let previous_epoch = existing
+            .as_ref()
+            .and_then(|document| document.epoch)
+            .unwrap_or(0);
+        let epoch = previous_epoch.checked_add(1).ok_or_else(|| {
+            LeaseError::AcquisitionFailed("cloud lease epoch overflow".to_string())
+        })?;
+        let now = chrono::Utc::now();
+        let document = LeaseDocument {
+            epoch: Some(epoch),
+            holder_id: holder_id.to_string(),
+            acquired_at: now.to_rfc3339(),
+            expires_at: (now
+                + chrono::Duration::seconds(CloudStorageLease::lease_ttl_seconds_i64(self.ttl)))
+            .to_rfc3339(),
+        };
+        let headers = match existing_head {
+            Some(metadata) => mutation_precondition_headers(&metadata).ok_or_else(|| {
+                LeaseError::AcquisitionFailed(
+                    "existing cloud lease has no conditional update token".to_string(),
+                )
+            })?,
+            None => vec![("If-None-Match".to_string(), "*".to_string())],
+        };
+        provider_write_doc(&self.cloud, &document, headers)?;
+
+        Ok(LeaderRecord {
+            epoch,
+            holder_id: document.holder_id,
+            acquired_at: document.acquired_at,
+        })
+    }
+
+    fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
+        Ok(
+            provider_read_doc(&self.cloud)?.map(|document| LeaderRecord {
+                epoch: document.epoch.unwrap_or(0),
+                holder_id: document.holder_id,
+                acquired_at: document.acquired_at,
+            }),
+        )
+    }
 }
 
 /// Primary lease implementation for cloud-backed storage.
@@ -60,8 +130,8 @@ pub struct CloudStorageLease {
     last_renewal: Mutex<Option<Instant>>,
     /// Epoch from the active coordination store, set after successful acquisition.
     acquired_epoch: std::sync::atomic::AtomicU64,
-    /// Local leader store used only by filesystem-simulated cloud mode.
-    leader_store: Option<Arc<FsLeaderStore>>,
+    /// Active leader store: filesystem-backed for simulation, provider-backed otherwise.
+    leader_store: Option<Arc<dyn LeaderStore>>,
     /// Real cloud object backend for distributed lease coordination.
     cloud: Option<Arc<CloudStorage>>,
 }
@@ -88,7 +158,7 @@ impl CloudStorageLease {
         // for epoch-based fencing.  Failure is non-fatal (degrades to epoch 0).
         let leader_store = RealFs::new(&local_cache_path)
             .ok()
-            .map(|fs| Arc::new(FsLeaderStore::new(Arc::new(fs))));
+            .map(|fs| Arc::new(FsLeaderStore::new(Arc::new(fs))) as Arc<dyn LeaderStore>);
 
         Self {
             config,
@@ -109,7 +179,10 @@ impl CloudStorageLease {
         cloud: Arc<CloudStorage>,
     ) -> Self {
         let mut lease = Self::new(config, local_cache_path);
-        lease.leader_store = None;
+        lease.leader_store = Some(Arc::new(ProviderLeaderStore::new(
+            Arc::clone(&cloud),
+            lease.ttl,
+        )));
         lease.cloud = Some(cloud);
         lease
     }
@@ -169,53 +242,14 @@ impl CloudStorageLease {
         let Some(cloud) = self.cloud.as_ref() else {
             return Ok(None);
         };
-        let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_head(LEASE_OBJECT_KEY, tx);
-        match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(CloudEvent::Head { result, .. }) => match result {
-                CloudOutcome::Ok(metadata) => Ok(Some(metadata)),
-                CloudOutcome::Err(error) if is_remote_not_found(&error) => Ok(None),
-                CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
-                    "cloud lease HEAD failed: {error}"
-                ))),
-            },
-            Ok(other) => Err(LeaseError::IoError(format!(
-                "unexpected cloud lease HEAD response: {other:?}"
-            ))),
-            Err(error) => Err(LeaseError::IoError(format!(
-                "cloud lease HEAD timed out: {error}"
-            ))),
-        }
+        provider_head(cloud)
     }
 
     fn remote_read_doc(&self) -> Result<Option<LeaseDocument>, LeaseError> {
         let Some(cloud) = self.cloud.as_ref() else {
             return Ok(None);
         };
-        let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_get(LEASE_OBJECT_KEY, tx);
-        match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(CloudEvent::Get { result, .. }) => match result {
-                CloudOutcome::Ok(bytes) => {
-                    let content = String::from_utf8(bytes).map_err(|error| {
-                        LeaseError::IoError(format!("cloud lease document is not UTF-8: {error}"))
-                    })?;
-                    parse_lease_document(&content).map(Some).ok_or_else(|| {
-                        LeaseError::IoError("cloud lease document is malformed".to_string())
-                    })
-                }
-                CloudOutcome::Err(error) if is_remote_not_found(&error) => Ok(None),
-                CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
-                    "cloud lease GET failed: {error}"
-                ))),
-            },
-            Ok(other) => Err(LeaseError::IoError(format!(
-                "unexpected cloud lease GET response: {other:?}"
-            ))),
-            Err(error) => Err(LeaseError::IoError(format!(
-                "cloud lease GET timed out: {error}"
-            ))),
-        }
+        provider_read_doc(cloud)
     }
 
     fn remote_write_doc(
@@ -226,27 +260,7 @@ impl CloudStorageLease {
         let Some(cloud) = self.cloud.as_ref() else {
             return self.write_lease_file(doc);
         };
-        let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_put(
-            LEASE_OBJECT_KEY,
-            format_lease_document(doc).into_bytes(),
-            headers,
-            tx,
-        );
-        match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(CloudEvent::Put { result, .. }) => match result {
-                CloudOutcome::Ok(()) => Ok(()),
-                CloudOutcome::Err(error) => Err(LeaseError::AcquisitionFailed(format!(
-                    "cloud lease conditional write failed: {error}"
-                ))),
-            },
-            Ok(other) => Err(LeaseError::IoError(format!(
-                "unexpected cloud lease PUT response: {other:?}"
-            ))),
-            Err(error) => Err(LeaseError::IoError(format!(
-                "cloud lease PUT timed out: {error}"
-            ))),
-        }
+        provider_write_doc(cloud, doc, headers)
     }
 
     fn remote_release_if_still_holder(&self) -> Result<(), LeaseError> {
@@ -335,71 +349,41 @@ impl PrimaryLease for CloudStorageLease {
             ));
         }
 
-        let existing_head = if inner.cloud.is_some() {
-            inner.remote_head()?
+        let epoch = if inner.cloud.is_some() {
+            let store = inner.leader_store.as_ref().ok_or_else(|| {
+                LeaseError::IoError("provider-backed lease has no leader store".to_string())
+            })?;
+            store.acquire_leadership(&inner.holder_id)?.epoch
         } else {
-            None
-        };
+            let existing = inner.read_current_doc()?;
 
-        let existing = inner.read_current_doc()?;
-
-        // Any unexpired document represents a live lease. This also prevents two
-        // instances in the same process from sharing a holder identifier.
-        if let Some(existing) = existing.as_ref() {
-            if !existing.is_expired() {
-                return Err(LeaseError::AcquisitionFailed(format!(
-                    "another instance holds the lease (holder: {}, expires: {})",
-                    existing.holder_id, existing.expires_at
-                )));
+            // Any unexpired document represents a live lease. This also prevents two
+            // instances in the same process from sharing a holder identifier.
+            if let Some(existing) = existing.as_ref() {
+                if !existing.is_expired() {
+                    return Err(LeaseError::AcquisitionFailed(format!(
+                        "another instance holds the lease (holder: {}, expires: {})",
+                        existing.holder_id, existing.expires_at
+                    )));
+                }
             }
-        }
 
-        let remote_epoch = if inner.cloud.is_some() {
-            let previous_epoch = existing
-                .as_ref()
-                .and_then(|document| document.epoch)
-                .unwrap_or(0);
-            Some(previous_epoch.checked_add(1).ok_or_else(|| {
-                LeaseError::AcquisitionFailed("cloud lease epoch overflow".to_string())
-            })?)
-        } else {
-            None
-        };
-
-        // Write our lease
-        let now = chrono::Utc::now();
-        let doc = LeaseDocument {
-            epoch: remote_epoch,
-            holder_id: inner.holder_id.clone(),
-            acquired_at: now.to_rfc3339(),
-            expires_at: (now + chrono::Duration::seconds(Self::lease_ttl_seconds_i64(inner.ttl)))
+            let now = chrono::Utc::now();
+            let document = LeaseDocument {
+                epoch: None,
+                holder_id: inner.holder_id.clone(),
+                acquired_at: now.to_rfc3339(),
+                expires_at: (now
+                    + chrono::Duration::seconds(Self::lease_ttl_seconds_i64(inner.ttl)))
                 .to_rfc3339(),
-        };
-        let headers = match existing_head {
-            Some(metadata) if !metadata.etag.is_empty() => {
-                vec![("If-Match".to_string(), metadata.etag)]
-            }
-            Some(_) if inner.cloud.is_some() => {
-                return Err(LeaseError::AcquisitionFailed(
-                    "existing cloud lease has no ETag for conditional update".to_string(),
-                ))
-            }
-            None if inner.cloud.is_some() => {
-                vec![("If-None-Match".to_string(), "*".to_string())]
-            }
-            _ => Vec::new(),
-        };
-        inner.write_current_doc(&doc, headers)?;
+            };
+            inner.write_current_doc(&document, Vec::new())?;
 
-        // Provider-backed leases fence with the remote document. Simulated cloud
-        // mode retains its filesystem-backed leader store.
-        let epoch = if let Some(epoch) = remote_epoch {
-            epoch
-        } else if let Some(ref store) = inner.leader_store {
-            let record = store.acquire_leadership(&inner.holder_id)?;
-            record.epoch
-        } else {
-            0
+            if let Some(store) = inner.leader_store.as_ref() {
+                store.acquire_leadership(&inner.holder_id)?.epoch
+            } else {
+                0
+            }
         };
         inner
             .acquired_epoch
@@ -520,9 +504,7 @@ impl PrimaryLease for CloudStorageLease {
     }
 
     fn get_leader_store(&self) -> Option<Arc<dyn LeaderStore>> {
-        self.leader_store
-            .as_ref()
-            .map(|s| Arc::clone(s) as Arc<dyn LeaderStore>)
+        self.leader_store.as_ref().map(Arc::clone)
     }
 }
 // SAFETY: CloudStorageLease is Send + Sync because:
@@ -530,8 +512,7 @@ impl PrimaryLease for CloudStorageLease {
 // - `acquired` uses `AtomicBool` for lock-free thread-safe access.
 // - `acquired_epoch` uses `AtomicU64` for lock-free thread-safe access.
 // - `last_renewal` uses `Mutex` for interior mutability with proper synchronization.
-// - `leader_store` is `Option<Arc<FsLeaderStore>>` — Arc is Send + Sync and is
-//   present only for filesystem-simulated cloud mode.
+// - `leader_store` is `Option<Arc<dyn LeaderStore>>`; the trait requires Send + Sync.
 unsafe impl Send for CloudStorageLease {}
 unsafe impl Sync for CloudStorageLease {}
 
@@ -622,6 +603,81 @@ fn mutation_precondition_headers(metadata: &ObjectMetadata) -> Option<Vec<(Strin
     }
 
     None
+}
+
+fn provider_head(cloud: &CloudStorage) -> Result<Option<ObjectMetadata>, LeaseError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    cloud.submit_head(LEASE_OBJECT_KEY, tx);
+    match rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(CloudEvent::Head { result, .. }) => match result {
+            CloudOutcome::Ok(metadata) => Ok(Some(metadata)),
+            CloudOutcome::Err(error) if is_remote_not_found(&error) => Ok(None),
+            CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
+                "cloud lease HEAD failed: {error}"
+            ))),
+        },
+        Ok(other) => Err(LeaseError::IoError(format!(
+            "unexpected cloud lease HEAD response: {other:?}"
+        ))),
+        Err(error) => Err(LeaseError::IoError(format!(
+            "cloud lease HEAD timed out: {error}"
+        ))),
+    }
+}
+
+fn provider_read_doc(cloud: &CloudStorage) -> Result<Option<LeaseDocument>, LeaseError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    cloud.submit_get(LEASE_OBJECT_KEY, tx);
+    match rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(CloudEvent::Get { result, .. }) => match result {
+            CloudOutcome::Ok(bytes) => {
+                let content = String::from_utf8(bytes).map_err(|error| {
+                    LeaseError::IoError(format!("cloud lease document is not UTF-8: {error}"))
+                })?;
+                parse_lease_document(&content).map(Some).ok_or_else(|| {
+                    LeaseError::IoError("cloud lease document is malformed".to_string())
+                })
+            }
+            CloudOutcome::Err(error) if is_remote_not_found(&error) => Ok(None),
+            CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
+                "cloud lease GET failed: {error}"
+            ))),
+        },
+        Ok(other) => Err(LeaseError::IoError(format!(
+            "unexpected cloud lease GET response: {other:?}"
+        ))),
+        Err(error) => Err(LeaseError::IoError(format!(
+            "cloud lease GET timed out: {error}"
+        ))),
+    }
+}
+
+fn provider_write_doc(
+    cloud: &CloudStorage,
+    document: &LeaseDocument,
+    headers: Vec<(String, String)>,
+) -> Result<(), LeaseError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    cloud.submit_put(
+        LEASE_OBJECT_KEY,
+        format_lease_document(document).into_bytes(),
+        headers,
+        tx,
+    );
+    match rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(CloudEvent::Put { result, .. }) => match result {
+            CloudOutcome::Ok(()) => Ok(()),
+            CloudOutcome::Err(error) => Err(LeaseError::AcquisitionFailed(format!(
+                "cloud lease conditional write failed: {error}"
+            ))),
+        },
+        Ok(other) => Err(LeaseError::IoError(format!(
+            "unexpected cloud lease PUT response: {other:?}"
+        ))),
+        Err(error) => Err(LeaseError::IoError(format!(
+            "cloud lease PUT timed out: {error}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -838,8 +894,8 @@ mod tests {
             temp_cache_path(),
             cloud,
         ));
-        assert!(first.get_leader_store().is_none());
-        assert!(second.get_leader_store().is_none());
+        assert!(first.get_leader_store().is_some());
+        assert!(second.get_leader_store().is_some());
 
         // Act
         let _first_guard = Arc::clone(&first)
@@ -854,6 +910,40 @@ mod tests {
         // Assert
         assert_eq!(first_epoch, 1);
         assert_eq!(second.epoch(), 2);
+    }
+
+    #[test]
+    fn should_validate_provider_epoch_through_leader_store() {
+        // Arrange
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+        let lease = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            Arc::clone(&cloud),
+        ));
+        let _guard = Arc::clone(&lease)
+            .try_acquire()
+            .expect("acquire provider lease");
+        let acquired_epoch = lease.epoch();
+        let leader_store = lease
+            .get_leader_store()
+            .expect("provider lease should expose its remote leader store");
+        let now = chrono::Utc::now();
+        let newer = LeaseDocument {
+            epoch: Some(acquired_epoch + 1),
+            holder_id: "new-holder@host".to_string(),
+            acquired_at: now.to_rfc3339(),
+            expires_at: (now + chrono::Duration::seconds(60)).to_rfc3339(),
+        };
+
+        // Act
+        let current_result = leader_store.validate_epoch(acquired_epoch);
+        put_remote_lease(&cloud, format_lease_document(&newer));
+        let stale_result = leader_store.validate_epoch(acquired_epoch);
+
+        // Assert
+        assert!(current_result.is_ok());
+        assert!(matches!(stale_result, Err(LeaseError::RenewalFailed(_))));
     }
 
     #[test]
