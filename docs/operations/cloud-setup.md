@@ -1,6 +1,6 @@
 # Cloud Storage Setup
 
-Guide to Midge's real cloud storage mode, local Peas qualification, and the lightweight credential support model.
+Guide to Midge's real cloud storage mode, local Sqrzl qualification, and the lightweight credential support model.
 
 > **STATUS: Pre-1.0**
 >
@@ -12,7 +12,7 @@ Guide to Midge's real cloud storage mode, local Peas qualification, and the ligh
 
 - [Cloud Storage Features](#cloud-storage-features)
 - [Public API](#public-api)
-- [Peas Emulator](#peas-emulator)
+- [Sqrzl Emulator](#sqrzl-emulator)
 - [Credential Matrix](#credential-matrix)
 - [Provider Notes](#provider-notes)
 - [Engine Safety](#engine-safety)
@@ -26,7 +26,7 @@ Midge has two separate cloud surfaces:
 - **Real cloud mode**: `OpenOptions::cloud(local_cache_path, CloudProviderConfig, prefix)` uses the selected object-store provider through `CloudStorage` and `HybridStorage`.
 - **Filesystem simulation**: `OpenOptions::cloud_simulated(local_cache_path, bucket, prefix)` keeps the deterministic local simulation for tests and failure injection.
 - **Provider coverage**: AWS S3, S3-compatible endpoints, MinIO, Wasabi, OCI S3-compatible, Azure Blob, and GCS.
-- **Local emulator**: Peas is the canonical local qualification target because it exposes S3, Azure Blob, GCS, and OCI-compatible front doors.
+- **Local emulator**: Sqrzl is the canonical local qualification target because it exposes S3, Azure Blob, GCS, and OCI-compatible front doors.
 - **No heavy SDKs**: credential loading and request signing are implemented directly by Midge.
 
 ### Hybrid Storage Architecture
@@ -228,16 +228,16 @@ let provider = CloudProviderConfig::s3_compatible_env("bucket", "http://old-endp
 
 The raw `CloudProviderConfig` enum variants remain public for advanced/manual configuration, but the constructors above are the recommended path.
 
-Endpoint, path-style, region, project-ID, and credential overrides are fallible on purpose. Midge rejects unsupported combinations instead of silently ignoring them. For example, use `s3_compatible_*` or `peas_s3(...)` for custom S3 endpoints; `aws_s3(...)` always targets AWS S3.
+Endpoint, path-style, region, project-ID, and credential overrides are fallible on purpose. Midge rejects unsupported combinations instead of silently ignoring them. For example, use `s3_compatible_*` or `sqrzl_s3(...)` for custom S3 endpoints; `aws_s3(...)` always targets AWS S3.
 
-## Peas Emulator
+## Sqrzl Emulator
 
-Peas is the canonical local emulator for cross-vendor cloud qualification.
+Sqrzl is the canonical local emulator for cross-vendor cloud qualification.
 
 Start it from the repository compose file:
 
 ```bash
-docker compose up -d peas
+docker compose up -d sqrzl
 ```
 
 The built-in helpers use explicit emulator credentials only:
@@ -245,24 +245,25 @@ The built-in helpers use explicit emulator credentials only:
 ```rust
 use cntryl_midge::CloudProviderConfig;
 
-let s3 = CloudProviderConfig::peas_s3("midge-peas-s3");
-let azure = CloudProviderConfig::peas_azure("midge-peas-azure");
-let gcs = CloudProviderConfig::peas_gcs("midge-peas-gcs");
+let s3 = CloudProviderConfig::sqrzl_s3("midge-sqrzl-s3");
+let azure = CloudProviderConfig::sqrzl_azure("midge-sqrzl-azure");
+let gcs = CloudProviderConfig::sqrzl_gcs("midge-sqrzl-gcs");
 ```
 
-Peas helper defaults:
+Sqrzl helper defaults:
 
 | Helper | Endpoint | Credentials | Notes |
 |---|---|---|---|
-| `peas_s3` | `http://127.0.0.1:9000` | `admin` / `easy-peasy` | S3-compatible, path-style |
-| `peas_azure` | `http://127.0.0.1:9000` | shared key `easy-peasy` | Azure emulator path-style URL |
-| `peas_gcs` | `http://127.0.0.1:9000` | HMAC `admin` / `easy-peasy` | GCS XML API with `GOOG1` signing |
+| `sqrzl_s3` | `http://127.0.0.1:9000` | `admin` / `easy-peasy` | S3-compatible, path-style |
+| `sqrzl_azure` | `http://127.0.0.1:9000` | shared key `easy-peasy` | Azure emulator path-style URL |
+| `sqrzl_gcs` | `http://127.0.0.1:9000` | HMAC `admin` / `easy-peasy` | GCS XML API with `GOOG1` signing |
 
-Known Peas emulator quirks observed during qualification:
+Known Sqrzl emulator quirks observed during qualification:
 
 - Namespace/container initialization can return `500` when the namespace already exists; Midge treats this as emulator-specific setup noise, not a provider contract.
-- Azure SharedKey canonicalization for Peas path-style URLs differs from production Azure endpoint paths; Midge uses emulator-compatible canonicalization only when an explicit emulator endpoint is configured.
-- Some S3 conditional behavior is normalized client-side for Peas qualification, but production safety still relies on provider-side object preconditions.
+- Azure SharedKey canonicalization for Sqrzl path-style URLs differs from production Azure endpoint paths; Midge uses emulator-compatible canonicalization only when an explicit emulator endpoint is configured.
+- Some S3 conditional behavior is normalized client-side for Sqrzl qualification, but production safety still relies on provider-side object preconditions.
+- Sqrzl's GCS JSON bearer path does not pass Midge's full round-trip contract; use the `sqrzl_gcs` XML/HMAC helper for qualification.
 
 ## Credential Matrix
 
@@ -277,7 +278,7 @@ Official references:
 
 ### AWS / S3-Compatible
 
-| Credential source | Constructor/source | AWS S3 | S3-compatible | Peas |
+| Credential source | Constructor/source | AWS S3 | S3-compatible | Sqrzl |
 |---|---|---:|---:|---|
 | Default AWS chain | `aws_s3(...)` / `AwsDefaultChain` | SDK-equivalent supported | Not allowed | Not used |
 | Explicit access keys | `aws_s3_static(...)`, `s3_compatible_static(...)` | Supported | Supported | Supported |
@@ -301,7 +302,7 @@ For S3-compatible providers, use explicit keys, environment keys, or shared prof
 
 ### Azure Blob
 
-| Credential source | Constructor/source | Support status | Peas |
+| Credential source | Constructor/source | Support status | Sqrzl |
 |---|---|---:|---|
 | Lean Azure identity chain | `azure_blob(...)` / `LightweightDefaultChain` | SDK-equivalent for supported identity sources | Not used |
 | Shared key | `azure_blob_shared_key(...)` | Supported | Supported |
@@ -318,7 +319,7 @@ Midge's Azure identity chain tries client-secret environment credentials, worklo
 
 ### GCS
 
-| Credential source | Constructor/source | API style | Support status | Peas |
+| Credential source | Constructor/source | API style | Support status | Sqrzl |
 |---|---|---|---:|---|
 | Application Default Credentials | `gcs(...)` / `ApplicationDefault` | JSON | SDK-equivalent for supported ADC files | Not used |
 | Service account JSON file | `gcs_service_account_file(...)` | JSON | Supported | Not used |
@@ -357,12 +358,12 @@ GCS HMAC keys are XML API credentials. `gcs_hmac(...)` selects XML automatically
 - Supports shared key, SAS token, and bearer-token authorization.
 - `azure_blob(...)` uses identity credentials only; storage keys, SAS, and connection strings are explicit constructors.
 - Supports emulator path-style URLs such as `http://127.0.0.1:9000/{account}/{container}`.
-- Uses Azure SharedKey canonicalization for production endpoints and Peas-compatible canonicalization for explicit emulator endpoints.
+- Uses Azure SharedKey canonicalization for production endpoints and Sqrzl-compatible canonicalization for explicit emulator endpoints.
 
 ### GCS
 
 - Supports JSON API bearer-token auth for ADC-style credentials, including service-account, authorized-user, metadata-server, and non-executable file-sourced external-account ADC.
-- Supports XML API `GOOG1` HMAC signing for Peas and HMAC deployments.
+- Supports XML API `GOOG1` HMAC signing for Sqrzl and HMAC deployments.
 - HMAC is XML-only, matching Google Cloud Storage restrictions, and `gcs_hmac(...)` selects XML automatically.
 
 ## Engine Safety
@@ -379,7 +380,7 @@ Real cloud mode now uses provider-backed engine startup and lease behavior:
 Important limitations:
 
 - Azure native blob leases are not used yet; the current lease path uses the portable conditional-object lease.
-- Peas is an emulator. Conditional writes are normalized by Midge for qualification, but production providers must still enforce object preconditions atomically.
+- Sqrzl is an emulator. Conditional writes are normalized by Midge for qualification, but production providers must still enforce object preconditions atomically.
 - Midge's lightweight default chains are intentionally narrower than the provider SDK chains.
 
 ## Testing Cloud Storage
@@ -399,12 +400,12 @@ cargo test --test cloud_persistence_hardening
 cargo test --lib storage::providers
 ```
 
-### Peas Qualification Tests
+### Sqrzl Qualification Tests
 
-Peas qualification is part of the default `cargo test` path, and the CI workflow runs it as an explicit gate. Start Peas first:
+Sqrzl qualification is feature-gated, and the CI workflow runs it as an explicit gate. Start Sqrzl first:
 
 ```bash
-docker compose up -d peas
+docker compose up -d sqrzl
 ```
 
 Then run the full suite:
@@ -416,10 +417,10 @@ cargo test
 Or narrow to just the provider qualification module:
 
 ```bash
-cargo test --lib storage::providers::qualification -- --test-threads=1
+cargo test --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1
 ```
 
-If Peas is not running, these tests are expected to fail instead of being skipped.
+If Sqrzl is not running, these tests are expected to fail instead of being skipped.
 
 For an opt-in real S3-compatible smoke run, set `MIDGE_REAL_S3_BUCKET`,
 `MIDGE_REAL_S3_ENDPOINT`, `MIDGE_REAL_S3_ACCESS_KEY`, and
@@ -444,15 +445,15 @@ Use one bucket/container per vendor family and a UUID prefix per test for isolat
 
 ### Mock Cloud Backend
 
-Keep `MockCloudBackend` tests for deterministic failure injection, retries, timeouts, and edge cases that are difficult or impossible to trigger reliably against Peas or a real provider.
+Keep `MockCloudBackend` tests for deterministic failure injection, retries, timeouts, and edge cases that are difficult or impossible to trigger reliably against Sqrzl or a real provider.
 
 ## Operational Guidance
 
-Use real cloud mode when you want to qualify object-store behavior, Peas compatibility, or cloud-backed recovery paths. Use local mode for the most conservative production-style evaluation while the 0.x cloud API is still moving.
+Use real cloud mode when you want to qualify object-store behavior, Sqrzl compatibility, or cloud-backed recovery paths. Use local mode for the most conservative production-style evaluation while the 0.x cloud API is still moving.
 
 Recommended rollout order:
 
-1. Run provider qualification against Peas.
+1. Run provider qualification against Sqrzl.
 2. Run provider qualification against the target vendor with a disposable bucket/container.
 3. Run engine-level recovery tests with an isolated prefix.
 4. Enable `RecoveryPolicy::Strict` for production-style validation.

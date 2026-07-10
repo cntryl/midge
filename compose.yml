@@ -1,9 +1,9 @@
 services:
 
-  peas:
-    container_name: peas
-    hostname: peas
-    image: ghcr.io/sqrzl/peas-emulator:latest
+  sqrzl:
+    container_name: sqrzl
+    hostname: sqrzl
+    image: ghcr.io/sqrzl/sqrzl-emulator:latest
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -12,7 +12,7 @@ services:
       ACCESS_KEY_ID: admin
       SECRET_ACCESS_KEY: easy-peasy
     volumes:
-      - peas-blobs:/app/blobs
+      - sqrzl-blobs:/app/blobs
 
 volumes:
-  peas-blobs:
+  sqrzl-blobs:

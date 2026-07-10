@@ -69,6 +69,26 @@ fn should_trigger_ci_when_documentation_changes() {
 }
 
 #[test]
+fn should_use_sqrzl_emulator_for_cloud_gates() {
+    // Arrange
+    let compose = read_workflow("compose.yml");
+    let ci = read_workflow(".github/workflows/ci.yml");
+    let publish = read_workflow(".github/workflows/publish.yml");
+    let manifest = read_workflow("Cargo.toml");
+
+    // Act
+    let uses_sqrzl_image = compose.contains("ghcr.io/sqrzl/sqrzl-emulator:latest");
+
+    // Assert
+    assert!(uses_sqrzl_image);
+    assert!(compose.contains("  sqrzl:"));
+    assert!(ci.contains("docker compose up -d sqrzl"));
+    assert!(ci.contains("--features sqrzl-tests"));
+    assert!(publish.contains("docker compose up -d sqrzl"));
+    assert!(manifest.contains("sqrzl-tests = []"));
+}
+
+#[test]
 fn should_verify_checked_in_v2_fixture_in_publish_workflow() {
     // Arrange
     let publish = read_workflow(".github/workflows/publish.yml");

@@ -1,4 +1,4 @@
-#![cfg(all(feature = "cloud-common", feature = "peas-tests"))]
+#![cfg(all(feature = "cloud-common", feature = "sqrzl-tests"))]
 
 use cntryl_midge::{
     Bytes, CloudProviderConfig, ColumnFamilyHandle, Engine, MemoryBudget, OpenOptions,
@@ -9,11 +9,11 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
-const PEAS_ENDPOINT: &str = "http://127.0.0.1:9000";
-const PEAS_SOCKET: &str = "127.0.0.1:9000";
-const PEAS_ACCESS_KEY: &str = "admin";
-const PEAS_SECRET_KEY: &str = "easy-peasy";
-const REQUIRE_PEAS_ENV: &str = "MIDGE_REQUIRE_PEAS";
+const SQRZL_ENDPOINT: &str = "http://127.0.0.1:9000";
+const SQRZL_SOCKET: &str = "127.0.0.1:9000";
+const SQRZL_ACCESS_KEY: &str = "admin";
+const SQRZL_SECRET_KEY: &str = "easy-peasy";
+const REQUIRE_SQRZL_ENV: &str = "MIDGE_REQUIRE_SQRZL";
 const REAL_S3_BUCKET_ENV: &str = "MIDGE_REAL_S3_BUCKET";
 const REAL_S3_ENDPOINT_ENV: &str = "MIDGE_REAL_S3_ENDPOINT";
 const REAL_S3_REGION_ENV: &str = "MIDGE_REAL_S3_REGION";
@@ -22,12 +22,12 @@ const REAL_S3_SECRET_KEY_ENV: &str = "MIDGE_REAL_S3_SECRET_KEY";
 const REAL_S3_PATH_STYLE_ENV: &str = "MIDGE_REAL_S3_PATH_STYLE";
 
 #[test]
-fn should_recover_engine_from_peas_s3_after_local_cache_loss() {
+fn should_recover_engine_from_sqrzl_s3_after_local_cache_loss() {
     // Arrange
-    let provider = CloudProviderConfig::peas_s3("midge-peas-engine-s3");
+    let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-engine-s3");
 
     // Act
-    engine_recovers_from_provider_after_local_cache_loss("peas-engine", provider, true);
+    engine_recovers_from_provider_after_local_cache_loss("sqrzl-engine", provider, true);
 
     // Assert
     // The helper performs the provider-backed recovery assertions.
@@ -62,12 +62,12 @@ fn engine_recovers_from_provider_after_local_cache_loss(
     provider: CloudProviderConfig,
     prepare_namespace: bool,
 ) {
-    if prepare_namespace && !peas_available_or_skip(label) {
+    if prepare_namespace && !sqrzl_available_or_skip(label) {
         return;
     }
 
     if prepare_namespace {
-        ensure_peas_s3_bucket(provider_bucket(&provider)).unwrap_or_else(|error| {
+        ensure_sqrzl_s3_bucket(provider_bucket(&provider)).unwrap_or_else(|error| {
             panic!("{label}: failed to prepare provider namespace: {error}");
         });
     }
@@ -124,7 +124,7 @@ fn default_cf(engine: &Engine) -> ColumnFamilyHandle {
 fn provider_bucket(provider: &CloudProviderConfig) -> &str {
     match provider {
         CloudProviderConfig::S3Compatible { bucket, .. } => bucket,
-        _ => panic!("engine qualification currently prepares S3-compatible Peas buckets only"),
+        _ => panic!("engine qualification currently prepares S3-compatible Sqrzl buckets only"),
     }
 }
 
@@ -147,29 +147,29 @@ fn configured_real_s3_provider() -> Option<CloudProviderConfig> {
     )
 }
 
-fn peas_available_or_skip(label: &str) -> bool {
-    if peas_is_available() {
+fn sqrzl_available_or_skip(label: &str) -> bool {
+    if sqrzl_is_available() {
         return true;
     }
 
     assert!(
-        !peas_required(),
-        "{label}: Peas is required by {REQUIRE_PEAS_ENV}, but {PEAS_ENDPOINT} is unreachable"
+        !sqrzl_required(),
+        "{label}: Sqrzl is required by {REQUIRE_SQRZL_ENV}, but {SQRZL_ENDPOINT} is unreachable"
     );
 
-    eprintln!("{label}: skipping Peas qualification test because {PEAS_ENDPOINT} is unreachable");
+    eprintln!("{label}: skipping Sqrzl qualification test because {SQRZL_ENDPOINT} is unreachable");
     false
 }
 
-fn peas_is_available() -> bool {
-    let Ok(addr) = PEAS_SOCKET.parse::<SocketAddr>() else {
+fn sqrzl_is_available() -> bool {
+    let Ok(addr) = SQRZL_SOCKET.parse::<SocketAddr>() else {
         return false;
     };
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
-fn peas_required() -> bool {
-    std::env::var(REQUIRE_PEAS_ENV)
+fn sqrzl_required() -> bool {
+    std::env::var(REQUIRE_SQRZL_ENV)
         .ok()
         .as_deref()
         .is_some_and(|value| {
@@ -180,7 +180,7 @@ fn peas_required() -> bool {
         })
 }
 
-fn ensure_peas_s3_bucket(bucket: &str) -> Result<(), String> {
+fn ensure_sqrzl_s3_bucket(bucket: &str) -> Result<(), String> {
     signed_s3_request("PUT", &format!("/{bucket}"), b"").map(|_| ())
 }
 
@@ -228,13 +228,13 @@ fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, S
         scope,
         hex::encode(Sha256::digest(canonical_request.as_bytes()))
     );
-    let k_date = hmac_sha256(format!("AWS4{PEAS_SECRET_KEY}").as_bytes(), &date);
+    let k_date = hmac_sha256(format!("AWS4{SQRZL_SECRET_KEY}").as_bytes(), &date);
     let k_region = hmac_sha256(&k_date, region);
     let k_service = hmac_sha256(&k_region, "s3");
     let k_signing = hmac_sha256(&k_service, "aws4_request");
     let signature = hex::encode(hmac_sha256(&k_signing, &string_to_sign));
     let authorization = format!(
-        "AWS4-HMAC-SHA256 Credential={PEAS_ACCESS_KEY}/{scope}, SignedHeaders={signed_headers}, Signature={signature}"
+        "AWS4-HMAC-SHA256 Credential={SQRZL_ACCESS_KEY}/{scope}, SignedHeaders={signed_headers}, Signature={signature}"
     );
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -243,7 +243,7 @@ fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, S
     let response = client
         .request(
             reqwest::Method::from_bytes(method.as_bytes()).map_err(|error| error.to_string())?,
-            format!("{PEAS_ENDPOINT}{path}"),
+            format!("{SQRZL_ENDPOINT}{path}"),
         )
         .header("host", host)
         .header("x-amz-content-sha256", payload_hash)

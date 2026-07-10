@@ -133,7 +133,7 @@ cloud-common = [
 ]
 cloud-aws = ["cloud-common", "dep:md5"]
 
-peas-tests = []
+sqrzl-tests = []
 cloud-azure = ["cloud-common"]
 cloud-gcp = ["cloud-common"]
 cloud-oci = ["cloud-common"]

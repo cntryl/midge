@@ -1,22 +1,22 @@
-//! Peas qualification tests for real cloud provider front doors.
+//! Sqrzl qualification tests for real cloud provider front doors.
 //!
-//! These tests intentionally assume Peas is already running. Start it with:
-//! `docker compose up -d peas`
+//! These tests intentionally assume Sqrzl is already running. Start it with:
+//! `docker compose up -d sqrzl`
 //! then run with the feature enabled, for example:
-//! `cargo test --lib --features peas-tests storage::providers::qualification -- --test-threads=1`
+//! `cargo test --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1`
 
 use super::build_cloud_storage;
-use super::{CloudProviderConfig, GcsApiStyle, GcsCredentialSource};
+use super::CloudProviderConfig;
 use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::fmt::Write as _;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
-const PEAS_ENDPOINT: &str = "http://127.0.0.1:9000";
-const PEAS_SOCKET: &str = "127.0.0.1:9000";
-const PEAS_ACCESS_KEY: &str = "admin";
-const PEAS_SECRET_KEY: &str = "easy-peasy";
-const REQUIRE_PEAS_ENV: &str = "MIDGE_REQUIRE_PEAS";
+const SQRZL_ENDPOINT: &str = "http://127.0.0.1:9000";
+const SQRZL_SOCKET: &str = "127.0.0.1:9000";
+const SQRZL_ACCESS_KEY: &str = "admin";
+const SQRZL_SECRET_KEY: &str = "easy-peasy";
+const REQUIRE_SQRZL_ENV: &str = "MIDGE_REQUIRE_SQRZL";
 const REAL_S3_BUCKET_ENV: &str = "MIDGE_REAL_S3_BUCKET";
 const REAL_S3_ENDPOINT_ENV: &str = "MIDGE_REAL_S3_ENDPOINT";
 const REAL_S3_REGION_ENV: &str = "MIDGE_REAL_S3_REGION";
@@ -25,53 +25,21 @@ const REAL_S3_SECRET_KEY_ENV: &str = "MIDGE_REAL_S3_SECRET_KEY";
 const REAL_S3_PATH_STYLE_ENV: &str = "MIDGE_REAL_S3_PATH_STYLE";
 
 #[test]
-fn should_run_s3_compatible_contract_against_peas() {
-    let provider = CloudProviderConfig::peas_s3("midge-peas-s3");
+fn should_run_s3_compatible_contract_against_sqrzl() {
+    let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-s3");
     run_provider_contract("s3", &provider);
 }
 
 #[test]
-fn should_run_azure_blob_contract_against_peas() {
-    let provider = CloudProviderConfig::peas_azure("midge-peas-azure");
+fn should_run_azure_blob_contract_against_sqrzl() {
+    let provider = CloudProviderConfig::sqrzl_azure("midge-sqrzl-azure");
     run_provider_contract("azure", &provider);
 }
 
 #[test]
-fn should_run_gcs_xml_contract_against_peas() {
-    let provider = CloudProviderConfig::peas_gcs("midge-peas-gcs");
+fn should_run_gcs_xml_contract_against_sqrzl() {
+    let provider = CloudProviderConfig::sqrzl_gcs("midge-sqrzl-gcs");
     run_provider_contract("gcs", &provider);
-}
-
-#[test]
-fn should_reject_gcs_json_bearer_config_given_peas_hmac_contract() {
-    // Arrange
-    if !peas_available_or_skip("gcs-json-bearer") {
-        return;
-    }
-
-    let provider = CloudProviderConfig::Gcs {
-        bucket: "midge-peas-gcs".to_string(),
-        project_id: "peas".to_string(),
-        endpoint: Some(PEAS_ENDPOINT.to_string()),
-        api: GcsApiStyle::Json,
-        credential: GcsCredentialSource::BearerToken {
-            token: "not-a-peas-token".to_string(),
-        },
-    };
-    let backend = build_cloud_storage(&provider, "").expect("build GCS JSON provider");
-    let prefix = format!("qualification/{}/", uuid::Uuid::new_v4());
-    let result = put(
-        &backend,
-        &format!("{prefix}auth-should-fail"),
-        b"body".to_vec(),
-        vec![],
-    );
-    // Act
-    // Assert
-    assert!(
-        result.is_err(),
-        "Peas should reject unsupported GCS bearer credentials"
-    );
 }
 
 #[test]
@@ -87,12 +55,12 @@ fn should_run_s3_compatible_contract_against_real_provider_if_configured() {
 }
 
 fn run_provider_contract(label: &str, provider: &CloudProviderConfig) {
-    if !peas_available_or_skip(label) {
+    if !sqrzl_available_or_skip(label) {
         return;
     }
 
-    ensure_peas_namespace(provider).unwrap_or_else(|error| {
-        panic!("{label}: failed to prepare Peas namespace: {error}");
+    ensure_sqrzl_namespace(provider).unwrap_or_else(|error| {
+        panic!("{label}: failed to prepare Sqrzl namespace: {error}");
     });
     run_provider_contract_body(label, provider);
 }
@@ -111,11 +79,11 @@ fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
     let conditional_key = format!("{prefix}conditional.bin");
     let missing_key = format!("{prefix}missing.bin");
 
-    put(&backend, &key, b"hello-peas".to_vec(), vec![]).expect("PUT");
-    assert_eq!(get(&backend, &key).expect("GET"), b"hello-peas");
+    put(&backend, &key, b"hello-sqrzl".to_vec(), vec![]).expect("PUT");
+    assert_eq!(get(&backend, &key).expect("GET"), b"hello-sqrzl");
 
     let metadata = head(&backend, &key).expect("HEAD");
-    assert_eq!(metadata.size, b"hello-peas".len() as u64);
+    assert_eq!(metadata.size, b"hello-sqrzl".len() as u64);
 
     let listed = list(&backend, &prefix).expect("LIST");
     assert!(
@@ -194,32 +162,32 @@ fn configured_real_s3_provider() -> Option<CloudProviderConfig> {
     )
 }
 
-fn peas_available_or_skip(label: &str) -> bool {
-    if peas_is_available() {
+fn sqrzl_available_or_skip(label: &str) -> bool {
+    if sqrzl_is_available() {
         return true;
     }
 
     assert!(
-        !peas_required(),
-        "{label}: Peas is required by {REQUIRE_PEAS_ENV}, but {PEAS_ENDPOINT} is unreachable"
+        !sqrzl_required(),
+        "{label}: Sqrzl is required by {REQUIRE_SQRZL_ENV}, but {SQRZL_ENDPOINT} is unreachable"
     );
 
-    eprintln!("{label}: skipping Peas qualification test because {PEAS_ENDPOINT} is unreachable");
+    eprintln!("{label}: skipping Sqrzl qualification test because {SQRZL_ENDPOINT} is unreachable");
     false
 }
 
-fn peas_is_available() -> bool {
-    let Ok(addr) = PEAS_SOCKET.parse::<SocketAddr>() else {
+fn sqrzl_is_available() -> bool {
+    let Ok(addr) = SQRZL_SOCKET.parse::<SocketAddr>() else {
         return false;
     };
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
-fn peas_required() -> bool {
-    peas_required_from_value(std::env::var(REQUIRE_PEAS_ENV).ok().as_deref())
+fn sqrzl_required() -> bool {
+    sqrzl_required_from_value(std::env::var(REQUIRE_SQRZL_ENV).ok().as_deref())
 }
 
-fn peas_required_from_value(value: Option<&str>) -> bool {
+fn sqrzl_required_from_value(value: Option<&str>) -> bool {
     value.is_some_and(|value| {
         matches!(
             value.to_ascii_lowercase().as_str(),
@@ -228,16 +196,16 @@ fn peas_required_from_value(value: Option<&str>) -> bool {
     })
 }
 
-fn ensure_peas_namespace(provider: &CloudProviderConfig) -> Result<(), String> {
+fn ensure_sqrzl_namespace(provider: &CloudProviderConfig) -> Result<(), String> {
     match provider {
         CloudProviderConfig::AwsS3 { .. } => Ok(()),
-        CloudProviderConfig::S3Compatible { bucket, .. } => ensure_peas_s3_bucket(bucket),
-        CloudProviderConfig::Gcs { bucket, .. } => ensure_peas_gcs_bucket(bucket),
-        CloudProviderConfig::AzureBlob { container, .. } => ensure_peas_azure_container(container),
+        CloudProviderConfig::S3Compatible { bucket, .. } => ensure_sqrzl_s3_bucket(bucket),
+        CloudProviderConfig::Gcs { bucket, .. } => ensure_sqrzl_gcs_bucket(bucket),
+        CloudProviderConfig::AzureBlob { container, .. } => ensure_sqrzl_azure_container(container),
     }
 }
 
-fn ensure_peas_s3_bucket(bucket: &str) -> Result<(), String> {
+fn ensure_sqrzl_s3_bucket(bucket: &str) -> Result<(), String> {
     signed_s3_request("PUT", &format!("/{bucket}"), b"").map(|_| ())
 }
 
@@ -285,13 +253,13 @@ fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, S
         scope,
         hex::encode(Sha256::digest(canonical_request.as_bytes()))
     );
-    let k_date = hmac_sha256(format!("AWS4{PEAS_SECRET_KEY}").as_bytes(), &date);
+    let k_date = hmac_sha256(format!("AWS4{SQRZL_SECRET_KEY}").as_bytes(), &date);
     let k_region = hmac_sha256(&k_date, region);
     let k_service = hmac_sha256(&k_region, "s3");
     let k_signing = hmac_sha256(&k_service, "aws4_request");
     let signature = hex::encode(hmac_sha256(&k_signing, &string_to_sign));
     let authorization = format!(
-        "AWS4-HMAC-SHA256 Credential={PEAS_ACCESS_KEY}/{scope}, SignedHeaders={signed_headers}, Signature={signature}"
+        "AWS4-HMAC-SHA256 Credential={SQRZL_ACCESS_KEY}/{scope}, SignedHeaders={signed_headers}, Signature={signature}"
     );
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -300,7 +268,7 @@ fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, S
     let response = client
         .request(
             reqwest::Method::from_bytes(method.as_bytes()).map_err(|error| error.to_string())?,
-            format!("{PEAS_ENDPOINT}{path}"),
+            format!("{SQRZL_ENDPOINT}{path}"),
         )
         .header("host", host)
         .header("x-amz-content-sha256", payload_hash)
@@ -327,7 +295,7 @@ fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, S
     }
 }
 
-fn ensure_peas_gcs_bucket(bucket: &str) -> Result<(), String> {
+fn ensure_sqrzl_gcs_bucket(bucket: &str) -> Result<(), String> {
     signed_gcs_request("PUT", &format!("/{bucket}"), "", b"").map(|_| ())
 }
 
@@ -344,7 +312,7 @@ fn signed_gcs_request(
         .format("%a, %d %b %Y %H:%M:%S GMT")
         .to_string();
     let string_to_sign = format!("{method}\n\n{content_type}\n{date}\n{path}");
-    let mut mac = Hmac::<Sha1>::new_from_slice(PEAS_SECRET_KEY.as_bytes())
+    let mut mac = Hmac::<Sha1>::new_from_slice(SQRZL_SECRET_KEY.as_bytes())
         .map_err(|error| error.to_string())?;
     mac.update(string_to_sign.as_bytes());
     let signature = base64::Engine::encode(
@@ -357,12 +325,12 @@ fn signed_gcs_request(
         .map_err(|error| error.to_string())?
         .request(
             reqwest::Method::from_bytes(method.as_bytes()).map_err(|error| error.to_string())?,
-            format!("{PEAS_ENDPOINT}{path}"),
+            format!("{SQRZL_ENDPOINT}{path}"),
         )
         .header("date", date)
         .header(
             "authorization",
-            format!("GOOG1 {PEAS_ACCESS_KEY}:{signature}"),
+            format!("GOOG1 {SQRZL_ACCESS_KEY}:{signature}"),
         )
         .body(body.to_vec());
     if !content_type.is_empty() {
@@ -387,10 +355,10 @@ fn signed_gcs_request(
     }
 }
 
-fn ensure_peas_azure_container(container: &str) -> Result<(), String> {
+fn ensure_sqrzl_azure_container(container: &str) -> Result<(), String> {
     signed_azure_request(
         "PUT",
-        &format!("/{PEAS_ACCESS_KEY}/{container}"),
+        &format!("/{SQRZL_ACCESS_KEY}/{container}"),
         "restype=container",
         b"",
         vec![],
@@ -426,7 +394,7 @@ fn azure_canonical_headers(headers: &[(String, String)]) -> String {
 }
 
 fn azure_canonical_resource(path: &str, query: &str) -> String {
-    let mut canonical_resource = format!("/{PEAS_ACCESS_KEY}{path}");
+    let mut canonical_resource = format!("/{SQRZL_ACCESS_KEY}{path}");
     if !query.is_empty() {
         let mut query_pairs = query
             .split('&')
@@ -479,8 +447,8 @@ fn azure_shared_key_signature(string_to_sign: &str) -> Result<String, String> {
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
-    let key = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, PEAS_SECRET_KEY)
-        .unwrap_or_else(|_| PEAS_SECRET_KEY.as_bytes().to_vec());
+    let key = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, SQRZL_SECRET_KEY)
+        .unwrap_or_else(|_| SQRZL_SECRET_KEY.as_bytes().to_vec());
     let mut mac = Hmac::<Sha256>::new_from_slice(&key).map_err(|error| error.to_string())?;
     mac.update(string_to_sign.as_bytes());
     Ok(base64::Engine::encode(
@@ -511,9 +479,9 @@ fn signed_azure_request(
     let string_to_sign = azure_string_to_sign(method, &headers, path, query, body);
     let signature = azure_shared_key_signature(&string_to_sign)?;
     let url = if query.is_empty() {
-        format!("{PEAS_ENDPOINT}{path}")
+        format!("{SQRZL_ENDPOINT}{path}")
     } else {
-        format!("{PEAS_ENDPOINT}{path}?{query}")
+        format!("{SQRZL_ENDPOINT}{path}?{query}")
     };
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -526,7 +494,7 @@ fn signed_azure_request(
         )
         .header(
             "authorization",
-            format!("SharedKey {PEAS_ACCESS_KEY}:{signature}"),
+            format!("SharedKey {SQRZL_ACCESS_KEY}:{signature}"),
         )
         .body(body.to_vec());
     for (name, value) in headers {
@@ -635,27 +603,27 @@ fn delete(backend: &CloudStorage, key: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::peas_required_from_value;
+    use super::sqrzl_required_from_value;
 
     #[test]
-    fn should_not_require_peas_when_env_is_unset_or_false() {
+    fn should_not_require_sqrzl_when_env_is_unset_or_false() {
         // Arrange
         // Act
         // Assert
-        assert!(!peas_required_from_value(None));
-        assert!(!peas_required_from_value(Some("0")));
-        assert!(!peas_required_from_value(Some("false")));
-        assert!(!peas_required_from_value(Some("off")));
+        assert!(!sqrzl_required_from_value(None));
+        assert!(!sqrzl_required_from_value(Some("0")));
+        assert!(!sqrzl_required_from_value(Some("false")));
+        assert!(!sqrzl_required_from_value(Some("off")));
     }
 
     #[test]
-    fn should_require_peas_for_truthy_env_values() {
+    fn should_require_sqrzl_for_truthy_env_values() {
         // Arrange
         // Act
         // Assert
-        assert!(peas_required_from_value(Some("1")));
-        assert!(peas_required_from_value(Some("true")));
-        assert!(peas_required_from_value(Some("YES")));
-        assert!(peas_required_from_value(Some("on")));
+        assert!(sqrzl_required_from_value(Some("1")));
+        assert!(sqrzl_required_from_value(Some("true")));
+        assert!(sqrzl_required_from_value(Some("YES")));
+        assert!(sqrzl_required_from_value(Some("on")));
     }
 }

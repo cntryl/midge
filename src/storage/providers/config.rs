@@ -253,7 +253,7 @@ impl GcsCredentialSource {
 pub enum GcsApiStyle {
     /// Native JSON API (`/storage/v1`, `/upload/storage/v1`).
     Json,
-    /// XML API with GOOG1 HMAC signing. This is the preferred Peas path.
+    /// XML API with GOOG1 HMAC signing. This is the preferred Sqrzl path.
     Xml,
 }
 
@@ -492,11 +492,13 @@ impl CloudProviderConfig {
         }
     }
 
-    pub fn peas_s3(bucket: impl Into<String>) -> Self {
+    /// Create an S3-compatible configuration for the local Sqrzl emulator.
+    pub fn sqrzl_s3(bucket: impl Into<String>) -> Self {
         Self::s3_compatible_static(bucket, "http://127.0.0.1:9000", "admin", "easy-peasy")
     }
 
-    pub fn peas_azure(container: impl Into<String>) -> Self {
+    /// Create an Azure Blob configuration for the local Sqrzl emulator.
+    pub fn sqrzl_azure(container: impl Into<String>) -> Self {
         Self::AzureBlob {
             account: "admin".to_string(),
             container: container.into(),
@@ -505,10 +507,11 @@ impl CloudProviderConfig {
         }
     }
 
-    pub fn peas_gcs(bucket: impl Into<String>) -> Self {
+    /// Create a GCS XML configuration for the local Sqrzl emulator.
+    pub fn sqrzl_gcs(bucket: impl Into<String>) -> Self {
         Self::Gcs {
             bucket: bucket.into(),
-            project_id: "peas".to_string(),
+            project_id: "sqrzl".to_string(),
             endpoint: Some("http://127.0.0.1:9000".to_string()),
             api: GcsApiStyle::Xml,
             credential: GcsCredentialSource::hmac_key("admin", "easy-peasy"),

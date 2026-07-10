@@ -79,7 +79,7 @@ jobs:
         run: cargo build --all-targets
 
   cloud-integration:
-    name: Cloud integration (Peas)
+    name: Cloud integration (Sqrzl)
     runs-on: ubuntu-latest
 
     env:
@@ -99,15 +99,15 @@ jobs:
         with:
           shared-key: "ci-cloud-integration"
 
-      - name: Start Peas emulator
-        run: docker compose up -d peas
+      - name: Start Sqrzl emulator
+        run: docker compose up -d sqrzl
 
-      - name: Peas qualification
-        run: cargo test --lib --features peas-tests storage::providers::qualification -- --test-threads=1
+      - name: Sqrzl qualification
+        run: cargo test --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1
 
-      - name: Full test suite against Peas emulator
+      - name: Full test suite against Sqrzl emulator
         run: cargo test
 
-      - name: Stop Peas emulator
+      - name: Stop Sqrzl emulator
         if: always()
         run: docker compose down -v

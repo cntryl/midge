@@ -46,8 +46,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
 
-      - name: Start Peas emulator
-        run: docker compose up -d peas
+      - name: Start Sqrzl emulator
+        run: docker compose up -d sqrzl
 
       - name: Full test suite
         run: cargo test
@@ -76,7 +76,7 @@ jobs:
       - name: Verify checked-in sample database
         run: cargo run --bin midge -- verify --json tests/fixtures/compatibility/v2_empty_db
 
-      - name: Stop Peas emulator
+      - name: Stop Sqrzl emulator
         if: always()
         run: docker compose down -v
 

@@ -54,7 +54,7 @@ mod factory;
 pub mod gcs;
 #[cfg(feature = "cloud-common")]
 mod gcs_resolver;
-#[cfg(all(test, feature = "cloud-common", feature = "peas-tests"))]
+#[cfg(all(test, feature = "cloud-common", feature = "sqrzl-tests"))]
 pub mod qualification;
 #[cfg(feature = "cloud-common")]
 pub mod s3;
