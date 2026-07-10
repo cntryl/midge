@@ -415,6 +415,7 @@ pub fn capture_runtime_perf_snapshot(engine: &Engine) -> RuntimePerfSnapshot {
     let metrics = engine
         .get_runtime_metrics()
         .expect("capture runtime performance snapshot");
+    let read_path = cntryl_midge::diagnostics::read_path_diagnostics_snapshot_for_benchmarks();
     RuntimePerfSnapshot {
         write_stalls_total: metrics.write_stalls_total,
         write_stalls_memory_total: metrics.write_stalls_memory_total,
@@ -434,20 +435,20 @@ pub fn capture_runtime_perf_snapshot(engine: &Engine) -> RuntimePerfSnapshot {
         cloud_async_wal_seal_latency_us: metrics.cloud_async_wal_seal_latency_us,
         cloud_async_wal_upload_latency_us: metrics.cloud_async_wal_upload_latency_us,
         cloud_async_wal_ack_latency_us: metrics.cloud_async_wal_ack_latency_us,
-        read_only_begin_tx_count: 0,
-        read_only_snapshot_cache_hits: 0,
-        read_only_snapshot_cache_misses: 0,
-        snapshot_register_count: 0,
-        snapshot_unregister_count: 0,
-        sst_reader_cache_hits: 0,
-        sst_reader_cache_misses: 0,
-        sst_block_cache_hits: 0,
-        sst_block_cache_misses: 0,
-        candidate_sst_files_checked: 0,
-        candidate_blocks_checked: 0,
-        data_blocks_read: 0,
-        bloom_rejects: 0,
-        range_tombstone_scans: 0,
+        read_only_begin_tx_count: read_path.read_only_begin_tx_count,
+        read_only_snapshot_cache_hits: read_path.read_only_snapshot_cache_hits,
+        read_only_snapshot_cache_misses: read_path.read_only_snapshot_cache_misses,
+        snapshot_register_count: read_path.snapshot_register_count,
+        snapshot_unregister_count: read_path.snapshot_unregister_count,
+        sst_reader_cache_hits: read_path.sst_reader_cache_hits,
+        sst_reader_cache_misses: read_path.sst_reader_cache_misses,
+        sst_block_cache_hits: read_path.sst_block_cache_hits,
+        sst_block_cache_misses: read_path.sst_block_cache_misses,
+        candidate_sst_files_checked: read_path.candidate_sst_files_checked,
+        candidate_blocks_checked: read_path.candidate_blocks_checked,
+        data_blocks_read: read_path.data_blocks_read,
+        bloom_rejects: read_path.bloom_rejects,
+        range_tombstone_scans: read_path.range_tombstone_scans,
     }
 }
 
@@ -460,6 +461,7 @@ pub fn runtime_perf_report(engine: &Engine, start: RuntimePerfSnapshot) -> Runti
     let end = engine
         .get_runtime_metrics()
         .expect("capture runtime performance report");
+    let read_path = cntryl_midge::diagnostics::read_path_diagnostics_snapshot_for_benchmarks();
     RuntimePerfReport {
         end_pending_cloud_uploads: end.pending_cloud_uploads,
         end_wal_local_durable_seq: end.wal_local_durable_seq,
@@ -515,20 +517,46 @@ pub fn runtime_perf_report(engine: &Engine, start: RuntimePerfSnapshot) -> Runti
         cloud_async_wal_ack_latency_us: end
             .cloud_async_wal_ack_latency_us
             .saturating_sub(start.cloud_async_wal_ack_latency_us),
-        read_only_begin_tx_count: 0,
-        read_only_snapshot_cache_hits: 0,
-        read_only_snapshot_cache_misses: 0,
-        snapshot_register_count: 0,
-        snapshot_unregister_count: 0,
-        sst_reader_cache_hits: 0,
-        sst_reader_cache_misses: 0,
-        sst_block_cache_hits: 0,
-        sst_block_cache_misses: 0,
-        candidate_sst_files_checked: 0,
-        candidate_blocks_checked: 0,
-        data_blocks_read: 0,
-        bloom_rejects: 0,
-        range_tombstone_scans: 0,
+        read_only_begin_tx_count: read_path
+            .read_only_begin_tx_count
+            .saturating_sub(start.read_only_begin_tx_count),
+        read_only_snapshot_cache_hits: read_path
+            .read_only_snapshot_cache_hits
+            .saturating_sub(start.read_only_snapshot_cache_hits),
+        read_only_snapshot_cache_misses: read_path
+            .read_only_snapshot_cache_misses
+            .saturating_sub(start.read_only_snapshot_cache_misses),
+        snapshot_register_count: read_path
+            .snapshot_register_count
+            .saturating_sub(start.snapshot_register_count),
+        snapshot_unregister_count: read_path
+            .snapshot_unregister_count
+            .saturating_sub(start.snapshot_unregister_count),
+        sst_reader_cache_hits: read_path
+            .sst_reader_cache_hits
+            .saturating_sub(start.sst_reader_cache_hits),
+        sst_reader_cache_misses: read_path
+            .sst_reader_cache_misses
+            .saturating_sub(start.sst_reader_cache_misses),
+        sst_block_cache_hits: read_path
+            .sst_block_cache_hits
+            .saturating_sub(start.sst_block_cache_hits),
+        sst_block_cache_misses: read_path
+            .sst_block_cache_misses
+            .saturating_sub(start.sst_block_cache_misses),
+        candidate_sst_files_checked: read_path
+            .candidate_sst_files_checked
+            .saturating_sub(start.candidate_sst_files_checked),
+        candidate_blocks_checked: read_path
+            .candidate_blocks_checked
+            .saturating_sub(start.candidate_blocks_checked),
+        data_blocks_read: read_path
+            .data_blocks_read
+            .saturating_sub(start.data_blocks_read),
+        bloom_rejects: read_path.bloom_rejects.saturating_sub(start.bloom_rejects),
+        range_tombstone_scans: read_path
+            .range_tombstone_scans
+            .saturating_sub(start.range_tombstone_scans),
     }
 }
 

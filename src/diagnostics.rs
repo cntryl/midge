@@ -15,6 +15,52 @@ static READ_ONLY_SNAPSHOT_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 static SNAPSHOT_REGISTER_COUNT: AtomicU64 = AtomicU64::new(0);
 static SNAPSHOT_UNREGISTER_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Read-path counters captured for benchmark diagnostics.
+///
+/// This is an internal, doc-hidden API. Consumers should capture two snapshots
+/// and subtract them to report one measured window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct ReadPathDiagnosticsSnapshot {
+    pub read_only_begin_tx_count: u64,
+    pub read_only_snapshot_cache_hits: u64,
+    pub read_only_snapshot_cache_misses: u64,
+    pub snapshot_register_count: u64,
+    pub snapshot_unregister_count: u64,
+    pub sst_reader_cache_hits: u64,
+    pub sst_reader_cache_misses: u64,
+    pub sst_block_cache_hits: u64,
+    pub sst_block_cache_misses: u64,
+    pub candidate_sst_files_checked: u64,
+    pub candidate_blocks_checked: u64,
+    pub data_blocks_read: u64,
+    pub bloom_rejects: u64,
+    pub range_tombstone_scans: u64,
+}
+
+/// Capture global read-path counters for benchmark diagnostics.
+#[must_use]
+#[doc(hidden)]
+pub fn read_path_diagnostics_snapshot_for_benchmarks() -> ReadPathDiagnosticsSnapshot {
+    let sst = crate::sst::read_path_metrics::global_sst_read_metrics();
+    ReadPathDiagnosticsSnapshot {
+        read_only_begin_tx_count: READ_ONLY_BEGIN_TX_COUNT.load(Ordering::Relaxed),
+        read_only_snapshot_cache_hits: READ_ONLY_SNAPSHOT_CACHE_HITS.load(Ordering::Relaxed),
+        read_only_snapshot_cache_misses: READ_ONLY_SNAPSHOT_CACHE_MISSES.load(Ordering::Relaxed),
+        snapshot_register_count: SNAPSHOT_REGISTER_COUNT.load(Ordering::Relaxed),
+        snapshot_unregister_count: SNAPSHOT_UNREGISTER_COUNT.load(Ordering::Relaxed),
+        sst_reader_cache_hits: sst.reader_cache_hits(),
+        sst_reader_cache_misses: sst.reader_cache_misses(),
+        sst_block_cache_hits: sst.block_cache_hits(),
+        sst_block_cache_misses: sst.block_cache_misses(),
+        candidate_sst_files_checked: sst.candidate_sst_files_checked(),
+        candidate_blocks_checked: sst.candidate_blocks_checked(),
+        data_blocks_read: sst.data_blocks_read(),
+        bloom_rejects: sst.bloom_rejects(),
+        range_tombstone_scans: sst.range_tombstone_scans(),
+    }
+}
+
 /// One internal timing sample for `Transaction::commit`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransactionCommitTimingSample {

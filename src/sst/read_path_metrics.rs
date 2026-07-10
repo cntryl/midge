@@ -17,6 +17,42 @@ pub(crate) struct SstReadMetrics {
 }
 
 impl SstReadMetrics {
+    pub(crate) fn reader_cache_hits(&self) -> u64 {
+        self.reader_cache_hits.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn reader_cache_misses(&self) -> u64 {
+        self.reader_cache_misses.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn block_cache_hits(&self) -> u64 {
+        self.block_cache_hits.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn block_cache_misses(&self) -> u64 {
+        self.block_cache_misses.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn candidate_sst_files_checked(&self) -> u64 {
+        self.candidate_sst_files_checked.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn candidate_blocks_checked(&self) -> u64 {
+        self.candidate_blocks_checked.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn data_blocks_read(&self) -> u64 {
+        self.data_blocks_read.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn bloom_rejects(&self) -> u64 {
+        self.bloom_rejects.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn range_tombstone_scans(&self) -> u64 {
+        self.range_tombstone_scans.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn record_reader_cache_hit(&self) {
         self.reader_cache_hits.fetch_add(1, Ordering::Relaxed);
     }

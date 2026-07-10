@@ -2,8 +2,7 @@
 
 use super::CachePolicy;
 use crate::sst::cache::key::CacheKey;
-use parking_lot::Mutex;
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// LRU eviction policy using generation counter
@@ -11,8 +10,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Tracks access order by assigning a monotonically increasing generation
 /// counter to each key on access.
 pub struct LruPolicy {
-    /// Map from key to last access generation
-    generations: Mutex<HashMap<CacheKey, u64>>,
+    /// Concurrent map from key to its last access generation.
+    ///
+    /// Hits only contend on the shard containing their key. The generation
+    /// itself is atomic so every hit can synchronously publish exact recency
+    /// without taking a policy-wide lock.
+    generations: DashMap<CacheKey, AtomicU64>,
     /// Current generation counter (incremented on each access)
     generation: AtomicU64,
 }
@@ -22,7 +25,7 @@ impl LruPolicy {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            generations: Mutex::new(HashMap::new()),
+            generations: DashMap::new(),
             generation: AtomicU64::new(0),
         }
     }
@@ -40,8 +43,17 @@ impl CachePolicy for LruPolicy {
     /// Assigns a new generation counter to track recency.
     #[inline]
     fn on_access(&self, key: CacheKey) {
-        let gen = self.generation.fetch_add(1, Ordering::Relaxed);
-        self.generations.lock().insert(key, gen);
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed);
+        if let Some(entry) = self.generations.get(&key) {
+            entry.store(generation, Ordering::Release);
+            return;
+        }
+
+        let entry = self
+            .generations
+            .entry(key)
+            .or_insert_with(|| AtomicU64::new(generation));
+        entry.store(generation, Ordering::Release);
     }
 
     /// Pick a victim for eviction
@@ -49,34 +61,37 @@ impl CachePolicy for LruPolicy {
     /// Finds the key with the smallest generation (least recently used)
     /// among non-excluded types.
     fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
-        let mut generations = self.generations.lock();
-
-        let victim = if exclude_types.is_empty() {
-            // Fast path: no exclusions, just find global minimum
-            generations
+        loop {
+            let candidate = self
+                .generations
                 .iter()
-                .min_by_key(|(_, &gen)| gen)
-                .map(|(&key, _)| key)
-        } else {
-            // With exclusions, filter first
-            generations
-                .iter()
-                .filter(|(key, _)| !exclude_types.contains(&key.block_type))
-                .min_by_key(|(_, &gen)| gen)
-                .map(|(&key, _)| key)
-        };
+                .filter(|entry| {
+                    exclude_types.is_empty() || !exclude_types.contains(&entry.key().block_type)
+                })
+                .map(|entry| (*entry.key(), entry.value().load(Ordering::Acquire)))
+                .min_by_key(|(_, generation)| *generation);
 
-        if let Some(key) = victim {
-            generations.remove(&key);
+            let (key, generation) = candidate?;
+
+            // A hit can update a candidate while the scan is in progress.
+            // Remove only if the exact generation we selected is still live;
+            // otherwise rescan to retain exact LRU ordering.
+            if self
+                .generations
+                .remove_if(&key, |_, current_generation| {
+                    current_generation.load(Ordering::Acquire) == generation
+                })
+                .is_some()
+            {
+                return Some(key);
+            }
         }
-
-        victim
     }
 
     /// Remove a key from tracking
     #[inline]
     fn on_remove(&self, key: CacheKey) {
-        self.generations.lock().remove(&key);
+        self.generations.remove(&key);
     }
 
     /// Mark a key as stale and remove it
@@ -85,18 +100,23 @@ impl CachePolicy for LruPolicy {
     /// Just clean up tracking state.
     #[inline]
     fn on_stale(&self, key: CacheKey) {
-        self.on_remove(key);
+        // `pick_victim` conditionally removes its selected generation. A stale
+        // cache entry therefore has no policy entry left to clean up. Leaving
+        // a concurrent fresh access alone is essential for exact recency.
+        let _ = key;
     }
 
     /// Clear all state
     fn clear(&self) {
-        self.generations.lock().clear();
+        self.generations.clear();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Barrier;
+    use std::thread;
 
     #[test]
     fn should_evict_least_recently_used() {
@@ -278,5 +298,53 @@ mod tests {
         // Assert - key should still be evicted once
         assert_eq!(victim, Some(key));
         assert_eq!(policy.pick_victim(&[]), None);
+    }
+
+    #[test]
+    fn should_preserve_fresh_access_when_stale_victim_is_reported() {
+        // Arrange
+        let policy = LruPolicy::new();
+        let key = CacheKey::for_data(1, 0);
+
+        // Act
+        policy.on_access(key);
+        assert_eq!(policy.pick_victim(&[]), Some(key));
+        policy.on_access(key);
+        policy.on_stale(key);
+
+        // Assert - stale cleanup must not erase the new synchronous access.
+        assert_eq!(policy.pick_victim(&[]), Some(key));
+    }
+
+    #[test]
+    fn should_evict_cold_key_after_concurrent_hot_key_accesses() {
+        // Arrange
+        let policy = std::sync::Arc::new(LruPolicy::new());
+        let cold_key = CacheKey::for_data(1, 0);
+        let hot_key = CacheKey::for_data(2, 0);
+        policy.on_access(cold_key);
+        policy.on_access(hot_key);
+        let barrier = std::sync::Arc::new(Barrier::new(9));
+        let mut workers = Vec::new();
+
+        // Act
+        for _ in 0..8 {
+            let policy = std::sync::Arc::clone(&policy);
+            let barrier = std::sync::Arc::clone(&barrier);
+            workers.push(thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..1_000 {
+                    policy.on_access(hot_key);
+                }
+            }));
+        }
+        barrier.wait();
+        for worker in workers {
+            worker.join().expect("hot-key worker should not panic");
+        }
+
+        // Assert
+        assert_eq!(policy.pick_victim(&[]), Some(cold_key));
+        assert_eq!(policy.pick_victim(&[]), Some(hot_key));
     }
 }
