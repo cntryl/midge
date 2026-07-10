@@ -290,6 +290,16 @@ name = "tier3_system_sst"
 path = "benches/tier3_system_sst.rs"
 harness = false
 
+[[bench]]
+name = "tier3_system_scan"
+path = "benches/tier3_system_scan.rs"
+harness = false
+
+[[bench]]
+name = "tier3_system_lifecycle"
+path = "benches/tier3_system_lifecycle.rs"
+harness = false
+
 # Tier 4
 [[bench]]
 name = "tier4_ycsb_workload_a"

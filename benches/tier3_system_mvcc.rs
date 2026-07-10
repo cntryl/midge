@@ -32,15 +32,9 @@ fn run_read_old_version_case(
     ctx.parameter("operation_surface", "mvcc_old_version_read");
     ctx.parameter("begin_tx_included", "false");
     ctx.parameter("rotating_key_count", num_keys);
-    match scenario {
-        "tier3_mvcc_read_old_version_cloud" => {
-            stress_config::mark_capped_probe(ctx, "old_version_cloud_snapshot_read_window");
-        }
-        "tier3_mvcc_read_old_version_local" => {
-            stress_config::mark_capped_probe(ctx, "old_version_local_snapshot_read_window");
-        }
-        _ => {}
-    }
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata("diagnostic_reason", "pending_three_clean_baselines");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
 
     let write_opts = stress_config::measured_write_options(&opts);
     let engine = setup_engine(opts);
@@ -85,7 +79,9 @@ fn run_read_old_version_case(
     engine.compact_all().unwrap();
 
     let expected = vec![1u8; VALUE_SIZE];
+    let read_path_before = engine.read_path_diagnostics_snapshot_for_benchmarks();
     let mut key_index = 0usize;
+    let mut validation_failures = 0_u64;
 
     let _ = ctx.measure_batch(scenario, OLD_VERSION_READ_BATCH_SIZE as u64, || {
         for _ in 0..OLD_VERSION_READ_BATCH_SIZE {
@@ -97,10 +93,31 @@ fn run_read_old_version_case(
             } else {
                 false
             };
-            std::hint::black_box(visible);
+            if !visible {
+                validation_failures += 1;
+            }
         }
     });
 
+    let read_path_after = engine.read_path_diagnostics_snapshot_for_benchmarks();
+    ctx.parameter(
+        "read_only_begin_tx_delta",
+        read_path_after.read_only_begin_tx_count - read_path_before.read_only_begin_tx_count,
+    );
+    ctx.parameter(
+        "candidate_sst_files_checked_delta",
+        read_path_after.candidate_sst_files_checked - read_path_before.candidate_sst_files_checked,
+    );
+    ctx.parameter(
+        "candidate_blocks_checked_delta",
+        read_path_after.candidate_blocks_checked - read_path_before.candidate_blocks_checked,
+    );
+    assert_eq!(validation_failures, 0, "measured MVCC reads must validate");
+
+    // Engine shutdown waits for active transaction guards so it cannot release
+    // its lease while a snapshot still references the runtime. End the
+    // snapshot before dropping the engine to avoid waiting on our own guard.
+    drop(snap_tx);
     drop(engine);
 }
 

@@ -55,6 +55,10 @@ Stress artifacts are written under `target/stress/{suite}/` as `latest.json`,
   storage/runtime behavior.
 - Tier 4: workload rows. Duration-based end-to-end workloads such as YCSB.
 
+Tier 3 owns clean open/drop lifecycle coverage over empty persisted state.
+Tier 4 owns recovery and reopen measurements once persisted state (WAL,
+manifest, flush, or compaction layout) changes the recovery question.
+
 `cntryl-stress` derives the benchmark mode from the tier:
 
 - Tier 1: micro timing

@@ -58,7 +58,10 @@ fn run_single_get_case(ctx: &mut StressContext, scenario: &'static str, opts: Mi
         engine.flush_cf(&cf).unwrap(); // Ensure durability before measurement
     }
 
+    let read_path_before = engine.read_path_diagnostics_snapshot_for_benchmarks();
+    let expected = vec![1u8; 128];
     let mut key_index = 0usize;
+    let mut validation_failures = 0_u64;
 
     let _ = ctx
         .benchmark(scenario)
@@ -71,9 +74,33 @@ fn run_single_get_case(ctx: &mut StressContext, scenario: &'static str, opts: Mi
                 let tx = engine
                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
                     .expect("begin");
-                let _ = tx.get(&key[..]).unwrap();
+                match tx.get(&key[..]) {
+                    Ok(Some(value)) if value.as_ref() == expected.as_slice() => {}
+                    _ => validation_failures += 1,
+                }
             }
         });
+
+    let read_path_after = engine.read_path_diagnostics_snapshot_for_benchmarks();
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata("diagnostic_reason", "pending_three_clean_baselines");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
+    ctx.parameter(
+        "read_only_begin_tx_delta",
+        read_path_after.read_only_begin_tx_count - read_path_before.read_only_begin_tx_count,
+    );
+    ctx.parameter(
+        "candidate_sst_files_checked_delta",
+        read_path_after.candidate_sst_files_checked - read_path_before.candidate_sst_files_checked,
+    );
+    ctx.parameter(
+        "candidate_blocks_checked_delta",
+        read_path_after.candidate_blocks_checked - read_path_before.candidate_blocks_checked,
+    );
+    assert_eq!(
+        validation_failures, 0,
+        "measured engine reads must validate"
+    );
 
     drop(engine);
 }

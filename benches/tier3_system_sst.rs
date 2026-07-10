@@ -40,6 +40,9 @@ fn run_sst_point_seek_case(
     ctx.parameter("operation_surface", "sst_point_seek");
     ctx.parameter("begin_tx_included", "false");
     ctx.parameter("rotating_key_count", num_keys);
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata("diagnostic_reason", "pending_three_clean_baselines");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
 
     let write_opts = stress_config::measured_write_options(&opts);
     let engine = setup_engine(opts);
@@ -67,6 +70,8 @@ fn run_sst_point_seek_case(
         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin");
     let mut key_index = num_keys / 2;
+    let read_path_before = engine.read_path_diagnostics_snapshot_for_benchmarks();
+    let mut validation_failures = 0_u64;
 
     let _ = ctx
         .benchmark(scenario)
@@ -76,10 +81,40 @@ fn run_sst_point_seek_case(
             for _ in 0..SST_POINT_SEEK_BATCH_SIZE {
                 let key = keys[key_index % keys.len()];
                 key_index = key_index.wrapping_add(1);
-                let _ = tx.get(&key[..]).unwrap();
+                let expected = vec![
+                    u8::try_from(key_index.wrapping_sub(1) % keys.len() % 251)
+                        .expect("value byte fits in u8");
+                    VALUE_SIZE
+                ];
+                match tx.get(&key[..]) {
+                    Ok(Some(value)) if value.as_ref() == expected.as_slice() => {}
+                    _ => validation_failures += 1,
+                }
             }
         });
 
+    let read_path_after = engine.read_path_diagnostics_snapshot_for_benchmarks();
+    ctx.parameter(
+        "candidate_sst_files_checked_delta",
+        read_path_after.candidate_sst_files_checked - read_path_before.candidate_sst_files_checked,
+    );
+    ctx.parameter(
+        "candidate_blocks_checked_delta",
+        read_path_after.candidate_blocks_checked - read_path_before.candidate_blocks_checked,
+    );
+    assert_eq!(
+        validation_failures, 0,
+        "measured SST point reads must validate"
+    );
+    assert!(
+        read_path_after.candidate_sst_files_checked > read_path_before.candidate_sst_files_checked
+            && read_path_after.candidate_blocks_checked > read_path_before.candidate_blocks_checked,
+        "SST point row must exercise candidate SST and block work"
+    );
+
+    // Engine shutdown waits for active transaction guards. Release the
+    // read snapshot before dropping the engine so this benchmark can finish.
+    drop(tx);
     drop(engine);
 }
 
@@ -94,6 +129,9 @@ fn run_sst_range_seek_case(
     ctx.parameter("operation_surface", "sst_range_seek_first_row");
     ctx.parameter("begin_tx_included", "false");
     ctx.parameter("rotating_key_count", num_keys);
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata("diagnostic_reason", "pending_three_clean_baselines");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
 
     let write_opts = stress_config::measured_write_options(&opts);
     let engine = setup_engine(opts);
@@ -121,6 +159,8 @@ fn run_sst_range_seek_case(
         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin");
     let mut key_index = 0usize;
+    let read_path_before = engine.read_path_diagnostics_snapshot_for_benchmarks();
+    let mut validation_failures = 0_u64;
 
     let _ = ctx.measure_batch(scenario, SST_RANGE_SEEK_BATCH_SIZE as u64, || {
         for _ in 0..SST_RANGE_SEEK_BATCH_SIZE {
@@ -132,10 +172,39 @@ fn run_sst_range_seek_case(
                 .start_key(cntryl_midge::Bytes::copy_from_slice(&start[..]))
                 .end_key(cntryl_midge::Bytes::copy_from_slice(&end[..]));
             let mut it = tx.scan(&query).expect("scan failed");
-            let _ = it.next();
+            let expected_value =
+                vec![u8::try_from(start_index % 251).expect("value byte fits"); VALUE_SIZE];
+            match it.next() {
+                Some((key, value))
+                    if key.as_slice() == start.as_slice()
+                        && value.as_slice() == expected_value.as_slice() => {}
+                _ => validation_failures += 1,
+            }
         }
     });
 
+    let read_path_after = engine.read_path_diagnostics_snapshot_for_benchmarks();
+    ctx.parameter(
+        "candidate_sst_files_checked_delta",
+        read_path_after.candidate_sst_files_checked - read_path_before.candidate_sst_files_checked,
+    );
+    ctx.parameter(
+        "candidate_blocks_checked_delta",
+        read_path_after.candidate_blocks_checked - read_path_before.candidate_blocks_checked,
+    );
+    assert_eq!(
+        validation_failures, 0,
+        "measured SST range reads must validate"
+    );
+    assert!(
+        read_path_after.candidate_sst_files_checked > read_path_before.candidate_sst_files_checked
+            && read_path_after.candidate_blocks_checked > read_path_before.candidate_blocks_checked,
+        "SST range row must exercise candidate SST and block work"
+    );
+
+    // Engine shutdown waits for active transaction guards. Release the
+    // read snapshot before dropping the engine so this benchmark can finish.
+    drop(tx);
     drop(engine);
 }
 
@@ -155,6 +224,12 @@ fn tier3_sst_point_seek_cloud(ctx: &mut StressContext) {
 fn tier3_sst_range_seek_local(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("local");
     run_sst_range_seek_case(ctx, "tier3_sst_range_seek_local", opts, 10_000);
+}
+
+#[stress(tier = 3)]
+fn tier3_sst_range_seek_cloud(ctx: &mut StressContext) {
+    let opts = stress_config::opts_for_mode("cloud");
+    run_sst_range_seek_case(ctx, "tier3_sst_range_seek_cloud", opts, 10_000);
 }
 
 stress_main!();

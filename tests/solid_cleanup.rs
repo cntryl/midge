@@ -796,3 +796,57 @@ fn should_keep_engine_backed_provider_qualification_out_of_storage_layer() {
         "engine-backed provider qualification should live in integration tests"
     );
 }
+
+#[test]
+fn should_keep_tier3_system_benchmarks_verified_and_registered() {
+    // Arrange
+    let manifest = read_source("Cargo.toml");
+    let engine = read_source("benches/tier3_system_engine.rs");
+    let mvcc = read_source("benches/tier3_system_mvcc.rs");
+    let sst = read_source("benches/tier3_system_sst.rs");
+    let scan = read_source("benches/tier3_system_scan.rs");
+    let lifecycle = read_source("benches/tier3_system_lifecycle.rs");
+
+    // Act
+    let existing_read_rows = [&engine, &mvcc, &sst];
+
+    // Assert
+    for target in [
+        "tier3_system_engine",
+        "tier3_system_mvcc",
+        "tier3_system_sst",
+        "tier3_system_scan",
+        "tier3_system_lifecycle",
+    ] {
+        assert!(manifest.contains(&format!("name = \"{target}\"")));
+    }
+    for row in existing_read_rows {
+        assert!(row.contains("pending_three_clean_baselines"));
+        assert!(row.contains("local_gate_rsd_limit_pct"));
+        assert!(row.contains("read_path_diagnostics_snapshot_for_benchmarks"));
+        assert!(row.contains("validation_failures"));
+    }
+    assert!(sst.contains("tier3_sst_range_seek_cloud"));
+    assert!(scan.contains("scan_seek_first_row"));
+    assert!(scan.contains("candidate_sst_files_checked"));
+    assert!(scan.contains("candidate_blocks_checked"));
+    assert!(lifecycle.contains("write_and_flush_cycle"));
+    assert!(lifecycle.contains("clean_reopen"));
+
+    for (source, transaction_drop) in [
+        (&mvcc, "drop(snap_tx);"),
+        (&sst, "drop(tx);"),
+        (&scan, "drop(snapshot);"),
+    ] {
+        let transaction_teardown = source
+            .find(transaction_drop)
+            .expect("Tier 3 row must drop its read transaction");
+        let engine_teardown = source
+            .find("drop(engine);")
+            .expect("Tier 3 row must drop its engine");
+        assert!(
+            transaction_teardown < engine_teardown,
+            "Tier 3 snapshots must end before engine shutdown"
+        );
+    }
+}

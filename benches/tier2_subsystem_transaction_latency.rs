@@ -304,15 +304,17 @@ fn run_transaction_coalescing_signal(
     let start = engine
         .get_runtime_metrics()
         .expect("get starting runtime metrics");
-    let barrier = Arc::new(Barrier::new(COALESCING_CLIENTS));
+    // The signal measures WAL submission coalescing, not snapshot-acquisition
+    // scheduling. Coordinate clients immediately before commit so every
+    // transaction is already prepared when the write-group collector runs.
+    let commit_barrier = Arc::new(Barrier::new(COALESCING_CLIENTS));
     let mut handles = Vec::with_capacity(COALESCING_CLIENTS);
 
     for client_id in 0..COALESCING_CLIENTS {
         let engine_clone = Arc::clone(engine);
-        let barrier_clone = Arc::clone(&barrier);
+        let commit_barrier_clone = Arc::clone(&commit_barrier);
 
         handles.push(std::thread::spawn(move || {
-            barrier_clone.wait();
             for txn_id in 0..COALESCING_TXNS_PER_CLIENT {
                 let mut tx = engine_clone
                     .begin_tx(cf_id, TransactionMode::ReadWrite)
@@ -322,6 +324,7 @@ fn run_transaction_coalescing_signal(
                     u8::try_from((client_id + txn_id) % 251).expect("value byte fits in u8");
                 tx.put(key, vec![value_byte; COALESCING_VALUE_SIZE], None)
                     .expect("put coalescing value");
+                commit_barrier_clone.wait();
                 tx.commit(WriteOptions::buffered())
                     .expect("commit coalescing transaction");
             }
