@@ -281,11 +281,6 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn sync(&self) -> MidgeResult<()> {
-        // Developer convenience: allow skipping WAL fsync during benches/dev runs
-        if std::env::var_os("MIDGE_SKIP_WAL_SYNC").is_some() {
-            return Ok(());
-        }
-
         // Request a durable fsync and wait for writer to perform it.
         // Note: we MUST request fsync even if queue is empty, because data may have
         // been written to the file but not yet fsynced (the writer thread writes
@@ -387,8 +382,128 @@ impl Drop for FsWalWriterIo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::traits::{DirEntry, FileCaps, Metadata};
+    use crate::io::{Durability, File, FsResult, OpenOptions};
     use crate::wal::types::{WalOpKind, WalRecord};
     use bytes::Bytes;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct SyncCountingFile {
+        inner: Box<dyn File>,
+        durable_sync_count: Arc<AtomicUsize>,
+    }
+
+    impl File for SyncCountingFile {
+        fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
+            self.inner.read_at(offset, len)
+        }
+
+        fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
+            self.inner.write_at(offset, data)
+        }
+
+        fn append(&mut self, data: Bytes) -> FsResult<u64> {
+            self.inner.append(data)
+        }
+
+        fn len(&self) -> FsResult<u64> {
+            self.inner.len()
+        }
+
+        fn sync(&mut self, durability: Durability) -> FsResult<()> {
+            self.inner.sync(durability)?;
+            if durability == Durability::Durable {
+                self.durable_sync_count.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
+        fn close(self: Box<Self>) -> FsResult<()> {
+            self.inner.close()
+        }
+
+        fn caps(&self) -> FileCaps {
+            self.inner.caps()
+        }
+    }
+
+    #[derive(Default)]
+    struct SyncCountingFs {
+        inner: crate::io::MockFs,
+        durable_sync_count: Arc<AtomicUsize>,
+    }
+
+    impl Fs for SyncCountingFs {
+        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            self.inner.open(path, options)
+        }
+
+        fn open_persistent_handle(
+            &self,
+            path: &FsPath,
+            options: OpenOptions,
+        ) -> FsResult<Box<dyn File>> {
+            Ok(Box::new(SyncCountingFile {
+                inner: self.inner.open_persistent_handle(path, options)?,
+                durable_sync_count: Arc::clone(&self.durable_sync_count),
+            }))
+        }
+
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+
+        fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+
+        fn sync_dir(&self, path: &FsPath, durability: Durability) -> FsResult<()> {
+            self.inner.sync_dir(path, durability)
+        }
+
+        fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+            self.inner.rename_atomic(from, to)
+        }
+    }
+
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.name, previous);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
 
     #[test]
     fn should_create_wal_writer_io() -> MidgeResult<()> {
@@ -414,6 +529,22 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn should_sync_durably_when_legacy_skip_variable_is_set() -> MidgeResult<()> {
+        // Arrange
+        let _environment_guard = EnvVarGuard::set("MIDGE_SKIP_WAL_SYNC", "1");
+        let fs = Arc::new(SyncCountingFs::default());
+        let sync_count = Arc::clone(&fs.durable_sync_count);
+        let writer = FsWalWriterIo::new("wal.log", fs)?;
+
+        // Act
+        writer.sync()?;
+
+        // Assert
+        assert_eq!(sync_count.load(Ordering::SeqCst), 1);
         Ok(())
     }
 
