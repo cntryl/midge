@@ -69,24 +69,24 @@ impl ManifestCoordinator {
             return HandleOutcome::Continue;
         }
 
-        event_loop.force_wal_sync(msg_rx);
-
-        let result = event_loop
-            .manifest_actor
-            .create_column_family(&mut event_loop.state, name)
-            .and_then(|cf_id| {
-                event_loop
-                    .mirror_metadata_after_local_commit("create column family")
-                    .map(|()| cf_id)
-            });
+        let result = event_loop.force_wal_sync(msg_rx).and_then(|()| {
+            event_loop
+                .manifest_actor
+                .create_column_family(&mut event_loop.state, name)
+                .and_then(|cf_id| {
+                    event_loop
+                        .mirror_metadata_after_local_commit("create column family")
+                        .map(|()| cf_id)
+                })
+        });
+        let should_publish = result.is_ok();
         let resp = result.map_or_else(
-            |error| RuntimeResponse::Error {
-                request_id,
-                error: crate::common::MidgeError::Internal(error.to_string()),
-            },
+            |error| RuntimeResponse::Error { request_id, error },
             |cf_id| RuntimeResponse::ColumnFamilyCreated { request_id, cf_id },
         );
-        event_loop.publish_snapshot();
+        if should_publish {
+            event_loop.publish_snapshot();
+        }
         event_loop.respond(request_id, resp);
         HandleOutcome::Continue
     }
@@ -115,12 +115,12 @@ impl ManifestCoordinator {
             return HandleOutcome::Continue;
         }
 
-        event_loop.force_wal_sync(msg_rx);
-
-        let result = event_loop
-            .manifest_actor
-            .drop_column_family(&mut event_loop.state, cf_id)
-            .and_then(|()| event_loop.mirror_metadata_after_local_commit("drop column family"));
+        let result = event_loop.force_wal_sync(msg_rx).and_then(|()| {
+            event_loop
+                .manifest_actor
+                .drop_column_family(&mut event_loop.state, cf_id)
+                .and_then(|()| event_loop.mirror_metadata_after_local_commit("drop column family"))
+        });
         if result.is_ok() {
             event_loop.publish_snapshot();
         }
@@ -134,10 +134,7 @@ impl ManifestCoordinator {
         result: crate::common::MidgeResult<()>,
     ) {
         let resp = result.map_or_else(
-            |error| RuntimeResponse::Error {
-                request_id,
-                error: crate::common::MidgeError::Internal(error.to_string()),
-            },
+            |error| RuntimeResponse::Error { request_id, error },
             |()| RuntimeResponse::Ok { request_id },
         );
         event_loop.respond(request_id, resp);

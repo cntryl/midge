@@ -249,11 +249,14 @@ impl EventLoop {
     /// Force WAL sync even if no pending writes (for DDL durability barriers).
     /// Required before CF metadata mutations to guarantee durability fences.
     /// CRITICAL: Must drain pending writes first so they are included in the sync.
-    pub(super) fn force_wal_sync(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
+    pub(super) fn force_wal_sync(
+        &mut self,
+        msg_rx: &Receiver<RuntimeMsg>,
+    ) -> crate::common::MidgeResult<()> {
         const MAX_DRAIN: usize = 4096;
 
         if self.wal_actor.is_cloud_async() {
-            return; // CloudAsync has separate logic
+            return Ok(()); // CloudAsync has separate logic
         }
 
         // 🔑 Drain any pending writes so they are included in this sync
@@ -261,17 +264,13 @@ impl EventLoop {
 
         // Always sync to establish durability barrier
         // (even if no pending writes or waiters - we're being asked to guarantee durability)
-        match self.wal_actor.sync(&mut self.state) {
-            Ok(sealed_gen) => {
-                // Rotate and complete any pending waiters
-                self.durability.rotate_to(sealed_gen + 1);
-                let completed = self.durability.complete_waiters_at(sealed_gen);
-                self.complete_durability_waiters(completed, CompletionSource::SealedGeneration);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to force WAL sync for durability barrier");
-            }
-        }
+        let sealed_gen = self.wal_actor.sync(&mut self.state)?;
+
+        // Rotate and complete any pending waiters only after successful sync.
+        self.durability.rotate_to(sealed_gen + 1);
+        let completed = self.durability.complete_waiters_at(sealed_gen);
+        self.complete_durability_waiters(completed, CompletionSource::SealedGeneration);
+        Ok(())
     }
 }
 

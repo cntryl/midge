@@ -211,18 +211,21 @@ impl ManifestActor {
             .try_into()
             .unwrap_or(u64::MAX);
 
-        let cf_id = state.manifest.create_column_family(name.clone());
+        let mut candidate_manifest = state.manifest.clone();
+        let cf_id = candidate_manifest.next_cf_id();
+        let edit = crate::metadata::ManifestEdit::CreateColumnFamily {
+            id: cf_id,
+            name: name.clone(),
+            created_at,
+        };
+        candidate_manifest.apply_edit(&edit);
 
         // Append create CF to journal (skip in memory mode)
         if !state.is_memory_mode() {
-            let edit = crate::metadata::ManifestEdit::CreateColumnFamily {
-                id: cf_id,
-                name: name.clone(),
-                created_at,
-            };
             crate::metadata::append_edit(&state.db_path, &edit)?;
         }
 
+        state.manifest = candidate_manifest;
         self.pending_edits += 1;
 
         // Create ColumnFamilyState for the new CF
@@ -247,7 +250,8 @@ impl ManifestActor {
             ));
         }
 
-        if !state.manifest.delete_column_family(cf_id) {
+        let mut candidate_manifest = state.manifest.clone();
+        if !candidate_manifest.delete_column_family(cf_id) {
             return Err(crate::common::MidgeError::Internal(format!(
                 "Column family {cf_id} not found or already deleted"
             )));
@@ -258,6 +262,8 @@ impl ManifestActor {
             let edit = crate::metadata::ManifestEdit::DropColumnFamily { id: cf_id };
             crate::metadata::append_edit(&state.db_path, &edit)?;
         }
+
+        state.manifest = candidate_manifest;
 
         // Remove ColumnFamilyState
         state.column_families.remove(&cf_id);

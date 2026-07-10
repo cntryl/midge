@@ -1622,6 +1622,10 @@ impl WalActor {
         }
 
         if let Some(writer) = &mut self.writer {
+            fail::fail_point!("midge::wal::inject_no_space_on_sync", |_| Err(
+                MidgeError::NoSpace("failpoint: no space on WAL sync".to_string())
+            ));
+
             // CRITICAL: Phase 2.3 - WAL fsync timeout protection
             // Wraps fsync in a timeout to prevent event loop starvation.
             // If fsync blocks >5s (unlikely except on severely degraded storage),

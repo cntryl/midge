@@ -167,6 +167,7 @@ impl Manifest {
     }
 
     /// Create a new column family
+    #[cfg(test)]
     pub fn create_column_family(&mut self, name: String) -> u32 {
         let id = self.next_cf_id();
         let created_at = millis_since_epoch();

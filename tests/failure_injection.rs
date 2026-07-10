@@ -10,6 +10,133 @@ use tempfile::TempDir;
 static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
+fn should_leave_column_family_absent_when_create_manifest_append_fails() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let engine = open_local_engine(db_path);
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::manifest::inject_no_space_on_append_edit", "return")
+        .expect("configure manifest append no-space failpoint");
+
+    // Act
+    let first_attempt = engine.create_column_family("create-atomic");
+    let absent_after_failure = engine.get_column_family("create-atomic").is_none();
+    let second_attempt = engine.create_column_family("create-atomic");
+    fail::remove("midge::manifest::inject_no_space_on_append_edit");
+    scenario.teardown();
+
+    // Assert
+    assert!(matches!(first_attempt, Err(MidgeError::NoSpace(_))));
+    assert!(matches!(second_attempt, Err(MidgeError::NoSpace(_))));
+    assert!(absent_after_failure);
+
+    engine
+        .create_column_family("create-atomic")
+        .expect("retry create after manifest recovers");
+    drop(engine);
+
+    let reopened = open_local_engine(db_path);
+    assert!(reopened.get_column_family("create-atomic").is_some());
+}
+
+#[test]
+fn should_keep_column_family_usable_when_drop_manifest_append_fails() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let engine = open_local_engine(db_path);
+    let cf = engine
+        .create_column_family("drop-atomic")
+        .expect("create column family");
+    write_cf_value(&engine, &cf, b"key", b"value");
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::manifest::inject_no_space_on_append_edit", "return")
+        .expect("configure manifest append no-space failpoint");
+
+    // Act
+    let drop_result = engine.drop_column_family(cf.id());
+    let value_after_failure = read_cf_value(&engine, &cf, b"key");
+    fail::remove("midge::manifest::inject_no_space_on_append_edit");
+    scenario.teardown();
+
+    // Assert
+    assert!(matches!(drop_result, Err(MidgeError::NoSpace(_))));
+    assert_eq!(value_after_failure, Some(Bytes::from_static(b"value")));
+    engine
+        .drop_column_family(cf.id())
+        .expect("retry drop after manifest recovers");
+    drop(engine);
+
+    let reopened = open_local_engine(db_path);
+    assert!(reopened.get_column_family("drop-atomic").is_none());
+}
+
+#[test]
+fn should_reject_column_family_create_when_wal_sync_fails() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let engine = open_local_engine(db_path);
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::wal::inject_no_space_on_sync", "return")
+        .expect("configure WAL sync no-space failpoint");
+
+    // Act
+    let create_result = engine.create_column_family("sync-create");
+    let absent_after_failure = engine.get_column_family("sync-create").is_none();
+    fail::remove("midge::wal::inject_no_space_on_sync");
+    scenario.teardown();
+
+    // Assert
+    assert!(matches!(create_result, Err(MidgeError::NoSpace(_))));
+    assert!(absent_after_failure);
+    engine
+        .create_column_family("sync-create")
+        .expect("create after WAL sync recovers");
+    drop(engine);
+
+    let reopened = open_local_engine(db_path);
+    assert!(reopened.get_column_family("sync-create").is_some());
+}
+
+#[test]
+fn should_reject_column_family_drop_when_wal_sync_fails() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let engine = open_local_engine(db_path);
+    let cf = engine
+        .create_column_family("sync-drop")
+        .expect("create column family");
+    write_cf_value(&engine, &cf, b"key", b"value");
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::wal::inject_no_space_on_sync", "return")
+        .expect("configure WAL sync no-space failpoint");
+
+    // Act
+    let drop_result = engine.drop_column_family(cf.id());
+    let value_after_failure = read_cf_value(&engine, &cf, b"key");
+    fail::remove("midge::wal::inject_no_space_on_sync");
+    scenario.teardown();
+
+    // Assert
+    assert!(matches!(drop_result, Err(MidgeError::NoSpace(_))));
+    assert_eq!(value_after_failure, Some(Bytes::from_static(b"value")));
+    engine
+        .drop_column_family(cf.id())
+        .expect("drop after WAL sync recovers");
+    drop(engine);
+
+    let reopened = open_local_engine(db_path);
+    assert!(reopened.get_column_family("sync-drop").is_none());
+}
+
+#[test]
 fn should_reject_transaction_when_no_space_hits_before_batch_append_and_remain_usable() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
@@ -961,6 +1088,32 @@ fn default_cf(engine: &Engine) -> cntryl_midge::ColumnFamilyHandle {
     engine
         .get_column_family("default")
         .expect("default column family")
+}
+
+fn write_cf_value(
+    engine: &Engine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    key: &[u8],
+    value: &[u8],
+) {
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin column-family write");
+    tx.put(key.to_vec(), value.to_vec(), None)
+        .expect("put column-family value");
+    tx.commit(WriteOptions::sync())
+        .expect("commit column-family value");
+}
+
+fn read_cf_value(
+    engine: &Engine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    key: &[u8],
+) -> Option<Bytes> {
+    engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .and_then(|tx| tx.get(key))
+        .expect("read column-family value")
 }
 
 fn seed_range(
