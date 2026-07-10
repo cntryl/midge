@@ -89,11 +89,7 @@ fn measure_find_block_stable(
         .measure_batch(find_logical_operation_count(), || {
             let mut found = 0u32;
             for _ in 0..FIND_BLOCK_BATCH_SIZE {
-                found = found.wrapping_add(
-                    reader
-                        .find_block(black_box(key))
-                        .unwrap_or(u32::MAX),
-                );
+                found = found.wrapping_add(reader.find_block(black_box(key)).unwrap_or(u32::MAX));
             }
             black_box(found);
         });

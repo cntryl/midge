@@ -109,7 +109,9 @@ fn run_write_phase(
         ..PhaseResult::default()
     };
     for handle in handles {
-        let result = handle.join().expect("compaction pressure worker should finish");
+        let result = handle
+            .join()
+            .expect("compaction pressure worker should finish");
         out.writes = out.writes.wrapping_add(result.writes);
         out.transactions = out.transactions.wrapping_add(result.transactions);
     }
@@ -145,7 +147,15 @@ fn run_compaction_backpressure_case(
         .expect("create compaction pressure column family");
     let cf_id = cf.id();
     let next_key = Arc::new(AtomicU64::new(0));
-    let _warmup = run_write_phase(&engine, cf_id, write_options, &next_key, WRITERS, WARMUP, false);
+    let _warmup = run_write_phase(
+        &engine,
+        cf_id,
+        write_options,
+        &next_key,
+        WRITERS,
+        WARMUP,
+        false,
+    );
 
     let start = ycsb::capture_runtime_perf_snapshot(&engine);
     let measured = run_write_phase(
@@ -171,14 +181,21 @@ fn run_compaction_backpressure_case(
 
     ctx.record_external(scenario, measured.elapsed, measured.writes);
     ctx.set_elements(measured.writes);
-    ctx.set_bytes(measured.writes.saturating_mul((ycsb::KEY_SIZE + VALUE_SIZE) as u64));
+    ctx.set_bytes(
+        measured
+            .writes
+            .saturating_mul((ycsb::KEY_SIZE + VALUE_SIZE) as u64),
+    );
 
     ctx.tag("write_stalls_total", perf.write_stalls_total.to_string());
     ctx.tag(
         "write_stalls_compaction_total",
         perf.write_stalls_compaction_total.to_string(),
     );
-    ctx.tag("write_stalls_cloud_total", perf.write_stalls_cloud_total.to_string());
+    ctx.tag(
+        "write_stalls_cloud_total",
+        perf.write_stalls_cloud_total.to_string(),
+    );
     ctx.tag("wal_append_count", perf.wal_append_count.to_string());
     ctx.tag("wal_fsync_count", perf.wal_fsync_count.to_string());
     ctx.tag(

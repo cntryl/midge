@@ -603,14 +603,13 @@ fn run_decode_field_stable(ctx: &mut StressContext, name: &'static str, data: &[
             || {
                 let mut total = 0usize;
                 for _ in 0..TLV_FIELD_DECODE_BATCH_SIZE {
-                    let (tag, value, consumed) = decode_tlv_field(black_box(encoded.as_ref())).unwrap();
+                    let (tag, value, consumed) =
+                        decode_tlv_field(black_box(encoded.as_ref())).unwrap();
                     total = total.wrapping_add(usize::from(tag));
                     total = total.wrapping_add(value.len());
                     total = total.wrapping_add(consumed);
-                    total = total
-                        .wrapping_add(usize::from(value.first().copied().unwrap_or(0)));
-                    total = total
-                        .wrapping_add(usize::from(value.last().copied().unwrap_or(0)));
+                    total = total.wrapping_add(usize::from(value.first().copied().unwrap_or(0)));
+                    total = total.wrapping_add(usize::from(value.last().copied().unwrap_or(0)));
                 }
                 black_box(total);
             },

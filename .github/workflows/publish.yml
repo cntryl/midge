@@ -40,8 +40,11 @@ jobs:
       - name: Install cntryl-tools
         run: cargo install --git https://github.com/cntryl/tools --locked
 
+      - name: Rustfmt
+        run: cargo fmt --check
+
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
 
       - name: Start Peas emulator
         run: docker compose up -d peas
@@ -71,7 +74,7 @@ jobs:
         run: cntryl-tools validate-tests
 
       - name: Verify checked-in sample database
-        run: cargo run --bin midge -- verify --json tests/fixtures/compatibility/v1_empty_db
+        run: cargo run --bin midge -- verify --json tests/fixtures/compatibility/v2_empty_db
 
       - name: Stop Peas emulator
         if: always()

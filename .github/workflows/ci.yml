@@ -10,6 +10,9 @@ on:
       - "compose.yml"
       - "src/**"
       - "tests/**"
+      - "benches/**"
+      - "docs/**"
+      - "*.md"
       - "*.toml"
       - ".cargo/**"
       - ".github/workflows/**"
@@ -19,6 +22,9 @@ on:
       - "compose.yml"
       - "src/**"
       - "tests/**"
+      - "benches/**"
+      - "docs/**"
+      - "*.md"
       - "*.toml"
       - ".cargo/**"
       - ".github/workflows/**"
@@ -62,6 +68,9 @@ jobs:
           test -f docs/development/stability-policy.md
           test -f docs/operations/migration-guide.md
           test -f CHANGELOG.md
+
+      - name: Rustfmt
+        run: cargo fmt --check
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic

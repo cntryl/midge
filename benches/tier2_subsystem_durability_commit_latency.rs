@@ -9,9 +9,9 @@ mod stress_config;
 
 use cntryl_midge::{Engine, TransactionMode, WriteOptions};
 use cntryl_stress::{stress, stress_main, StressContext};
+use std::time::Instant;
 #[allow(unused_imports)]
 use stress_config::{BenchConfig, MidgeStressContextExt as _};
-use std::time::Instant;
 
 const VALUE_SIZE: usize = 128;
 const TRANSACTIONS_PER_SAMPLE: usize = 512;
