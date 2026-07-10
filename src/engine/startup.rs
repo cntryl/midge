@@ -1140,7 +1140,7 @@ impl StartupStoragePath {
 
 struct StartupLease {
     lease: Arc<dyn crate::lease::PrimaryLease>,
-    lease_guard: crate::lease::LeaseGuard,
+    lease_guard: Option<crate::lease::LeaseGuard>,
     writer_epoch: u64,
     leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     lease_healthy: Arc<std::sync::atomic::AtomicBool>,
@@ -1178,7 +1178,7 @@ impl StartupLease {
 
         Ok(Self {
             lease,
-            lease_guard,
+            lease_guard: Some(lease_guard),
             writer_epoch,
             leader_store,
             lease_healthy,
@@ -1202,6 +1202,14 @@ impl StartupLease {
         }
 
         Ok(lease_heartbeat)
+    }
+}
+
+impl Drop for StartupLease {
+    fn drop(&mut self) {
+        if self.lease_guard.is_some() {
+            let _ = self.lease.release();
+        }
     }
 }
 
@@ -1464,7 +1472,7 @@ impl FacadeAssembly {
     fn assemble(
         opts: &OpenOptions,
         storage_path: StartupStoragePath,
-        startup_lease: StartupLease,
+        mut startup_lease: StartupLease,
         started: StartedRuntime,
         start: std::time::Instant,
     ) -> MidgeResult<Engine> {
@@ -1494,6 +1502,11 @@ impl FacadeAssembly {
             }
         }
 
+        let lease = Arc::clone(&startup_lease.lease);
+        let lease_guard = startup_lease.lease_guard.take().ok_or_else(|| {
+            MidgeError::Internal("startup lease guard was already transferred".to_string())
+        })?;
+
         Ok(Engine {
             runtime: Some(started.runtime),
             runtime_handle: started.runtime_handle,
@@ -1508,8 +1521,8 @@ impl FacadeAssembly {
             )),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
             column_families,
-            lease: Some(startup_lease.lease),
-            lease_guard: Some(startup_lease.lease_guard),
+            lease: Some(lease),
+            lease_guard: Some(lease_guard),
             lease_heartbeat: Some(std::sync::Mutex::new(lease_heartbeat)),
             ingest_coordinators,
         })
