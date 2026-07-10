@@ -161,6 +161,8 @@ pub struct Transaction {
     cloud_mode: bool,
     /// Owns the active snapshot registration for this transaction.
     snapshot_pin: SnapshotPinGuard,
+    /// Keeps the runtime alive until this transaction is fully dropped.
+    _runtime_transaction_guard: crate::runtime::RuntimeTransactionGuard,
 }
 
 enum WriteSetLookup {
@@ -192,7 +194,7 @@ impl SnapshotPinGuard {
         let _ = self
             .runtime_handle
             .unregister_snapshot_pin(self.snapshot_id);
-        crate::diagnostics::record_snapshot_unregister();
+        self.runtime_handle.diagnostics.record_snapshot_unregister();
         self.active = false;
         true
     }
@@ -269,6 +271,7 @@ pub(crate) struct TransactionInit {
     pub(crate) start_sequence: u64,
     pub(crate) read_snapshot: Option<Arc<crate::runtime::ReadSnapshot>>,
     pub(crate) cloud_mode: bool,
+    pub(crate) runtime_transaction_guard: crate::runtime::RuntimeTransactionGuard,
 }
 
 impl Transaction {
@@ -287,6 +290,7 @@ impl Transaction {
             read_snapshot: init.read_snapshot,
             cloud_mode: init.cloud_mode,
             snapshot_pin: SnapshotPinGuard::new(runtime_handle, init.id),
+            _runtime_transaction_guard: init.runtime_transaction_guard,
         }
     }
 
@@ -575,7 +579,10 @@ impl Transaction {
     /// Returns an error when the transaction snapshot is unavailable.
     pub fn scan(&self, query: &super::query::Query) -> MidgeResult<super::iterator::Iterator> {
         let start = query.effective_start().unwrap_or(&[]);
-        let end_vec = query.effective_end().unwrap_or_default();
+        // A prefix has no safe finite lexical upper bound when it ends in
+        // 0xFF. Use an unbounded storage scan and apply the prefix predicate
+        // explicitly below.
+        let end_vec = query.end.as_ref().map_or_else(Vec::new, |end| end.to_vec());
         let end = if end_vec.is_empty() {
             &[][..]
         } else {
@@ -595,16 +602,22 @@ impl Transaction {
         let mut merged: BTreeMap<Vec<u8>, Option<bytes::Bytes>> = BTreeMap::new();
 
         for (key, value) in base_results {
-            merged.insert(key.to_vec(), Some(value));
+            if Self::key_matches_query(&key, query) {
+                merged.insert(key.to_vec(), Some(value));
+            }
         }
 
         for intent in &self.write_set {
             match intent {
                 WriteIntent::Put { key, value, .. } | WriteIntent::Insert { key, value, .. } => {
-                    merged.insert(key.clone(), Some(bytes::Bytes::from(value.clone())));
+                    if Self::key_matches_query(key, query) {
+                        merged.insert(key.clone(), Some(bytes::Bytes::from(value.clone())));
+                    }
                 }
                 WriteIntent::Delete { key, .. } => {
-                    merged.insert(key.clone(), None);
+                    if Self::key_matches_query(key, query) {
+                        merged.insert(key.clone(), None);
+                    }
                 }
                 WriteIntent::DeleteRange {
                     start_key, end_key, ..
@@ -671,6 +684,19 @@ impl Transaction {
         }
 
         None
+    }
+
+    fn key_matches_query(key: &[u8], query: &super::query::Query) -> bool {
+        if query.effective_start().is_some_and(|start| key < start) {
+            return false;
+        }
+        if query.end.as_ref().is_some_and(|end| key >= end.as_ref()) {
+            return false;
+        }
+        query
+            .prefix
+            .as_ref()
+            .is_none_or(|prefix| key.starts_with(prefix.as_ref()))
     }
 }
 

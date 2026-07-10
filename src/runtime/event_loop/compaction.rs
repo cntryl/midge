@@ -154,13 +154,28 @@ impl CompactionCoordinator {
             .active_compactions
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
 
-        event_loop.compaction_actor.handle_complete(
+        let reservation = event_loop.compaction_actor.handle_complete(
             &mut event_loop.state,
             &input_ssts,
             &output_ssts,
         );
 
-        if !succeeded {
+        if succeeded {
+            let published = Self::publish_success(
+                event_loop,
+                request_id,
+                &input_ssts,
+                &output_ssts,
+                cf_id,
+                target_level,
+                reservation,
+            );
+            if published {
+                allow_emergent_followup = true;
+            } else if let (Some(hybrid), Some(token)) = (&event_loop.hybrid_storage, reservation) {
+                hybrid.compaction_aborted_with_token(token);
+            }
+        } else {
             if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                 telemetry.metrics().record_compaction_failure();
             }
@@ -169,16 +184,10 @@ impl CompactionCoordinator {
                 output_count = output_ssts.len(),
                 "compaction worker failed or aborted; leaving manifest unchanged"
             );
+            if let (Some(hybrid), Some(token)) = (&event_loop.hybrid_storage, reservation) {
+                hybrid.compaction_aborted_with_token(token);
+            }
             event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
-        } else if Self::publish_success(
-            event_loop,
-            request_id,
-            &input_ssts,
-            &output_ssts,
-            cf_id,
-            target_level,
-        ) {
-            allow_emergent_followup = true;
         }
 
         Self::complete_pending_waits(event_loop, allow_emergent_followup);
@@ -193,6 +202,7 @@ impl CompactionCoordinator {
         output_ssts: &[String],
         cf_id: crate::types::ColumnFamilyId,
         target_level: u32,
+        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     ) -> bool {
         let added = match Self::build_output_metadata(event_loop, cf_id, target_level, output_ssts)
         {
@@ -210,7 +220,13 @@ impl CompactionCoordinator {
             return Self::respond_publish_failure(event_loop, request_id, &error);
         }
 
-        Self::finalize_published_compaction(event_loop, request_id, input_ssts, output_ssts);
+        Self::finalize_published_compaction(
+            event_loop,
+            request_id,
+            input_ssts,
+            output_ssts,
+            reservation,
+        );
         true
     }
 
@@ -264,10 +280,22 @@ impl CompactionCoordinator {
         request_id: u64,
         input_ssts: &[String],
         output_ssts: &[String],
+        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     ) {
         fail::fail_point!("slice6::after_manifest_persist_before_sst_gc");
 
         let hybrid_storage = event_loop.hybrid_storage.clone();
+        if let (Some(hybrid), Some(token)) = (&hybrid_storage, reservation) {
+            let output_sizes: Vec<u64> = output_ssts
+                .iter()
+                .filter_map(|name| {
+                    std::fs::metadata(event_loop.state.sst_dir.join(name))
+                        .ok()
+                        .map(|metadata| metadata.len())
+                })
+                .collect();
+            hybrid.compaction_completed_with_token(token, &output_sizes);
+        }
         event_loop
             .gc_actor
             .delete_ssts(&mut event_loop.state, input_ssts, hybrid_storage);

@@ -1,8 +1,16 @@
 use super::{EventLoop, HandleOutcome};
+use crate::common::MidgeError;
+use crate::runtime::RuntimeResponse;
 
 impl EventLoop {
-    pub(super) fn handle_shutdown(&mut self) -> HandleOutcome {
+    pub(super) fn handle_shutdown(&mut self, request_id: Option<u64>) -> HandleOutcome {
         tracing::info!("Runtime shutting down");
+        let mut shutdown_error = None;
+
+        // Stop compaction before the runtime drains cloud work. Its worker
+        // owns staged SST output and must finish while this lease epoch is
+        // still valid.
+        self.compaction_actor.cancel_and_join_worker();
 
         if self.wal_actor.is_cloud_async() && self.state.wal.pending_writes > 0 {
             match self.seal_current_cloud_segment() {
@@ -15,6 +23,7 @@ impl EventLoop {
                         error = %error,
                         "Failed to seal CloudAsync segment during shutdown"
                     );
+                    shutdown_error = Some(error);
                 }
             }
         }
@@ -57,10 +66,32 @@ impl EventLoop {
                         "Shutdown timeout: {} pending CloudAsync uploads not completed",
                         storage.pending_upload_count()
                     );
+                    if shutdown_error.is_none() {
+                        shutdown_error = Some(MidgeError::Internal(format!(
+                            "shutdown timed out with {} pending cloud uploads",
+                            storage.pending_upload_count()
+                        )));
+                    }
                 } else {
                     tracing::info!("All CloudAsync uploads completed on shutdown");
                 }
             }
+        }
+
+        // GC and remote WAL-prune workers can mutate local/cloud storage.
+        // Join them before the event loop exits; Engine releases its lease
+        // only after this runtime has quiesced.
+        self.gc_actor.shutdown_workers();
+        if let Some(storage) = &self.hybrid_storage {
+            storage.shutdown_background_workers();
+        }
+
+        if let Some(request_id) = request_id {
+            let response = match shutdown_error {
+                Some(error) => RuntimeResponse::Error { request_id, error },
+                None => RuntimeResponse::Ok { request_id },
+            };
+            self.respond(request_id, response);
         }
 
         HandleOutcome::Break

@@ -95,7 +95,12 @@ impl FsLeaderStore {
     }
 
     fn lock_is_stale(content: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
-        Self::parse_lock_created_at(content).is_none_or(|created_at| {
+        // An empty or malformed lock can be observed in the small interval
+        // after `create_new` succeeds and before its owner writes the
+        // timestamp. Treating it as stale lets another acquirer unlink a live
+        // lock and creates a split-brain window. Fail closed unless a valid,
+        // demonstrably old timestamp proves the lock is abandoned.
+        Self::parse_lock_created_at(content).is_some_and(|created_at| {
             now.signed_duration_since(created_at).num_seconds() >= STALE_LOCK_TIMEOUT_SECS
         })
     }
@@ -238,6 +243,7 @@ impl FsLeaderStore {
         holder_id: &str,
         expected_epoch: u64,
     ) -> Result<(), LeaseError> {
+        let _lock = self.acquire_lock(holder_id)?;
         // Read current record and verify ownership
         let current = self.read_current()?;
         match current {
@@ -280,25 +286,37 @@ impl FsLeaderStore {
         Ok(())
     }
 
-    /// Write an arbitrary leader-record payload to disk via CAS-rename.
-    ///
-    /// This bypasses ownership checks and is used during lease release to
-    /// stamp a stale `acquired_at` timestamp while preserving the epoch.
-    pub fn write_raw(&self, content: &str) -> Result<(), LeaseError> {
-        let temp = Self::temp_path();
-        let target = FsPath::new(LEADER_RECORD_FILE);
+    /// Mark a lease released only if the current record still belongs to the
+    /// expected holder and epoch. A stale releaser must never overwrite a new
+    /// leader's fencing record.
+    pub fn release_if_owner(
+        &self,
+        holder_id: &str,
+        expected_epoch: u64,
+    ) -> Result<bool, LeaseError> {
+        let _lock = self.acquire_lock(holder_id)?;
+        let Some(current) = self.read_current()? else {
+            return Ok(false);
+        };
+        if current.holder_id != holder_id || current.epoch != expected_epoch {
+            return Ok(false);
+        }
 
+        let released = LeaderRecord {
+            epoch: expected_epoch,
+            holder_id: holder_id.to_string(),
+            acquired_at: "1970-01-01T00:00:00Z".to_string(),
+        };
+        let temp = Self::temp_path();
         staging::stage_bytes(
             &self.fs,
             &temp,
-            &target,
-            content.as_bytes(),
+            &FsPath::new(LEADER_RECORD_FILE),
+            format_leader_record(&released).as_bytes(),
             LeaseError::IoError,
         )?;
-
         let _ = self.fs.sync_dir(&FsPath::new("."), Durability::Durable);
-
-        Ok(())
+        Ok(true)
     }
 
     /// Core CAS logic, called under the lock file held by `acquire_leadership`.
@@ -309,7 +327,9 @@ impl FsLeaderStore {
             None => 0,
         };
 
-        let new_epoch = current_epoch + 1;
+        let new_epoch = current_epoch
+            .checked_add(1)
+            .ok_or_else(|| LeaseError::AcquisitionFailed("leader epoch exhausted".to_string()))?;
         let now = chrono::Utc::now().to_rfc3339();
 
         let new_record = LeaderRecord {
@@ -461,6 +481,62 @@ mod tests {
         assert!(e1 < e2);
         assert!(e2 < e3);
         assert!(e3 < e4);
+    }
+
+    #[test]
+    fn should_reject_stale_release_after_new_holder_acquires() {
+        // Arrange
+        let store = make_store();
+        let first = store.acquire_leadership("node-a").unwrap();
+        let second = store.acquire_leadership("node-b").unwrap();
+
+        // Act
+        let released = store.release_if_owner("node-a", first.epoch).unwrap();
+
+        // Assert
+        assert!(!released);
+        assert_eq!(store.read_current().unwrap().unwrap().holder_id, "node-b");
+        assert!(second.epoch > first.epoch);
+    }
+
+    #[test]
+    fn should_reject_stale_refresh_after_new_holder_acquires() {
+        // Arrange
+        let store = make_store();
+        let first = store.acquire_leadership("node-a").unwrap();
+        store.acquire_leadership("node-b").unwrap();
+
+        // Act
+        let result = store.refresh_timestamp("node-a", first.epoch);
+
+        // Assert
+        assert!(result.is_err());
+        assert_eq!(store.read_current().unwrap().unwrap().holder_id, "node-b");
+    }
+
+    #[test]
+    fn should_fail_closed_when_an_acquisition_lock_is_not_initialized_yet() {
+        // Arrange
+        let fs = Arc::new(MockFs::new());
+        let store = FsLeaderStore::new(Arc::clone(&fs) as Arc<dyn Fs>);
+        let lock_path = FsPath::new(LEADER_LOCK_FILE);
+        fs.open(
+            &lock_path,
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: true,
+                truncate: false,
+            },
+        )
+        .expect("create an intentionally empty acquisition lock");
+
+        // Act
+        let result = store.acquire_leadership("node-b");
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::AcquisitionFailed(_))));
+        assert!(fs.exists(&lock_path).expect("lock presence check"));
     }
 
     #[test]

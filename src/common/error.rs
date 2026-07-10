@@ -51,6 +51,9 @@ pub enum MidgeError {
 
     /// Transaction write conflict detected under strict conflict policy
     WriteConflict(String),
+
+    /// A cooperative operation was cancelled before it could publish a result.
+    Aborted(String),
 }
 
 impl fmt::Display for MidgeError {
@@ -70,6 +73,7 @@ impl fmt::Display for MidgeError {
             MidgeError::MemoryModeViolation(msg) => write!(f, "Memory mode violation: {msg}"),
             MidgeError::Fenced(msg) => write!(f, "Fenced: writer epoch is stale: {msg}"),
             MidgeError::WriteConflict(msg) => write!(f, "Write conflict: {msg}"),
+            MidgeError::Aborted(msg) => write!(f, "Aborted: {msg}"),
         }
     }
 }

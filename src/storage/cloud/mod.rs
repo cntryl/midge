@@ -164,6 +164,10 @@ pub trait CloudBackend: Send + Sync + 'static {
 pub struct MockCloudBackend {
     storage: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     gens: Arc<Mutex<HashMap<String, u64>>>,
+    /// Serializes conditional mutation checks with their corresponding write
+    /// or delete. Separate storage and generation maps otherwise permit a
+    /// stale request to pass a read-then-write race.
+    mutation_lock: Arc<Mutex<()>>,
     uploads: Arc<Mutex<Vec<(String, u64)>>>,
     downloads: Arc<Mutex<Vec<String>>>,
 }
@@ -173,6 +177,7 @@ impl MockCloudBackend {
         Self {
             storage: Arc::new(Mutex::new(HashMap::new())),
             gens: Arc::new(Mutex::new(HashMap::new())),
+            mutation_lock: Arc::new(Mutex::new(())),
             uploads: Arc::new(Mutex::new(Vec::new())),
             downloads: Arc::new(Mutex::new(Vec::new())),
         }
@@ -209,6 +214,7 @@ impl CloudBackend for MockCloudBackend {
         callback: CloudCallback,
     ) {
         let key = key.to_string();
+        let _mutation = self.mutation_lock.lock();
         // Honor `If-None-Match: *` (conditional create).
         let if_none_match = headers
             .iter()
@@ -310,6 +316,7 @@ impl CloudBackend for MockCloudBackend {
 
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         let key = key.to_string();
+        let _mutation = self.mutation_lock.lock();
         if let Some((_, expected)) = headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("if-match"))

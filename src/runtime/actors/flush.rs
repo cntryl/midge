@@ -10,10 +10,22 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::sst::Memtable;
 use std::path::Path;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FlushOutput {
     pub sst_name: String,
     pub file_meta: Option<crate::runtime::FileMeta>,
+    /// Identity of the frozen memtable represented by this output.
+    pub frozen_memtable: Option<std::sync::Arc<crate::sst::SkipListMemtable>>,
+    /// Accounting reservation for this exact flush publication.
+    pub reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+}
+
+struct FlushPublication<'a> {
+    cf_id: crate::types::ColumnFamilyId,
+    sst_name: &'a str,
+    frozen: &'a std::sync::Arc<crate::sst::SkipListMemtable>,
+    sst_path: &'a Path,
+    reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
 }
 
 /// Actor handling memtable flushes
@@ -69,84 +81,39 @@ impl FlushActor {
             return Ok(FlushOutput {
                 sst_name: format!("memory_flush_{}", state.sequence),
                 file_meta: None,
+                frozen_memtable: None,
+                reservation: None,
             });
         }
 
         // Estimate SST size: approximate as active memtable size
         let est_size = 1024 * 1024; // 1MB estimate; could be more precise
 
-        // Try to reserve space if SBA is available
-        if let Some(hybrid) = sba {
-            let reservation = hybrid.reserve_for_flush(est_size);
-            match reservation {
-                crate::storage::hybrid::actor::ReservationResult::Ok => {
-                    // Proceed with flush
-                }
-                crate::storage::hybrid::actor::ReservationResult::WaitForCloudUpload => {
-                    if let Some(t) = crate::telemetry::Telemetry::global() {
-                        t.metrics().record_write_stall_cloud();
-                    }
-                    tracing::warn!(cf_id = cf_id, "Flush blocked: waiting for cloud upload");
-                    return Err(MidgeError::WriteStall(
-                        "flush blocked until cloud upload frees durable capacity".to_string(),
-                    ));
-                }
-                crate::storage::hybrid::actor::ReservationResult::WaitForCompaction => {
-                    if let Some(t) = crate::telemetry::Telemetry::global() {
-                        t.metrics().record_write_stall_compaction();
-                    }
-                    tracing::warn!(cf_id = cf_id, "Flush blocked: waiting for compaction");
-                    return Err(MidgeError::WriteStall(
-                        "flush blocked until compaction frees durable capacity".to_string(),
-                    ));
-                }
-                crate::storage::hybrid::actor::ReservationResult::RejectNoSpace => {
-                    if let Some(t) = crate::telemetry::Telemetry::global() {
-                        t.metrics().record_no_space_event();
-                        t.metrics().record_write_stall_no_space();
-                    }
-                    tracing::error!(cf_id = cf_id, "Flush rejected: no disk space available");
-                    return Err(MidgeError::NoSpace(
-                        "no disk space available for flush".to_string(),
-                    ));
-                }
-            }
-        }
+        let flush_reservation = Self::reserve_flush(sba, cf_id, est_size)?;
 
-        // === Phase 1.1: Check immutable queue capacity BEFORE adding to it ===
-        // If immutable queue is at capacity, reject flush request with WriteStall error.
-        // This provides backpressure to clients: they must retry after backoff.
-        if state.is_immutable_memtable_queue_full(cf_id) {
-            let max_immutable = state.max_immutable_memtables;
-            let immutable_count = state
-                .get_cf(cf_id)
-                .map_or(0, |cf| cf.immutable_memtables.len());
-
-            tracing::warn!(
-                cf_id = cf_id,
-                immutable_count = immutable_count,
-                max_immutable = max_immutable,
-                "Write stall: immutable memtable queue at capacity"
-            );
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_write_stall_memory();
-            }
-            return Err(MidgeError::WriteStall(format!(
-                "immutable memtable queue full ({immutable_count}/{max_immutable}); flush in progress"
-            )));
-        }
+        Self::ensure_immutable_capacity(state, cf_id, sba, flush_reservation)?;
 
         let current_segment_id = state.wal.current_segment_id;
 
         // Get the column family (after stall check to avoid borrow issues)
-        let cf = state
-            .get_cf_mut(cf_id)
-            .ok_or_else(|| MidgeError::Internal(format!("Column family {cf_id} not found")))?;
+        let Some(cf) = state.get_cf_mut(cf_id) else {
+            if let Some(token) = flush_reservation {
+                Self::release_flush_reservation(sba, token);
+            }
+            return Err(MidgeError::Internal(format!(
+                "Column family {cf_id} not found"
+            )));
+        };
 
         if cf.memtable.size_bytes() == 0 {
+            if let Some(token) = flush_reservation {
+                Self::release_flush_reservation(sba, token);
+            }
             return Ok(FlushOutput {
                 sst_name: format!("noop_flush_{}", state.sequence),
                 file_meta: None,
+                frozen_memtable: None,
+                reservation: None,
             });
         }
 
@@ -172,7 +139,12 @@ impl FlushActor {
 
         // Ensure parent directory exists
         if let Some(parent) = sst_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                if let Some(token) = flush_reservation {
+                    Self::release_flush_reservation(sba, token);
+                }
+                return Err(error.into());
+            }
         }
 
         // Update next SST sequence (journal before applying)
@@ -181,33 +153,139 @@ impl FlushActor {
                 cf_id,
                 next_seq: sst_seq + 1,
             };
-            crate::metadata::append_edit(&state.db_path, &edit)?;
+            if let Err(error) = crate::metadata::append_edit(&state.db_path, &edit) {
+                if let Some(token) = flush_reservation {
+                    Self::release_flush_reservation(sba, token);
+                }
+                return Err(error);
+            }
         }
         state.manifest.next_sst_seqs.insert(cf_id, sst_seq + 1);
 
         self.in_progress += 1;
         tracing::info!(cf_id = cf_id, sst_name = %sst_name, "Flush started");
 
-        self.publish_flush_output(state, cf_id, &sst_name, &frozen, &sst_path, sba)
+        let publication = FlushPublication {
+            cf_id,
+            sst_name: &sst_name,
+            frozen: &frozen,
+            sst_path: &sst_path,
+            reservation: flush_reservation,
+        };
+        let result = self.publish_flush_output(state, &publication, sba);
+        if result.is_err() {
+            self.in_progress = self.in_progress.saturating_sub(1);
+            if let Some(token) = flush_reservation {
+                Self::release_flush_reservation(sba, token);
+            }
+        }
+        result
+    }
+
+    fn reserve_flush(
+        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+        cf_id: crate::types::ColumnFamilyId,
+        est_size: u64,
+    ) -> MidgeResult<Option<crate::storage::hybrid::actor::StorageReservationToken>> {
+        let Some(hybrid) = sba else {
+            return Ok(None);
+        };
+
+        match hybrid.reserve_for_flush_with_token(est_size) {
+            Ok(token) => Ok(Some(token)),
+            Err(crate::storage::hybrid::actor::ReservationResult::WaitForCloudUpload) => {
+                if let Some(t) = crate::telemetry::Telemetry::global() {
+                    t.metrics().record_write_stall_cloud();
+                }
+                tracing::warn!(cf_id, "Flush blocked: waiting for cloud upload");
+                Err(MidgeError::WriteStall(
+                    "flush blocked until cloud upload frees durable capacity".to_string(),
+                ))
+            }
+            Err(crate::storage::hybrid::actor::ReservationResult::WaitForCompaction) => {
+                if let Some(t) = crate::telemetry::Telemetry::global() {
+                    t.metrics().record_write_stall_compaction();
+                }
+                tracing::warn!(cf_id, "Flush blocked: waiting for compaction");
+                Err(MidgeError::WriteStall(
+                    "flush blocked until compaction frees durable capacity".to_string(),
+                ))
+            }
+            Err(crate::storage::hybrid::actor::ReservationResult::RejectNoSpace) => {
+                if let Some(t) = crate::telemetry::Telemetry::global() {
+                    t.metrics().record_no_space_event();
+                    t.metrics().record_write_stall_no_space();
+                }
+                tracing::error!(cf_id, "Flush rejected: no disk space available");
+                Err(MidgeError::NoSpace(
+                    "no disk space available for flush".to_string(),
+                ))
+            }
+            Err(crate::storage::hybrid::actor::ReservationResult::Ok) => Err(MidgeError::Internal(
+                "storage returned a successful reservation without a token".to_string(),
+            )),
+        }
+    }
+
+    fn ensure_immutable_capacity(
+        state: &RuntimeState,
+        cf_id: crate::types::ColumnFamilyId,
+        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+    ) -> MidgeResult<()> {
+        if !state.is_immutable_memtable_queue_full(cf_id) {
+            return Ok(());
+        }
+
+        let max_immutable = state.max_immutable_memtables;
+        let immutable_count = state
+            .get_cf(cf_id)
+            .map_or(0, |cf| cf.immutable_memtables.len());
+        tracing::warn!(
+            cf_id,
+            immutable_count,
+            max_immutable,
+            "Write stall: immutable memtable queue at capacity"
+        );
+        if let Some(t) = crate::telemetry::Telemetry::global() {
+            t.metrics().record_write_stall_memory();
+        }
+        if let Some(token) = reservation {
+            Self::release_flush_reservation(sba, token);
+        }
+        Err(MidgeError::WriteStall(format!(
+            "immutable memtable queue full ({immutable_count}/{max_immutable}); flush in progress"
+        )))
+    }
+
+    fn release_flush_reservation(
+        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+        token: crate::storage::hybrid::actor::StorageReservationToken,
+    ) {
+        if let Some(hybrid) = sba {
+            hybrid.flush_failed_with_token(token);
+        }
     }
 
     fn publish_flush_output(
         &self,
         state: &mut RuntimeState,
-        cf_id: crate::types::ColumnFamilyId,
-        sst_name: &str,
-        frozen: &std::sync::Arc<crate::sst::SkipListMemtable>,
-        sst_path: &std::path::PathBuf,
+        publication: &FlushPublication<'_>,
         sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<FlushOutput> {
         let start = std::time::Instant::now();
-        let mut file_meta = self.write_memtable_to_sst(frozen, sst_path, cf_id, sst_name)?;
+        let mut file_meta = self.write_memtable_to_sst(
+            publication.frozen,
+            publication.sst_path,
+            publication.cf_id,
+            publication.sst_name,
+        )?;
         file_meta.level = 0;
         let write_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         state.append_intent(crate::runtime::IntentLogEntry::FlushPublish {
             phase: crate::runtime::PublicationPhase::OutputDurable,
-            cf_id,
+            cf_id: publication.cf_id,
             sequence: state.sequence,
             file_meta: file_meta.clone(),
         })?;
@@ -215,23 +293,22 @@ impl FlushActor {
         fail::fail_point!("midge::flush::after_sst_write_before_publish");
 
         if let Some(hybrid) = sba {
-            let sst_path_obj = std::fs::metadata(sst_path)?;
-            hybrid.flush_completed(sst_path_obj.len());
-
-            let remote_bytes = std::fs::read(sst_path)?;
-            hybrid.write_sst_object(sst_name, remote_bytes)?;
+            let remote_bytes = std::fs::read(publication.sst_path)?;
+            hybrid.write_sst_object(publication.sst_name, remote_bytes)?;
             tracing::debug!(
-                cf_id = cf_id,
-                sst_name = %sst_name,
+                cf_id = publication.cf_id,
+                sst_name = %publication.sst_name,
                 "SST mirrored to authoritative cloud storage"
             );
         }
 
-        tracing::info!(cf_id = cf_id, sst_name = %sst_name, write_ms, "SST file written");
+        tracing::info!(cf_id = publication.cf_id, sst_name = %publication.sst_name, write_ms, "SST file written");
 
         Ok(FlushOutput {
-            sst_name: sst_name.to_string(),
+            sst_name: publication.sst_name.to_string(),
             file_meta: Some(file_meta),
+            frozen_memtable: Some(std::sync::Arc::clone(publication.frozen)),
+            reservation: publication.reservation,
         })
     }
 
@@ -254,19 +331,36 @@ impl FlushActor {
 
         // Get all entries from memtable and write to SST
         let entries = memtable.iter_all_with_meta(u64::MAX);
-        if entries.is_empty() {
+        let range_tombstones = memtable.range_tombstones();
+        if entries.is_empty() && range_tombstones.is_empty() {
             return Err(MidgeError::Corruption(
                 "attempted to flush an empty memtable".to_string(),
             ));
         }
 
+        // Manifest bounds are a conservative routing proof, so they must
+        // cover both point entries and every range-tombstone endpoint. If a
+        // tombstone falls outside the point-key bounds, narrowing metadata to
+        // the points lets reads skip the SST and resurrect older values.
         let smallest_key = entries
-            .first()
+            .iter()
             .map(|(key, _, _, _, _)| key.clone())
+            .chain(
+                range_tombstones
+                    .iter()
+                    .flat_map(|tombstone| [tombstone.start.clone(), tombstone.end.clone()]),
+            )
+            .min()
             .ok_or_else(|| MidgeError::Corruption("memtable flush missing smallest key".into()))?;
         let largest_key = entries
-            .last()
+            .iter()
             .map(|(key, _, _, _, _)| key.clone())
+            .chain(
+                range_tombstones
+                    .iter()
+                    .flat_map(|tombstone| [tombstone.start.clone(), tombstone.end.clone()]),
+            )
+            .max()
             .ok_or_else(|| MidgeError::Corruption("memtable flush missing largest key".into()))?;
         let mut smallest_seq = u64::MAX;
         let mut largest_seq = 0_u64;
@@ -279,6 +373,11 @@ impl FlushActor {
 
             writer.add_with_meta(&key, value.as_deref(), seq, op_type, expiration)?;
             added_count += 1;
+        }
+        for tombstone in &range_tombstones {
+            smallest_seq = smallest_seq.min(tombstone.seq);
+            largest_seq = largest_seq.max(tombstone.seq);
+            writer.add_range_tombstone(&tombstone.start, &tombstone.end, tombstone.seq)?;
         }
         let add_ns = add_start.elapsed().as_nanos();
 
@@ -319,14 +418,22 @@ impl FlushActor {
         cf_id: crate::types::ColumnFamilyId,
         sst_name: &str,
         sequence: u64,
+        frozen_memtable: Option<&std::sync::Arc<crate::sst::SkipListMemtable>>,
     ) {
         if let Some(cf) = state.get_cf_mut(cf_id) {
-            // Remove the oldest immutable memtable (FIFO) and update total memory accounting
-            if !cf.immutable_memtables.is_empty() {
-                let removed = cf.immutable_memtables.remove(0);
-                let removed_size = removed.size_bytes();
-                state.total_memtable_bytes =
-                    state.total_memtable_bytes.saturating_sub(removed_size);
+            // Remove exactly the immutable represented by this flush. A failed
+            // older flush may remain ahead of a later successful one.
+            if let Some(frozen_memtable) = frozen_memtable {
+                if let Some(index) = cf
+                    .immutable_memtables
+                    .iter()
+                    .position(|candidate| std::sync::Arc::ptr_eq(candidate, frozen_memtable))
+                {
+                    let removed = cf.immutable_memtables.remove(index);
+                    let removed_size = removed.size_bytes();
+                    state.total_memtable_bytes =
+                        state.total_memtable_bytes.saturating_sub(removed_size);
+                }
             }
         }
 
@@ -338,6 +445,12 @@ impl FlushActor {
         self.in_progress = self.in_progress.saturating_sub(1);
 
         tracing::info!(cf_id = cf_id, sst_name, sequence, "Flush completed");
+    }
+
+    /// Abort a flush after the SST was written but before manifest
+    /// publication. The frozen immutable remains queued for retry.
+    pub fn handle_flush_failure(&mut self) {
+        self.in_progress = self.in_progress.saturating_sub(1);
     }
 }
 

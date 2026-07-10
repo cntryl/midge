@@ -15,6 +15,7 @@ pub(crate) struct ReadResources {
     sst_path_prefix: PathBuf,
     block_cache: Arc<BlockCache>,
     readers: Mutex<HashMap<ReaderCacheKey, Arc<SstFileIo>>>,
+    diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -24,11 +25,28 @@ struct ReaderCacheKey {
 }
 
 impl ReadResources {
+    #[cfg(test)]
     pub(crate) fn new(
         sst_fs: Arc<dyn Fs>,
         sst_path_prefix: PathBuf,
         block_cache_size: usize,
         block_cache_policy: CachePolicyType,
+    ) -> Self {
+        Self::new_with_diagnostics(
+            sst_fs,
+            sst_path_prefix,
+            block_cache_size,
+            block_cache_policy,
+            crate::diagnostics::legacy_runtime_diagnostics(),
+        )
+    }
+
+    pub(crate) fn new_with_diagnostics(
+        sst_fs: Arc<dyn Fs>,
+        sst_path_prefix: PathBuf,
+        block_cache_size: usize,
+        block_cache_policy: CachePolicyType,
+        diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
     ) -> Self {
         Self {
             sst_fs,
@@ -39,10 +57,23 @@ impl ReadResources {
                 block_cache_policy,
             )),
             readers: Mutex::new(HashMap::new()),
+            diagnostics,
         }
     }
 
+    pub(crate) fn diagnostics(&self) -> Arc<crate::diagnostics::RuntimeDiagnostics> {
+        Arc::clone(&self.diagnostics)
+    }
+
     pub(crate) fn reader_for(&self, file_meta: &FileMeta) -> MidgeResult<Arc<SstFileIo>> {
+        self.reader_for_with_metrics(file_meta, true)
+    }
+
+    fn reader_for_with_metrics(
+        &self,
+        file_meta: &FileMeta,
+        record_metrics: bool,
+    ) -> MidgeResult<Arc<SstFileIo>> {
         let name = file_meta.name.clone();
         let sst_id = Self::sst_id_for_file(file_meta);
         let cache_key = ReaderCacheKey {
@@ -56,17 +87,22 @@ impl ReadResources {
             .get(&cache_key)
             .cloned()
         {
-            crate::sst::read_path_metrics::global_sst_read_metrics().record_reader_cache_hit();
+            if record_metrics {
+                self.diagnostics.sst_metrics().record_reader_cache_hit();
+            }
             return Ok(reader);
         }
-        crate::sst::read_path_metrics::global_sst_read_metrics().record_reader_cache_miss();
+        if record_metrics {
+            self.diagnostics.sst_metrics().record_reader_cache_miss();
+        }
 
         let sst_path = self.sst_path_prefix.join(&name);
         let path_str = sst_path.to_string_lossy().to_string();
         let reader = Arc::new(
             SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))?
                 .with_sst_id(sst_id)
-                .with_block_cache(Arc::clone(&self.block_cache)),
+                .with_block_cache(Arc::clone(&self.block_cache))
+                .with_read_path_diagnostics(Arc::clone(&self.diagnostics)),
         );
 
         let mut readers = self
@@ -87,7 +123,7 @@ impl ReadResources {
         sst_files
             .iter()
             .filter_map(|file_meta| {
-                self.reader_for(file_meta)
+                self.reader_for_with_metrics(file_meta, false)
                     .ok()
                     .map(|reader| (file_meta.name.clone(), reader))
             })

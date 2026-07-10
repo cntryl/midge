@@ -108,6 +108,12 @@ impl CloudWalPruneGuard {
     }
 }
 
+#[derive(Default)]
+struct PruneWorkerRegistry {
+    shutting_down: bool,
+    handles: Vec<JoinHandle<()>>,
+}
+
 /// Hybrid storage combining local filesystem and cloud backends
 ///
 /// Managed by a Storage Budget Actor to enforce disk constraints, watermarks,
@@ -148,6 +154,10 @@ pub struct HybridStorage {
 
     /// Background WAL upload worker thread handle
     upload_worker_handle: Option<JoinHandle<()>>,
+
+    /// Remote WAL prune workers are tracked so shutdown can join them before
+    /// releasing the lease that fenced their conditional deletes.
+    prune_workers: Mutex<PruneWorkerRegistry>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -227,6 +237,7 @@ impl HybridStorage {
             wal_upload_tx: Some(wal_upload_tx),
             upload_worker_failed,
             upload_worker_handle,
+            prune_workers: Mutex::new(PruneWorkerRegistry::default()),
         }
     }
 
@@ -493,14 +504,26 @@ impl HybridStorage {
         );
     }
 
-    /// Try to reserve space for an upcoming flush.
-    pub fn reserve_for_flush(&self, est_size: u64) -> actor::ReservationResult {
+    /// Try to reserve space for an upcoming flush and return the operation
+    /// token that must settle that exact reservation.
+    pub fn reserve_for_flush_with_token(
+        &self,
+        est_size: u64,
+    ) -> Result<actor::StorageReservationToken, actor::ReservationResult> {
         let mut actor = self.budget_actor.lock();
-        let result = actor
-            .handle_event(actor::StorageBudgetEvent::ReserveForFlush { est_size })
-            .unwrap_or(actor::ReservationResult::Ok);
+        let result = actor.reserve_for_flush_with_token(est_size);
         drop(actor);
 
+        let reservation_result = match result {
+            Ok(_) => actor::ReservationResult::Ok,
+            Err(result) => result,
+        };
+        self.emit_reservation_result(reservation_result);
+
+        result
+    }
+
+    fn emit_reservation_result(&self, result: actor::ReservationResult) {
         let event = match result {
             actor::ReservationResult::Ok => StorageEvent::BackpressureOff,
             actor::ReservationResult::WaitForCloudUpload
@@ -511,8 +534,6 @@ impl HybridStorage {
         if let Some(tx) = &self.external_event_tx {
             let _ = tx.send(event);
         }
-
-        result
     }
 
     /// Process a single WAL upload inline (fallback when worker thread unavailable)
@@ -708,22 +729,46 @@ impl HybridStorage {
         }
     }
 
-    /// Signal that a flush completed with actual size
-    pub fn flush_completed(&self, actual_size: u64) {
+    /// Settle the exact flush reservation that published an SST.
+    pub fn flush_completed_with_token(
+        &self,
+        token: actor::StorageReservationToken,
+        actual_size: u64,
+    ) {
         let mut actor = self.budget_actor.lock();
-        let _ = actor.handle_event(actor::StorageBudgetEvent::FlushCompleted { actual_size });
+        let _ = actor.complete_flush_for(token, actual_size);
     }
 
-    /// Signal that compaction is starting
-    pub fn compaction_planned(&self, input_sizes: Vec<u64>) {
+    /// Release the exact flush reservation whose output did not publish.
+    pub fn flush_failed_with_token(&self, token: actor::StorageReservationToken) {
         let mut actor = self.budget_actor.lock();
-        let _ = actor.handle_event(actor::StorageBudgetEvent::CompactionPlanned { input_sizes });
+        let _ = actor.abort_flush_for(token);
     }
 
-    /// Signal that compaction completed
-    pub fn compaction_completed(&self, output_sizes: Vec<u64>) {
+    /// Reserve compaction output space and return the token for its terminal
+    /// completion or cancellation.
+    pub fn compaction_planned_with_token(
+        &self,
+        input_sizes: &[u64],
+    ) -> actor::StorageReservationToken {
         let mut actor = self.budget_actor.lock();
-        let _ = actor.handle_event(actor::StorageBudgetEvent::CompactionCompleted { output_sizes });
+        actor.plan_compaction_with_token(input_sizes)
+    }
+
+    /// Settle the exact compaction reservation after manifest publication.
+    pub fn compaction_completed_with_token(
+        &self,
+        token: actor::StorageReservationToken,
+        output_sizes: &[u64],
+    ) {
+        let mut actor = self.budget_actor.lock();
+        let _ = actor.complete_compaction_for(token, output_sizes);
+    }
+
+    /// Release the exact compaction reservation without deleting its inputs.
+    pub fn compaction_aborted_with_token(&self, token: actor::StorageReservationToken) {
+        let mut actor = self.budget_actor.lock();
+        let _ = actor.abort_compaction_for(token);
     }
 
     pub fn budget_snapshot(&self) -> HybridStorageBudgetSnapshot {
@@ -872,74 +917,6 @@ impl HybridStorage {
                 "unexpected storage delete response for '{key}': {other:?}"
             )),
             Err(error) => Err(format!("storage delete timed out for '{key}': {error}")),
-        }
-    }
-
-    fn spawn_best_effort_local_cache_delete(
-        local: Arc<dyn StorageBackend>,
-        key: String,
-        sst_name: String,
-    ) {
-        let log_key = key.clone();
-        let log_sst_name = sst_name.clone();
-        if let Err(error) = std::thread::Builder::new()
-            .name("midge-sst-cache-gc".to_string())
-            .spawn(move || {
-                let (tx, rx) = std::sync::mpsc::channel();
-                local.submit_delete(&key, tx);
-                match rx.recv_timeout(Duration::from_secs(30)) {
-                    Ok(StorageEvent::DeleteComplete {
-                        result: StorageOutcome::Ok(()),
-                        ..
-                    }) => {
-                        tracing::debug!(sst_name, key, "Deleted obsolete local hybrid SST cache");
-                    }
-                    Ok(StorageEvent::DeleteComplete {
-                        result: StorageOutcome::Err(error),
-                        ..
-                    }) if Self::storage_error_indicates_missing(&error) => {
-                        tracing::debug!(
-                            sst_name,
-                            key,
-                            "Obsolete local hybrid SST cache already missing"
-                        );
-                    }
-                    Ok(StorageEvent::DeleteComplete {
-                        result: StorageOutcome::Err(error),
-                        ..
-                    }) => {
-                        tracing::warn!(
-                            sst_name,
-                            key,
-                            error,
-                            "Failed to delete obsolete SST from local hybrid cache"
-                        );
-                    }
-                    Ok(other) => {
-                        tracing::warn!(
-                            sst_name,
-                            key,
-                            ?other,
-                            "Unexpected local hybrid SST cache delete response"
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            sst_name,
-                            key,
-                            %error,
-                            "Timed out deleting obsolete SST from local hybrid cache"
-                        );
-                    }
-                }
-            })
-        {
-            tracing::warn!(
-                sst_name = %log_sst_name,
-                key = %log_key,
-                %error,
-                "Failed to schedule obsolete local hybrid SST cache delete"
-            );
         }
     }
 
@@ -1347,6 +1324,8 @@ impl HybridStorage {
         segment_id: u64,
         guard: CloudWalPruneGuard,
     ) -> Result<(), String> {
+        self.reap_finished_prune_workers();
+
         let proof = self
             .verified_wal_segments
             .lock()
@@ -1371,7 +1350,12 @@ impl HybridStorage {
         let verified_sst_objects = Arc::clone(&self.verified_sst_objects);
         let expected_max_sequence = proof.max_sequence;
 
-        thread::Builder::new()
+        let mut workers = self.prune_workers.lock();
+        if workers.shutting_down {
+            return Err("hybrid storage is shutting down; cloud WAL prune rejected".to_string());
+        }
+
+        let worker = thread::Builder::new()
             .name(format!("midge-wal-pruner-{segment_id}"))
             .spawn(move || {
                 let key = crate::wal::cloud_segment::object_key(segment_id);
@@ -1411,8 +1395,46 @@ impl HybridStorage {
                     let _ = tx.send(event);
                 }
             })
-            .map(|_| ())
-            .map_err(|error| format!("failed to spawn cloud WAL prune worker: {error}"))
+            .map_err(|error| format!("failed to spawn cloud WAL prune worker: {error}"))?;
+        workers.handles.push(worker);
+        Ok(())
+    }
+
+    /// Stop admitting cloud prune work and join every outstanding worker.
+    ///
+    /// Each worker may issue a conditional remote delete, so shutdown must
+    /// wait for it while the current lease/fencing epoch remains valid.
+    pub(crate) fn shutdown_background_workers(&self) {
+        let handles = {
+            let mut workers = self.prune_workers.lock();
+            workers.shutting_down = true;
+            std::mem::take(&mut workers.handles)
+        };
+
+        for worker in handles {
+            if let Ok(()) = worker.join() {
+                tracing::debug!("cloud WAL prune worker joined");
+            } else {
+                tracing::warn!("cloud WAL prune worker panicked during join");
+            }
+        }
+    }
+
+    fn reap_finished_prune_workers(&self) {
+        let mut workers = self.prune_workers.lock();
+        let mut still_running = Vec::new();
+        for worker in std::mem::take(&mut workers.handles) {
+            if worker.is_finished() {
+                if let Ok(()) = worker.join() {
+                    tracing::debug!("cloud WAL prune worker completed");
+                } else {
+                    tracing::warn!("cloud WAL prune worker panicked");
+                }
+            } else {
+                still_running.push(worker);
+            }
+        }
+        workers.handles = still_running;
     }
 
     fn revalidate_cloud_wal_prune_guard(
@@ -1602,11 +1624,28 @@ impl HybridStorage {
         }
 
         self.verified_sst_objects.lock().remove(&key);
-        Self::spawn_best_effort_local_cache_delete(
-            Arc::clone(&self.local),
-            key,
-            sst_name.to_string(),
-        );
+        // This runs inside the tracked GC worker that owns this deletion.
+        // Avoid a detached local-cache delete that could outlive the lease.
+        match Self::delete_object_from_backend_blocking(&self.local, &key) {
+            Ok(true) => {
+                tracing::debug!(sst_name, key, "Deleted obsolete local hybrid SST cache");
+            }
+            Ok(false) => {
+                tracing::debug!(
+                    sst_name,
+                    key,
+                    "Obsolete local hybrid SST cache already missing"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    sst_name,
+                    key,
+                    error,
+                    "Failed to delete obsolete local hybrid SST cache"
+                );
+            }
+        }
 
         Ok(())
     }
@@ -1805,38 +1844,24 @@ impl StorageBackend for HybridStorage {
 
 impl Drop for HybridStorage {
     fn drop(&mut self) {
+        self.shutdown_background_workers();
+
         // Drop sender first so worker recv() unblocks and exits promptly.
         // Waiting for join before dropping sender can deadlock until timeout.
         let _ = self.wal_upload_tx.take();
 
-        // Wait for the worker thread to complete with a timeout
+        // Join the worker before releasing storage ownership. A detached
+        // uploader could continue mutating cloud state after the lease is
+        // released, violating fencing guarantees.
         if let Some(handle) = self.upload_worker_handle.take() {
             let start = Instant::now();
-            let timeout = Duration::from_secs(30);
-
-            // Spawn a thread to join with timeout
-            let (tx, rx) = mpsc::channel();
-            thread::spawn(move || {
-                let result = handle.join();
-                let _ = tx.send(result);
-            });
-
-            // Wait for completion or timeout
-            match rx.recv_timeout(timeout) {
-                Ok(Ok(())) => {
-                    tracing::debug!(
-                        elapsed_ms = start.elapsed().as_millis(),
-                        "HybridStorage WAL upload worker shutdown cleanly"
-                    );
-                }
-                Ok(Err(_)) => {
+            match handle.join() {
+                Ok(()) => tracing::debug!(
+                    elapsed_ms = start.elapsed().as_millis(),
+                    "HybridStorage WAL upload worker shutdown cleanly"
+                ),
+                Err(_) => {
                     tracing::warn!("HybridStorage WAL upload worker panicked during shutdown");
-                }
-                Err(_timeout) => {
-                    tracing::error!(
-                        "HybridStorage WAL upload worker did not shutdown within 30s timeout; thread detached"
-                    );
-                    // Thread will be detached and continue running
                 }
             }
         }

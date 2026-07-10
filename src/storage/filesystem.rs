@@ -16,7 +16,39 @@ use crate::storage::{
     StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome,
 };
 use std::fs;
+use std::hash::{Hash, Hasher};
+use std::io::Write;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
+use std::sync::LazyLock;
+
+const CONDITIONAL_LOCK_STRIPES: usize = 64;
+static MUTATION_LOCKS: LazyLock<Vec<parking_lot::Mutex<()>>> = LazyLock::new(|| {
+    (0..CONDITIONAL_LOCK_STRIPES)
+        .map(|_| parking_lot::Mutex::new(()))
+        .collect()
+});
+
+/// Cross-process companion to the in-process stripe lock. Conditional
+/// `If-Match` operations must serialize against ordinary writers too; a
+/// process-local mutex alone cannot provide that guarantee.
+#[cfg(unix)]
+struct ProcessMutationLock {
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for ProcessMutationLock {
+    fn drop(&mut self) {
+        // SAFETY: `file` remains open for the lifetime of the lock and the
+        // descriptor was successfully opened by `acquire_process_lock`.
+        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+#[cfg(not(unix))]
+struct ProcessMutationLock;
 
 /// Filesystem-based storage backend
 ///
@@ -50,6 +82,40 @@ impl FileSystem {
         }
         out
     }
+
+    fn acquire_process_lock(&self, full_path: &Path) -> Result<ProcessMutationLock, String> {
+        #[cfg(unix)]
+        {
+            let lock_dir = self.base_path.join(".midge-locks");
+            fs::create_dir_all(&lock_dir).map_err(|error| {
+                format!("create lock directory {}: {error}", lock_dir.display())
+            })?;
+            let identity = full_path.to_string_lossy();
+            let lock_name = format!("{:08x}.lock", crc32c::crc32c(identity.as_bytes()));
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(lock_dir.join(lock_name))
+                .map_err(|error| format!("open conditional mutation lock: {error}"))?;
+            // SAFETY: `file` is a valid open descriptor. `LOCK_EX` requests an
+            // advisory exclusive lock which is released in `Drop` above.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(format!(
+                    "acquire conditional mutation lock: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok(ProcessMutationLock { file })
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = full_path;
+            Ok(ProcessMutationLock)
+        }
+    }
 }
 
 fn write_file_with_parents(full_path: &Path, data: Vec<u8>) -> StorageOutcome<()> {
@@ -63,6 +129,41 @@ fn write_file_with_parents(full_path: &Path, data: Vec<u8>) -> StorageOutcome<()
         Ok(()) => StorageOutcome::Ok(()),
         Err(e) => StorageOutcome::Err(format!("write {}: {e}", full_path.display())),
     }
+}
+
+fn mutation_lock(full_path: &Path) -> parking_lot::MutexGuard<'static, ()> {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    full_path.hash(&mut hasher);
+    let stripe = usize::try_from(hasher.finish()).unwrap_or(0) % CONDITIONAL_LOCK_STRIPES;
+    MUTATION_LOCKS[stripe].lock()
+}
+
+fn create_file_new_with_parents(full_path: &Path, data: &[u8]) -> StorageOutcome<()> {
+    if let Some(parent) = full_path.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            return StorageOutcome::Err(format!("mkdir {}: {error}", parent.display()));
+        }
+    }
+
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(full_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return StorageOutcome::Err("precondition failed: object already exists".to_string());
+        }
+        Err(error) => {
+            return StorageOutcome::Err(format!("create {}: {error}", full_path.display()));
+        }
+    };
+
+    if let Err(error) = file.write_all(data).and_then(|()| file.sync_all()) {
+        let _ = fs::remove_file(full_path);
+        return StorageOutcome::Err(format!("write {}: {error}", full_path.display()));
+    }
+    StorageOutcome::Ok(())
 }
 
 impl StorageBackend for FileSystem {
@@ -82,23 +183,32 @@ impl StorageBackend for FileSystem {
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
         let full_path = self.full_path(key);
+        let _lock = mutation_lock(&full_path);
+        let _process_lock = match self.acquire_process_lock(&full_path) {
+            Ok(lock) => lock,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::WriteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
 
-        let outcome = {
-            // Always try to create parent directories if present.
-            if let Some(parent) = full_path.parent() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    StorageOutcome::Err(format!("mkdir {}: {e}", parent.display()))
-                } else if let Err(e) = fs::write(&full_path, data) {
-                    StorageOutcome::Err(format!("write {}: {e}", full_path.display()))
-                } else {
-                    StorageOutcome::Ok(())
-                }
+        // Always try to create parent directories if present.
+        let outcome = if let Some(parent) = full_path.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                StorageOutcome::Err(format!("mkdir {}: {e}", parent.display()))
+            } else if let Err(e) = fs::write(&full_path, data) {
+                StorageOutcome::Err(format!("write {}: {e}", full_path.display()))
             } else {
-                // Path has no parent (e.g., "foo") — still attempt the write.
-                match fs::write(&full_path, data) {
-                    Ok(()) => StorageOutcome::Ok(()),
-                    Err(e) => StorageOutcome::Err(format!("write {}: {e}", full_path.display())),
-                }
+                StorageOutcome::Ok(())
+            }
+        } else {
+            // Path has no parent (e.g., "foo") — still attempt the write.
+            match fs::write(&full_path, data) {
+                Ok(()) => StorageOutcome::Ok(()),
+                Err(e) => StorageOutcome::Err(format!("write {}: {e}", full_path.display())),
             }
         };
 
@@ -130,9 +240,18 @@ impl StorageBackend for FileSystem {
             .find(|(name, _)| name.eq_ignore_ascii_case("if-match"))
             .map(|(_, value)| value.trim().trim_matches('"').to_string());
 
-        let outcome = if if_none_match.as_deref() == Some("*") && full_path.exists() {
-            StorageOutcome::Err("precondition failed: object already exists".to_string())
-        } else if let Some(expected) = if_match {
+        let _lock = mutation_lock(&full_path);
+        let _process_lock = match self.acquire_process_lock(&full_path) {
+            Ok(lock) => lock,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::WriteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
+        let outcome = if let Some(expected) = if_match {
             match fs::read(&full_path) {
                 Ok(existing) => {
                     let current =
@@ -149,7 +268,7 @@ impl StorageBackend for FileSystem {
                 )),
             }
         } else if if_none_match.as_deref() == Some("*") {
-            write_file_with_parents(&full_path, data)
+            create_file_new_with_parents(&full_path, &data)
         } else {
             StorageOutcome::Err("conditional write requires a supported precondition".to_string())
         };
@@ -162,6 +281,17 @@ impl StorageBackend for FileSystem {
 
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
         let full_path = self.full_path(key);
+        let _lock = mutation_lock(&full_path);
+        let _process_lock = match self.acquire_process_lock(&full_path) {
+            Ok(lock) => lock,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::DeleteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
 
         let outcome = match fs::remove_file(&full_path) {
             Ok(()) => StorageOutcome::Ok(()),
@@ -186,6 +316,17 @@ impl StorageBackend for FileSystem {
         }
 
         let full_path = self.full_path(key);
+        let _lock = mutation_lock(&full_path);
+        let _process_lock = match self.acquire_process_lock(&full_path) {
+            Ok(lock) => lock,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::DeleteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
         let outcome = if let Some((_, expected)) = headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("if-match"))
@@ -233,7 +374,9 @@ impl StorageBackend for FileSystem {
 
                     for entry in iter.flatten() {
                         if let Some(name) = entry.file_name().to_str() {
-                            items.push(name.to_string());
+                            if name != ".midge-locks" {
+                                items.push(name.to_string());
+                            }
                         }
                     }
 
@@ -255,7 +398,7 @@ impl StorageBackend for FileSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Arc, Barrier};
     use tempfile::TempDir;
 
     // =========== Write Tests ===========
@@ -451,6 +594,89 @@ mod tests {
             }
             _ => panic!("Expected WriteComplete"),
         }
+    }
+
+    #[test]
+    fn should_allow_exactly_one_concurrent_conditional_create() {
+        // Arrange
+        let temp_dir = TempDir::new().unwrap();
+        let backend = Arc::new(FileSystem::new(temp_dir.path()).unwrap());
+        let contenders = 8;
+        let barrier = Arc::new(Barrier::new(contenders));
+
+        // Act
+        let joins: Vec<_> = (0..contenders)
+            .map(|index| {
+                let backend = Arc::clone(&backend);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let (tx, rx) = mpsc::channel();
+                    barrier.wait();
+                    backend.submit_write_with_headers(
+                        "racing-create.txt",
+                        format!("writer-{index}").into_bytes(),
+                        vec![("If-None-Match".into(), "*".into())],
+                        tx,
+                    );
+                    match rx.recv().expect("conditional create response") {
+                        StorageEvent::WriteComplete { result, .. } => result.is_ok(),
+                        other => panic!("unexpected response: {other:?}"),
+                    }
+                })
+            })
+            .collect();
+        let success_count = joins
+            .into_iter()
+            .map(|join| usize::from(join.join().expect("create contender panicked")))
+            .sum::<usize>();
+
+        // Assert
+        assert_eq!(success_count, 1);
+        assert!(temp_dir.path().join("racing-create.txt").exists());
+    }
+
+    #[test]
+    fn should_allow_exactly_one_concurrent_compare_and_swap_update() {
+        // Arrange
+        let temp_dir = TempDir::new().unwrap();
+        let key = "racing-cas.txt";
+        let initial = b"initial".to_vec();
+        std::fs::write(temp_dir.path().join(key), &initial).unwrap();
+        let etag = StorageObjectMetadata::content_crc(initial.len() as u64, &initial).etag;
+        let backend = Arc::new(FileSystem::new(temp_dir.path()).unwrap());
+        let contenders = 8;
+        let barrier = Arc::new(Barrier::new(contenders));
+
+        // Act
+        let joins: Vec<_> = (0..contenders)
+            .map(|index| {
+                let backend = Arc::clone(&backend);
+                let barrier = Arc::clone(&barrier);
+                let etag = etag.clone();
+                std::thread::spawn(move || {
+                    let (tx, rx) = mpsc::channel();
+                    barrier.wait();
+                    backend.submit_write_with_headers(
+                        key,
+                        format!("writer-{index}").into_bytes(),
+                        vec![("If-Match".into(), etag)],
+                        tx,
+                    );
+                    match rx.recv().expect("conditional update response") {
+                        StorageEvent::WriteComplete { result, .. } => result.is_ok(),
+                        other => panic!("unexpected response: {other:?}"),
+                    }
+                })
+            })
+            .collect();
+        let success_count = joins
+            .into_iter()
+            .map(|join| usize::from(join.join().expect("CAS contender panicked")))
+            .sum::<usize>();
+
+        // Assert
+        assert_eq!(success_count, 1);
+        assert_ne!(std::fs::read(temp_dir.path().join(key)).unwrap(), initial);
     }
 
     // =========== Read Tests ===========
@@ -716,6 +942,37 @@ mod tests {
                 StorageOutcome::Err(e) => panic!("List failed: {e}"),
             },
             _ => panic!("Expected ListComplete"),
+        }
+    }
+
+    #[test]
+    fn should_hide_internal_process_lock_directory_from_list_results() {
+        // Arrange
+        let temp_dir = TempDir::new().unwrap();
+        let fs = FileSystem::new(temp_dir.path()).unwrap();
+        let (write_tx, write_rx) = mpsc::channel();
+        fs.submit_write("visible.txt", b"data".to_vec(), write_tx);
+        assert!(matches!(
+            write_rx.recv().expect("write response"),
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            }
+        ));
+        let (list_tx, list_rx) = mpsc::channel();
+
+        // Act
+        fs.submit_list("", list_tx);
+
+        // Assert
+        match list_rx.recv().expect("list response") {
+            StorageEvent::ListComplete {
+                result: StorageOutcome::Ok(items),
+                ..
+            } => {
+                assert_eq!(items, vec!["visible.txt".to_string()]);
+            }
+            other => panic!("unexpected list response: {other:?}"),
         }
     }
 

@@ -1,23 +1,24 @@
 //! Compaction execution: version collection, merging, and output
 //!
-//! This module implements a **streaming** compaction pipeline:
-//!   1. Collect per-SST iterators of logical "versions" from input files.
-//!   2. Merge them into a single sorted stream (key ascending, seq descending).
-//!   3. Stream through deduplication (one entry per key, newest first).
-//!   4. Drop expired entries on-the-fly (TTL-based filtering).
-//!   5. Optionally filter tombstones for final output.
-//!   6. Stream to output SST using the `SstFactory` writer.
+//! This module implements a K-way compaction pipeline:
+//!   1. Collect one logical-version buffer per input SST.
+//!   2. Merge their heads into a sorted stream (key ascending, seq descending).
+//!   3. Deduplicate one key at a time (newest version first).
+//!   4. Normalize expired values to masking tombstones on-the-fly.
+//!   5. Feed the result directly to the `SstFactory` writer.
 //!
-//! The streaming design ensures constant memory usage regardless of input size.
-//! The API remains backward compatible with the original batch helpers.
+//! This avoids an additional all-input vector, key map, and deduplicated output
+//! vector. The reader trait currently materializes one buffer per SST.
 
 use crate::common::MidgeResult;
 use crate::sst::traits::SstFactory;
 use crate::sst::types::{KeyState, RangeTombstone};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
+#[cfg(test)]
 use std::collections::BTreeMap;
+use std::collections::BinaryHeap;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A single logical version of a key observed during compaction.
 ///
@@ -25,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 ///   - `seq` is strictly monotonic per write.
 ///   - Higher `seq` means "newer".
 ///   - Tombstones represent deletions.
-///   - TTL is expressed as an absolute expiry timestamp (seconds since epoch).
+///   - TTL is expressed as an absolute expiry timestamp (milliseconds since epoch).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompactionVersion {
     /// User key
@@ -36,7 +37,7 @@ pub struct CompactionVersion {
     pub is_tombstone: bool,
     /// Value bytes (None if tombstone)
     pub value: Option<Vec<u8>>,
-    /// Expiration time in seconds since epoch (optional)
+    /// Expiration time in milliseconds since epoch (optional)
     pub expiration: Option<u64>,
 }
 
@@ -51,20 +52,18 @@ pub struct CompactionVersion {
 pub struct StreamDeduplicate<I: Iterator<Item = CompactionVersion>> {
     inner: I,
     last_key: Option<Vec<u8>>,
-    now_secs: u64,
+    now_millis: u64,
 }
 
 #[cfg(test)]
 impl<I: Iterator<Item = CompactionVersion>> StreamDeduplicate<I> {
     pub fn new(inner: I) -> Self {
-        let now_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+        let now_millis = crate::common::time::unix_time_millis();
 
         Self {
             inner,
             last_key: None,
-            now_secs,
+            now_millis,
         }
     }
 }
@@ -77,10 +76,17 @@ impl<I: Iterator<Item = CompactionVersion>> Iterator for StreamDeduplicate<I> {
         loop {
             let version = self.inner.next()?;
 
-            // Skip expired entries
-            if is_expired(&version, self.now_secs) {
-                continue;
-            }
+            let version = if is_expired(&version, self.now_millis) && !version.is_tombstone {
+                CompactionVersion {
+                    key: version.key.clone(),
+                    seq: version.seq,
+                    is_tombstone: true,
+                    value: None,
+                    expiration: None,
+                }
+            } else {
+                version
+            };
 
             // Skip duplicate keys (we already emitted the highest-seq version of this key)
             if let Some(ref last_key) = self.last_key {
@@ -96,15 +102,114 @@ impl<I: Iterator<Item = CompactionVersion>> Iterator for StreamDeduplicate<I> {
     }
 }
 
-/// Return `true` if this version is expired with respect to `now_secs`.
-fn is_expired(version: &CompactionVersion, now_secs: u64) -> bool {
-    matches!(version.expiration, Some(exp) if exp <= now_secs)
+/// Return `true` if this version is expired with respect to `now_millis`.
+fn is_expired(version: &CompactionVersion, now_millis: u64) -> bool {
+    crate::common::time::is_expired_at(version.expiration, now_millis)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SstCompactionInput {
     pub versions: Vec<CompactionVersion>,
     pub range_tombstones: Vec<RangeTombstone>,
+}
+
+/// One sorted input and its current merge head.
+struct VersionMergeInput {
+    iter: std::vec::IntoIter<CompactionVersion>,
+    current: Option<CompactionVersion>,
+}
+
+/// Heap item that orders compaction versions by key ascending and sequence
+/// descending. `BinaryHeap` is a max heap, so the key ordering is inverted.
+#[derive(Debug, Clone)]
+struct VersionHeapItem {
+    key: Vec<u8>,
+    seq: u64,
+    input_idx: usize,
+}
+
+impl PartialEq for VersionHeapItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.seq == other.seq && self.input_idx == other.input_idx
+    }
+}
+
+impl Eq for VersionHeapItem {}
+
+impl PartialOrd for VersionHeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for VersionHeapItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.key.cmp(&other.key) {
+            Ordering::Less => Ordering::Greater,
+            Ordering::Greater => Ordering::Less,
+            Ordering::Equal => match self.seq.cmp(&other.seq) {
+                Ordering::Less => Ordering::Less,
+                Ordering::Greater => Ordering::Greater,
+                Ordering::Equal => self.input_idx.cmp(&other.input_idx).reverse(),
+            },
+        }
+    }
+}
+
+/// K-way merge over the per-SST version vectors. It emits one input head at a
+/// time, so deduplication and SST writing never need an additional global
+/// version vector or key map.
+struct VersionMergeIterator {
+    inputs: Vec<VersionMergeInput>,
+    heap: BinaryHeap<VersionHeapItem>,
+}
+
+impl VersionMergeIterator {
+    fn new(mut streams: Vec<Vec<CompactionVersion>>) -> Self {
+        let mut inputs = Vec::with_capacity(streams.len());
+        let mut heap = BinaryHeap::new();
+
+        for (input_idx, stream) in streams.iter_mut().enumerate() {
+            stream.sort_by(|left, right| {
+                left.key
+                    .cmp(&right.key)
+                    .then_with(|| right.seq.cmp(&left.seq))
+            });
+            let mut iter = std::mem::take(stream).into_iter();
+            let current = iter.next();
+            if let Some(entry) = &current {
+                heap.push(VersionHeapItem {
+                    key: entry.key.clone(),
+                    seq: entry.seq,
+                    input_idx,
+                });
+            }
+            inputs.push(VersionMergeInput { iter, current });
+        }
+
+        Self { inputs, heap }
+    }
+}
+
+impl Iterator for VersionMergeIterator {
+    type Item = CompactionVersion;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let head = self.heap.pop()?;
+        let input = self.inputs.get_mut(head.input_idx)?;
+        let current = input.current.take()?;
+
+        if let Some(next) = input.iter.next() {
+            self.heap.push(VersionHeapItem {
+                key: next.key.clone(),
+                seq: next.seq,
+                input_idx: head.input_idx,
+            });
+            input.current = Some(next);
+        }
+
+        Some(current)
+    }
 }
 
 fn normalize_range_tombstones(mut tombstones: Vec<RangeTombstone>) -> Vec<RangeTombstone> {
@@ -149,13 +254,16 @@ fn collect_reader_input(
     })
 }
 
-/// Collect compaction input from the given input SST files.
-pub fn collect_compaction_input(
+/// Materialize each input SST independently for a K-way merge. Reader APIs
+/// currently return vectors, but retaining those per-input buffers avoids a
+/// second all-input vector and lets downstream deduplication write directly
+/// to the output stream.
+pub(crate) fn collect_compaction_stream_inputs(
     sst_factory: &dyn SstFactory,
     input_files: &[String],
     abort_check: Option<&dyn Fn() -> bool>,
-) -> MidgeResult<SstCompactionInput> {
-    let mut versions = Vec::new();
+) -> MidgeResult<(Vec<Vec<CompactionVersion>>, Vec<RangeTombstone>)> {
+    let mut streams = Vec::with_capacity(input_files.len());
     let mut range_tombstones = Vec::new();
 
     for filename in input_files {
@@ -163,7 +271,9 @@ pub fn collect_compaction_input(
         if let Some(check) = abort_check {
             if check() {
                 tracing::info!(file = %filename, "compaction aborting due to ingest epoch change");
-                return Ok(SstCompactionInput::default());
+                return Err(crate::common::MidgeError::Aborted(
+                    "compaction aborted due to ingest epoch change".to_string(),
+                ));
             }
         }
 
@@ -178,20 +288,11 @@ pub fn collect_compaction_input(
                 "compaction observed SST range tombstones"
             );
         }
-        versions.extend(input.versions);
+        streams.push(input.versions);
         range_tombstones.extend(input.range_tombstones);
     }
 
-    versions.sort_by(|left, right| {
-        left.key
-            .cmp(&right.key)
-            .then_with(|| right.seq.cmp(&left.seq))
-    });
-
-    Ok(SstCompactionInput {
-        versions,
-        range_tombstones: normalize_range_tombstones(range_tombstones),
-    })
+    Ok((streams, normalize_range_tombstones(range_tombstones)))
 }
 
 /// Deduplicate versions, keeping only the newest **non-expired** entry per key.
@@ -203,31 +304,37 @@ pub fn collect_compaction_input(
 ///
 /// This is a pure, side-effect-free helper and is intentionally independent of
 /// any particular SST layout.
+#[cfg(test)]
 pub fn deduplicate_versions(versions: &[CompactionVersion]) -> Vec<CompactionVersion> {
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    let now_millis = crate::common::time::unix_time_millis();
 
     // Map: key -> newest visible version (by sequence).
     let mut newest_by_key: BTreeMap<Vec<u8>, CompactionVersion> = BTreeMap::new();
 
     for version in versions {
-        // Skip expired entries
-        if is_expired(version, now_secs) {
-            continue;
-        }
+        let normalized = if is_expired(version, now_millis) && !version.is_tombstone {
+            CompactionVersion {
+                key: version.key.clone(),
+                seq: version.seq,
+                is_tombstone: true,
+                value: None,
+                expiration: None,
+            }
+        } else {
+            version.clone()
+        };
 
-        let key = &version.key;
+        let key = &normalized.key;
 
         match newest_by_key.get(key) {
             None => {
                 // First observation of this key.
-                newest_by_key.insert(key.clone(), version.clone());
+                newest_by_key.insert(key.clone(), normalized);
             }
             Some(existing) => {
                 // Keep the one with the higher sequence number.
-                if version.seq > existing.seq {
-                    newest_by_key.insert(key.clone(), version.clone());
+                if normalized.seq > existing.seq {
+                    newest_by_key.insert(key.clone(), normalized);
                 }
             }
         }
@@ -254,6 +361,7 @@ pub fn filter_tombstones(versions: &[CompactionVersion]) -> Vec<CompactionVersio
 ///   - If `snapshot_horizon` is `None`, all tombstones are dropped (legacy behavior).
 ///   - If `Some(h)`, tombstones with `seq > h` are preserved to prevent resurrection
 ///     for snapshots reading at sequence `h` or earlier.
+#[cfg(test)]
 pub fn filter_tombstones_with_horizon(
     versions: &[CompactionVersion],
     snapshot_horizon: Option<u64>,
@@ -272,73 +380,95 @@ pub fn filter_tombstones_with_horizon(
     }
 }
 
-pub fn write_compaction_output_to_sst(
+/// Merge, normalize, deduplicate, and write compaction versions without
+/// materializing a second deduplicated result vector.
+pub(crate) fn write_merged_compaction_output_to_sst(
     sst_factory: &dyn SstFactory,
     output_filename: &str,
-    versions: &[CompactionVersion],
+    streams: Vec<Vec<CompactionVersion>>,
     range_tombstones: &[RangeTombstone],
     abort_check: Option<&dyn Fn() -> bool>,
-) -> MidgeResult<()> {
+) -> MidgeResult<usize> {
     let mut writer = sst_factory.create()?;
+    let now_millis = crate::common::time::unix_time_millis();
+    let mut last_key: Option<Vec<u8>> = None;
+    let mut written = 0usize;
 
-    let mut added: usize = 0;
-    let add_start = std::time::Instant::now();
-    for (i, version) in versions.iter().enumerate() {
-        // Periodically check if we should abort (every 1024 entries)
-        if i % 1024 == 0 {
+    for (seen, mut version) in VersionMergeIterator::new(streams).enumerate() {
+        if seen % 1024 == 0 {
             if let Some(check) = abort_check {
                 if check() {
-                    tracing::info!(output = %output_filename, "compaction aborting during write due to ingest epoch change at {} entries", i);
-                    return Err(crate::common::MidgeError::Internal(
+                    return Err(crate::common::MidgeError::Aborted(
                         "compaction aborted due to ingest epoch change".to_string(),
                     ));
                 }
             }
         }
 
-        let op_type = if version.is_tombstone { 2u8 } else { 0u8 };
+        if is_expired(&version, now_millis) && !version.is_tombstone {
+            version.is_tombstone = true;
+            version.value = None;
+            version.expiration = None;
+        }
 
-        writer.add_with_meta(
+        if last_key.as_deref() == Some(version.key.as_slice()) {
+            continue;
+        }
+        last_key = Some(version.key.clone());
+
+        writer.add_sorted_with_meta(
             &version.key,
-            // `add_with_meta` expects `Option<&[u8]>` for value; we pass through.
             version.value.as_deref(),
             version.seq,
-            op_type,
+            u8::from(version.is_tombstone) * 2,
             version.expiration,
         )?;
-        added += 1;
+        written = written.saturating_add(1);
     }
 
-    for (i, tombstone) in range_tombstones.iter().enumerate() {
-        if i % 1024 == 0 {
+    for (index, tombstone) in range_tombstones.iter().enumerate() {
+        if index % 1024 == 0 {
             if let Some(check) = abort_check {
                 if check() {
-                    tracing::info!(output = %output_filename, "compaction aborting during range tombstone write due to ingest epoch change at {} tombstones", i);
-                    return Err(crate::common::MidgeError::Internal(
+                    return Err(crate::common::MidgeError::Aborted(
                         "compaction aborted due to ingest epoch change".to_string(),
                     ));
                 }
             }
         }
-
         writer.add_range_tombstone(&tombstone.start, &tombstone.end, tombstone.seq)?;
     }
-    let add_ns = add_start.elapsed().as_nanos();
 
-    let path = Path::new(output_filename);
-    let finish_start = std::time::Instant::now();
-    crate::sst::fs::finish_writer_to_path(writer, path)?;
-    let finish_ns = finish_start.elapsed().as_nanos();
+    if written == 0 && range_tombstones.is_empty() {
+        return Err(crate::common::MidgeError::Internal(
+            "compaction produced no output after filtering; inputs were not replaced".to_string(),
+        ));
+    }
 
-    tracing::info!(
-        output = %output_filename,
-        versions = added,
-        add_ns = add_ns,
-        finish_ns = finish_ns,
-        "compaction write breakdown"
-    );
+    if abort_check.is_some_and(|check| check()) {
+        return Err(crate::common::MidgeError::Aborted(
+            "compaction aborted due to ingest epoch change".to_string(),
+        ));
+    }
 
-    Ok(())
+    let output_path = Path::new(output_filename);
+    crate::sst::fs::finish_writer_to_path(writer, output_path)?;
+
+    // Cancellation can race with finalization. Once an output exists, it is
+    // still only staged: remove it before reporting the abort so a later
+    // compaction cannot mistake it for a publishable replacement.
+    if abort_check.is_some_and(|check| check()) {
+        match std::fs::remove_file(output_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(crate::common::MidgeError::Io(error)),
+        }
+        return Err(crate::common::MidgeError::Aborted(
+            "compaction aborted due to ingest epoch change".to_string(),
+        ));
+    }
+
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -400,10 +530,7 @@ mod tests {
     #[test]
     fn should_skip_expired_entries_when_deduplicating_with_ttl() {
         // Arrange
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = crate::common::time::unix_time_millis();
 
         let versions = vec![
             mk_version(
@@ -444,6 +571,36 @@ mod tests {
         assert_eq!(deduped[0].seq, 3);
         assert_eq!(deduped[1].key, b"b".to_vec());
         assert_eq!(deduped[1].seq, 2);
+    }
+
+    #[test]
+    fn should_merge_version_streams_by_key_then_descending_sequence() {
+        // Arrange
+        let left = vec![
+            mk_version("a", 3, false, Some("a3"), None),
+            mk_version("c", 1, false, Some("c1"), None),
+        ];
+        let right = vec![
+            mk_version("a", 4, false, Some("a4"), None),
+            mk_version("b", 2, false, Some("b2"), None),
+        ];
+
+        // Act
+        let merged: Vec<_> = VersionMergeIterator::new(vec![left, right]).collect();
+
+        // Assert
+        assert_eq!(
+            merged
+                .iter()
+                .map(|version| (version.key.clone(), version.seq))
+                .collect::<Vec<_>>(),
+            vec![
+                (b"a".to_vec(), 4),
+                (b"a".to_vec(), 3),
+                (b"b".to_vec(), 2),
+                (b"c".to_vec(), 1),
+            ]
+        );
     }
 
     #[test]

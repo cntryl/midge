@@ -16,11 +16,13 @@ impl FlushCoordinator {
         ) {
             Ok(flush_output) => {
                 let sequence = event_loop.state.sequence;
-                match event_loop.publish_flushed_sst(
+                match event_loop.publish_flushed_sst_with_reservation(
                     cf_id,
                     &flush_output.sst_name,
                     sequence,
                     flush_output.file_meta,
+                    flush_output.frozen_memtable.as_ref(),
+                    flush_output.reservation,
                 ) {
                     Ok(()) => {
                         event_loop.wake_write_stall_waiters();
@@ -44,7 +46,7 @@ impl FlushCoordinator {
         sst_name: &str,
         sequence: u64,
     ) -> HandleOutcome {
-        let resp = match event_loop.publish_flushed_sst(cf_id, sst_name, sequence, None) {
+        let resp = match event_loop.publish_flushed_sst(cf_id, sst_name, sequence, None, None) {
             Ok(()) => {
                 event_loop.wake_write_stall_waiters();
                 RuntimeResponse::Ok { request_id }

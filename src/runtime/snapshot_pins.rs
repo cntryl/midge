@@ -3,6 +3,7 @@
 use crate::types::SnapshotPinSnapshot;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -16,10 +17,27 @@ struct SnapshotPin {
 #[derive(Default)]
 pub(crate) struct SnapshotPinRegistry {
     active: DashMap<u64, SnapshotPin>,
+    /// Serializes snapshot capture/pin registration with GC's pin sampling.
+    acquisition: RwLock<()>,
+}
+
+pub(crate) struct SnapshotAcquisitionGuard<'a> {
+    _guard: RwLockReadGuard<'a, ()>,
 }
 
 impl SnapshotPinRegistry {
+    #[cfg(test)]
     pub(crate) fn register(
+        &self,
+        snapshot_id: u64,
+        sequence: u64,
+        pinned_sst_names: Vec<String>,
+    ) -> bool {
+        let _guard = self.acquisition.write();
+        self.register_while_acquired(snapshot_id, sequence, pinned_sst_names)
+    }
+
+    pub(crate) fn register_while_acquired(
         &self,
         snapshot_id: u64,
         sequence: u64,
@@ -41,7 +59,18 @@ impl SnapshotPinRegistry {
     }
 
     pub(crate) fn unregister(&self, snapshot_id: u64) -> bool {
+        // A transaction drops this pin only after it has stopped using the
+        // captured snapshot. Sharing the acquisition guard keeps normal read
+        // transactions concurrent while a GC pass obtains the exclusive guard
+        // before sampling pins and deleting obsolete files.
+        let _guard = self.acquisition.read();
         self.active.remove(&snapshot_id).is_some()
+    }
+
+    pub(crate) fn begin_acquisition(&self) -> SnapshotAcquisitionGuard<'_> {
+        SnapshotAcquisitionGuard {
+            _guard: self.acquisition.read(),
+        }
     }
 
     pub(crate) fn active_count(&self) -> usize {
@@ -49,6 +78,10 @@ impl SnapshotPinRegistry {
     }
 
     pub(crate) fn pinned_sst_names(&self, max_lifetime: Duration) -> HashSet<String> {
+        // GC must exclude the capture-to-registration window. Snapshot
+        // acquisition takes a shared guard, so the exclusive guard here waits
+        // until every in-flight capture has published its pin.
+        let _guard: RwLockWriteGuard<'_, ()> = self.acquisition.write();
         let now = Instant::now();
         let mut pinned = HashSet::new();
 
@@ -71,6 +104,7 @@ impl SnapshotPinRegistry {
     }
 
     pub(crate) fn oldest_sequence(&self) -> Option<u64> {
+        let _guard = self.acquisition.read();
         self.active.iter().map(|entry| entry.value().sequence).min()
     }
 

@@ -48,9 +48,14 @@ impl CacheShard {
 
     /// Get a cached value.
     ///
-    /// The entry lookup is concurrent. Policy and metrics updates may use their
-    /// own internal synchronization.
+    /// The entry lookup and policy update share the mutation boundary so a hit
+    /// cannot race an eviction into stale policy state.
     pub fn get(&self, key: &CacheKey) -> Option<CacheValue> {
+        // A hit must linearize with eviction: if policy recency were updated
+        // after an evictor removed the entry, the policy could retain a stale
+        // key that no longer exists in the cache. Serialize the entry lookup
+        // and synchronous policy publication with put/remove/eviction.
+        let _lock = self.lock_mutation();
         if let Some(value_ref) = self.entries.get(key) {
             let value = value_ref.value().clone();
             let _ = value.increment_access();
@@ -261,6 +266,144 @@ impl CacheShard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    struct PausedHitState {
+        pause_target: AtomicBool,
+        target_access_entered: AtomicBool,
+        release_target: AtomicBool,
+        victim_selected: AtomicBool,
+        keys: std::sync::Mutex<HashSet<CacheKey>>,
+    }
+
+    struct PausedHitPolicy {
+        state: Arc<PausedHitState>,
+        target: CacheKey,
+    }
+
+    impl CachePolicy for PausedHitPolicy {
+        fn on_access(&self, key: CacheKey) {
+            if key == self.target && self.state.pause_target.swap(false, Ordering::SeqCst) {
+                self.state
+                    .target_access_entered
+                    .store(true, Ordering::SeqCst);
+                while !self.state.release_target.load(Ordering::SeqCst) {
+                    thread::yield_now();
+                }
+            }
+            self.state
+                .keys
+                .lock()
+                .expect("policy keys lock")
+                .insert(key);
+        }
+
+        fn pick_victim(&self, _exclude_types: &[BlockType]) -> Option<CacheKey> {
+            self.state.victim_selected.store(true, Ordering::SeqCst);
+            let keys = self.state.keys.lock().expect("policy keys lock");
+            keys.contains(&self.target)
+                .then_some(self.target)
+                .or_else(|| keys.iter().next().copied())
+        }
+
+        fn on_remove(&self, key: CacheKey) {
+            self.state
+                .keys
+                .lock()
+                .expect("policy keys lock")
+                .remove(&key);
+        }
+
+        fn on_stale(&self, key: CacheKey) {
+            self.on_remove(key);
+        }
+
+        fn clear(&self) {
+            self.state.keys.lock().expect("policy keys lock").clear();
+        }
+    }
+
+    fn wait_until(condition: impl Fn() -> bool, message: &str) {
+        for _ in 0..10_000 {
+            if condition() {
+                return;
+            }
+            thread::yield_now();
+        }
+        panic!("{message}");
+    }
+
+    #[test]
+    fn should_not_leave_stale_policy_state_when_hit_races_eviction() {
+        // Arrange
+        let target = CacheKey::for_data(1, 0);
+        let replacement = CacheKey::for_data(2, 0);
+        let state = Arc::new(PausedHitState {
+            pause_target: AtomicBool::new(false),
+            target_access_entered: AtomicBool::new(false),
+            release_target: AtomicBool::new(false),
+            victim_selected: AtomicBool::new(false),
+            keys: std::sync::Mutex::new(HashSet::new()),
+        });
+        let shard = Arc::new(CacheShard {
+            entries: DashMap::new(),
+            policy: Box::new(PausedHitPolicy {
+                state: Arc::clone(&state),
+                target,
+            }),
+            mutation_lock: Mutex::new(()),
+            metrics: CacheMetrics::new(),
+            max_bytes: 1,
+        });
+        assert!(shard.put(target, &Bytes::from_static(b"a")));
+        state.pause_target.store(true, Ordering::SeqCst);
+
+        let hit_shard = Arc::clone(&shard);
+        let hit = thread::spawn(move || hit_shard.get(&target));
+        wait_until(
+            || state.target_access_entered.load(Ordering::SeqCst),
+            "hit did not reach the policy publication barrier",
+        );
+
+        let put_shard = Arc::clone(&shard);
+        let eviction_attempted = Arc::new(AtomicBool::new(false));
+        let eviction_attempted_for_thread = Arc::clone(&eviction_attempted);
+        let eviction = thread::spawn(move || {
+            eviction_attempted_for_thread.store(true, Ordering::SeqCst);
+            put_shard.put(replacement, &Bytes::from_static(b"b"))
+        });
+        wait_until(
+            || eviction_attempted.load(Ordering::SeqCst),
+            "eviction thread did not start",
+        );
+
+        // Act / Assert: while a hit is publishing recency, eviction must not
+        // select a victim. Otherwise the hit can resurrect stale policy state.
+        for _ in 0..10_000 {
+            assert!(
+                !state.victim_selected.load(Ordering::SeqCst),
+                "eviction selected a victim while the hit was in-flight"
+            );
+            thread::yield_now();
+        }
+        state.release_target.store(true, Ordering::SeqCst);
+        assert!(hit.join().expect("hit thread should finish").is_some());
+        assert!(eviction.join().expect("eviction thread should finish"));
+
+        // Assert: policy and cache entry state are removed together.
+        assert!(!shard.entries.contains_key(&target));
+        assert!(shard.entries.contains_key(&replacement));
+        assert!(
+            !state
+                .keys
+                .lock()
+                .expect("policy keys lock")
+                .contains(&target),
+            "evicted entry must not remain in policy metadata"
+        );
+    }
 
     #[test]
     fn should_make_first_data_block_put_visible_without_prior_admission() {

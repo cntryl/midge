@@ -28,6 +28,13 @@ pub struct Manifest {
     /// Next SST sequence numbers per CF
     #[serde(default)]
     pub next_sst_seqs: HashMap<u32, u64>,
+    /// Highest manifest journal edit included in the latest checkpoint.
+    ///
+    /// Older manifests omit this field and therefore replay their complete
+    /// journal. Keeping the horizon in the snapshot makes a crash after the
+    /// snapshot rename but before journal truncation idempotent.
+    #[serde(default)]
+    pub edit_checkpoint_id: u64,
 }
 
 impl Default for Manifest {
@@ -39,6 +46,7 @@ impl Default for Manifest {
             cloud_checkpoint: None,
             next_wal_seq: 1,
             next_sst_seqs: HashMap::new(),
+            edit_checkpoint_id: 0,
         }
     }
 }
@@ -146,7 +154,15 @@ impl Manifest {
 
     /// Add a file to the manifest
     pub fn add_file(&mut self, file: FileMeta) {
-        self.files.push(file);
+        if let Some(existing) = self
+            .files
+            .iter_mut()
+            .find(|existing| existing.name == file.name)
+        {
+            *existing = file;
+        } else {
+            self.files.push(file);
+        }
     }
 
     /// Remove a file from the manifest
@@ -234,12 +250,20 @@ impl Manifest {
                 name,
                 created_at,
             } => {
-                self.column_families.push(ColumnFamilyMeta {
-                    id: *id,
-                    name: name.clone(),
-                    created_at: *created_at,
-                    deleted_at: None,
-                });
+                if let Some(existing) = self.column_families.iter_mut().find(|cf| cf.id == *id) {
+                    if existing.deleted_at.is_some() {
+                        existing.name.clone_from(name);
+                        existing.created_at = *created_at;
+                        existing.deleted_at = None;
+                    }
+                } else {
+                    self.column_families.push(ColumnFamilyMeta {
+                        id: *id,
+                        name: name.clone(),
+                        created_at: *created_at,
+                        deleted_at: None,
+                    });
+                }
             }
             crate::metadata::ManifestEdit::DropColumnFamily { id } => {
                 let _ = self.delete_column_family(*id);
@@ -250,10 +274,19 @@ impl Manifest {
                 }
             }
             crate::metadata::ManifestEdit::BumpNextSstSeq { cf_id, next_seq } => {
-                self.next_sst_seqs.insert(*cf_id, *next_seq);
+                let current = self.next_sst_seqs.get(cf_id).copied().unwrap_or(0);
+                if *next_seq > current {
+                    self.next_sst_seqs.insert(*cf_id, *next_seq);
+                }
             }
             crate::metadata::ManifestEdit::SetCloudCheckpoint(cp) => {
-                self.cloud_checkpoint = Some(cp.clone());
+                let should_advance = self
+                    .cloud_checkpoint
+                    .as_ref()
+                    .is_none_or(|current| cp.checkpoint_sequence >= current.checkpoint_sequence);
+                if should_advance {
+                    self.cloud_checkpoint = Some(cp.clone());
+                }
             }
             crate::metadata::ManifestEdit::Batch(edits) => {
                 // Apply each edit in order (atomic at journal record boundary)

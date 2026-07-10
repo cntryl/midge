@@ -54,6 +54,24 @@ pub enum ManifestEdit {
     Batch(Vec<ManifestEdit>),
 }
 
+/// Journal payload wrapper used by new writers.
+///
+/// The record framing and edit enum remain unchanged so older journals can be
+/// replayed. The wrapper adds a durable monotonic identity to each record,
+/// allowing checkpoint recovery to ignore edits already represented by the
+/// snapshot even when journal truncation did not complete.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JournalEditEnvelope {
+    edit_id: u64,
+    edit: ManifestEdit,
+}
+
+#[derive(Debug, Clone)]
+struct JournalEdit {
+    edit_id: u64,
+    edit: ManifestEdit,
+}
+
 impl ManifestEdit {
     pub fn record_type(&self) -> u8 {
         match self {
@@ -156,6 +174,66 @@ static MANIFEST_SYNC_STATE: std::sync::LazyLock<Mutex<ManifestSyncState>> =
 
 const JOURNAL_FILE: &str = "manifest.journal";
 
+fn checkpoint_edit_id_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> MidgeResult<u64> {
+    use crate::io::traits::{FsPath, OpenMode, OpenOptions};
+
+    let path = FsPath::new("manifest.snapshot.json");
+    let snapshot_exists = match fs.exists(&path) {
+        Ok(exists) => exists,
+        Err(crate::io::traits::FsError::NotFound(_)) => false,
+        Err(error) => return Err(crate::common::MidgeError::from(error)),
+    };
+    if !snapshot_exists {
+        return Ok(0);
+    }
+
+    let file = fs.open(
+        &path,
+        OpenOptions {
+            mode: OpenMode::ReadOnly,
+            create: false,
+            create_new: false,
+            truncate: false,
+        },
+    )?;
+    let len = file.len().map_err(crate::common::MidgeError::from)?;
+    let bytes = file
+        .read_at(0, len)
+        .map_err(crate::common::MidgeError::from)?;
+    let manifest: crate::metadata::Manifest = serde_json::from_slice(&bytes)
+        .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))?;
+    Ok(manifest.edit_checkpoint_id)
+}
+
+fn next_edit_id_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> MidgeResult<u64> {
+    let checkpoint = checkpoint_edit_id_with_fs(fs)?;
+    let (_edits, journal_max) = replay_journal_with_ids_and_max_with_fs(fs, true)?;
+    Ok(checkpoint.max(journal_max).saturating_add(1).max(1))
+}
+
+pub(crate) fn highest_edit_id_with_fs(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+) -> MidgeResult<u64> {
+    let checkpoint = checkpoint_edit_id_with_fs(fs)?;
+    let journal_max = replay_journal_with_ids_with_fs(fs)?
+        .into_iter()
+        .map(|edit| edit.edit_id)
+        .max()
+        .unwrap_or(0);
+    Ok(checkpoint.max(journal_max))
+}
+
+pub(crate) fn replay_edits_after_with_fs(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    checkpoint: u64,
+) -> MidgeResult<Vec<ManifestEdit>> {
+    Ok(replay_journal_with_ids_with_fs(fs)?
+        .into_iter()
+        .filter(|edit| edit.edit_id > checkpoint)
+        .map(|edit| edit.edit)
+        .collect())
+}
+
 /// Append an edit to the manifest journal using a provided Fs (preferred).
 pub fn append_edit_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
@@ -163,7 +241,11 @@ pub fn append_edit_with_fs(
 ) -> MidgeResult<()> {
     use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
 
-    let payload = journal_serialize(edit)?;
+    let edit_id = next_edit_id_with_fs(fs)?;
+    let payload = journal_serialize(&JournalEditEnvelope {
+        edit_id,
+        edit: edit.clone(),
+    })?;
     let mut hasher = Crc32::new();
     hasher.update(&payload);
     let crc = hasher.finalize();
@@ -267,11 +349,26 @@ pub fn replay_journal(db_path: &Path) -> MidgeResult<Vec<ManifestEdit>> {
 
 /// Replay a journal file at `db_path`. Returns Vec<ManifestEdit> in order.
 /// Stops cleanly on partial or corrupt tail record (returns edits up to that point).
+#[cfg(test)]
 pub fn replay_journal_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
 ) -> MidgeResult<Vec<ManifestEdit>> {
+    replay_journal_with_ids_with_fs(fs)
+        .map(|edits| edits.into_iter().map(|edit| edit.edit).collect())
+}
+
+fn replay_journal_with_ids_with_fs(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+) -> MidgeResult<Vec<JournalEdit>> {
+    replay_journal_with_ids_and_max_with_fs(fs, false).map(|(edits, _max_edit_id)| edits)
+}
+
+fn replay_journal_with_ids_and_max_with_fs(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    include_uncommitted: bool,
+) -> MidgeResult<(Vec<JournalEdit>, u64)> {
     let Some(file) = open_journal_for_replay(fs)? else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     };
 
     let file_len = file.len().map_err(crate::common::MidgeError::from)?;
@@ -313,14 +410,15 @@ pub fn replay_journal_with_fs(
         }
     }
 
-    finalize_journal_replay(state)
+    finalize_journal_replay(state, include_uncommitted)
 }
 
 #[derive(Default)]
 struct JournalReplayState {
-    edits: Vec<ManifestEdit>,
+    edits: Vec<JournalEdit>,
     last_marker_edit_idx: Option<usize>,
     fatal_prefix_error: Option<String>,
+    max_edit_id: u64,
 }
 
 struct JournalRecord {
@@ -359,6 +457,11 @@ fn open_journal_for_replay(
     ) {
         Ok(file) => Ok(Some(file)),
         Err(crate::io::traits::FsError::NotFound(_)) => Ok(None),
+        Err(crate::io::traits::FsError::Io(message))
+            if message.contains("No such file") || message.contains("no such file") =>
+        {
+            Ok(None)
+        }
         Err(e) => Err(crate::common::MidgeError::from(e)),
     }
 }
@@ -460,9 +563,27 @@ fn handle_fsync_marker_record(record: &JournalRecord, state: &mut JournalReplayS
 }
 
 fn handle_batch_record(record: &JournalRecord, state: &mut JournalReplayState) -> bool {
+    if let Ok(envelope) = journal_deserialize::<JournalEditEnvelope>(&record.payload) {
+        push_journal_edit(
+            state,
+            JournalEdit {
+                edit_id: envelope.edit_id,
+                edit: envelope.edit,
+            },
+        );
+        return true;
+    }
+
     match journal_deserialize::<Vec<ManifestEdit>>(&record.payload) {
         Ok(batch) => {
-            state.edits.push(ManifestEdit::Batch(batch));
+            let edit_id = next_replay_edit_id(state);
+            push_journal_edit(
+                state,
+                JournalEdit {
+                    edit_id,
+                    edit: ManifestEdit::Batch(batch),
+                },
+            );
             true
         }
         Err(e) => {
@@ -478,9 +599,21 @@ fn handle_batch_record(record: &JournalRecord, state: &mut JournalReplayState) -
 }
 
 fn handle_manifest_edit_record(record: &JournalRecord, state: &mut JournalReplayState) -> bool {
+    if let Ok(envelope) = journal_deserialize::<JournalEditEnvelope>(&record.payload) {
+        push_journal_edit(
+            state,
+            JournalEdit {
+                edit_id: envelope.edit_id,
+                edit: envelope.edit,
+            },
+        );
+        return true;
+    }
+
     match journal_deserialize::<ManifestEdit>(&record.payload) {
         Ok(edit) => {
-            state.edits.push(edit);
+            let edit_id = next_replay_edit_id(state);
+            push_journal_edit(state, JournalEdit { edit_id, edit });
             true
         }
         Err(e) => {
@@ -495,6 +628,15 @@ fn handle_manifest_edit_record(record: &JournalRecord, state: &mut JournalReplay
     }
 }
 
+fn push_journal_edit(state: &mut JournalReplayState, edit: JournalEdit) {
+    state.max_edit_id = state.max_edit_id.max(edit.edit_id);
+    state.edits.push(edit);
+}
+
+fn next_replay_edit_id(state: &JournalReplayState) -> u64 {
+    state.max_edit_id.saturating_add(1).max(1)
+}
+
 fn maybe_mark_fatal_prefix(state: &mut JournalReplayState, record_start: u64, message: String) {
     if is_fatal_first_journal_record(state, record_start) {
         state.fatal_prefix_error = Some(message);
@@ -505,16 +647,22 @@ fn is_fatal_first_journal_record(state: &JournalReplayState, record_start: u64) 
     state.edits.is_empty() && state.last_marker_edit_idx.is_none() && record_start == 0
 }
 
-fn finalize_journal_replay(mut state: JournalReplayState) -> MidgeResult<Vec<ManifestEdit>> {
+fn finalize_journal_replay(
+    mut state: JournalReplayState,
+    include_uncommitted: bool,
+) -> MidgeResult<(Vec<JournalEdit>, u64)> {
     if let Some(message) = state.fatal_prefix_error {
         return Err(crate::common::MidgeError::Corruption(message));
     }
 
-    if let Some(idx) = state.last_marker_edit_idx {
-        state.edits.truncate(idx);
+    if !include_uncommitted {
+        if let Some(idx) = state.last_marker_edit_idx {
+            state.edits.truncate(idx);
+        }
     }
 
-    Ok(state.edits)
+    let max_edit_id = state.max_edit_id;
+    Ok((state.edits, max_edit_id))
 }
 
 /// Append a batch of edits as a single TLV record using the provided Fs (preferred).
@@ -524,7 +672,11 @@ pub fn append_edit_batch_with_fs(
 ) -> MidgeResult<()> {
     use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
 
-    let payload = journal_serialize(batch)?;
+    let edit_id = next_edit_id_with_fs(fs)?;
+    let payload = journal_serialize(&JournalEditEnvelope {
+        edit_id,
+        edit: ManifestEdit::Batch(batch.to_vec()),
+    })?;
     let mut hasher = Crc32::new();
     hasher.update(&payload);
     let crc = hasher.finalize();
@@ -678,7 +830,6 @@ pub fn append_fsync_marker_with_fs(
 }
 
 /// Truncate or rotate journal after snapshot using provided Fs.
-#[cfg(test)]
 pub fn truncate_journal_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> MidgeResult<()> {
     use crate::io::traits::{FsPath, OpenMode, OpenOptions};
 

@@ -164,10 +164,8 @@ impl WalRecord {
         writer_epoch: u64,
     ) -> Self {
         let expiration = if ttl_seconds > 0 {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-            Some(now + (ttl_seconds * 1000))
+            let now = crate::common::time::unix_time_millis();
+            Some(now.saturating_add(ttl_seconds.saturating_mul(1_000)))
         } else {
             None
         };
@@ -188,14 +186,7 @@ impl WalRecord {
 
     /// Check if this record has expired
     pub fn is_expired(&self) -> bool {
-        if let Some(exp_time) = self.expiration {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-            now > exp_time
-        } else {
-            false
-        }
+        crate::common::time::is_expired_at(self.expiration, crate::common::time::unix_time_millis())
     }
 
     /// Get the size in bytes of this record when serialized

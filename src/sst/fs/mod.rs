@@ -6,7 +6,7 @@
 pub mod factory_io;
 pub mod reader_io;
 
-use std::io::Write;
+use std::io::Read;
 use std::path::Path;
 
 use crate::common::{MidgeError, MidgeResult};
@@ -21,9 +21,21 @@ pub use reader_io::{SstFileIo, SstFileSummary};
 ///
 /// Returns an error if finalizing the writer, writing the temp file, syncing, or renaming fails.
 pub fn finish_writer_to_path(writer: Box<dyn DynSstWriter>, path: &Path) -> MidgeResult<()> {
-    let finish_start = std::time::Instant::now();
     let bytes = writer.finish_bytes()?;
-    let write_bytes = bytes.len() as u64;
+    persist_sst_bytes_to_path(&bytes, path)
+}
+
+/// Atomically persist finalized SST bytes. This is public within the crate so
+/// an SST writer can stream a finalized scratch file without reconstructing a
+/// whole byte vector first.
+pub(crate) fn persist_sst_bytes_to_path(bytes: &[u8], path: &Path) -> MidgeResult<()> {
+    let mut source = std::io::Cursor::new(bytes);
+    persist_sst_stream_to_path(&mut source, path)
+}
+
+/// Atomically persist a finalized SST byte stream.
+pub(crate) fn persist_sst_stream_to_path(source: &mut dyn Read, path: &Path) -> MidgeResult<()> {
+    let finish_start = std::time::Instant::now();
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
 
     let tmp = path.with_extension("tmp");
@@ -39,7 +51,7 @@ pub fn finish_writer_to_path(writer: Box<dyn DynSstWriter>, path: &Path) -> Midg
             .truncate(true)
             .open(&tmp)
             .map_err(MidgeError::Io)?;
-        file.write_all(&bytes).map_err(MidgeError::Io)?;
+        let write_bytes = std::io::copy(source, &mut file).map_err(MidgeError::Io)?;
 
         let sync_start = std::time::Instant::now();
         file.sync_all().map_err(MidgeError::Io)?;
@@ -68,7 +80,7 @@ pub fn finish_writer_to_path(writer: Box<dyn DynSstWriter>, path: &Path) -> Midg
 
     tracing::info!(
         path = ?path,
-        bytes = write_bytes,
+        bytes = std::fs::metadata(path).map_or(0, |metadata| metadata.len()),
         finish_total_ms = finish_start.elapsed().as_secs_f64() * 1000.0,
         write_ms = std::time::Duration::from_nanos(u64::try_from(write_ns).unwrap_or(u64::MAX))
             .as_secs_f64()

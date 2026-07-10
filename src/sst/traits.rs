@@ -47,6 +47,16 @@ pub trait SstStateReader: Send + Sync {
         end: Option<&[u8]>,
     ) -> MidgeResult<Vec<(Bytes, super::types::KeyState)>>;
 
+    /// Snapshot-aware range lookup with a caller-owned TTL clock.
+    fn scan_range_state_with_time(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        _now_millis: u64,
+    ) -> MidgeResult<Vec<(Bytes, super::types::KeyState)>> {
+        self.scan_range_state(start, end)
+    }
+
     /// Snapshot-aware point lookup (entries with seq > `snapshot_seq` are ignored)
     ///
     /// # Errors
@@ -63,6 +73,16 @@ pub trait SstStateReader: Send + Sync {
             }
             _ => Ok(state),
         }
+    }
+
+    /// Snapshot-aware lookup with a caller-owned TTL clock.
+    fn get_state_at_with_time(
+        &self,
+        key: &[u8],
+        snapshot_seq: u64,
+        _now_millis: u64,
+    ) -> MidgeResult<super::types::KeyState> {
+        self.get_state_at(key, snapshot_seq)
     }
 
     /// Return all range tombstones stored in this SST
@@ -105,6 +125,27 @@ pub trait DynSstWriter: Send {
         }
     }
 
+    /// Add an entry that is already sorted by key ascending and sequence
+    /// descending for equal keys.
+    ///
+    /// The default preserves compatibility with writers that only implement
+    /// `add_with_meta`. Filesystem writers use this signal to encode and spill
+    /// complete data blocks incrementally during compaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the entry cannot be appended to the SST.
+    fn add_sorted_with_meta(
+        &mut self,
+        key: &[u8],
+        value: Option<&[u8]>,
+        seq: u64,
+        op_type: u8,
+        expiration: Option<u64>,
+    ) -> MidgeResult<()> {
+        self.add_with_meta(key, value, seq, op_type, expiration)
+    }
+
     /// Add a range tombstone
     ///
     /// # Errors
@@ -112,7 +153,9 @@ pub trait DynSstWriter: Send {
     /// Returns an error when the range tombstone cannot be appended to the SST.
     fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()> {
         let _ = (start, end, seq);
-        Ok(())
+        Err(crate::common::MidgeError::NotSupported(
+            "this SST writer does not support range tombstones".to_string(),
+        ))
     }
 
     /// Finalize and get SST bytes
@@ -490,15 +533,18 @@ mod tests {
     }
 
     #[test]
-    fn should_add_range_tombstone_default_impl_returns_ok() {
+    fn should_reject_range_tombstone_when_writer_does_not_support_it() {
         // Arrange
         let mut writer = MockSstWriter::new();
 
-        // Act - Default impl returns Ok(())
+        // Act - unsupported range tombstones must fail closed.
         let result = writer.add_range_tombstone(b"start", b"end", 100);
 
         // Assert
-        assert!(result.is_ok());
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::NotSupported(_))
+        ));
     }
 
     #[test]

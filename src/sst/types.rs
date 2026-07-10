@@ -575,11 +575,7 @@ impl SstEntry {
     }
 
     pub fn is_expired(&self, now_millis: u64) -> bool {
-        if let Some(exp) = self.expiration {
-            now_millis >= exp
-        } else {
-            false
-        }
+        crate::common::time::is_expired_at(self.expiration, now_millis)
     }
 }
 

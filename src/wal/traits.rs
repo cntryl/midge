@@ -4,6 +4,7 @@
 
 use crate::common::MidgeResult;
 use crate::wal::types::{WalOpKind, WalPos, WalRecord};
+use std::time::Duration;
 
 /// Writer contract for a WAL implementation.
 ///
@@ -84,6 +85,15 @@ pub trait WalWriter: Send + Sync {
     ///
     /// Returns an error when the WAL cannot be durably synced.
     fn sync(&self) -> MidgeResult<()>;
+
+    /// Ensure durability, returning when the configured wait deadline elapses.
+    ///
+    /// Implementations with asynchronous writers should wait on their
+    /// completion condition rather than blocking the caller indefinitely.
+    fn sync_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
+        let _ = timeout;
+        self.sync()
+    }
 
     /// Sync only to *local* WAL storage (fsync/local durability) without
     /// waiting for any external/cloud uploads.

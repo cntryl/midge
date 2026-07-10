@@ -141,6 +141,74 @@ pub(crate) fn next_request_id() -> MidgeResult<u64> {
     Ok(id)
 }
 
+struct RuntimeLifecycle {
+    closing: std::sync::atomic::AtomicBool,
+    running: std::sync::atomic::AtomicBool,
+    active_transactions: std::sync::atomic::AtomicUsize,
+    wait_lock: std::sync::Mutex<()>,
+    wait_cv: std::sync::Condvar,
+}
+
+impl RuntimeLifecycle {
+    fn new() -> Self {
+        Self {
+            closing: std::sync::atomic::AtomicBool::new(false),
+            running: std::sync::atomic::AtomicBool::new(false),
+            active_transactions: std::sync::atomic::AtomicUsize::new(0),
+            wait_lock: std::sync::Mutex::new(()),
+            wait_cv: std::sync::Condvar::new(),
+        }
+    }
+
+    fn acquire(self: &Arc<Self>) -> MidgeResult<RuntimeTransactionGuard> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(MidgeError::InvalidArgument(
+                "engine is shutting down".to_string(),
+            ));
+        }
+        self.active_transactions.fetch_add(1, Ordering::AcqRel);
+        if self.closing.load(Ordering::Acquire) {
+            self.release();
+            return Err(MidgeError::InvalidArgument(
+                "engine is shutting down".to_string(),
+            ));
+        }
+        Ok(RuntimeTransactionGuard {
+            lifecycle: Arc::clone(self),
+        })
+    }
+
+    fn release(&self) {
+        if self.active_transactions.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.wait_cv.notify_all();
+        }
+    }
+
+    fn begin_shutdown(&self) {
+        self.closing.store(true, Ordering::Release);
+        let mut guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while self.active_transactions.load(Ordering::Acquire) != 0 {
+            guard = self
+                .wait_cv
+                .wait(guard)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+}
+
+pub(crate) struct RuntimeTransactionGuard {
+    lifecycle: Arc<RuntimeLifecycle>,
+}
+
+impl Drop for RuntimeTransactionGuard {
+    fn drop(&mut self) {
+        self.lifecycle.release();
+    }
+}
+
 use serde::{Deserialize, Serialize};
 
 /// Crash-recovery phase marker for publish workflows.
@@ -507,6 +575,8 @@ pub enum RuntimeMsg {
     // === Control ===
     /// Shutdown the runtime (no `request_id`; fire-and-forget).
     Shutdown,
+    /// Shutdown the runtime and report final durability/upload failures.
+    ShutdownWithResponse { request_id: u64 },
     /// Trigger a full compaction sweep and wait for completion.
     CompactAll { request_id: u64 },
     /// No-op for testing.
@@ -537,6 +607,8 @@ pub enum RuntimeMsg {
     /// Used by timeout/cancellation-aware callers (e.g. stress harness).
     /// Fire-and-forget.
     CancelWaitForWriteStallClear { wait_request_id: u64 },
+    /// Retry obsolete SST deletion after a snapshot pin is released.
+    RetryGc,
 }
 
 impl RuntimeMsg {
@@ -564,7 +636,10 @@ impl RuntimeMsg {
             | RuntimeMsg::CheckWriteStall { request_id, .. }
             | RuntimeMsg::WaitForWriteStallClear { request_id, .. } => Some(*request_id),
 
-            RuntimeMsg::CancelWaitForWriteStallClear { .. } | RuntimeMsg::Shutdown => None,
+            RuntimeMsg::CancelWaitForWriteStallClear { .. }
+            | RuntimeMsg::Shutdown
+            | RuntimeMsg::RetryGc => None,
+            RuntimeMsg::ShutdownWithResponse { request_id } => Some(*request_id),
 
             #[cfg(test)]
             RuntimeMsg::FlushComplete { request_id, .. }
@@ -616,9 +691,11 @@ impl RuntimeMsg {
             RuntimeMsg::SetRuntimeConfig { .. } => "SetRuntimeConfig",
             RuntimeMsg::CompactAll { .. } => "CompactAll",
             RuntimeMsg::Shutdown => "Shutdown",
+            RuntimeMsg::ShutdownWithResponse { .. } => "ShutdownWithResponse",
             RuntimeMsg::CheckWriteStall { .. } => "CheckWriteStall",
             RuntimeMsg::WaitForWriteStallClear { .. } => "WaitForWriteStallClear",
             RuntimeMsg::CancelWaitForWriteStallClear { .. } => "CancelWaitForWriteStallClear",
+            RuntimeMsg::RetryGc => "RetryGc",
 
             #[cfg(test)]
             RuntimeMsg::FlushComplete { .. } => "FlushComplete",
@@ -888,6 +965,22 @@ impl ResponseRouter {
     pub fn unregister(&self, request_id: u64) {
         let _ = self.pending.remove(&request_id);
     }
+
+    fn fail_all(&self, message: &str) {
+        let pending = self
+            .pending
+            .iter()
+            .map(|entry| *entry.key())
+            .collect::<Vec<_>>();
+        for request_id in pending {
+            if let Some((_, tx)) = self.pending.remove(&request_id) {
+                let _ = tx.send(RuntimeResponse::Error {
+                    request_id,
+                    error: MidgeError::Internal(message.to_string()),
+                });
+            }
+        }
+    }
 }
 
 /// Handle for submitting work to the runtime.
@@ -908,9 +1001,22 @@ pub struct RuntimeHandle {
     pub(crate) snapshot_cache: Arc<snapshot_cache::SnapshotCache>,
     /// Concurrent snapshot pins observed by GC and compaction.
     pub(crate) snapshot_pins: Arc<snapshot_pins::SnapshotPinRegistry>,
+    /// Per-runtime read-path diagnostics shared with the event loop and
+    /// read resources.
+    pub(crate) diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
+    lifecycle: Arc<RuntimeLifecycle>,
 }
 
 impl RuntimeHandle {
+    pub(crate) fn read_path_diagnostics_snapshot(
+        &self,
+    ) -> crate::diagnostics::ReadPathDiagnosticsSnapshot {
+        self.diagnostics.snapshot()
+    }
+
+    pub(crate) fn acquire_transaction_guard(&self) -> MidgeResult<RuntimeTransactionGuard> {
+        self.lifecycle.acquire()
+    }
     /// Return whether the runtime ingest barrier is currently active.
     ///
     /// This is intentionally a direct atomic read instead of an event-loop
@@ -919,18 +1025,26 @@ impl RuntimeHandle {
         self.ingest_active.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    pub(crate) fn register_snapshot_pin(
+    pub(crate) fn begin_snapshot_acquisition(&self) -> snapshot_pins::SnapshotAcquisitionGuard<'_> {
+        self.snapshot_pins.begin_acquisition()
+    }
+
+    pub(crate) fn register_snapshot_pin_while_acquiring(
         &self,
         snapshot_id: u64,
         sequence: u64,
         pinned_sst_names: Vec<String>,
     ) -> bool {
         self.snapshot_pins
-            .register(snapshot_id, sequence, pinned_sst_names)
+            .register_while_acquired(snapshot_id, sequence, pinned_sst_names)
     }
 
     pub(crate) fn unregister_snapshot_pin(&self, snapshot_id: u64) -> bool {
-        self.snapshot_pins.unregister(snapshot_id)
+        let removed = self.snapshot_pins.unregister(snapshot_id);
+        if removed {
+            let _ = self.msg_tx.send(RuntimeMsg::RetryGc);
+        }
+        removed
     }
 
     /// Submit a message to the runtime (fire-and-forget).
@@ -959,9 +1073,10 @@ impl RuntimeHandle {
         // Register for the response before sending the request.
         let rx = self.router.register(request_id);
 
-        self.msg_tx
-            .send(msg)
-            .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))?;
+        if self.msg_tx.send(msg).is_err() {
+            self.router.unregister(request_id);
+            return Err(MidgeError::Internal("Runtime channel closed".to_string()));
+        }
 
         // Block waiting for the single response.
         // If debug-wait mode is enabled, emit a periodic warning to help
@@ -1006,9 +1121,10 @@ impl RuntimeHandle {
         // Register for the response before sending the request.
         let rx = self.router.register(request_id);
 
-        self.msg_tx
-            .send(msg)
-            .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))?;
+        if self.msg_tx.send(msg).is_err() {
+            self.router.unregister(request_id);
+            return Err(MidgeError::Internal("Runtime channel closed".to_string()));
+        }
 
         match rx.recv_timeout(timeout) {
             Ok(resp) => Ok(Some(resp)),
@@ -1017,6 +1133,7 @@ impl RuntimeHandle {
                 Ok(None)
             }
             Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                self.router.unregister(request_id);
                 Err(MidgeError::Internal("Response channel closed".to_string()))
             }
         }
@@ -1044,9 +1161,20 @@ impl RuntimeHandle {
         }
     }
 
-    /// Request runtime shutdown (fire-and-forget).
+    /// Request runtime shutdown and wait for the final durability result.
     pub fn shutdown(&self) -> MidgeResult<()> {
-        self.send(RuntimeMsg::Shutdown)
+        self.lifecycle.begin_shutdown();
+        if !self.lifecycle.running.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let request_id = next_request_id()?;
+        match self.send_and_wait(RuntimeMsg::ShutdownWithResponse { request_id })? {
+            RuntimeResponse::Ok { .. } => Ok(()),
+            RuntimeResponse::Error { error, .. } => Err(error),
+            other => Err(MidgeError::Internal(format!(
+                "Unexpected response to shutdown: {other:?}"
+            ))),
+        }
     }
 
     pub(crate) fn send_apply_transaction_and_wait(
@@ -1149,6 +1277,8 @@ pub struct Runtime {
     trace_enabled: bool,
     /// Response router shared between handle and event loop.
     router: Arc<ResponseRouter>,
+    diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
+    lifecycle: Arc<RuntimeLifecycle>,
 }
 
 impl Runtime {
@@ -1162,6 +1292,8 @@ impl Runtime {
 
         let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
         let snapshot_pins = Arc::new(snapshot_pins::SnapshotPinRegistry::default());
+        let diagnostics = Arc::new(crate::diagnostics::RuntimeDiagnostics::default());
+        let lifecycle = Arc::new(RuntimeLifecycle::new());
 
         let handle = RuntimeHandle {
             msg_tx: msg_tx.clone(),
@@ -1169,6 +1301,8 @@ impl Runtime {
             ingest_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             snapshot_cache,
             snapshot_pins,
+            diagnostics: Arc::clone(&diagnostics),
+            lifecycle: Arc::clone(&lifecycle),
         };
 
         let runtime = Self {
@@ -1177,6 +1311,8 @@ impl Runtime {
             event_loop_handle: None,
             trace_enabled,
             router,
+            diagnostics,
+            lifecycle,
         };
 
         (runtime, handle)
@@ -1187,7 +1323,7 @@ impl Runtime {
     /// Returns the Runtime (which owns the thread) and a handle for submitting work.
     pub fn start_with_config(
         mut self,
-        state: RuntimeState,
+        mut state: RuntimeState,
         config: RuntimeConfig,
     ) -> MidgeResult<(Self, RuntimeHandle)> {
         let trace_enabled = self.trace_enabled;
@@ -1199,6 +1335,9 @@ impl Runtime {
         let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
         let ingest_active = Arc::clone(&state.ingest_active);
         let snapshot_pins = Arc::clone(&state.snapshot_pins);
+        state.diagnostics = Arc::clone(&self.diagnostics);
+        let lifecycle = Arc::clone(&self.lifecycle);
+        let lifecycle_for_thread = Arc::clone(&lifecycle);
 
         // Handle for callers to use.
         let handle = RuntimeHandle {
@@ -1207,10 +1346,13 @@ impl Runtime {
             ingest_active,
             snapshot_cache: snapshot_cache.clone(),
             snapshot_pins,
+            diagnostics: Arc::clone(&self.diagnostics),
+            lifecycle,
         };
 
         let msg_tx_for_loop = self.msg_tx.clone();
         let msg_rx = std::mem::replace(&mut self.msg_rx, channel::bounded(1000).1);
+        let router_for_thread = router.clone();
 
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())
@@ -1219,15 +1361,26 @@ impl Runtime {
                     Ok(mut event_loop) => {
                         // Share the snapshot cache with the event loop
                         event_loop.set_snapshot_cache(snapshot_cache);
+                        lifecycle_for_thread.running.store(true, Ordering::Release);
                         // Signal successful initialization
                         let _ = init_tx.send(Ok(()));
-                        event_loop.run(&msg_rx);
+                        let run_result =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                event_loop.run(&msg_rx);
+                            }));
+                        if run_result.is_err() {
+                            tracing::error!("Runtime event loop panicked");
+                            router_for_thread
+                                .fail_all("runtime event loop panicked before responding");
+                        }
+                        lifecycle_for_thread.running.store(false, Ordering::Release);
                     }
                     Err(e) => {
                         let msg = format!("Failed to create event loop: {e}");
                         tracing::error!("{}", msg);
                         // Signal initialization failure
                         let _ = init_tx.send(Err(msg));
+                        lifecycle_for_thread.running.store(false, Ordering::Release);
                     }
                 }
             })
@@ -1246,6 +1399,7 @@ impl Runtime {
     }
 
     fn shutdown_inner(&mut self, context: &str) {
+        self.lifecycle.begin_shutdown();
         if let Some(handle) = self.event_loop_handle.take() {
             if let Err(e) = self.msg_tx.send(RuntimeMsg::Shutdown) {
                 tracing::debug!("Runtime {}: shutdown message send failed: {}", context, e);
@@ -1259,6 +1413,8 @@ impl Runtime {
                     tracing::warn!("Runtime thread panicked during {}", context);
                 }
             }
+            self.router
+                .fail_all("runtime event loop terminated before responding");
         }
     }
 

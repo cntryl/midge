@@ -88,15 +88,25 @@ impl Query {
     pub fn effective_end(&self) -> Option<Vec<u8>> {
         match (self.end.as_ref(), self.prefix.as_ref()) {
             (Some(e), _) => Some(e.to_vec()),
-            (None, Some(p)) => {
-                // For prefix, end is prefix + 0xFF to get all keys with that prefix
-                let mut v = p.to_vec();
-                // Try to increment the prefix by appending 0xFF
-                v.push(0xFF);
-                Some(v)
-            }
+            (None, Some(p)) => Self::prefix_successor(p),
             (None, None) => None,
         }
+    }
+
+    /// Return the first lexicographic key outside `prefix`, if one exists.
+    ///
+    /// Appending `0xFF` is not a valid upper bound because descendants such
+    /// as `prefix || 0xFF || suffix` compare above it. Incrementing the final
+    /// non-`0xFF` byte gives the exclusive bound for every binary descendant.
+    fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
+        let mut successor = prefix.to_vec();
+        while let Some(byte) = successor.pop() {
+            if byte != u8::MAX {
+                successor.push(byte + 1);
+                return Some(successor);
+            }
+        }
+        None
     }
 }
 
@@ -582,7 +592,8 @@ mod tests {
     }
 
     // ========== Effective End Tests ==========
-    // Tests for effective_end() invariants: returns end if set, else prefix+0xFF, else None
+    // Tests for effective_end() invariants: returns end if set, else the
+    // lexicographic prefix successor when one exists, else None.
 
     #[test]
     fn should_return_end_when_end_is_set() {
@@ -598,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn should_return_prefix_with_0xff_when_end_not_set_but_prefix_is() {
+    fn should_return_prefix_successor_when_end_not_set_but_prefix_is() {
         // Arrange
         let prefix = Bytes::from_static(b"pre");
         let query = Query::new().prefix(prefix);
@@ -606,8 +617,32 @@ mod tests {
         // Act
         let effective = query.effective_end();
 
-        // Assert - should be prefix + 0xFF
-        assert_eq!(effective, Some(vec![b'p', b'r', b'e', 0xFF]));
+        // Assert
+        assert_eq!(effective, Some(b"prf".to_vec()));
+    }
+
+    #[test]
+    fn should_compute_binary_prefix_successor_when_prefix_ends_in_ff() {
+        // Arrange
+        let query = Query::new().prefix(Bytes::from(vec![0x10, 0xff]));
+
+        // Act
+        let effective = query.effective_end();
+
+        // Assert: [0x11] is the first key outside the [0x10, 0xff] prefix.
+        assert_eq!(effective, Some(vec![0x11]));
+    }
+
+    #[test]
+    fn should_leave_prefix_scan_unbounded_when_prefix_has_no_successor() {
+        // Arrange
+        let query = Query::new().prefix(Bytes::from(vec![0xff, 0xff]));
+
+        // Act
+        let effective = query.effective_end();
+
+        // Assert
+        assert_eq!(effective, None);
     }
 
     #[test]
@@ -650,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn should_return_empty_bytes_with_0xff_when_prefix_is_empty() {
+    fn should_return_none_when_empty_prefix_has_no_finite_upper_bound() {
         // Arrange
         let empty_prefix = Bytes::from_static(b"");
         let query = Query::new().prefix(empty_prefix);
@@ -659,7 +694,7 @@ mod tests {
         let effective = query.effective_end();
 
         // Assert
-        assert_eq!(effective, Some(vec![0xFF]));
+        assert_eq!(effective, None);
     }
 
     #[test]
@@ -676,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn should_append_single_0xff_to_prefix() {
+    fn should_increment_the_last_prefix_byte() {
         // Arrange
         let prefix = Bytes::from_static(b"test");
         let query = Query::new().prefix(prefix);
@@ -685,12 +720,7 @@ mod tests {
         let effective = query.effective_end();
 
         // Assert
-        let expected = {
-            let mut v = b"test".to_vec();
-            v.push(0xFF);
-            v
-        };
-        assert_eq!(effective, Some(expected));
+        assert_eq!(effective, Some(b"tesu".to_vec()));
     }
 
     // ========== Complex Chaining Tests ==========

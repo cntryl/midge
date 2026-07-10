@@ -3,17 +3,12 @@
 use crossbeam::queue::SegQueue;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 static TRANSACTION_COMMIT_TIMING_ENABLED: AtomicBool = AtomicBool::new(false);
 static TRANSACTION_COMMIT_TIMINGS: OnceLock<SegQueue<TransactionCommitTimingSample>> =
     OnceLock::new();
-static READ_ONLY_BEGIN_TX_COUNT: AtomicU64 = AtomicU64::new(0);
-static READ_ONLY_SNAPSHOT_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
-static READ_ONLY_SNAPSHOT_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
-static SNAPSHOT_REGISTER_COUNT: AtomicU64 = AtomicU64::new(0);
-static SNAPSHOT_UNREGISTER_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Read-path counters captured for benchmark diagnostics.
 ///
@@ -38,27 +33,92 @@ pub struct ReadPathDiagnosticsSnapshot {
     pub range_tombstone_scans: u64,
 }
 
-/// Capture global read-path counters for benchmark diagnostics.
+/// Read-path counters owned by one runtime.
+///
+/// A runtime owns its cache and snapshot state, so the counters must follow
+/// that same ownership boundary. This keeps concurrent engines in one process
+/// from leaking work into each other's benchmark windows.
+#[derive(Debug, Default)]
+pub(crate) struct RuntimeDiagnostics {
+    read_only_begin_tx_count: AtomicU64,
+    read_only_snapshot_cache_hits: AtomicU64,
+    read_only_snapshot_cache_misses: AtomicU64,
+    snapshot_register_count: AtomicU64,
+    snapshot_unregister_count: AtomicU64,
+    sst: crate::sst::read_path_metrics::SstReadMetrics,
+}
+
+impl RuntimeDiagnostics {
+    pub(crate) fn snapshot(&self) -> ReadPathDiagnosticsSnapshot {
+        ReadPathDiagnosticsSnapshot {
+            read_only_begin_tx_count: self.read_only_begin_tx_count.load(Ordering::Relaxed),
+            read_only_snapshot_cache_hits: self
+                .read_only_snapshot_cache_hits
+                .load(Ordering::Relaxed),
+            read_only_snapshot_cache_misses: self
+                .read_only_snapshot_cache_misses
+                .load(Ordering::Relaxed),
+            snapshot_register_count: self.snapshot_register_count.load(Ordering::Relaxed),
+            snapshot_unregister_count: self.snapshot_unregister_count.load(Ordering::Relaxed),
+            sst_reader_cache_hits: self.sst.reader_cache_hits(),
+            sst_reader_cache_misses: self.sst.reader_cache_misses(),
+            sst_block_cache_hits: self.sst.block_cache_hits(),
+            sst_block_cache_misses: self.sst.block_cache_misses(),
+            candidate_sst_files_checked: self.sst.candidate_sst_files_checked(),
+            candidate_blocks_checked: self.sst.candidate_blocks_checked(),
+            data_blocks_read: self.sst.data_blocks_read(),
+            bloom_rejects: self.sst.bloom_rejects(),
+            range_tombstone_scans: self.sst.range_tombstone_scans(),
+        }
+    }
+
+    pub(crate) fn sst_metrics(&self) -> &crate::sst::read_path_metrics::SstReadMetrics {
+        &self.sst
+    }
+
+    pub(crate) fn record_read_only_begin_tx(&self) {
+        self.read_only_begin_tx_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_read_only_snapshot_cache_hit(&self) {
+        self.read_only_snapshot_cache_hits
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_read_only_snapshot_cache_miss(&self) {
+        self.read_only_snapshot_cache_misses
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_snapshot_register(&self) {
+        self.snapshot_register_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_snapshot_unregister(&self) {
+        self.snapshot_unregister_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+static LEGACY_RUNTIME_DIAGNOSTICS: OnceLock<Arc<RuntimeDiagnostics>> = OnceLock::new();
+
+/// Diagnostics for direct standalone readers and the legacy global snapshot
+/// helper. Engines always receive an independent `RuntimeDiagnostics` value.
+pub(crate) fn legacy_runtime_diagnostics() -> Arc<RuntimeDiagnostics> {
+    Arc::clone(LEGACY_RUNTIME_DIAGNOSTICS.get_or_init(|| Arc::new(RuntimeDiagnostics::default())))
+}
+
+/// Capture legacy process-wide read-path counters for benchmark diagnostics.
+///
+/// New benchmark code should call `Engine::read_path_diagnostics_snapshot_for_benchmarks`
+/// so a concurrent engine cannot contaminate its measurement window. This
+/// function is retained for existing doc-hidden consumers and standalone SST
+/// readers that have no runtime owner.
 #[must_use]
 #[doc(hidden)]
 pub fn read_path_diagnostics_snapshot_for_benchmarks() -> ReadPathDiagnosticsSnapshot {
-    let sst = crate::sst::read_path_metrics::global_sst_read_metrics();
-    ReadPathDiagnosticsSnapshot {
-        read_only_begin_tx_count: READ_ONLY_BEGIN_TX_COUNT.load(Ordering::Relaxed),
-        read_only_snapshot_cache_hits: READ_ONLY_SNAPSHOT_CACHE_HITS.load(Ordering::Relaxed),
-        read_only_snapshot_cache_misses: READ_ONLY_SNAPSHOT_CACHE_MISSES.load(Ordering::Relaxed),
-        snapshot_register_count: SNAPSHOT_REGISTER_COUNT.load(Ordering::Relaxed),
-        snapshot_unregister_count: SNAPSHOT_UNREGISTER_COUNT.load(Ordering::Relaxed),
-        sst_reader_cache_hits: sst.reader_cache_hits(),
-        sst_reader_cache_misses: sst.reader_cache_misses(),
-        sst_block_cache_hits: sst.block_cache_hits(),
-        sst_block_cache_misses: sst.block_cache_misses(),
-        candidate_sst_files_checked: sst.candidate_sst_files_checked(),
-        candidate_blocks_checked: sst.candidate_blocks_checked(),
-        data_blocks_read: sst.data_blocks_read(),
-        bloom_rejects: sst.bloom_rejects(),
-        range_tombstone_scans: sst.range_tombstone_scans(),
-    }
+    legacy_runtime_diagnostics().snapshot()
 }
 
 /// One internal timing sample for `Transaction::commit`.
@@ -176,26 +236,6 @@ pub(crate) fn record_transaction_submit_follower_wait(duration: Duration) {
             .follower_wait
             .saturating_add(duration_as_nanos(duration));
     });
-}
-
-pub(crate) fn record_read_only_begin_tx() {
-    READ_ONLY_BEGIN_TX_COUNT.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_read_only_snapshot_cache_hit() {
-    READ_ONLY_SNAPSHOT_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_read_only_snapshot_cache_miss() {
-    READ_ONLY_SNAPSHOT_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_snapshot_register() {
-    SNAPSHOT_REGISTER_COUNT.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_snapshot_unregister() {
-    SNAPSHOT_UNREGISTER_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 fn transaction_commit_timing_queue() -> &'static SegQueue<TransactionCommitTimingSample> {

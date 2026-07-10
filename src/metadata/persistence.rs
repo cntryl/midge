@@ -19,7 +19,6 @@ impl ManifestPersistence {
 
     /// Snapshot file name
     const MANIFEST_SNAPSHOT: &'static str = "manifest.snapshot.json";
-    #[cfg(test)]
     const MANIFEST_SNAPSHOT_TEMP: &'static str = "manifest.snapshot.json.tmp";
 
     /// Get the manifest file path
@@ -118,8 +117,11 @@ impl ManifestPersistence {
             return Ok(manifest);
         }
 
-        // Replay journal edits on top of snapshot/manifest
-        match crate::metadata::journal::replay_journal_with_fs(fs) {
+        // Replay only edits newer than the snapshot checkpoint. If a crash
+        // happened after snapshot rename but before journal truncation, the
+        // already-applied prefix is therefore harmless.
+        match crate::metadata::journal::replay_edits_after_with_fs(fs, manifest.edit_checkpoint_id)
+        {
             Ok(edits) => {
                 for edit in &edits {
                     manifest.apply_edit(edit);
@@ -185,7 +187,6 @@ impl ManifestPersistence {
 
     /// Save a full manifest snapshot and truncate journal (atomic as possible).
     /// Writes to `manifest.snapshot.json.tmp` then renames into `manifest.snapshot.json`.
-    #[cfg(test)]
     pub fn save_snapshot_and_truncate_journal_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
@@ -196,14 +197,29 @@ impl ManifestPersistence {
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
         let temp = FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP);
 
-        let json = serde_json::to_vec_pretty(manifest)
+        let mut checkpoint = manifest.clone();
+        checkpoint.edit_checkpoint_id = checkpoint.edit_checkpoint_id.max(
+            crate::metadata::journal::highest_edit_id_with_fs(fs)
+                .map_err(|error| format!("failed to inspect manifest journal: {error}"))?,
+        );
+        let json = serde_json::to_vec_pretty(&checkpoint)
             .map_err(|e| format!("failed to serialize manifest to JSON: {e}"))?;
 
         staging::stage_bytes(fs, &temp, &snap_path, &json, |msg| msg)?;
 
+        fail::fail_point!(
+            "midge::manifest::after_snapshot_rename_before_journal_truncate",
+            |_| Err("failpoint: crash after manifest snapshot rename".to_string())
+        );
+
         // truncate journal
         crate::metadata::journal::truncate_journal_with_fs(fs)
             .map_err(|e| format!("failed to truncate journal: {e:?}"))?;
+
+        // Keep the legacy manifest filename as a compatibility mirror. The
+        // snapshot remains authoritative during recovery, so a crash while
+        // updating this mirror cannot reintroduce duplicate journal edits.
+        Self::save_with_fs(fs, &checkpoint)?;
 
         tracing::info!(path = ?snap_path, "manifest snapshot written and journal truncated");
 
@@ -243,7 +259,6 @@ impl ManifestPersistence {
 
     /// Save a full manifest snapshot and truncate journal (atomic as possible).
     /// This wrapper constructs a `RealFs` and delegates to the fs-backed implementation.
-    #[cfg(test)]
     pub fn save_snapshot_and_truncate_journal(
         db_path: &Path,
         manifest: &Manifest,

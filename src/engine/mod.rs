@@ -105,14 +105,6 @@ impl Drop for Engine {
         let drop_start = std::time::Instant::now();
         tracing::debug!("Engine dropping, initiating cleanup");
 
-        // Stop lease heartbeat first
-        if let Some(heartbeat_mutex) = self.lease_heartbeat.take() {
-            if let Ok(mut heartbeat) = heartbeat_mutex.lock() {
-                heartbeat.stop();
-                tracing::trace!("Engine: lease heartbeat stopped");
-            }
-        }
-
         // Drop all ingest coordinators
         let ingest_count = self.ingest_coordinators.len();
         self.ingest_coordinators.clear();
@@ -124,6 +116,15 @@ impl Drop for Engine {
         // Then drop the runtime which will wait for the thread to finish
         self.runtime.take();
         tracing::trace!("Engine: runtime shutdown complete");
+
+        // Keep fencing renewal active until runtime and cloud work have
+        // quiesced. Only then stop the heartbeat and release the lease.
+        if let Some(heartbeat_mutex) = self.lease_heartbeat.take() {
+            if let Ok(mut heartbeat) = heartbeat_mutex.lock() {
+                heartbeat.stop();
+                tracing::trace!("Engine: lease heartbeat stopped");
+            }
+        }
 
         // Release lease via the PrimaryLease interface
         if let Some(lease) = self.lease.take() {
@@ -388,7 +389,7 @@ impl Engine {
     ) -> MidgeResult<api::Transaction> {
         let is_read_only = mode == api::TransactionMode::ReadOnly;
         if is_read_only {
-            crate::diagnostics::record_read_only_begin_tx();
+            self.runtime_handle.diagnostics.record_read_only_begin_tx();
         }
 
         if self.is_ingesting() {
@@ -397,6 +398,13 @@ impl Engine {
                     .to_string(),
             ));
         }
+
+        let runtime_transaction_guard = self.runtime_handle.acquire_transaction_guard()?;
+        // Hold the registry acquisition write guard from snapshot capture
+        // through pin publication. GC samples the same registry under a read
+        // guard, so an obsolete SST cannot be deleted in the capture/register
+        // window.
+        let _snapshot_acquisition = self.runtime_handle.begin_snapshot_acquisition();
 
         let Some(coordinator) = self
             .ingest_coordinators
@@ -408,53 +416,14 @@ impl Engine {
             )));
         };
 
-        let committed_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let (start_sequence, read_snapshot) =
+            self.acquire_transaction_snapshot(cf_id, is_read_only)?;
 
-        // Fast path: read snapshot from lock-free ArcSwap cache (no event loop round-trip).
-        let cache_guard = self.runtime_handle.snapshot_cache.load();
-        let cached_snapshot = cache_guard
-            .cf_snapshots
-            .get(&cf_id)
-            .map(|data| Arc::clone(&data.snapshot));
-        let cached_sequence = cache_guard.sequence;
-        let cached_snapshot = cached_snapshot.filter(|_| cached_sequence >= committed_sequence);
-        drop(cache_guard);
-
-        // Fall back to the runtime if the published cache is absent or behind a
-        // commit this Engine has already observed.
-        let (start_sequence, read_snapshot) = if let Some(snapshot) = cached_snapshot {
-            if is_read_only {
-                crate::diagnostics::record_read_only_snapshot_cache_hit();
-            }
-            (cached_sequence, snapshot)
-        } else {
-            if is_read_only {
-                crate::diagnostics::record_read_only_snapshot_cache_miss();
-            }
-            match self
-                .runtime_handle
-                .send_and_wait(RuntimeMsg::BeginTransaction {
-                    request_id: next_request_id()?,
-                    cf_id,
-                })? {
-                RuntimeResponse::BeginTransactionResult {
-                    start_sequence,
-                    snapshot: Some(snapshot),
-                    ..
-                } => (start_sequence, snapshot),
-                RuntimeResponse::BeginTransactionResult { snapshot: None, .. } => {
-                    return Err(MidgeError::InvalidArgument(format!(
-                        "column family {cf_id} does not exist"
-                    )));
-                }
-                RuntimeResponse::Error { error, .. } => return Err(error),
-                _ => {
-                    return Err(MidgeError::Internal(
-                        "Unexpected response to BeginTransaction".to_string(),
-                    ));
-                }
-            }
-        };
+        let read_snapshot = Arc::new(
+            (*read_snapshot)
+                .clone()
+                .with_read_time_millis(crate::runtime::ReadSnapshot::current_time_millis()),
+        );
 
         let pinned_sst_names = read_snapshot
             .sst_files
@@ -466,15 +435,16 @@ impl Engine {
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        if !self
-            .runtime_handle
-            .register_snapshot_pin(txn_id, start_sequence, pinned_sst_names)
-        {
+        if !self.runtime_handle.register_snapshot_pin_while_acquiring(
+            txn_id,
+            start_sequence,
+            pinned_sst_names,
+        ) {
             return Err(MidgeError::Internal(format!(
                 "snapshot {txn_id} is already registered"
             )));
         }
-        crate::diagnostics::record_snapshot_register();
+        self.runtime_handle.diagnostics.record_snapshot_register();
 
         Ok(api::Transaction::new(api::TransactionInit {
             runtime_handle: self.runtime_handle.clone(),
@@ -486,7 +456,71 @@ impl Engine {
             start_sequence,
             read_snapshot: Some(read_snapshot),
             cloud_mode: self.cloud_mode,
+            runtime_transaction_guard,
         }))
+    }
+
+    fn acquire_transaction_snapshot(
+        &self,
+        cf_id: ColumnFamilyId,
+        is_read_only: bool,
+    ) -> MidgeResult<(u64, Arc<crate::runtime::ReadSnapshot>)> {
+        let committed_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let cache_guard = self.runtime_handle.snapshot_cache.load();
+        let cached_snapshot = cache_guard
+            .cf_snapshots
+            .get(&cf_id)
+            .map(|data| Arc::clone(&data.snapshot));
+        let cached_sequence = cache_guard.sequence;
+        let cached_snapshot = cached_snapshot.filter(|_| cached_sequence >= committed_sequence);
+        drop(cache_guard);
+
+        if let Some(snapshot) = cached_snapshot {
+            if is_read_only {
+                self.runtime_handle
+                    .diagnostics
+                    .record_read_only_snapshot_cache_hit();
+            }
+            return Ok((cached_sequence, snapshot));
+        }
+
+        if is_read_only {
+            self.runtime_handle
+                .diagnostics
+                .record_read_only_snapshot_cache_miss();
+        }
+        match self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::BeginTransaction {
+                request_id: next_request_id()?,
+                cf_id,
+            })? {
+            RuntimeResponse::BeginTransactionResult {
+                start_sequence,
+                snapshot: Some(snapshot),
+                ..
+            } => Ok((start_sequence, snapshot)),
+            RuntimeResponse::BeginTransactionResult { snapshot: None, .. } => Err(
+                MidgeError::InvalidArgument(format!("column family {cf_id} does not exist")),
+            ),
+            RuntimeResponse::Error { error, .. } => Err(error),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to BeginTransaction".to_string(),
+            )),
+        }
+    }
+
+    /// Capture read-path diagnostics owned by this engine's runtime.
+    ///
+    /// This doc-hidden benchmark hook deliberately scopes the snapshot to one
+    /// engine, so another engine in the same process cannot contaminate a
+    /// before/after measurement window.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn read_path_diagnostics_snapshot_for_benchmarks(
+        &self,
+    ) -> crate::diagnostics::ReadPathDiagnosticsSnapshot {
+        self.runtime_handle.read_path_diagnostics_snapshot()
     }
 
     /// Wait for a write stall to clear for `cf_id`.
@@ -529,8 +563,13 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error when shutdown coordination fails.
-    pub fn shutdown(self) -> MidgeResult<()> {
-        self.runtime_handle.shutdown()
+    pub fn shutdown(mut self) -> MidgeResult<()> {
+        let result = self.runtime_handle.shutdown();
+        // The runtime has acknowledged the shutdown and its event-loop thread
+        // has exited. Take ownership here so Drop does not issue a second
+        // request against an already terminated loop.
+        self.runtime.take();
+        result
     }
 
     // === Column Family Lifecycle ===

@@ -8,8 +8,8 @@ pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 use crate::common::{MidgeError, MidgeResult};
 use std::path::{Path, PathBuf};
 
-/// Executes a compaction plan by streaming merged key/value pairs into one or more
-/// output SST files. This function performs:
+/// Executes a compaction plan by merging per-SST streams directly into one
+/// output SST file. This function performs:
 ///   1. Input SST discovery
 ///   2. Streaming merge across all inputs (sorted, deduped)
 ///   3. Tombstone filtering
@@ -27,36 +27,33 @@ pub fn execute_compaction(
     output_dir: &Path,
     abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<Vec<String>> {
-    // --- 1. Collect versions from all input files ---------------------------
+    // --- 1. Materialize reader-provided per-SST streams ---------------------
     //
-    // For now, we load versions into memory. Future: streaming merge iterator.
-    let input = executor::collect_compaction_input(sst_factory, &plan.input_files, abort_check)?;
+    // The reader contract currently returns one vector per SST. Keep those
+    // independent and merge their heads below rather than building a second
+    // all-input vector followed by a deduplicated result vector.
+    let (streams, range_tombstones) =
+        executor::collect_compaction_stream_inputs(sst_factory, &plan.input_files, abort_check)?;
 
-    if input.versions.is_empty() && input.range_tombstones.is_empty() {
-        return Ok(Vec::new());
+    if streams.iter().all(Vec::is_empty) && range_tombstones.is_empty() {
+        return Err(MidgeError::Internal(
+            "compaction produced no output; inputs were not replaced".to_string(),
+        ));
     }
 
-    // --- 2. Deduplicate and keep only latest versions -----------------------
-    let deduplicated = executor::deduplicate_versions(&input.versions);
-
-    // --- 3. Filter out tombstones for final output --------------------------
-    let final_versions =
-        executor::filter_tombstones_with_horizon(&deduplicated, plan.snapshot_horizon);
-
-    if final_versions.is_empty() && input.range_tombstones.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // --- 4. Prepare output file path ----------------------------------------
+    // --- 2. Prepare output file path ----------------------------------------
     let output_file = output_filename(plan, output_dir);
     let output_file_str = output_file.to_str().ok_or(MidgeError::InvalidPath)?;
 
-    // --- 5. Write merged versions to SST ------------------------------------
-    executor::write_compaction_output_to_sst(
+    // --- 3. K-way merge, deduplicate, and write directly to the output -----
+    // This plan does not carry a proof that all deeper levels were included,
+    // so the writer retains point tombstones even when a snapshot horizon
+    // exists. Range tombstones are retained for the same reason.
+    let _written = executor::write_merged_compaction_output_to_sst(
         sst_factory,
         output_file_str,
-        &final_versions,
-        &input.range_tombstones,
+        streams,
+        &range_tombstones,
         abort_check,
     )?;
 
@@ -397,8 +394,10 @@ mod tests {
         let reader = factory.open(std::path::Path::new(&output_name))?;
         let states = reader.scan_range_state(None, None)?;
         assert!(
-            states.is_empty(),
-            "point tombstone should be dropped without snapshots"
+            states
+                .iter()
+                .any(|(_, state)| matches!(state, crate::sst::types::KeyState::Tombstone(_))),
+            "point tombstone must be retained without a bottommost proof"
         );
 
         let range_tombstones = reader.range_tombstones();
@@ -439,6 +438,80 @@ mod tests {
             other => panic!("expected preserved tombstone, got {other:?}"),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn should_leave_inputs_untouched_when_compaction_is_cancelled() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let input_name = "input.sst";
+        let input_path = temp_dir.path().join(input_name);
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"key", Some(b"value"), 1, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(writer, &input_path)?;
+        let input_bytes = std::fs::read(&input_path)?;
+
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(44);
+        plan.input_files.push(input_name.to_string());
+        let cancelled = || true;
+
+        // Act
+        let error = execute_compaction(&plan, &factory, temp_dir.path(), Some(&cancelled))
+            .expect_err("cancelled compaction must return an error");
+
+        // Assert
+        assert!(matches!(error, MidgeError::Aborted(_)));
+        assert_eq!(std::fs::read(&input_path)?, input_bytes);
+        assert!(!temp_dir
+            .path()
+            .join(crate::sst::file_name(0, 1, 44))
+            .exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_remove_staged_output_when_compaction_is_cancelled_after_writing() -> MidgeResult<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Arrange: make cancellation happen after input collection and the
+        // first streaming check, immediately after output finalization.
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let input_name = "input.sst";
+        let input_path = temp_dir.path().join(input_name);
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"key", Some(b"value"), 1, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(writer, &input_path)?;
+        let input_bytes = std::fs::read(&input_path)?;
+
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(45);
+        plan.input_files.push(input_name.to_string());
+        let checks = AtomicUsize::new(0);
+        let cancelled_after_finalize = || checks.fetch_add(1, Ordering::SeqCst) >= 3;
+
+        // Act
+        let error = execute_compaction(
+            &plan,
+            &factory,
+            temp_dir.path(),
+            Some(&cancelled_after_finalize),
+        )
+        .expect_err("late cancellation must not publish staged output");
+
+        // Assert
+        assert!(matches!(error, MidgeError::Aborted(_)));
+        assert_eq!(std::fs::read(&input_path)?, input_bytes);
+        assert!(
+            !temp_dir
+                .path()
+                .join(crate::sst::file_name(0, 1, 45))
+                .exists(),
+            "aborted output must not survive for a later manifest publication"
+        );
         Ok(())
     }
 }

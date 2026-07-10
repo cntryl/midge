@@ -728,6 +728,7 @@ fn duplicate_midge_error(error: &MidgeError) -> MidgeError {
         }
         MidgeError::Fenced(message) => MidgeError::Fenced(message.clone()),
         MidgeError::WriteConflict(message) => MidgeError::WriteConflict(message.clone()),
+        MidgeError::Aborted(message) => MidgeError::Aborted(message.clone()),
     }
 }
 
@@ -998,13 +999,12 @@ mod tests {
         key: &[u8],
         expected: Option<&[u8]>,
     ) {
-        let actual = event_loop
-            .state
-            .get_cf(cf_id)
-            .expect("column family should exist")
-            .memtable
-            .get_at_seq(key, u64::MAX)
-            .expect("memtable lookup should succeed");
+        let snapshot = event_loop
+            .create_read_snapshot(cf_id)
+            .expect("column family should exist");
+        let actual = snapshot
+            .get(key, u64::MAX)
+            .expect("snapshot lookup should succeed");
         assert_eq!(actual.as_deref(), expected);
     }
 

@@ -1,7 +1,6 @@
 //! Lightweight counters for SST point-read diagnostics.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 
 #[derive(Debug, Default)]
 pub(crate) struct SstReadMetrics {
@@ -90,10 +89,4 @@ impl SstReadMetrics {
     pub(crate) fn record_range_tombstone_scan(&self) {
         self.range_tombstone_scans.fetch_add(1, Ordering::Relaxed);
     }
-}
-
-static GLOBAL_SST_READ_METRICS: OnceLock<SstReadMetrics> = OnceLock::new();
-
-pub(crate) fn global_sst_read_metrics() -> &'static SstReadMetrics {
-    GLOBAL_SST_READ_METRICS.get_or_init(SstReadMetrics::default)
 }

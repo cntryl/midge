@@ -4,6 +4,7 @@
 //! Actors read from and propose updates to this state.
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::diagnostics::RuntimeDiagnostics;
 use crate::metadata::Manifest;
 use crate::runtime::snapshot_pins::SnapshotPinRegistry;
 use crate::runtime::{IntentLogEntry, PublicationPhase};
@@ -402,6 +403,9 @@ pub struct RuntimeState {
     pub cloud: CloudState,
     pub snapshots: SnapshotState,
     pub snapshot_pins: Arc<SnapshotPinRegistry>,
+    /// Per-runtime read-path counters. This follows the same ownership
+    /// boundary as the snapshots, readers, and block cache it measures.
+    pub diagnostics: Arc<RuntimeDiagnostics>,
     /// Recently committed range deletes for strict write-conflict checks.
     pub recent_delete_ranges: Vec<RecentDeleteRange>,
 
@@ -536,6 +540,7 @@ impl RuntimeState {
                 max_snapshot_lifetime: std::time::Duration::from_hours(1), // 1 hour default
             },
             snapshot_pins: Arc::new(SnapshotPinRegistry::default()),
+            diagnostics: Arc::new(RuntimeDiagnostics::default()),
             recent_delete_ranges: Vec::new(),
             memtable_size_limit: 64 * 1024 * 1024, // 64MB
             mode: RuntimeMode {
@@ -1664,8 +1669,11 @@ impl RuntimeState {
             return Ok(());
         }
 
-        crate::metadata::ManifestPersistence::save(&self.db_path, &self.manifest)
-            .map_err(crate::common::MidgeError::Internal)
+        crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
+            &self.db_path,
+            &self.manifest,
+        )
+        .map_err(crate::common::MidgeError::Internal)
     }
 
     fn handle_recovery_issue(&mut self, message: String) -> MidgeResult<bool> {

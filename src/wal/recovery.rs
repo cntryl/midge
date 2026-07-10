@@ -703,12 +703,14 @@ fn apply_record<S: BuildHasher>(
 
     match record.op {
         WalOpKind::Put | WalOpKind::Insert => {
-            // Skip expired entries during recovery
+            // Preserve an expired write as a masking version. Dropping it
+            // would allow an older value to resurrect after restart.
             if let Some(exp) = record.expiration {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-                if exp <= now {
+                if crate::common::time::is_expired_at(
+                    Some(exp),
+                    crate::common::time::unix_time_millis(),
+                ) {
+                    memtable.delete_with_seq(record.key.to_vec(), record.seq)?;
                     return Ok(());
                 }
             }

@@ -36,8 +36,11 @@ pub struct KeyStructureProfile {
 
 /// Profiler that analyzes keys during SST construction
 pub struct KeyStructureProfiler {
-    /// Keys seen so far (we need to keep them for full analysis)
-    keys: Vec<Vec<u8>>,
+    /// First key, retained solely to update the all-keys common prefix.
+    first_key: Option<Vec<u8>>,
+
+    /// Most recent key, retained solely for adjacent-prefix measurement.
+    previous_key: Option<Vec<u8>>,
 
     /// Running sum of shared prefix lengths
     shared_prefix_sum: usize,
@@ -56,6 +59,18 @@ pub struct KeyStructureProfiler {
 
     /// Prefix length to track for divergence (default 4)
     prefix_track_len: usize,
+
+    /// Number of non-empty keys observed.
+    key_count: usize,
+
+    /// Sum of observed key lengths for online variance calculation.
+    total_key_bytes: usize,
+
+    /// Sum of squared observed key lengths for online variance calculation.
+    total_key_bytes_squared: u128,
+
+    /// Prefix shared by every key seen so far.
+    common_prefix_len: usize,
 }
 
 impl KeyStructureProfiler {
@@ -63,13 +78,18 @@ impl KeyStructureProfiler {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            keys: Vec::new(),
+            first_key: None,
+            previous_key: None,
             shared_prefix_sum: 0,
             max_shared_prefix: 0,
             prefix_freq: HashMap::new(),
             byte_freq: [0; 256],
             total_bytes: 0,
             prefix_track_len: 4,
+            key_count: 0,
+            total_key_bytes: 0,
+            total_key_bytes_squared: 0,
+            common_prefix_len: 0,
         }
     }
 
@@ -79,18 +99,32 @@ impl KeyStructureProfiler {
             return;
         }
 
-        // Calculate shared prefix with previous key
-        if let Some(prev_key) = self.keys.last() {
+        // Calculate shared prefix with the immediately preceding key. Keeping
+        // only that key makes profiling independent of SST entry count.
+        if let Some(prev_key) = &self.previous_key {
             let shared = lcp(prev_key, key);
             self.shared_prefix_sum += shared;
             self.max_shared_prefix = self.max_shared_prefix.max(shared);
+        }
+
+        // The common prefix of a set can be updated from its first key and a
+        // scalar horizon; retaining every key is unnecessary.
+        if let Some(first_key) = &self.first_key {
+            self.common_prefix_len = self.common_prefix_len.min(lcp(first_key, key));
+        } else {
+            self.first_key = Some(key.to_vec());
+            self.common_prefix_len = key.len();
         }
 
         // Track prefix frequencies (first N bytes)
         let prefix_len = self.prefix_track_len.min(key.len());
         if prefix_len > 0 {
             let prefix = key[..prefix_len].to_vec();
-            *self.prefix_freq.entry(prefix).or_insert(0) += 1;
+            if let Some(count) = self.prefix_freq.get_mut(&prefix) {
+                *count = count.saturating_add(1);
+            } else if self.prefix_freq.len() < Self::MAX_TRACKED_PREFIXES {
+                self.prefix_freq.insert(prefix, 1);
+            }
         }
 
         // Track byte frequencies for entropy
@@ -99,14 +133,19 @@ impl KeyStructureProfiler {
             self.total_bytes += 1;
         }
 
-        // Store key
-        self.keys.push(key.to_vec());
+        self.key_count = self.key_count.saturating_add(1);
+        self.total_key_bytes = self.total_key_bytes.saturating_add(key.len());
+        let key_len = u128::try_from(key.len()).unwrap_or(u128::MAX);
+        self.total_key_bytes_squared = self
+            .total_key_bytes_squared
+            .saturating_add(key_len.saturating_mul(key_len));
+        self.previous_key = Some(key.to_vec());
     }
 
     /// Finalize and generate profile
     #[must_use]
     pub fn finish(self) -> KeyStructureProfile {
-        let key_count = self.keys.len();
+        let key_count = self.key_count;
 
         if key_count == 0 {
             return KeyStructureProfile {
@@ -135,10 +174,10 @@ impl KeyStructureProfiler {
         let entropy = self.calculate_entropy();
 
         // Find common prefix across ALL keys
-        let common_prefix_len = self.find_common_prefix_len();
+        let common_prefix_len = self.common_prefix_len;
 
-        // Calculate key length variance
-        let key_length_variance = self.calculate_key_length_variance();
+        // Calculate key length variance from online aggregates.
+        let key_length_variance = self.key_length_standard_deviation();
 
         // Get top prefix samples
         let mut prefix_heat: Vec<_> = self.prefix_freq.into_iter().collect();
@@ -173,43 +212,17 @@ impl KeyStructureProfiler {
         entropy
     }
 
-    fn find_common_prefix_len(&self) -> usize {
-        if self.keys.is_empty() {
-            return 0;
-        }
+    const MAX_TRACKED_PREFIXES: usize = 4096;
 
-        let first_key = &self.keys[0];
-        let mut common_len = first_key.len();
-
-        for key in &self.keys[1..] {
-            let shared = lcp(first_key, key);
-            common_len = common_len.min(shared);
-            if common_len == 0 {
-                break;
-            }
-        }
-
-        common_len
-    }
-
-    fn calculate_key_length_variance(&self) -> f32 {
-        if self.keys.is_empty() {
+    fn key_length_standard_deviation(&self) -> f32 {
+        if self.key_count == 0 {
             return 0.0;
         }
 
-        let mean_len = usize_to_f32(self.keys.iter().map(std::vec::Vec::len).sum::<usize>())
-            / usize_to_f32(self.keys.len());
-        let variance = self
-            .keys
-            .iter()
-            .map(|k| {
-                let diff = usize_to_f32(k.len()) - mean_len;
-                diff * diff
-            })
-            .sum::<f32>()
-            / usize_to_f32(self.keys.len());
-
-        variance.sqrt()
+        let count = usize_to_f32(self.key_count);
+        let mean = usize_to_f32(self.total_key_bytes) / count;
+        let mean_square = u128_to_f32(self.total_key_bytes_squared) / count;
+        (mean_square - mean * mean).max(0.0).sqrt()
     }
 }
 
@@ -234,6 +247,15 @@ fn usize_to_f32(value: usize) -> f32 {
         + f32::from(chunk_1) * 65_536.0
         + f32::from(chunk_2) * 4_294_967_296.0
         + f32::from(chunk_3) * 281_474_976_710_656.0
+}
+
+fn u128_to_f32(value: u128) -> f32 {
+    let mut result = 0.0;
+    for shift in (0..128).step_by(16) {
+        let chunk = u16::try_from((value >> shift) & 0xFFFF).unwrap_or(u16::MAX);
+        result += f32::from(chunk) * 65_536.0_f32.powi(shift / 16);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -494,6 +516,27 @@ mod tests {
 
         // Assert
         assert!(profile.prefix_heat.len() <= 10); // Truncated to top 10
+    }
+
+    #[test]
+    fn should_bound_prefix_metadata_when_profiling_many_unique_keys() {
+        // Arrange
+        let mut profiler = KeyStructureProfiler::new();
+
+        // Act
+        for i in 0..(KeyStructureProfiler::MAX_TRACKED_PREFIXES * 4) {
+            let key = format!("{i:08x}-unique-key");
+            profiler.add_key(key.as_bytes());
+        }
+
+        // Assert
+        assert_eq!(
+            profiler.key_count,
+            KeyStructureProfiler::MAX_TRACKED_PREFIXES * 4
+        );
+        assert!(profiler.prefix_freq.len() <= KeyStructureProfiler::MAX_TRACKED_PREFIXES);
+        assert!(profiler.first_key.is_some());
+        assert!(profiler.previous_key.is_some());
     }
 
     #[test]

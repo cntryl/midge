@@ -415,7 +415,7 @@ pub fn capture_runtime_perf_snapshot(engine: &Engine) -> RuntimePerfSnapshot {
     let metrics = engine
         .get_runtime_metrics()
         .expect("capture runtime performance snapshot");
-    let read_path = cntryl_midge::diagnostics::read_path_diagnostics_snapshot_for_benchmarks();
+    let read_path = engine.read_path_diagnostics_snapshot_for_benchmarks();
     RuntimePerfSnapshot {
         write_stalls_total: metrics.write_stalls_total,
         write_stalls_memory_total: metrics.write_stalls_memory_total,
@@ -461,7 +461,7 @@ pub fn runtime_perf_report(engine: &Engine, start: RuntimePerfSnapshot) -> Runti
     let end = engine
         .get_runtime_metrics()
         .expect("capture runtime performance report");
-    let read_path = cntryl_midge::diagnostics::read_path_diagnostics_snapshot_for_benchmarks();
+    let read_path = engine.read_path_diagnostics_snapshot_for_benchmarks();
     RuntimePerfReport {
         end_pending_cloud_uploads: end.pending_cloud_uploads,
         end_wal_local_durable_seq: end.wal_local_durable_seq,

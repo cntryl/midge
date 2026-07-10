@@ -44,11 +44,22 @@ impl CachePolicy for TinyLfuPolicy {
         // Add to recent window
         recent.push_back(key);
         if recent.len() > self.window_size {
-            recent.pop_front();
+            let expired = recent
+                .pop_front()
+                .expect("recent window is non-empty after an overflow");
+
+            // Frequency metadata is a bounded, sliding window too.  Leaving
+            // an entry behind after its final recency sample expires makes
+            // policy memory grow with lifetime insertions even when the
+            // cache itself is repeatedly evicting old keys.
+            if !recent.contains(&expired) {
+                frequencies.remove(&expired);
+            }
         }
 
         // Increment frequency
-        *frequencies.entry(key).or_insert(0) += 1;
+        let frequency = frequencies.entry(key).or_insert(0);
+        *frequency = frequency.saturating_add(1);
     }
 
     fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
@@ -224,6 +235,21 @@ mod tests {
         // Assert - should handle gracefully
         let victim = policy.pick_victim(&[]);
         assert!(victim.is_some());
+    }
+
+    #[test]
+    fn should_bound_frequency_metadata_to_the_recency_window() {
+        // Arrange
+        let policy = TinyLfuPolicy::new();
+
+        // Act
+        for i in 0..10_000 {
+            policy.on_access(CacheKey::for_data(i, 0));
+        }
+
+        // Assert
+        assert!(policy.recent.lock().len() <= policy.window_size);
+        assert!(policy.frequencies.lock().len() <= policy.window_size);
     }
 
     #[test]

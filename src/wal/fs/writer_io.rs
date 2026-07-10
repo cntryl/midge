@@ -21,6 +21,7 @@ use crate::wal::traits::WalWriter;
 use crate::wal::types::{WalPos, WalRecord};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 
@@ -281,6 +282,10 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn sync(&self) -> MidgeResult<()> {
+        self.sync_with_timeout(Duration::from_secs(30))
+    }
+
+    fn sync_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
         // Request a durable fsync and wait for writer to perform it.
         // Note: we MUST request fsync even if queue is empty, because data may have
         // been written to the file but not yet fsynced (the writer thread writes
@@ -303,7 +308,18 @@ impl WalWriter for FsWalWriterIo {
                     .unwrap_or_else(|| "WAL sync failed persistently".to_string());
                 return Err(Self::error_from_message(msg));
             }
-            self.sync_cond.wait(&mut s);
+            let Some(remaining) = timeout.checked_sub(sync_start.elapsed()) else {
+                return Err(crate::common::MidgeError::Internal(
+                    "WAL sync deadline exceeded".to_string(),
+                ));
+            };
+            if self.sync_cond.wait_for(&mut s, remaining).timed_out()
+                && s.completed_fsyncs < my_sync_id
+            {
+                return Err(crate::common::MidgeError::Internal(
+                    "WAL sync deadline exceeded".to_string(),
+                ));
+            }
         }
         let elapsed = sync_start.elapsed();
         if let Some(t) = crate::telemetry::Telemetry::global() {

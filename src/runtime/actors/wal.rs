@@ -88,6 +88,19 @@ pub(crate) struct TransactionAppendResult {
     pub op_count: usize,
     pub deferred: bool,
 }
+
+enum TransactionIntent<'a> {
+    Point {
+        cf_id: crate::types::ColumnFamilyId,
+        key: &'a [u8],
+        exists: bool,
+    },
+    Range {
+        cf_id: crate::types::ColumnFamilyId,
+        start: &'a [u8],
+        end: &'a [u8],
+    },
+}
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -740,6 +753,19 @@ impl WalActor {
             return Ok((state.sequence, 0, false));
         }
 
+        for op in &ops {
+            let cf_id = match op {
+                crate::runtime::TransactionOp::Put { cf_id, .. }
+                | crate::runtime::TransactionOp::Delete { cf_id, .. }
+                | crate::runtime::TransactionOp::DeleteRange { cf_id, .. } => *cf_id,
+            };
+            if !state.column_families.contains_key(&cf_id) {
+                return Err(MidgeError::InvalidArgument(format!(
+                    "column family {cf_id} does not exist"
+                )));
+            }
+        }
+
         let prepared = self.prepare_transaction_append(
             state,
             TransactionAppendParams {
@@ -787,6 +813,19 @@ impl WalActor {
             return Err(MidgeError::InvalidArgument(
                 "transaction append requires at least one operation".to_string(),
             ));
+        }
+
+        for op in &ops {
+            let cf_id = match op {
+                crate::runtime::TransactionOp::Put { cf_id, .. }
+                | crate::runtime::TransactionOp::Delete { cf_id, .. }
+                | crate::runtime::TransactionOp::DeleteRange { cf_id, .. } => *cf_id,
+            };
+            if !state.column_families.contains_key(&cf_id) {
+                return Err(MidgeError::InvalidArgument(format!(
+                    "column family {cf_id} does not exist"
+                )));
+            }
         }
 
         self.validate_transaction_preconditions(state, &ops, start_sequence, conflict_policy)?;
@@ -891,18 +930,71 @@ impl WalActor {
             Self::ensure_no_write_conflicts(state, ops, start_sequence)?;
         }
 
+        let mut intents = Vec::with_capacity(ops.len());
+        let key_exists_after_intents =
+            |cf_id: crate::types::ColumnFamilyId, key: &[u8], intents: &[TransactionIntent<'_>]| {
+                for intent in intents.iter().rev() {
+                    match intent {
+                        TransactionIntent::Point {
+                            cf_id: intent_cf,
+                            key: intent_key,
+                            exists,
+                        } if *intent_cf == cf_id && *intent_key == key => return *exists,
+                        TransactionIntent::Range {
+                            cf_id: intent_cf,
+                            start,
+                            end,
+                        } if *intent_cf == cf_id && *start <= key && key < *end => return false,
+                        _ => {}
+                    }
+                }
+                self.key_exists_or_pending(state, cf_id, key)
+            };
+
         for op in ops {
-            if let crate::runtime::TransactionOp::Put {
-                cf_id,
-                key,
-                insert_only: true,
-                ..
-            } = op
-            {
-                if self.key_exists_or_pending(state, *cf_id, &key[..]) {
-                    return Err(MidgeError::InvalidArgument(
-                        "key already exists".to_string(),
-                    ));
+            match op {
+                crate::runtime::TransactionOp::Put {
+                    cf_id,
+                    key,
+                    insert_only: false,
+                    ..
+                } => intents.push(TransactionIntent::Point {
+                    cf_id: *cf_id,
+                    key: key.as_ref(),
+                    exists: true,
+                }),
+                crate::runtime::TransactionOp::Delete { cf_id, key } => {
+                    intents.push(TransactionIntent::Point {
+                        cf_id: *cf_id,
+                        key: key.as_ref(),
+                        exists: false,
+                    });
+                }
+                crate::runtime::TransactionOp::DeleteRange {
+                    cf_id,
+                    start_key,
+                    end_key,
+                } => intents.push(TransactionIntent::Range {
+                    cf_id: *cf_id,
+                    start: start_key.as_ref(),
+                    end: end_key.as_ref(),
+                }),
+                crate::runtime::TransactionOp::Put {
+                    cf_id,
+                    key,
+                    insert_only: true,
+                    ..
+                } => {
+                    if key_exists_after_intents(*cf_id, key, &intents) {
+                        return Err(MidgeError::InvalidArgument(
+                            "key already exists".to_string(),
+                        ));
+                    }
+                    intents.push(TransactionIntent::Point {
+                        cf_id: *cf_id,
+                        key: key.as_ref(),
+                        exists: true,
+                    });
                 }
             }
         }
@@ -1516,17 +1608,30 @@ impl WalActor {
 
     /// Checks current in-memory view (active + immutable memtables) for existence
     fn key_exists(state: &RuntimeState, cf_id: crate::types::ColumnFamilyId, key: &[u8]) -> bool {
-        if let Some(cf_state) = state.column_families.get(&cf_id) {
-            if let Ok(Some(_)) = cf_state.memtable.get(key) {
-                return true;
-            }
-            for imm in cf_state.immutable_memtables.iter().rev() {
-                if let Ok(Some(_)) = imm.get(key) {
-                    return true;
-                }
-            }
-        }
-        false
+        let Some(cf_state) = state.column_families.get(&cf_id) else {
+            return false;
+        };
+        let sst_files = state
+            .manifest
+            .files
+            .iter()
+            .filter(|file| file.cf_id == cf_id)
+            .cloned()
+            .collect();
+        let sst_path_prefix = state
+            .sst_dir
+            .strip_prefix(&state.db_path)
+            .unwrap_or_else(|_| std::path::Path::new("sst"))
+            .to_path_buf();
+        let snapshot = crate::runtime::ReadSnapshot::new(
+            cf_state.memtable.clone(),
+            cf_state.immutable_memtables.clone(),
+            sst_files,
+            Arc::clone(&state.fs),
+            sst_path_prefix,
+            state.is_memory_mode(),
+        );
+        matches!(snapshot.get(key, u64::MAX), Ok(Some(_)))
     }
 
     fn key_exists_or_pending(
@@ -1629,23 +1734,16 @@ impl WalActor {
             // CRITICAL: Phase 2.3 - WAL fsync timeout protection
             // Wraps fsync in a timeout to prevent event loop starvation.
             // If fsync blocks >5s (unlikely except on severely degraded storage),
-            // we still update state to allow progress and log a warning.
-            // This prioritizes liveness over perfect durability in extreme cases.
+            // the durability operation fails closed and leaves the frontier
+            // unchanged; the caller can surface the failure to the client.
             let start = Instant::now();
             let fsync_timeout = Duration::from_secs(5);
 
-            let sync_result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| writer.sync()));
+            let sync_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                writer.sync_with_timeout(fsync_timeout)
+            }));
 
             let elapsed = start.elapsed();
-
-            // Check if sync took too long (but still succeeded)
-            if elapsed > fsync_timeout {
-                tracing::warn!(
-                    elapsed_ms = elapsed.as_millis(),
-                    "WAL fsync exceeded timeout threshold (5s); storage may be degraded or stalled"
-                );
-            }
 
             // Handle panic or error from sync
             match sync_result {

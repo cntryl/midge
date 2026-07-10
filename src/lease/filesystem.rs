@@ -76,13 +76,6 @@ impl FileSystemLease {
     }
 }
 
-/// Write a raw leader-record payload through the `FsLeaderStore`'s underlying Fs.
-/// Used during release to stamp a stale timestamp without going through the
-/// ownership check in `refresh_timestamp`.
-fn write_leader_record_raw(store: &FsLeaderStore, content: &str) -> Result<(), LeaseError> {
-    store.write_raw(content)
-}
-
 impl PrimaryLease for FileSystemLease {
     fn try_acquire(self: Arc<Self>) -> Result<LeaseGuard, LeaseError> {
         if self.acquired.load(Ordering::Acquire) {
@@ -160,19 +153,13 @@ impl PrimaryLease for FileSystemLease {
             return Ok(()); // Idempotent
         }
 
-        // Rewrite the leader record with an ancient timestamp so that:
-        // 1. The epoch value is preserved for the next acquirer to increment
-        // 2. The staleness check sees it as expired, allowing re-acquisition
         let our_epoch = self.acquired_epoch.load(Ordering::Acquire);
         if our_epoch > 0 {
-            let released_record = crate::lease::traits::LeaderRecord {
-                epoch: our_epoch,
-                holder_id: self.holder_id.clone(),
-                acquired_at: "1970-01-01T00:00:00Z".to_string(),
-            };
-            let content = crate::lease::traits::format_leader_record(&released_record);
-            // Best-effort write — if it fails the heartbeat TTL will expire naturally
-            let _ = write_leader_record_raw(&self.leader_store, &content);
+            // Conditional release preserves a newer holder's record if this
+            // lease was fenced between shutdown admission and release.
+            let _ = self
+                .leader_store
+                .release_if_owner(&self.holder_id, our_epoch);
         }
 
         self.acquired.store(false, Ordering::Release);

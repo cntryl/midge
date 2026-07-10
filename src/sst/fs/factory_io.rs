@@ -2,6 +2,7 @@
 
 use crate::common::MidgeResult;
 use crate::sst::traits::{DynSstWriter, SstFactory};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -77,6 +78,10 @@ struct InMemorySstWriter {
     range_tombstones: Vec<RangeTombstone>,
     block_size: usize,
     compression_policy: CompressionPolicy,
+    /// Activated only by `add_sorted_with_meta`, which is the compaction
+    /// contract. Complete encoded blocks are spilled to a scratch file rather
+    /// than retained as logical entries until finalization.
+    streaming: Option<StreamingState>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +101,38 @@ struct FinalizedDataBlocks {
     largest_key: Option<Vec<u8>>,
 }
 
+struct StreamingState {
+    scratch: tempfile::NamedTempFile,
+    offset: u64,
+    block_index_entries: Vec<(Vec<u8>, BlockHandle)>,
+    key_profiler: KeyStructureProfiler,
+    current_block: Vec<u8>,
+    current_first_key: Option<Vec<u8>>,
+    previous_key: Vec<u8>,
+    last_key: Option<Vec<u8>>,
+    last_sequence: u64,
+    smallest_key: Option<Vec<u8>>,
+    largest_key: Option<Vec<u8>>,
+}
+
+impl StreamingState {
+    fn new() -> MidgeResult<Self> {
+        Ok(Self {
+            scratch: tempfile::NamedTempFile::new().map_err(crate::common::MidgeError::Io)?,
+            offset: 0,
+            block_index_entries: Vec::new(),
+            key_profiler: KeyStructureProfiler::new(),
+            current_block: Vec::new(),
+            current_first_key: None,
+            previous_key: Vec::new(),
+            last_key: None,
+            last_sequence: 0,
+            smallest_key: None,
+            largest_key: None,
+        })
+    }
+}
+
 impl InMemorySstWriter {
     fn new(compression_policy: CompressionPolicy, block_size: usize) -> Self {
         Self {
@@ -103,6 +140,7 @@ impl InMemorySstWriter {
             range_tombstones: Vec::new(),
             block_size,
             compression_policy,
+            streaming: None,
         }
     }
 
@@ -123,6 +161,26 @@ impl InMemorySstWriter {
         );
         file_bytes.extend_from_slice(&compressed);
         Ok(BlockHandle::new(offset, size))
+    }
+
+    fn append_block_to_stream(
+        file: &mut std::fs::File,
+        offset: &mut u64,
+        block_bytes: &[u8],
+        compression_policy: &CompressionPolicy,
+    ) -> MidgeResult<BlockHandle> {
+        use crate::sst::compression;
+
+        let compressed = compression::compress_block_with_trailer(block_bytes, compression_policy)?;
+        let payload_len = u32::try_from(compressed.len()).unwrap_or(u32::MAX);
+        let size = 4u64.saturating_add(u64::try_from(compressed.len()).unwrap_or(u64::MAX));
+        let handle = BlockHandle::new(*offset, size);
+        file.write_all(&payload_len.to_le_bytes())
+            .map_err(crate::common::MidgeError::Io)?;
+        file.write_all(&compressed)
+            .map_err(crate::common::MidgeError::Io)?;
+        *offset = offset.saturating_add(size);
+        Ok(handle)
     }
 
     fn serialize_index(index_entries: &[IndexEntry]) -> Vec<u8> {
@@ -211,6 +269,72 @@ impl InMemorySstWriter {
             block_index_entries.push((first_key, handle));
         }
         current_block.clear();
+        Ok(())
+    }
+
+    fn flush_streaming_current_block(
+        state: &mut StreamingState,
+        compression_policy: &CompressionPolicy,
+    ) -> MidgeResult<()> {
+        if state.current_block.is_empty() {
+            return Ok(());
+        }
+
+        let handle = Self::append_block_to_stream(
+            state.scratch.as_file_mut(),
+            &mut state.offset,
+            &state.current_block,
+            compression_policy,
+        )?;
+        if let Some(first_key) = state.current_first_key.take() {
+            state.block_index_entries.push((first_key, handle));
+        }
+        state.current_block.clear();
+        Ok(())
+    }
+
+    fn append_sorted_entry(
+        state: &mut StreamingState,
+        entry: PendingEntry,
+        block_size: usize,
+        compression_policy: &CompressionPolicy,
+    ) -> MidgeResult<()> {
+        if let Some(last_key) = &state.last_key {
+            match entry.key.cmp(last_key) {
+                std::cmp::Ordering::Less => {
+                    return Err(crate::common::MidgeError::InvalidArgument(
+                        "sorted SST writer received keys out of order".to_string(),
+                    ));
+                }
+                std::cmp::Ordering::Equal if entry.sequence > state.last_sequence => {
+                    return Err(crate::common::MidgeError::InvalidArgument(
+                        "sorted SST writer received sequences out of descending order".to_string(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        state.key_profiler.add_key(&entry.key);
+        Self::update_key_bounds(&mut state.smallest_key, &mut state.largest_key, &entry.key);
+
+        let target_block_size = block_size.max(4 * 1024);
+        let mut encoded = Self::encode_pending_entry(&state.previous_key, &entry);
+        if !state.current_block.is_empty()
+            && state.current_block.len().saturating_add(encoded.len()) > target_block_size
+        {
+            Self::flush_streaming_current_block(state, compression_policy)?;
+            state.previous_key.clear();
+            encoded = Self::encode_pending_entry(&state.previous_key, &entry);
+        }
+
+        if state.current_first_key.is_none() {
+            state.current_first_key = Some(entry.key.clone());
+        }
+        state.current_block.extend_from_slice(&encoded);
+        state.previous_key.clone_from(&entry.key);
+        state.last_sequence = entry.sequence;
+        state.last_key = Some(entry.key);
         Ok(())
     }
 
@@ -338,6 +462,144 @@ impl InMemorySstWriter {
         file_bytes.extend_from_slice(&footer.encode());
         Ok(())
     }
+
+    fn append_range_tombstone_block_to_stream(
+        state: &mut StreamingState,
+        range_tombstones: &[RangeTombstone],
+        compression_policy: &CompressionPolicy,
+    ) -> MidgeResult<Option<BlockHandle>> {
+        if range_tombstones.is_empty() {
+            return Ok(None);
+        }
+
+        let bytes = encode_range_tombstones(range_tombstones);
+        Self::append_block_to_stream(
+            state.scratch.as_file_mut(),
+            &mut state.offset,
+            &bytes,
+            compression_policy,
+        )
+        .map(Some)
+    }
+
+    fn append_trie_block_to_stream(
+        state: &mut StreamingState,
+        compression_policy: &CompressionPolicy,
+        index_kind: IndexKind,
+    ) -> MidgeResult<Option<BlockHandle>> {
+        if !matches!(index_kind, IndexKind::Trie) {
+            return Ok(None);
+        }
+
+        let mut trie_writer = TrieWriter::new(true);
+        for (block_index, (first_key, _)) in state.block_index_entries.iter().enumerate() {
+            trie_writer.add_block_key(first_key, u32::try_from(block_index).unwrap_or(u32::MAX))?;
+        }
+
+        match trie_writer.finish() {
+            Some(bytes) => Self::append_block_to_stream(
+                state.scratch.as_file_mut(),
+                &mut state.offset,
+                &bytes,
+                compression_policy,
+            )
+            .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn append_metadata_index_and_footer_to_stream(
+        state: &mut StreamingState,
+        compression_policy: &CompressionPolicy,
+        metadata: &SstMetadata,
+        sparse_index_entries: &[IndexEntry],
+        trie_handle: Option<BlockHandle>,
+    ) -> MidgeResult<()> {
+        let meta_handle = Self::append_block_to_stream(
+            state.scratch.as_file_mut(),
+            &mut state.offset,
+            &metadata.encode(),
+            compression_policy,
+        )?;
+        let index_bytes = Self::serialize_index(sparse_index_entries);
+        let index_handle = Self::append_block_to_stream(
+            state.scratch.as_file_mut(),
+            &mut state.offset,
+            &index_bytes,
+            compression_policy,
+        )?;
+        let footer = trie_handle.map_or_else(
+            || Footer::new(meta_handle, index_handle),
+            |handle| Footer::new(meta_handle, index_handle).with_trie(handle),
+        );
+        let footer = footer.encode();
+        state
+            .scratch
+            .as_file_mut()
+            .write_all(&footer)
+            .map_err(crate::common::MidgeError::Io)?;
+        state.offset = state
+            .offset
+            .saturating_add(u64::try_from(footer.len()).unwrap_or(u64::MAX));
+        Ok(())
+    }
+
+    fn finish_streaming(
+        mut state: StreamingState,
+        range_tombstones: &[RangeTombstone],
+        compression_policy: &CompressionPolicy,
+    ) -> MidgeResult<tempfile::NamedTempFile> {
+        Self::flush_streaming_current_block(&mut state, compression_policy)?;
+
+        for tombstone in range_tombstones {
+            Self::update_key_bounds(
+                &mut state.smallest_key,
+                &mut state.largest_key,
+                &tombstone.start,
+            );
+            Self::update_key_bounds(
+                &mut state.smallest_key,
+                &mut state.largest_key,
+                &tombstone.end,
+            );
+        }
+
+        let range_tombstone_handle = Self::append_range_tombstone_block_to_stream(
+            &mut state,
+            range_tombstones,
+            compression_policy,
+        )?;
+        let sparse_index_entries = Self::build_sparse_index_entries(&state.block_index_entries);
+        let index_kind = IndexTuner::decide(&std::mem::take(&mut state.key_profiler).finish());
+        let trie_handle =
+            Self::append_trie_block_to_stream(&mut state, compression_policy, index_kind)?;
+        let metadata = SstMetadata {
+            format_version: SST_FORMAT_V3,
+            index_kind,
+            range_tombstone_handle,
+            key_range: state
+                .smallest_key
+                .clone()
+                .zip(state.largest_key.clone())
+                .map(|(smallest_key, largest_key)| KeyRangeMetadata {
+                    smallest_key,
+                    largest_key,
+                }),
+        };
+        Self::append_metadata_index_and_footer_to_stream(
+            &mut state,
+            compression_policy,
+            &metadata,
+            &sparse_index_entries,
+            trie_handle,
+        )?;
+        state
+            .scratch
+            .as_file_mut()
+            .sync_all()
+            .map_err(crate::common::MidgeError::Io)?;
+        Ok(state.scratch)
+    }
 }
 
 impl DynSstWriter for InMemorySstWriter {
@@ -353,6 +615,12 @@ impl DynSstWriter for InMemorySstWriter {
         op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
+        if self.streaming.is_some() {
+            return Err(crate::common::MidgeError::InvalidArgument(
+                "cannot append unordered entries after sorted SST streaming has started"
+                    .to_string(),
+            ));
+        }
         self.entries.push(PendingEntry {
             key: key.to_vec(),
             value: value.map(<[u8]>::to_vec),
@@ -361,6 +629,42 @@ impl DynSstWriter for InMemorySstWriter {
             expiration,
         });
         Ok(())
+    }
+
+    fn add_sorted_with_meta(
+        &mut self,
+        key: &[u8],
+        value: Option<&[u8]>,
+        seq: u64,
+        op_type: u8,
+        expiration: Option<u64>,
+    ) -> MidgeResult<()> {
+        if !self.entries.is_empty() {
+            return Err(crate::common::MidgeError::InvalidArgument(
+                "cannot start sorted SST streaming after unordered entries were added".to_string(),
+            ));
+        }
+        if self.streaming.is_none() {
+            self.streaming = Some(StreamingState::new()?);
+        }
+
+        let block_size = self.block_size;
+        let compression_policy = self.compression_policy.clone();
+        let entry = PendingEntry {
+            key: key.to_vec(),
+            value: value.map(<[u8]>::to_vec),
+            sequence: seq,
+            op_type,
+            expiration,
+        };
+        Self::append_sorted_entry(
+            self.streaming
+                .as_mut()
+                .expect("streaming state is initialized above"),
+            entry,
+            block_size,
+            &compression_policy,
+        )
     }
 
     fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()> {
@@ -375,12 +679,26 @@ impl DynSstWriter for InMemorySstWriter {
             range_tombstones,
             block_size,
             compression_policy,
+            streaming,
         } = *self;
+
+        if let Some(streaming) = streaming {
+            let scratch =
+                Self::finish_streaming(streaming, &range_tombstones, &compression_policy)?;
+            let mut source = scratch.reopen().map_err(crate::common::MidgeError::Io)?;
+            let mut bytes = Vec::new();
+            source
+                .read_to_end(&mut bytes)
+                .map_err(crate::common::MidgeError::Io)?;
+            return Ok(bytes);
+        }
+
         let writer = Self {
             entries: Vec::new(),
             range_tombstones,
             block_size,
             compression_policy,
+            streaming: None,
         };
 
         let entries = Self::sort_entries(entries);
@@ -482,7 +800,7 @@ mod tests {
         let path = temp_dir.path().join("stateful.sst");
 
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"alpha", Some(b"value-a"), 10, 0, Some(5_000))?;
+        writer.add_with_meta(b"alpha", Some(b"value-a"), 10, 0, Some(4_000_000_000_000))?;
         writer.add_with_meta(b"alpha", None, 9, 2, None)?;
         writer.add_with_meta(b"beta", Some(b"value-b"), 8, 1, None)?;
         writer.add_range_tombstone(b"cat", b"cow", 7)?;
@@ -499,7 +817,7 @@ mod tests {
                 assert_eq!(states[0].0.as_ref(), b"alpha");
                 assert_eq!(value.as_ref(), b"value-a");
                 assert_eq!(*seq, 10);
-                assert_eq!(*expiration, Some(5_000));
+                assert_eq!(*expiration, Some(4_000_000_000_000));
                 assert_eq!(*op_type, 0);
             }
             other => panic!("expected value state, got {other:?}"),
@@ -579,6 +897,56 @@ mod tests {
             }
             other => panic!("expected empty value state, got {other:?}"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn should_spill_sorted_compaction_entries_and_roundtrip_multiple_blocks() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = FsSstFactoryIo::new(fs, 4096);
+        let path = temp_dir.path().join("streamed.sst");
+        let mut writer = factory.create()?;
+
+        // Act
+        for index in 0..2_000 {
+            let key = format!("key-{index:06}");
+            writer.add_sorted_with_meta(key.as_bytes(), Some(b"value"), index, 0, None)?;
+        }
+        crate::sst::fs::finish_writer_to_path(writer, &path)?;
+        let reader = factory.open(std::path::Path::new("streamed.sst"))?;
+        let states = reader.scan_range_state(None, None)?;
+
+        // Assert
+        assert_eq!(states.len(), 2_000);
+        assert_eq!(
+            states.first().map(|(key, _)| key.as_ref()),
+            Some(&b"key-000000"[..])
+        );
+        assert_eq!(
+            states.last().map(|(key, _)| key.as_ref()),
+            Some(&b"key-001999"[..])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_out_of_order_entries_on_sorted_writer_path() -> MidgeResult<()> {
+        // Arrange
+        let fs = Arc::new(crate::io::MockFs::new());
+        let factory = FsSstFactoryIo::new(fs, 4096);
+        let mut writer = factory.create()?;
+        writer.add_sorted_with_meta(b"b", Some(b"value"), 2, 0, None)?;
+
+        // Act
+        let result = writer.add_sorted_with_meta(b"a", Some(b"value"), 1, 0, None);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::InvalidArgument(_))
+        ));
         Ok(())
     }
 }

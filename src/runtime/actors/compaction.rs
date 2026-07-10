@@ -6,11 +6,13 @@
 //! - Merging SST files across levels
 
 use super::super::state::RuntimeState;
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 use crate::compaction::{Compactor, LeveledCompactionConfig};
 use crate::runtime::{next_request_id, RuntimeMsg};
 use crate::sst::SstFactory;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 
 /// Actor handling SST compaction
 pub struct CompactionActor {
@@ -20,6 +22,14 @@ pub struct CompactionActor {
     sst_factory: Arc<dyn SstFactory>,
     /// Compaction strategy
     compactor: Compactor,
+    /// Accounting reservation for the one active compaction. The actor
+    /// serializes compactions, but the token still prevents a delayed terminal
+    /// message from settling a later operation.
+    storage_reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+    /// Cooperative cancellation flag for the active background worker.
+    worker_cancel: Arc<AtomicBool>,
+    /// Active background worker, joined before runtime shutdown completes.
+    worker_handle: Option<JoinHandle<()>>,
 }
 
 impl CompactionActor {
@@ -36,6 +46,9 @@ impl CompactionActor {
             compaction_running: false,
             sst_factory,
             compactor: Compactor::with_config(config),
+            storage_reservation: None,
+            worker_cancel: Arc::new(AtomicBool::new(false)),
+            worker_handle: None,
         }
     }
 
@@ -127,10 +140,37 @@ impl CompactionActor {
     ) -> MidgeResult<Vec<String>> {
         self.prepare_compaction(state, plan, sba)?;
         if let Some(tx) = worker_msg_tx {
-            return self.run_async_compaction(state, tx, plan);
+            let result = self.run_async_compaction(state, tx, plan);
+            if result.is_err() {
+                self.abort_compaction(state, plan, sba);
+            }
+            return result;
         }
 
-        self.run_sync_compaction(state, plan, sba)
+        let result = self.run_sync_compaction(state, plan, sba);
+        if result.is_err() {
+            self.abort_compaction(state, plan, sba);
+        }
+        result
+    }
+
+    fn abort_compaction(
+        &mut self,
+        state: &mut RuntimeState,
+        plan: &crate::compaction::CompactionPlan,
+        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+    ) {
+        state
+            .compaction
+            .compacting_ssts
+            .retain(|name| !plan.input_files.contains(name));
+        state
+            .active_compactions
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.compaction_running = false;
+        if let (Some(hybrid), Some(token)) = (sba, self.storage_reservation.take()) {
+            hybrid.compaction_aborted_with_token(token);
+        }
     }
 
     /// Handle compaction completion
@@ -139,7 +179,7 @@ impl CompactionActor {
         state: &mut RuntimeState,
         input_ssts: &[String],
         output_ssts: &[String],
-    ) {
+    ) -> Option<crate::storage::hybrid::actor::StorageReservationToken> {
         // Invariant: completion only clears in-memory "running" state. The
         // actual authority switch happens when manifest publication removes the
         // old SSTs and adds the replacement set.
@@ -150,12 +190,37 @@ impl CompactionActor {
             .retain(|s| !input_ssts.contains(s));
 
         self.compaction_running = false;
+        self.join_worker();
 
         tracing::info!(
             input_count = input_ssts.len(),
             output_count = output_ssts.len(),
             "Compaction completed"
         );
+
+        self.storage_reservation.take()
+    }
+
+    /// Cancel and join any active worker before runtime shutdown releases its
+    /// storage lease. The worker checks this flag before and after output
+    /// finalization, so it cannot publish or leave a staged replacement after
+    /// shutdown has begun.
+    pub fn cancel_and_join_worker(&mut self) {
+        self.worker_cancel.store(true, Ordering::Release);
+        self.join_worker();
+        self.compaction_running = false;
+    }
+
+    fn join_worker(&mut self) {
+        let Some(handle) = self.worker_handle.take() else {
+            return;
+        };
+
+        if let Ok(()) = handle.join() {
+            tracing::debug!("compaction worker joined");
+        } else {
+            tracing::warn!("compaction worker panicked during join");
+        }
     }
 
     fn prepare_compaction(
@@ -185,9 +250,8 @@ impl CompactionActor {
             .map(|f| f.size_bytes)
             .collect();
 
-        if let Some(hybrid) = sba {
-            hybrid.compaction_planned(input_sizes);
-        }
+        self.storage_reservation =
+            sba.map(|hybrid| hybrid.compaction_planned_with_token(&input_sizes));
 
         tracing::info!(
             input_count = plan.input_files.len(),
@@ -208,7 +272,7 @@ impl CompactionActor {
         &mut self,
         state: &RuntimeState,
         plan: &crate::compaction::CompactionPlan,
-        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+        _sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<Vec<String>> {
         let output_ssts = crate::compaction::execute_compaction(
             plan,
@@ -216,18 +280,6 @@ impl CompactionActor {
             &state.sst_dir,
             None,
         )?;
-
-        let output_sizes: Vec<u64> = output_ssts
-            .iter()
-            .filter_map(|name| {
-                let path = state.sst_dir.join(name);
-                std::fs::metadata(&path).ok().map(|m| m.len())
-            })
-            .collect();
-
-        if let Some(hybrid) = sba {
-            hybrid.compaction_completed(output_sizes);
-        }
 
         tracing::info!(
             input_count = plan.input_files.len(),
@@ -249,12 +301,19 @@ impl CompactionActor {
         let input_files = plan.input_files.clone();
         let plan_clone = plan.clone();
         let epoch = std::sync::Arc::clone(&state.ingest_epoch);
+        self.worker_cancel.store(false, Ordering::Release);
+        let worker_cancel = Arc::clone(&self.worker_cancel);
         let job_id = next_request_id()?;
 
-        std::thread::spawn(move || {
+        let worker = std::thread::Builder::new()
+            .name(format!("midge-compaction-{job_id}"))
+            .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let my_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
-                let abort_check = || epoch.load(std::sync::atomic::Ordering::SeqCst) != my_epoch;
+                let abort_check = || {
+                    worker_cancel.load(Ordering::Acquire)
+                        || epoch.load(std::sync::atomic::Ordering::SeqCst) != my_epoch
+                };
                 let result = crate::compaction::execute_compaction(
                     &plan_clone,
                     sst_factory.as_ref(),
@@ -265,8 +324,7 @@ impl CompactionActor {
                 let (output_ssts, succeeded) = match result {
                     Ok(v) => (v, true),
                     Err(e) => {
-                        let s = e.to_string();
-                        if s.contains("ingest epoch change") || s.contains("compaction aborted") {
+                        if matches!(e, MidgeError::Aborted(_)) {
                             let new_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
                             tracing::info!(
                                 component = "compaction",
@@ -308,15 +366,34 @@ impl CompactionActor {
                 }
             };
 
-            let _ = tx.send(RuntimeMsg::CompactionComplete {
-                request_id: next_request_id().expect("request ID in compaction worker"),
-                input_ssts: input_files,
-                output_ssts,
-                cf_id: plan_clone.cf_id,
-                target_level: plan_clone.target_level,
-                succeeded,
-            });
-        });
+            let Ok(request_id) = next_request_id() else {
+                tracing::error!(
+                    component = "compaction",
+                    job_id,
+                    "compaction worker could not allocate completion request ID"
+                );
+                return;
+            };
+            if tx
+                .send(RuntimeMsg::CompactionComplete {
+                    request_id,
+                    input_ssts: input_files,
+                    output_ssts,
+                    cf_id: plan_clone.cf_id,
+                    target_level: plan_clone.target_level,
+                    succeeded,
+                })
+                .is_err()
+            {
+                tracing::warn!(
+                    component = "compaction",
+                    job_id,
+                    "compaction completion receiver closed"
+                );
+            }
+        })
+            .map_err(|error| MidgeError::Internal(format!("spawn compaction worker: {error}")))?;
+        self.worker_handle = Some(worker);
 
         Ok(Vec::new())
     }
@@ -328,7 +405,16 @@ impl Clone for CompactionActor {
             compaction_running: self.compaction_running,
             sst_factory: Arc::clone(&self.sst_factory),
             compactor: Compactor::with_config(self.compactor.config.clone()),
+            storage_reservation: self.storage_reservation,
+            worker_cancel: Arc::clone(&self.worker_cancel),
+            worker_handle: None,
         }
+    }
+}
+
+impl Drop for CompactionActor {
+    fn drop(&mut self) {
+        self.cancel_and_join_worker();
     }
 }
 

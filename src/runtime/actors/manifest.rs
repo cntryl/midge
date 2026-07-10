@@ -79,7 +79,7 @@ impl ManifestActor {
             ..Default::default()
         };
 
-        state.manifest.files.push(manifest_meta);
+        state.manifest.add_file(manifest_meta);
         self.pending_edits += 1;
 
         tracing::info!(
@@ -148,7 +148,7 @@ impl ManifestActor {
                 largest_seq: file_meta.largest_seq,
                 ..Default::default()
             };
-            state.manifest.files.push(manifest_meta);
+            state.manifest.add_file(manifest_meta);
         }
 
         self.pending_edits += 1;
@@ -176,9 +176,13 @@ impl ManifestActor {
             "Manifest: persisting"
         );
 
-        // Use ManifestPersistence to save the current manifest JSON checkpoint.
-        crate::metadata::ManifestPersistence::save(&state.db_path, &state.manifest)
-            .map_err(crate::common::MidgeError::Internal)?;
+        // Publish a crash-safe snapshot before truncating the journal. Recovery
+        // can therefore replay only edits newer than the checkpoint horizon.
+        crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
+            &state.db_path,
+            &state.manifest,
+        )
+        .map_err(crate::common::MidgeError::Internal)?;
 
         tracing::debug!("Manifest persisted");
 

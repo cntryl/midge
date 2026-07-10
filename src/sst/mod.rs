@@ -35,6 +35,7 @@ use crate::common::MidgeResult;
 use crate::iterators::skiplist::OpType;
 use crate::iterators::SkipList;
 use bytes::Bytes;
+use parking_lot::RwLock;
 use std::sync::Arc;
 
 pub mod bloom;
@@ -120,6 +121,7 @@ pub struct SkipListMemtable {
     skiplist: Arc<SkipList>,
     seq_generator: std::sync::atomic::AtomicU64,
     size_bytes: std::sync::atomic::AtomicUsize,
+    range_tombstones: RwLock<Vec<crate::sst::types::RangeTombstone>>,
 }
 
 impl SkipListMemtable {
@@ -129,6 +131,7 @@ impl SkipListMemtable {
             skiplist: Arc::new(SkipList::new()),
             seq_generator: std::sync::atomic::AtomicU64::new(1),
             size_bytes: std::sync::atomic::AtomicUsize::new(0),
+            range_tombstones: RwLock::new(Vec::new()),
         }
     }
 
@@ -138,15 +141,15 @@ impl SkipListMemtable {
     }
 
     fn is_expired(expiration: Option<u64>) -> bool {
-        let Some(exp_time) = expiration else {
-            return false;
-        };
+        Self::is_expired_at(expiration, Self::current_time_millis())
+    }
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    fn current_time_millis() -> u64 {
+        crate::common::time::unix_time_millis()
+    }
 
-        exp_time <= now
+    fn is_expired_at(expiration: Option<u64>, now_millis: u64) -> bool {
+        crate::common::time::is_expired_at(expiration, now_millis)
     }
 
     /// Iterate over all entries in the memtable.
@@ -213,6 +216,16 @@ impl SkipListMemtable {
         key: &[u8],
         snapshot_seq: u64,
     ) -> MidgeResult<crate::sst::types::KeyState> {
+        self.get_key_state_at_with_time(key, snapshot_seq, Self::current_time_millis())
+    }
+
+    /// Get key state using the caller's fixed snapshot clock.
+    pub fn get_key_state_at_with_time(
+        &self,
+        key: &[u8],
+        snapshot_seq: u64,
+        now_millis: u64,
+    ) -> MidgeResult<crate::sst::types::KeyState> {
         Ok(self
             .skiplist
             .get_visible_entry_with_exp(key, snapshot_seq)
@@ -220,7 +233,7 @@ impl SkipListMemtable {
                 match (entry.value, entry.is_tombstone) {
                     (_, true) | (None, _) => crate::sst::types::KeyState::Tombstone(entry.seq),
                     (Some(value), false) => {
-                        if Self::is_expired(entry.expiration) {
+                        if Self::is_expired_at(entry.expiration, now_millis) {
                             crate::sst::types::KeyState::Tombstone(entry.seq)
                         } else {
                             crate::sst::types::KeyState::Value(
@@ -295,6 +308,17 @@ impl SkipListMemtable {
         end: Option<&[u8]>,
         snapshot_seq: u64,
     ) -> Vec<(Vec<u8>, crate::sst::types::KeyState)> {
+        self.range_state_at_with_time(start, end, snapshot_seq, Self::current_time_millis())
+    }
+
+    /// Scan key state using the caller's fixed snapshot clock.
+    pub fn range_state_at_with_time(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        snapshot_seq: u64,
+        now_millis: u64,
+    ) -> Vec<(Vec<u8>, crate::sst::types::KeyState)> {
         use std::collections::BTreeMap;
 
         let mut by_key = BTreeMap::new();
@@ -316,7 +340,7 @@ impl SkipListMemtable {
             let state = match (value, is_tombstone) {
                 (_, true) | (None, _) => crate::sst::types::KeyState::Tombstone(seq),
                 (Some(value), false) => {
-                    if Self::is_expired(exp) {
+                    if Self::is_expired_at(exp, now_millis) {
                         crate::sst::types::KeyState::Tombstone(seq)
                     } else {
                         crate::sst::types::KeyState::Value(value, seq, exp, op.as_u8())
@@ -418,14 +442,41 @@ impl SkipListMemtable {
         end_key: &[u8],
         seq: u64,
     ) -> MidgeResult<()> {
-        let count = self
-            .skiplist
-            .delete_range(Some(start_key), Some(end_key), seq);
-        // Estimate size impact: tombstone per deleted key
-        let size_delta = count * 32; // rough estimate
+        if start_key >= end_key {
+            return Ok(());
+        }
+
+        self.range_tombstones
+            .write()
+            .push(crate::sst::types::RangeTombstone::new(
+                start_key.to_vec(),
+                end_key.to_vec(),
+                seq,
+            ));
+        // Keep the estimate bounded by the tombstone itself. The range marker,
+        // rather than one point tombstone per currently resident key, is the
+        // durable representation.
+        let size_delta = start_key.len() + end_key.len() + 24;
         self.size_bytes
             .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Return range tombstones visible at `snapshot_seq` in insertion order.
+    #[must_use]
+    pub fn range_tombstones_at(&self, snapshot_seq: u64) -> Vec<crate::sst::types::RangeTombstone> {
+        self.range_tombstones
+            .read()
+            .iter()
+            .filter(|tombstone| snapshot_seq == u64::MAX || tombstone.seq <= snapshot_seq)
+            .cloned()
+            .collect()
+    }
+
+    /// Return all range tombstones for flush/compaction publication.
+    #[must_use]
+    pub fn range_tombstones(&self) -> Vec<crate::sst::types::RangeTombstone> {
+        self.range_tombstones.read().clone()
     }
 }
 

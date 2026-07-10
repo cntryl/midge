@@ -34,22 +34,17 @@ pub struct ReadSnapshot {
     pub sst_path_prefix: std::path::PathBuf,
     /// In-memory mode flag (skip SST reads when true)
     pub memory_mode: bool,
+    /// Wall-clock captured when this snapshot was created. TTL visibility is
+    /// evaluated against this value for the whole snapshot.
+    pub read_time_millis: u64,
     read_resources: Option<Arc<ReadResources>>,
+    diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
     sst_readers: HashMap<String, Arc<SstFileIo>>,
 }
 
 impl ReadSnapshot {
-    fn current_time_millis() -> u64 {
-        u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis()),
-        )
-        .unwrap_or(u64::MAX)
-    }
-
-    fn is_expired(expiration: Option<u64>) -> bool {
-        expiration.is_some_and(|expiration| expiration <= Self::current_time_millis())
+    pub(crate) fn current_time_millis() -> u64 {
+        crate::common::time::unix_time_millis()
     }
 
     fn state_sequence(state: &KeyState) -> Option<u64> {
@@ -59,9 +54,13 @@ impl ReadSnapshot {
         }
     }
 
-    fn normalize_state(state: KeyState) -> KeyState {
+    fn normalize_state(state: KeyState, now_millis: u64) -> KeyState {
         match state {
-            KeyState::Value(_, seq, exp, _) if Self::is_expired(exp) => KeyState::Tombstone(seq),
+            KeyState::Value(_, seq, exp, _)
+                if crate::common::time::is_expired_at(exp, now_millis) =>
+            {
+                KeyState::Tombstone(seq)
+            }
             _ => state,
         }
     }
@@ -76,8 +75,13 @@ impl ReadSnapshot {
                 && !matches!(existing, KeyState::Tombstone(_)))
     }
 
-    fn merge_state(states: &mut BTreeMap<Vec<u8>, KeyState>, key: Vec<u8>, state: KeyState) {
-        let normalized = Self::normalize_state(state);
+    fn merge_state(
+        states: &mut BTreeMap<Vec<u8>, KeyState>,
+        key: Vec<u8>,
+        state: KeyState,
+        now_millis: u64,
+    ) {
+        let normalized = Self::normalize_state(state, now_millis);
         if matches!(normalized, KeyState::Absent) {
             return;
         }
@@ -90,8 +94,8 @@ impl ReadSnapshot {
         }
     }
 
-    fn merge_best_state(best_state: &mut Option<KeyState>, state: KeyState) {
-        let normalized = Self::normalize_state(state);
+    fn merge_best_state(best_state: &mut Option<KeyState>, state: KeyState, now_millis: u64) {
+        let normalized = Self::normalize_state(state, now_millis);
         if matches!(normalized, KeyState::Absent) {
             return;
         }
@@ -169,6 +173,10 @@ impl ReadSnapshot {
     ) -> Self {
         // Extract cf_id from first SST file or default to DEFAULT
         let cf_id = sst_files.first().map_or(0, |f| f.cf_id);
+        let diagnostics = read_resources.as_ref().map_or_else(
+            crate::diagnostics::legacy_runtime_diagnostics,
+            |resources| resources.diagnostics(),
+        );
         let sst_readers = if memory_mode {
             HashMap::new()
         } else {
@@ -186,14 +194,21 @@ impl ReadSnapshot {
             sst_fs,
             sst_path_prefix,
             memory_mode,
+            read_time_millis: Self::current_time_millis(),
             read_resources,
+            diagnostics,
             sst_readers,
         }
     }
 
+    pub(crate) fn with_read_time_millis(mut self, read_time_millis: u64) -> Self {
+        self.read_time_millis = read_time_millis;
+        self
+    }
+
     fn sst_reader(&self, file_meta: &FileMeta) -> crate::common::MidgeResult<Arc<SstFileIo>> {
         if let Some(reader) = self.sst_readers.get(&file_meta.name) {
-            crate::sst::read_path_metrics::global_sst_read_metrics().record_reader_cache_hit();
+            self.diagnostics.sst_metrics().record_reader_cache_hit();
             return Ok(Arc::clone(reader));
         }
         if let Some(resources) = &self.read_resources {
@@ -202,11 +217,11 @@ impl ReadSnapshot {
 
         let sst_path = self.sst_path_prefix.join(&file_meta.name);
         let path_str = sst_path.to_string_lossy().to_string();
-        crate::sst::read_path_metrics::global_sst_read_metrics().record_reader_cache_miss();
-        Ok(Arc::new(crate::sst::fs::SstFileIo::open(
-            &path_str,
-            Arc::clone(&self.sst_fs),
-        )?))
+        self.diagnostics.sst_metrics().record_reader_cache_miss();
+        Ok(Arc::new(
+            crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))?
+                .with_read_path_diagnostics(Arc::clone(&self.diagnostics)),
+        ))
     }
 
     /// Perform a point read on this snapshot
@@ -214,33 +229,42 @@ impl ReadSnapshot {
         let mut best_state = None;
         let mut range_tombstones = Vec::new();
 
-        let state = self.memtable.get_key_state_at(key, seq)?;
-        Self::merge_best_state(&mut best_state, state);
+        let state = self
+            .memtable
+            .get_key_state_at_with_time(key, seq, self.read_time_millis)?;
+        Self::merge_best_state(&mut best_state, state, self.read_time_millis);
 
         for imm in &self.immutable_memtables {
-            let state = imm.get_key_state_at(key, seq)?;
-            Self::merge_best_state(&mut best_state, state);
+            let state = imm.get_key_state_at_with_time(key, seq, self.read_time_millis)?;
+            Self::merge_best_state(&mut best_state, state, self.read_time_millis);
+            range_tombstones.extend(
+                imm.range_tombstones_at(seq)
+                    .into_iter()
+                    .filter(|tombstone| tombstone.covers(key)),
+            );
         }
+        range_tombstones.extend(
+            self.memtable
+                .range_tombstones_at(seq)
+                .into_iter()
+                .filter(|tombstone| tombstone.covers(key)),
+        );
 
+        // Manifest key bounds are advisory and older manifests may not
+        // include range-tombstone endpoints. Let each opened SST's persisted
+        // metadata make the exclusion decision instead of risking a skipped
+        // masking tombstone.
         if !self.memory_mode {
             for file_meta in &self.sst_files {
-                if let (Some(smallest), Some(largest)) =
-                    (&file_meta.smallest_key, &file_meta.largest_key)
-                {
-                    if key < smallest.as_slice() || key > largest.as_slice() {
-                        continue;
-                    }
-                }
-
                 file_meta.record_read();
-                crate::sst::read_path_metrics::global_sst_read_metrics()
+                self.diagnostics
+                    .sst_metrics()
                     .record_candidate_sst_file_checked();
                 let reader = self.sst_reader(file_meta)?;
-                let state = reader.get_state_at(key, seq)?;
-                Self::merge_best_state(&mut best_state, state);
+                let state = reader.get_state_at_with_time(key, seq, self.read_time_millis)?;
+                Self::merge_best_state(&mut best_state, state, self.read_time_millis);
 
-                crate::sst::read_path_metrics::global_sst_read_metrics()
-                    .record_range_tombstone_scan();
+                self.diagnostics.sst_metrics().record_range_tombstone_scan();
                 range_tombstones.extend(reader.range_tombstones().into_iter().filter(
                     |tombstone| (seq == u64::MAX || tombstone.seq <= seq) && tombstone.covers(key),
                 ));
@@ -255,7 +279,11 @@ impl ReadSnapshot {
         }
 
         Ok(match state {
-            KeyState::Value(value, _, exp, _) if !Self::is_expired(exp) => Some(value.to_vec()),
+            KeyState::Value(value, _, exp, _)
+                if !crate::common::time::is_expired_at(exp, self.read_time_millis) =>
+            {
+                Some(value.to_vec())
+            }
             _ => None,
         })
     }
@@ -268,27 +296,32 @@ impl ReadSnapshot {
         let mut best_state = None;
         let mut range_tombstones = Vec::new();
 
-        let state = self.memtable.get_key_state_at(key, u64::MAX)?;
-        Self::merge_best_state(&mut best_state, state);
+        let state =
+            self.memtable
+                .get_key_state_at_with_time(key, u64::MAX, self.read_time_millis)?;
+        Self::merge_best_state(&mut best_state, state, self.read_time_millis);
 
         for imm in &self.immutable_memtables {
-            let state = imm.get_key_state_at(key, u64::MAX)?;
-            Self::merge_best_state(&mut best_state, state);
+            let state = imm.get_key_state_at_with_time(key, u64::MAX, self.read_time_millis)?;
+            Self::merge_best_state(&mut best_state, state, self.read_time_millis);
+            range_tombstones.extend(
+                imm.range_tombstones_at(u64::MAX)
+                    .into_iter()
+                    .filter(|tombstone| tombstone.covers(key)),
+            );
         }
+        range_tombstones.extend(
+            self.memtable
+                .range_tombstones_at(u64::MAX)
+                .into_iter()
+                .filter(|tombstone| tombstone.covers(key)),
+        );
 
         if !self.memory_mode {
             for file_meta in &self.sst_files {
-                if let (Some(smallest), Some(largest)) =
-                    (&file_meta.smallest_key, &file_meta.largest_key)
-                {
-                    if key < smallest.as_slice() || key > largest.as_slice() {
-                        continue;
-                    }
-                }
-
                 let reader = self.sst_reader(file_meta)?;
-                let state = reader.get_state_at(key, u64::MAX)?;
-                Self::merge_best_state(&mut best_state, state);
+                let state = reader.get_state_at_with_time(key, u64::MAX, self.read_time_millis)?;
+                Self::merge_best_state(&mut best_state, state, self.read_time_millis);
 
                 range_tombstones.extend(
                     reader
@@ -322,34 +355,43 @@ impl ReadSnapshot {
 
         let mut max_seq = 0u64;
 
-        for (_key, state) in self.memtable.range_state_at(start_opt, end_opt, u64::MAX) {
+        for (_key, state) in self.memtable.range_state_at_with_time(
+            start_opt,
+            end_opt,
+            u64::MAX,
+            self.read_time_millis,
+        ) {
             if let Some(seq) = Self::state_sequence(&state) {
                 max_seq = max_seq.max(seq);
             }
         }
 
         for imm in &self.immutable_memtables {
-            for (_key, state) in imm.range_state_at(start_opt, end_opt, u64::MAX) {
+            for (_key, state) in
+                imm.range_state_at_with_time(start_opt, end_opt, u64::MAX, self.read_time_millis)
+            {
                 if let Some(seq) = Self::state_sequence(&state) {
                     max_seq = max_seq.max(seq);
                 }
+            }
+            for tombstone in imm.range_tombstones_at(u64::MAX) {
+                if Self::range_tombstone_overlaps_query(&tombstone, start_opt, end_opt) {
+                    max_seq = max_seq.max(tombstone.seq);
+                }
+            }
+        }
+
+        for tombstone in self.memtable.range_tombstones_at(u64::MAX) {
+            if Self::range_tombstone_overlaps_query(&tombstone, start_opt, end_opt) {
+                max_seq = max_seq.max(tombstone.seq);
             }
         }
 
         if !self.memory_mode {
             for file_meta in &self.sst_files {
-                if let (Some(smallest), Some(largest)) =
-                    (&file_meta.smallest_key, &file_meta.largest_key)
-                {
-                    if start_opt.is_some_and(|s| s > largest.as_slice())
-                        || end_opt.is_some_and(|e| e <= smallest.as_slice())
-                    {
-                        continue;
-                    }
-                }
-
                 let reader = self.sst_reader(file_meta)?;
-                let entries = reader.scan_range_state(start_opt, end_opt)?;
+                let entries =
+                    reader.scan_range_state_with_time(start_opt, end_opt, self.read_time_millis)?;
                 for (_key, state) in entries {
                     if let Some(seq) = Self::state_sequence(&state) {
                         max_seq = max_seq.max(seq);
@@ -385,39 +427,52 @@ impl ReadSnapshot {
         let start_opt = if start.is_empty() { None } else { Some(start) };
         let end_opt = if end.is_empty() { None } else { Some(end) };
 
-        for (key, state) in self.memtable.range_state_at(start_opt, end_opt, seq) {
-            Self::merge_state(&mut states, key, state);
+        for (key, state) in
+            self.memtable
+                .range_state_at_with_time(start_opt, end_opt, seq, self.read_time_millis)
+        {
+            Self::merge_state(&mut states, key, state, self.read_time_millis);
         }
 
         for imm in &self.immutable_memtables {
-            for (key, state) in imm.range_state_at(start_opt, end_opt, seq) {
-                Self::merge_state(&mut states, key, state);
+            for (key, state) in
+                imm.range_state_at_with_time(start_opt, end_opt, seq, self.read_time_millis)
+            {
+                Self::merge_state(&mut states, key, state, self.read_time_millis);
             }
+        }
+
+        range_tombstones.extend(self.memtable.range_tombstones_at(seq).into_iter().filter(
+            |tombstone| Self::range_tombstone_overlaps_query(tombstone, start_opt, end_opt),
+        ));
+        for imm in &self.immutable_memtables {
+            range_tombstones.extend(
+                imm.range_tombstones_at(seq)
+                    .into_iter()
+                    .filter(|tombstone| {
+                        Self::range_tombstone_overlaps_query(tombstone, start_opt, end_opt)
+                    }),
+            );
         }
 
         if !self.memory_mode {
             for file_meta in &self.sst_files {
-                if let (Some(smallest), Some(largest)) =
-                    (&file_meta.smallest_key, &file_meta.largest_key)
-                {
-                    if start_opt.is_some_and(|s| s > largest.as_slice())
-                        || end_opt.is_some_and(|e| e <= smallest.as_slice())
-                    {
-                        continue;
-                    }
-                }
-
                 file_meta.record_read();
                 let reader = self.sst_reader(file_meta)?;
-                let entries = reader.scan_range_state(start_opt, end_opt)?;
+                self.diagnostics
+                    .sst_metrics()
+                    .record_candidate_sst_file_checked();
+                let entries =
+                    reader.scan_range_state_with_time(start_opt, end_opt, self.read_time_millis)?;
                 for (key, state) in entries {
                     if Self::is_visible_state(&state, seq) {
-                        Self::merge_state(&mut states, key.to_vec(), state);
+                        Self::merge_state(&mut states, key.to_vec(), state, self.read_time_millis);
                     }
                 }
 
                 range_tombstones.extend(reader.range_tombstones().into_iter().filter(
                     |tombstone| {
+                        self.diagnostics.sst_metrics().record_range_tombstone_scan();
                         (seq == u64::MAX || tombstone.seq <= seq)
                             && Self::range_tombstone_overlaps_query(tombstone, start_opt, end_opt)
                     },
@@ -433,7 +488,9 @@ impl ReadSnapshot {
                 }
 
                 match state {
-                    KeyState::Value(value, _, exp, _) if !Self::is_expired(exp) => {
+                    KeyState::Value(value, _, exp, _)
+                        if !crate::common::time::is_expired_at(exp, self.read_time_millis) =>
+                    {
                         Some((key, value.to_vec()))
                     }
                     _ => None,
@@ -453,9 +510,10 @@ impl std::fmt::Debug for ReadSnapshot {
             .field("sst_fs", &"<dyn Fs>")
             .field("sst_path_prefix", &self.sst_path_prefix)
             .field("memory_mode", &self.memory_mode)
+            .field("read_time_millis", &self.read_time_millis)
             .field("read_resources", &self.read_resources.is_some())
             .field("sst_readers", &self.sst_readers.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -468,7 +526,7 @@ mod tests {
     fn should_use_shared_block_cache_for_snapshot_sst_reads() -> crate::common::MidgeResult<()> {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
-        let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"cache-key", Some(b"cache-value"), 10, 0, None)?;
@@ -519,6 +577,68 @@ mod tests {
             hits_after > hits_before,
             "second snapshot read should hit shared block cache"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_skip_range_tombstone_when_manifest_bounds_are_narrow(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: model an older manifest whose second SST recorded only its
+        // point key `m`, even though the SST itself contains [a, c) tombstone.
+        let temp_dir = tempfile::tempdir()?;
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+
+        let mut old_writer = factory.create()?;
+        old_writer.add_with_meta(b"b", Some(b"old"), 1, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(old_writer, &temp_dir.path().join("old.sst"))?;
+
+        let mut tombstone_writer = factory.create()?;
+        tombstone_writer.add_with_meta(b"m", Some(b"new"), 3, 0, None)?;
+        tombstone_writer.add_range_tombstone(b"a", b"c", 2)?;
+        crate::sst::fs::finish_writer_to_path(
+            tombstone_writer,
+            &temp_dir.path().join("tombstone.sst"),
+        )?;
+
+        let snapshot = ReadSnapshot::new(
+            Arc::new(SkipListMemtable::new()),
+            Vec::new(),
+            vec![
+                FileMeta {
+                    name: "old.sst".to_string(),
+                    level: 0,
+                    size_bytes: std::fs::metadata(temp_dir.path().join("old.sst"))?.len(),
+                    cf_id: 0,
+                    smallest_key: Some(b"b".to_vec()),
+                    largest_key: Some(b"b".to_vec()),
+                    smallest_seq: Some(1),
+                    largest_seq: Some(1),
+                    ..Default::default()
+                },
+                FileMeta {
+                    name: "tombstone.sst".to_string(),
+                    level: 0,
+                    size_bytes: std::fs::metadata(temp_dir.path().join("tombstone.sst"))?.len(),
+                    cf_id: 0,
+                    // Intentionally stale/narrow manifest metadata.
+                    smallest_key: Some(b"m".to_vec()),
+                    largest_key: Some(b"m".to_vec()),
+                    smallest_seq: Some(2),
+                    largest_seq: Some(3),
+                    ..Default::default()
+                },
+            ],
+            fs,
+            std::path::PathBuf::new(),
+            false,
+        );
+
+        // Act
+        let value = snapshot.get(b"b", u64::MAX)?;
+
+        // Assert
+        assert_eq!(value, None);
         Ok(())
     }
 }

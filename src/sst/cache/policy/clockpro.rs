@@ -125,8 +125,13 @@ impl CachePolicy for ClockProPolicy {
                 }
             }
         } else {
-            // New entry: insert with ref_bit set, initially in cold region
-            let slot_idx = slots.len();
+            // New entry: reuse a ghost slot before growing metadata. This
+            // keeps policy memory bounded by the configured resident/ghost
+            // capacity over the lifetime of the cache.
+            let slot_idx = slots
+                .iter()
+                .position(|slot| slot.key.is_none())
+                .unwrap_or(slots.len());
             Self::ensure_capacity(&mut slots, slot_idx);
 
             slots[slot_idx] = SlotMetadata {
@@ -458,5 +463,24 @@ mod tests {
         // Assert
         let key_map = policy.key_to_slot.lock();
         assert_eq!(key_map.len(), 100);
+    }
+
+    #[test]
+    fn should_reuse_slots_without_growing_metadata_across_repeated_evictions() {
+        // Arrange
+        let policy = ClockProPolicy::with_capacity(16);
+
+        // Act
+        for index in 0..10_000 {
+            let key = CacheKey::for_data(index, 0);
+            policy.on_access(key);
+            policy.on_remove(key);
+        }
+
+        // Assert
+        let slots = policy.slots.lock();
+        assert!(slots.len() <= 16);
+        assert!(slots.capacity() <= 16);
+        assert!(policy.key_to_slot.lock().is_empty());
     }
 }

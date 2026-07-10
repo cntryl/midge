@@ -29,6 +29,19 @@ impl LruPolicy {
             generation: AtomicU64::new(0),
         }
     }
+
+    fn publish_generation(entry: &AtomicU64, generation: u64) {
+        // Accesses are assigned a generation before they touch the map. A
+        // delayed thread must not publish an older generation over a newer
+        // access, so publication is an atomic max rather than a plain store.
+        let mut current = entry.load(Ordering::Acquire);
+        while current < generation {
+            match entry.compare_exchange(current, generation, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
 }
 
 impl Default for LruPolicy {
@@ -44,8 +57,14 @@ impl CachePolicy for LruPolicy {
     #[inline]
     fn on_access(&self, key: CacheKey) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed);
+
+        // The overwhelmingly common path is a hit on an already tracked key.
+        // `DashMap::entry` takes that shard's write lock even when no insertion
+        // is needed, turning a shared hot block into a serialized read path.
+        // A read lookup keeps exact synchronous recency publication while
+        // allowing concurrent hits to CAS the per-key generation.
         if let Some(entry) = self.generations.get(&key) {
-            entry.store(generation, Ordering::Release);
+            Self::publish_generation(entry.value(), generation);
             return;
         }
 
@@ -53,7 +72,7 @@ impl CachePolicy for LruPolicy {
             .generations
             .entry(key)
             .or_insert_with(|| AtomicU64::new(generation));
-        entry.store(generation, Ordering::Release);
+        Self::publish_generation(&entry, generation);
     }
 
     /// Pick a victim for eviction

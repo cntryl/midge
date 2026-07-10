@@ -201,9 +201,12 @@ impl RuntimeDispatcher {
         msg: RuntimeMsg,
         msg_rx: &Receiver<RuntimeMsg>,
     ) -> HandleOutcome {
+        if let Some(outcome) = Self::handle_early_control(event_loop, &msg) {
+            return outcome;
+        }
+
         match msg {
-            RuntimeMsg::Shutdown
-            | RuntimeMsg::CheckWriteStall { .. }
+            RuntimeMsg::CheckWriteStall { .. }
             | RuntimeMsg::WaitForWriteStallClear { .. }
             | RuntimeMsg::CancelWaitForWriteStallClear { .. }
             | RuntimeMsg::GetReadAmpMetrics { .. }
@@ -289,12 +292,23 @@ impl RuntimeDispatcher {
             RuntimeMsg::Read { .. } | RuntimeMsg::RangeScan { .. } => {
                 Self::handle_read_message(event_loop, msg)
             }
+            _ => unreachable!("message handled before dispatch routing"),
+        }
+    }
+
+    fn handle_early_control(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> Option<HandleOutcome> {
+        match msg {
+            RuntimeMsg::Shutdown => Some(event_loop.handle_shutdown(None)),
+            &RuntimeMsg::ShutdownWithResponse { request_id } => {
+                Some(event_loop.handle_shutdown(Some(request_id)))
+            }
+            RuntimeMsg::RetryGc => Some(event_loop.retry_gc()),
+            _ => None,
         }
     }
 
     fn handle_control_message(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> HandleOutcome {
         match msg {
-            RuntimeMsg::Shutdown => event_loop.handle_shutdown(),
             &RuntimeMsg::CheckWriteStall { request_id, cf_id } => Self::dispatch_runtime(
                 event_loop,
                 RuntimeRoute::CheckWriteStall { request_id, cf_id },

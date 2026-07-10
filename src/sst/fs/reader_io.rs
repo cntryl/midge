@@ -3,9 +3,11 @@
 //! This reader uses the base `io::Fs` trait instead of `std::fs` directly,
 //! allowing for swappable implementations (Real, Mock, Chaos) for testing.
 
+use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use std::convert::TryFrom;
-use std::sync::{Arc, Mutex};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsPath};
@@ -48,7 +50,12 @@ pub struct SstFileIo {
     sparse_index: Option<Arc<SparseIndexReader>>,
     trie_reader: Option<Arc<TrieReader>>,
     block_cache: Option<Arc<BlockCache>>,
-    index_entries: Mutex<Option<IndexEntries>>,
+    /// Runtime-owned read-path counters. Standalone readers use the legacy
+    /// compatibility bucket until a runtime supplies its own state.
+    diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
+    /// Immutable index publication. The common lookup path loads this
+    /// atomically without taking a reader-wide mutex.
+    index_entries: ArcSwapOption<Vec<(Vec<u8>, BlockHandle)>>,
     format_version: u32,
     index_kind: IndexKind,
     smallest_key: Option<Vec<u8>>,
@@ -57,14 +64,25 @@ pub struct SstFileIo {
 }
 
 impl SstFileIo {
+    fn stable_sst_id(path: &str, fs: &Arc<dyn Fs>) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        path.hash(&mut hasher);
+        (Arc::as_ptr(fs).cast::<()>() as usize).hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// Create a new SST reader using the provided filesystem
     #[must_use]
     pub fn new(path_str: &str, fs: Arc<dyn Fs>) -> Self {
+        let sst_id = Self::stable_sst_id(path_str, &fs);
         Self {
             path: FsPath::new(path_str),
             fs,
             footer: None,
-            sst_id: 0,
+            // Standalone readers may be created without ReadResources. Derive
+            // an identity from the stable SST path so their shared block-cache
+            // keys cannot collide at the same block offset.
+            sst_id,
             bloom_reader: None,
             block_bloom_filter: None,
             bloom_metrics: BloomMetrics::new(),
@@ -72,7 +90,8 @@ impl SstFileIo {
             sparse_index: None,
             trie_reader: None,
             block_cache: None,
-            index_entries: Mutex::new(None),
+            diagnostics: crate::diagnostics::legacy_runtime_diagnostics(),
+            index_entries: ArcSwapOption::empty(),
             format_version: SST_FORMAT_V1,
             index_kind: IndexKind::Sparse,
             smallest_key: None,
@@ -160,6 +179,16 @@ impl SstFileIo {
     #[must_use]
     pub fn with_block_cache(mut self, cache: Arc<BlockCache>) -> Self {
         self.block_cache = Some(cache);
+        self
+    }
+
+    /// Attach the runtime that owns this reader's diagnostics.
+    #[must_use]
+    pub(crate) fn with_read_path_diagnostics(
+        mut self,
+        diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
+    ) -> Self {
+        self.diagnostics = diagnostics;
         self
     }
 
@@ -456,6 +485,7 @@ impl SstFileIo {
         // Single block: use existing path
         if handles.len() == 1 {
             let block_data = self.read_block(&handles[0])?;
+            self.diagnostics.sst_metrics().record_data_block_read();
             return Ok(vec![block_data]);
         }
 
@@ -479,6 +509,10 @@ impl SstFileIo {
 
         // Single contiguous read for all blocks in window
         let buffer = file.read_at(read_start, total_len)?;
+        let read_metrics = self.diagnostics.sst_metrics();
+        for _ in handles {
+            read_metrics.record_data_block_read();
+        }
 
         // Extract individual blocks from the buffer
         let mut result = Vec::with_capacity(handles.len());
@@ -589,22 +623,15 @@ impl SstFileIo {
     }
 
     fn index_entries(&self) -> MidgeResult<IndexEntries> {
-        if let Some(cached) = self
-            .index_entries
-            .lock()
-            .map_err(|_| MidgeError::Internal("SST index cache lock poisoned".into()))?
-            .as_ref()
-            .cloned()
-        {
+        if let Some(cached) = self.index_entries.load_full() {
             return Ok(cached);
         }
 
         let parsed = Arc::new(self.parse_index_entries()?);
-        *self
-            .index_entries
-            .lock()
-            .map_err(|_| MidgeError::Internal("SST index cache lock poisoned".into()))? =
-            Some(Arc::clone(&parsed));
+        // Concurrent cold readers may parse the same immutable index more
+        // than once. Publishing either equivalent result is safe, and avoids
+        // placing a mutex in every subsequent point-read hot path.
+        self.index_entries.store(Some(Arc::clone(&parsed)));
         Ok(parsed)
     }
 
@@ -716,7 +743,7 @@ impl SstFileIo {
 
     fn read_cached_data_block(&self, handle: &BlockHandle) -> MidgeResult<bytes::Bytes> {
         let cache_key = CacheKey::for_data(self.sst_id, handle.offset);
-        let read_metrics = crate::sst::read_path_metrics::global_sst_read_metrics();
+        let read_metrics = self.diagnostics.sst_metrics();
 
         if let Some(ref cache) = self.block_cache {
             if let Some(cached_value) = cache.get(&cache_key) {
@@ -793,17 +820,6 @@ impl SstFileIo {
         Ok(result)
     }
 
-    fn scan_block_from_bytes(
-        &self,
-        block_data: &bytes::Bytes,
-    ) -> MidgeResult<Vec<(bytes::Bytes, Option<bytes::Bytes>)>> {
-        Ok(self
-            .scan_block_entries_from_bytes(block_data)?
-            .into_iter()
-            .map(|entry| (Bytes::from(entry.key), entry.value))
-            .collect())
-    }
-
     fn state_from_entry(entry: SstEntry) -> KeyState {
         if entry.is_tombstone() {
             KeyState::Tombstone(entry.sequence)
@@ -812,6 +828,92 @@ impl SstFileIo {
         } else {
             KeyState::Absent
         }
+    }
+
+    fn state_from_entry_view(block_data: &Bytes, entry: encoding::EntryView<'_>) -> KeyState {
+        if matches!(entry.entry_type, encoding::EntryType::Delete) {
+            return KeyState::Tombstone(entry.sequence);
+        }
+
+        let Some(value_offset) = entry.value_offset else {
+            return KeyState::Absent;
+        };
+        let value_len = entry.value.map_or(0, <[u8]>::len);
+        let value_end = value_offset.saturating_add(value_len);
+        KeyState::Value(
+            block_data.slice(value_offset..value_end),
+            entry.sequence,
+            entry.expiration,
+            entry.entry_type as u8,
+        )
+    }
+
+    fn state_sequence(state: &KeyState) -> u64 {
+        match state {
+            KeyState::Absent => 0,
+            KeyState::Tombstone(sequence) | KeyState::Value(_, sequence, _, _) => *sequence,
+        }
+    }
+
+    fn merge_newer_state(best_state: &mut KeyState, candidate: KeyState) {
+        let candidate_sequence = Self::state_sequence(&candidate);
+        let best_sequence = Self::state_sequence(best_state);
+        if candidate_sequence > best_sequence
+            || (candidate_sequence == best_sequence
+                && matches!(&candidate, KeyState::Tombstone(_))
+                && !matches!(best_state, KeyState::Tombstone(_)))
+        {
+            *best_state = candidate;
+        }
+    }
+
+    fn key_state_from_encoded_block(
+        &self,
+        block_data: &Bytes,
+        key: &[u8],
+        snapshot_seq: u64,
+    ) -> MidgeResult<KeyState> {
+        let mut offset = 0usize;
+        let mut reconstructed_key = Vec::new();
+        let mut best_state = KeyState::Absent;
+        let mut best_sequence = 0u64;
+
+        while offset < block_data.len() {
+            let (entry, next_offset) =
+                encoding::decode_with_format(block_data.as_ref(), offset, self.format_version)?;
+            let shared_len = usize::from(entry.shared_len);
+            if shared_len > reconstructed_key.len() {
+                return Err(MidgeError::Corruption(
+                    "Invalid shared prefix length in SST entry".into(),
+                ));
+            }
+
+            reconstructed_key.truncate(shared_len);
+            reconstructed_key.extend_from_slice(entry.key_delta);
+
+            match reconstructed_key.as_slice().cmp(key) {
+                std::cmp::Ordering::Less => {}
+                std::cmp::Ordering::Greater => break,
+                std::cmp::Ordering::Equal => {
+                    if snapshot_seq == u64::MAX || entry.sequence <= snapshot_seq {
+                        let candidate = Self::state_from_entry_view(block_data, entry);
+                        let candidate_sequence = Self::state_sequence(&candidate);
+                        if candidate_sequence > best_sequence
+                            || (candidate_sequence == best_sequence
+                                && matches!(&candidate, KeyState::Tombstone(_))
+                                && !matches!(&best_state, KeyState::Tombstone(_)))
+                        {
+                            best_sequence = candidate_sequence;
+                            best_state = candidate;
+                        }
+                    }
+                }
+            }
+
+            offset = next_offset;
+        }
+
+        Ok(best_state)
     }
 
     /// Check block bloom filter with proper metrics and failure-safe semantics
@@ -823,7 +925,7 @@ impl SstFileIo {
                 BloomTestResult::DefinitelyNotPresent => {
                     self.bloom_metrics.record_negative();
                     self.bloom_metrics.record_block_skipped();
-                    crate::sst::read_path_metrics::global_sst_read_metrics().record_bloom_reject();
+                    self.diagnostics.sst_metrics().record_bloom_reject();
                     false
                 }
                 BloomTestResult::MightBePresent => true,
@@ -837,55 +939,17 @@ impl SstFileIo {
 
 impl crate::sst::SstReader for SstFileIo {
     fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
-        if self.key_outside_persisted_range(key) {
-            self.read_amp_metrics.record_read(0, 0, 0);
-            return Ok(None);
-        }
-
-        let mut blocks_read = 0u64;
-
-        // Step 1: Check SST-level bloom filter (negative lookup)
-        if let Some(ref bloom) = self.bloom_reader {
-            match bloom.contains(key) {
-                BloomTestResult::DefinitelyNotPresent => {
-                    self.read_amp_metrics.record_read(1, 0, 0);
-                    return Ok(None);
-                }
-                BloomTestResult::MightBePresent => {
-                    // Continue to index lookup
-                }
-            }
-        }
-
-        let index = self.index_entries()?;
-        blocks_read += 1; // Index block read
-
-        // Step 2: Use sparse index or binary search to identify only blocks
-        // whose key interval can contain this key. Adjacent duplicate-key
-        // blocks are included so MVCC versions split across block boundaries
-        // remain visible to snapshot reads.
-        let candidate_blocks = self.candidate_data_blocks(index.as_ref(), key);
-        crate::sst::read_path_metrics::global_sst_read_metrics()
-            .record_candidate_blocks_checked(candidate_blocks.len());
-
-        for (idx, handle) in candidate_blocks {
-            if !self.check_block_bloom(idx, key) {
-                continue;
-            }
-            blocks_read += 1;
-            let block_data = self.read_cached_data_block(&handle)?;
-
-            let entries = self.scan_block_from_bytes(&block_data)?;
-            for (entry_key, value) in entries {
-                if entry_key.as_ref() == key {
-                    self.read_amp_metrics.record_read(1, 0, blocks_read);
-                    return Ok(value);
-                }
-            }
-        }
-
-        self.read_amp_metrics.record_read(1, 0, blocks_read);
-        Ok(None)
+        let now_millis = crate::common::time::unix_time_millis();
+        let state = <Self as crate::sst::SstStateReader>::get_state_at_with_time(
+            self,
+            key,
+            u64::MAX,
+            now_millis,
+        )?;
+        Ok(match state {
+            KeyState::Value(value, _, _, _) => Some(value),
+            KeyState::Absent | KeyState::Tombstone(_) => None,
+        })
     }
 
     fn scan_range(
@@ -898,7 +962,9 @@ impl crate::sst::SstReader for SstFileIo {
         }
 
         let index = self.index_entries()?;
-        let mut result = Vec::new();
+        let mut latest_by_key: std::collections::BTreeMap<Vec<u8>, SstEntry> =
+            std::collections::BTreeMap::new();
+        let now_millis = crate::common::time::unix_time_millis();
 
         let start_block = start
             .and_then(|start_key| self.candidate_block_indices(index.as_ref(), start_key))
@@ -915,6 +981,9 @@ impl crate::sst::SstReader for SstFileIo {
             .iter()
             .map(|(_, handle)| *handle)
             .collect();
+        self.diagnostics
+            .sst_metrics()
+            .record_candidate_blocks_checked(handles.len());
 
         // Process blocks in readahead windows for cold-cache efficiency
         for window_start in (0..handles.len()).step_by(Self::READAHEAD_WINDOW_BLOCKS) {
@@ -926,27 +995,40 @@ impl crate::sst::SstReader for SstFileIo {
 
             // Process each block's data
             for block_data in block_data_vec {
-                let entries = self.scan_block_from_bytes(&block_data)?;
-                for (key, value) in entries {
+                let entries = self.scan_block_entries_from_bytes(&block_data)?;
+                for entry in entries {
                     if let Some(s) = start {
-                        if key.as_ref() < s {
+                        if entry.key.as_slice() < s {
                             continue;
                         }
                     }
                     if let Some(e) = end {
-                        if key.as_ref() >= e {
+                        if entry.key.as_slice() >= e {
                             continue;
                         }
                     }
 
-                    if let Some(val) = value {
-                        result.push((key.clone(), val));
+                    let replace = latest_by_key.get(&entry.key).is_none_or(|current| {
+                        entry.sequence > current.sequence
+                            || (entry.sequence == current.sequence
+                                && entry.is_tombstone()
+                                && !current.is_tombstone())
+                    });
+                    if replace {
+                        latest_by_key.insert(entry.key.clone(), entry);
                     }
                 }
             }
         }
 
-        Ok(result)
+        Ok(latest_by_key
+            .into_iter()
+            .filter_map(|(key, entry)| {
+                (!entry.is_tombstone() && !entry.is_expired(now_millis))
+                    .then(|| entry.value.map(|value| (Bytes::from(key), value)))
+                    .flatten()
+            })
+            .collect())
     }
 }
 
@@ -956,40 +1038,43 @@ impl crate::sst::SstStateReader for SstFileIo {
             return Ok(crate::sst::types::KeyState::Absent);
         }
 
-        let mut best_match: Option<SstEntry> = None;
+        let mut best_state = KeyState::Absent;
         let index = self.index_entries()?;
 
         let candidate_blocks = self.candidate_data_blocks(index.as_ref(), key);
-        crate::sst::read_path_metrics::global_sst_read_metrics()
+        self.diagnostics
+            .sst_metrics()
             .record_candidate_blocks_checked(candidate_blocks.len());
 
         for (_idx, handle) in candidate_blocks {
             let block_data = self.read_cached_data_block(&handle)?;
-            for entry in self.scan_block_entries_from_bytes(&block_data)? {
-                if entry.key.as_slice() == key
-                    && best_match
-                        .as_ref()
-                        .is_none_or(|current| entry.sequence > current.sequence)
-                {
-                    best_match = Some(entry);
-                }
-            }
+            let candidate = self.key_state_from_encoded_block(&block_data, key, u64::MAX)?;
+            Self::merge_newer_state(&mut best_state, candidate);
         }
 
-        Ok(best_match.map_or(crate::sst::types::KeyState::Absent, Self::state_from_entry))
+        let now_millis = crate::common::time::unix_time_millis();
+        Ok(match best_state {
+            KeyState::Value(_, sequence, expiration, _)
+                if crate::common::time::is_expired_at(expiration, now_millis) =>
+            {
+                KeyState::Tombstone(sequence)
+            }
+            state => state,
+        })
     }
 
-    fn get_state_at(
+    fn get_state_at_with_time(
         &self,
         key: &[u8],
         snapshot_seq: u64,
+        now_millis: u64,
     ) -> MidgeResult<crate::sst::types::KeyState> {
         if self.key_outside_persisted_range(key) {
             self.read_amp_metrics.record_read(0, 0, 0);
             return Ok(KeyState::Absent);
         }
 
-        let mut best_match: Option<SstEntry> = None;
+        let mut best_state = KeyState::Absent;
 
         if let Some(ref bloom) = self.bloom_reader {
             if matches!(bloom.contains(key), BloomTestResult::DefinitelyNotPresent) {
@@ -1002,7 +1087,8 @@ impl crate::sst::SstStateReader for SstFileIo {
         let mut blocks_read = 1u64;
 
         let candidate_blocks = self.candidate_data_blocks(index.as_ref(), key);
-        crate::sst::read_path_metrics::global_sst_read_metrics()
+        self.diagnostics
+            .sst_metrics()
             .record_candidate_blocks_checked(candidate_blocks.len());
 
         for (idx, handle) in candidate_blocks {
@@ -1012,40 +1098,36 @@ impl crate::sst::SstStateReader for SstFileIo {
 
             blocks_read += 1;
             let block_data = self.read_cached_data_block(&handle)?;
-            for entry in self.scan_block_entries_from_bytes(&block_data)? {
-                if entry.key.as_slice() != key {
-                    continue;
-                }
-                if snapshot_seq != u64::MAX && entry.sequence > snapshot_seq {
-                    continue;
-                }
-                if best_match
-                    .as_ref()
-                    .is_none_or(|current| entry.sequence > current.sequence)
-                {
-                    best_match = Some(entry);
-                }
-            }
+            let candidate = self.key_state_from_encoded_block(&block_data, key, snapshot_seq)?;
+            Self::merge_newer_state(&mut best_state, candidate);
         }
 
         self.read_amp_metrics.record_read(1, 0, blocks_read);
 
-        let now_millis = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-
-        Ok(match best_match {
-            Some(entry) if entry.is_tombstone() => KeyState::Tombstone(entry.sequence),
-            Some(entry) if entry.is_expired(now_millis) => KeyState::Tombstone(entry.sequence),
-            Some(entry) => Self::state_from_entry(entry),
-            None => KeyState::Absent,
+        Ok(match best_state {
+            KeyState::Value(_, sequence, expiration, _)
+                if crate::common::time::is_expired_at(expiration, now_millis) =>
+            {
+                KeyState::Tombstone(sequence)
+            }
+            state => state,
         })
     }
 
-    fn scan_range_state(
+    fn get_state_at(
+        &self,
+        key: &[u8],
+        snapshot_seq: u64,
+    ) -> MidgeResult<crate::sst::types::KeyState> {
+        let now_millis = crate::common::time::unix_time_millis();
+        self.get_state_at_with_time(key, snapshot_seq, now_millis)
+    }
+
+    fn scan_range_state_with_time(
         &self,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
+        now_millis: u64,
     ) -> MidgeResult<Vec<(Bytes, crate::sst::types::KeyState)>> {
         if self.range_outside_persisted_bounds(start, end) {
             return Ok(Vec::new());
@@ -1065,8 +1147,13 @@ impl crate::sst::SstStateReader for SstFileIo {
             return Ok(Vec::new());
         }
 
-        for (_first_key, handle) in &index[start_block..=end_block] {
-            let block_data = self.read_block(handle)?;
+        let handles = &index[start_block..=end_block];
+        self.diagnostics
+            .sst_metrics()
+            .record_candidate_blocks_checked(handles.len());
+
+        for (_first_key, handle) in handles {
+            let block_data = self.read_cached_data_block(handle)?;
             for entry in self.scan_block_entries_from_bytes(&block_data)? {
                 if let Some(s) = start {
                     if entry.key.as_slice() < s {
@@ -1080,11 +1167,25 @@ impl crate::sst::SstStateReader for SstFileIo {
                 }
 
                 let key = Bytes::from(entry.key.clone());
-                result.push((key, Self::state_from_entry(entry)));
+                let state = if entry.is_tombstone() || entry.is_expired(now_millis) {
+                    KeyState::Tombstone(entry.sequence)
+                } else {
+                    Self::state_from_entry(entry)
+                };
+                result.push((key, state));
             }
         }
 
         Ok(result)
+    }
+
+    fn scan_range_state(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> MidgeResult<Vec<(Bytes, crate::sst::types::KeyState)>> {
+        let now_millis = crate::common::time::unix_time_millis();
+        self.scan_range_state_with_time(start, end, now_millis)
     }
 
     fn range_tombstones(&self) -> Vec<crate::sst::types::RangeTombstone> {
@@ -1576,11 +1677,20 @@ mod tests {
         let old_dead = reader.get_state_at(b"dead", 4)?;
         let deleted_dead = reader.get_state_at(b"dead", u64::MAX)?;
         let expired = reader.get_state_at(b"ttl", u64::MAX)?;
+        let current_expired = reader.get_state(b"ttl")?;
+        let direct_expired = reader.get(b"ttl")?;
+        let direct_rows = reader.scan_range(None, None)?;
 
         // Assert
         assert!(matches!(old_dead, KeyState::Value(_, 4, _, _)));
         assert_eq!(deleted_dead, KeyState::Tombstone(9));
         assert_eq!(expired, KeyState::Tombstone(11));
+        assert_eq!(current_expired, KeyState::Tombstone(11));
+        assert_eq!(direct_expired, None);
+        assert!(
+            direct_rows.is_empty(),
+            "expired and deleted states must mask scans"
+        );
         Ok(())
     }
 

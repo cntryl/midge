@@ -25,7 +25,6 @@ mod control;
 mod dispatch;
 mod durability_sync;
 mod flush;
-#[cfg(test)]
 mod gc;
 mod ingest;
 mod manifest;
@@ -156,11 +155,12 @@ impl EventLoop {
                 .strip_prefix(&state.db_path)
                 .unwrap_or_else(|_| std::path::Path::new("sst"))
                 .to_path_buf();
-            Some(Arc::new(ReadResources::new(
+            Some(Arc::new(ReadResources::new_with_diagnostics(
                 Arc::clone(&state.fs),
                 sst_path_prefix,
                 config.block_cache_size,
                 config.block_cache_policy,
+                Arc::clone(&state.diagnostics),
             )))
         };
 
@@ -194,6 +194,9 @@ impl EventLoop {
             config.cloud_runtime_policy.eventual_flush_segment_gap;
         state.set_compaction_enabled(config.background_compaction);
 
+        let mut gc_actor = GcActor::new();
+        gc_actor.set_retry_notifier(worker_msg_tx.clone());
+
         let mut event_loop = Self {
             state,
             flush_actor,
@@ -207,7 +210,7 @@ impl EventLoop {
             wal_actor,
             #[cfg(test)]
             cloud_actor: CloudActor::new(),
-            gc_actor: GcActor::new(),
+            gc_actor,
             manifest_actor: ManifestActor::new(),
             hybrid_storage: None,
             hybrid_storage_events: config.hybrid_storage_events.clone(),
@@ -669,12 +672,59 @@ impl EventLoop {
         }
     }
 
+    #[cfg(test)]
     fn publish_flushed_sst(
         &mut self,
         cf_id: crate::types::ColumnFamilyId,
         sst_name: &str,
         sequence: u64,
         file_meta: Option<crate::runtime::FileMeta>,
+        frozen_memtable: Option<&std::sync::Arc<crate::sst::SkipListMemtable>>,
+    ) -> crate::common::MidgeResult<()> {
+        self.publish_flushed_sst_with_reservation(
+            cf_id,
+            sst_name,
+            sequence,
+            file_meta,
+            frozen_memtable,
+            None,
+        )
+    }
+
+    fn publish_flushed_sst_with_reservation(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        sst_name: &str,
+        sequence: u64,
+        file_meta: Option<crate::runtime::FileMeta>,
+        frozen_memtable: Option<&std::sync::Arc<crate::sst::SkipListMemtable>>,
+        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+    ) -> crate::common::MidgeResult<()> {
+        let result = self.publish_flushed_sst_inner(
+            cf_id,
+            sst_name,
+            sequence,
+            file_meta,
+            frozen_memtable,
+            reservation,
+        );
+        if result.is_err() {
+            self.flush_actor.handle_flush_failure();
+            if let (Some(hybrid), Some(token)) = (&self.hybrid_storage, reservation) {
+                hybrid.flush_failed_with_token(token);
+            }
+        }
+        result
+    }
+
+    fn publish_flushed_sst_inner(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        sst_name: &str,
+        sequence: u64,
+        file_meta: Option<crate::runtime::FileMeta>,
+        frozen_memtable: Option<&std::sync::Arc<crate::sst::SkipListMemtable>>,
+        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     ) -> crate::common::MidgeResult<()> {
         // Invariant: this is the flush authority switch. Before this point the
         // WAL-backed state remains authoritative; after successful manifest
@@ -682,6 +732,7 @@ impl EventLoop {
         let Some(file_meta) = file_meta else {
             return Ok(());
         };
+        let actual_size = file_meta.size_bytes;
 
         let mut cloud_manifest_published = false;
         if !self.state.is_memory_mode() {
@@ -711,8 +762,18 @@ impl EventLoop {
             }
         }
 
-        self.flush_actor
-            .handle_flush_complete(&mut self.state, cf_id, sst_name, sequence);
+        self.flush_actor.handle_flush_complete(
+            &mut self.state,
+            cf_id,
+            sst_name,
+            sequence,
+            frozen_memtable,
+        );
+        if let Some(hybrid) = &self.hybrid_storage {
+            if let Some(token) = reservation {
+                hybrid.flush_completed_with_token(token, actual_size);
+            }
+        }
         if cloud_manifest_published {
             self.prune_cloud_wal_segments_covered_by_manifest();
         }
@@ -754,11 +815,13 @@ impl EventLoop {
                     }
 
                     let sequence = self.state.sequence;
-                    if let Err(error) = self.publish_flushed_sst(
+                    if let Err(error) = self.publish_flushed_sst_with_reservation(
                         candidate.cf_id,
                         &flush_output.sst_name,
                         sequence,
                         flush_output.file_meta,
+                        flush_output.frozen_memtable.as_ref(),
+                        flush_output.reservation,
                     ) {
                         tracing::error!(
                             %error,
@@ -821,6 +884,10 @@ impl EventLoop {
         }
     }
 
+    pub(super) fn retry_gc(&mut self) -> HandleOutcome {
+        gc::GcCoordinator::retry(self)
+    }
+
     fn has_actionable_work(&self) -> bool {
         if self.pending_msg.is_some() {
             return true;
@@ -854,7 +921,15 @@ impl EventLoop {
     }
 
     fn idle_progress_timeout(&self) -> Option<Duration> {
-        self.wal_actor.sync_deadline_timeout()
+        match (
+            self.wal_actor.sync_deadline_timeout(),
+            self.gc_actor.retry_deadline_timeout(),
+        ) {
+            (Some(wal), Some(gc)) => Some(wal.min(gc)),
+            (Some(wal), None) => Some(wal),
+            (None, Some(gc)) => Some(gc),
+            (None, None) => None,
+        }
     }
 
     fn progress_pass(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
@@ -862,6 +937,9 @@ impl EventLoop {
         self.maybe_flush_cloud_async_wal();
         self.tick_hybrid_storage();
         self.drain_hybrid_storage_events();
+        let hybrid_storage = self.hybrid_storage.clone();
+        self.gc_actor
+            .retry_failed_cloud_deletes_if_due(&mut self.state, hybrid_storage);
     }
 
     fn record_wake_batch(&mut self, batch: usize) {
@@ -1219,11 +1297,11 @@ pub(super) mod tests {
             crate::storage::hybrid::policy::StorageBudgetPolicy::new(1_000_000),
         )
         .expect("create cloud event loop");
-        event_loop
-            .hybrid_storage
-            .as_ref()
-            .expect("hybrid storage")
-            .flush_completed(960_000);
+        let hybrid = event_loop.hybrid_storage.as_ref().expect("hybrid storage");
+        let reservation = hybrid
+            .reserve_for_flush_with_token(960_000)
+            .expect("test flush reservation");
+        hybrid.flush_completed_with_token(reservation, 960_000);
 
         event_loop.state.memtable_flush_threshold = 1024;
         event_loop.state.memtable_size_limit = 1024 * 1024;
@@ -1266,7 +1344,7 @@ pub(super) mod tests {
             .extend((1..=3).map(|seq| test_manifest_l0_file_meta(&format!("pre-{seq}.sst"), seq)));
 
         let flushed = write_runtime_l0_sst_for_test(&event_loop, "threshold-crossing.sst", 4);
-        event_loop.publish_flushed_sst(0, "threshold-crossing.sst", 4, Some(flushed))?;
+        event_loop.publish_flushed_sst(0, "threshold-crossing.sst", 4, Some(flushed), None)?;
 
         // Act
         // Assert
@@ -1312,7 +1390,13 @@ pub(super) mod tests {
 
         let flushed =
             write_runtime_l0_sst_for_test(&event_loop, "disabled-threshold-crossing.sst", 4);
-        event_loop.publish_flushed_sst(0, "disabled-threshold-crossing.sst", 4, Some(flushed))?;
+        event_loop.publish_flushed_sst(
+            0,
+            "disabled-threshold-crossing.sst",
+            4,
+            Some(flushed),
+            None,
+        )?;
 
         // Act
         // Assert
