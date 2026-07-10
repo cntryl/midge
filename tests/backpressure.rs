@@ -107,6 +107,7 @@ fn should_auto_flush_when_explicit_flush_threshold_is_lower_than_size_limit() {
         OpenOptions::local(temp_dir.path())
             .with_memtable_size_limit(1024 * 1024)
             .with_memtable_flush_threshold(64 * 1024)
+            .background_compaction(false)
             .build(),
     )
     .expect("open engine");

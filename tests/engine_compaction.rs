@@ -152,7 +152,9 @@ fn should_preserve_range_tombstones_after_flushing_deleted_range() {
 #[test]
 fn should_preserve_large_values_after_flushing() {
     // Arrange
-    let engine = open_with_mode(&opts_for_mode("local"), "local");
+    let mut opts = opts_for_mode("local");
+    opts.memtable_size = 2 * 1024 * 1024;
+    let engine = open_with_mode(&opts, "local");
     let cf = engine.create_column_family("test").expect("create cf");
     let large_value = vec![0xAB; 100_000]; // 100KB value
 
