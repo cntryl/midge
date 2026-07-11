@@ -2,62 +2,39 @@ name: CI
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 0 * * *" # Runs daily at midnight UTC
   push:
     branches: [main]
     paths:
-      - "compose.yml"
-      - ".dockerignore"
-      - "Dockerfile*"
       - "src/**"
       - "tests/**"
-      - "benches/**"
-      - "docs/**"
-      - "examples/**"
-      - "fuzz/**"
-      - "scripts/**"
-      - "*.md"
-      - "*.toml"
+      - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
-      - ".github/workflows/**"
+      - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
     paths:
-      - "compose.yml"
-      - ".dockerignore"
-      - "Dockerfile*"
       - "src/**"
       - "tests/**"
-      - "benches/**"
-      - "docs/**"
-      - "examples/**"
-      - "fuzz/**"
-      - "scripts/**"
-      - "*.md"
-      - "*.toml"
+      - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
-      - ".github/workflows/**"
+      - ".github/workflows/ci.yml"
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  matrix:
-    name: Matrix (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    
+  core:
+    name: Core (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       CARGO_INCREMENTAL: 0
-
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-      fail-fast: false
-
-    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -69,29 +46,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "ci"
-
-      - name: Verify production contract docs are present
-        shell: bash
-        run: |
-          test -f docs/development/one-dot-zero-contract.md
-          test -f docs/development/support-matrix.md
-          test -f docs/development/format-compatibility.md
-          test -f docs/development/release-policy.md
-          test -f docs/operations/production-runbook.md
-          test -f docs/operations/release-checklist.md
-          test -f docs/development/stability-policy.md
-          test -f docs/operations/migration-guide.md
-          test -f CHANGELOG.md
-
-      - name: Validate benchmark contract
-        shell: bash
-        run: |
-          if command -v python3 >/dev/null; then
-            python3 scripts/validate_benchmark_contract.py
-          else
-            python scripts/validate_benchmark_contract.py
-          fi
+          shared-key: "ci-core"
 
       - name: Rustfmt
         run: cargo fmt --check
@@ -99,8 +54,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
 
-      - name: Build
-        run: cargo build --all-targets
+      - name: Test
+        run: cargo test --workspace --all-features
 
       - name: Verify default release excludes failpoints
         shell: bash
@@ -110,139 +65,3 @@ jobs:
             exit 1
           fi
           cargo check --release
-
-      - name: Test
-        run: cargo test --workspace --all-features
-
-  msrv:
-    name: MSRV and no-default features
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Install MSRV toolchain
-        run: rustup toolchain install 1.97 --profile minimal --component clippy
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "ci-msrv"
-
-      - name: Check MSRV
-        run: rustup run 1.97 cargo check --workspace --all-targets
-
-      - name: Strict no-default Clippy
-        run: rustup run 1.97 cargo clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic
-
-  provider-features:
-    name: Provider feature (${{ matrix.provider }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        provider: [cloud-aws, cloud-azure, cloud-gcp, cloud-oci]
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Update Rust toolchain
-        run: rustup update stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "ci-provider-${{ matrix.provider }}"
-
-      - name: Check isolated provider feature
-        run: cargo check --workspace --all-targets --no-default-features --features ${{ matrix.provider }}
-
-  repository-qualification:
-    name: Repository qualification
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Update Rust toolchain
-        run: rustup update stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "ci-repository-qualification"
-
-      - name: Install pinned repository tools
-        run: |
-          cargo install --git https://github.com/cntryl/tools --rev d36dc1c09462a4fd691ed9fdcc4413eb61f0c80c --locked
-          cargo install cargo-machete --version 0.9.2 --locked
-
-      - name: Validate test contracts
-        run: cntryl-tools validate-tests
-
-      - name: Reject unused dependencies
-        run: cargo machete
-
-      - name: Compile crate documentation
-        run: cargo test --workspace --all-features --doc
-
-      - name: Compile canonical documentation example
-        run: cargo check --example documented_quick_start --all-features
-
-      - name: Verify publishable package
-        run: cargo package --locked
-
-  docker-test-image:
-    name: Docker test image
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Build test image
-        run: docker build --file Dockerfile.tests --tag midge-tests:ci .
-
-  cloud-integration:
-    name: Cloud integration (Sqrzl)
-    runs-on: ubuntu-latest
-
-    env:
-      CARGO_INCREMENTAL: 0
-      MIDGE_REQUIRE_SQRZL: 1
-
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Update Rust toolchain
-        run: rustup update stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "ci-cloud-integration"
-
-      - name: Start Sqrzl emulator
-        run: docker compose up -d sqrzl
-
-      - name: Wait for Sqrzl health
-        run: curl --fail --retry 30 --retry-delay 1 --retry-all-errors http://127.0.0.1:9001/healthz
-
-      - name: Sqrzl qualification
-        run: cargo test --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1
-
-      - name: Provider engine qualification
-        run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests -- --test-threads=1
-
-      - name: Full test suite against Sqrzl emulator
-        run: cargo test --workspace --all-features
-
-      - name: Stop Sqrzl emulator
-        if: always()
-        run: docker compose down -v

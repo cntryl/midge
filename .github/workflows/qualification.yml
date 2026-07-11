@@ -1,0 +1,98 @@
+name: Repository Qualification
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 1 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "examples/**"
+      - "benches/**"
+      - "scripts/**"
+      - "fuzz/**"
+      - "*.md"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - ".github/workflows/qualification.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "examples/**"
+      - "benches/**"
+      - "scripts/**"
+      - "fuzz/**"
+      - "*.md"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - ".github/workflows/qualification.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualification-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository:
+    name: Repository contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust toolchain
+        run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "qualification"
+
+      - name: Verify production contract docs are present
+        shell: bash
+        run: |
+          test -f docs/development/one-dot-zero-contract.md
+          test -f docs/development/support-matrix.md
+          test -f docs/development/format-compatibility.md
+          test -f docs/development/release-policy.md
+          test -f docs/operations/production-runbook.md
+          test -f docs/operations/release-checklist.md
+          test -f docs/development/stability-policy.md
+          test -f docs/operations/migration-guide.md
+          test -f CHANGELOG.md
+
+      - name: Validate benchmark contract
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null; then
+            python3 scripts/validate_benchmark_contract.py
+          else
+            python scripts/validate_benchmark_contract.py
+          fi
+
+      - name: Install repository tools
+        run: |
+          cargo install --git https://github.com/cntryl/tools --rev d36dc1c09462a4fd691ed9fdcc4413eb61f0c80c --locked
+          cargo install cargo-machete --version 0.9.2 --locked
+
+      - name: Validate test contracts
+        run: cntryl-tools validate-tests
+
+      - name: Reject unused dependencies
+        run: cargo machete
+
+      - name: Compile crate documentation
+        run: cargo test --workspace --all-features --doc
+
+      - name: Compile canonical documentation example
+        run: cargo check --example documented_quick_start --all-features
+
+      - name: Verify publishable package
+        run: cargo package --locked

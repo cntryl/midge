@@ -402,7 +402,9 @@ cargo test --lib storage::providers
 
 ### Sqrzl Qualification Tests
 
-Sqrzl qualification is feature-gated, and the CI workflow runs it as an explicit gate. Start Sqrzl first:
+Sqrzl qualification is feature-gated, and the `Cloud Qualification` workflow
+runs it as an explicit gate after the focused core CI succeeds. Start Sqrzl
+first:
 
 ```bash
 docker compose up -d sqrzl

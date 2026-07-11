@@ -96,6 +96,49 @@ fn should_require_rust_formatting_when_ci_runs() {
 }
 
 #[test]
+fn should_keep_push_ci_focused_on_the_core_suite() {
+    // Arrange
+    let ci = read_workflow(".github/workflows/ci.yml");
+
+    // Act
+    let has_platform_matrix = ci.contains("windows-latest") || ci.contains("macos-latest");
+    let has_cloud_or_docker_gate = ci.contains("docker compose up") || ci.contains("docker build");
+
+    // Assert
+    assert!(
+        !has_platform_matrix,
+        "platform coverage belongs in platform.yml"
+    );
+    assert!(
+        !has_cloud_or_docker_gate,
+        "cloud and Docker qualification must not slow the core CI workflow"
+    );
+}
+
+#[test]
+fn should_route_extended_gates_through_triggered_workflows() {
+    // Arrange
+    let cloud = read_workflow(".github/workflows/cloud.yml");
+    let compatibility = read_workflow(".github/workflows/compatibility.yml");
+    let platform = read_workflow(".github/workflows/platform.yml");
+    let qualification = read_workflow(".github/workflows/qualification.yml");
+    let docker = read_workflow(".github/workflows/docker.yml");
+
+    // Act
+    let follow_up_workflows = [&cloud, &compatibility, &platform];
+
+    // Assert
+    for workflow in follow_up_workflows {
+        assert!(workflow.contains("workflow_run:"));
+        assert!(workflow.contains("workflows: [\"CI\"]"));
+        assert!(workflow.contains("workflow_dispatch:"));
+        assert!(workflow.contains("schedule:"));
+    }
+    assert!(qualification.contains("pull_request:"));
+    assert!(docker.contains("pull_request:"));
+}
+
+#[test]
 fn should_require_rust_formatting_when_publish_runs() {
     // Arrange
     let publish = read_workflow(".github/workflows/publish.yml");
@@ -113,10 +156,10 @@ fn should_require_rust_formatting_when_publish_runs() {
 #[test]
 fn should_trigger_ci_when_benchmark_changes() {
     // Arrange
-    let ci = read_workflow(".github/workflows/ci.yml");
+    let qualification = read_workflow(".github/workflows/qualification.yml");
 
     // Act
-    let benchmark_trigger_count = ci.matches("\"benches/**\"").count();
+    let benchmark_trigger_count = qualification.matches("\"benches/**\"").count();
 
     // Assert
     assert_eq!(
@@ -128,10 +171,10 @@ fn should_trigger_ci_when_benchmark_changes() {
 #[test]
 fn should_trigger_ci_when_documentation_changes() {
     // Arrange
-    let ci = read_workflow(".github/workflows/ci.yml");
+    let qualification = read_workflow(".github/workflows/qualification.yml");
 
     // Act
-    let documentation_trigger_count = ci.matches("\"docs/**\"").count();
+    let documentation_trigger_count = qualification.matches("\"docs/**\"").count();
 
     // Assert
     assert_eq!(
@@ -144,7 +187,7 @@ fn should_trigger_ci_when_documentation_changes() {
 fn should_use_sqrzl_emulator_for_cloud_gates() {
     // Arrange
     let compose = read_workflow("compose.yml");
-    let ci = read_workflow(".github/workflows/ci.yml");
+    let cloud = read_workflow(".github/workflows/cloud.yml");
     let publish = read_workflow(".github/workflows/publish.yml");
     let manifest = read_workflow("Cargo.toml");
 
@@ -154,10 +197,10 @@ fn should_use_sqrzl_emulator_for_cloud_gates() {
     // Assert
     assert!(uses_sqrzl_image);
     assert!(compose.contains("  sqrzl:"));
-    assert!(ci.contains("docker compose up -d sqrzl"));
-    assert!(ci.contains("--features sqrzl-tests"));
-    assert!(ci.contains("MIDGE_REQUIRE_SQRZL: 1"));
-    assert!(ci.contains("http://127.0.0.1:9001/healthz"));
+    assert!(cloud.contains("docker compose up -d sqrzl"));
+    assert!(cloud.contains("--features sqrzl-tests"));
+    assert!(cloud.contains("MIDGE_REQUIRE_SQRZL: 1"));
+    assert!(cloud.contains("http://127.0.0.1:9001/healthz"));
     assert!(publish.contains("docker compose up -d sqrzl"));
     assert!(publish.contains("MIDGE_REQUIRE_SQRZL: 1"));
     assert!(manifest.contains("sqrzl-tests = []"));
@@ -217,7 +260,12 @@ fn should_use_versioned_external_actions() {
         read_workflow(".github/workflows/bench.yml"),
         read_workflow(".github/workflows/ci.yml"),
         read_workflow(".github/workflows/cleanup.yml"),
+        read_workflow(".github/workflows/cloud.yml"),
+        read_workflow(".github/workflows/compatibility.yml"),
         read_workflow(".github/workflows/fuzz.yml"),
+        read_workflow(".github/workflows/docker.yml"),
+        read_workflow(".github/workflows/platform.yml"),
+        read_workflow(".github/workflows/qualification.yml"),
         read_workflow(".github/workflows/publish.yml"),
     ];
 
@@ -254,32 +302,36 @@ fn should_pin_release_tools_to_immutable_revisions() {
 fn should_test_supported_build_matrix_before_release() {
     // Arrange
     let ci = read_workflow(".github/workflows/ci.yml");
+    let platform = read_workflow(".github/workflows/platform.yml");
+    let compatibility = read_workflow(".github/workflows/compatibility.yml");
 
     // Act
     // Assert
-    assert!(ci.contains("os: [ubuntu-latest, windows-latest, macos-latest]"));
+    assert!(ci.contains("runs-on: ubuntu-latest"));
+    assert!(platform.contains("os: [windows-latest, macos-latest]"));
     assert!(ci.contains("cargo test --workspace --all-features"));
-    assert!(ci.contains("rustup toolchain install 1.97"));
-    assert!(ci.contains("rustup run 1.97 cargo check --workspace --all-targets"));
-    assert!(
-        ci.contains("rustup run 1.97 cargo clippy --workspace --all-targets --no-default-features")
-    );
+    assert!(compatibility.contains("rustup toolchain install 1.97"));
+    assert!(compatibility.contains("rustup run 1.97 cargo check --workspace --all-targets"));
+    assert!(compatibility
+        .contains("rustup run 1.97 cargo clippy --workspace --all-targets --no-default-features"));
 }
 
 #[test]
 fn should_trigger_ci_for_repository_contract_changes() {
     // Arrange
-    let ci = read_workflow(".github/workflows/ci.yml");
+    let qualification = read_workflow(".github/workflows/qualification.yml");
+    let docker = read_workflow(".github/workflows/docker.yml");
 
     // Act
     // Assert
-    for path in ["Dockerfile*", "examples/**", "scripts/**", "fuzz/**"] {
+    for path in ["examples/**", "scripts/**", "fuzz/**"] {
         assert_eq!(
-            ci.matches(&format!("\"{path}\"")).count(),
+            qualification.matches(&format!("\"{path}\"")).count(),
             2,
             "push and pull requests must include {path}"
         );
     }
+    assert_eq!(docker.matches("\"Dockerfile*\"").count(), 2);
 }
 
 #[test]
@@ -465,24 +517,24 @@ fn should_cover_every_fuzz_target_when_scheduled_smokes_run() {
 #[test]
 fn should_validate_benchmark_contract_when_ci_runs() {
     // Arrange
-    let ci = read_workflow(".github/workflows/ci.yml");
+    let qualification = read_workflow(".github/workflows/qualification.yml");
     let validator = repository_root().join("scripts/validate_benchmark_contract.py");
 
     // Act
     // Assert
     assert!(validator.is_file());
-    assert!(ci.contains("scripts/validate_benchmark_contract.py"));
+    assert!(qualification.contains("scripts/validate_benchmark_contract.py"));
 }
 
 #[test]
 fn should_run_provider_feature_matrix_when_ci_runs() {
     // Arrange
-    let ci = read_workflow(".github/workflows/ci.yml");
+    let compatibility = read_workflow(".github/workflows/compatibility.yml");
 
     // Act
     // Assert
-    assert!(ci.contains("provider: [cloud-aws, cloud-azure, cloud-gcp, cloud-oci]"));
-    assert!(ci.contains(
+    assert!(compatibility.contains("provider: [cloud-aws, cloud-azure, cloud-gcp, cloud-oci]"));
+    assert!(compatibility.contains(
         "cargo check --workspace --all-targets --no-default-features --features ${{ matrix.provider }}"
     ));
 }
@@ -490,7 +542,7 @@ fn should_run_provider_feature_matrix_when_ci_runs() {
 #[test]
 fn should_run_repository_qualification_when_ci_runs() {
     // Arrange
-    let ci = read_workflow(".github/workflows/ci.yml");
+    let qualification = read_workflow(".github/workflows/qualification.yml");
 
     // Act
     let required_commands = [
@@ -506,7 +558,7 @@ fn should_run_repository_qualification_when_ci_runs() {
     // Assert
     for command in required_commands {
         assert!(
-            ci.contains(command),
+            qualification.contains(command),
             "CI is missing qualification command: {command}"
         );
     }
@@ -538,11 +590,11 @@ fn should_run_repository_qualification_before_publish() {
 #[test]
 fn should_build_test_image_when_ci_runs() {
     // Arrange
-    let ci = read_workflow(".github/workflows/ci.yml");
+    let docker = read_workflow(".github/workflows/docker.yml");
 
     // Act
     // Assert
-    assert!(ci.contains("docker build --file Dockerfile.tests --tag midge-tests:ci ."));
+    assert!(docker.contains("docker build --file Dockerfile.tests --tag midge-tests:ci ."));
 }
 
 #[test]
@@ -572,11 +624,11 @@ fn should_trigger_ci_when_lockfile_changes() {
 #[test]
 fn should_trigger_ci_when_docker_context_changes() {
     // Arrange
-    let ci = read_workflow(".github/workflows/ci.yml");
+    let docker = read_workflow(".github/workflows/docker.yml");
 
     // Act
     // Assert
-    assert_eq!(ci.matches("\".dockerignore\"").count(), 2);
+    assert_eq!(docker.matches("\".dockerignore\"").count(), 2);
 }
 
 #[test]
@@ -595,13 +647,13 @@ fn should_limit_validation_workflow_permissions_to_read_only() {
 fn should_compile_canonical_example_when_repository_qualifies() {
     // Arrange
     let example = repository_root().join("examples/documented_quick_start.rs");
-    let ci = read_workflow(".github/workflows/ci.yml");
+    let qualification = read_workflow(".github/workflows/qualification.yml");
     let publish = read_workflow(".github/workflows/publish.yml");
 
     // Act
     // Assert
     assert!(example.is_file());
-    assert!(ci.contains("cargo check --example documented_quick_start --all-features"));
+    assert!(qualification.contains("cargo check --example documented_quick_start --all-features"));
     assert!(publish.contains("cargo check --example documented_quick_start --all-features"));
 }
 

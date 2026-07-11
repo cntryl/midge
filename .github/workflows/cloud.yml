@@ -1,0 +1,56 @@
+name: Cloud Qualification
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "47 2 * * *"
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  sqrzl:
+    name: Sqrzl emulator
+    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: 0
+      MIDGE_REQUIRE_SQRZL: 1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust toolchain
+        run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "cloud"
+
+      - name: Start Sqrzl emulator
+        run: docker compose up -d sqrzl
+
+      - name: Wait for Sqrzl health
+        run: curl --fail --retry 30 --retry-delay 1 --retry-all-errors http://127.0.0.1:9001/healthz
+
+      - name: Sqrzl qualification
+        run: cargo test --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1
+
+      - name: Provider engine qualification
+        run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests -- --test-threads=1
+
+      - name: Full test suite against Sqrzl emulator
+        run: cargo test --workspace --all-features
+
+      - name: Stop Sqrzl emulator
+        if: always()
+        run: docker compose down -v
