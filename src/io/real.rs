@@ -15,6 +15,8 @@ use super::traits::{
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 
 /// Real filesystem backend
 pub struct RealFs {
@@ -211,7 +213,43 @@ impl Fs for RealFs {
             fs::create_dir_all(parent).map_err(|e| io_err("create_dir_all", parent, &e))?;
         }
 
-        fs::rename(&from_full, &to_full).map_err(|e| io_err("rename", &to_full, &e))
+        #[cfg(windows)]
+        {
+            use winapi::um::winbase::{
+                MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            };
+
+            let from_wide: Vec<u16> = from_full
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let to_wide: Vec<u16> = to_full
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            // SAFETY: both paths are valid, NUL-terminated UTF-16 buffers for
+            // the duration of the call. The flags request atomic replacement
+            // and a write-through durability barrier.
+            let result = unsafe {
+                MoveFileExW(
+                    from_wide.as_ptr(),
+                    to_wide.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if result == 0 {
+                let error = io::Error::last_os_error();
+                return Err(io_err("rename", &to_full, &error));
+            }
+            Ok(())
+        }
+
+        #[cfg(not(windows))]
+        {
+            fs::rename(&from_full, &to_full).map_err(|e| io_err("rename", &to_full, &e))
+        }
     }
 }
 
@@ -572,6 +610,27 @@ mod tests {
         // Assert
         // File should be in temp dir, not parent
         assert!(fs.exists(&FsPath::new("escape.txt"))?);
+        Ok(())
+    }
+
+    #[test]
+    fn should_atomically_replace_existing_target_when_renaming() -> FsResult<()> {
+        // Arrange
+        let temp = TempDir::new().map_err(|error| FsError::Io(error.to_string()))?;
+        let fs = RealFs::new(temp.path())?;
+        std::fs::write(temp.path().join("source.tmp"), b"new")
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        std::fs::write(temp.path().join("target"), b"old")
+            .map_err(|error| FsError::Io(error.to_string()))?;
+
+        // Act
+        fs.rename_atomic(&FsPath::new("source.tmp"), &FsPath::new("target"))?;
+
+        // Assert
+        let contents = std::fs::read(temp.path().join("target"))
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        assert_eq!(contents, b"new");
+        assert!(!temp.path().join("source.tmp").exists());
         Ok(())
     }
 }
