@@ -1235,6 +1235,8 @@ impl HybridStorage {
             || error.contains("notfound")
             || error.contains("no such file")
             || error.contains("does not exist")
+            || error.contains("cannot find the file")
+            || error.contains("cannot find the path")
             || error.contains("404")
     }
 
@@ -2049,6 +2051,23 @@ mod tests {
         Arc,
     };
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn should_classify_windows_missing_paths_as_absent() {
+        // Arrange
+        let errors = [
+            "read C:\\data\\missing.sst: The system cannot find the file specified. (os error 2)",
+            "read C:\\data\\sst: The system cannot find the path specified. (os error 3)",
+        ];
+
+        // Act
+        let all_missing = errors
+            .iter()
+            .all(|error| HybridStorage::storage_error_indicates_missing(error));
+
+        // Assert
+        assert!(all_missing);
+    }
 
     #[test]
     fn should_retain_terminal_upload_completion_when_transient_queue_is_saturated() {

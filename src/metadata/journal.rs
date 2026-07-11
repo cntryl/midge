@@ -437,6 +437,11 @@ fn replay_journal_with_state(
         }
     }
 
+    // Windows does not permit replacing a file while a read handle is still
+    // open. Release the replay handle before a caller repairs a partial tail
+    // with an atomic replacement.
+    drop(file);
+
     let durable_edit_count = state.last_marker_edit_idx.unwrap_or(0);
     if matches!(tail, JournalReplayTail::Clean) && state.edits.len() > durable_edit_count {
         tail = JournalReplayTail::PartialEof {
