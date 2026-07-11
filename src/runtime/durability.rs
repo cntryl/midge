@@ -218,13 +218,14 @@ impl DurabilityCoordinator {
             .map(|info| info.enqueued_at)
     }
 
-    /// Remove and return the `max_sequence` for a specific inflight segment.
-    /// Useful when a segment fails and we need to invalidate idempotency allocations
-    /// that were part of that segment.
-    pub fn take_cloud_segment_max_sequence(&mut self, segment_id: u64) -> Option<u64> {
-        self.inflight
-            .remove(&segment_id)
-            .map(|info| info.max_sequence)
+    /// Return the expected maximum sequence for an inflight segment without
+    /// removing it from the contiguous durability frontier.
+    ///
+    /// A failed upload may be retried by the storage layer. Keeping its
+    /// frontier entry in place prevents later segment acknowledgements from
+    /// skipping the failed segment while that retry is outstanding.
+    pub fn cloud_segment_max_sequence(&self, segment_id: u64) -> Option<u64> {
+        self.inflight.get(&segment_id).map(|info| info.max_sequence)
     }
 
     pub fn inflight_segment_for_sequence(&self, sequence: u64) -> Option<u64> {
@@ -234,11 +235,6 @@ impl DurabilityCoordinator {
             .min_by_key(|(_, info)| info.max_sequence)
             .map(|(segment_id, _)| *segment_id)
     }
-    /// Clear all inflight segments (on error or shutdown).
-    pub fn clear_inflight(&mut self) {
-        self.inflight.clear();
-    }
-
     /// Check if `CloudAsync` should flush based on thresholds.
     ///
     /// **CRITICAL**: This function MUST NOT flush based on pending writer count alone.

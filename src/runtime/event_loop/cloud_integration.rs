@@ -262,11 +262,13 @@ impl EventLoop {
             .pending_uploads
             .retain(|item| item != &resource);
         self.state.mark_persistence_anomaly();
-        self.cloud_acked_wal_segments.split_off(&segment_id);
+        self.cloud_acked_wal_segments.remove(&segment_id);
 
         // Attempt to recover the failed segment's max_sequence so we can
-        // invalidate idempotency allocations that were part of it.
-        let failed_max_seq = self.durability.take_cloud_segment_max_sequence(segment_id);
+        // invalidate idempotency allocations that were part of it. Keep the
+        // segment in the inflight frontier: the bounded storage queue may
+        // retry the same segment, and later ACKs must not skip this gap.
+        let failed_max_seq = self.durability.cloud_segment_max_sequence(segment_id);
 
         // Let WAL actor handle its internal failure handling and drop pending writes.
         self.wal_actor.handle_cloud_upload_failed(segment_id, error);
@@ -308,8 +310,9 @@ impl EventLoop {
             );
         }
 
-        // Clear any remaining inflight segments.
-        self.durability.clear_inflight();
+        // Keep all inflight segments. A later ACK may already be buffered, but
+        // it cannot advance the frontier until this failed segment is retried
+        // successfully.
     }
 
     pub(super) fn maybe_flush_cloud_async_wal(&mut self) {
@@ -2861,8 +2864,8 @@ mod tests {
             "failure of the earlier segment must not let a buffered later ack advance durability"
         );
         assert!(
-            !el.cloud_acked_wal_segments.contains_key(&second_segment),
-            "later buffered ack bookkeeping must be discarded after an earlier gap fails"
+            el.cloud_acked_wal_segments.contains_key(&second_segment),
+            "later verified ACK bookkeeping must remain buffered behind an earlier gap"
         );
         assert_eq!(
             el.wal_actor.pending_cloud_writes_len(),
@@ -3259,6 +3262,81 @@ mod tests {
         assert!(
             deferred2,
             "retry should be deferred when retried after fail (CloudAsync)"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_advance_cloud_frontier_across_failed_segment_gap(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let (first_seq, first_deferred) = el.wal_actor.append(
+            &mut el.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: 701,
+                cf_id: 0,
+                key: Bytes::from_static(b"frontier-gap-first"),
+                value: Some(Bytes::from_static(b"value-1")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        assert!(first_deferred);
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id: 701,
+                sequence: first_seq,
+            });
+        let (first_segment, first_max_sequence) = seal_segment_for_test(&mut el)?;
+
+        let (second_seq, second_deferred) = el.wal_actor.append(
+            &mut el.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: 702,
+                cf_id: 0,
+                key: Bytes::from_static(b"frontier-gap-second"),
+                value: Some(Bytes::from_static(b"value-2")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        assert!(second_deferred);
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id: 702,
+                sequence: second_seq,
+            });
+        let (second_segment, second_max_sequence) = seal_segment_for_test(&mut el)?;
+
+        // Act
+        el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+            segment_id: first_segment,
+            error: "injected upload failure".to_string(),
+        });
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id: second_segment,
+            max_sequence: second_max_sequence,
+        });
+
+        // Assert
+        assert_eq!(
+            el.state.wal.cloud_durable_seq, 0,
+            "a later cloud ACK must not skip an earlier failed segment"
+        );
+
+        // A retry ACK for the failed segment closes the gap and may advance
+        // the contiguous frontier through the already-verified later segment.
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id: first_segment,
+            max_sequence: first_max_sequence,
+        });
+        assert_eq!(
+            el.state.wal.cloud_durable_seq, second_max_sequence,
+            "the frontier should advance only after the failed segment is durable"
         );
 
         Ok(())
