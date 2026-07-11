@@ -113,6 +113,10 @@ impl FileSystem {
         #[cfg(not(unix))]
         {
             let _ = full_path;
+            let lock_dir = self.base_path.join(".midge-locks");
+            fs::create_dir_all(&lock_dir).map_err(|error| {
+                format!("create lock directory {}: {error}", lock_dir.display())
+            })?;
             Ok(ProcessMutationLock)
         }
     }
