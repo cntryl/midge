@@ -1007,6 +1007,7 @@ mod tests {
             .write_all(&encoded[..encoded.len() - 3])
             .expect("append partial EOF record");
         journal.sync_all().expect("sync partial EOF record");
+        drop(journal);
 
         let after_repair = ManifestEdit::BumpWalSeq { seq: 3 };
 

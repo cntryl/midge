@@ -2073,7 +2073,8 @@ pub(super) mod tests {
                     .strip_prefix(env!("CARGO_MANIFEST_DIR"))
                     .expect("strip source prefix")
                     .display()
-                    .to_string();
+                    .to_string()
+                    .replace('\\', "/");
                 for (line_idx, line) in source.lines().enumerate() {
                     if line.contains(&pattern) {
                         call_sites.push(format!("{relative}:{}:{}", line_idx + 1, line.trim()));
