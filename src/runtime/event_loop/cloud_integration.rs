@@ -5,6 +5,9 @@
 
 use super::durability_sync::CompletionSource;
 use super::EventLoop;
+use crate::runtime::hybrid_persistence::{
+    CloudMetadataPruneGuard, CloudMetadataPruneProof, CloudWalPruneGuard, HybridPersistence,
+};
 use std::convert::TryFrom;
 use std::time::Instant;
 
@@ -249,7 +252,7 @@ impl EventLoop {
         let Some(storage) = self.hybrid_storage.as_ref() else {
             return Err("CloudAck received without HybridStorage".to_string());
         };
-        storage.verify_cached_remote_wal_segment(segment_id, max_sequence)
+        storage.verify_remote_wal_segment(segment_id, max_sequence)
     }
 
     fn handle_cloud_upload_failure(&mut self, segment_id: u64, error: &str) {
@@ -370,7 +373,7 @@ impl EventLoop {
         };
         let persisted_sequence = self.state.manifest.last_persisted_sequence;
 
-        let eligible_segments: Vec<u64> = self
+        let eligible_segments: Vec<(u64, u64)> = self
             .cloud_acked_wal_segments
             .iter()
             .filter_map(|(segment_id, max_sequence)| {
@@ -382,17 +385,15 @@ impl EventLoop {
                     return None;
                 }
 
-                let Ok(covered_by_manifest) = storage
-                    .cached_remote_wal_segment_covered_by_manifest(
-                        *segment_id,
-                        *max_sequence,
-                        &self.state.manifest,
-                    )
-                else {
+                let Ok(covered_by_manifest) = storage.remote_wal_segment_covered_by_manifest(
+                    *segment_id,
+                    *max_sequence,
+                    &self.state.manifest,
+                ) else {
                     return None;
                 };
 
-                covered_by_manifest.then_some(*segment_id)
+                covered_by_manifest.then_some((*segment_id, *max_sequence))
             })
             .collect();
 
@@ -422,28 +423,35 @@ impl EventLoop {
                 }
             };
 
-        let prune_guard = crate::storage::hybrid::backend::CloudWalPruneGuard::new(
-            self.state.manifest.clone(),
-            metadata_guard,
-        );
+        let prune_guard = CloudWalPruneGuard::new(self.state.manifest.clone(), metadata_guard);
 
-        for segment_id in eligible_segments {
+        for (segment_id, max_sequence) in eligible_segments {
             self.cloud_wal_prune_inflight.insert(segment_id);
-            if let Err(error) = storage.prune_cloud_wal_segment(segment_id, prune_guard.clone()) {
+            if let Err(error) =
+                storage.prune_cloud_wal_segment(segment_id, max_sequence, prune_guard.clone())
+            {
                 self.cloud_wal_prune_inflight.remove(&segment_id);
-                self.state.mark_persistence_anomaly();
-                tracing::warn!(
-                    segment_id,
-                    error = %error,
-                    "Failed to schedule cloud-covered remote WAL prune"
-                );
+                if error.contains("at capacity") {
+                    tracing::debug!(
+                        segment_id,
+                        error = %error,
+                        "Cloud WAL prune admission is full; retaining segment for retry"
+                    );
+                } else {
+                    self.state.mark_persistence_anomaly();
+                    tracing::warn!(
+                        segment_id,
+                        error = %error,
+                        "Failed to schedule cloud-covered remote WAL prune"
+                    );
+                }
             }
         }
     }
 
     fn cloud_metadata_prune_guard_for_wal_cleanup_with_convergence(
         &mut self,
-    ) -> Result<Option<crate::storage::hybrid::backend::CloudMetadataPruneGuard>, String> {
+    ) -> Result<Option<CloudMetadataPruneGuard>, String> {
         match self.cloud_metadata_prune_guard_for_wal_cleanup() {
             Ok(guard) => Ok(guard),
             Err(error) if Self::is_convergeable_cloud_metadata_mismatch(&error) => {
@@ -480,7 +488,7 @@ impl EventLoop {
 
     fn cloud_metadata_prune_guard_for_wal_cleanup(
         &mut self,
-    ) -> Result<Option<crate::storage::hybrid::backend::CloudMetadataPruneGuard>, String> {
+    ) -> Result<Option<CloudMetadataPruneGuard>, String> {
         let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
             return Ok(None);
         };
@@ -511,7 +519,7 @@ impl EventLoop {
                         )
                     })?;
                     if actual.bytes == local_data && actual.metadata == proof.remote {
-                        objects.push(crate::storage::hybrid::backend::CloudMetadataPruneProof {
+                        objects.push(CloudMetadataPruneProof {
                             key,
                             expected_bytes: local_data,
                             remote: proof.remote.clone(),
@@ -546,16 +554,14 @@ impl EventLoop {
                     remote: cloud_proof.metadata.clone(),
                 },
             );
-            objects.push(crate::storage::hybrid::backend::CloudMetadataPruneProof {
+            objects.push(CloudMetadataPruneProof {
                 key,
                 expected_bytes: local_data,
                 remote: cloud_proof.metadata,
             });
         }
 
-        Ok(Some(
-            crate::storage::hybrid::backend::CloudMetadataPruneGuard::new(cloud.clone(), objects),
-        ))
+        Ok(Some(CloudMetadataPruneGuard::new(cloud.clone(), objects)))
     }
 
     fn remove_cloud_durable_local_wal_segment(&mut self, segment_id: u64) {
@@ -591,6 +597,7 @@ impl EventLoop {
 mod tests {
     use super::super::tests::{create_test_cloud_event_loop, create_test_event_loop};
     use super::super::EventLoop;
+    use crate::runtime::hybrid_persistence::HybridPersistence;
     use crate::runtime::{state::RuntimeState, ResponseRouter, RuntimeMsg, RuntimeResponse};
     use crate::sst::Memtable;
     use bytes::Bytes;
@@ -2536,8 +2543,8 @@ mod tests {
     }
 
     #[test]
-    fn should_retry_after_clearing_prune_inflight_when_worker_guard_fails(
-    ) -> crate::common::MidgeResult<()> {
+    fn should_retry_prune_after_preflight_failure_clears_inflight() -> crate::common::MidgeResult<()>
+    {
         // Arrange
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
@@ -2548,30 +2555,15 @@ mod tests {
         seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
         el.state.wal.cloud_durable_seq = max_sequence;
         let sst_bytes = add_valid_manifest_sst_for_test(&mut el, sst_name, max_sequence);
-        let storage = el.hybrid_storage.as_ref().expect("hybrid storage").clone();
-        storage
-            .verify_manifest_cloud_objects(&el.state.manifest)
-            .expect("initial manifest validation");
-
-        el.cloud_wal_prune_inflight.insert(segment_id);
         std::fs::remove_file(remote_sst_path_for_test(&el, sst_name))
             .expect("delete remote SST after initial validation");
-        storage
-            .prune_cloud_wal_segment(
-                segment_id,
-                crate::storage::hybrid::backend::CloudWalPruneGuard::new(
-                    el.state.manifest.clone(),
-                    None,
-                ),
-            )
-            .expect("schedule guarded prune");
-        drain_prune_completion_for_test(&mut el);
+        el.prune_cloud_wal_segments_covered_by_manifest();
 
         // Act
         // Assert
         assert!(
             el.cloud_wal_prune_inflight.is_empty(),
-            "worker-side guard failure must clear prune inflight state"
+            "preflight failure must not leave prune inflight state"
         );
         assert!(
             el.cloud_acked_wal_segments.contains_key(&segment_id),
@@ -2654,7 +2646,7 @@ mod tests {
     }
 
     #[test]
-    fn should_treat_unproven_cloud_ack_as_failure_without_local_wal_removal(
+    fn should_validate_uncached_cloud_ack_before_local_wal_removal(
     ) -> crate::common::MidgeResult<()> {
         // Arrange
         let mut el = create_test_cloud_event_loop(
@@ -2697,8 +2689,8 @@ mod tests {
         });
 
         assert!(
-            local_wal.exists(),
-            "local WAL must be retained when CloudAck has no prior remote readback proof"
+            !local_wal.exists(),
+            "valid remote WAL should be proven directly before local removal"
         );
 
         Ok(())

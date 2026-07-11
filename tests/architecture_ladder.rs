@@ -17,6 +17,28 @@ fn rust_sources_under(relative: &str) -> Vec<PathBuf> {
     sources
 }
 
+fn production_source(path: &Path) -> String {
+    let source = std::fs::read_to_string(path).expect("read Rust source");
+    source
+        .split("\n#[cfg(test)]\nmod tests")
+        .next()
+        .unwrap_or(&source)
+        .to_string()
+}
+
+fn prohibited_edges_under(relative: &str, forbidden: &[&str]) -> Vec<String> {
+    rust_sources_under(relative)
+        .into_iter()
+        .flat_map(|path| {
+            let source = production_source(&path);
+            forbidden
+                .iter()
+                .filter(move |edge| source.contains(**edge))
+                .map(move |edge| format!("{} imports {edge}", path.display()))
+        })
+        .collect()
+}
+
 #[test]
 fn should_keep_common_independent_from_higher_subsystems() {
     // Arrange
@@ -74,5 +96,86 @@ fn should_keep_provider_configuration_owned_by_config_layer() {
     assert!(
         violations.is_empty(),
         "configuration DTOs must not be owned or re-exported by storage: {violations:#?}"
+    );
+}
+
+#[test]
+fn should_keep_storage_as_raw_object_io() {
+    // Arrange
+    let forbidden = [
+        "crate::engine",
+        "crate::metadata",
+        "crate::runtime",
+        "crate::sst",
+        "crate::wal",
+    ];
+
+    // Act
+    let violations = prohibited_edges_under("src/storage", &forbidden);
+
+    // Assert
+    assert!(
+        violations.is_empty(),
+        "storage must provide raw bounded object I/O without format or runtime ownership: {violations:#?}"
+    );
+}
+
+#[test]
+fn should_keep_sst_below_read_layers() {
+    // Arrange
+    let forbidden = [
+        "crate::engine",
+        "crate::iterators",
+        "crate::metadata",
+        "crate::runtime",
+        "crate::storage",
+        "crate::wal",
+    ];
+
+    // Act
+    let violations = prohibited_edges_under("src/sst", &forbidden);
+
+    // Assert
+    assert!(
+        violations.is_empty(),
+        "SST format and readers must not depend on iterator facades or orchestration: {violations:#?}"
+    );
+}
+
+#[test]
+fn should_keep_iterator_contracts_in_lower_layer() {
+    // Arrange
+    let forbidden = [
+        "crate::engine",
+        "crate::metadata",
+        "crate::runtime",
+        "crate::sst",
+        "crate::storage",
+        "crate::wal",
+    ];
+
+    // Act
+    let violations = prohibited_edges_under("src/iterators", &forbidden);
+
+    // Assert
+    assert!(
+        violations.is_empty(),
+        "shared iterator contracts must be owned below SST and orchestration: {violations:#?}"
+    );
+}
+
+#[test]
+fn should_keep_persistence_formats_below_storage_orchestration() {
+    // Arrange
+    let forbidden = ["crate::engine", "crate::runtime", "crate::storage"];
+
+    // Act
+    let mut violations = prohibited_edges_under("src/wal", &forbidden);
+    violations.extend(prohibited_edges_under("src/metadata", &forbidden));
+
+    // Assert
+    assert!(
+        violations.is_empty(),
+        "WAL and metadata formats must not depend on storage or runtime orchestration: {violations:#?}"
     );
 }

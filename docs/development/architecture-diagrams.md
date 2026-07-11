@@ -9,7 +9,9 @@ flowchart TB
     API["Public API<br/>Engine, Transaction, OpenOptions"]
     Engine["engine<br/>facade, startup, ingest"]
     Runtime["runtime<br/>event loop, state, snapshots"]
+    HybridRuntime["runtime::hybrid_persistence<br/>WAL/SST proof and prune policy"]
     Actors["runtime::actors<br/>WAL, flush, compaction, manifest, GC, cloud, eviction"]
+    Memtable["memtable<br/>ordered in-memory state"]
     WAL["wal<br/>frames, segments, recovery"]
     SST["sst<br/>readers, writers, bloom, cache, trie"]
     Metadata["metadata<br/>manifest, journal, format marker"]
@@ -25,6 +27,12 @@ flowchart TB
     Engine --> Runtime
     Engine --> Lease
     Runtime --> Actors
+    Runtime --> HybridRuntime
+    HybridRuntime --> WAL
+    HybridRuntime --> SST
+    HybridRuntime --> Metadata
+    HybridRuntime --> Storage
+    Runtime --> Memtable
     Runtime --> WAL
     Runtime --> SST
     Runtime --> Metadata
@@ -226,13 +234,14 @@ flowchart TB
 
 ## Hybrid Cloud Mode
 
-Hybrid storage has separate paths for SST object storage and WAL cloud durability. WAL segments use `enqueue_wal_segment`; SST objects use normal object writes.
+The runtime owns format interpretation and publication/prune policy. Hybrid storage sees only explicit object keys, bytes, provider identities, bounded queues, and conditional operations.
 
 ```mermaid
 flowchart TB
     Runtime["Runtime"]
+    Proofs["runtime::hybrid_persistence<br/>format validation and coverage"]
     WalActor["WalActor"]
-    Hybrid["HybridStorage"]
+    Hybrid["HybridStorage<br/>raw bounded object I/O"]
     LocalWal["Local WAL segment"]
     CloudWal["Cloud object<br/>wal/{segment}.wal"]
     CloudAck["StorageEvent::CloudAck"]
@@ -245,16 +254,19 @@ flowchart TB
 
     Runtime --> WalActor
     WalActor --> LocalWal
-    WalActor --> Hybrid
+    WalActor --> Proofs
+    Proofs --> Hybrid
     Hybrid --> CloudWal
     CloudWal --> CloudAck
     CloudWal --> CloudFail
-    CloudAck --> Runtime
+    CloudAck --> Proofs
+    Proofs --> Runtime
     CloudFail --> Runtime
 
     Runtime --> FlushActor
     FlushActor --> LocalSst
-    LocalSst --> Hybrid
+    LocalSst --> Proofs
+    Proofs --> Hybrid
     Hybrid --> CloudSst
     Hybrid --> Backpressure
     Backpressure --> Runtime

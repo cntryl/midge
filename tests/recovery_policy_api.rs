@@ -14,7 +14,13 @@ fn initialize_format_marker(db_path: &std::path::Path) {
 fn write_corrupt_wal(db_path: &std::path::Path) {
     let wal_dir = db_path.join("wal");
     fs::create_dir_all(&wal_dir).expect("create wal dir");
-    fs::write(wal_dir.join("wal.log"), b"\x01\x02\x03").expect("write corrupt wal");
+    // A sealed segment is not allowed to hide an incomplete/corrupt prefix;
+    // the active `wal.log` tail is intentionally tolerated by strict replay.
+    fs::write(
+        wal_dir.join(cntryl_midge::wal::segment_file_name(1)),
+        b"\x01\x02\x03",
+    )
+    .expect("write corrupt wal");
 }
 
 #[test]

@@ -70,14 +70,24 @@ impl ManifestCoordinator {
         }
 
         let result = event_loop.force_wal_sync(msg_rx).and_then(|()| {
-            event_loop
-                .manifest_actor
-                .create_column_family(&mut event_loop.state, name)
-                .and_then(|cf_id| {
-                    event_loop
-                        .mirror_metadata_after_local_commit("create column family")
-                        .map(|()| cf_id)
-                })
+            if let Some(existing) = event_loop.state.manifest.get_column_family_by_name(name) {
+                let existing_id = existing.id;
+                return event_loop
+                    .mirror_metadata_after_local_commit("idempotent create column family")
+                    .map(|()| existing_id);
+            }
+            let edit = crate::runtime::ddl::create_edit(&event_loop.state, name)?;
+            let cf_id = match &edit {
+                crate::metadata::ManifestEdit::CreateColumnFamily { id, .. } => *id,
+                _ => unreachable!("create_edit returned a non-create edit"),
+            };
+            crate::runtime::ddl::execute(
+                &mut event_loop.state,
+                event_loop.hybrid_storage.as_ref(),
+                &edit,
+            )
+            .and_then(|()| event_loop.mirror_metadata_after_local_commit("create column family"))
+            .map(|()| cf_id)
         });
         let should_publish = result.is_ok();
         let resp = result.map_or_else(
@@ -116,13 +126,17 @@ impl ManifestCoordinator {
         }
 
         let result = event_loop.force_wal_sync(msg_rx).and_then(|()| {
-            event_loop
-                .manifest_actor
-                .drop_column_family(&mut event_loop.state, cf_id)
-                .and_then(|()| event_loop.mirror_metadata_after_local_commit("drop column family"))
+            let edit = crate::runtime::ddl::drop_edit(&event_loop.state, cf_id)?;
+            crate::runtime::ddl::execute(
+                &mut event_loop.state,
+                event_loop.hybrid_storage.as_ref(),
+                &edit,
+            )
+            .and_then(|()| event_loop.mirror_metadata_after_local_commit("drop column family"))
         });
         if result.is_ok() {
             event_loop.publish_snapshot();
+            let _ = event_loop.retry_gc();
         }
         Self::respond_result(event_loop, request_id, result);
         HandleOutcome::Continue

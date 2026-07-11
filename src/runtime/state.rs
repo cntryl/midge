@@ -1086,13 +1086,15 @@ impl RuntimeState {
 
     pub fn health(&self) -> crate::config::EngineHealth {
         let residue = self.storage_residue_assessment();
-        crate::storage::residue::classify_engine_health(crate::storage::residue::HealthInputs {
-            opened_in_salvage_mode: self.opened_in_salvage_mode(),
-            write_stalled: self.has_any_hard_write_stall(),
-            persistence_anomaly_detected: self.persistence_anomaly_detected(),
-            pending_intents: self.intent_log.len(),
-            orphan_ssts: residue.orphan_ssts.len(),
-        })
+        crate::runtime::storage_residue::classify_engine_health(
+            crate::runtime::storage_residue::HealthInputs {
+                opened_in_salvage_mode: self.opened_in_salvage_mode(),
+                write_stalled: self.has_any_hard_write_stall(),
+                persistence_anomaly_detected: self.persistence_anomaly_detected(),
+                pending_intents: self.intent_log.len(),
+                orphan_ssts: residue.orphan_ssts.len(),
+            },
+        )
     }
 
     fn snapshot_retention_metrics(&self, now: Instant) -> (usize, u64) {
@@ -1263,12 +1265,14 @@ impl RuntimeState {
         }
     }
 
-    fn storage_residue_assessment(&self) -> crate::storage::residue::StorageResidueAssessment {
+    fn storage_residue_assessment(
+        &self,
+    ) -> crate::runtime::storage_residue::StorageResidueAssessment {
         if self.is_memory_mode() {
-            return crate::storage::residue::StorageResidueAssessment::default();
+            return crate::runtime::storage_residue::StorageResidueAssessment::default();
         }
 
-        crate::storage::residue::StorageResidueAssessment::scan_sst_dir(
+        crate::runtime::storage_residue::StorageResidueAssessment::scan_sst_dir(
             &self.db_path,
             &self.manifest,
         )
@@ -2170,6 +2174,34 @@ impl RuntimeState {
     /// Return the oldest active snapshot sequence, if any snapshots are pinned.
     pub fn oldest_active_snapshot_sequence(&self) -> Option<u64> {
         self.snapshot_pins.oldest_sequence()
+    }
+
+    /// Durably remove SSTs belonging to dropped column families once no
+    /// active snapshot can observe the pre-drop frontier.  The returned names
+    /// are safe for the GC actor to delete only after the caller publishes the
+    /// updated manifest to any remote authority.
+    pub fn reclaim_dropped_column_families(&mut self) -> MidgeResult<Vec<String>> {
+        let candidates = self
+            .manifest
+            .reclaimable_column_family_files(self.oldest_active_snapshot_sequence());
+        let edits = candidates
+            .iter()
+            .map(
+                |(cf_id, names)| crate::metadata::ManifestEdit::ReclaimColumnFamily {
+                    id: *cf_id,
+                    names: names.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        if !self.is_memory_mode() && !edits.is_empty() {
+            crate::metadata::append_edit_batch(&self.db_path, &edits)?;
+        }
+        let mut reclaimed_names = Vec::new();
+        for ((_, names), edit) in candidates.into_iter().zip(edits) {
+            self.manifest.apply_edit(&edit);
+            reclaimed_names.extend(names);
+        }
+        Ok(reclaimed_names)
     }
 
     pub fn record_delete_range(

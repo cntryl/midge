@@ -11,14 +11,17 @@
 //! - **Actors**: Stateless handlers that process messages and return state updates
 
 pub mod actors;
+pub(crate) mod ddl;
 pub mod durability;
 pub mod event_loop;
+pub(crate) mod hybrid_persistence;
 pub mod intent_persistence;
 pub(crate) mod read_resources;
 pub mod read_snapshot;
 pub mod snapshot_cache;
 pub(crate) mod snapshot_pins;
 pub mod state;
+pub(crate) mod storage_residue;
 pub(crate) mod transaction_spill;
 
 pub use event_loop::EventLoop;

@@ -433,12 +433,18 @@ mod tests {
                     name: "default".to_string(),
                     created_at: 0,
                     deleted_at: None,
+                    drop_sequence: None,
+                    dropped_sst_names: Vec::new(),
+                    reclaimed: false,
                 },
                 crate::metadata::ColumnFamilyMeta {
                     id: 1,
                     name: "secondary".to_string(),
                     created_at: 0,
                     deleted_at: None,
+                    drop_sequence: None,
+                    dropped_sst_names: Vec::new(),
+                    reclaimed: false,
                 },
             ],
             ..Default::default()

@@ -85,6 +85,22 @@ pub struct ColumnFamilyMeta {
     /// Timestamp when column family was deleted (None if active)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<u64>,
+    /// Sequence frontier at which this column family became invisible.
+    ///
+    /// SSTs belonging to a dropped family remain authoritative until every
+    /// snapshot at or below this frontier has been released.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_sequence: Option<u64>,
+    /// SST names captured when the family was dropped.  Keeping this list on
+    /// the tombstone makes reclamation retryable after a crash or compaction
+    /// of unrelated files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_sst_names: Vec<String>,
+    /// Set only after the reclaim edit has removed the captured files from the
+    /// authoritative manifest.  The tombstone itself is retained so IDs are
+    /// never reused.
+    #[serde(default)]
+    pub reclaimed: bool,
 }
 
 /// File metadata for an SST
@@ -193,6 +209,9 @@ impl Manifest {
             name,
             created_at,
             deleted_at: None,
+            drop_sequence: None,
+            dropped_sst_names: Vec::new(),
+            reclaimed: false,
         });
 
         id
@@ -222,18 +241,67 @@ impl Manifest {
             .collect()
     }
 
-    /// Mark a column family as deleted (soft delete for durability)
+    /// Mark a column family as deleted (soft delete for durability).
+    #[cfg(test)]
     pub fn delete_column_family(&mut self, cf_id: u32) -> bool {
+        self.delete_column_family_with_reclamation(cf_id, 0, Vec::new())
+    }
+
+    /// Mark a family deleted while recording the snapshot frontier and the
+    /// exact files that must eventually be reclaimed.
+    pub fn delete_column_family_with_reclamation(
+        &mut self,
+        cf_id: u32,
+        drop_sequence: u64,
+        dropped_sst_names: Vec<String>,
+    ) -> bool {
         if let Some(cf) = self
             .column_families
             .iter_mut()
             .find(|cf| cf.id == cf_id && cf.deleted_at.is_none())
         {
             cf.deleted_at = Some(millis_since_epoch());
+            cf.drop_sequence = Some(drop_sequence);
+            cf.dropped_sst_names = dropped_sst_names;
+            cf.reclaimed = false;
             true
         } else {
             false
         }
+    }
+
+    /// Return dropped families whose snapshot frontier is no longer pinned.
+    pub fn reclaimable_column_family_files(
+        &self,
+        oldest_snapshot_sequence: Option<u64>,
+    ) -> Vec<(u32, Vec<String>)> {
+        self.column_families
+            .iter()
+            .filter(|cf| cf.deleted_at.is_some() && !cf.reclaimed)
+            .filter(|cf| {
+                let Some(drop_sequence) = cf.drop_sequence else {
+                    return oldest_snapshot_sequence.is_none();
+                };
+                oldest_snapshot_sequence.is_none_or(|oldest| oldest > drop_sequence)
+            })
+            .map(|cf| (cf.id, cf.dropped_sst_names.clone()))
+            .collect()
+    }
+
+    /// Mark a dropped family reclaimed after a durable remove-file edit.
+    pub fn mark_column_family_reclaimed(&mut self, cf_id: u32, names: &[String]) -> bool {
+        let Some(cf) = self
+            .column_families
+            .iter_mut()
+            .find(|cf| cf.id == cf_id && cf.deleted_at.is_some() && !cf.reclaimed)
+        else {
+            return false;
+        };
+        for name in names {
+            cf.dropped_sst_names.retain(|candidate| candidate != name);
+        }
+        cf.reclaimed = cf.dropped_sst_names.is_empty();
+        true
     }
 
     /// Apply a `ManifestEdit` (journal replay or live append)
@@ -262,11 +330,42 @@ impl Manifest {
                         name: name.clone(),
                         created_at: *created_at,
                         deleted_at: None,
+                        drop_sequence: None,
+                        dropped_sst_names: Vec::new(),
+                        reclaimed: false,
                     });
                 }
             }
             crate::metadata::ManifestEdit::DropColumnFamily { id } => {
-                let _ = self.delete_column_family(*id);
+                let names = self
+                    .files
+                    .iter()
+                    .filter(|file| file.cf_id == *id)
+                    .map(|file| file.name.clone())
+                    .collect();
+                let _ = self.delete_column_family_with_reclamation(*id, 0, names);
+            }
+            crate::metadata::ManifestEdit::DropColumnFamilyAt {
+                id,
+                drop_sequence,
+                dropped_sst_names,
+            } => {
+                let names = if dropped_sst_names.is_empty() {
+                    self.files
+                        .iter()
+                        .filter(|file| file.cf_id == *id)
+                        .map(|file| file.name.clone())
+                        .collect()
+                } else {
+                    dropped_sst_names.clone()
+                };
+                let _ = self.delete_column_family_with_reclamation(*id, *drop_sequence, names);
+            }
+            crate::metadata::ManifestEdit::ReclaimColumnFamily { id, names } => {
+                for name in names {
+                    self.remove_file(name);
+                }
+                let _ = self.mark_column_family_reclaimed(*id, names);
             }
             crate::metadata::ManifestEdit::BumpWalSeq { seq } => {
                 if *seq > self.last_persisted_sequence {

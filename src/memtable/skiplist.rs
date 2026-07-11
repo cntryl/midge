@@ -1,4 +1,4 @@
-//! Lock-Free Multi-Version Skiplist
+//! Lock-Free Multi-Version Memtable Skiplist
 //!
 //! - Fully lock-free inserts (writers use CAS, readers are wait-free under epoch guards).
 //! - Uses crossbeam-epoch for safe concurrent memory reclamation.

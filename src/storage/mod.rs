@@ -49,7 +49,8 @@
 //! ```text
 //! WAL append barrier (local)
 //!   → memtable visibility
-//!   → HybridStorage::enqueue_wal_segment()
+//!   → runtime::hybrid_persistence maps the WAL object key
+//!   → HybridStorage::enqueue_object_upload()
 //!   → [Pending] → [InProgress] → [Completed]
 //!   → CloudStorage (upload via CloudExecutor)
 //!   → StorageEvent::CloudAck(segment_id)
@@ -67,7 +68,6 @@ pub(crate) mod cloud;
 pub(crate) mod filesystem;
 pub(crate) mod hybrid;
 pub(crate) mod providers;
-pub(crate) mod residue;
 pub(crate) mod test_support;
 
 pub use hybrid::backend::HybridStorage;
@@ -84,9 +84,9 @@ pub use hybrid::backend::HybridStorage;
 //   2. Cloud storage is the cloud durability target.
 //      A write becomes cloud-durable only after CloudBackend acknowledges upload.
 //
-//   3. HybridStorage orchestrates:
-//        - local write
-//        - cloud upload
+//   3. Runtime owns WAL/SST/manifest meaning. HybridStorage owns:
+//        - raw local and remote object I/O
+//        - bounded cloud upload
 //        - retry on failure
 //        - disk watermark backpressure
 //        - emitting StorageEvent::CloudAck(segment_id)
@@ -94,10 +94,10 @@ pub use hybrid::backend::HybridStorage;
 //   4. HybridStorage MUST maintain:
 //        struct UploadState { segment_id, local_path, retries, status }
 //
-//   5. HybridStorage MUST expose:
-//        fn enqueue_wal_segment(segment_id: u64, path: Path)
+//   5. HybridStorage MUST expose format-neutral operations:
+//        fn enqueue_object_upload(request_id: u64, key: String, path: Path)
 //        fn poll() -> Vec<StorageEvent>
-//      Called by StorageBudgetActor or Runtime.
+//      Called through runtime-owned format orchestration.
 //
 //   6. StorageEvent variants must include:
 //        CloudAck(segment_id)

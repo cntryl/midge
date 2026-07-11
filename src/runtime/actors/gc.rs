@@ -7,6 +7,7 @@
 
 use super::super::state::RuntimeState;
 use crate::common::MidgeResult;
+use crate::runtime::hybrid_persistence::HybridPersistence;
 use crate::runtime::RuntimeMsg;
 #[cfg(test)]
 use std::collections::HashSet;
@@ -31,6 +32,9 @@ pub struct GcActor {
     last_gc_run: Option<std::time::Instant>,
     /// Obsolete files that were retained because a transaction still pins them.
     pending_obsolete: VecDeque<String>,
+    /// SSTs removed from the local manifest but waiting for the updated
+    /// manifest to be published to the remote authority before deletion.
+    pending_manifest_reclamation: VecDeque<String>,
     /// Failed asynchronous cloud deletes. The worker owns this queue until the
     /// event loop imports it for a delayed retry, so a failed provider request
     /// cannot be lost when the worker exits.
@@ -51,6 +55,7 @@ impl GcActor {
         Self {
             last_gc_run: None,
             pending_obsolete: VecDeque::new(),
+            pending_manifest_reclamation: VecDeque::new(),
             failed_cloud_deletes: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
             failed_delete_retry_at: None,
             retry_notifier: None,
@@ -262,6 +267,27 @@ impl GcActor {
         }
         let pending = self.pending_obsolete.drain(..).collect::<Vec<_>>();
         self.delete_ssts(state, &pending, hybrid_storage);
+    }
+
+    pub fn queue_manifest_reclamation(&mut self, names: impl IntoIterator<Item = String>) {
+        for name in names {
+            if !self
+                .pending_manifest_reclamation
+                .iter()
+                .any(|pending| pending == &name)
+            {
+                self.pending_manifest_reclamation.push_back(name);
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn has_manifest_reclamation(&self) -> bool {
+        !self.pending_manifest_reclamation.is_empty()
+    }
+
+    pub fn take_manifest_reclamation(&mut self) -> Vec<String> {
+        self.pending_manifest_reclamation.drain(..).collect()
     }
 
     /// Return the duration until the next failed cloud-delete retry, if one is

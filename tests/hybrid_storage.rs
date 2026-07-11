@@ -309,7 +309,7 @@ fn should_persist_eviction_state_across_restart() {
         // Arrange
         // Act: Write, evict, note manifest state
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let value = vec![b'E'; 128 * 1024]; // 128KB
@@ -326,7 +326,9 @@ fn should_persist_eviction_state_across_restart() {
 
             // Eviction occurs
             thread::sleep(Duration::from_millis(200));
-            // Drop engine; manifest should persist eviction state
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before same-path restart");
         }
 
         // Assert: Restart and verify eviction state

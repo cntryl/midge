@@ -43,6 +43,7 @@ mod io;
 #[doc(hidden)]
 pub mod iterators;
 mod lease;
+mod memtable;
 mod metadata;
 mod runtime;
 #[doc(hidden)]

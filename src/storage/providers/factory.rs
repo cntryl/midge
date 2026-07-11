@@ -11,11 +11,14 @@ impl CloudProviderFactory {
     pub(crate) fn build_backend(
         provider: &CloudProviderConfig,
     ) -> MidgeResult<Arc<dyn CloudBackend>> {
-        match provider {
-            CloudProviderConfig::AwsS3 { .. } => Self::build_aws(provider),
-            CloudProviderConfig::S3Compatible { .. } => Self::build_s3_compatible(provider),
-            CloudProviderConfig::AzureBlob { .. } => Self::build_azure(provider),
-            CloudProviderConfig::Gcs { .. } => Self::build_gcp(provider),
+        if super::is_aws_s3(provider) {
+            Self::build_aws(provider)
+        } else if super::is_s3_compatible(provider) {
+            Self::build_s3_compatible(provider)
+        } else if super::is_azure_blob(provider) {
+            Self::build_azure(provider)
+        } else {
+            Self::build_gcp(provider)
         }
     }
 

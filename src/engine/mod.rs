@@ -43,6 +43,17 @@ pub use api::{
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<ColumnFamilyId, ColumnFamilyHandle>;
 
+type FencingResources = (
+    Option<std::sync::Mutex<crate::lease::LeaseHeartbeat>>,
+    Option<Arc<dyn crate::lease::PrimaryLease>>,
+    Option<crate::lease::LeaseGuard>,
+);
+
+struct PendingFencingCleanup {
+    completion: crossbeam::channel::Receiver<()>,
+    terminal_result: MidgeResult<()>,
+}
+
 /// Column family handle for API operations
 #[derive(Debug, Clone)]
 pub struct ColumnFamilyHandle {
@@ -97,6 +108,8 @@ pub struct Engine {
     lease_guard: Option<crate::lease::LeaseGuard>,
     /// Lease heartbeat (keeps lease renewed)
     lease_heartbeat: Option<std::sync::Mutex<crate::lease::LeaseHeartbeat>>,
+    /// Detached fencing cleanup retained after a bounded shutdown times out.
+    pending_fencing_cleanup: Option<PendingFencingCleanup>,
     /// Per-CF ingest coordinators for write batching
     ingest_coordinators: dashmap::DashMap<ColumnFamilyId, Arc<ingest::IngestCoordinator>>,
     /// Shared bounded pool for resident transaction intents.
@@ -148,10 +161,11 @@ impl Engine {
         lease_guard: Option<crate::lease::LeaseGuard>,
     ) {
         if let Some(heartbeat_mutex) = lease_heartbeat {
-            if let Ok(mut heartbeat) = heartbeat_mutex.lock() {
-                heartbeat.stop();
-                tracing::trace!("Engine: lease heartbeat stopped");
-            }
+            let mut heartbeat = heartbeat_mutex
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            heartbeat.stop();
+            tracing::trace!("Engine: lease heartbeat stopped");
         }
         if let Some(lease) = lease {
             loop {
@@ -171,19 +185,96 @@ impl Engine {
         drop(lease_guard);
     }
 
-    fn release_fencing_resources(&mut self) -> MidgeResult<()> {
-        if let Some(heartbeat_mutex) = &self.lease_heartbeat {
-            if let Ok(mut heartbeat) = heartbeat_mutex.lock() {
-                heartbeat.stop();
+    fn has_fencing_resources(&self) -> bool {
+        self.lease_heartbeat.is_some() || self.lease.is_some() || self.lease_guard.is_some()
+    }
+
+    fn schedule_fencing_cleanup(&mut self, terminal_result: MidgeResult<()>) -> MidgeResult<()> {
+        debug_assert!(self.pending_fencing_cleanup.is_none());
+
+        let resources: FencingResources = (
+            self.lease_heartbeat.take(),
+            self.lease.take(),
+            self.lease_guard.take(),
+        );
+        let retained_resources = Arc::new(std::sync::Mutex::new(Some(resources)));
+        let worker_resources = Arc::clone(&retained_resources);
+        let (completion_tx, completion_rx) = crossbeam::channel::bounded(1);
+        let spawn_result = std::thread::Builder::new()
+            .name("midge-fencing-reaper".to_string())
+            .spawn(move || {
+                let resources = worker_resources
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some((lease_heartbeat, lease, lease_guard)) = resources {
+                    Self::release_fencing_parts(lease_heartbeat, lease, lease_guard);
+                }
+                let _ = completion_tx.send(());
+                tracing::debug!("Engine fencing reaper cleanup complete");
+            });
+
+        match spawn_result {
+            Ok(worker) => {
+                drop(worker);
+                self.pending_fencing_cleanup = Some(PendingFencingCleanup {
+                    completion: completion_rx,
+                    terminal_result,
+                });
+                Ok(())
+            }
+            Err(error) => {
+                let (lease_heartbeat, lease, lease_guard) = retained_resources
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .ok_or_else(|| {
+                        MidgeError::Internal(
+                            "fencing resources disappeared after cleanup reaper spawn failure"
+                                .to_string(),
+                        )
+                    })?;
+                self.lease_heartbeat = lease_heartbeat;
+                self.lease = lease;
+                self.lease_guard = lease_guard;
+                tracing::error!(%error, "failed to spawn fencing cleanup reaper");
+                match terminal_result {
+                    Ok(()) => Err(MidgeError::ResourceLimit(format!(
+                        "failed to spawn fencing cleanup reaper: {error}"
+                    ))),
+                    Err(terminal_error) => Err(terminal_error),
+                }
             }
         }
-        if let Some(lease) = &self.lease {
-            lease.release()?;
+    }
+
+    fn wait_for_fencing_cleanup(&mut self, timeout: Duration) -> MidgeResult<()> {
+        let wait_result = self
+            .pending_fencing_cleanup
+            .as_ref()
+            .ok_or_else(|| MidgeError::Internal("fencing cleanup was not scheduled".to_string()))?
+            .completion
+            .recv_timeout(timeout);
+
+        match wait_result {
+            Ok(()) => {
+                self.pending_fencing_cleanup
+                    .take()
+                    .ok_or_else(|| {
+                        MidgeError::Internal("fencing cleanup result was lost".to_string())
+                    })?
+                    .terminal_result
+            }
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => Err(MidgeError::Timeout(
+                "fencing cleanup did not complete before shutdown deadline".to_string(),
+            )),
+            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                self.pending_fencing_cleanup.take();
+                Err(MidgeError::Internal(
+                    "fencing cleanup reaper terminated without reporting completion".to_string(),
+                ))
+            }
         }
-        self.lease_heartbeat.take();
-        self.lease.take();
-        self.lease_guard.take();
-        Ok(())
     }
 
     fn verify_storage_path_internal(
@@ -560,12 +651,21 @@ impl Engine {
     ///
     /// Returns `MidgeError::Busy` while transactions remain active,
     /// `MidgeError::Timeout` when the deadline elapses, or a durability error
-    /// reported by the runtime during its final flush.
+    /// reported by the runtime during its final flush. Returns
+    /// `MidgeError::ResourceLimit` if the fencing cleanup worker cannot start.
     pub fn shutdown(&mut self, timeout: Duration) -> MidgeResult<()> {
-        let Some(runtime) = self.runtime.as_mut() else {
-            return self.release_fencing_resources();
-        };
         let started = std::time::Instant::now();
+        if self.pending_fencing_cleanup.is_some() {
+            return self.wait_for_fencing_cleanup(timeout);
+        }
+
+        let Some(runtime) = self.runtime.as_mut() else {
+            if !self.has_fencing_resources() {
+                return Ok(());
+            }
+            self.schedule_fencing_cleanup(Ok(()))?;
+            return self.wait_for_fencing_cleanup(timeout.saturating_sub(started.elapsed()));
+        };
         let shutdown_result = self.runtime_handle.shutdown(timeout);
         if matches!(
             &shutdown_result,
@@ -574,11 +674,7 @@ impl Engine {
             return shutdown_result;
         }
 
-        let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
-            return Err(MidgeError::Timeout(
-                "runtime acknowledged shutdown at the deadline".to_string(),
-            ));
-        };
+        let remaining = timeout.saturating_sub(started.elapsed());
         if !runtime.wait_for_exit(remaining) {
             return Err(MidgeError::Timeout(
                 "runtime workers did not terminate before shutdown deadline".to_string(),
@@ -587,8 +683,11 @@ impl Engine {
 
         self.runtime.take();
         self.ingest_coordinators.clear();
-        self.release_fencing_resources()?;
-        shutdown_result
+        if !self.has_fencing_resources() {
+            return shutdown_result;
+        }
+        self.schedule_fencing_cleanup(shutdown_result)?;
+        self.wait_for_fencing_cleanup(timeout.saturating_sub(started.elapsed()))
     }
 
     // === Column Family Lifecycle ===
@@ -621,10 +720,12 @@ impl Engine {
                 // Start ingest coordinator for new CF
                 let coordinator = Arc::new(ingest::IngestCoordinator::new(cf_id));
                 self.ingest_coordinators.insert(cf_id, coordinator);
-                self.runtime_handle
-                    .send_and_wait(RuntimeMsg::ManifestPersist {
-                        request_id: next_request_id()?,
-                    })?;
+                if !self.cloud_mode {
+                    self.runtime_handle
+                        .send_and_wait(RuntimeMsg::ManifestPersist {
+                            request_id: next_request_id()?,
+                        })?;
+                }
 
                 Ok(handle)
             }
@@ -662,13 +763,12 @@ impl Engine {
 
                 // Remove from local registry
                 self.column_families.remove(&cf_id);
-
-                // Persist manifest to disk
-                let _persist_response =
+                if !self.cloud_mode {
                     self.runtime_handle
                         .send_and_wait(RuntimeMsg::ManifestPersist {
                             request_id: next_request_id()?,
                         })?;
+                }
 
                 Ok(())
             }
@@ -918,6 +1018,180 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lease::PrimaryLease;
+
+    #[derive(Default)]
+    struct BlockingReleaseState {
+        started: bool,
+        allowed: bool,
+        completed: bool,
+    }
+
+    #[derive(Default)]
+    struct BlockingReleaseLease {
+        state: std::sync::Mutex<BlockingReleaseState>,
+        changed: std::sync::Condvar,
+    }
+
+    impl BlockingReleaseLease {
+        fn wait_until_release_started(&self, timeout: Duration) -> bool {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (state, _) = self
+                .changed
+                .wait_timeout_while(state, timeout, |state| !state.started)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.started
+        }
+
+        fn allow_release(&self) {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.allowed = true;
+            self.changed.notify_all();
+        }
+
+        fn wait_until_release_completed(&self, timeout: Duration) -> bool {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (state, _) = self
+                .changed
+                .wait_timeout_while(state, timeout, |state| !state.completed)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.completed
+        }
+
+        fn release_completed(&self) -> bool {
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .completed
+        }
+    }
+
+    impl crate::lease::PrimaryLease for BlockingReleaseLease {
+        fn try_acquire(
+            self: Arc<Self>,
+        ) -> Result<crate::lease::LeaseGuard, crate::lease::LeaseError> {
+            Ok(crate::lease::LeaseGuard::token())
+        }
+
+        fn renew(&self) -> Result<(), crate::lease::LeaseError> {
+            Ok(())
+        }
+
+        fn release(&self) -> Result<(), crate::lease::LeaseError> {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.started = true;
+            self.changed.notify_all();
+            state = self
+                .changed
+                .wait_while(state, |state| !state.allowed)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.completed = true;
+            self.changed.notify_all();
+            Ok(())
+        }
+
+        fn ttl(&self) -> Duration {
+            Duration::from_secs(30)
+        }
+
+        fn holder_id(&self) -> String {
+            "blocking-release-test".to_string()
+        }
+
+        fn epoch(&self) -> u64 {
+            1
+        }
+    }
+
+    #[test]
+    fn should_bound_shutdown_when_primary_lease_release_blocks() -> MidgeResult<()> {
+        // Arrange
+        let mut engine = Engine::open(OpenOptions::in_memory().build()?)?;
+        let lease_heartbeat = engine.lease_heartbeat.take();
+        let lease = engine.lease.take();
+        let lease_guard = engine.lease_guard.take();
+        Engine::release_fencing_parts(lease_heartbeat, lease, lease_guard);
+
+        let blocking_lease = Arc::new(BlockingReleaseLease::default());
+        let lease_guard = Arc::clone(&blocking_lease).try_acquire()?;
+        let engine_lease: Arc<dyn crate::lease::PrimaryLease> = blocking_lease.clone();
+        engine.lease = Some(engine_lease);
+        engine.lease_guard = Some(lease_guard);
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::sync_channel(1);
+
+        // Act
+        let shutdown_thread = std::thread::Builder::new()
+            .name("midge-blocking-release-shutdown-test".to_string())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let result = engine.shutdown(Duration::from_millis(25));
+                let elapsed = started.elapsed();
+                let _ = shutdown_tx.send((engine, result, elapsed));
+            })
+            .map_err(MidgeError::Io)?;
+        let release_started = blocking_lease.wait_until_release_started(Duration::from_secs(2));
+        let first_response = shutdown_rx.recv_timeout(Duration::from_millis(250));
+        let returned_before_release = first_response.is_ok();
+        let release_completed_before_unblock = blocking_lease.release_completed();
+        blocking_lease.allow_release();
+        let (mut engine, first_shutdown, shutdown_elapsed) = match first_response {
+            Ok(response) => response,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => shutdown_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|error| {
+                    MidgeError::Internal(format!(
+                        "shutdown did not return after releasing the test lease: {error}"
+                    ))
+                })?,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(MidgeError::Internal(
+                    "shutdown test thread disconnected before returning the engine".to_string(),
+                ));
+            }
+        };
+        shutdown_thread
+            .join()
+            .map_err(|_| MidgeError::Internal("shutdown test thread panicked".to_string()))?;
+        let release_completed = blocking_lease.wait_until_release_completed(Duration::from_secs(2));
+        let retry_shutdown = engine.shutdown(Duration::from_secs(2));
+
+        // Assert
+        assert!(release_started, "shutdown never attempted lease release");
+        assert!(
+            returned_before_release,
+            "shutdown exceeded its caller deadline while primary lease release was blocked"
+        );
+        assert!(
+            matches!(first_shutdown, Err(MidgeError::Timeout(_))),
+            "blocked fencing cleanup must return Timeout, got {first_shutdown:?}"
+        );
+        assert!(
+            shutdown_elapsed < Duration::from_millis(250),
+            "shutdown returned after its bounded deadline: {shutdown_elapsed:?}"
+        );
+        assert!(
+            !release_completed_before_unblock,
+            "shutdown released fencing resources before detached cleanup completed"
+        );
+        assert!(
+            release_completed,
+            "detached fencing cleanup did not finish after lease release resumed"
+        );
+        retry_shutdown?;
+        Ok(())
+    }
 
     #[test]
     fn should_allow_shutdown_retry_when_live_transaction_is_released() -> MidgeResult<()> {

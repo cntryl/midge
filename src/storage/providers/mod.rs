@@ -78,6 +78,21 @@ pub(crate) use crate::config::S3CredentialSource;
 pub(crate) use crate::config::{GcsApiStyle, GcsCredentialSource};
 
 #[cfg(feature = "cloud-common")]
+pub(super) fn is_aws_s3(provider: &CloudProviderConfig) -> bool {
+    matches!(provider, CloudProviderConfig::AwsS3 { .. })
+}
+
+#[cfg(feature = "cloud-common")]
+pub(super) fn is_s3_compatible(provider: &CloudProviderConfig) -> bool {
+    matches!(provider, CloudProviderConfig::S3Compatible { .. })
+}
+
+#[cfg(feature = "cloud-common")]
+pub(super) fn is_azure_blob(provider: &CloudProviderConfig) -> bool {
+    matches!(provider, CloudProviderConfig::AzureBlob { .. })
+}
+
+#[cfg(feature = "cloud-common")]
 pub(crate) fn build_cloud_backend(
     provider: &CloudProviderConfig,
 ) -> MidgeResult<Arc<dyn CloudBackend>> {

@@ -7,6 +7,7 @@
 
 use super::super::state::RuntimeState;
 use crate::common::{MidgeError, MidgeResult};
+use crate::runtime::hybrid_persistence::HybridPersistence;
 use crate::sst::Memtable;
 use std::path::Path;
 

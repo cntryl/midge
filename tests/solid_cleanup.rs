@@ -267,7 +267,8 @@ fn should_keep_block_cache_admission_synchronous() {
         "handle.join()",
     ];
 
-    // Act / Assert
+    // Act
+
     // Assert
     assert!(shard.contains("pub fn put(&self, key: CacheKey, value: &Bytes) -> bool"));
     assert!(shard.contains("self.insert_and_update_metrics(key, cache_value);"));
@@ -407,7 +408,8 @@ fn should_construct_runtime_observability_dtos_from_shared_types() {
     let engine = read_source("src/engine/mod.rs");
     let shared = read_source("src/types.rs");
 
-    // Act / Assert
+    // Act
+
     // Assert
     assert!(state.contains("crate::types::RuntimeMetricsSnapshot"));
     assert!(state.contains("crate::types::StorageLayoutSnapshot"));
@@ -573,19 +575,22 @@ fn should_keep_cloud_provider_constructors_on_same_variants() {
 fn should_own_cloud_provider_config_in_storage_providers() {
     // Arrange
     let generic_config = read_source("src/config.rs");
-    let provider_config = read_source("src/storage/providers/config.rs");
+    let provider_config = read_source("src/config/provider.rs");
+    let provider_module = read_source("src/storage/providers/mod.rs");
 
-    // Act / Assert
+    // Act
+
     // Assert
     assert!(!generic_config.contains("pub enum CloudProviderConfig"));
     assert!(!generic_config.contains("pub enum S3CredentialSource"));
     assert!(!generic_config.contains("pub enum AzureCredentialSource"));
     assert!(!generic_config.contains("pub enum GcsCredentialSource"));
-    assert!(generic_config.contains("pub use crate::storage::providers"));
+    assert!(generic_config.contains("pub use provider::"));
     assert!(provider_config.contains("pub enum CloudProviderConfig"));
     assert!(provider_config.contains("pub enum S3CredentialSource"));
     assert!(provider_config.contains("pub enum AzureCredentialSource"));
     assert!(provider_config.contains("pub enum GcsCredentialSource"));
+    assert!(provider_module.contains("pub(crate) use crate::config::CloudProviderConfig"));
     assert!(provider_config.contains("impl CloudProviderConfig"));
 }
 
@@ -663,8 +668,7 @@ fn should_keep_moved_config_types_out_of_lower_layers_engine_imports() {
         "src/runtime/intent_persistence.rs",
         "src/runtime/state.rs",
         "src/lease/mod.rs",
-        "src/storage/residue.rs",
-        "src/storage/providers/mod.rs",
+        "src/runtime/storage_residue.rs",
         "src/storage/providers/factory.rs",
         "src/storage/providers/s3_resolver.rs",
         "src/storage/providers/azure_resolver.rs",

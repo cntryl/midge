@@ -1,3 +1,5 @@
+//! Runtime assessment of files that are present but not authoritative.
+
 use crate::config::EngineHealth;
 use crate::metadata::Manifest;
 use std::collections::HashSet;
@@ -5,18 +7,18 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct StorageResidueAssessment {
-    pub orphan_ssts: Vec<String>,
+    pub(crate) orphan_ssts: Vec<String>,
     /// Temporary residue inside `sst/` that is never authoritative.
-    pub sst_temp_files: Vec<String>,
+    pub(crate) sst_temp_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct HealthInputs {
-    pub opened_in_salvage_mode: bool,
-    pub write_stalled: bool,
-    pub persistence_anomaly_detected: bool,
-    pub pending_intents: usize,
-    pub orphan_ssts: usize,
+    pub(crate) opened_in_salvage_mode: bool,
+    pub(crate) write_stalled: bool,
+    pub(crate) persistence_anomaly_detected: bool,
+    pub(crate) pending_intents: usize,
+    pub(crate) orphan_ssts: usize,
 }
 
 impl StorageResidueAssessment {

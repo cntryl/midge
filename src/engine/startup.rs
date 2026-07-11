@@ -1420,6 +1420,11 @@ impl RuntimeRecoveryMaterialization {
             )?;
         }
 
+        crate::runtime::ddl::reconcile_startup(
+            &mut materialized.state,
+            materialized.runtime_config.hybrid_storage.as_ref(),
+        )?;
+
         materialized.state.replay_intent_log()?;
         if let Some(root) = materialized.cloud_root.as_deref() {
             CloudStartupRecovery::ensure_local_sst_cache_from_cloud(&mut materialized.state, root)?;
@@ -1529,6 +1534,7 @@ impl FacadeAssembly {
             lease: Some(lease),
             lease_guard: Some(lease_guard),
             lease_heartbeat: Some(std::sync::Mutex::new(lease_heartbeat)),
+            pending_fencing_cleanup: None,
             ingest_coordinators,
             transaction_memory_pool: Arc::new(
                 crate::runtime::transaction_spill::TransactionMemoryPool::new(

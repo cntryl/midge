@@ -2,12 +2,14 @@
 //!
 //! Generic iterator traits for traversing key-value data
 
-pub mod skiplist;
+pub mod skiplist {
+    pub use crate::memtable::skiplist::*;
+}
 
 pub use skiplist::SkipList;
 
 use crate::common::MidgeResult;
-use crate::sst::KvPair;
+pub use crate::types::KvPair;
 
 /// Forward iterator trait
 pub trait Iterator: Send + Sync {

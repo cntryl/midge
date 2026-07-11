@@ -1,7 +1,7 @@
 //! Hybrid storage with cloud integration and disk pressure management
 //!
 //! Provides:
-//! - **`HybridStorage`**: Combines local and cloud backends with WAL durability
+//! - **`HybridStorage`**: Combines local and cloud backends with bounded object I/O
 //! - **`StorageBudgetActor`**: Tracks disk usage and enforces watermarks
 //! - **`StorageBudgetPolicy`**: Watermark thresholds and eviction strategy
 //! - **`DiskState`**: Disk usage accounting
@@ -13,13 +13,13 @@
 //! - **policy.rs**: `StorageBudgetPolicy` - watermark thresholds
 //! - **state.rs**: `DiskState` - disk accounting
 //!
-//! # Two Storage Roles
+//! # Storage Roles
 //!
 //! `HybridStorage` manages:
-//! 1. **Object Storage**: SSTs via `submit_read/write/delete/list`
-//! 2. **WAL Durability**: Segments via `enqueue_wal_segment()` + `process_uploads()`
+//! 1. **Object Storage**: keyed bytes via `submit_read/write/delete/list`
+//! 2. **Queued Durability**: explicit keys via `enqueue_object_upload()` + `process_uploads()`
 //!
-//! WAL Flow: local write → `enqueue_wal_segment()` → `process_uploads()` → `CloudAck`
+//! The runtime maps WAL/SST names, validates formats, and proves manifest coverage. Storage never interprets those formats.
 //!
 //! # Usage
 

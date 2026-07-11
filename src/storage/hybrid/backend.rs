@@ -2,26 +2,19 @@
 //!
 //! CRITICAL ARCHITECTURE:
 //!
-//! `HybridStorage` has TWO SEPARATE ROLES:
+//! `HybridStorage` has TWO FORMAT-NEUTRAL ROLES:
 //!
-//! 1. OBJECT STORAGE (SSTs, metadata):
-//!    - `submit_read/write/delete/list` for SST files
+//! 1. OBJECT STORAGE:
+//!    - `submit_read/write/delete/list` for keyed bytes
 //!    - Local + cloud merging/fallback
-//!    - Cloud writes only for sst/ prefix
 //!
-//! 2. WAL DURABILITY PIPELINE (`CloudAsync` mode):
-//!    - `enqueue_wal_segment()` - queue WAL for cloud upload
+//! 2. BOUNDED UPLOAD PIPELINE:
+//!    - `enqueue_object_upload()` - queue an explicit object key
 //!    - `process_uploads()` - initiate cloud uploads
-//!    - `poll()` - retrieve CloudAck/CloudFail events
-//!    - NEVER uses `submit_write()` for WAL
+//!    - retain/coalesce terminal acknowledgements without unbounded channels
 //!
-//! WAL Flow:
-//!   `WalActor` → local append barrier → memtable visibility →
-//!   `enqueue_wal_segment()` → `process_uploads()` → cloud backend →
-//!   `CloudAck` event → `WalActor` advances cloud durability bookkeeping
-//!
-//! SST Flow:
-//!   Engine → `submit_write()` → local write + cloud write (if sst/) → done
+//! WAL/SST key mapping, physical validation, manifest coverage, and prune policy
+//! live in `runtime::hybrid_persistence`; this module never imports those formats.
 
 use super::actor;
 use super::policy;
@@ -31,7 +24,6 @@ use crate::storage::{
 use crossbeam::channel as cb;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -44,6 +36,8 @@ const WAL_UPLOAD_WORKER_QUEUE_CAPACITY: usize = 32;
 const MAX_PENDING_STORAGE_EVENTS: usize = MAX_PENDING_WAL_UPLOADS * 2;
 pub(crate) const HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY: usize = MAX_PENDING_STORAGE_EVENTS;
 const MAX_PENDING_STORAGE_EVENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CONCURRENT_PRUNE_WORKERS: usize = 4;
+const MAX_PENDING_PRUNE_REQUESTS: usize = 64;
 const STORAGE_CALLBACK_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLOUD_ERROR_BYTES: usize = 4 * 1024;
 
@@ -54,6 +48,8 @@ struct HybridQueueLimits {
     worker_entries: usize,
     event_entries: usize,
     event_bytes: usize,
+    prune_workers: usize,
+    prune_requests: usize,
     callback_timeout: Duration,
 }
 
@@ -65,6 +61,8 @@ impl Default for HybridQueueLimits {
             worker_entries: WAL_UPLOAD_WORKER_QUEUE_CAPACITY,
             event_entries: MAX_PENDING_STORAGE_EVENTS,
             event_bytes: MAX_PENDING_STORAGE_EVENT_BYTES,
+            prune_workers: MAX_CONCURRENT_PRUNE_WORKERS,
+            prune_requests: MAX_PENDING_PRUNE_REQUESTS,
             callback_timeout: STORAGE_CALLBACK_TIMEOUT,
         }
     }
@@ -149,10 +147,22 @@ struct QueuedStorageEvent {
     accounted_bytes: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TerminalEventKey {
+    Upload(u64),
+    Prune(u64),
+}
+
 #[derive(Debug)]
 struct BoundedEventQueue {
+    /// Advisory/transient state changes. These may be coalesced independently
+    /// from terminal completions.
     entries: VecDeque<QueuedStorageEvent>,
     pending_bytes: usize,
+    /// One terminal result per admitted operation. A completion must not be
+    /// lost merely because the transient queue is saturated.
+    terminal_entries: HashMap<TerminalEventKey, QueuedStorageEvent>,
+    terminal_pending_bytes: usize,
     max_entries: usize,
     max_bytes: usize,
 }
@@ -162,8 +172,23 @@ impl BoundedEventQueue {
         Self {
             entries: VecDeque::new(),
             pending_bytes: 0,
+            terminal_entries: HashMap::new(),
+            terminal_pending_bytes: 0,
             max_entries,
             max_bytes,
+        }
+    }
+
+    fn terminal_key(event: &StorageEvent) -> Option<TerminalEventKey> {
+        match event {
+            StorageEvent::CloudAck { segment_id, .. }
+            | StorageEvent::CloudFail { segment_id, .. } => {
+                Some(TerminalEventKey::Upload(*segment_id))
+            }
+            StorageEvent::CloudWalPruneComplete { segment_id, .. } => {
+                Some(TerminalEventKey::Prune(*segment_id))
+            }
+            _ => None,
         }
     }
 
@@ -212,6 +237,44 @@ impl BoundedEventQueue {
     }
 
     fn try_push(&mut self, event: StorageEvent, externally_delivered: bool) -> Result<(), String> {
+        let accounted_bytes = Self::event_bytes(&event);
+        if let Some(key) = Self::terminal_key(&event) {
+            let replaced = self.terminal_entries.remove(&key);
+            if let Some(replaced) = replaced.as_ref() {
+                self.terminal_pending_bytes = self
+                    .terminal_pending_bytes
+                    .saturating_sub(replaced.accounted_bytes);
+            }
+            if self.terminal_entries.len() >= self.max_entries
+                || self.terminal_pending_bytes.saturating_add(accounted_bytes) > self.max_bytes
+            {
+                if let Some(replaced) = replaced {
+                    self.terminal_pending_bytes = self
+                        .terminal_pending_bytes
+                        .saturating_add(replaced.accounted_bytes);
+                    self.terminal_entries.insert(key, replaced);
+                }
+                return Err(format!(
+                    "terminal storage event queue at capacity: entries={}/{}, bytes={}/{}",
+                    self.terminal_entries.len(),
+                    self.max_entries,
+                    self.terminal_pending_bytes,
+                    self.max_bytes
+                ));
+            }
+            self.terminal_pending_bytes =
+                self.terminal_pending_bytes.saturating_add(accounted_bytes);
+            self.terminal_entries.insert(
+                key,
+                QueuedStorageEvent {
+                    event,
+                    externally_delivered,
+                    accounted_bytes,
+                },
+            );
+            return Ok(());
+        }
+
         if matches!(
             event,
             StorageEvent::BackpressureOn | StorageEvent::BackpressureOff
@@ -219,7 +282,6 @@ impl BoundedEventQueue {
             self.retain_non_backpressure();
         }
 
-        let accounted_bytes = Self::event_bytes(&event);
         if self.entries.len() >= self.max_entries
             || self.pending_bytes.saturating_add(accounted_bytes) > self.max_bytes
         {
@@ -256,7 +318,22 @@ impl BoundedEventQueue {
 
     fn drain(&mut self) -> Vec<QueuedStorageEvent> {
         self.pending_bytes = 0;
-        self.entries.drain(..).collect()
+        self.terminal_pending_bytes = 0;
+        let mut drained = Vec::with_capacity(
+            self.terminal_entries
+                .len()
+                .saturating_add(self.entries.len()),
+        );
+        drained.extend(self.terminal_entries.drain().map(|(_, queued)| queued));
+        drained.extend(self.entries.drain(..));
+        drained
+    }
+
+    fn pending_prune_completions(&self) -> usize {
+        self.terminal_entries
+            .keys()
+            .filter(|key| matches!(key, TerminalEventKey::Prune(_)))
+            .count()
     }
 }
 
@@ -273,6 +350,7 @@ pub enum UploadStatus {
 #[derive(Debug, Clone)]
 pub struct UploadState {
     pub segment_id: u64,
+    pub object_key: String,
     pub local_path: PathBuf,
     pub status: UploadStatus,
     pub max_sequence: u64,
@@ -280,61 +358,83 @@ pub struct UploadState {
     size_bytes: u64,
 }
 
-#[derive(Debug, Clone)]
-struct VerifiedWalSegment {
-    max_sequence: u64,
-    data_records: Vec<crate::wal::cloud_segment::DataCoverageRecord>,
-    metadata: StorageObjectMetadata,
-}
-
-#[derive(Debug, Clone)]
-struct VerifiedCloudObject {
-    metadata: StorageObjectMetadata,
-    content_crc32c: Option<u32>,
-    summary: Option<crate::sst::fs::SstFileSummary>,
-}
-
-#[derive(Clone)]
-pub(crate) struct CloudMetadataPruneGuard {
-    cloud: Arc<crate::storage::cloud::CloudStorage>,
-    objects: Vec<CloudMetadataPruneProof>,
-}
-
-impl CloudMetadataPruneGuard {
-    pub(crate) fn new(
-        cloud: Arc<crate::storage::cloud::CloudStorage>,
-        objects: Vec<CloudMetadataPruneProof>,
-    ) -> Self {
-        Self { cloud, objects }
-    }
-}
-
+/// A stable read plus identity observation for one remote object.
+///
+/// Format-aware validation belongs to the runtime. Storage only establishes
+/// that the bytes it returned still match the provider identity observed by
+/// `HEAD`.
 #[derive(Clone, Debug)]
-pub(crate) struct CloudMetadataPruneProof {
-    pub(crate) key: String,
-    pub(crate) expected_bytes: Vec<u8>,
-    pub(crate) remote: StorageObjectMetadata,
+pub(crate) struct RemoteObjectProof {
+    key: String,
+    bytes: Vec<u8>,
+    metadata: StorageObjectMetadata,
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct CloudWalPruneGuard {
-    manifest: crate::metadata::Manifest,
-    metadata: Option<CloudMetadataPruneGuard>,
-}
+impl RemoteObjectProof {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 
-impl CloudWalPruneGuard {
-    pub(crate) fn new(
-        manifest: crate::metadata::Manifest,
-        metadata: Option<CloudMetadataPruneGuard>,
-    ) -> Self {
-        Self { manifest, metadata }
+    pub(crate) fn metadata(&self) -> &StorageObjectMetadata {
+        &self.metadata
     }
 }
 
-#[derive(Default)]
+/// A format-neutral object identity that must still hold immediately before a
+/// conditional delete is issued.
+#[derive(Clone)]
+pub(crate) struct GuardedObjectProof {
+    backend: Arc<dyn StorageBackend>,
+    key: String,
+    expected_bytes: Option<Vec<u8>>,
+    metadata: StorageObjectMetadata,
+}
+
+impl GuardedObjectProof {
+    pub(crate) fn metadata_only(
+        backend: Arc<dyn StorageBackend>,
+        key: String,
+        metadata: StorageObjectMetadata,
+    ) -> Self {
+        Self {
+            backend,
+            key,
+            expected_bytes: None,
+            metadata,
+        }
+    }
+
+    pub(crate) fn exact(
+        backend: Arc<dyn StorageBackend>,
+        key: String,
+        expected_bytes: Vec<u8>,
+        metadata: StorageObjectMetadata,
+    ) -> Self {
+        Self {
+            backend,
+            key,
+            expected_bytes: Some(expected_bytes),
+            metadata,
+        }
+    }
+}
+
 struct PruneWorkerRegistry {
     shutting_down: bool,
     handles: Vec<JoinHandle<()>>,
+    max_workers: usize,
+    max_requests: usize,
+}
+
+impl PruneWorkerRegistry {
+    fn new(max_workers: usize, max_requests: usize) -> Self {
+        Self {
+            shutting_down: false,
+            handles: Vec::new(),
+            max_workers: max_workers.max(1),
+            max_requests: max_requests.max(1),
+        }
+    }
 }
 
 /// Hybrid storage combining local filesystem and cloud backends
@@ -357,12 +457,6 @@ pub struct HybridStorage {
     upload_queue: Arc<Mutex<UploadQueue>>,
     /// Completed events ready for polling
     event_queue: Arc<Mutex<BoundedEventQueue>>,
-
-    /// WAL segments whose remote object was read back and decoded successfully.
-    verified_wal_segments: Arc<Mutex<HashMap<u64, VerifiedWalSegment>>>,
-
-    /// Immutable SST objects whose remote object was read back and opened successfully.
-    verified_sst_objects: Arc<Mutex<HashMap<String, VerifiedCloudObject>>>,
 
     /// Optional external event sink for CloudAck/CloudFail.
     /// When set, upload completions are pushed directly to the runtime event loop
@@ -452,15 +546,16 @@ impl HybridStorage {
             limits.upload_entries,
             limits.upload_bytes,
         )));
+        let terminal_capacity = limits
+            .upload_entries
+            .saturating_add(limits.prune_requests.max(1));
+        let terminal_bytes = terminal_capacity.saturating_mul(
+            std::mem::size_of::<StorageEvent>().saturating_add(MAX_CLOUD_ERROR_BYTES),
+        );
         let event_queue = Arc::new(Mutex::new(BoundedEventQueue::new(
-            limits.event_entries,
-            limits.event_bytes,
+            limits.event_entries.max(terminal_capacity),
+            limits.event_bytes.max(terminal_bytes),
         )));
-        let verified_wal_segments: Arc<Mutex<HashMap<u64, VerifiedWalSegment>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let verified_sst_objects: Arc<Mutex<HashMap<String, VerifiedCloudObject>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
         // Single background worker for WAL uploads.
         // This avoids spawning one OS thread per segment, which is extremely
         // expensive under CloudAsync + synchronous write APIs (e.g. 10k puts).
@@ -471,7 +566,6 @@ impl HybridStorage {
             cloud.clone(),
             event_queue.clone(),
             external_event_tx.clone(),
-            verified_wal_segments.clone(),
             limits.callback_timeout,
         );
 
@@ -481,14 +575,15 @@ impl HybridStorage {
             budget_actor: Arc::new(Mutex::new(budget_actor)),
             upload_queue,
             event_queue,
-            verified_wal_segments,
-            verified_sst_objects,
             external_event_tx,
             wal_upload_tx: Some(wal_upload_tx),
             callback_timeout: limits.callback_timeout,
             upload_worker_failed,
             upload_worker_handle,
-            prune_workers: Mutex::new(PruneWorkerRegistry::default()),
+            prune_workers: Mutex::new(PruneWorkerRegistry::new(
+                limits.prune_workers,
+                limits.prune_requests,
+            )),
         }
     }
 
@@ -527,20 +622,24 @@ impl HybridStorage {
         self.upload_queue.lock().is_stalled()
     }
 
-    pub fn enqueue_wal_segment(
+    /// Queue a local file for bounded remote publication under an explicit
+    /// object key. The runtime owns the meaning of the request id and frontier.
+    pub(crate) fn enqueue_object_upload(
         &self,
-        segment_id: u64,
+        request_id: u64,
+        object_key: String,
         local_path: &Path,
-        max_sequence: u64,
+        frontier: u64,
     ) -> crate::common::MidgeResult<()> {
         let size_bytes = std::fs::metadata(local_path)
             .map_err(crate::common::MidgeError::Io)?
             .len();
         let upload_state = UploadState {
-            segment_id,
+            segment_id: request_id,
+            object_key,
             local_path: local_path.to_path_buf(),
             status: UploadStatus::Pending,
-            max_sequence,
+            max_sequence: frontier,
             retries: 0,
             size_bytes,
         };
@@ -559,18 +658,18 @@ impl HybridStorage {
             tracing::warn!(
                 queue_size = queue.entries.len(),
                 queue_bytes = queue.pending_bytes,
-                segment_id,
+                request_id,
                 "CloudAsync WAL upload queue growing; cloud uploads may be slow"
             );
         }
 
         tracing::debug!(
-            segment_id,
+            request_id,
             ?local_path,
-            max_sequence,
+            frontier,
             queue_size = queue.entries.len(),
             queue_bytes = queue.pending_bytes,
-            "WAL segment enqueued for cloud upload"
+            "object enqueued for cloud upload"
         );
         Ok(())
     }
@@ -631,6 +730,19 @@ impl HybridStorage {
         }
 
         // 3) Schedule any eligible uploads.
+        self.schedule_pending_uploads(&mut queue);
+
+        // 4) Garbage-collect finished items (Completed or Failed after 3 attempts).
+        queue.remove_terminal();
+
+        drained_events
+            .into_iter()
+            .filter(|queued| !queued.externally_delivered)
+            .map(|queued| queued.event)
+            .collect()
+    }
+
+    fn schedule_pending_uploads(&self, queue: &mut UploadQueue) {
         let now = Instant::now();
         for upload in &mut queue.entries {
             let eligible = match upload.status {
@@ -643,60 +755,58 @@ impl HybridStorage {
             }
 
             upload.status = UploadStatus::InFlight { started_at: now };
-
-            let forced_failure =
-                crate::failpoints::is_active("midge::cloud::inject_fail_wal_upload");
-            if forced_failure {
+            if crate::failpoints::is_active("midge::cloud::inject_fail_wal_upload") {
                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                     telemetry.metrics().record_cloud_async_wal_upload_failed();
                 }
-
-                let fail = StorageEvent::CloudFail {
-                    segment_id: upload.segment_id,
-                    error: "failpoint: cloud WAL upload failed".to_string(),
-                };
-                {
-                    Self::queue_storage_event(
-                        &self.event_queue,
-                        self.external_event_tx.as_ref(),
-                        fail,
-                    );
-                }
+                Self::emit_wal_upload_failure(
+                    upload,
+                    "failpoint: cloud WAL upload failed",
+                    &self.event_queue,
+                    self.external_event_tx.as_ref(),
+                );
                 continue;
             }
 
-            // Send to the dedicated worker; avoid per-upload thread spawn.
-            // If worker failed to spawn, perform inline upload as fallback.
             if self.upload_worker_failed {
-                self.process_upload_inline(upload);
-            } else if let Some(tx) = &self.wal_upload_tx {
-                match tx.try_send(upload.clone()) {
-                    Ok(()) => {}
-                    Err(mpsc::TrySendError::Full(_)) => {
-                        upload.status = UploadStatus::Pending;
-                        break;
-                    }
-                    Err(mpsc::TrySendError::Disconnected(_)) => {
-                        tracing::warn!(
-                            segment_id = upload.segment_id,
-                            "WAL upload worker unavailable, falling back to inline upload"
-                        );
-                        self.process_upload_inline(upload);
-                    }
+                Self::emit_wal_upload_failure(
+                    upload,
+                    "cloud upload worker failed to start",
+                    &self.event_queue,
+                    self.external_event_tx.as_ref(),
+                );
+                continue;
+            }
+
+            let Some(tx) = &self.wal_upload_tx else {
+                Self::emit_wal_upload_failure(
+                    upload,
+                    "cloud upload worker is shutting down",
+                    &self.event_queue,
+                    self.external_event_tx.as_ref(),
+                );
+                continue;
+            };
+            match tx.try_send(upload.clone()) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
+                    upload.status = UploadStatus::Pending;
+                    break;
                 }
-            } else {
-                self.process_upload_inline(upload);
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    tracing::warn!(
+                        segment_id = upload.segment_id,
+                        "cloud upload worker unavailable"
+                    );
+                    Self::emit_wal_upload_failure(
+                        upload,
+                        "cloud upload worker channel disconnected",
+                        &self.event_queue,
+                        self.external_event_tx.as_ref(),
+                    );
+                }
             }
         }
-
-        // 4) Garbage-collect finished items (Completed or Failed after 3 attempts).
-        queue.remove_terminal();
-
-        drained_events
-            .into_iter()
-            .filter(|queued| !queued.externally_delivered)
-            .map(|queued| queued.event)
-            .collect()
     }
 
     fn duration_micros_to_u64(duration: Duration) -> u64 {
@@ -739,7 +849,6 @@ impl HybridStorage {
         cloud: Arc<dyn StorageBackend>,
         event_queue: Arc<Mutex<BoundedEventQueue>>,
         external_event_tx: Option<cb::Sender<StorageEvent>>,
-        verified_wal_segments: Arc<Mutex<HashMap<u64, VerifiedWalSegment>>>,
         callback_timeout: Duration,
     ) -> (Option<JoinHandle<()>>, bool) {
         let spawn_result = thread::Builder::new()
@@ -751,7 +860,6 @@ impl HybridStorage {
                         &cloud,
                         &event_queue,
                         external_event_tx.as_ref(),
-                        &verified_wal_segments,
                         callback_timeout,
                     );
                 }
@@ -774,7 +882,6 @@ impl HybridStorage {
         cloud: &Arc<dyn StorageBackend>,
         event_queue: &Arc<Mutex<BoundedEventQueue>>,
         external_event_tx: Option<&cb::Sender<StorageEvent>>,
-        verified_wal_segments: &Arc<Mutex<HashMap<u64, VerifiedWalSegment>>>,
         callback_timeout: Duration,
     ) {
         let upload_start = Instant::now();
@@ -805,10 +912,11 @@ impl HybridStorage {
             return;
         }
 
+        let expected_data = data.clone();
+        let object_key = upload.object_key.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        let cloud_key = crate::wal::cloud_segment::object_key(upload.segment_id);
         cloud.submit_write_with_headers(
-            &cloud_key,
+            &upload.object_key,
             data,
             vec![("If-None-Match".into(), "*".into())],
             tx,
@@ -821,13 +929,16 @@ impl HybridStorage {
             external_event_tx,
             &rx,
             callback_timeout,
-            |segment_id, max_sequence| {
-                Self::verify_remote_wal_segment_with_backend(
-                    cloud,
-                    verified_wal_segments,
-                    segment_id,
-                    max_sequence,
-                )
+            |_, _| {
+                let proof =
+                    Self::stable_object_proof_from_backend(cloud, &object_key, callback_timeout)?;
+                if proof.bytes == expected_data {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "remote object '{object_key}' differs from uploaded bytes"
+                    ))
+                }
             },
         );
     }
@@ -859,68 +970,6 @@ impl HybridStorage {
             | actor::ReservationResult::RejectNoSpace => StorageEvent::BackpressureOn,
         };
         Self::queue_storage_event(&self.event_queue, self.external_event_tx.as_ref(), event);
-    }
-
-    /// Process a single WAL upload inline (fallback when worker thread unavailable)
-    ///
-    /// This is a fallback path used when:
-    /// - The background upload worker failed to spawn
-    /// - The worker thread died unexpectedly
-    ///
-    /// Performs the upload synchronously in the caller's context (typically runtime thread).
-    /// This may add latency but prevents deadlock when resources are constrained.
-    fn process_upload_inline(&self, upload: &UploadState) {
-        let upload_start = Instant::now();
-        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-            telemetry.metrics().record_cloud_async_wal_upload_started();
-        }
-
-        Self::log_wal_upload_start(upload, false);
-        let data = match Self::read_wal_file(upload) {
-            Ok(data) => data,
-            Err(error) => {
-                Self::emit_wal_upload_failure(
-                    upload,
-                    &error,
-                    &self.event_queue,
-                    self.external_event_tx.as_ref(),
-                );
-                return;
-            }
-        };
-
-        Self::record_wal_bytes(&data);
-        if crate::failpoints::is_active("midge::cloud::inject_fail_wal_upload") {
-            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                telemetry.metrics().record_cloud_async_wal_upload_failed();
-            }
-            Self::emit_wal_upload_failure(
-                upload,
-                "failpoint: cloud WAL upload failed",
-                &self.event_queue,
-                self.external_event_tx.as_ref(),
-            );
-            return;
-        }
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        let cloud_key = crate::wal::cloud_segment::object_key(upload.segment_id);
-        self.cloud.submit_write_with_headers(
-            &cloud_key,
-            data,
-            vec![("If-None-Match".into(), "*".into())],
-            tx,
-        );
-
-        Self::handle_wal_upload_result(
-            upload,
-            upload_start,
-            &self.event_queue,
-            self.external_event_tx.as_ref(),
-            &rx,
-            self.callback_timeout,
-            |segment_id, max_sequence| self.verify_remote_wal_segment(segment_id, max_sequence),
-        );
     }
 
     fn log_wal_upload_start(upload: &UploadState, with_worker: bool) {
@@ -1123,9 +1172,17 @@ impl HybridStorage {
         cloud: &Arc<dyn StorageBackend>,
         key: &str,
     ) -> Result<Vec<u8>, String> {
+        Self::read_object_from_backend_blocking(cloud, key, STORAGE_CALLBACK_TIMEOUT)
+    }
+
+    fn read_object_from_backend_blocking(
+        backend: &Arc<dyn StorageBackend>,
+        key: &str,
+        callback_timeout: Duration,
+    ) -> Result<Vec<u8>, String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_read(key, tx);
-        match rx.recv_timeout(Duration::from_secs(30)) {
+        backend.submit_read(key, tx);
+        match rx.recv_timeout(callback_timeout) {
             Ok(StorageEvent::ReadComplete {
                 result: StorageOutcome::Ok(data),
                 ..
@@ -1141,13 +1198,14 @@ impl HybridStorage {
         }
     }
 
-    fn head_cloud_object_from_backend_blocking(
-        cloud: &Arc<dyn StorageBackend>,
+    fn head_object_from_backend_blocking(
+        backend: &Arc<dyn StorageBackend>,
         key: &str,
+        callback_timeout: Duration,
     ) -> Result<StorageObjectMetadata, String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_head(key, tx);
-        match rx.recv_timeout(Duration::from_secs(30)) {
+        backend.submit_head(key, tx);
+        match rx.recv_timeout(callback_timeout) {
             Ok(StorageEvent::HeadComplete {
                 key: returned_key,
                 result: StorageOutcome::Ok(metadata),
@@ -1250,475 +1308,278 @@ impl HybridStorage {
         }
     }
 
-    fn verify_cloud_object_proof(
-        cloud: &Arc<dyn StorageBackend>,
+    fn stable_object_proof_from_backend(
+        backend: &Arc<dyn StorageBackend>,
         key: &str,
-        expected: &StorageObjectMetadata,
-    ) -> Result<(), String> {
-        let actual = Self::head_cloud_object_from_backend_blocking(cloud, key)?;
-        if &actual == expected {
-            return Ok(());
-        }
-
-        Err(format!(
-            "cloud object '{key}' changed since validation: expected {expected:?}, actual {actual:?}"
-        ))
-    }
-
-    #[cfg(test)]
-    fn is_verified_wal_segment(
-        verified_wal_segments: &Arc<Mutex<HashMap<u64, VerifiedWalSegment>>>,
-        segment_id: u64,
-        expected_max_sequence: u64,
-    ) -> bool {
-        verified_wal_segments
-            .lock()
-            .get(&segment_id)
-            .is_some_and(|proof| proof.max_sequence == expected_max_sequence)
-    }
-
-    #[cfg(test)]
-    pub fn is_remote_wal_segment_verified(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-    ) -> bool {
-        Self::is_verified_wal_segment(
-            &self.verified_wal_segments,
-            segment_id,
-            expected_max_sequence,
-        )
-    }
-
-    pub fn verify_cached_remote_wal_segment(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-    ) -> Result<(), String> {
-        let key = crate::wal::cloud_segment::object_key(segment_id);
-        let Some(proof) = self.verified_wal_segments.lock().get(&segment_id).cloned() else {
+        callback_timeout: Duration,
+    ) -> Result<RemoteObjectProof, String> {
+        let before = Self::head_object_from_backend_blocking(backend, key, callback_timeout)?;
+        let bytes = Self::read_object_from_backend_blocking(backend, key, callback_timeout)?;
+        let after = Self::head_object_from_backend_blocking(backend, key, callback_timeout)?;
+        if before != after {
             return Err(format!(
-                "cloud WAL segment {segment_id} has no prior readback proof for max sequence {expected_max_sequence}"
-            ));
-        };
-        if proof.max_sequence != expected_max_sequence {
-            return Err(format!(
-                "cached cloud WAL segment '{key}' max sequence {} does not match expected {expected_max_sequence}",
-                proof.max_sequence
+                "object '{key}' identity changed during read: before {before:?}, after {after:?}"
             ));
         }
-        Self::verify_cloud_object_proof(&self.cloud, &key, &proof.metadata)
-    }
-
-    pub(crate) fn cached_remote_wal_segment_covered_by_manifest(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-        manifest: &crate::metadata::Manifest,
-    ) -> Result<bool, String> {
-        let proof = self.cached_remote_wal_segment_proof(segment_id, expected_max_sequence)?;
-        Ok(Self::wal_data_records_covered_by_manifest(
-            &proof.data_records,
-            manifest,
-        ))
-    }
-
-    fn cached_remote_wal_segment_proof(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-    ) -> Result<VerifiedWalSegment, String> {
-        let key = crate::wal::cloud_segment::object_key(segment_id);
-        let Some(proof) = self.verified_wal_segments.lock().get(&segment_id).cloned() else {
+        if after.size != bytes.len() as u64 {
             return Err(format!(
-                "cloud WAL segment {segment_id} has no prior readback proof for max sequence {expected_max_sequence}"
+                "object '{key}' size changed during read: bytes={}, metadata={} ",
+                bytes.len(),
+                after.size
             ));
+        }
+        Ok(RemoteObjectProof {
+            key: key.to_string(),
+            bytes,
+            metadata: after,
+        })
+    }
+
+    /// Read one cloud object together with a stable provider identity. The
+    /// runtime may validate the bytes as WAL, SST, or metadata without giving
+    /// those formats to the storage layer.
+    pub(crate) fn remote_object_proof(&self, key: &str) -> Result<RemoteObjectProof, String> {
+        Self::stable_object_proof_from_backend(&self.cloud, key, self.callback_timeout)
+    }
+
+    /// Return a stable proof when the remote key exists, or `None` for a
+    /// provider-confirmed missing key.
+    pub(crate) fn remote_object_proof_optional(
+        &self,
+        key: &str,
+    ) -> Result<Option<RemoteObjectProof>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.cloud.submit_head(key, tx);
+        match rx.recv_timeout(self.callback_timeout) {
+            Ok(StorageEvent::HeadComplete {
+                result: StorageOutcome::Ok(_),
+                ..
+            }) => self.remote_object_proof(key).map(Some),
+            Ok(StorageEvent::HeadComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            }) if Self::storage_error_indicates_missing(&error) => Ok(None),
+            Ok(StorageEvent::HeadComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            }) => Err(format!("remote object '{key}' HEAD failed: {error}")),
+            Ok(other) => Err(format!(
+                "unexpected remote object HEAD response for '{key}': {other:?}"
+            )),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err(format!("remote object HEAD timed out for '{key}'"))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(format!("remote object HEAD callback closed for '{key}'"))
+            }
+        }
+    }
+
+    /// Conditionally replace or create a remote object and return a stable
+    /// proof of the exact bytes that won the provider CAS.
+    pub(crate) fn compare_exchange_remote_object(
+        &self,
+        key: &str,
+        expected: Option<&StorageObjectMetadata>,
+        data: Vec<u8>,
+    ) -> crate::common::MidgeResult<RemoteObjectProof> {
+        let headers = if let Some(expected) = expected {
+            let etag = expected.etag.trim();
+            if etag.is_empty() {
+                return Err(crate::common::MidgeError::InvalidArgument(format!(
+                    "remote CAS for '{key}' requires a non-empty identity token"
+                )));
+            }
+            vec![("If-Match".to_string(), etag.to_string())]
+        } else {
+            vec![("If-None-Match".to_string(), "*".to_string())]
         };
-        if proof.max_sequence != expected_max_sequence {
-            return Err(format!(
-                "cached cloud WAL segment '{key}' max sequence {} does not match expected {expected_max_sequence}",
-                proof.max_sequence
-            ));
+        let expected_bytes = data.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.cloud.submit_write_with_headers(key, data, headers, tx);
+        match rx.recv_timeout(self.callback_timeout) {
+            Ok(StorageEvent::WriteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            }) => {}
+            Ok(StorageEvent::WriteComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            }) => {
+                let lower = error.to_ascii_lowercase();
+                if lower.contains("precondition")
+                    || lower.contains("if-match")
+                    || lower.contains("already exists")
+                {
+                    return Err(crate::common::MidgeError::Busy(format!(
+                        "remote CAS conflict for '{key}': {error}"
+                    )));
+                }
+                return Err(crate::common::MidgeError::Internal(format!(
+                    "remote CAS failed for '{key}': {error}"
+                )));
+            }
+            Ok(other) => {
+                return Err(crate::common::MidgeError::Internal(format!(
+                    "unexpected remote CAS response for '{key}': {other:?}"
+                )));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err(crate::common::MidgeError::Timeout(format!(
+                    "remote CAS timed out for '{key}'"
+                )));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(crate::common::MidgeError::Internal(format!(
+                    "remote CAS callback closed for '{key}'"
+                )));
+            }
+        }
+
+        let proof = self
+            .remote_object_proof(key)
+            .map_err(crate::common::MidgeError::Internal)?;
+        if proof.bytes != expected_bytes {
+            return Err(crate::common::MidgeError::Corruption(format!(
+                "remote CAS for '{key}' read back different bytes"
+            )));
         }
         Ok(proof)
     }
 
-    fn wal_data_records_covered_by_manifest(
-        data_records: &[crate::wal::cloud_segment::DataCoverageRecord],
-        manifest: &crate::metadata::Manifest,
-    ) -> bool {
-        data_records
-            .iter()
-            .all(|record| Self::manifest_covers_wal_data_record(manifest, record))
-    }
-
-    fn manifest_covers_wal_data_record(
-        manifest: &crate::metadata::Manifest,
-        record: &crate::wal::cloud_segment::DataCoverageRecord,
-    ) -> bool {
-        manifest
-            .files
-            .iter()
-            .any(|file| Self::manifest_file_covers_wal_data_record(file, record))
-    }
-
-    fn manifest_file_covers_wal_data_record(
-        file: &crate::metadata::FileMeta,
-        record: &crate::wal::cloud_segment::DataCoverageRecord,
-    ) -> bool {
-        if file.cf_id != record.cf_id {
-            return false;
-        }
-
-        let (Some(smallest_seq), Some(largest_seq)) = (file.smallest_seq, file.largest_seq) else {
-            return false;
-        };
-        if record.seq < smallest_seq || record.seq > largest_seq {
-            return false;
-        }
-
-        let (Some(smallest_key), Some(largest_key)) =
-            (file.smallest_key.as_ref(), file.largest_key.as_ref())
-        else {
-            return false;
-        };
-
-        if let Some(range_end) = record.range_end.as_ref() {
-            smallest_key.as_slice() <= record.key.as_slice()
-                && range_end.as_slice() <= largest_key.as_slice()
-        } else {
-            smallest_key.as_slice() <= record.key.as_slice()
-                && record.key.as_slice() <= largest_key.as_slice()
-        }
-    }
-
-    fn verify_remote_wal_segment_with_backend(
-        cloud: &Arc<dyn StorageBackend>,
-        verified_wal_segments: &Arc<Mutex<HashMap<u64, VerifiedWalSegment>>>,
-        segment_id: u64,
-        expected_max_sequence: u64,
-    ) -> Result<(), String> {
-        let key = crate::wal::cloud_segment::object_key(segment_id);
-        if let Some(proof) = verified_wal_segments.lock().get(&segment_id).cloned() {
-            if proof.max_sequence != expected_max_sequence {
-                return Err(format!(
-                    "cached cloud WAL segment '{key}' max sequence {} does not match expected {expected_max_sequence}",
-                    proof.max_sequence
-                ));
-            }
-            return Self::verify_cloud_object_proof(cloud, &key, &proof.metadata);
-        }
-
-        let data = Self::read_cloud_object_from_backend_blocking(cloud, &key)?;
-        let readback =
-            crate::wal::cloud_segment::validate_bytes(&key, &data, expected_max_sequence)?;
-        let metadata = Self::head_cloud_object_from_backend_blocking(cloud, &key)?;
-        if metadata.size != data.len() as u64 {
-            return Err(format!(
-                "cloud WAL segment '{key}' size changed during validation: read={}, head={}",
-                data.len(),
-                metadata.size
-            ));
-        }
-        verified_wal_segments.lock().insert(
-            segment_id,
-            VerifiedWalSegment {
-                max_sequence: readback.validation.max_sequence,
-                data_records: readback.data_records,
-                metadata,
-            },
-        );
-        Ok(())
-    }
-
-    pub fn verify_remote_wal_segment(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-    ) -> Result<(), String> {
-        Self::verify_remote_wal_segment_with_backend(
-            &self.cloud,
-            &self.verified_wal_segments,
-            segment_id,
-            expected_max_sequence,
+    /// Convert a validated cloud read into a metadata-only dependency for a
+    /// guarded delete. The delete worker rechecks this identity immediately
+    /// before issuing the conditional delete.
+    pub(crate) fn remote_identity_guard(&self, proof: &RemoteObjectProof) -> GuardedObjectProof {
+        GuardedObjectProof::metadata_only(
+            Arc::clone(&self.cloud),
+            proof.key.clone(),
+            proof.metadata.clone(),
         )
     }
 
-    fn validate_sst_object_bytes(
-        sst_name: &str,
-        expected_size_bytes: u64,
-        expected_content_crc32c: Option<u32>,
-        expected_file: Option<&crate::metadata::FileMeta>,
-        data: &[u8],
-    ) -> Result<(u32, crate::sst::fs::SstFileSummary), String> {
-        if expected_size_bytes > 0 && data.len() as u64 != expected_size_bytes {
-            return Err(format!(
-                "cloud SST '{sst_name}' size mismatch: manifest={expected_size_bytes}, object={}",
-                data.len()
-            ));
-        }
-
-        let actual_content_crc32c = crc32c::crc32c(data);
-        if let Some(expected_content_crc32c) = expected_content_crc32c {
-            if actual_content_crc32c != expected_content_crc32c {
-                return Err(format!(
-                    "cloud SST '{sst_name}' content crc32c {actual_content_crc32c:08x} does not match manifest {expected_content_crc32c:08x}"
-                ));
-            }
-        }
-
-        let mut temp = tempfile::Builder::new()
-            .prefix("midge-cloud-sst-verify-")
-            .suffix(".sst")
-            .tempfile()
-            .map_err(|error| format!("create temp SST verifier for '{sst_name}': {error}"))?;
-        temp.write_all(data)
-            .map_err(|error| format!("write temp SST verifier for '{sst_name}': {error}"))?;
-        temp.flush()
-            .map_err(|error| format!("flush temp SST verifier for '{sst_name}': {error}"))?;
-
-        let reader = crate::sst::fs::SstFileIo::open_with_real_fs(temp.path())
-            .map_err(|error| format!("cloud SST '{sst_name}' failed validation: {error}"))?;
-        let summary = reader
-            .summary()
-            .map_err(|error| format!("cloud SST '{sst_name}' summary validation: {error}"))?;
-        if let Some(expected_file) = expected_file {
-            Self::verify_sst_summary_matches_manifest(sst_name, &summary, expected_file)?;
-        }
-
-        Ok((actual_content_crc32c, summary))
-    }
-
-    fn verify_sst_summary_matches_manifest(
-        sst_name: &str,
-        summary: &crate::sst::fs::SstFileSummary,
-        file: &crate::metadata::FileMeta,
+    fn verify_guarded_object_proof(
+        proof: &GuardedObjectProof,
+        callback_timeout: Duration,
     ) -> Result<(), String> {
-        if file.size_bytes > 0 && summary.size_bytes != file.size_bytes {
-            return Err(format!(
-                "cloud SST '{sst_name}' physical size {} does not match manifest {}",
-                summary.size_bytes, file.size_bytes
-            ));
-        }
-        if let Some(smallest_key) = file.smallest_key.as_ref() {
-            if summary.smallest_key.as_slice() != smallest_key.as_slice() {
-                return Err(format!(
-                    "cloud SST '{sst_name}' smallest key does not match manifest"
-                ));
-            }
-        }
-        if let Some(largest_key) = file.largest_key.as_ref() {
-            if summary.largest_key.as_slice() != largest_key.as_slice() {
-                return Err(format!(
-                    "cloud SST '{sst_name}' largest key does not match manifest"
-                ));
-            }
-        }
-        if let Some(smallest_seq) = file.smallest_seq {
-            if summary.smallest_seq != smallest_seq {
-                return Err(format!(
-                    "cloud SST '{sst_name}' smallest sequence {} does not match manifest {smallest_seq}",
-                    summary.smallest_seq
-                ));
-            }
-        }
-        if let Some(largest_seq) = file.largest_seq {
-            if summary.largest_seq != largest_seq {
-                return Err(format!(
-                    "cloud SST '{sst_name}' largest sequence {} does not match manifest {largest_seq}",
-                    summary.largest_seq
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    pub fn verify_manifest_cloud_objects(
-        &self,
-        manifest: &crate::metadata::Manifest,
-    ) -> Result<(), String> {
-        Self::verify_manifest_cloud_objects_with_backend(
-            &self.cloud,
-            &self.verified_sst_objects,
-            manifest,
-        )
-    }
-
-    fn verify_manifest_cloud_objects_with_backend(
-        cloud: &Arc<dyn StorageBackend>,
-        verified_sst_objects: &Arc<Mutex<HashMap<String, VerifiedCloudObject>>>,
-        manifest: &crate::metadata::Manifest,
-    ) -> Result<(), String> {
-        for file in &manifest.files {
-            let key = crate::sst::object_key(&file.name);
-            Self::verify_sst_cloud_object_with_backend(
-                cloud,
-                verified_sst_objects,
-                &key,
-                &file.name,
-                file.size_bytes,
-                file.content_crc32c,
-                Some(file),
+        if let Some(expected_bytes) = proof.expected_bytes.as_ref() {
+            let actual = Self::stable_object_proof_from_backend(
+                &proof.backend,
+                &proof.key,
+                callback_timeout,
             )?;
-        }
-
-        Ok(())
-    }
-
-    fn verify_sst_cloud_object(
-        &self,
-        key: &str,
-        sst_name: &str,
-        expected_size_bytes: u64,
-        expected_content_crc32c: Option<u32>,
-        expected_file: Option<&crate::metadata::FileMeta>,
-    ) -> Result<(), String> {
-        Self::verify_sst_cloud_object_with_backend(
-            &self.cloud,
-            &self.verified_sst_objects,
-            key,
-            sst_name,
-            expected_size_bytes,
-            expected_content_crc32c,
-            expected_file,
-        )
-    }
-
-    fn verify_sst_cloud_object_with_backend(
-        cloud: &Arc<dyn StorageBackend>,
-        verified_sst_objects: &Arc<Mutex<HashMap<String, VerifiedCloudObject>>>,
-        key: &str,
-        sst_name: &str,
-        expected_size_bytes: u64,
-        expected_content_crc32c: Option<u32>,
-        expected_file: Option<&crate::metadata::FileMeta>,
-    ) -> Result<(), String> {
-        if let Some(proof) = verified_sst_objects.lock().get(key).cloned() {
-            if expected_size_bytes > 0 && proof.metadata.size != expected_size_bytes {
+            if actual.bytes != *expected_bytes {
                 return Err(format!(
-                    "cached cloud SST '{sst_name}' size {} does not match manifest {expected_size_bytes}",
-                    proof.metadata.size
+                    "guarded object '{}' changed before conditional delete",
+                    proof.key
                 ));
             }
-            Self::verify_cloud_object_proof(cloud, key, &proof.metadata)?;
-            if let Some(expected_content_crc32c) = expected_content_crc32c {
-                if proof.content_crc32c != Some(expected_content_crc32c) {
-                    let actual = proof
-                        .content_crc32c
-                        .map_or_else(|| "unknown".to_string(), |crc| format!("{crc:08x}"));
-                    return Err(format!(
-                        "cached cloud SST '{sst_name}' content crc32c {actual} does not match manifest {expected_content_crc32c:08x}"
-                    ));
-                }
-            }
-            if let Some(expected_file) = expected_file {
-                let Some(summary) = proof.summary.as_ref() else {
-                    return Err(format!(
-                        "cached cloud SST '{sst_name}' has no physical summary proof"
-                    ));
-                };
-                Self::verify_sst_summary_matches_manifest(sst_name, summary, expected_file)?;
+            if actual.metadata != proof.metadata {
+                return Err(format!(
+                    "guarded object '{}' identity changed before conditional delete: expected {:?}, actual {:?}",
+                    proof.key, proof.metadata, actual.metadata
+                ));
             }
             return Ok(());
         }
 
-        let data = Self::read_cloud_object_from_backend_blocking(cloud, key)?;
-        let (content_crc32c, summary) = Self::validate_sst_object_bytes(
-            sst_name,
-            expected_size_bytes,
-            expected_content_crc32c,
-            expected_file,
-            &data,
-        )?;
-        let metadata = Self::head_cloud_object_from_backend_blocking(cloud, key)?;
-        if metadata.size != data.len() as u64 {
-            return Err(format!(
-                "cloud SST '{sst_name}' size changed during validation: read={}, head={}",
-                data.len(),
-                metadata.size
-            ));
+        let actual =
+            Self::head_object_from_backend_blocking(&proof.backend, &proof.key, callback_timeout)?;
+        if actual == proof.metadata {
+            return Ok(());
         }
-        verified_sst_objects.lock().insert(
-            key.to_string(),
-            VerifiedCloudObject {
-                metadata,
-                content_crc32c: Some(content_crc32c),
-                summary: Some(summary),
-            },
-        );
-        Ok(())
+        Err(format!(
+            "guarded object '{}' identity changed before conditional delete: expected {:?}, actual {actual:?}",
+            proof.key, proof.metadata
+        ))
     }
 
-    pub(crate) fn prune_cloud_wal_segment(
+    /// Conditionally delete a remote object after revalidating format-neutral
+    /// dependency identities. The runtime must first establish all semantic
+    /// coverage relationships and supply the resulting proofs.
+    pub(crate) fn delete_remote_object_guarded(
         &self,
-        segment_id: u64,
-        guard: CloudWalPruneGuard,
+        request_id: u64,
+        target: RemoteObjectProof,
+        dependencies: Vec<GuardedObjectProof>,
     ) -> Result<(), String> {
         self.reap_finished_prune_workers();
 
-        let proof = self
-            .verified_wal_segments
-            .lock()
-            .get(&segment_id)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "cannot prune cloud WAL segment {segment_id} without a cached readback proof"
-                )
-            })?;
-        let etag = proof.metadata.etag.trim().to_string();
+        let etag = target.metadata.etag.trim().to_string();
         if etag.is_empty() {
             return Err(format!(
-                "cannot prune cloud WAL segment {segment_id} without a conditional delete token"
+                "cannot conditionally delete remote object '{}' without an identity token",
+                target.key
             ));
         }
 
         let cloud = Arc::clone(&self.cloud);
+        let target_guard = self.remote_identity_guard(&target);
+        let target_key = target.key;
         let event_queue = Arc::clone(&self.event_queue);
         let external_event_tx = self.external_event_tx.clone();
-        let verified_wal_segments = Arc::clone(&self.verified_wal_segments);
-        let verified_sst_objects = Arc::clone(&self.verified_sst_objects);
-        let expected_max_sequence = proof.max_sequence;
+        let callback_timeout = self.callback_timeout;
 
         let mut workers = self.prune_workers.lock();
         if workers.shutting_down {
-            return Err("hybrid storage is shutting down; cloud WAL prune rejected".to_string());
+            return Err("hybrid storage is shutting down; guarded delete rejected".to_string());
+        }
+        let pending_completions = self.event_queue.lock().pending_prune_completions();
+        if workers.handles.len() >= workers.max_workers {
+            return Err(format!(
+                "guarded delete workers at capacity: running={}/{}",
+                workers.handles.len(),
+                workers.max_workers
+            ));
+        }
+        if workers.handles.len().saturating_add(pending_completions) >= workers.max_requests {
+            return Err(format!(
+                "guarded delete completion queue at capacity: outstanding={}/{}",
+                workers.handles.len().saturating_add(pending_completions),
+                workers.max_requests
+            ));
         }
 
         let worker = thread::Builder::new()
-            .name(format!("midge-wal-pruner-{segment_id}"))
+            .name(format!("midge-object-pruner-{request_id}"))
             .spawn(move || {
-                let key = crate::wal::cloud_segment::object_key(segment_id);
-                let result = match Self::revalidate_cloud_wal_prune_guard(
-                    &cloud,
-                    &verified_wal_segments,
-                    &verified_sst_objects,
-                    segment_id,
-                    expected_max_sequence,
-                    &guard,
-                ) {
-                    Ok(()) => {
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        cloud.submit_delete_with_headers(&key, vec![("If-Match".into(), etag)], tx);
-
-                        match rx.recv_timeout(Duration::from_secs(30)) {
-                            Ok(StorageEvent::DeleteComplete { result, .. }) => result,
-                            Ok(other) => StorageOutcome::Err(format!(
-                                "unexpected cloud WAL prune response for '{key}': {other:?}"
-                            )),
-                            Err(error) => StorageOutcome::Err(format!(
-                                "cloud WAL prune timed out for '{key}': {error}"
-                            )),
-                        }
+                let result = (|| {
+                    Self::verify_guarded_object_proof(&target_guard, callback_timeout)?;
+                    for dependency in &dependencies {
+                        Self::verify_guarded_object_proof(dependency, callback_timeout)?;
                     }
+
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    cloud.submit_delete_with_headers(
+                        &target_key,
+                        vec![("If-Match".into(), etag)],
+                        tx,
+                    );
+                    match rx.recv_timeout(callback_timeout) {
+                        Ok(StorageEvent::DeleteComplete { result, .. }) => match result {
+                            StorageOutcome::Ok(()) => Ok(()),
+                            StorageOutcome::Err(error) => Err(error),
+                        },
+                        Ok(other) => Err(format!(
+                            "unexpected guarded delete response for '{target_key}': {other:?}"
+                        )),
+                        Err(error) => Err(format!(
+                            "guarded delete timed out for '{target_key}': {error}"
+                        )),
+                    }
+                })();
+
+                let result = match result {
+                    Ok(()) => StorageOutcome::Ok(()),
                     Err(error) => StorageOutcome::Err(error),
                 };
-
-                let event = StorageEvent::CloudWalPruneComplete { segment_id, result };
-
+                let event = StorageEvent::CloudWalPruneComplete {
+                    segment_id: request_id,
+                    result,
+                };
                 Self::queue_storage_event(&event_queue, external_event_tx.as_ref(), event);
             })
-            .map_err(|error| format!("failed to spawn cloud WAL prune worker: {error}"))?;
+            .map_err(|error| format!("failed to spawn guarded delete worker: {error}"))?;
         workers.handles.push(worker);
         Ok(())
     }
@@ -1760,105 +1621,22 @@ impl HybridStorage {
         workers.handles = still_running;
     }
 
-    fn revalidate_cloud_wal_prune_guard(
-        cloud: &Arc<dyn StorageBackend>,
-        verified_wal_segments: &Arc<Mutex<HashMap<u64, VerifiedWalSegment>>>,
-        verified_sst_objects: &Arc<Mutex<HashMap<String, VerifiedCloudObject>>>,
-        segment_id: u64,
-        expected_max_sequence: u64,
-        guard: &CloudWalPruneGuard,
-    ) -> Result<(), String> {
-        Self::verify_remote_wal_segment_with_backend(
-            cloud,
-            verified_wal_segments,
-            segment_id,
-            expected_max_sequence,
-        )?;
-        let proof = verified_wal_segments
-            .lock()
-            .get(&segment_id)
-            .cloned()
-            .ok_or_else(|| {
-                format!("cloud WAL segment {segment_id} has no readback proof after validation")
-            })?;
-        if !Self::wal_data_records_covered_by_manifest(&proof.data_records, &guard.manifest) {
-            return Err(format!(
-                "cloud WAL segment {segment_id} contains records not covered by the committed manifest"
-            ));
-        }
-        Self::verify_manifest_cloud_objects_with_backend(
-            cloud,
-            verified_sst_objects,
-            &guard.manifest,
-        )?;
-        Self::verify_cloud_metadata_prune_guard(guard.metadata.as_ref())
-    }
-
-    fn verify_cloud_metadata_prune_guard(
-        guard: Option<&CloudMetadataPruneGuard>,
-    ) -> Result<(), String> {
-        let Some(guard) = guard else {
-            return Ok(());
-        };
-
-        for proof in &guard.objects {
-            let actual =
-                crate::storage::cloud::blocking_cloud_object_proof(&guard.cloud, &proof.key)?
-                    .ok_or_else(|| {
-                        format!("cloud metadata '{}' is missing before WAL prune", proof.key)
-                    })?;
-            if actual.bytes != proof.expected_bytes {
-                return Err(format!(
-                    "cloud metadata '{}' changed before WAL prune",
-                    proof.key
-                ));
-            }
-            if actual.metadata != proof.remote {
-                return Err(format!(
-                    "cloud metadata '{}' identity changed before WAL prune: expected {:?}, actual {:?}",
-                    proof.key, proof.remote, actual.metadata
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn write_sst_object(
+    /// Publish immutable bytes to the remote backend and local cache. Retries
+    /// succeed only when an existing object contains exactly the same bytes.
+    pub(crate) fn publish_immutable_object(
         &self,
-        sst_name: &str,
+        key: &str,
         data: Vec<u8>,
     ) -> crate::common::MidgeResult<()> {
-        let key = crate::sst::object_key(sst_name);
-        let expected_size_bytes = data.len() as u64;
-        let expected_content_crc32c = Some(crc32c::crc32c(&data));
-        let local_exists = self.ensure_local_sst_retry_compatible(&key, &data)?;
-
-        let forced_failure = crate::failpoints::is_active("midge::cloud::inject_fail_sst_upload");
-        if forced_failure {
-            return Err(crate::common::MidgeError::Internal(
-                "failpoint: cloud SST upload failed".to_string(),
-            ));
-        }
-
-        self.ensure_remote_sst_published(&key, &data)?;
-
-        self.verify_sst_cloud_object(
-            &key,
-            sst_name,
-            expected_size_bytes,
-            expected_content_crc32c,
-            None,
-        )
-        .map_err(crate::common::MidgeError::Internal)?;
-
+        let local_exists = self.ensure_local_immutable_retry_compatible(key, &data)?;
+        self.ensure_remote_immutable_published(key, &data)?;
         if !local_exists {
-            self.write_local_sst_cache(&key, data)?;
+            self.write_local_immutable_cache(key, data)?;
         }
         Ok(())
     }
 
-    fn ensure_local_sst_retry_compatible(
+    fn ensure_local_immutable_retry_compatible(
         &self,
         key: &str,
         data: &[u8],
@@ -1866,7 +1644,7 @@ impl HybridStorage {
         let exists =
             Self::object_exists_in_backend_blocking(&self.local, key).map_err(|error| {
                 crate::common::MidgeError::Internal(format!(
-                    "local SST cache preflight failed: {error}"
+                    "local immutable cache preflight failed: {error}"
                 ))
             })?;
         if !exists {
@@ -1877,13 +1655,13 @@ impl HybridStorage {
             .map_err(crate::common::MidgeError::Internal)?;
         if existing != data {
             return Err(crate::common::MidgeError::Internal(format!(
-                "local SST cache already exists with different bytes for immutable SST object '{key}'"
+                "local cache already exists with different bytes for immutable object '{key}'"
             )));
         }
         Ok(true)
     }
 
-    fn ensure_remote_sst_published(
+    fn ensure_remote_immutable_published(
         &self,
         key: &str,
         data: &[u8],
@@ -1905,10 +1683,10 @@ impl HybridStorage {
             .recv_timeout(self.callback_timeout)
             .map_err(|error| match error {
                 mpsc::RecvTimeoutError::Timeout => crate::common::MidgeError::Timeout(
-                    "cloud SST upload callback timed out".to_string(),
+                    "cloud immutable upload callback timed out".to_string(),
                 ),
                 mpsc::RecvTimeoutError::Disconnected => crate::common::MidgeError::Internal(
-                    "cloud SST upload callback channel closed".to_string(),
+                    "cloud immutable upload callback channel closed".to_string(),
                 ),
             })?;
 
@@ -1922,7 +1700,7 @@ impl HybridStorage {
                 ..
             } => Self::ensure_backend_object_matches(&self.cloud, key, data, Some(&error)),
             other => Err(crate::common::MidgeError::Internal(format!(
-                "unexpected cloud SST upload response: {other:?}"
+                "unexpected cloud immutable upload response: {other:?}"
             ))),
         }
     }
@@ -1936,7 +1714,7 @@ impl HybridStorage {
         let existing =
             Self::read_cloud_object_from_backend_blocking(backend, key).map_err(|read_error| {
                 crate::common::MidgeError::Internal(format!(
-                    "cloud SST upload failed{}; readback failed: {read_error}",
+                    "cloud immutable upload failed{}; readback failed: {read_error}",
                     upload_error.map_or_else(String::new, |error| format!(": {error}"))
                 ))
             })?;
@@ -1944,12 +1722,16 @@ impl HybridStorage {
             return Ok(());
         }
         Err(crate::common::MidgeError::Internal(format!(
-            "cloud SST upload failed{}: immutable object '{key}' contains different bytes",
+            "cloud immutable upload failed{}: object '{key}' contains different bytes",
             upload_error.map_or_else(String::new, |error| format!(": {error}"))
         )))
     }
 
-    fn write_local_sst_cache(&self, key: &str, data: Vec<u8>) -> crate::common::MidgeResult<()> {
+    fn write_local_immutable_cache(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+    ) -> crate::common::MidgeResult<()> {
         let (tx, rx) = std::sync::mpsc::channel();
         self.local.submit_write_with_headers(
             key,
@@ -1961,10 +1743,10 @@ impl HybridStorage {
             .recv_timeout(self.callback_timeout)
             .map_err(|error| match error {
                 mpsc::RecvTimeoutError::Timeout => crate::common::MidgeError::Timeout(
-                    "local SST cache write callback timed out".to_string(),
+                    "local immutable cache write callback timed out".to_string(),
                 ),
                 mpsc::RecvTimeoutError::Disconnected => crate::common::MidgeError::Internal(
-                    "local SST cache write callback channel closed".to_string(),
+                    "local immutable cache write callback channel closed".to_string(),
                 ),
             })?;
         match event {
@@ -1976,51 +1758,48 @@ impl HybridStorage {
                 result: StorageOutcome::Err(error),
                 ..
             } => Err(crate::common::MidgeError::Internal(format!(
-                "local SST cache write failed: {error}"
+                "local immutable cache write failed: {error}"
             ))),
             other => Err(crate::common::MidgeError::Internal(format!(
-                "unexpected local SST cache write response: {other:?}"
+                "unexpected local immutable cache write response: {other:?}"
             ))),
         }
     }
 
-    pub fn delete_sst_object_blocking(&self, sst_name: &str) -> crate::common::MidgeResult<()> {
-        let key = crate::sst::object_key(sst_name);
-
-        match Self::delete_object_from_backend_blocking(&self.cloud, &key) {
+    /// Delete one immutable key from the remote backend and best-effort local
+    /// cache. The caller owns any manifest or lifecycle decision.
+    pub(crate) fn delete_immutable_object_blocking(
+        &self,
+        key: &str,
+    ) -> crate::common::MidgeResult<()> {
+        match Self::delete_object_from_backend_blocking(&self.cloud, key) {
             Ok(true) => {
-                tracing::info!(sst_name, key, "Deleted obsolete cloud SST object");
+                tracing::info!(key, "deleted obsolete remote immutable object");
             }
             Ok(false) => {
-                tracing::debug!(sst_name, key, "Obsolete cloud SST object already missing");
+                tracing::debug!(key, "remote immutable object already missing");
             }
             Err(error) => {
                 return Err(crate::common::MidgeError::Internal(format!(
-                    "cloud SST delete failed: {error}"
+                    "remote immutable object delete failed: {error}"
                 )));
             }
         }
 
-        self.verified_sst_objects.lock().remove(&key);
         // This runs inside the tracked GC worker that owns this deletion.
         // Avoid a detached local-cache delete that could outlive the lease.
-        match Self::delete_object_from_backend_blocking(&self.local, &key) {
+        match Self::delete_object_from_backend_blocking(&self.local, key) {
             Ok(true) => {
-                tracing::debug!(sst_name, key, "Deleted obsolete local hybrid SST cache");
+                tracing::debug!(key, "deleted obsolete local immutable cache object");
             }
             Ok(false) => {
-                tracing::debug!(
-                    sst_name,
-                    key,
-                    "Obsolete local hybrid SST cache already missing"
-                );
+                tracing::debug!(key, "local immutable cache object already missing");
             }
             Err(error) => {
                 tracing::warn!(
-                    sst_name,
                     key,
                     error,
-                    "Failed to delete obsolete local hybrid SST cache"
+                    "failed to delete obsolete local immutable cache object"
                 );
             }
         }
@@ -2259,6 +2038,9 @@ impl Drop for HybridStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::hybrid_persistence::{
+        CloudMetadataPruneGuard, CloudMetadataPruneProof, CloudWalPruneGuard, HybridPersistence,
+    };
     use crate::sst::SstFactory;
     use crate::storage::cloud::{CloudStorage, MockCloudBackend};
     use bytes::Bytes;
@@ -2267,6 +2049,141 @@ mod tests {
         Arc,
     };
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn should_retain_terminal_upload_completion_when_transient_queue_is_saturated() {
+        // Arrange
+        let mut queue = BoundedEventQueue::new(1, std::mem::size_of::<StorageEvent>() * 2);
+        queue
+            .try_push(StorageEvent::BackpressureOn, false)
+            .expect("fill transient event capacity");
+
+        // Act
+        let result = queue.try_push(
+            StorageEvent::CloudAck {
+                segment_id: 17,
+                max_sequence: 29,
+            },
+            false,
+        );
+
+        // Assert
+        assert!(
+            result.is_ok(),
+            "terminal completion was dropped: {result:?}"
+        );
+        assert!(queue.drain().iter().any(|queued| {
+            matches!(
+                queued.event,
+                StorageEvent::CloudAck {
+                    segment_id: 17,
+                    max_sequence: 29
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn should_create_remote_object_when_cas_key_is_missing() {
+        // Arrange
+        let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+        let key = "metadata/ddl-manifest.json";
+        let data = br#"{"epoch":1}"#.to_vec();
+        assert!(storage
+            .remote_object_proof_optional(key)
+            .expect("check missing CAS key")
+            .is_none());
+
+        // Act
+        let proof = storage
+            .compare_exchange_remote_object(key, None, data.clone())
+            .expect("conditionally create remote object");
+
+        // Assert
+        assert_eq!(proof.bytes(), data);
+        assert_eq!(
+            storage
+                .remote_object_proof_optional(key)
+                .expect("read created CAS key")
+                .expect("created CAS key must exist")
+                .bytes(),
+            proof.bytes()
+        );
+    }
+
+    #[test]
+    fn should_reject_remote_cas_when_identity_is_stale() {
+        // Arrange
+        let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+        let key = "metadata/ddl-manifest.json";
+        let original = storage
+            .compare_exchange_remote_object(key, None, b"epoch-1".to_vec())
+            .expect("create initial remote object");
+        storage
+            .compare_exchange_remote_object(key, Some(original.metadata()), b"epoch-2".to_vec())
+            .expect("advance remote object");
+
+        // Act
+        let error = storage
+            .compare_exchange_remote_object(key, Some(original.metadata()), b"stale".to_vec())
+            .expect_err("stale identity must lose provider CAS");
+
+        // Assert
+        assert!(matches!(error, crate::common::MidgeError::Busy(_)));
+        assert_eq!(
+            storage
+                .remote_object_proof(key)
+                .expect("read winning CAS bytes")
+                .bytes(),
+            b"epoch-2"
+        );
+    }
+
+    #[test]
+    fn should_reject_guarded_delete_when_worker_capacity_is_exhausted() {
+        // Arrange
+        let tmp = tempfile::tempdir().expect("create guarded-delete test dir");
+        let local = Arc::new(
+            crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+                .expect("create local backend"),
+        );
+        let cloud = Arc::new(NeverCompletesBackend::default());
+        let limits = HybridQueueLimits {
+            prune_workers: 1,
+            prune_requests: 1,
+            callback_timeout: Duration::from_millis(100),
+            ..HybridQueueLimits::default()
+        };
+        let storage = HybridStorage::with_policy_event_sender_and_limits(
+            local,
+            cloud,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            None,
+            limits,
+        );
+        let target = RemoteObjectProof {
+            key: "objects/first".to_string(),
+            bytes: vec![1],
+            metadata: StorageObjectMetadata {
+                size: 1,
+                etag: "first-etag".to_string(),
+                generation: None,
+            },
+        };
+        storage
+            .delete_remote_object_guarded(1, target.clone(), Vec::new())
+            .expect("first guarded delete should occupy the worker");
+
+        // Act
+        let started = Instant::now();
+        let error = storage
+            .delete_remote_object_guarded(2, target, Vec::new())
+            .expect_err("second guarded delete must be rejected at worker capacity");
+
+        // Assert
+        assert!(error.contains("workers at capacity"), "{error}");
+        assert!(started.elapsed() < Duration::from_millis(50));
+    }
 
     fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, HybridStorage) {
         let tmp = tempfile::tempdir().expect("create hybrid storage test dir");
@@ -2585,8 +2502,31 @@ mod tests {
         }
     }
 
+    fn manifest_covering_wal(
+        sst_name: &str,
+        sst_bytes: &[u8],
+        sequence: u64,
+        content_crc32c: Option<u32>,
+    ) -> crate::metadata::Manifest {
+        crate::metadata::Manifest {
+            files: vec![crate::metadata::FileMeta {
+                name: sst_name.to_string(),
+                level: 0,
+                size_bytes: sst_bytes.len() as u64,
+                content_crc32c,
+                cf_id: 0,
+                smallest_key: Some(b"k".to_vec()),
+                largest_key: Some(b"k".to_vec()),
+                smallest_seq: Some(sequence),
+                largest_seq: Some(sequence),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn should_not_reread_verified_manifest_ssts_on_repeated_validation() {
+    fn should_revalidate_manifest_ssts_on_repeated_validation() {
         // Arrange
         let (mock_cloud, storage) = hybrid_with_mock_cloud();
         let sst_name = "cached.sst";
@@ -2612,15 +2552,19 @@ mod tests {
             .verify_manifest_cloud_objects(&manifest)
             .expect("second manifest validation");
 
+        let downloads = mock_cloud.get_downloads();
         assert_eq!(
-            mock_cloud.get_downloads(),
-            first_downloads,
-            "verified immutable SSTs should not be reread on unchanged manifest validation"
+            downloads
+                .iter()
+                .filter(|key| key.ends_with("sst/cached.sst"))
+                .count(),
+            2,
+            "authoritative validation must reread the immutable SST: {downloads:?}"
         );
     }
 
     #[test]
-    fn should_only_validate_new_manifest_ssts_after_manifest_extends() {
+    fn should_revalidate_full_manifest_after_extension() {
         // Arrange
         let (mock_cloud, storage) = hybrid_with_mock_cloud();
         let first_name = "first.sst";
@@ -2683,8 +2627,8 @@ mod tests {
             "extended validation should read the new SST, got {downloads:?}"
         );
         assert!(
-            downloads.iter().all(|key| !key.ends_with("sst/first.sst")),
-            "extended validation should not reread already verified SSTs, got {downloads:?}"
+            downloads.iter().any(|key| key.ends_with("sst/first.sst")),
+            "authoritative validation should reread the existing SST, got {downloads:?}"
         );
     }
 
@@ -2809,7 +2753,7 @@ mod tests {
         // Act
         // Assert
         assert!(
-            error.to_string().contains("cloud SST upload failed")
+            error.to_string().contains("cloud immutable upload failed")
                 || error.to_string().contains("precondition failed"),
             "unexpected SST collision error: {error}"
         );
@@ -2842,7 +2786,7 @@ mod tests {
         // Act
         // Assert
         assert!(
-            error.to_string().contains("local SST cache already exists"),
+            error.to_string().contains("local cache already exists"),
             "unexpected local SST collision error: {error}"
         );
         assert_eq!(
@@ -2895,7 +2839,7 @@ mod tests {
     }
 
     #[test]
-    fn should_cache_remote_wal_readback_validation() {
+    fn should_revalidate_remote_wal_readback() {
         // Arrange
         let (mock_cloud, storage) = hybrid_with_mock_cloud();
         let segment_id = 7;
@@ -2923,10 +2867,14 @@ mod tests {
         storage
             .verify_remote_wal_segment(segment_id, max_sequence)
             .expect("second remote WAL validation");
+        let downloads = mock_cloud.get_downloads();
         assert_eq!(
-            mock_cloud.get_downloads(),
-            first_downloads,
-            "verified immutable WAL segments should not be reread"
+            downloads
+                .iter()
+                .filter(|key| key.ends_with("wal/00000000000000000007.wal"))
+                .count(),
+            2,
+            "authoritative WAL validation must reread the segment: {downloads:?}"
         );
     }
 
@@ -2963,13 +2911,13 @@ mod tests {
         let max_sequence = 21;
         let key = crate::wal::cloud_segment::object_key(segment_id);
         write_cloud_object(&storage, &key, valid_wal_bytes(max_sequence));
-        storage
-            .verify_remote_wal_segment(segment_id, max_sequence)
-            .expect("initial remote WAL validation");
+        let stale_proof = storage
+            .remote_object_proof(&key)
+            .expect("initial remote object proof");
 
         write_cloud_object(&storage, &key, valid_wal_bytes(max_sequence));
         storage
-            .prune_cloud_wal_segment(segment_id, CloudWalPruneGuard::default())
+            .delete_remote_object_guarded(segment_id, stale_proof, Vec::new())
             .expect("schedule prune");
 
         let result = wait_for_wal_prune_result(&storage, segment_id);
@@ -2991,8 +2939,8 @@ mod tests {
         let wal_key = crate::wal::cloud_segment::object_key(segment_id);
         let sst_name = "missing-after-validation.sst";
         let sst_key = crate::sst::object_key(sst_name);
-        let sst_bytes = valid_sst_bytes(b"a", b"v1", 1);
-        let manifest = manifest_for_ssts(&[(sst_name, sst_bytes.len() as u64)]);
+        let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
+        let manifest = manifest_covering_wal(sst_name, &sst_bytes, max_sequence, None);
 
         write_cloud_object(&storage, &wal_key, valid_wal_bytes(max_sequence));
         write_cloud_object(&storage, &sst_key, sst_bytes);
@@ -3004,16 +2952,19 @@ mod tests {
             .expect("initial manifest SST validation");
 
         delete_cloud_object(&storage, &sst_key);
-        storage
-            .prune_cloud_wal_segment(segment_id, CloudWalPruneGuard::new(manifest.clone(), None))
-            .expect("schedule prune");
+        let error = storage
+            .prune_cloud_wal_segment(
+                segment_id,
+                max_sequence,
+                CloudWalPruneGuard::new(manifest.clone(), None),
+            )
+            .expect_err("missing manifest SST must reject prune");
 
-        let result = wait_for_wal_prune_result(&storage, segment_id);
         // Act
         // Assert
         assert!(
-            result.is_err(),
-            "worker-side manifest revalidation must fail conservatively"
+            error.contains("unreadable") || error.contains("not found"),
+            "unexpected missing manifest SST error: {error}"
         );
         assert_cloud_object_exists(&storage, &wal_key);
     }
@@ -3027,26 +2978,28 @@ mod tests {
         let wal_key = crate::wal::cloud_segment::object_key(segment_id);
         let sst_name = "wrong-crc-prune-guard.sst";
         let sst_key = crate::sst::object_key(sst_name);
-        let sst_bytes = valid_sst_bytes(b"a", b"v1", 1);
+        let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
         let wrong_crc = crc32c::crc32c(&sst_bytes) ^ 0xffff_ffff;
-        let manifest =
-            manifest_for_ssts_with_crc(&[(sst_name, sst_bytes.len() as u64, Some(wrong_crc))]);
+        let manifest = manifest_covering_wal(sst_name, &sst_bytes, max_sequence, Some(wrong_crc));
 
         write_cloud_object(&storage, &wal_key, valid_wal_bytes(max_sequence));
         write_cloud_object(&storage, &sst_key, sst_bytes);
         storage
             .verify_remote_wal_segment(segment_id, max_sequence)
             .expect("initial remote WAL validation");
-        storage
-            .prune_cloud_wal_segment(segment_id, CloudWalPruneGuard::new(manifest, None))
-            .expect("schedule guarded prune");
+        let error = storage
+            .prune_cloud_wal_segment(
+                segment_id,
+                max_sequence,
+                CloudWalPruneGuard::new(manifest, None),
+            )
+            .expect_err("incorrect manifest CRC must reject prune");
 
-        let result = wait_for_wal_prune_result(&storage, segment_id);
         // Act
         // Assert
         assert!(
-            result.is_err(),
-            "worker-side manifest CRC revalidation must fail conservatively"
+            error.contains("crc32c"),
+            "unexpected manifest CRC error: {error}"
         );
         assert_cloud_object_exists(&storage, &wal_key);
     }
@@ -3058,6 +3011,15 @@ mod tests {
         let segment_id = 14;
         let max_sequence = 24;
         let wal_key = crate::wal::cloud_segment::object_key(segment_id);
+        let sst_name = "metadata-guard.sst";
+        let sst_key = crate::sst::object_key(sst_name);
+        let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
+        let manifest = manifest_covering_wal(
+            sst_name,
+            &sst_bytes,
+            max_sequence,
+            Some(crc32c::crc32c(&sst_bytes)),
+        );
         let metadata_backend = Arc::new(MockCloudBackend::new());
         let metadata_cloud = Arc::new(CloudStorage::new(
             metadata_backend,
@@ -3067,6 +3029,7 @@ mod tests {
         let metadata_bytes = br#"{"last_persisted_sequence":24}"#.to_vec();
 
         write_cloud_object(&storage, &wal_key, valid_wal_bytes(max_sequence));
+        write_cloud_object(&storage, &sst_key, sst_bytes);
         storage
             .verify_remote_wal_segment(segment_id, max_sequence)
             .expect("initial remote WAL validation");
@@ -3084,7 +3047,8 @@ mod tests {
         storage
             .prune_cloud_wal_segment(
                 segment_id,
-                CloudWalPruneGuard::new(crate::metadata::Manifest::default(), Some(metadata_guard)),
+                max_sequence,
+                CloudWalPruneGuard::new(manifest, Some(metadata_guard)),
             )
             .expect("schedule prune");
 
@@ -3152,6 +3116,7 @@ mod tests {
         storage
             .prune_cloud_wal_segment(
                 segment_id,
+                max_sequence,
                 CloudWalPruneGuard::new(manifest, Some(metadata_guard)),
             )
             .expect("schedule prune");
@@ -3241,10 +3206,6 @@ mod tests {
             read_cloud_object(&storage, &key),
             existing_bytes,
             "upload must not overwrite an existing remote WAL object"
-        );
-        assert!(
-            !storage.is_remote_wal_segment_verified(segment_id, upload_max_sequence),
-            "failed conditional upload must not cache a proof for the attempted segment"
         );
     }
 
@@ -3513,6 +3474,10 @@ mod tests {
             segment_id: 1,
             max_sequence: 1,
         };
+        let second_ack = StorageEvent::CloudAck {
+            segment_id: 2,
+            max_sequence: 2,
+        };
         let ack_bytes = BoundedEventQueue::event_bytes(&ack);
         let mut entry_limited = BoundedEventQueue::new(1, ack_bytes * 2);
         let mut byte_limited = BoundedEventQueue::new(2, ack_bytes);
@@ -3522,19 +3487,19 @@ mod tests {
             .try_push(ack.clone(), false)
             .expect("first event fits entry bound");
         let entry_error = entry_limited
-            .try_push(ack.clone(), false)
+            .try_push(second_ack.clone(), false)
             .expect_err("second event exceeds entry bound");
         byte_limited
             .try_push(ack.clone(), false)
             .expect("first event fits byte bound");
         let byte_error = byte_limited
-            .try_push(ack, false)
+            .try_push(second_ack, false)
             .expect_err("second event exceeds byte bound");
 
         // Assert
         assert!(entry_error.contains("entries=1/1"));
         assert!(byte_error.contains("bytes="));
-        assert_eq!(entry_limited.entries.len(), 1);
-        assert_eq!(byte_limited.pending_bytes, ack_bytes);
+        assert_eq!(entry_limited.terminal_entries.len(), 1);
+        assert_eq!(byte_limited.terminal_pending_bytes, ack_bytes);
     }
 }

@@ -123,10 +123,9 @@ fn should_compile_provider_modules_only_for_their_owner_features() {
     assert!(!providers.contains("#[cfg(feature = \"cloud-common\")]\npub mod azure;"));
     assert!(!providers.contains("#[cfg(feature = \"cloud-common\")]\npub mod gcs;"));
     assert!(!providers.contains("#[cfg(feature = \"cloud-common\")]\npub mod s3;"));
-    assert!(factory.contains("CloudProviderConfig::AwsS3 { .. } => Self::build_aws(provider)"));
-    assert!(factory.contains(
-        "CloudProviderConfig::S3Compatible { .. } => Self::build_s3_compatible(provider)"
-    ));
+    assert!(factory.contains("super::is_aws_s3(provider)"));
+    assert!(factory.contains("super::is_s3_compatible(provider)"));
+    assert!(factory.contains("super::is_azure_blob(provider)"));
     assert!(factory.contains(
         "#[cfg(any(feature = \"cloud-aws\", feature = \"cloud-oci\"))]\n    fn build_s3_compatible"
     ));

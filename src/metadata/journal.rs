@@ -42,6 +42,20 @@ pub enum ManifestEdit {
     DropColumnFamily {
         id: u32,
     },
+    /// Durable drop intent carrying the snapshot frontier and exact SST set.
+    DropColumnFamilyAt {
+        id: u32,
+        drop_sequence: u64,
+        #[serde(default)]
+        dropped_sst_names: Vec<String>,
+    },
+    /// Remove the captured SST set after the minimum snapshot passed the drop
+    /// frontier. The CF tombstone itself remains to prevent ID reuse.
+    ReclaimColumnFamily {
+        id: u32,
+        #[serde(default)]
+        names: Vec<String>,
+    },
     BumpWalSeq {
         seq: u64,
     },
@@ -83,6 +97,8 @@ impl ManifestEdit {
             ManifestEdit::BumpNextSstSeq { .. } => 6,
             ManifestEdit::SetCloudCheckpoint(_) => 7,
             ManifestEdit::Batch(_) => 8,
+            ManifestEdit::DropColumnFamilyAt { .. } => 10,
+            ManifestEdit::ReclaimColumnFamily { .. } => 11,
         }
     }
 
@@ -94,6 +110,18 @@ impl ManifestEdit {
         match self {
             ManifestEdit::AddSst(meta) => validate(&meta.name),
             ManifestEdit::RemoveSst { name } => validate(name),
+            ManifestEdit::DropColumnFamilyAt {
+                dropped_sst_names, ..
+            }
+            | ManifestEdit::ReclaimColumnFamily {
+                names: dropped_sst_names,
+                ..
+            } => {
+                for name in dropped_sst_names {
+                    validate(name)?;
+                }
+                Ok(())
+            }
             ManifestEdit::SetCloudCheckpoint(checkpoint) => {
                 for name in &checkpoint.covering_ssts {
                     validate(name)?;
@@ -124,6 +152,8 @@ pub struct FsyncMarker {
 
 const BATCH_RECORD_TYPE: u8 = 8;
 const FSYNC_MARKER_TYPE: u8 = 9;
+const DROP_COLUMN_FAMILY_AT_RECORD_TYPE: u8 = 10;
+const RECLAIM_COLUMN_FAMILY_RECORD_TYPE: u8 = 11;
 
 const JOURNAL_FILE: &str = "manifest.journal";
 const JOURNAL_REPAIR_TEMP_FILE: &str = "manifest.journal.repair.tmp";
@@ -551,7 +581,7 @@ fn read_journal_record(
 }
 
 fn validate_journal_record_type(record_type: u8, record_start: u64) -> MidgeResult<()> {
-    if (1..=FSYNC_MARKER_TYPE).contains(&record_type) {
+    if (1..=RECLAIM_COLUMN_FAMILY_RECORD_TYPE).contains(&record_type) {
         return Ok(());
     }
 
@@ -644,7 +674,12 @@ fn handle_manifest_edit_record(
     record: &JournalRecord,
     state: &mut JournalReplayState,
 ) -> MidgeResult<()> {
-    if !(1..BATCH_RECORD_TYPE).contains(&record.typ) {
+    let is_legacy_edit = (1..BATCH_RECORD_TYPE).contains(&record.typ);
+    let is_reclamation_edit = matches!(
+        record.typ,
+        DROP_COLUMN_FAMILY_AT_RECORD_TYPE | RECLAIM_COLUMN_FAMILY_RECORD_TYPE
+    );
+    if !is_legacy_edit && !is_reclamation_edit {
         return Err(crate::common::MidgeError::Corruption(format!(
             "manifest journal has unknown record type {} at byte {}",
             record.typ, record.record_start

@@ -32,8 +32,7 @@
 //! - **fs**: Filesystem-backed SST implementation (uses `io::Fs` abstraction)
 
 use crate::common::MidgeResult;
-use crate::iterators::skiplist::OpType;
-use crate::iterators::SkipList;
+use crate::memtable::skiplist::{OpType, SkipList};
 use bytes::Bytes;
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -52,6 +51,7 @@ pub mod traits;
 pub mod trie;
 pub mod types;
 
+pub use crate::types::KvPair;
 pub use fs::FsSstFactoryIo;
 
 pub(crate) use name::PersistedSstName;
@@ -84,14 +84,6 @@ pub fn temp_object_key(file_name: &str) -> String {
 }
 
 type MemtableEntryWithMeta = (Vec<u8>, Option<Vec<u8>>, u64, Option<u64>, u8);
-
-/// Key-value pair
-#[derive(Clone, Debug)]
-pub struct KvPair {
-    pub key: Vec<u8>,
-    pub value: Option<Vec<u8>>,
-    pub sequence: u64,
-}
 
 /// Memtable trait for lock-free concurrent access
 pub trait Memtable: Send + Sync {

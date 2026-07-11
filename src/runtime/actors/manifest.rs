@@ -191,6 +191,8 @@ impl ManifestActor {
     }
 
     /// Create a new column family
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn create_column_family(
         &mut self,
         state: &mut RuntimeState,
@@ -243,6 +245,8 @@ impl ManifestActor {
     }
 
     /// Drop a column family (soft delete for durability)
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn drop_column_family(
         &mut self,
         state: &mut RuntimeState,
@@ -255,8 +259,20 @@ impl ManifestActor {
             ));
         }
 
+        let dropped_sst_names = state
+            .manifest
+            .files
+            .iter()
+            .filter(|file| file.cf_id == cf_id)
+            .map(|file| file.name.clone())
+            .collect::<Vec<_>>();
+        let drop_sequence = state.sequence;
         let mut candidate_manifest = state.manifest.clone();
-        if !candidate_manifest.delete_column_family(cf_id) {
+        if !candidate_manifest.delete_column_family_with_reclamation(
+            cf_id,
+            drop_sequence,
+            dropped_sst_names.clone(),
+        ) {
             return Err(crate::common::MidgeError::Internal(format!(
                 "Column family {cf_id} not found or already deleted"
             )));
@@ -264,7 +280,11 @@ impl ManifestActor {
 
         // Append drop CF edit to journal (skip in memory mode)
         if !state.is_memory_mode() {
-            let edit = crate::metadata::ManifestEdit::DropColumnFamily { id: cf_id };
+            let edit = crate::metadata::ManifestEdit::DropColumnFamilyAt {
+                id: cf_id,
+                drop_sequence,
+                dropped_sst_names,
+            };
             crate::metadata::append_edit(&state.db_path, &edit)?;
         }
 

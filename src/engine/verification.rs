@@ -119,16 +119,18 @@ pub(super) fn verify_storage_path(
         .max(manifest.edit_checkpoint_id);
 
     let residue =
-        crate::storage::residue::StorageResidueAssessment::scan_sst_dir(db_path, &manifest);
+        crate::runtime::storage_residue::StorageResidueAssessment::scan_sst_dir(db_path, &manifest);
     let health = match runtime_health {
         Some(EngineHealth::Healthy) | None => {
-            crate::storage::residue::classify_engine_health(crate::storage::residue::HealthInputs {
-                opened_in_salvage_mode: false,
-                write_stalled: false,
-                persistence_anomaly_detected: false,
-                pending_intents: intents.len(),
-                orphan_ssts: residue.orphan_ssts.len(),
-            })
+            crate::runtime::storage_residue::classify_engine_health(
+                crate::runtime::storage_residue::HealthInputs {
+                    opened_in_salvage_mode: false,
+                    write_stalled: false,
+                    persistence_anomaly_detected: false,
+                    pending_intents: intents.len(),
+                    orphan_ssts: residue.orphan_ssts.len(),
+                },
+            )
         }
         Some(other) => other,
     };

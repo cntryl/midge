@@ -8,6 +8,14 @@ use crate::config::EngineHealth;
 /// Column family identifier.
 pub type ColumnFamilyId = u32;
 
+/// Key-value pair produced by internal ordered read sources.
+#[derive(Clone, Debug)]
+pub struct KvPair {
+    pub key: Vec<u8>,
+    pub value: Option<Vec<u8>>,
+    pub sequence: u64,
+}
+
 /// Conflict handling policy for read-write transaction commits.
 ///
 /// This type is shared by the public API and the runtime so the engine does not

@@ -84,13 +84,16 @@ The WAL is the first durable landing zone for writes in local durable modes.
 ### Dependency boundary
 
 - WAL replay depends on the base `io::Fs` and `io::File` abstractions, not `storage`.
-- Hybrid storage owns cloud orchestration for WAL segment upload, readback proof, and pruning.
 - Byte-level WAL segment interpretation, including cloud WAL object-key formatting and transaction-batch expansion, lives in `src/wal/cloud_segment.rs`.
-- Storage policy code consumes WAL-owned coverage records and combines them with manifest/SST proof before pruning remote WAL.
+- `runtime::hybrid_persistence` owns cloud WAL/SST interpretation, manifest coverage decisions, and guarded-prune orchestration.
+- `HybridStorage` exposes only bounded keyed object I/O, byte-identity readback, provider identities, immutable publication, and conditional deletion. It does not import WAL, SST, or manifest formats.
+- A guarded prune is authorized in the runtime, then rechecks format-neutral object identities in the storage worker immediately before the provider conditional delete.
 
 ## Memtable
 
 The memtable is the newest readable state.
+
+The ordered skiplist implementation lives in the lower `memtable` module. Public scan contracts live in `iterators`, while SST construction consumes the memtable directly; SST and iterator modules do not depend on each other.
 
 ### Responsibilities
 
