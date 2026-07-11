@@ -853,17 +853,22 @@ mod tests {
     }
 
     #[cfg(feature = "failpoints")]
-    struct TxnAppendBatchNoSpaceFailpointGuard;
+    struct TxnAppendBatchNoSpaceFailpointGuard {
+        _test_guard: crate::failpoints::TestFailpointGuard,
+    }
 
     #[cfg(feature = "failpoints")]
     impl TxnAppendBatchNoSpaceFailpointGuard {
         fn setup(request_id: u64) -> Self {
+            let test_guard = crate::failpoints::test_failpoint_guard();
             crate::runtime::actors::wal::set_txn_append_batch_no_space_failpoint_request_id(Some(
                 request_id,
             ));
             fail::cfg("midge::wal::inject_no_space_on_txn_append_batch", "return")
                 .expect("configure txn append batch no-space failpoint");
-            Self
+            Self {
+                _test_guard: test_guard,
+            }
         }
     }
 
@@ -1573,7 +1578,6 @@ mod tests {
             .expect("queue second transaction");
 
         {
-            let _test_guard = crate::failpoints::test_failpoint_guard();
             let scenario = fail::FailScenario::setup();
             let failpoint_guard = TxnAppendBatchNoSpaceFailpointGuard::setup(60);
 
@@ -1662,7 +1666,6 @@ mod tests {
             .expect("queue same-key fallback transaction");
 
         {
-            let _test_guard = crate::failpoints::test_failpoint_guard();
             let scenario = fail::FailScenario::setup();
             let failpoint_guard = TxnAppendBatchNoSpaceFailpointGuard::setup(80);
 

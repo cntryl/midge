@@ -40,10 +40,10 @@ pub(crate) fn is_active(name: &str) -> bool {
 
 #[cfg(feature = "failpoints")]
 use std::cell::Cell;
-#[cfg(feature = "failpoints")]
-use std::sync::{OnceLock, RwLock, RwLockReadGuard};
 #[cfg(all(test, feature = "failpoints"))]
 use std::sync::RwLockWriteGuard;
+#[cfg(feature = "failpoints")]
+use std::sync::{OnceLock, RwLock, RwLockReadGuard};
 
 #[cfg(feature = "failpoints")]
 static FAILPOINT_GATE: OnceLock<RwLock<()>> = OnceLock::new();
