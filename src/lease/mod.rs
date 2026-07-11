@@ -39,6 +39,14 @@ use std::sync::Arc;
 
 static INMEM_LEASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+// Keep the dependency direction common <- lease: the higher lease layer owns
+// conversion of its error into the shared public error type.
+impl From<LeaseError> for crate::common::MidgeError {
+    fn from(error: LeaseError) -> Self {
+        Self::Fenced(error.to_string())
+    }
+}
+
 /// Create a lease implementation appropriate for the given storage backend.
 pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseError> {
     match storage {

@@ -106,9 +106,3 @@ impl From<io::Error> for MidgeError {
         }
     }
 }
-
-impl From<crate::lease::LeaseError> for MidgeError {
-    fn from(err: crate::lease::LeaseError) -> Self {
-        MidgeError::Fenced(err.to_string())
-    }
-}
