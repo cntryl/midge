@@ -44,8 +44,8 @@ impl FsLeaderStore {
         FsPath::new(format!(".midge_leader.{}.{}.tmp", std::process::id(), n))
     }
 
-    fn lock_contents(holder_id: &str, created_at: &str) -> String {
-        format!("holder_id={holder_id}\ncreated_at={created_at}\n")
+    fn lock_contents(holder_id: &str, owner_token: &str, created_at: &str) -> String {
+        format!("holder_id={holder_id}\nowner_token={owner_token}\ncreated_at={created_at}\n")
     }
 
     fn read_lock_contents(&self) -> Result<Option<String>, LeaseError> {
@@ -94,21 +94,49 @@ impl FsLeaderStore {
             .map(|value| value.with_timezone(&chrono::Utc))
     }
 
+    fn parse_lock_owner_token(content: &str) -> Option<&str> {
+        content
+            .lines()
+            .find_map(|line| line.strip_prefix("owner_token="))
+            .filter(|value| !value.is_empty())
+    }
+
     fn lock_is_stale(content: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
         // An empty or malformed lock can be observed in the small interval
         // after `create_new` succeeds and before its owner writes the
         // timestamp. Treating it as stale lets another acquirer unlink a live
         // lock and creates a split-brain window. Fail closed unless a valid,
         // demonstrably old timestamp proves the lock is abandoned.
-        Self::parse_lock_created_at(content).is_some_and(|created_at| {
-            now.signed_duration_since(created_at).num_seconds() >= STALE_LOCK_TIMEOUT_SECS
-        })
+        Self::parse_lock_owner_token(content).is_some()
+            && Self::parse_lock_created_at(content).is_some_and(|created_at| {
+                now.signed_duration_since(created_at).num_seconds() >= STALE_LOCK_TIMEOUT_SECS
+            })
+    }
+
+    /// Remove the acquisition lock only while it still carries the ownership
+    /// token observed by the caller. A stale guard or cleanup attempt must not
+    /// unlink a lock created by a newer acquirer.
+    fn remove_lock_if_owner(&self, expected_owner_token: &str) -> Result<bool, LeaseError> {
+        let Some(content) = self.read_lock_contents()? else {
+            return Ok(false);
+        };
+        if Self::parse_lock_owner_token(&content) != Some(expected_owner_token) {
+            return Ok(false);
+        }
+
+        self.fs
+            .remove_file(&FsPath::new(LEADER_LOCK_FILE))
+            .map_err(|error| {
+                LeaseError::IoError(format!("failed to remove leader lock: {error}"))
+            })?;
+        Ok(true)
     }
 
     fn acquire_lock(&self, holder_id: &str) -> Result<LockGuard<'_>, LeaseError> {
         let lock_path = FsPath::new(LEADER_LOCK_FILE);
         let now = chrono::Utc::now();
-        let payload = Self::lock_contents(holder_id, &now.to_rfc3339());
+        let owner_token = uuid::Uuid::new_v4().to_string();
+        let payload = Self::lock_contents(holder_id, &owner_token, &now.to_rfc3339());
 
         for _ in 0..2 {
             match self.fs.open(
@@ -129,15 +157,20 @@ impl FsLeaderStore {
                             ))
                         })?;
                     let _ = lock_file.sync(Durability::Durable);
-                    return Ok(LockGuard { store: self });
+                    return Ok(LockGuard {
+                        store: self,
+                        owner_token,
+                    });
                 }
                 Err(error) => {
                     let content = self.read_lock_contents()?;
-                    if content
+                    if let Some(existing) = content
                         .as_deref()
-                        .is_some_and(|existing| Self::lock_is_stale(existing, now))
+                        .filter(|existing| Self::lock_is_stale(existing, now))
                     {
-                        let _ = self.fs.remove_file(&lock_path);
+                        let stale_owner_token = Self::parse_lock_owner_token(existing)
+                            .expect("stale lock validation requires an ownership token");
+                        let _removed = self.remove_lock_if_owner(stale_owner_token)?;
                         continue;
                     }
                     return Err(LeaseError::AcquisitionFailed(format!(
@@ -209,11 +242,14 @@ impl LeaderStore for FsLeaderStore {
 
 struct LockGuard<'a> {
     store: &'a FsLeaderStore,
+    owner_token: String,
 }
 
 impl Drop for LockGuard<'_> {
     fn drop(&mut self) {
-        let _ = self.store.fs.remove_file(&FsPath::new(LEADER_LOCK_FILE));
+        if let Err(error) = self.store.remove_lock_if_owner(&self.owner_token) {
+            tracing::warn!(%error, "failed to release leader acquisition lock");
+        }
     }
 }
 
@@ -378,6 +414,8 @@ impl FsLeaderStore {
 mod tests {
     use super::*;
     use crate::io::MockFs;
+    use std::sync::Barrier;
+    use std::thread;
 
     fn make_store() -> FsLeaderStore {
         FsLeaderStore::new(Arc::new(MockFs::new()))
@@ -537,6 +575,98 @@ mod tests {
         // Assert
         assert!(matches!(result, Err(LeaseError::AcquisitionFailed(_))));
         assert!(fs.exists(&lock_path).expect("lock presence check"));
+    }
+
+    #[test]
+    fn should_preserve_new_acquisition_lock_when_old_guard_is_dropped() {
+        // Arrange
+        let fs = Arc::new(MockFs::new());
+        let store = FsLeaderStore::new(Arc::clone(&fs) as Arc<dyn Fs>);
+        let old_guard = store.acquire_lock("node-a").expect("acquire old lock");
+        let stale_timestamp = (chrono::Utc::now()
+            - chrono::Duration::seconds(STALE_LOCK_TIMEOUT_SECS + 1))
+        .to_rfc3339();
+        let lock_path = FsPath::new(LEADER_LOCK_FILE);
+        let mut lock_file = fs
+            .open(
+                &lock_path,
+                OpenOptions {
+                    mode: OpenMode::ReadWrite,
+                    create: false,
+                    create_new: false,
+                    truncate: true,
+                },
+            )
+            .expect("open old lock for deterministic aging");
+        lock_file
+            .write_at(
+                0,
+                bytes::Bytes::from(FsLeaderStore::lock_contents(
+                    "node-a",
+                    &old_guard.owner_token,
+                    &stale_timestamp,
+                )),
+            )
+            .expect("age old lock");
+        drop(lock_file);
+
+        let new_guard = store
+            .acquire_lock("node-a")
+            .expect("replace stale lock for same holder identity");
+        let new_owner_token = new_guard.owner_token.clone();
+        assert_ne!(old_guard.owner_token, new_owner_token);
+
+        // Act
+        drop(old_guard);
+
+        // Assert
+        let current = store
+            .read_lock_contents()
+            .expect("read replacement lock")
+            .expect("replacement lock remains present");
+        assert_eq!(
+            FsLeaderStore::parse_lock_owner_token(&current),
+            Some(new_owner_token.as_str())
+        );
+        drop(new_guard);
+        assert!(!fs.exists(&lock_path).expect("lock presence check"));
+    }
+
+    #[test]
+    fn should_allow_only_one_concurrent_acquisition_lock_owner() {
+        // Arrange
+        const CONTENDERS: usize = 8;
+        let fs = Arc::new(MockFs::new());
+        let store = Arc::new(FsLeaderStore::new(Arc::clone(&fs) as Arc<dyn Fs>));
+        let start = Arc::new(Barrier::new(CONTENDERS));
+        let attempts_complete = Arc::new(Barrier::new(CONTENDERS));
+        let mut handles = Vec::with_capacity(CONTENDERS);
+        for contender in 0..CONTENDERS {
+            let store = Arc::clone(&store);
+            let start = Arc::clone(&start);
+            let attempts_complete = Arc::clone(&attempts_complete);
+            handles.push(thread::spawn(move || {
+                start.wait();
+                let guard = store.acquire_lock(&format!("node-{contender}"));
+                attempts_complete.wait();
+                guard.is_ok()
+            }));
+        }
+
+        // Act
+        let acquired = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("acquisition thread panicked"))
+            .filter(|acquired| *acquired)
+            .count();
+
+        // Assert
+        assert_eq!(acquired, 1);
+        assert!(
+            !fs.exists(&FsPath::new(LEADER_LOCK_FILE))
+                .expect("lock presence check"),
+            "winning guard should remove its own acquisition lock"
+        );
     }
 
     #[test]

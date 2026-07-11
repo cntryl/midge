@@ -96,28 +96,44 @@ impl PrimaryLease for FileSystemLease {
                     return Ok(());
                 }
 
-                if let Ok(acquired_at) = chrono::DateTime::parse_from_rfc3339(&existing.acquired_at)
-                {
-                    let age = chrono::Utc::now()
-                        .signed_duration_since(acquired_at)
-                        .to_std()
-                        .unwrap_or(Duration::from_secs(u64::MAX));
-                    if age < Duration::from_secs(DEFAULT_TTL_SECS * 2) {
-                        return Err(LeaseError::AcquisitionFailed(format!(
-                            "another Midge instance is already running against this storage \
-                             (holder: {}, epoch: {}, acquired {}s ago)",
-                            existing.holder_id,
-                            existing.epoch,
-                            age.as_secs()
-                        )));
-                    }
-                    tracing::warn!(
-                        old_holder = %existing.holder_id,
-                        old_epoch = existing.epoch,
-                        age_secs = age.as_secs(),
-                        "taking over stale leader record (previous holder likely crashed)"
-                    );
+                let acquired_at = chrono::DateTime::parse_from_rfc3339(&existing.acquired_at)
+                    .map_err(|_| {
+                        LeaseError::AcquisitionFailed(format!(
+                            "another Midge instance may still own this storage; leader timestamp \
+                             is invalid (holder: {}, epoch: {})",
+                            existing.holder_id, existing.epoch
+                        ))
+                    })?;
+                let signed_age = chrono::Utc::now().signed_duration_since(acquired_at);
+                if signed_age < chrono::Duration::zero() {
+                    return Err(LeaseError::AcquisitionFailed(format!(
+                        "another Midge instance may still own this storage; leader timestamp is \
+                         in the future (holder: {}, epoch: {})",
+                        existing.holder_id, existing.epoch
+                    )));
                 }
+                let age = signed_age.to_std().map_err(|_| {
+                    LeaseError::AcquisitionFailed(format!(
+                        "another Midge instance may still own this storage; leader age is \
+                         ambiguous (holder: {}, epoch: {})",
+                        existing.holder_id, existing.epoch
+                    ))
+                })?;
+                if age < Duration::from_secs(DEFAULT_TTL_SECS * 2) {
+                    return Err(LeaseError::AcquisitionFailed(format!(
+                        "another Midge instance is already running against this storage \
+                         (holder: {}, epoch: {}, acquired {}s ago)",
+                        existing.holder_id,
+                        existing.epoch,
+                        age.as_secs()
+                    )));
+                }
+                tracing::warn!(
+                    old_holder = %existing.holder_id,
+                    old_epoch = existing.epoch,
+                    age_secs = age.as_secs(),
+                    "taking over stale leader record (previous holder likely crashed)"
+                );
                 Ok(())
             })
             .map_err(|e| LeaseError::AcquisitionFailed(e.to_string()))?;
@@ -200,6 +216,7 @@ unsafe impl Sync for FileSystemLease {}
 
 #[cfg(test)]
 mod tests {
+    use super::super::traits::{format_leader_record, LeaderRecord};
     use super::*;
 
     #[test]
@@ -282,5 +299,36 @@ mod tests {
 
         // Assert
         assert!(matches!(result, Err(LeaseError::RenewalFailed(_))));
+    }
+
+    #[test]
+    fn should_reject_takeover_when_leader_timestamp_is_in_the_future() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().unwrap();
+        let future_record = LeaderRecord {
+            epoch: 41,
+            holder_id: "future-node".to_string(),
+            acquired_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+        };
+        std::fs::write(
+            temp_dir.path().join(".midge_leader"),
+            format_leader_record(&future_record),
+        )
+        .expect("write future leader record");
+        let lease = Arc::new(FileSystemLease::new(temp_dir.path(), false).unwrap());
+
+        // Act
+        let result = Arc::clone(&lease).try_acquire();
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::AcquisitionFailed(_))));
+        assert_eq!(
+            lease
+                .leader_store
+                .read_current()
+                .expect("read current leader"),
+            Some(future_record),
+            "an ambiguous future timestamp must retain the existing leader indefinitely"
+        );
     }
 }
