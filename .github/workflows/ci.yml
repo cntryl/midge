@@ -8,10 +8,13 @@ on:
     branches: [main]
     paths:
       - "compose.yml"
+      - "Dockerfile*"
       - "src/**"
       - "tests/**"
       - "benches/**"
       - "docs/**"
+      - "fuzz/**"
+      - "scripts/**"
       - "*.md"
       - "*.toml"
       - ".cargo/**"
@@ -20,10 +23,13 @@ on:
     branches: [main]
     paths:
       - "compose.yml"
+      - "Dockerfile*"
       - "src/**"
       - "tests/**"
       - "benches/**"
       - "docs/**"
+      - "fuzz/**"
+      - "scripts/**"
       - "*.md"
       - "*.toml"
       - ".cargo/**"
@@ -40,19 +46,19 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-      fail-fast: true
+      fail-fast: false
 
     timeout-minutes: 20
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Update Rust toolchain
         run: rustup update stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: "ci"
 
@@ -78,35 +84,67 @@ jobs:
       - name: Build
         run: cargo build --all-targets
 
+      - name: Test
+        run: cargo test --workspace --all-features
+
+  msrv:
+    name: MSRV and no-default features
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Install MSRV toolchain
+        run: rustup toolchain install 1.93 --profile minimal --component clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: "ci-msrv"
+
+      - name: Check MSRV
+        run: cargo +1.93 check --workspace --all-targets
+
+      - name: Strict no-default Clippy
+        run: cargo +1.93 clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic
+
   cloud-integration:
     name: Cloud integration (Sqrzl)
     runs-on: ubuntu-latest
 
     env:
       CARGO_INCREMENTAL: 0
+      MIDGE_REQUIRE_SQRZL: 1
 
     timeout-minutes: 20
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Update Rust toolchain
         run: rustup update stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: "ci-cloud-integration"
 
       - name: Start Sqrzl emulator
         run: docker compose up -d sqrzl
 
+      - name: Wait for Sqrzl health
+        run: curl --fail --retry 30 --retry-delay 1 --retry-all-errors http://127.0.0.1:9001/healthz
+
       - name: Sqrzl qualification
         run: cargo test --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1
 
+      - name: Provider engine qualification
+        run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests -- --test-threads=1
+
       - name: Full test suite against Sqrzl emulator
-        run: cargo test
+        run: cargo test --workspace --all-features
 
       - name: Stop Sqrzl emulator
         if: always()

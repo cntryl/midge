@@ -1,26 +1,37 @@
 name: Publish
 
 on:
-  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   release-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      MIDGE_REQUIRE_SQRZL: 1
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Verify tag matches crate version
+        shell: bash
+        run: |
+          crate_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          test "${GITHUB_REF_NAME}" = "v${crate_version}"
 
       - name: Update Rust toolchain
         run: rustup update stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: "release-gate"
 
@@ -38,7 +49,7 @@ jobs:
           test -f CHANGELOG.md
 
       - name: Install cntryl-tools
-        run: cargo install --git https://github.com/cntryl/tools --locked
+        run: cargo install --git https://github.com/cntryl/tools --rev d36dc1c09462a4fd691ed9fdcc4413eb61f0c80c --locked
 
       - name: Rustfmt
         run: cargo fmt --check
@@ -49,8 +60,17 @@ jobs:
       - name: Start Sqrzl emulator
         run: docker compose up -d sqrzl
 
+      - name: Wait for Sqrzl health
+        run: curl --fail --retry 30 --retry-delay 1 --retry-all-errors http://127.0.0.1:9001/healthz
+
       - name: Full test suite
-        run: cargo test
+        run: cargo test --workspace --all-features
+
+      - name: Sqrzl provider qualification
+        run: cargo test --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1
+
+      - name: Sqrzl engine qualification
+        run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests -- --test-threads=1
 
       - name: Trust-critical smoke suite
         run: cargo test --test external_adopter_smoke
@@ -83,15 +103,19 @@ jobs:
   publish:
     needs: release-gate
     runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Update Rust toolchain
         run: rustup update stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: "publish"
 
@@ -100,7 +124,7 @@ jobs:
 
       - name: Login
         id: auth
-        uses: rust-lang/crates-io-auth-action@v1
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
 
       - name: Publish crate to crates.io
         env:
