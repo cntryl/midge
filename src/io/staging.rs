@@ -69,7 +69,7 @@ where
             })?;
 
         let mut offset = 0_u64;
-        let mut chunk = [0_u8; 64 * 1024];
+        let mut chunk = vec![0_u8; 64 * 1024];
         loop {
             let count = source.read(&mut chunk).map_err(|error| {
                 map_error(format!(
