@@ -10,10 +10,11 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::engine::api::write_options::effective_wal_durability_policy;
 use crate::engine::ingest::IngestCoordinator;
 use crate::engine::ColumnFamilyId;
+use crate::runtime::transaction_spill::{IntentLookup, TransactionMemoryPool, TransactionWriteSet};
 use crate::runtime::RuntimeHandle;
 use crate::types::ConflictPolicy;
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,116 +26,6 @@ pub enum TransactionMode {
     ReadOnly,
     /// Read-write transaction; point writes are allowed
     ReadWrite,
-}
-
-/// Pending write intent collected within a transaction.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WriteIntent {
-    /// Put operation (upsert)
-    Put {
-        cf_id: ColumnFamilyId,
-        key: Vec<u8>,
-        value: Vec<u8>,
-        ttl_seconds: Option<u64>,
-    },
-    /// Insert operation (error if exists)
-    Insert {
-        cf_id: ColumnFamilyId,
-        key: Vec<u8>,
-        value: Vec<u8>,
-        ttl_seconds: Option<u64>,
-    },
-    /// Delete operation
-    Delete { cf_id: ColumnFamilyId, key: Vec<u8> },
-    /// Delete range operation (atomic range tombstone)
-    DeleteRange {
-        cf_id: ColumnFamilyId,
-        start_key: Vec<u8>,
-        end_key: Vec<u8>,
-    },
-}
-
-impl WriteIntent {
-    pub(crate) fn into_runtime_op(self) -> crate::runtime::TransactionOp {
-        match self {
-            Self::Put {
-                cf_id,
-                key,
-                value,
-                ttl_seconds,
-            } => crate::runtime::TransactionOp::Put {
-                cf_id,
-                key: bytes::Bytes::from(key),
-                value: bytes::Bytes::from(value),
-                ttl_seconds,
-                insert_only: false,
-            },
-            Self::Insert {
-                cf_id,
-                key,
-                value,
-                ttl_seconds,
-            } => crate::runtime::TransactionOp::Put {
-                cf_id,
-                key: bytes::Bytes::from(key),
-                value: bytes::Bytes::from(value),
-                ttl_seconds,
-                insert_only: true,
-            },
-            Self::Delete { cf_id, key } => crate::runtime::TransactionOp::Delete {
-                cf_id,
-                key: bytes::Bytes::from(key),
-            },
-            Self::DeleteRange {
-                cf_id,
-                start_key,
-                end_key,
-            } => crate::runtime::TransactionOp::DeleteRange {
-                cf_id,
-                start_key: bytes::Bytes::from(start_key),
-                end_key: bytes::Bytes::from(end_key),
-            },
-        }
-    }
-
-    /// Create a put intent (upsert)
-    fn put(cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>, ttl_seconds: Option<u64>) -> Self {
-        Self::Put {
-            cf_id,
-            key,
-            value,
-            ttl_seconds,
-        }
-    }
-
-    /// Create an insert intent (error if exists)
-    fn insert(
-        cf_id: ColumnFamilyId,
-        key: Vec<u8>,
-        value: Vec<u8>,
-        ttl_seconds: Option<u64>,
-    ) -> Self {
-        Self::Insert {
-            cf_id,
-            key,
-            value,
-            ttl_seconds,
-        }
-    }
-
-    /// Create a delete intent
-    fn delete(cf_id: ColumnFamilyId, key: Vec<u8>) -> Self {
-        Self::Delete { cf_id, key }
-    }
-
-    /// Create a delete range intent
-    fn delete_range(cf_id: ColumnFamilyId, start_key: Vec<u8>, end_key: Vec<u8>) -> Self {
-        Self::DeleteRange {
-            cf_id,
-            start_key,
-            end_key,
-        }
-    }
 }
 
 /// Transaction for multi-key ACID operations
@@ -151,8 +42,8 @@ pub struct Transaction {
     mode: TransactionMode,
     /// Isolation behavior used during commit conflict handling.
     conflict_policy: ConflictPolicy,
-    /// Write set: sequence of write intents
-    write_set: Vec<WriteIntent>,
+    /// Bounded resident write set with optional durable spill runs.
+    write_set: TransactionWriteSet,
     /// Start sequence number (snapshot point)
     start_sequence: u64,
     /// Immutable snapshot for direct read execution (bypasses event loop)
@@ -163,11 +54,6 @@ pub struct Transaction {
     snapshot_pin: SnapshotPinGuard,
     /// Keeps the runtime alive until this transaction is fully dropped.
     _runtime_transaction_guard: crate::runtime::RuntimeTransactionGuard,
-}
-
-enum WriteSetLookup {
-    Present(Vec<u8>),
-    Deleted,
 }
 
 struct SnapshotPinGuard {
@@ -271,6 +157,9 @@ pub(crate) struct TransactionInit {
     pub(crate) start_sequence: u64,
     pub(crate) read_snapshot: Option<Arc<crate::runtime::ReadSnapshot>>,
     pub(crate) cloud_mode: bool,
+    pub(crate) db_path: PathBuf,
+    pub(crate) memory_mode: bool,
+    pub(crate) transaction_memory_pool: Arc<TransactionMemoryPool>,
     pub(crate) runtime_transaction_guard: crate::runtime::RuntimeTransactionGuard,
 }
 
@@ -285,7 +174,12 @@ impl Transaction {
             cf_id: init.cf_id,
             mode: init.mode,
             conflict_policy: ConflictPolicy::LastWriteWins,
-            write_set: Vec::new(),
+            write_set: TransactionWriteSet::new(
+                init.transaction_memory_pool,
+                &init.db_path,
+                init.memory_mode,
+                init.id,
+            ),
             start_sequence: init.start_sequence,
             read_snapshot: init.read_snapshot,
             cloud_mode: init.cloud_mode,
@@ -310,9 +204,13 @@ impl Transaction {
                 "Cannot write in ReadOnly transaction".to_string(),
             ));
         }
-        self.write_set
-            .push(WriteIntent::put(self.cf_id, key, value, ttl_seconds));
-        Ok(())
+        self.write_set.push(crate::runtime::TransactionOp::Put {
+            cf_id: self.cf_id,
+            key: bytes::Bytes::from(key),
+            value: bytes::Bytes::from(value),
+            ttl_seconds,
+            insert_only: false,
+        })
     }
 
     /// Add an insert (error if exists) to the transaction's write set
@@ -331,9 +229,13 @@ impl Transaction {
                 "Cannot write in ReadOnly transaction".to_string(),
             ));
         }
-        self.write_set
-            .push(WriteIntent::insert(self.cf_id, key, value, ttl_seconds));
-        Ok(())
+        self.write_set.push(crate::runtime::TransactionOp::Put {
+            cf_id: self.cf_id,
+            key: bytes::Bytes::from(key),
+            value: bytes::Bytes::from(value),
+            ttl_seconds,
+            insert_only: true,
+        })
     }
 
     /// Add a delete to the transaction's write set
@@ -347,8 +249,10 @@ impl Transaction {
                 "Cannot write in ReadOnly transaction".to_string(),
             ));
         }
-        self.write_set.push(WriteIntent::delete(self.cf_id, key));
-        Ok(())
+        self.write_set.push(crate::runtime::TransactionOp::Delete {
+            cf_id: self.cf_id,
+            key: bytes::Bytes::from(key),
+        })
     }
 
     /// Add a delete range (atomic tombstone) to the transaction's write set
@@ -372,8 +276,11 @@ impl Transaction {
             ));
         }
         self.write_set
-            .push(WriteIntent::delete_range(self.cf_id, start_key, end_key));
-        Ok(())
+            .push(crate::runtime::TransactionOp::DeleteRange {
+                cf_id: self.cf_id,
+                start_key: bytes::Bytes::from(start_key),
+                end_key: bytes::Bytes::from(end_key),
+            })
     }
 
     // === Internal helpers for engine/mod.rs commit logic ===
@@ -424,7 +331,6 @@ impl Transaction {
             return sync_result;
         }
 
-        let runtime_ops = self.take_runtime_ops();
         let conflict_policy = match self.conflict_policy() {
             ConflictPolicy::LastWriteWins => crate::runtime::ConflictPolicy::LastWriteWins,
             ConflictPolicy::AbortOnWriteConflict => {
@@ -435,14 +341,27 @@ impl Transaction {
         let durability_policy = Some(effective_wal_durability_policy(self.cloud_mode, opts)?);
         let submit_started_at = CommitTiming::phase_start(timing.as_ref());
         let collect_submit_timing = timing.is_some();
-        let commit_result = self.coordinator.submit_ops(
-            &self.runtime_handle,
-            runtime_ops,
-            durability_policy,
-            Some(self.start_sequence()),
-            conflict_policy,
-            collect_submit_timing,
-        );
+        let commit_result = if self.write_set.has_spills() {
+            let source = self.write_set.take_source();
+            self.coordinator.submit_spilled_ops(
+                &self.runtime_handle,
+                source,
+                durability_policy,
+                self.start_sequence(),
+                conflict_policy,
+                collect_submit_timing,
+            )
+        } else {
+            let runtime_ops = self.write_set.take_in_memory_ops();
+            self.coordinator.submit_ops(
+                &self.runtime_handle,
+                runtime_ops,
+                durability_policy,
+                Some(self.start_sequence()),
+                conflict_policy,
+                collect_submit_timing,
+            )
+        };
         CommitTiming::record_submit(&mut timing, submit_started_at);
 
         let result = match commit_result {
@@ -471,13 +390,6 @@ impl Transaction {
     pub fn rollback(mut self) -> MidgeResult<()> {
         self.unregister_snapshot();
         Ok(())
-    }
-
-    pub(crate) fn take_runtime_ops(&mut self) -> Vec<crate::runtime::TransactionOp> {
-        std::mem::take(&mut self.write_set)
-            .into_iter()
-            .map(WriteIntent::into_runtime_op)
-            .collect()
     }
 
     pub(crate) fn unregister_snapshot(&mut self) {
@@ -551,10 +463,10 @@ impl Transaction {
     /// Returns an error when the transaction snapshot is unavailable.
     pub fn get(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
         // Check transaction's write set first (read-your-own-writes)
-        if let Some(value) = self.get_from_write_set(key) {
+        if let Some(value) = self.write_set.latest_for_key(key)? {
             return Ok(match value {
-                WriteSetLookup::Present(bytes) => Some(bytes::Bytes::from(bytes)),
-                WriteSetLookup::Deleted => None,
+                IntentLookup::Present(bytes) => Some(bytes),
+                IntentLookup::Deleted => None,
             });
         }
 
@@ -607,24 +519,24 @@ impl Transaction {
             }
         }
 
-        for intent in &self.write_set {
+        self.write_set.for_each_ordinal(|_, intent| {
             match intent {
-                WriteIntent::Put { key, value, .. } | WriteIntent::Insert { key, value, .. } => {
-                    if Self::key_matches_query(key, query) {
-                        merged.insert(key.clone(), Some(bytes::Bytes::from(value.clone())));
+                crate::runtime::TransactionOp::Put { key, value, .. } => {
+                    if Self::key_matches_query(&key, query) {
+                        merged.insert(key.to_vec(), Some(value));
                     }
                 }
-                WriteIntent::Delete { key, .. } => {
-                    if Self::key_matches_query(key, query) {
-                        merged.insert(key.clone(), None);
+                crate::runtime::TransactionOp::Delete { key, .. } => {
+                    if Self::key_matches_query(&key, query) {
+                        merged.insert(key.to_vec(), None);
                     }
                 }
-                WriteIntent::DeleteRange {
+                crate::runtime::TransactionOp::DeleteRange {
                     start_key, end_key, ..
                 } => {
                     // Mark all keys in [start_key, end_key) as deleted
                     let mut to_delete = Vec::new();
-                    for (key, _) in merged.range(start_key.clone()..end_key.clone()) {
+                    for (key, _) in merged.range(start_key.to_vec()..end_key.to_vec()) {
                         to_delete.push(key.clone());
                     }
                     for key in to_delete {
@@ -632,7 +544,8 @@ impl Transaction {
                     }
                 }
             }
-        }
+            Ok(())
+        })?;
 
         let mut results = Vec::new();
         for (key, value_opt) in merged {
@@ -660,30 +573,6 @@ impl Transaction {
         };
 
         Ok(iter)
-    }
-
-    fn get_from_write_set(&self, key: &[u8]) -> Option<WriteSetLookup> {
-        for intent in self.write_set.iter().rev() {
-            match intent {
-                WriteIntent::Put { key: k, value, .. }
-                | WriteIntent::Insert { key: k, value, .. }
-                    if k.as_slice() == key =>
-                {
-                    return Some(WriteSetLookup::Present(value.clone()));
-                }
-                WriteIntent::Delete { key: k, .. } if k.as_slice() == key => {
-                    return Some(WriteSetLookup::Deleted);
-                }
-                WriteIntent::DeleteRange {
-                    start_key, end_key, ..
-                } if key >= start_key.as_slice() && key < end_key.as_slice() => {
-                    return Some(WriteSetLookup::Deleted);
-                }
-                _ => {}
-            }
-        }
-
-        None
     }
 
     fn key_matches_query(key: &[u8], query: &super::query::Query) -> bool {

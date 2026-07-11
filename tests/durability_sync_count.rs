@@ -3,6 +3,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 static SYNC_COUNT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static TELEMETRY_INIT: OnceLock<()> = OnceLock::new();
 
 fn sync_count_test_guard() -> std::sync::MutexGuard<'static, ()> {
     SYNC_COUNT_TEST_LOCK
@@ -12,7 +13,7 @@ fn sync_count_test_guard() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn open_engine() -> (tempfile::TempDir, Engine, cntryl_midge::ColumnFamilyHandle) {
-    cntryl_midge::init_benchmark_telemetry().expect("enable test-visible WAL metrics");
+    init_test_telemetry();
     let temp_dir = tempfile::tempdir().expect("create database directory");
     let engine = Engine::open(
         OpenOptions::local(temp_dir.path())
@@ -24,6 +25,12 @@ fn open_engine() -> (tempfile::TempDir, Engine, cntryl_midge::ColumnFamilyHandle
         .get_column_family("default")
         .expect("default column family");
     (temp_dir, engine, cf)
+}
+
+fn init_test_telemetry() {
+    TELEMETRY_INIT.get_or_init(|| {
+        cntryl_midge::init_benchmark_telemetry().expect("enable test-visible WAL metrics");
+    });
 }
 
 fn wal_fsync_count(engine: &Engine) -> u64 {
@@ -59,6 +66,51 @@ fn should_issue_one_physical_wal_sync_when_non_empty_sync_transaction_commits() 
     engine
         .shutdown(Duration::from_secs(2))
         .expect("shutdown sync-count engine");
+}
+
+#[test]
+fn should_issue_one_physical_wal_sync_when_spilled_transaction_commits() {
+    // Arrange
+    let _guard = sync_count_test_guard();
+    init_test_telemetry();
+    let temp_dir = tempfile::tempdir().expect("create database directory");
+    let mut engine = Engine::open(
+        OpenOptions::local(temp_dir.path())
+            .transaction_memory_pool_size(8 * 1024)
+            .build()
+            .expect("build options"),
+    )
+    .expect("open engine");
+    let cf = engine
+        .get_column_family("default")
+        .expect("default column family");
+    let before = wal_fsync_count(&engine);
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin spilled transaction");
+    for index in 0..4 {
+        tx.put(
+            format!("spill-{index}").into_bytes(),
+            vec![b'x'; 8 * 1024],
+            None,
+        )
+        .expect("stage spilled value");
+    }
+
+    // Act
+    tx.commit(WriteOptions::sync())
+        .expect("commit spilled transaction synchronously");
+    let after = wal_fsync_count(&engine);
+
+    // Assert
+    assert_eq!(
+        after.saturating_sub(before),
+        1,
+        "split WAL frames must share one physical sync boundary"
+    );
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown spilled sync-count engine");
 }
 
 #[test]

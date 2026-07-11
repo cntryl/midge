@@ -15,8 +15,56 @@ use crate::sst::Memtable;
 use crate::sst::SkipListMemtable;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
+use std::io::{Read as _, Seek as _, Write as _};
 use std::sync::Arc;
 use tracing::instrument;
+
+struct RecoveryTxnSpool {
+    file: std::fs::File,
+    record_count: usize,
+}
+
+impl RecoveryTxnSpool {
+    fn new() -> MidgeResult<Self> {
+        Ok(Self {
+            // Anonymous/delete-on-close storage cannot leak a named recovery
+            // artifact if the process crashes during replay.
+            file: tempfile::tempfile()?,
+            record_count: 0,
+        })
+    }
+
+    fn append(&mut self, record: &WalRecord) -> MidgeResult<()> {
+        let payload = super::encoding::encode(record)?;
+        let mut frame =
+            Vec::with_capacity(super::frame::WAL_FRAME_HEADER_LEN.saturating_add(payload.len()));
+        super::frame::append_frame(&mut frame, &payload)?;
+        self.file.write_all(&frame)?;
+        self.record_count = self.record_count.saturating_add(1);
+        Ok(())
+    }
+
+    fn replay(mut self, mut visitor: impl FnMut(WalRecord) -> MidgeResult<()>) -> MidgeResult<()> {
+        self.file.flush()?;
+        self.file.seek(std::io::SeekFrom::Start(0))?;
+        for _ in 0..self.record_count {
+            let mut header = [0_u8; super::frame::WAL_FRAME_HEADER_LEN];
+            self.file.read_exact(&mut header)?;
+            let (payload_len, expected_crc) = super::frame::decode_frame_header(&header)?;
+            let mut payload = vec![0_u8; payload_len];
+            self.file.read_exact(&mut payload)?;
+            super::frame::verify_frame_crc(&payload, expected_crc)?;
+            visitor(super::encoding::decode(payload.as_slice())?)?;
+        }
+        let mut trailing = [0_u8; 1];
+        if self.file.read(&mut trailing)? != 0 {
+            return Err(MidgeError::Corruption(
+                "transaction recovery spool has trailing bytes".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayPolicy {
@@ -186,9 +234,7 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
     //
     // Legacy split-marker transactions are buffered until TxnCommit.
     // Current TxnBatch records apply atomically from a single validated frame.
-    let mut open_txns: std::collections::HashMap<u64, Vec<WalRecord>> =
-        std::collections::HashMap::new();
-    let mut begun_txns: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut open_txns = std::collections::HashMap::<(u64, u64), RecoveryTxnSpool>::new();
 
     tracing::info!(dir = %wal_dir, "starting wal replay");
 
@@ -206,7 +252,6 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
             stats: &mut stats,
             memtables,
             open_txns: &mut open_txns,
-            begun_txns: &mut begun_txns,
             epoch_frontiers: &epoch_frontiers,
             replay_ordinal: 0,
         };
@@ -301,8 +346,7 @@ fn collect_replay_paths(storage: &dyn Fs, wal_dir: &FsPath) -> MidgeResult<Vec<R
 struct WalReplayState<'a, S: BuildHasher> {
     stats: &'a mut RecoveryStats,
     memtables: &'a mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
-    open_txns: &'a mut std::collections::HashMap<u64, Vec<WalRecord>>,
-    begun_txns: &'a mut std::collections::HashSet<u64>,
+    open_txns: &'a mut std::collections::HashMap<(u64, u64), RecoveryTxnSpool>,
     epoch_frontiers: &'a WriterEpochFrontiers,
     replay_ordinal: u64,
 }
@@ -473,11 +517,10 @@ fn replay_wal_file<S: BuildHasher>(
                     stats: &mut *replay_state.stats,
                     memtables: &mut *replay_state.memtables,
                     open_txns: &mut *replay_state.open_txns,
-                    begun_txns: &mut *replay_state.begun_txns,
                     epoch_frontiers: replay_state.epoch_frontiers,
                     file_apply_ns: &mut file_apply_ns,
                 };
-                apply_replayed_wal_record(frame.record, pos, record_ordinal, &mut apply_ctx)?;
+                apply_replayed_wal_record(&frame.record, pos, record_ordinal, &mut apply_ctx)?;
                 replay_state.replay_ordinal = replay_state.replay_ordinal.saturating_add(1);
                 pos = next_pos;
             }
@@ -502,8 +545,7 @@ struct WalReplayApplyContext<'a, S: BuildHasher> {
     file_path: &'a FsPath,
     stats: &'a mut RecoveryStats,
     memtables: &'a mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
-    open_txns: &'a mut std::collections::HashMap<u64, Vec<WalRecord>>,
-    begun_txns: &'a mut std::collections::HashSet<u64>,
+    open_txns: &'a mut std::collections::HashMap<(u64, u64), RecoveryTxnSpool>,
     epoch_frontiers: &'a WriterEpochFrontiers,
     file_apply_ns: &'a mut u128,
 }
@@ -630,12 +672,12 @@ fn read_wal_frame_payload(
 }
 
 fn apply_replayed_wal_record<S: BuildHasher>(
-    record: WalRecord,
+    record: &WalRecord,
     pos: u64,
     record_ordinal: u64,
     ctx: &mut WalReplayApplyContext<'_, S>,
 ) -> MidgeResult<()> {
-    if ctx.epoch_frontiers.is_stale(&record, record_ordinal) {
+    if ctx.epoch_frontiers.is_stale(record, record_ordinal) {
         ctx.stats.stale_records_skipped += 1;
         tracing::warn!(
             epoch = record.writer_epoch,
@@ -650,14 +692,14 @@ fn apply_replayed_wal_record<S: BuildHasher>(
         return Ok(());
     }
 
-    ctx.stats.record(&record);
+    ctx.stats.record(record);
 
     match record.op {
         WalOpKind::TxnBatch => {
             let payload = record.value.as_ref().ok_or_else(|| {
                 MidgeError::Corruption("transaction batch record missing payload".into())
             })?;
-            let batch = super::encoding::decode_txn_batch_payload(&record, payload)?;
+            let batch = super::encoding::decode_txn_batch_payload(record, payload)?;
             for buffered in batch.records {
                 let replay_record = WalRecord {
                     cf_id: buffered.cf_id,
@@ -676,34 +718,38 @@ fn apply_replayed_wal_record<S: BuildHasher>(
         }
         WalOpKind::TxnBegin => {
             if let Some(txn_id) = record.txn_id {
-                ctx.begun_txns.insert(txn_id);
-                ctx.open_txns.entry(txn_id).or_default();
+                let key = (record.writer_epoch, txn_id);
+                match ctx.open_txns.entry(key) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(RecoveryTxnSpool::new()?);
+                    }
+                    std::collections::hash_map::Entry::Occupied(_) => {
+                        return Err(MidgeError::Corruption(format!(
+                            "duplicate transaction begin for writer epoch {} transaction {txn_id}",
+                            record.writer_epoch
+                        )));
+                    }
+                }
             }
         }
         WalOpKind::TxnCommit => {
             if let Some(txn_id) = record.txn_id {
-                if ctx.begun_txns.remove(&txn_id) {
-                    if let Some(records) = ctx.open_txns.remove(&txn_id) {
-                        for buffered in &records {
-                            apply_wal_record_to_memtables(
-                                buffered,
-                                ctx.memtables,
-                                ctx.file_apply_ns,
-                            )?;
-                        }
-                    }
+                if let Some(spool) = ctx.open_txns.remove(&(record.writer_epoch, txn_id)) {
+                    spool.replay(|buffered| {
+                        apply_wal_record_to_memtables(&buffered, ctx.memtables, ctx.file_apply_ns)
+                    })?;
                 }
             }
         }
         _ => {
             if let Some(txn_id) = record.txn_id {
-                if ctx.begun_txns.contains(&txn_id) {
-                    ctx.open_txns.entry(txn_id).or_default().push(record);
+                if let Some(spool) = ctx.open_txns.get_mut(&(record.writer_epoch, txn_id)) {
+                    spool.append(record)?;
                     return Ok(());
                 }
             }
 
-            apply_wal_record_to_memtables(&record, ctx.memtables, ctx.file_apply_ns)?;
+            apply_wal_record_to_memtables(record, ctx.memtables, ctx.file_apply_ns)?;
         }
     }
 
@@ -1614,6 +1660,127 @@ mod tests {
         assert!(
             !memtables.contains_key(&0),
             "incomplete transactions must not materialize a recovered memtable entry"
+        );
+    }
+
+    #[test]
+    fn should_isolate_reused_transaction_id_by_writer_epoch() {
+        // Arrange: epoch 11 crashes after writing an uncommitted operation.
+        // Epoch 12 then reuses transaction id 1 and commits different data.
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
+        {
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
+            let mut old_begin =
+                WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 1, 11);
+            old_begin.txn_id = Some(1);
+            writer.append_record(&old_begin).unwrap();
+            let mut orphaned = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"orphaned"),
+                Some(Bytes::from_static(b"must-stay-hidden")),
+                2,
+                11,
+            );
+            orphaned.txn_id = Some(1);
+            writer.append_record(&orphaned).unwrap();
+
+            let mut new_begin =
+                WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 3, 12);
+            new_begin.txn_id = Some(1);
+            writer.append_record(&new_begin).unwrap();
+            let mut committed = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"committed"),
+                Some(Bytes::from_static(b"visible")),
+                4,
+                12,
+            );
+            committed.txn_id = Some(1);
+            writer.append_record(&committed).unwrap();
+            let mut new_commit = WalRecord::new(
+                WalOpKind::TxnCommit,
+                Bytes::from_static(b"txn"),
+                None,
+                5,
+                12,
+            );
+            new_commit.txn_id = Some(1);
+            writer.append_record(&new_commit).unwrap();
+            writer.sync().unwrap();
+        }
+
+        // Act
+        let mut memtables = HashMap::new();
+        replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        let recovered = &memtables[&0];
+        assert_eq!(recovered.get(b"orphaned").unwrap(), None);
+        assert_eq!(
+            recovered.get(b"committed").unwrap(),
+            Some(b"visible".to_vec())
+        );
+    }
+
+    #[test]
+    fn should_replay_committed_split_transaction_from_spool() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
+        let txn_id = 73;
+        let operation_count = 128_u64;
+        {
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
+            let mut begin =
+                WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 1, 1);
+            begin.txn_id = Some(txn_id);
+            writer.append_record(&begin).unwrap();
+            for index in 0..operation_count {
+                let mut put = WalRecord::new(
+                    WalOpKind::Put,
+                    Bytes::from(format!("spooled-{index:03}")),
+                    Some(Bytes::from(vec![b'x'; 4 * 1024])),
+                    index + 2,
+                    1,
+                );
+                put.txn_id = Some(txn_id);
+                writer.append_record(&put).unwrap();
+            }
+            let mut commit = WalRecord::new(
+                WalOpKind::TxnCommit,
+                Bytes::from_static(b"txn"),
+                None,
+                operation_count + 2,
+                1,
+            );
+            commit.txn_id = Some(txn_id);
+            writer.append_record(&commit).unwrap();
+            writer.sync().unwrap();
+        }
+
+        // Act
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        assert_eq!(stats.record_count, operation_count + 2);
+        let recovered = &memtables[&0];
+        assert_eq!(
+            recovered.get(b"spooled-000").unwrap(),
+            Some(vec![b'x'; 4 * 1024])
+        );
+        assert_eq!(
+            recovered.get(b"spooled-127").unwrap(),
+            Some(vec![b'x'; 4 * 1024])
         );
     }
 

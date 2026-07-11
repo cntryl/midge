@@ -1530,6 +1530,11 @@ impl FacadeAssembly {
             lease_guard: Some(lease_guard),
             lease_heartbeat: Some(std::sync::Mutex::new(lease_heartbeat)),
             ingest_coordinators,
+            transaction_memory_pool: Arc::new(
+                crate::runtime::transaction_spill::TransactionMemoryPool::new(
+                    opts.transaction_memory_pool_size(),
+                ),
+            ),
         })
     }
 }
@@ -1549,6 +1554,9 @@ impl EngineStartup {
         storage_path.prepare();
 
         let startup_lease = StartupLease::acquire(opts.storage())?;
+        if !storage_path.memory_mode {
+            crate::runtime::transaction_spill::cleanup_orphaned_runs(&storage_path.db_path)?;
+        }
         let materialized =
             RuntimeStorageMaterialization::materialize(opts, &storage_path, &startup_lease)?;
         let recovered = RuntimeRecoveryMaterialization::replay_and_repair(

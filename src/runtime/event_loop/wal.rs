@@ -14,6 +14,14 @@ pub(super) struct ApplyTransactionRequest {
     pub conflict_policy: ConflictPolicy,
 }
 
+pub(super) struct SpilledTransactionRequest {
+    pub request_id: u64,
+    pub source: crate::runtime::transaction_spill::TransactionOpSource,
+    pub durability_policy: Option<DurabilityPolicy>,
+    pub start_sequence: u64,
+    pub conflict_policy: ConflictPolicy,
+}
+
 #[cfg(test)]
 pub(super) struct AppendRequest {
     pub request_id: u64,
@@ -25,6 +33,89 @@ pub(super) struct AppendRequest {
 }
 
 impl WalCoordinator {
+    pub(super) fn apply_spilled_transaction(
+        event_loop: &mut EventLoop,
+        msg_rx: &Receiver<RuntimeMsg>,
+        request: SpilledTransactionRequest,
+        response_tx: Option<Sender<RuntimeResponse>>,
+    ) -> HandleOutcome {
+        let SpilledTransactionRequest {
+            request_id,
+            source,
+            durability_policy,
+            start_sequence,
+            conflict_policy,
+        } = request;
+        if let Some(response_tx) = response_tx {
+            event_loop.register_inline_response(request_id, response_tx);
+        }
+        if !Self::accept_write(event_loop, request_id) {
+            return HandleOutcome::Continue;
+        }
+
+        let touched_cfs = match source.touched_cf_ids() {
+            Ok(cfs) => cfs,
+            Err(error) => {
+                event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+                return HandleOutcome::Continue;
+            }
+        };
+        match event_loop.wal_actor.append_spilled_transaction(
+            &mut event_loop.state,
+            request_id,
+            &source,
+            durability_policy,
+            start_sequence,
+            conflict_policy,
+        ) {
+            Ok((last_sequence, op_count, deferred)) => {
+                event_loop.publish_snapshot();
+                if event_loop.should_ack_immediately(deferred) {
+                    if event_loop.wal_actor.is_cloud_async() {
+                        event_loop
+                            .durability
+                            .queue_waiter(DurabilityWaiter::ConfirmTransactionApply { request_id });
+                    } else if deferred {
+                        event_loop.maybe_queue_confirm_only_waiter(deferred, request_id, true);
+                    } else {
+                        event_loop.state.clear_pending_transaction_barrier();
+                        event_loop.state.confirm_sequences(request_id);
+                    }
+                    event_loop.respond(
+                        request_id,
+                        RuntimeResponse::TransactionApplied {
+                            request_id,
+                            last_sequence,
+                            op_count,
+                            write_stall_hint: event_loop.write_stall_hint_for_cfs(&touched_cfs),
+                        },
+                    );
+                } else {
+                    event_loop
+                        .durability
+                        .queue_waiter(DurabilityWaiter::TransactionApply {
+                            request_id,
+                            last_sequence,
+                            op_count,
+                            touched_cfs,
+                        });
+                }
+            }
+            Err(error) => {
+                event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+            }
+        }
+
+        if !event_loop.wal_actor.is_cloud_async() {
+            const MAX_DRAIN_WRITES_AFTER_BATCH: usize = 1024;
+            let _ = event_loop.drain_pending_writes(msg_rx, MAX_DRAIN_WRITES_AFTER_BATCH);
+            event_loop.sync_batched_wal_if_needed(msg_rx);
+        }
+        event_loop.maybe_flush_cloud_async_wal();
+        event_loop.drain_auto_flush_memtables();
+        HandleOutcome::Continue
+    }
+
     pub(super) fn apply_transaction(
         event_loop: &mut EventLoop,
         msg_rx: &Receiver<RuntimeMsg>,

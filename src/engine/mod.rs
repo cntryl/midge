@@ -99,6 +99,8 @@ pub struct Engine {
     lease_heartbeat: Option<std::sync::Mutex<crate::lease::LeaseHeartbeat>>,
     /// Per-CF ingest coordinators for write batching
     ingest_coordinators: dashmap::DashMap<ColumnFamilyId, Arc<ingest::IngestCoordinator>>,
+    /// Shared bounded pool for resident transaction intents.
+    transaction_memory_pool: Arc<crate::runtime::transaction_spill::TransactionMemoryPool>,
 }
 
 impl Drop for Engine {
@@ -442,6 +444,9 @@ impl Engine {
             start_sequence,
             read_snapshot: Some(read_snapshot),
             cloud_mode: self.cloud_mode,
+            db_path: self.db_path.clone(),
+            memory_mode: self.memory_mode,
+            transaction_memory_pool: Arc::clone(&self.transaction_memory_pool),
             runtime_transaction_guard,
         }))
     }

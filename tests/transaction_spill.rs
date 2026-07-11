@@ -266,7 +266,7 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
 
         // Act
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -277,6 +277,10 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put");
             }
+            drop(tx);
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert
@@ -305,7 +309,7 @@ fn should_recover_committed_spill_given_restart_after_commit() {
 
         // Act
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -317,6 +321,9 @@ fn should_recover_committed_spill_given_restart_after_commit() {
                     .expect("put");
             }
             tx.commit(buffered_write_options(mode)).expect("commit");
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert

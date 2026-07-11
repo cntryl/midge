@@ -284,6 +284,47 @@ impl IngestCoordinator {
         }
     }
 
+    /// Submit an explicit transaction backed by bounded spill runs.
+    pub(crate) fn submit_spilled_ops(
+        &self,
+        runtime: &RuntimeHandle,
+        source: crate::runtime::transaction_spill::TransactionOpSource,
+        durability_policy: Option<crate::wal::DurabilityPolicy>,
+        start_sequence: u64,
+        conflict_policy: crate::runtime::ConflictPolicy,
+        collect_submit_timing: bool,
+    ) -> MidgeResult<u64> {
+        if source.is_empty() {
+            return Ok(0);
+        }
+        if self.stall_flag.load(Ordering::Acquire) {
+            if runtime.check_write_stall(self.cf_id)? {
+                return Err(MidgeError::WriteStall(format!(
+                    "Memory budget exceeded for CF {}",
+                    self.cf_id
+                )));
+            }
+            self.stall_flag.store(false, Ordering::Release);
+        }
+
+        let expected_op_count = source.len();
+        let request_id = next_request_id()?;
+        let runtime_apply_started_at = submit_timing_phase_start(collect_submit_timing);
+        let response = runtime.send_spilled_transaction_and_wait(
+            request_id,
+            source,
+            durability_policy,
+            start_sequence,
+            conflict_policy,
+        );
+        record_submit_runtime_apply(runtime_apply_started_at);
+        Self::decode_apply_transaction_response(
+            response?,
+            Some(expected_op_count),
+            &self.stall_flag,
+        )
+    }
+
     fn drain_as_leader(
         &self,
         runtime: &RuntimeHandle,

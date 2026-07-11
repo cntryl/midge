@@ -10,7 +10,7 @@ use super::{
     flush::FlushCoordinator,
     manifest::ManifestCoordinator,
     snapshot::SnapshotCoordinator,
-    wal::{ApplyTransactionRequest, WalCoordinator},
+    wal::{ApplyTransactionRequest, SpilledTransactionRequest, WalCoordinator},
     EventLoop, HandleOutcome,
 };
 use crate::runtime::{RuntimeMsg, RuntimeResponse};
@@ -97,6 +97,10 @@ enum SnapshotRoute {
 enum WalRoute {
     ApplyTransaction {
         request: ApplyTransactionRequest,
+        response_tx: Option<Sender<RuntimeResponse>>,
+    },
+    ApplySpilledTransaction {
+        request: SpilledTransactionRequest,
         response_tx: Option<Sender<RuntimeResponse>>,
     },
     #[cfg(test)]
@@ -222,7 +226,7 @@ impl RuntimeDispatcher {
             | RuntimeMsg::ManifestPersist { .. }
             | RuntimeMsg::SetRuntimeConfig { .. } => Self::handle_control_message(event_loop, &msg),
             RuntimeMsg::BeginTransaction { .. } => Self::handle_snapshot_message(event_loop, &msg),
-            RuntimeMsg::ApplyTransaction { .. } => {
+            RuntimeMsg::ApplyTransaction { .. } | RuntimeMsg::ApplySpilledTransaction { .. } => {
                 Self::handle_wal_message(event_loop, msg, msg_rx)
             }
             RuntimeMsg::FlushMemtable { .. } => Self::handle_flush_message(event_loop, &msg),
@@ -478,6 +482,27 @@ impl RuntimeDispatcher {
                     request: ApplyTransactionRequest {
                         request_id,
                         ops,
+                        durability_policy,
+                        start_sequence,
+                        conflict_policy,
+                    },
+                    response_tx,
+                },
+                msg_rx,
+            ),
+            RuntimeMsg::ApplySpilledTransaction {
+                request_id,
+                source,
+                durability_policy,
+                start_sequence,
+                conflict_policy,
+                response_tx,
+            } => Self::dispatch_wal(
+                event_loop,
+                WalRoute::ApplySpilledTransaction {
+                    request: SpilledTransactionRequest {
+                        request_id,
+                        source,
                         durability_policy,
                         start_sequence,
                         conflict_policy,
@@ -831,6 +856,12 @@ impl RuntimeDispatcher {
                 request,
                 response_tx,
             } => WalCoordinator::apply_transaction(event_loop, msg_rx, request, response_tx),
+            WalRoute::ApplySpilledTransaction {
+                request,
+                response_tx,
+            } => {
+                WalCoordinator::apply_spilled_transaction(event_loop, msg_rx, request, response_tx)
+            }
             #[cfg(test)]
             WalRoute::Append(request) => WalCoordinator::append(event_loop, msg_rx, request),
             #[cfg(test)]

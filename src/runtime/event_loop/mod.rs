@@ -1000,6 +1000,11 @@ impl EventLoop {
                 request_id,
                 response_tx,
                 ..
+            }
+            | RuntimeMsg::ApplySpilledTransaction {
+                request_id,
+                response_tx,
+                ..
             } => {
                 let response = RuntimeResponse::Error {
                     request_id,

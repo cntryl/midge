@@ -19,6 +19,7 @@ pub mod read_snapshot;
 pub mod snapshot_cache;
 pub(crate) mod snapshot_pins;
 pub mod state;
+pub(crate) mod transaction_spill;
 
 pub use event_loop::EventLoop;
 pub use intent_persistence::IntentPersistence;
@@ -508,6 +509,18 @@ pub enum RuntimeMsg {
         conflict_policy: ConflictPolicy,
         response_tx: Option<Sender<RuntimeResponse>>,
     },
+    /// Apply a transaction from bounded engine-private spill runs.
+    ///
+    /// The source is reopenable so validation, WAL append, and memtable apply
+    /// can each stream it without materializing the complete write set.
+    ApplySpilledTransaction {
+        request_id: u64,
+        source: transaction_spill::TransactionOpSource,
+        durability_policy: Option<DurabilityPolicy>,
+        start_sequence: u64,
+        conflict_policy: ConflictPolicy,
+        response_tx: Option<Sender<RuntimeResponse>>,
+    },
     /// Sync WAL to disk.
     WalSync { request_id: u64 },
     /// Rotate WAL segment.
@@ -742,6 +755,7 @@ impl RuntimeMsg {
             RuntimeMsg::FlushMemtable { request_id, .. }
             | RuntimeMsg::CompactionComplete { request_id, .. }
             | RuntimeMsg::ApplyTransaction { request_id, .. }
+            | RuntimeMsg::ApplySpilledTransaction { request_id, .. }
             | RuntimeMsg::WalSync { request_id }
             | RuntimeMsg::SealWalForCloud { request_id, .. }
             | RuntimeMsg::ManifestPersist { request_id }
@@ -801,6 +815,7 @@ impl RuntimeMsg {
             RuntimeMsg::FlushMemtable { .. } => "FlushMemtable",
             RuntimeMsg::CompactionComplete { .. } => "CompactionComplete",
             RuntimeMsg::ApplyTransaction { .. } => "ApplyTransaction",
+            RuntimeMsg::ApplySpilledTransaction { .. } => "ApplySpilledTransaction",
             RuntimeMsg::WalSync { .. } => "WalSync",
             RuntimeMsg::SealWalForCloud { .. } => "SealWalForCloud",
             RuntimeMsg::ManifestPersist { .. } => "ManifestPersist",
@@ -1517,6 +1532,33 @@ impl RuntimeHandle {
                 Err(MidgeError::Internal("Response channel closed".to_string()))
             }
         }
+    }
+
+    pub(crate) fn send_spilled_transaction_and_wait(
+        &self,
+        request_id: u64,
+        source: transaction_spill::TransactionOpSource,
+        durability_policy: Option<DurabilityPolicy>,
+        start_sequence: u64,
+        conflict_policy: ConflictPolicy,
+    ) -> MidgeResult<RuntimeResponse> {
+        let submission_guard = self.lifecycle.begin_submission()?;
+        let (response_tx, response_rx) = channel::bounded(1);
+        self.msg_tx
+            .try_send(RuntimeMsg::ApplySpilledTransaction {
+                request_id,
+                source,
+                durability_policy,
+                start_sequence,
+                conflict_policy,
+                response_tx: Some(response_tx),
+            })
+            .map_err(Self::map_submission_error)?;
+        drop(submission_guard);
+
+        response_rx
+            .recv()
+            .map_err(|_| MidgeError::Internal("Response channel closed".to_string()))
     }
 
     /// Check if writes should be stalled for the given column family.
