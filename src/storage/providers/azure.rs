@@ -1541,6 +1541,13 @@ impl CloudSigner for ManagedIdentitySigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn azure_client_id_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     // =========== AzureCredential Tests ===========
 
     #[test]
@@ -1794,6 +1801,7 @@ mod tests {
     #[test]
     fn should_create_provider_with_managed_identity_system_assigned() {
         // Arrange
+        let _env_guard = azure_client_id_env_lock().lock().unwrap();
         let account = "myaccount";
         let container = "mycontainer";
 
@@ -1814,6 +1822,7 @@ mod tests {
     #[test]
     fn should_create_provider_with_managed_identity_user_assigned() {
         // Arrange
+        let _env_guard = azure_client_id_env_lock().lock().unwrap();
         let account = "myaccount";
         let container = "mycontainer";
         let client_id = "00000000-0000-0000-0000-000000000000";
@@ -1839,6 +1848,7 @@ mod tests {
     #[test]
     fn should_use_env_var_for_client_id_when_none_provided() {
         // Arrange
+        let _env_guard = azure_client_id_env_lock().lock().unwrap();
         std::env::set_var("AZURE_CLIENT_ID", "env-client-id");
         let account = "myaccount";
         let container = "mycontainer";
@@ -1861,6 +1871,7 @@ mod tests {
     #[test]
     fn should_prefer_explicit_client_id_over_env() {
         // Arrange
+        let _env_guard = azure_client_id_env_lock().lock().unwrap();
         std::env::set_var("AZURE_CLIENT_ID", "env-client-id");
         let account = "myaccount";
         let container = "mycontainer";

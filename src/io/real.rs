@@ -204,9 +204,12 @@ impl Fs for RealFs {
         {
             use std::os::windows::fs::OpenOptionsExt;
 
+            // FlushFileBuffers requires GENERIC_WRITE even for a directory
+            // handle opened with backup semantics.
             let mut options = fs::OpenOptions::new();
             options
                 .read(true)
+                .write(true)
                 .custom_flags(winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS);
             let dir = options
                 .open(&full)
@@ -651,6 +654,20 @@ mod tests {
             .map_err(|error| FsError::Io(error.to_string()))?;
         assert_eq!(contents, b"new");
         assert!(!temp.path().join("source.tmp").exists());
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn should_sync_directory_with_a_writable_backup_handle() -> FsResult<()> {
+        // Arrange
+        let temp = TempDir::new().map_err(|error| FsError::Io(error.to_string()))?;
+        let fs = RealFs::new(temp.path())?;
+
+        // Act
+        fs.sync_dir(&FsPath::new("."), Durability::Durable)?;
+
+        // Assert
         Ok(())
     }
 }
