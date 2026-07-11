@@ -8,6 +8,7 @@
 
 use crate::io::traits::{Durability, Fs, FsPath, OpenMode, OpenOptions};
 use bytes::Bytes;
+use std::io::Read;
 use std::sync::Arc;
 
 fn cleanup_temp_file(fs: &Arc<dyn Fs>, temp_path: &FsPath) {
@@ -33,6 +34,95 @@ where
     M: Fn(String) -> E,
 {
     stage_bytes_with_hook(fs, temp_path, target_path, data, || Ok(()), map_error)
+}
+
+/// Stage a byte stream without reconstructing it into one large allocation.
+///
+/// The stream is copied into a temporary file in bounded chunks, followed by
+/// the same file-sync, atomic-rename, and parent-directory-sync sequence used
+/// by [`stage_bytes`].
+pub(crate) fn stage_stream<E, M>(
+    fs: &Arc<dyn Fs>,
+    temp_path: &FsPath,
+    target_path: &FsPath,
+    source: &mut dyn Read,
+    map_error: M,
+) -> Result<u64, E>
+where
+    M: Fn(String) -> E,
+{
+    let result = (|| {
+        let mut file = fs
+            .open(
+                temp_path,
+                OpenOptions {
+                    mode: OpenMode::ReadWrite,
+                    create: true,
+                    create_new: false,
+                    truncate: true,
+                },
+            )
+            .map_err(|error| {
+                map_error(format!(
+                    "failed to open staging file {temp_path:?}: {error:?}"
+                ))
+            })?;
+
+        let mut offset = 0_u64;
+        let mut chunk = [0_u8; 64 * 1024];
+        loop {
+            let count = source.read(&mut chunk).map_err(|error| {
+                map_error(format!(
+                    "failed to read staging source for {target_path:?}: {error}"
+                ))
+            })?;
+            if count == 0 {
+                break;
+            }
+            file.write_at(offset, Bytes::copy_from_slice(&chunk[..count]))
+                .map_err(|error| {
+                    map_error(format!(
+                        "failed to write staging file {temp_path:?}: {error:?}"
+                    ))
+                })?;
+            offset = offset.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+        }
+
+        file.sync(Durability::Durable).map_err(|error| {
+            map_error(format!(
+                "failed to sync staging file {temp_path:?}: {error:?}"
+            ))
+        })?;
+        drop(file);
+
+        fs.rename_atomic(temp_path, target_path).map_err(|error| {
+            map_error(format!(
+                "failed to rename staging file {temp_path:?} -> {target_path:?}: {error:?}"
+            ))
+        })?;
+
+        let parent_path = std::path::Path::new(&target_path.0)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map_or_else(
+                || FsPath::new("."),
+                |parent| FsPath::new(parent.to_string_lossy()),
+            );
+        fs.sync_dir(&parent_path, Durability::Durable)
+            .map_err(|error| {
+                map_error(format!(
+                    "failed to sync staging target directory {parent_path:?}: {error:?}"
+                ))
+            })?;
+
+        Ok(offset)
+    })();
+
+    if result.is_err() {
+        cleanup_temp_file(fs, temp_path);
+    }
+
+    result
 }
 
 /// Stage a byte buffer with a hook that runs after the temp file is synced and
@@ -282,6 +372,60 @@ mod tests {
             &FsPath::new("manifest.json.tmp"),
             &FsPath::new("manifest.json"),
             b"manifest",
+            |message| message,
+        );
+
+        // Assert
+        assert!(result
+            .expect_err("directory sync failure must be returned")
+            .contains("injected directory sync failure"));
+    }
+
+    #[test]
+    fn should_stream_then_sync_parent_directory_after_atomic_rename() -> Result<(), String> {
+        // Arrange
+        let fs = Arc::new(RecordingFs::new(false));
+        let events = Arc::clone(&fs.events);
+        let fs: Arc<dyn Fs> = fs;
+        let mut source = std::io::Cursor::new(vec![b'x'; 128 * 1024 + 7]);
+
+        // Act
+        let written = stage_stream(
+            &fs,
+            &FsPath::new("sst/output.sst.tmp"),
+            &FsPath::new("sst/output.sst"),
+            &mut source,
+            |message| message,
+        )?;
+
+        // Assert
+        assert_eq!(written, 128 * 1024 + 7);
+        assert_eq!(
+            *events.lock(),
+            [
+                "write",
+                "write",
+                "write",
+                "file sync",
+                "rename",
+                "directory sync sst"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_return_error_when_stream_parent_directory_sync_fails() {
+        // Arrange
+        let fs: Arc<dyn Fs> = Arc::new(RecordingFs::new(true));
+        let mut source = std::io::Cursor::new(b"sst-data");
+
+        // Act
+        let result = stage_stream(
+            &fs,
+            &FsPath::new("sst/output.sst.tmp"),
+            &FsPath::new("sst/output.sst"),
+            &mut source,
             |message| message,
         );
 

@@ -37,62 +37,28 @@ pub(crate) fn persist_sst_bytes_to_path(bytes: &[u8], path: &Path) -> MidgeResul
 pub(crate) fn persist_sst_stream_to_path(source: &mut dyn Read, path: &Path) -> MidgeResult<()> {
     let finish_start = std::time::Instant::now();
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-
-    let tmp = path.with_extension("tmp");
     fail::fail_point!("midge::sst::inject_no_space_on_finish_to_path", |_| Err(
         MidgeError::NoSpace("failpoint: no space while finalizing SST".to_string())
     ));
 
-    let write_start = std::time::Instant::now();
-    {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)
-            .map_err(MidgeError::Io)?;
-        let write_bytes = std::io::copy(source, &mut file).map_err(MidgeError::Io)?;
-
-        let sync_start = std::time::Instant::now();
-        file.sync_all().map_err(MidgeError::Io)?;
-        let sync_ns = sync_start.elapsed().as_nanos();
-
-        tracing::debug!(path = ?tmp, write_bytes, sync_ns, "sst temp file written and fsynced");
-    }
-    let write_ns = write_start.elapsed().as_nanos();
-
-    let rename_start = std::time::Instant::now();
-    std::fs::rename(&tmp, path).map_err(MidgeError::Io)?;
-    let rename_ns = rename_start.elapsed().as_nanos();
-
-    let dir_fsync_start = std::time::Instant::now();
-    match std::fs::File::open(parent) {
-        Ok(dir_f) => {
-            if let Err(error) = dir_f.sync_all() {
-                tracing::debug!("failed to fsync parent dir for sst: {}", error);
-            }
-        }
-        Err(error) => {
-            tracing::debug!("failed to open parent dir for fsync: {}", error);
-        }
-    }
-    let dir_fsync_ns = dir_fsync_start.elapsed().as_nanos();
+    let target_name = path
+        .file_name()
+        .ok_or(MidgeError::InvalidPath)?
+        .to_string_lossy()
+        .into_owned();
+    let target_path = crate::io::FsPath::new(&target_name);
+    let temp_path = crate::io::FsPath::new(format!("{target_name}.tmp"));
+    let fs: std::sync::Arc<dyn crate::io::Fs> =
+        std::sync::Arc::new(crate::io::RealFs::new(parent).map_err(MidgeError::from)?);
+    let write_bytes =
+        crate::io::staging::stage_stream(&fs, &temp_path, &target_path, source, |message| {
+            MidgeError::from(std::io::Error::other(message))
+        })?;
 
     tracing::info!(
         path = ?path,
-        bytes = std::fs::metadata(path).map_or(0, |metadata| metadata.len()),
+        bytes = write_bytes,
         finish_total_ms = finish_start.elapsed().as_secs_f64() * 1000.0,
-        write_ms = std::time::Duration::from_nanos(u64::try_from(write_ns).unwrap_or(u64::MAX))
-            .as_secs_f64()
-            * 1000.0,
-        rename_ms = std::time::Duration::from_nanos(u64::try_from(rename_ns).unwrap_or(u64::MAX))
-            .as_secs_f64()
-            * 1000.0,
-        dir_fsync_ms = std::time::Duration::from_nanos(
-            u64::try_from(dir_fsync_ns).unwrap_or(u64::MAX),
-        )
-        .as_secs_f64()
-            * 1000.0,
         "sst finished to path"
     );
 
