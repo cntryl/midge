@@ -173,9 +173,8 @@ impl PrimaryLease for FileSystemLease {
         if our_epoch > 0 {
             // Conditional release preserves a newer holder's record if this
             // lease was fenced between shutdown admission and release.
-            let _ = self
-                .leader_store
-                .release_if_owner(&self.holder_id, our_epoch);
+            self.leader_store
+                .release_if_owner(&self.holder_id, our_epoch)?;
         }
 
         self.acquired.store(false, Ordering::Release);
