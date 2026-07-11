@@ -204,6 +204,9 @@ impl RuntimeDispatcher {
         if let Some(outcome) = Self::handle_early_control(event_loop, &msg) {
             return outcome;
         }
+        let Some(msg) = event_loop.gate_message_for_storage_verification(msg) else {
+            return HandleOutcome::Continue;
+        };
 
         match msg {
             RuntimeMsg::CheckWriteStall { .. }
@@ -230,6 +233,7 @@ impl RuntimeDispatcher {
             | RuntimeMsg::ManifestDropColumnFamily { .. } => {
                 Self::handle_manifest_message(event_loop, msg, msg_rx)
             }
+            RuntimeMsg::RetryGc => event_loop.retry_gc(),
             #[cfg(test)]
             RuntimeMsg::Noop { .. } => Self::handle_control_message(event_loop, &msg),
             #[cfg(test)]
@@ -298,11 +302,16 @@ impl RuntimeDispatcher {
 
     fn handle_early_control(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> Option<HandleOutcome> {
         match msg {
-            RuntimeMsg::Shutdown => Some(event_loop.handle_shutdown(None)),
+            RuntimeMsg::Shutdown => Some(event_loop.handle_shutdown_request(None)),
             &RuntimeMsg::ShutdownWithResponse { request_id } => {
-                Some(event_loop.handle_shutdown(Some(request_id)))
+                Some(event_loop.handle_shutdown_request(Some(request_id)))
             }
-            RuntimeMsg::RetryGc => Some(event_loop.retry_gc()),
+            &RuntimeMsg::BeginStorageVerification { request_id } => {
+                Some(event_loop.begin_storage_verification(request_id))
+            }
+            &RuntimeMsg::EndStorageVerification { request_id, token } => {
+                Some(event_loop.end_storage_verification(request_id, token))
+            }
             _ => None,
         }
     }

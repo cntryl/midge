@@ -50,6 +50,8 @@ use super::snapshot_cache::{CfSnapshotData, PublishedSnapshot, SnapshotCache};
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
 
+type SstRuntimeResources = (Arc<dyn crate::sst::SstFactory>, Option<Arc<ReadResources>>);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MetadataCleanupProof {
     len: u64,
@@ -97,6 +99,11 @@ pub struct EventLoop {
     /// if we encounter a non-write message, we stash it here and handle it next.
     pub(super) pending_msg: Option<RuntimeMsg>,
 
+    /// Active runtime-wide barrier token held by online storage verification.
+    verification_barrier_token: Option<u64>,
+    /// Internal completion messages held until the verification barrier releases.
+    verification_deferred_messages: VecDeque<RuntimeMsg>,
+
     /// Sender that worker threads can use to post back completion messages
     /// (compaction threads will use this to report completion).
     pub(super) worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
@@ -122,27 +129,20 @@ pub(super) enum HandleOutcome {
 }
 
 impl EventLoop {
-    pub(crate) fn new(
-        mut state: RuntimeState,
-        trace_enabled: bool,
-        router: Arc<ResponseRouter>,
-        config: super::RuntimeConfig,
-        worker_msg_tx: Option<crossbeam::channel::Sender<super::RuntimeMsg>>,
-    ) -> crate::common::MidgeResult<Self> {
-        let wal_dir = state.wal_dir.clone();
-        let sst_dir = state.sst_dir.clone();
-        let memory_mode = state.is_memory_mode();
-        let initial_segment_id = state.wal.current_segment_id;
-
-        let sst_factory = if memory_mode {
-            // Use in-memory MockFs for SST factory in memory mode
+    fn initialize_sst_resources(
+        state: &RuntimeState,
+        sst_dir: &std::path::Path,
+        memory_mode: bool,
+        config: &super::RuntimeConfig,
+    ) -> crate::common::MidgeResult<SstRuntimeResources> {
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = if memory_mode {
             let fs = Arc::new(crate::io::MockFs::new());
             Arc::new(
                 crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
                     .with_compression_policy(config.compression_policy.clone()),
             )
         } else {
-            let fs = Arc::new(crate::io::RealFs::new(&sst_dir)?);
+            let fs = Arc::new(crate::io::RealFs::new(sst_dir)?);
             Arc::new(
                 crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
                     .with_compression_policy(config.compression_policy.clone()),
@@ -163,6 +163,23 @@ impl EventLoop {
                 Arc::clone(&state.diagnostics),
             )))
         };
+        Ok((sst_factory, read_resources))
+    }
+
+    pub(crate) fn new(
+        mut state: RuntimeState,
+        trace_enabled: bool,
+        router: Arc<ResponseRouter>,
+        config: super::RuntimeConfig,
+        worker_msg_tx: Option<crossbeam::channel::Sender<super::RuntimeMsg>>,
+    ) -> crate::common::MidgeResult<Self> {
+        let wal_dir = state.wal_dir.clone();
+        let sst_dir = state.sst_dir.clone();
+        let memory_mode = state.is_memory_mode();
+        let initial_segment_id = state.wal.current_segment_id;
+
+        let (sst_factory, read_resources) =
+            Self::initialize_sst_resources(&state, &sst_dir, memory_mode, &config)?;
 
         // Create actors - they handle memory_mode internally
         let flush_actor =
@@ -231,6 +248,8 @@ impl EventLoop {
             router,
             inline_responses: RefCell::new(HashMap::new()),
             pending_msg: None,
+            verification_barrier_token: None,
+            verification_deferred_messages: VecDeque::new(),
             worker_msg_tx,
 
             write_stall_waiters: HashMap::new(),
@@ -893,9 +912,183 @@ impl EventLoop {
         gc::GcCoordinator::retry(self)
     }
 
+    pub(super) fn defer_verification_message(&mut self, message: RuntimeMsg) {
+        let is_duplicate_maintenance = matches!(message, RuntimeMsg::RetryGc)
+            && self
+                .verification_deferred_messages
+                .iter()
+                .any(|pending| matches!(pending, RuntimeMsg::RetryGc));
+        let is_duplicate_drop_shutdown = matches!(message, RuntimeMsg::Shutdown)
+            && self
+                .verification_deferred_messages
+                .iter()
+                .any(|pending| matches!(pending, RuntimeMsg::Shutdown));
+        if !is_duplicate_maintenance && !is_duplicate_drop_shutdown {
+            self.verification_deferred_messages.push_back(message);
+        }
+    }
+
+    pub(super) fn begin_storage_verification(&mut self, request_id: u64) -> HandleOutcome {
+        let active_compactions = self
+            .state
+            .active_compactions
+            .load(std::sync::atomic::Ordering::Acquire);
+        let layout_is_changing = active_compactions > 0
+            || self.state.compaction.pending_tasks > 0
+            || !self.state.compaction.compacting_ssts.is_empty();
+        if self.verification_barrier_token.is_some() || layout_is_changing {
+            self.respond(
+                request_id,
+                RuntimeResponse::Error {
+                    request_id,
+                    error: crate::common::MidgeError::Busy(
+                        "storage layout is busy or already being verified".to_string(),
+                    ),
+                },
+            );
+            return HandleOutcome::Continue;
+        }
+
+        self.verification_barrier_token = Some(request_id);
+        crate::failpoints::fail_point!("midge::verification::before_barrier_response");
+        self.respond(
+            request_id,
+            RuntimeResponse::StorageVerificationBarrier {
+                request_id,
+                token: request_id,
+            },
+        );
+        HandleOutcome::Continue
+    }
+
+    pub(super) fn end_storage_verification(
+        &mut self,
+        request_id: u64,
+        token: u64,
+    ) -> HandleOutcome {
+        if self.verification_barrier_token != Some(token) {
+            self.respond(
+                request_id,
+                RuntimeResponse::Error {
+                    request_id,
+                    error: crate::common::MidgeError::InvalidArgument(
+                        "storage verification barrier token does not match".to_string(),
+                    ),
+                },
+            );
+            return HandleOutcome::Continue;
+        }
+
+        self.verification_barrier_token = None;
+        if self.pending_msg.is_none() {
+            self.pending_msg = self.verification_deferred_messages.pop_front();
+        }
+        self.respond(request_id, RuntimeResponse::Ok { request_id });
+        HandleOutcome::Continue
+    }
+
+    pub(super) fn gate_message_for_storage_verification(
+        &mut self,
+        msg: RuntimeMsg,
+    ) -> Option<RuntimeMsg> {
+        if self.verification_barrier_token.is_none() {
+            return Some(msg);
+        }
+
+        match msg {
+            RuntimeMsg::ApplyTransaction {
+                request_id,
+                response_tx,
+                ..
+            } => {
+                let response = RuntimeResponse::Error {
+                    request_id,
+                    error: crate::common::MidgeError::Busy(
+                        "storage verification barrier is active".to_string(),
+                    ),
+                };
+                if let Some(response_tx) = response_tx {
+                    let _ = response_tx.send(response);
+                } else {
+                    self.respond(request_id, response);
+                }
+                None
+            }
+            message @ RuntimeMsg::CompactionComplete { .. } => {
+                self.defer_verification_message(message);
+                None
+            }
+            message @ RuntimeMsg::RetryGc => {
+                self.defer_verification_message(message);
+                None
+            }
+            #[cfg(test)]
+            message @ (RuntimeMsg::FlushComplete { .. }
+            | RuntimeMsg::WalSyncComplete { .. }
+            | RuntimeMsg::CloudUploadComplete { .. }
+            | RuntimeMsg::DeleteObsoleteSsts { .. }
+            | RuntimeMsg::ManifestAddSst { .. }
+            | RuntimeMsg::ManifestCompactionComplete { .. }) => {
+                self.defer_verification_message(message);
+                None
+            }
+            message @ (RuntimeMsg::FlushMemtable { .. }
+            | RuntimeMsg::WalSync { .. }
+            | RuntimeMsg::SealWalForCloud { .. }
+            | RuntimeMsg::ManifestPersist { .. }
+            | RuntimeMsg::ManifestCreateColumnFamily { .. }
+            | RuntimeMsg::ManifestDropColumnFamily { .. }
+            | RuntimeMsg::SetRuntimeConfig { .. }
+            | RuntimeMsg::CompactAll { .. }) => {
+                let request_id = message
+                    .request_id()
+                    .expect("barrier-blocked runtime message has request id");
+                self.respond(
+                    request_id,
+                    RuntimeResponse::Error {
+                        request_id,
+                        error: crate::common::MidgeError::Busy(
+                            "storage verification barrier is active".to_string(),
+                        ),
+                    },
+                );
+                None
+            }
+            #[cfg(test)]
+            message @ (RuntimeMsg::WalAppend { .. }
+            | RuntimeMsg::WalAppendDeleteRange { .. }
+            | RuntimeMsg::WalRotate { .. }
+            | RuntimeMsg::CloudUploadSst { .. }
+            | RuntimeMsg::CloudUploadWal { .. }
+            | RuntimeMsg::CheckGc { .. }
+            | RuntimeMsg::RunCompaction { .. }
+            | RuntimeMsg::BeginIngest { .. }
+            | RuntimeMsg::EndIngest { .. }) => {
+                let request_id = message
+                    .request_id()
+                    .expect("barrier-blocked test message has request id");
+                self.respond(
+                    request_id,
+                    RuntimeResponse::Error {
+                        request_id,
+                        error: crate::common::MidgeError::Busy(
+                            "storage verification barrier is active".to_string(),
+                        ),
+                    },
+                );
+                None
+            }
+            message => Some(message),
+        }
+    }
+
     fn has_actionable_work(&self) -> bool {
         if self.pending_msg.is_some() {
             return true;
+        }
+
+        if self.verification_barrier_token.is_some() {
+            return false;
         }
 
         if self.wal_actor.should_sync_batch() || self.wal_actor.has_pending_cloud_writes() {
@@ -941,6 +1134,9 @@ impl EventLoop {
     }
 
     fn progress_pass(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
+        if self.verification_barrier_token.is_some() {
+            return;
+        }
         self.sync_batched_wal_if_needed(msg_rx);
         self.maybe_flush_cloud_async_wal();
         self.tick_hybrid_storage();
@@ -982,9 +1178,11 @@ impl EventLoop {
     }
 
     fn process_one(&mut self, msg: RuntimeMsg, msg_rx: &Receiver<RuntimeMsg>) -> HandleOutcome {
-        self.maybe_flush_cloud_async_wal();
-        self.tick_hybrid_storage();
-        self.drain_hybrid_storage_events();
+        if self.verification_barrier_token.is_none() {
+            self.maybe_flush_cloud_async_wal();
+            self.tick_hybrid_storage();
+            self.drain_hybrid_storage_events();
+        }
         self.handle_runtime_msg(msg, msg_rx)
     }
 
@@ -1010,10 +1208,20 @@ impl EventLoop {
             return outcome;
         }
 
-        let drained = self.drain_pending_writes(msg_rx, max_drain);
+        let drained = if self.verification_barrier_token.is_some() || self.pending_msg.is_some() {
+            0
+        } else {
+            self.drain_pending_writes(msg_rx, max_drain)
+        };
         batch += drained;
         self.record_wake_batch(batch);
         outcome
+    }
+
+    fn restore_verification_deferred_message(&mut self) {
+        if self.verification_barrier_token.is_none() && self.pending_msg.is_none() {
+            self.pending_msg = self.verification_deferred_messages.pop_front();
+        }
     }
 
     /// Main event loop — runs until Shutdown message or channel close.
@@ -1022,6 +1230,7 @@ impl EventLoop {
         const ACTIONABLE_IDLE_BACKOFF: Duration = Duration::from_micros(50);
 
         loop {
+            self.restore_verification_deferred_message();
             if let Some(pending) = self.pending_msg.take() {
                 let outcome = self.process_one(pending, msg_rx);
                 if outcome == HandleOutcome::Break {
@@ -1059,7 +1268,12 @@ impl EventLoop {
             }
 
             let idle_timeout = self.idle_progress_timeout();
-            let msg = if let Some(storage_rx) = self.hybrid_storage_events.clone() {
+            let selectable_storage_rx = self
+                .verification_barrier_token
+                .is_none()
+                .then(|| self.hybrid_storage_events.clone())
+                .flatten();
+            let msg = if let Some(storage_rx) = selectable_storage_rx {
                 if let Some(timeout) = idle_timeout {
                     crossbeam::channel::select! {
                         recv(msg_rx) -> msg => msg.ok(),
@@ -1532,6 +1746,82 @@ pub(super) mod tests {
             event_loop.compaction_actor.l0_file_count_threshold(),
             2,
             "runtime config should update the compaction actor L0 file-count trigger"
+        );
+    }
+
+    #[test]
+    fn should_defer_layout_completion_until_verification_barrier_releases() {
+        // Arrange
+        let mut event_loop = create_test_event_loop().expect("create memory event loop");
+        let barrier_request_id = 100;
+        let barrier_rx = event_loop.router.register(barrier_request_id);
+        event_loop.begin_storage_verification(barrier_request_id);
+        assert!(matches!(
+            barrier_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("barrier response"),
+            RuntimeResponse::StorageVerificationBarrier { token: 100, .. }
+        ));
+
+        let mutation_request_id = 101;
+        let mutation_rx = event_loop.router.register(mutation_request_id);
+        let completion = RuntimeMsg::CompactionComplete {
+            request_id: 102,
+            input_ssts: vec!["input.sst".to_string()],
+            output_ssts: vec!["output.sst".to_string()],
+            cf_id: 0,
+            target_level: 1,
+            succeeded: true,
+        };
+
+        // Act
+        let blocked_mutation =
+            event_loop.gate_message_for_storage_verification(RuntimeMsg::ManifestPersist {
+                request_id: mutation_request_id,
+            });
+        let deferred_completion = event_loop.gate_message_for_storage_verification(completion);
+        let deferred_gc = event_loop.gate_message_for_storage_verification(RuntimeMsg::RetryGc);
+        let duplicate_gc = event_loop.gate_message_for_storage_verification(RuntimeMsg::RetryGc);
+
+        let release_request_id = 103;
+        let release_rx = event_loop.router.register(release_request_id);
+        event_loop.end_storage_verification(release_request_id, barrier_request_id);
+
+        // Assert
+        assert!(blocked_mutation.is_none());
+        assert!(matches!(
+            mutation_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("blocked mutation response"),
+            RuntimeResponse::Error {
+                error: crate::common::MidgeError::Busy(_),
+                ..
+            }
+        ));
+        assert!(deferred_completion.is_none());
+        assert!(deferred_gc.is_none());
+        assert!(duplicate_gc.is_none());
+        assert!(matches!(
+            release_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("barrier release response"),
+            RuntimeResponse::Ok { .. }
+        ));
+        assert!(matches!(
+            event_loop.pending_msg,
+            Some(RuntimeMsg::CompactionComplete {
+                request_id: 102,
+                ..
+            })
+        ));
+        assert!(matches!(
+            event_loop.verification_deferred_messages.front(),
+            Some(RuntimeMsg::RetryGc)
+        ));
+        assert_eq!(
+            event_loop.verification_deferred_messages.len(),
+            1,
+            "duplicate maintenance retries must be coalesced while verification is active"
         );
     }
 

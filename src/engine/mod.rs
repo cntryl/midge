@@ -28,6 +28,7 @@ static IN_MEMORY_OPEN_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub(crate) mod api;
 mod ingest;
 mod startup;
+mod verification;
 
 pub use crate::config::EngineHealth;
 pub use crate::types::{
@@ -187,62 +188,7 @@ impl Engine {
         db_path: &Path,
         runtime_health: Option<EngineHealth>,
     ) -> MidgeResult<StorageVerificationReport> {
-        crate::metadata::validate_format_marker(db_path)?;
-
-        let manifest =
-            crate::metadata::ManifestPersistence::load_with_policy(db_path, RecoveryPolicy::Strict)
-                .map_err(MidgeError::RecoveryFailed)?;
-        let intents =
-            crate::runtime::IntentPersistence::load_with_policy(db_path, RecoveryPolicy::Strict)
-                .map_err(MidgeError::RecoveryFailed)?;
-
-        let fs =
-            std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
-                MidgeError::RecoveryFailed(format!("failed to open filesystem: {e}"))
-            })?) as Arc<dyn crate::io::Fs>;
-
-        for file in &manifest.files {
-            let rel = std::path::PathBuf::from("sst").join(&file.name);
-            let path_str = rel.to_string_lossy().to_string();
-            crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&fs)).map_err(|e| {
-                MidgeError::Corruption(format!("failed to verify SST {}: {}", file.name, e))
-            })?;
-        }
-
-        let wal_storage = crate::io::RealFs::new(db_path.join("wal")).map_err(|e| {
-            MidgeError::RecoveryFailed(format!("failed to open WAL directory: {e}"))
-        })?;
-        let wal_stats = crate::wal::recovery::replay_wal_with_policy(
-            &wal_storage,
-            &crate::io::FsPath::new(""),
-            &mut std::collections::HashMap::new(),
-            crate::wal::recovery::ReplayPolicy::Strict,
-        )
-        .map_err(|e| MidgeError::RecoveryFailed(format!("WAL verification failed: {e}")))?;
-
-        let residue =
-            crate::storage::residue::StorageResidueAssessment::scan_sst_dir(db_path, &manifest);
-        let health = match runtime_health {
-            Some(EngineHealth::Healthy) | None => crate::storage::residue::classify_engine_health(
-                crate::storage::residue::HealthInputs {
-                    opened_in_salvage_mode: false,
-                    write_stalled: false,
-                    persistence_anomaly_detected: false,
-                    pending_intents: intents.len(),
-                    orphan_ssts: residue.orphan_ssts.len(),
-                },
-            ),
-            Some(other) => other,
-        };
-
-        Ok(StorageVerificationReport {
-            manifest_files_verified: manifest.files.len(),
-            sst_files_verified: manifest.files.len(),
-            wal_recovery_records_replayed: wal_stats.record_count,
-            wal_recovery_bytes_replayed: wal_stats.bytes,
-            intent_entries_loaded: intents.len(),
-            health,
-        })
+        verification::verify_storage_path(db_path, runtime_health)
     }
 
     #[cfg(test)]
@@ -893,10 +839,15 @@ impl Engine {
 
     /// Run a non-mutating integrity pass over manifest, intent-log, WAL, and SST files.
     ///
+    /// The caller-provided timeout covers runtime health capture, verification-barrier
+    /// acquisition, the storage pass, and barrier release. If the storage pass itself
+    /// outlives the deadline, a background verifier retains the barrier until it can
+    /// release it safely.
+    ///
     /// # Errors
     ///
-    /// Returns an error when verification is unsupported or the verification pass fails.
-    pub fn verify_storage(&self) -> MidgeResult<StorageVerificationReport> {
+    /// Returns an error when verification is unsupported, times out, or fails.
+    pub fn verify_storage(&self, timeout: Duration) -> MidgeResult<StorageVerificationReport> {
         self.runtime_handle.ensure_open()?;
         if self.memory_mode {
             return Err(MidgeError::NotSupported(
@@ -904,12 +855,46 @@ impl Engine {
             ));
         }
 
-        Self::verify_storage_path_internal(
-            &self.db_path,
-            match self.get_runtime_metrics() {
-                Ok(snapshot) => Some(snapshot.health),
-                Err(_) => Some(EngineHealth::Corrupt),
+        if timeout.is_zero() {
+            return Err(MidgeError::Timeout(
+                "online storage verification deadline is zero".to_string(),
+            ));
+        }
+
+        let started = std::time::Instant::now();
+        let health_request_id = next_request_id()?;
+        let runtime_health = match self.runtime_handle.send_and_wait_timeout(
+            RuntimeMsg::GetRuntimeMetrics {
+                request_id: health_request_id,
             },
+            timeout,
+        )? {
+            Some(RuntimeResponse::RuntimeMetricsSnapshot { snapshot, .. }) => snapshot.health,
+            Some(RuntimeResponse::Error { error, .. }) => return Err(error),
+            Some(other) => {
+                return Err(MidgeError::Internal(format!(
+                    "unexpected runtime-health response before verification: {other:?}"
+                )));
+            }
+            None => {
+                return Err(MidgeError::Timeout(
+                    "runtime health capture exceeded the verification deadline".to_string(),
+                ));
+            }
+        };
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(MidgeError::Timeout(
+                "online storage verification deadline elapsed during health capture".to_string(),
+            ));
+        }
+
+        verification::verify_storage_online(
+            &self.runtime_handle,
+            self.db_path.clone(),
+            runtime_health,
+            self.cloud_mode,
+            remaining,
         )
     }
 

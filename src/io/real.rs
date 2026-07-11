@@ -14,9 +14,9 @@ use super::traits::{
 };
 use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
+use std::path::{Component, Path, PathBuf};
 
 /// Real filesystem backend
 pub struct RealFs {
@@ -37,6 +37,26 @@ impl RealFs {
     pub fn new(base_path: impl AsRef<Path>) -> FsResult<Self> {
         let path = base_path.as_ref().to_path_buf();
         fs::create_dir_all(&path).map_err(|e| io_err("create_dir_all", &path, &e))?;
+        Ok(Self { base_path: path })
+    }
+
+    /// Open a filesystem root that must already exist, without creating it.
+    ///
+    /// This is the entry point for offline inspection and verification paths,
+    /// where observing a missing directory must never mutate disk state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the root is missing, inaccessible, or not a directory.
+    pub fn open_existing(base_path: impl AsRef<Path>) -> FsResult<Self> {
+        let path = base_path.as_ref().to_path_buf();
+        let metadata = fs::metadata(&path).map_err(|error| io_err("metadata", &path, &error))?;
+        if !metadata.is_dir() {
+            return Err(FsError::Io(format!(
+                "filesystem root is not a directory: {}",
+                path.display()
+            )));
+        }
         Ok(Self { base_path: path })
     }
 

@@ -36,6 +36,13 @@ pub struct SstFileSummary {
     pub largest_seq: u64,
 }
 
+/// Counts produced by a complete checksummed SST verification pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SstVerificationStats {
+    pub size_bytes: u64,
+    pub data_blocks: u64,
+}
+
 /// SST file reader using `io::Fs` abstraction
 /// Identical to `SstFile` but accepts `Arc<dyn Fs>` for the filesystem backend
 pub struct SstFileIo {
@@ -298,6 +305,67 @@ impl SstFileIo {
                 ))
             })?,
         })
+    }
+
+    /// Read, checksum, and decode every block referenced by this SST.
+    ///
+    /// Opening an SST validates only its footer and metadata. Authoritative
+    /// verification must also validate the index, optional accelerators, and
+    /// every data block so late corruption cannot hide behind intact metadata.
+    pub(crate) fn verify_all_blocks(&self) -> MidgeResult<SstVerificationStats> {
+        let file_size = self.fs.metadata(&self.path)?.len;
+        if !self.uses_block_trailers() {
+            return Err(MidgeError::Corruption(format!(
+                "SST '{}' does not use checksummed block trailers",
+                self.path.0.as_str()
+            )));
+        }
+
+        let footer = self
+            .footer
+            .as_ref()
+            .ok_or_else(|| MidgeError::Corruption("SST footer is missing".into()))?;
+        let index = self.parse_index_entries()?;
+
+        Self::validate_block_handle(footer.meta_index_handle, file_size, "metadata")?;
+        Self::validate_block_handle(footer.index_handle, file_size, "index")?;
+        let _ = self.read_block(&footer.meta_index_handle)?;
+        let _ = self.read_block(&footer.index_handle)?;
+
+        if let Some(handle) = footer.trie_handle {
+            Self::validate_block_handle(handle, file_size, "trie")?;
+            let trie = self.read_block(&handle)?;
+            let _ = TrieReader::new(&trie)?;
+        }
+        if let Some(handle) = footer.block_bloom_handle {
+            Self::validate_block_handle(handle, file_size, "block bloom")?;
+            let bloom = self.read_block(&handle)?;
+            let _ = BlockBloomFilter::deserialize(&bloom)?;
+        }
+
+        for (_, handle) in &index {
+            Self::validate_block_handle(*handle, file_size, "data")?;
+            let block = self.read_block(handle)?;
+            let _ = self.scan_block_entries_from_bytes(&block)?;
+        }
+
+        Ok(SstVerificationStats {
+            size_bytes: file_size,
+            data_blocks: u64::try_from(index.len()).unwrap_or(u64::MAX),
+        })
+    }
+
+    fn validate_block_handle(handle: BlockHandle, file_size: u64, kind: &str) -> MidgeResult<()> {
+        let end = handle.offset.checked_add(handle.size).ok_or_else(|| {
+            MidgeError::Corruption(format!("SST {kind} block handle overflows file offsets"))
+        })?;
+        if handle.size < 4 || end > file_size {
+            return Err(MidgeError::Corruption(format!(
+                "SST {kind} block [{}, {}) exceeds file length {file_size}",
+                handle.offset, end
+            )));
+        }
+        Ok(())
     }
 
     fn load_metadata(&mut self) -> MidgeResult<()> {
@@ -570,7 +638,9 @@ impl SstFileIo {
 
         while offset < index_data.len() {
             if offset + 20 > index_data.len() {
-                break;
+                return Err(MidgeError::Corruption(
+                    "SST index has a truncated entry header".into(),
+                ));
             }
 
             let key_len = u32::from_le_bytes([
@@ -582,14 +652,18 @@ impl SstFileIo {
             offset += 4;
 
             if offset + key_len > index_data.len() {
-                break;
+                return Err(MidgeError::Corruption(
+                    "SST index has a truncated key".into(),
+                ));
             }
 
             let key = index_data[offset..offset + key_len].to_vec();
             offset += key_len;
 
             if offset + 16 > index_data.len() {
-                break;
+                return Err(MidgeError::Corruption(
+                    "SST index has a truncated block handle".into(),
+                ));
             }
 
             let block_offset = u64::from_le_bytes([

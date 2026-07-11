@@ -61,27 +61,61 @@ impl IntentPersistence {
                 format!("failed to parse intent JSON (salvage mode): {e}")
             }
         })?;
+        Self::validate_persisted_sst_names(&intents)?;
 
         tracing::debug!(path = ?p, entries = intents.len(), "intent log loaded");
         Ok(intents)
     }
 
-    #[cfg(test)]
-    pub fn load(db_path: &Path) -> Result<Vec<IntentLogEntry>, String> {
-        Self::load_with_policy(db_path, crate::config::RecoveryPolicy::Strict)
+    fn validate_persisted_sst_names(intents: &[IntentLogEntry]) -> Result<(), String> {
+        fn validate(name: &str, context: &str) -> Result<(), String> {
+            crate::sst::PersistedSstName::parse(name)
+                .map(|_| ())
+                .map_err(|error| format!("{context} SST name is invalid: {error}"))
+        }
+
+        fn validate_meta(meta: &crate::runtime::FileMeta, context: &str) -> Result<(), String> {
+            validate(&meta.name, context)
+        }
+
+        for intent in intents {
+            match intent {
+                IntentLogEntry::CompactionPlanned { input_files, .. } => {
+                    for name in input_files {
+                        validate(name, "compaction plan input")?;
+                    }
+                }
+                IntentLogEntry::FlushPublish { file_meta, .. }
+                | IntentLogEntry::SstAdded { file_meta } => {
+                    validate_meta(file_meta, "intent")?;
+                }
+                IntentLogEntry::CompactionPublish { removed, added, .. }
+                | IntentLogEntry::CompactionApplied { removed, added } => {
+                    for name in removed {
+                        validate(name, "compaction removal")?;
+                    }
+                    for meta in added {
+                        validate_meta(meta, "compaction output")?;
+                    }
+                }
+                IntentLogEntry::SeqnoAllocated { .. }
+                | IntentLogEntry::FlushPlanned { .. }
+                | IntentLogEntry::WalSynced { .. }
+                | IntentLogEntry::CloudUploadComplete { .. } => {}
+            }
+        }
+        Ok(())
     }
 
-    pub fn load_with_policy(
-        db_path: &Path,
-        recovery_policy: crate::config::RecoveryPolicy,
-    ) -> Result<Vec<IntentLogEntry>, String> {
+    #[cfg(test)]
+    pub fn load(db_path: &Path) -> Result<Vec<IntentLogEntry>, String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;
 
-        let real =
-            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {e:?}"))?;
+        let real = RealFs::open_existing(db_path)
+            .map_err(|e| format!("failed to open existing real fs: {e:?}"))?;
         let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
-        Self::load_with_fs_and_policy(&fs, recovery_policy)
+        Self::load_with_fs_and_policy(&fs, crate::config::RecoveryPolicy::Strict)
     }
 
     pub fn save_with_fs(
@@ -90,6 +124,8 @@ impl IntentPersistence {
     ) -> Result<(), String> {
         use crate::io::staging;
         use crate::io::traits::FsPath;
+
+        Self::validate_persisted_sst_names(intents)?;
 
         let json = serde_json::to_vec_pretty(intents)
             .map_err(|e| format!("failed to serialize intent log to JSON: {e}"))?;
@@ -233,6 +269,36 @@ mod tests {
         assert!(
             IntentPersistence::intent_path(&test_dir).ends_with("intent_log.json"),
             "intent log should persist to intent_log.json"
+        );
+    }
+
+    #[test]
+    fn should_reject_unsafe_sst_name_before_intent_log_is_persisted() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let intents = vec![IntentLogEntry::SstAdded {
+            file_meta: crate::runtime::FileMeta {
+                name: "/outside.sst".to_string(),
+                level: 0,
+                size_bytes: 0,
+                content_crc32c: None,
+                cf_id: 0,
+                smallest_key: None,
+                largest_key: None,
+                smallest_seq: None,
+                largest_seq: None,
+            },
+        }];
+
+        // Act
+        let error = IntentPersistence::save(&test_dir, &intents)
+            .expect_err("unsafe intent name must be rejected");
+
+        // Assert
+        assert!(error.contains("SST name"), "unexpected error: {error}");
+        assert!(
+            !IntentPersistence::intent_path(&test_dir).exists(),
+            "invalid intent log must not reach durable storage"
         );
     }
 

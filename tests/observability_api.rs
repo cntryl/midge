@@ -32,7 +32,9 @@ fn should_expose_local_engine_observability_surfaces() {
     // Act
     let metrics = engine.get_runtime_metrics().expect("runtime metrics");
     let layout = engine.get_storage_layout().expect("storage layout");
-    let report = engine.verify_storage().expect("verify storage");
+    let report = engine
+        .verify_storage(Duration::from_secs(5))
+        .expect("verify storage");
     let offline_report = Engine::verify_path(db_path).expect("offline verify path");
 
     // Assert
@@ -92,7 +94,7 @@ fn should_reject_storage_verification_in_memory_mode() {
         .expect("open in-memory engine");
 
     // Act
-    let result = engine.verify_storage();
+    let result = engine.verify_storage(Duration::from_secs(5));
 
     // Assert
     match result {
@@ -179,7 +181,9 @@ fn should_report_degraded_health_given_obsolete_sst_files_and_json_verification(
     // Act
     let metrics = engine.get_runtime_metrics().expect("runtime metrics");
     let layout = engine.get_storage_layout().expect("storage layout");
-    let report = engine.verify_storage().expect("verify storage");
+    let report = engine
+        .verify_storage(Duration::from_secs(5))
+        .expect("verify storage");
     let output = Command::new(env!("CARGO_BIN_EXE_midge"))
         .arg("verify")
         .arg("--json")
@@ -235,7 +239,9 @@ fn should_ignore_stale_sst_temp_files_on_reopen() {
         .expect("reopen engine");
     let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
     let layout = reopened.get_storage_layout().expect("storage layout");
-    let report = reopened.verify_storage().expect("verify storage");
+    let report = reopened
+        .verify_storage(Duration::from_secs(5))
+        .expect("verify storage");
 
     // Assert
     assert_eq!(metrics.health, EngineHealth::Healthy);

@@ -114,6 +114,7 @@ impl ManifestPersistence {
         })?;
         if !journal_exists {
             tracing::debug!(path = ?journal_path, "manifest journal not found, skipping replay");
+            Self::validate_persisted_sst_names(&manifest)?;
             return Ok(manifest);
         }
 
@@ -136,7 +137,22 @@ impl ManifestPersistence {
             }
         }
 
+        Self::validate_persisted_sst_names(&manifest)?;
         Ok(manifest)
+    }
+
+    fn validate_persisted_sst_names(manifest: &Manifest) -> Result<(), String> {
+        for file in &manifest.files {
+            crate::sst::PersistedSstName::parse(&file.name)
+                .map_err(|error| format!("manifest SST name is invalid: {error}"))?;
+        }
+        if let Some(checkpoint) = &manifest.cloud_checkpoint {
+            for name in &checkpoint.covering_ssts {
+                crate::sst::PersistedSstName::parse(name)
+                    .map_err(|error| format!("cloud checkpoint SST name is invalid: {error}"))?;
+            }
+        }
+        Ok(())
     }
 
     /// Save manifest to disk in JSON format
@@ -153,6 +169,8 @@ impl ManifestPersistence {
     ) -> Result<(), String> {
         use crate::io::staging;
         use crate::io::traits::FsPath;
+
+        Self::validate_persisted_sst_names(manifest)?;
 
         // Serialize to pretty JSON for machine parsing with human-debuggability.
         let json = serde_json::to_vec_pretty(manifest)
@@ -202,6 +220,7 @@ impl ManifestPersistence {
             crate::metadata::journal::highest_edit_id_with_fs(fs)
                 .map_err(|error| format!("failed to inspect manifest journal: {error}"))?,
         );
+        Self::validate_persisted_sst_names(&checkpoint)?;
         let json = serde_json::to_vec_pretty(&checkpoint)
             .map_err(|e| format!("failed to serialize manifest to JSON: {e}"))?;
 
@@ -240,21 +259,13 @@ impl ManifestPersistence {
     /// Load manifest using a `RealFs` (compat wrapper)
     #[cfg(test)]
     pub fn load(db_path: &Path) -> Result<Manifest, String> {
-        Self::load_with_policy(db_path, crate::config::RecoveryPolicy::Strict)
-    }
-
-    /// Load manifest using a `RealFs` with an explicit recovery policy.
-    pub fn load_with_policy(
-        db_path: &Path,
-        recovery_policy: crate::config::RecoveryPolicy,
-    ) -> Result<Manifest, String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;
 
-        let real =
-            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {e:?}"))?;
+        let real = RealFs::open_existing(db_path)
+            .map_err(|e| format!("failed to open existing real fs: {e:?}"))?;
         let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
-        Self::load_with_fs_and_policy(&fs, recovery_policy)
+        Self::load_with_fs_and_policy(&fs, crate::config::RecoveryPolicy::Strict)
     }
 
     /// Save a full manifest snapshot and truncate journal (atomic as possible).
@@ -452,6 +463,30 @@ mod tests {
         assert_eq!(loaded.column_families.len(), 2);
         assert_eq!(loaded.column_families[0].name, "default");
         assert_eq!(loaded.column_families[1].name, "secondary");
+    }
+
+    #[test]
+    fn should_reject_unsafe_sst_name_before_manifest_is_persisted() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let manifest = Manifest {
+            files: vec![crate::metadata::FileMeta {
+                name: "../outside.sst".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        // Act
+        let error = ManifestPersistence::save(&test_dir, &manifest)
+            .expect_err("unsafe manifest name must be rejected");
+
+        // Assert
+        assert!(error.contains("SST name"), "unexpected error: {error}");
+        assert!(
+            !ManifestPersistence::manifest_path(&test_dir).exists(),
+            "invalid manifest must not reach durable storage"
+        );
     }
 
     #[test]

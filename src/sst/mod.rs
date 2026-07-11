@@ -44,6 +44,7 @@ pub mod compression;
 pub mod encoding;
 pub mod fs;
 pub mod index;
+mod name;
 pub mod read_amp_metrics;
 pub(crate) mod read_path_metrics;
 pub mod sparse_index;
@@ -53,6 +54,7 @@ pub mod types;
 
 pub use fs::FsSstFactoryIo;
 
+pub(crate) use name::PersistedSstName;
 pub use read_amp_metrics::ReadAmpMetrics;
 
 pub use traits::{SstFactory, SstReader, SstStateReader};

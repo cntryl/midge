@@ -34,10 +34,15 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "health={:?} manifest_files_verified={} sst_files_verified={} wal_recovery_records_replayed={} wal_recovery_bytes_replayed={} intent_entries_loaded={}",
+                    "health={:?} authoritative={} manifest_epoch={} manifest_files_verified={} sst_files_verified={} bytes_verified={} data_blocks_verified={} wal_boundary={:?} wal_recovery_records_replayed={} wal_recovery_bytes_replayed={} intent_entries_loaded={}",
                     report.health,
+                    report.authoritative,
+                    report.manifest_epoch,
                     report.manifest_files_verified,
                     report.sst_files_verified,
+                    report.bytes_verified,
+                    report.data_blocks_verified,
+                    report.wal_boundary,
                     report.wal_recovery_records_replayed,
                     report.wal_recovery_bytes_replayed,
                     report.intent_entries_loaded

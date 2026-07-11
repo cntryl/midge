@@ -643,6 +643,12 @@ pub enum RuntimeMsg {
     /// Get a stable storage layout snapshot for operators.
     GetStorageLayout { request_id: u64 },
 
+    /// Acquire the runtime-wide publication barrier used by online verification.
+    BeginStorageVerification { request_id: u64 },
+
+    /// Release a previously acquired online-verification barrier.
+    EndStorageVerification { request_id: u64, token: u64 },
+
     // === Sequencing ===
     /// Get the runtime's authoritative current sequence number.
     ///
@@ -745,6 +751,8 @@ impl RuntimeMsg {
             | RuntimeMsg::GetRecoveryMetrics { request_id }
             | RuntimeMsg::GetRuntimeMetrics { request_id }
             | RuntimeMsg::GetStorageLayout { request_id }
+            | RuntimeMsg::BeginStorageVerification { request_id }
+            | RuntimeMsg::EndStorageVerification { request_id, .. }
             | RuntimeMsg::BeginTransaction { request_id, .. }
             | RuntimeMsg::SetRuntimeConfig { request_id, .. }
             | RuntimeMsg::CompactAll { request_id }
@@ -802,6 +810,8 @@ impl RuntimeMsg {
             RuntimeMsg::GetRecoveryMetrics { .. } => "GetRecoveryMetrics",
             RuntimeMsg::GetRuntimeMetrics { .. } => "GetRuntimeMetrics",
             RuntimeMsg::GetStorageLayout { .. } => "GetStorageLayout",
+            RuntimeMsg::BeginStorageVerification { .. } => "BeginStorageVerification",
+            RuntimeMsg::EndStorageVerification { .. } => "EndStorageVerification",
             RuntimeMsg::BeginTransaction { .. } => "BeginTransaction",
             RuntimeMsg::SetRuntimeConfig { .. } => "SetRuntimeConfig",
             RuntimeMsg::CompactAll { .. } => "CompactAll",
@@ -958,6 +968,12 @@ pub enum RuntimeResponse {
         snapshot: crate::types::StorageLayoutSnapshot,
     },
 
+    /// Online verification barrier acquisition acknowledgement.
+    StorageVerificationBarrier {
+        request_id: u64,
+        token: u64,
+    },
+
     /// Current authoritative runtime sequence.
     #[cfg(test)]
     CurrentSequence {
@@ -1017,6 +1033,7 @@ impl RuntimeResponse {
             | RuntimeResponse::RecoveryMetricsSnapshot { request_id, .. }
             | RuntimeResponse::RuntimeMetricsSnapshot { request_id, .. }
             | RuntimeResponse::StorageLayoutSnapshot { request_id, .. }
+            | RuntimeResponse::StorageVerificationBarrier { request_id, .. }
             | RuntimeResponse::BeginTransactionResult { request_id, .. }
             | RuntimeResponse::WriteStallStatus { request_id, .. } => *request_id,
             #[cfg(test)]
@@ -1197,6 +1214,37 @@ impl RuntimeHandle {
             .map_err(Self::map_submission_error);
         drop(submission_guard);
         result
+    }
+
+    /// Release an online-verification barrier even after lifecycle closing begins.
+    ///
+    /// Shutdown is deferred behind this token, so this narrow control path must
+    /// bypass ordinary submission rejection or the runtime and its lease could
+    /// never reach a quiescent state.
+    pub(crate) fn release_storage_verification_barrier(&self, token: u64) -> MidgeResult<()> {
+        let request_id = next_request_id()?;
+        let response_rx = self.router.register(request_id);
+        if self
+            .msg_tx
+            .send(RuntimeMsg::EndStorageVerification { request_id, token })
+            .is_err()
+        {
+            self.router.unregister(request_id);
+            return Err(MidgeError::Internal(
+                "runtime channel closed before verification barrier release".to_string(),
+            ));
+        }
+
+        match response_rx.recv() {
+            Ok(RuntimeResponse::Ok { .. }) => Ok(()),
+            Ok(RuntimeResponse::Error { error, .. }) => Err(error),
+            Ok(other) => Err(MidgeError::Internal(format!(
+                "unexpected verification barrier release response: {other:?}"
+            ))),
+            Err(_) => Err(MidgeError::Internal(
+                "runtime response channel closed during verification barrier release".to_string(),
+            )),
+        }
     }
 
     /// Submit a message and wait synchronously for its response.

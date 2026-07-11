@@ -1,8 +1,19 @@
 use super::{EventLoop, HandleOutcome};
 use crate::common::MidgeError;
-use crate::runtime::RuntimeResponse;
+use crate::runtime::{RuntimeMsg, RuntimeResponse};
 
 impl EventLoop {
+    pub(super) fn handle_shutdown_request(&mut self, request_id: Option<u64>) -> HandleOutcome {
+        if self.verification_barrier_token.is_some() {
+            let message = request_id.map_or(RuntimeMsg::Shutdown, |request_id| {
+                RuntimeMsg::ShutdownWithResponse { request_id }
+            });
+            self.defer_verification_message(message);
+            return HandleOutcome::Continue;
+        }
+        self.handle_shutdown(request_id)
+    }
+
     pub(super) fn handle_shutdown(&mut self, request_id: Option<u64>) -> HandleOutcome {
         tracing::info!("Runtime shutting down");
         let mut shutdown_error = None;

@@ -85,6 +85,33 @@ impl ManifestEdit {
             ManifestEdit::Batch(_) => 8,
         }
     }
+
+    fn validate_persisted_sst_names(&self) -> MidgeResult<()> {
+        fn validate(name: &str) -> MidgeResult<()> {
+            crate::sst::PersistedSstName::parse(name).map(|_| ())
+        }
+
+        match self {
+            ManifestEdit::AddSst(meta) => validate(&meta.name),
+            ManifestEdit::RemoveSst { name } => validate(name),
+            ManifestEdit::SetCloudCheckpoint(checkpoint) => {
+                for name in &checkpoint.covering_ssts {
+                    validate(name)?;
+                }
+                Ok(())
+            }
+            ManifestEdit::Batch(edits) => {
+                for edit in edits {
+                    edit.validate_persisted_sst_names()?;
+                }
+                Ok(())
+            }
+            ManifestEdit::CreateColumnFamily { .. }
+            | ManifestEdit::DropColumnFamily { .. }
+            | ManifestEdit::BumpWalSeq { .. }
+            | ManifestEdit::BumpNextSstSeq { .. } => Ok(()),
+        }
+    }
 }
 
 // Special TLV record type used to mark a durable sync point in the journal.
@@ -195,6 +222,7 @@ pub fn append_edit_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     edit: &ManifestEdit,
 ) -> MidgeResult<()> {
+    edit.validate_persisted_sst_names()?;
     let edit_id = next_edit_id_with_fs(fs)?;
     let record = encode_journal_record(
         edit.record_type(),
@@ -591,7 +619,7 @@ fn handle_batch_record(record: &JournalRecord, state: &mut JournalReplayState) -
                 edit_id: envelope.edit_id,
                 edit: envelope.edit,
             },
-        );
+        )?;
         return Ok(());
     }
 
@@ -608,7 +636,7 @@ fn handle_batch_record(record: &JournalRecord, state: &mut JournalReplayState) -
             edit_id,
             edit: ManifestEdit::Batch(batch),
         },
-    );
+    )?;
     Ok(())
 }
 
@@ -633,7 +661,7 @@ fn handle_manifest_edit_record(
                 edit_id: envelope.edit_id,
                 edit: envelope.edit,
             },
-        );
+        )?;
         return Ok(());
     }
 
@@ -647,7 +675,7 @@ fn handle_manifest_edit_record(
         return Err(journal_record_type_mismatch(record, &edit));
     }
     let edit_id = next_replay_edit_id(state);
-    push_journal_edit(state, JournalEdit { edit_id, edit });
+    push_journal_edit(state, JournalEdit { edit_id, edit })?;
     Ok(())
 }
 
@@ -663,9 +691,11 @@ fn journal_record_type_mismatch(
     ))
 }
 
-fn push_journal_edit(state: &mut JournalReplayState, edit: JournalEdit) {
+fn push_journal_edit(state: &mut JournalReplayState, edit: JournalEdit) -> MidgeResult<()> {
+    edit.edit.validate_persisted_sst_names()?;
     state.max_edit_id = state.max_edit_id.max(edit.edit_id);
     state.edits.push(edit);
+    Ok(())
 }
 
 fn next_replay_edit_id(state: &JournalReplayState) -> u64 {
@@ -677,6 +707,9 @@ pub fn append_edit_batch_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     batch: &[ManifestEdit],
 ) -> MidgeResult<()> {
+    for edit in batch {
+        edit.validate_persisted_sst_names()?;
+    }
     let edit_id = next_edit_id_with_fs(fs)?;
     let record = encode_journal_record(
         BATCH_RECORD_TYPE,

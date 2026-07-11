@@ -188,10 +188,20 @@ pub struct StorageLayoutSnapshot {
 /// Non-mutating verification report for a storage directory.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StorageVerificationReport {
+    /// Highest durable manifest edit represented by the verified layout.
+    pub manifest_epoch: u64,
     pub manifest_files_verified: usize,
     pub sst_files_verified: usize,
+    /// Physical SST bytes plus decoded WAL payload bytes verified.
+    pub bytes_verified: u64,
+    /// Checksummed SST data blocks read and decoded.
+    pub data_blocks_verified: u64,
+    /// Highest sequence observed in the verified WAL, if it contained records.
+    pub wal_boundary: Option<u64>,
     pub wal_recovery_records_replayed: u64,
     pub wal_recovery_bytes_replayed: u64,
     pub intent_entries_loaded: usize,
+    /// Whether the pass covered authoritative storage rather than a cloud cache.
+    pub authoritative: bool,
     pub health: EngineHealth,
 }
