@@ -77,7 +77,10 @@ pub type MidgeEngine = Engine;
 pub use engine::{Direction, Query, ScanIterator};
 
 // Observability and diagnostics
-pub use config::EngineHealth;
+pub use config::{
+    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, EngineHealth, GcsApiStyle,
+    GcsCredentialSource, S3CredentialSource,
+};
 pub use types::{
     ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot, SnapshotPinSnapshot,
     StorageFileLayout, StorageLayoutLevel, StorageLayoutSnapshot, StorageVerificationReport,
@@ -87,10 +90,6 @@ pub use types::{
 pub use engine::{
     BlockCachePolicy, CloudWritePolicy, Goal, MemoryBudget, OpenOptions, OpenOptionsBuilder,
     RecoveryPolicy, Storage, WorkloadProfile, WriteOptions,
-};
-pub use storage::providers::{
-    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, GcsApiStyle,
-    GcsCredentialSource, S3CredentialSource,
 };
 
 // Key/value types

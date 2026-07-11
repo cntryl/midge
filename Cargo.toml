@@ -77,14 +77,12 @@ tempfile = "3.27"
 # Cloud Backend Support (optional)
 base64 = { version = "0.22", optional = true }
 hmac = { version = "0.13", optional = true }
-md5 = { version = "0.8", optional = true }
 percent-encoding = { version = "2.3", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "blocking"], optional = true }
 rsa = { version = "0.10.0-rc.18", features = ["sha2"], optional = true }
 sha2 = { version = "0.11", optional = true }
 sha1 = { version = "0.11", optional = true }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros"], optional = true }
-ureq = { version = "3", features = ["rustls", "json"], optional = true }
 url = { version = "2.5", optional = true }
 urlencoding = { version = "2.1", optional = true }
 
@@ -105,7 +103,7 @@ cntryl-stress = { git = "https://github.com/cntryl/stress", branch = "main", pac
 # =============================================================================
 
 [features]
-default = ["cloud-common"]
+default = ["cloud-all"]
 failpoints = ["dep:fail"]
 telemetry = [
     "cloud-common",
@@ -117,24 +115,47 @@ telemetry-otlp = ["telemetry", "dep:opentelemetry-otlp"]
 
 # Cloud storage backend support enabled by default for current deployment profiles.
 cloud-common = [
-    "dep:ureq",
+    "dep:tokio",
+    "dep:reqwest",
+]
+cloud-aws = [
+    "cloud-common",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:percent-encoding",
+    "dep:url",
+    "dep:urlencoding",
+]
+
+sqrzl-tests = []
+cloud-azure = [
+    "cloud-common",
+    "dep:base64",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:percent-encoding",
+    "dep:url",
+    "dep:urlencoding",
+]
+cloud-gcp = [
+    "cloud-common",
+    "dep:base64",
     "dep:hmac",
     "dep:sha1",
     "dep:sha2",
-    "dep:base64",
-    "dep:url",
-    "dep:tokio",
-    "dep:reqwest",
     "dep:percent-encoding",
     "dep:rsa",
+    "dep:url",
     "dep:urlencoding",
 ]
-cloud-aws = ["cloud-common", "dep:md5"]
-
-sqrzl-tests = []
-cloud-azure = ["cloud-common"]
-cloud-gcp = ["cloud-common"]
-cloud-oci = ["cloud-common"]
+cloud-oci = [
+    "cloud-common",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:percent-encoding",
+    "dep:url",
+    "dep:urlencoding",
+]
 cloud-all = ["cloud-aws", "cloud-azure", "cloud-gcp", "cloud-oci"]
 cloud_integration = ["cloud-all"]
 

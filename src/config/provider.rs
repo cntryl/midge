@@ -1,7 +1,7 @@
-//! Provider-owned public cloud configuration types.
+//! Public cloud-provider configuration types.
 //!
-//! Storage provider families own their credential/configuration DTOs so lower
-//! layers can construct providers without depending on the generic engine config bag.
+//! Configuration owns these DTOs; storage providers consume them without
+//! becoming part of the public configuration surface.
 
 use std::fmt;
 use std::path::PathBuf;

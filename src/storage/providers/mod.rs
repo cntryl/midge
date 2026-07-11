@@ -43,22 +43,21 @@
 //!
 //! ## Example Usage
 
-#[cfg(feature = "cloud-common")]
+#[cfg(feature = "cloud-azure")]
 pub mod azure;
-#[cfg(feature = "cloud-common")]
+#[cfg(feature = "cloud-azure")]
 mod azure_resolver;
-pub(crate) mod config;
 #[cfg(feature = "cloud-common")]
 mod factory;
-#[cfg(feature = "cloud-common")]
+#[cfg(feature = "cloud-gcp")]
 pub mod gcs;
-#[cfg(feature = "cloud-common")]
+#[cfg(feature = "cloud-gcp")]
 mod gcs_resolver;
-#[cfg(all(test, feature = "cloud-common", feature = "sqrzl-tests"))]
+#[cfg(all(test, feature = "cloud-all", feature = "sqrzl-tests"))]
 pub mod qualification;
-#[cfg(feature = "cloud-common")]
+#[cfg(any(feature = "cloud-aws", feature = "cloud-oci"))]
 pub mod s3;
-#[cfg(feature = "cloud-common")]
+#[cfg(any(feature = "cloud-aws", feature = "cloud-oci"))]
 mod s3_resolver;
 
 use std::sync::Arc;
@@ -70,10 +69,13 @@ use crate::common::MidgeResult;
 use crate::storage::cloud::CloudBackend;
 use crate::storage::cloud::CloudStorage;
 
-pub use config::{
-    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, GcsApiStyle,
-    GcsCredentialSource, S3CredentialSource,
-};
+#[cfg(feature = "cloud-azure")]
+pub(crate) use crate::config::AzureCredentialSource;
+pub(crate) use crate::config::CloudProviderConfig;
+#[cfg(any(feature = "cloud-aws", feature = "cloud-oci"))]
+pub(crate) use crate::config::S3CredentialSource;
+#[cfg(feature = "cloud-gcp")]
+pub(crate) use crate::config::{GcsApiStyle, GcsCredentialSource};
 
 #[cfg(feature = "cloud-common")]
 pub(crate) fn build_cloud_backend(
@@ -100,6 +102,6 @@ pub(crate) fn build_cloud_storage(
     _prefix: &str,
 ) -> MidgeResult<Arc<CloudStorage>> {
     Err(MidgeError::InvalidArgument(
-        "real cloud storage requires the cloud-common feature".to_string(),
+        "real cloud storage requires an enabled cloud provider feature".to_string(),
     ))
 }

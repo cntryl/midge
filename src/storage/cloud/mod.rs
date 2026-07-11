@@ -23,7 +23,12 @@
 //! - Events are received asynchronously but callback processing is synchronous
 //! - No futures in the engine: all async work happens in `CloudExecutor` embedded tokio runtime
 
-#[cfg(feature = "cloud-common")]
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-azure",
+    feature = "cloud-gcp",
+    feature = "cloud-oci"
+))]
 pub mod executor;
 
 use super::{StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome};
@@ -35,33 +40,20 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[cfg(feature = "cloud-common")]
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-azure",
+    feature = "cloud-gcp",
+    feature = "cloud-oci"
+))]
 pub use executor::{CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 
-/// Cloud operation outcome – cloneable wrapper around Result
-#[derive(Clone, Debug)]
-pub enum CloudOutcome<T: Clone> {
-    Ok(T),
-    Err(String),
-}
-impl<T: Clone> CloudOutcome<T> {
-    #[cfg(test)]
-    pub fn is_ok(&self) -> bool {
-        matches!(self, CloudOutcome::Ok(_))
-    }
+/// Cloud operation outcome sent across the callback boundary.
+pub type CloudOutcome<T> = Result<T, String>;
 
-    #[cfg(test)]
-    pub fn is_err(&self) -> bool {
-        matches!(self, CloudOutcome::Err(_))
-    }
-
-    #[cfg(test)]
-    pub fn from_result(result: Result<T, MidgeError>) -> Self {
-        match result {
-            Ok(value) => CloudOutcome::Ok(value),
-            Err(err) => CloudOutcome::Err(format!("{err:?}")),
-        }
-    }
+#[cfg(test)]
+fn cloud_outcome_from_result<T>(result: Result<T, MidgeError>) -> CloudOutcome<T> {
+    result.map_err(|error| format!("{error:?}"))
 }
 
 /// Cloud operation completion events sent back via callback.
@@ -109,6 +101,13 @@ pub struct ObjectMetadata {
     pub generation: Option<String>,
 }
 impl ObjectMetadata {
+    #[cfg(any(
+        test,
+        feature = "cloud-aws",
+        feature = "cloud-azure",
+        feature = "cloud-gcp",
+        feature = "cloud-oci"
+    ))]
     pub fn new(size: u64, etag: String, last_modified: u64) -> Self {
         #[cfg(not(test))]
         let _ = last_modified;
@@ -121,6 +120,7 @@ impl ObjectMetadata {
         }
     }
 
+    #[cfg(feature = "cloud-gcp")]
     pub fn with_generation(
         size: u64,
         etag: String,
@@ -151,12 +151,32 @@ pub trait CloudBackend: Send + Sync + 'static {
         headers: Vec<(String, String)>,
         callback: CloudCallback,
     );
-    fn submit_get(&self, key: &str, callback: CloudCallback);
+    fn submit_get(&self, key: &str, callback: CloudCallback) {
+        let _ = callback.send(CloudEvent::Get {
+            key: key.to_string(),
+            result: Err("cloud backend does not support GET".to_string()),
+        });
+    }
     #[cfg(test)]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback);
-    fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback);
-    fn submit_list(&self, prefix: &str, callback: CloudCallback);
-    fn submit_head(&self, key: &str, callback: CloudCallback);
+    fn submit_delete(&self, key: &str, _headers: Vec<(String, String)>, callback: CloudCallback) {
+        let _ = callback.send(CloudEvent::Delete {
+            key: key.to_string(),
+            result: Err("cloud backend does not support DELETE".to_string()),
+        });
+    }
+    fn submit_list(&self, prefix: &str, callback: CloudCallback) {
+        let _ = callback.send(CloudEvent::List {
+            prefix: prefix.to_string(),
+            result: Err("cloud backend does not support LIST".to_string()),
+        });
+    }
+    fn submit_head(&self, key: &str, callback: CloudCallback) {
+        let _ = callback.send(CloudEvent::Head {
+            key: key.to_string(),
+            result: Err("cloud backend does not support HEAD".to_string()),
+        });
+    }
 }
 
 /// Deterministic mock backend for testing (synchronous).
@@ -287,7 +307,7 @@ impl CloudBackend for MockCloudBackend {
         self.downloads.lock().push(key.clone());
         let event = CloudEvent::Get {
             key,
-            result: CloudOutcome::from_result(result),
+            result: cloud_outcome_from_result(result),
         };
         let _ = callback.send(event);
     }
@@ -309,7 +329,7 @@ impl CloudBackend for MockCloudBackend {
             key,
             start,
             end,
-            result: CloudOutcome::from_result(result),
+            result: cloud_outcome_from_result(result),
         };
         let _ = callback.send(event);
     }
@@ -382,7 +402,7 @@ impl CloudBackend for MockCloudBackend {
             .ok_or(MidgeError::NotFound);
         let event = CloudEvent::Head {
             key,
-            result: CloudOutcome::from_result(result),
+            result: cloud_outcome_from_result(result),
         };
         let _ = callback.send(event);
     }
@@ -482,6 +502,7 @@ pub(crate) fn blocking_cloud_object_proof(
 }
 
 impl CloudStorage {
+    #[cfg(any(test, feature = "cloud-common"))]
     pub fn new(backend: Arc<dyn CloudBackend>, namespace: String) -> Self {
         Self { backend, namespace }
     }
@@ -824,14 +845,14 @@ mod tests {
     }
 
     #[test]
-    fn should_convert_result_to_outcome() {
+    fn should_convert_engine_result_to_cloud_outcome() {
         // Arrange
         let ok_result: Result<i32, MidgeError> = Ok(100);
         let err_result: Result<i32, MidgeError> = Err(MidgeError::Corruption("test".into()));
 
         // Act
-        let ok_outcome = CloudOutcome::from_result(ok_result);
-        let err_outcome = CloudOutcome::from_result(err_result);
+        let ok_outcome = cloud_outcome_from_result(ok_result);
+        let err_outcome = cloud_outcome_from_result(err_result);
 
         // Assert
         assert!(ok_outcome.is_ok());

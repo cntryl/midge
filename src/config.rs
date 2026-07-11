@@ -9,7 +9,9 @@ use std::time::Duration;
 
 pub(crate) const DEFAULT_STORAGE_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub use crate::storage::providers::{
+mod provider;
+
+pub use provider::{
     AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, GcsApiStyle,
     GcsCredentialSource, S3CredentialSource,
 };

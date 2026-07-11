@@ -1,4 +1,4 @@
-#![cfg(all(feature = "cloud-common", feature = "sqrzl-tests"))]
+#![cfg(all(feature = "cloud-all", feature = "sqrzl-tests"))]
 
 use cntryl_midge::{
     Bytes, CloudProviderConfig, ColumnFamilyHandle, Engine, MemoryBudget, OpenOptions,

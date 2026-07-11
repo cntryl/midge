@@ -48,3 +48,31 @@ fn should_keep_common_independent_from_higher_subsystems() {
         "common must remain the bottom dependency layer: {violations:#?}"
     );
 }
+
+#[test]
+fn should_keep_provider_configuration_owned_by_config_layer() {
+    // Arrange
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = vec![manifest_dir.join("src/config.rs")];
+    let config_dir = manifest_dir.join("src/config");
+    if config_dir.exists() {
+        sources.extend(rust_sources_under("src/config"));
+    }
+
+    // Act
+    let violations: Vec<_> = sources
+        .into_iter()
+        .filter_map(|path| {
+            let source = std::fs::read_to_string(&path).expect("read config source");
+            source
+                .contains("crate::storage")
+                .then(|| format!("{} imports crate::storage", path.display()))
+        })
+        .collect();
+
+    // Assert
+    assert!(
+        violations.is_empty(),
+        "configuration DTOs must not be owned or re-exported by storage: {violations:#?}"
+    );
+}
