@@ -211,7 +211,7 @@ fn should_publish_only_version_matching_tags_with_least_privilege() {
 }
 
 #[test]
-fn should_pin_external_actions_to_immutable_revisions() {
+fn should_use_versioned_external_actions() {
     // Arrange
     let workflows = [
         read_workflow(".github/workflows/bench.yml"),
@@ -233,12 +233,10 @@ fn should_pin_external_actions_to_immutable_revisions() {
             .rsplit_once('@')
             .map(|(_, revision)| revision.split_whitespace().next().unwrap_or_default())
             .expect("external action must include a revision");
-        assert_eq!(
-            revision.len(),
-            40,
-            "external action must use a full immutable commit: {action}"
+        assert!(
+            revision.starts_with('v') && revision.len() > 1,
+            "external action must use a version tag: {action}"
         );
-        assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 }
 
@@ -261,10 +259,10 @@ fn should_test_supported_build_matrix_before_release() {
     // Assert
     assert!(ci.contains("os: [ubuntu-latest, windows-latest, macos-latest]"));
     assert!(ci.contains("cargo test --workspace --all-features"));
-    assert!(ci.contains("rustup toolchain install 1.93"));
-    assert!(ci.contains("rustup run 1.93 cargo check --workspace --all-targets"));
+    assert!(ci.contains("rustup toolchain install 1.97"));
+    assert!(ci.contains("rustup run 1.97 cargo check --workspace --all-targets"));
     assert!(
-        ci.contains("rustup run 1.93 cargo clippy --workspace --all-targets --no-default-features")
+        ci.contains("rustup run 1.97 cargo clippy --workspace --all-targets --no-default-features")
     );
 }
 

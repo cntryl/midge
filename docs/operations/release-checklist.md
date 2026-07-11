@@ -5,7 +5,7 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] `cargo fmt --check`
 - [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic`
 - [ ] `cargo clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic`
-- [ ] Rust 1.93 MSRV checks pass
+- [ ] Rust 1.97 MSRV checks pass
 - [ ] Linux, macOS, and Windows tests pass
 - [ ] each provider-only feature check passes (`cloud-aws`, `cloud-azure`, `cloud-gcp`, `cloud-oci`)
 - [ ] `cargo test --workspace --all-features`
