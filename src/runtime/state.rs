@@ -13,7 +13,7 @@ use crate::sst::{Memtable, ReadAmpMetrics, SkipListMemtable};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::io::traits::{Fs, FsError, FsPath};
 
@@ -29,11 +29,36 @@ pub struct RecentDeleteRange {
     pub sequence: u64,
 }
 
+const INITIAL_FLUSH_RETRY_BACKOFF: Duration = Duration::from_millis(10);
+const MAX_FLUSH_RETRY_BACKOFF: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImmutableFlushPhase {
+    Pending,
+    Flushing,
+}
+
+#[derive(Clone)]
+pub(crate) struct ImmutableFlush {
+    pub memtable: Arc<SkipListMemtable>,
+    pub sst_name: String,
+    pub sst_seq: u64,
+    pub sequence: u64,
+    pub phase: ImmutableFlushPhase,
+    pub failures: u32,
+    pub retry_at: Instant,
+}
+
 /// Column family state
 pub struct ColumnFamilyState {
     pub memtable: Arc<SkipListMemtable>,
     /// Immutable memtables waiting to be flushed
     pub immutable_memtables: Vec<Arc<SkipListMemtable>>,
+    /// Publication state for each immutable created by the flush actor.
+    ///
+    /// `immutable_memtables` remains the read-path view; this queue owns the
+    /// stable flush identity and retry lifecycle for those same `Arc`s.
+    pub(crate) immutable_flushes: Vec<ImmutableFlush>,
     /// WAL segment ID when the active memtable first became non-empty.
     pub active_memtable_started_in_segment: u64,
 }
@@ -43,6 +68,7 @@ impl ColumnFamilyState {
         Self {
             memtable: Arc::new(SkipListMemtable::new()),
             immutable_memtables: Vec::new(),
+            immutable_flushes: Vec::new(),
             active_memtable_started_in_segment: 1,
         }
     }
@@ -105,6 +131,7 @@ pub struct SnapshotState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FlushReason {
+    PendingImmutable,
     SizeThreshold,
     CloudSegmentGap,
 }
@@ -151,6 +178,128 @@ struct WalRecoveryState {
 }
 
 impl RuntimeState {
+    pub(crate) fn track_new_immutable_flush(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        memtable: Arc<SkipListMemtable>,
+        sst_name: String,
+        sst_seq: u64,
+        sequence: u64,
+    ) -> Option<ImmutableFlush> {
+        let cf_state = self.column_families.get_mut(&cf_id)?;
+        cf_state.immutable_memtables.push(Arc::clone(&memtable));
+        let flush = ImmutableFlush {
+            memtable,
+            sst_name,
+            sst_seq,
+            sequence,
+            phase: ImmutableFlushPhase::Flushing,
+            failures: 0,
+            retry_at: Instant::now(),
+        };
+        cf_state.immutable_flushes.push(flush.clone());
+        Some(flush)
+    }
+
+    pub(crate) fn begin_pending_immutable_flush(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        retry_due_only: bool,
+    ) -> Option<ImmutableFlush> {
+        let now = Instant::now();
+        let flush = self
+            .column_families
+            .get_mut(&cf_id)?
+            .immutable_flushes
+            .iter_mut()
+            .find(|flush| {
+                flush.phase == ImmutableFlushPhase::Pending
+                    && (!retry_due_only || flush.retry_at <= now)
+            })?;
+        flush.phase = ImmutableFlushPhase::Flushing;
+        Some(flush.clone())
+    }
+
+    pub(crate) fn mark_immutable_flush_failed(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        memtable: &Arc<SkipListMemtable>,
+    ) -> Option<Duration> {
+        let flush = self
+            .column_families
+            .get_mut(&cf_id)?
+            .immutable_flushes
+            .iter_mut()
+            .find(|flush| Arc::ptr_eq(&flush.memtable, memtable))?;
+
+        if flush.phase == ImmutableFlushPhase::Pending {
+            return Some(flush.retry_at.saturating_duration_since(Instant::now()));
+        }
+
+        flush.failures = flush.failures.saturating_add(1);
+        let multiplier = 1_u64 << flush.failures.saturating_sub(1).min(7);
+        let delay = INITIAL_FLUSH_RETRY_BACKOFF
+            .saturating_mul(u32::try_from(multiplier).unwrap_or(u32::MAX))
+            .min(MAX_FLUSH_RETRY_BACKOFF);
+        flush.phase = ImmutableFlushPhase::Pending;
+        flush.retry_at = Instant::now() + delay;
+        Some(delay)
+    }
+
+    pub(crate) fn complete_immutable_flush(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        memtable: &Arc<SkipListMemtable>,
+    ) -> Option<usize> {
+        let cf_state = self.column_families.get_mut(&cf_id)?;
+        let flush_index = cf_state
+            .immutable_flushes
+            .iter()
+            .position(|flush| Arc::ptr_eq(&flush.memtable, memtable))?;
+        let memtable_index = cf_state
+            .immutable_memtables
+            .iter()
+            .position(|candidate| Arc::ptr_eq(candidate, memtable))?;
+        cf_state.immutable_flushes.remove(flush_index);
+        Some(
+            cf_state
+                .immutable_memtables
+                .remove(memtable_index)
+                .size_bytes(),
+        )
+    }
+
+    pub(crate) fn has_due_immutable_flush(&self) -> bool {
+        let now = Instant::now();
+        self.column_families.values().any(|cf_state| {
+            cf_state
+                .immutable_flushes
+                .iter()
+                .any(|flush| flush.phase == ImmutableFlushPhase::Pending && flush.retry_at <= now)
+        })
+    }
+
+    pub(crate) fn flush_retry_deadline_timeout(&self) -> Option<Duration> {
+        let now = Instant::now();
+        self.column_families
+            .values()
+            .flat_map(|cf_state| cf_state.immutable_flushes.iter())
+            .filter(|flush| flush.phase == ImmutableFlushPhase::Pending)
+            .map(|flush| flush.retry_at.saturating_duration_since(now))
+            .min()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn make_immutable_flush_retry_due(&mut self, cf_id: crate::types::ColumnFamilyId) {
+        if let Some(cf_state) = self.column_families.get_mut(&cf_id) {
+            for flush in &mut cf_state.immutable_flushes {
+                if flush.phase == ImmutableFlushPhase::Pending {
+                    flush.retry_at = Instant::now();
+                }
+            }
+        }
+    }
+
     pub fn memtable_flush_trigger_bytes(&self) -> usize {
         self.memtable_size_limit
             .min(self.memtable_flush_threshold)
@@ -302,15 +451,47 @@ impl RuntimeState {
         Some(oldest_active_segment.unwrap_or(self.wal.current_segment_id))
     }
 
+    #[cfg(test)]
     pub(crate) fn next_flush_candidate(
         &self,
         cloud_segment_gap_enabled: bool,
     ) -> Option<FlushCandidate> {
+        self.next_flush_candidate_skipping(cloud_segment_gap_enabled, &HashSet::new())
+    }
+
+    pub(crate) fn next_flush_candidate_skipping(
+        &self,
+        cloud_segment_gap_enabled: bool,
+        attempted_cfs: &HashSet<crate::types::ColumnFamilyId>,
+    ) -> Option<FlushCandidate> {
+        let now = Instant::now();
+        let retry_candidate = self
+            .column_families
+            .iter()
+            .filter(|(cf_id, _)| !attempted_cfs.contains(cf_id))
+            .filter(|(_, cf_state)| {
+                cf_state.immutable_flushes.iter().any(|flush| {
+                    flush.phase == ImmutableFlushPhase::Pending && flush.retry_at <= now
+                })
+            })
+            .map(|(cf_id, _)| *cf_id)
+            .min();
+
+        if let Some(cf_id) = retry_candidate {
+            return Some(FlushCandidate {
+                cf_id,
+                reason: FlushReason::PendingImmutable,
+            });
+        }
+
         let flush_threshold = self.memtable_flush_trigger_bytes();
 
         let size_candidate = self
             .column_families
             .iter()
+            .filter(|(cf_id, cf_state)| {
+                !attempted_cfs.contains(cf_id) && cf_state.immutable_flushes.is_empty()
+            })
             .filter_map(|(cf_id, cf_state)| {
                 let size = cf_state.memtable.size_bytes();
                 (size >= flush_threshold).then_some((*cf_id, size))
@@ -330,6 +511,9 @@ impl RuntimeState {
 
         self.column_families
             .iter()
+            .filter(|(cf_id, cf_state)| {
+                !attempted_cfs.contains(cf_id) && cf_state.immutable_flushes.is_empty()
+            })
             .filter_map(|(cf_id, cf_state)| {
                 if cf_state.memtable.size_bytes() == 0 {
                     return None;
@@ -1419,6 +1603,7 @@ impl RuntimeState {
     }
 
     /// Append an intent entry and persist the intent log to disk.
+    #[cfg(test)]
     pub fn append_intent(&mut self, entry: crate::runtime::IntentLogEntry) -> MidgeResult<()> {
         self.intent_log.push(entry);
         // Persist intent log unless running in memory mode
@@ -1426,6 +1611,43 @@ impl RuntimeState {
             crate::runtime::IntentPersistence::save(&self.db_path, &self.intent_log)
                 .map_err(crate::common::MidgeError::Internal)?;
         }
+        Ok(())
+    }
+
+    /// Record one durable publication intent for a stable flush identity.
+    ///
+    /// A retry replaces any earlier intent for the same SST in a proposed copy
+    /// and installs that copy only after persistence succeeds. This prevents a
+    /// failed retry from accumulating duplicate intents or mutating live state.
+    pub(crate) fn record_flush_publication_intent(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        sequence: u64,
+        file_meta: crate::runtime::FileMeta,
+    ) -> MidgeResult<()> {
+        let sst_name = file_meta.name.clone();
+        let mut proposed = self.intent_log.clone();
+        proposed.retain(|entry| {
+            !matches!(
+                entry,
+                crate::runtime::IntentLogEntry::FlushPublish {
+                    file_meta: existing,
+                    ..
+                } if existing.name == sst_name
+            )
+        });
+        proposed.push(crate::runtime::IntentLogEntry::FlushPublish {
+            phase: PublicationPhase::OutputDurable,
+            cf_id,
+            sequence,
+            file_meta,
+        });
+
+        if !self.is_memory_mode() {
+            crate::runtime::IntentPersistence::save(&self.db_path, &proposed)
+                .map_err(crate::common::MidgeError::Internal)?;
+        }
+        self.intent_log = proposed;
         Ok(())
     }
 
@@ -1549,7 +1771,7 @@ impl RuntimeState {
         left_names == right_names
     }
 
-    fn manifest_has_file(&self, sst_name: &str) -> bool {
+    pub(crate) fn manifest_has_file(&self, sst_name: &str) -> bool {
         self.manifest.files.iter().any(|file| file.name == sst_name)
     }
 
@@ -2119,6 +2341,85 @@ mod tests {
 
         // Assert
         assert_eq!(cf.immutable_memtables.len(), 2);
+    }
+
+    #[test]
+    fn should_select_due_pending_immutable_before_active_memtable() {
+        // Arrange
+        let mut state = RuntimeState::new(isolated_test_db_path(), false);
+        state.memtable_flush_threshold = 1;
+        let immutable = Arc::new(SkipListMemtable::new());
+        immutable
+            .put_with_seq(b"older".to_vec(), b"value".to_vec(), 1, None)
+            .expect("seed immutable");
+        let tracked = state
+            .track_new_immutable_flush(
+                0,
+                Arc::clone(&immutable),
+                crate::sst::file_name(0, 0, 1),
+                1,
+                1,
+            )
+            .expect("track immutable");
+        state
+            .mark_immutable_flush_failed(0, &tracked.memtable)
+            .expect("mark failed");
+        state.make_immutable_flush_retry_due(0);
+        state
+            .get_cf(0)
+            .expect("default cf")
+            .memtable
+            .put_with_seq(b"newer".to_vec(), b"value".to_vec(), 2, None)
+            .expect("seed active memtable");
+
+        // Act
+        let candidate = state
+            .next_flush_candidate(false)
+            .expect("pending immutable candidate");
+
+        // Assert
+        assert_eq!(candidate.cf_id, 0);
+        assert_eq!(candidate.reason, FlushReason::PendingImmutable);
+    }
+
+    #[test]
+    fn should_cap_immutable_flush_retry_backoff_at_one_second() {
+        // Arrange
+        let mut state = RuntimeState::new(isolated_test_db_path(), false);
+        let immutable = Arc::new(SkipListMemtable::new());
+        immutable
+            .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)
+            .expect("seed immutable");
+        let tracked = state
+            .track_new_immutable_flush(
+                0,
+                Arc::clone(&immutable),
+                crate::sst::file_name(0, 0, 1),
+                1,
+                1,
+            )
+            .expect("track immutable");
+
+        // Act
+        let mut final_delay = Duration::ZERO;
+        for _ in 0..32 {
+            final_delay = state
+                .mark_immutable_flush_failed(0, &tracked.memtable)
+                .expect("mark failed");
+            state.make_immutable_flush_retry_due(0);
+            state
+                .begin_pending_immutable_flush(0, true)
+                .expect("begin retry");
+        }
+
+        // Assert
+        assert_eq!(final_delay, MAX_FLUSH_RETRY_BACKOFF);
+        assert!(
+            state
+                .flush_retry_deadline_timeout()
+                .is_none_or(|delay| delay <= MAX_FLUSH_RETRY_BACKOFF),
+            "maintenance retry deadline must remain bounded"
+        );
     }
 
     #[test]

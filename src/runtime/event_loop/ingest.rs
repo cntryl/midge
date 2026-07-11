@@ -90,11 +90,10 @@ impl EventLoop {
                 self.flush_actor
                     .handle_flush(&mut self.state, cf_id, self.hybrid_storage.as_ref())
             {
-                let sequence = self.state.sequence;
                 let _ = self.publish_flushed_sst_with_reservation(
                     cf_id,
                     &flush_output.sst_name,
-                    sequence,
+                    flush_output.sequence,
                     flush_output.file_meta,
                     flush_output.frozen_memtable.as_ref(),
                     flush_output.reservation,

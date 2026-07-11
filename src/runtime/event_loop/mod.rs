@@ -709,7 +709,8 @@ impl EventLoop {
             reservation,
         );
         if result.is_err() {
-            self.flush_actor.handle_flush_failure();
+            self.flush_actor
+                .handle_flush_failure(&mut self.state, cf_id, frozen_memtable);
             if let (Some(hybrid), Some(token)) = (&self.hybrid_storage, reservation) {
                 hybrid.flush_failed_with_token(token);
             }
@@ -736,7 +737,9 @@ impl EventLoop {
 
         let mut cloud_manifest_published = false;
         if !self.state.is_memory_mode() {
-            self.manifest_actor.add_sst(&mut self.state, file_meta)?;
+            if !self.state.manifest_has_file(sst_name) {
+                self.manifest_actor.add_sst(&mut self.state, file_meta)?;
+            }
             self.state.transition_flush_publication_intent(
                 sst_name,
                 crate::runtime::PublicationPhase::ManifestPublished,
@@ -788,14 +791,16 @@ impl EventLoop {
         }
 
         let mut flushed = 0usize;
+        let mut attempted_cfs = HashSet::new();
 
         loop {
             let Some(candidate) = self
                 .state
-                .next_flush_candidate(self.wal_actor.is_cloud_async())
+                .next_flush_candidate_skipping(self.wal_actor.is_cloud_async(), &attempted_cfs)
             else {
                 return flushed;
             };
+            attempted_cfs.insert(candidate.cf_id);
 
             let wal_segment_gap = self.state.active_memtable_wal_segment_gap(candidate.cf_id);
             match self.flush_actor.handle_flush(
@@ -814,11 +819,10 @@ impl EventLoop {
                         return flushed;
                     }
 
-                    let sequence = self.state.sequence;
                     if let Err(error) = self.publish_flushed_sst_with_reservation(
                         candidate.cf_id,
                         &flush_output.sst_name,
-                        sequence,
+                        flush_output.sequence,
                         flush_output.file_meta,
                         flush_output.frozen_memtable.as_ref(),
                         flush_output.reservation,
@@ -905,6 +909,10 @@ impl EventLoop {
             return true;
         }
 
+        if self.state.has_due_immutable_flush() {
+            return true;
+        }
+
         if let Some(storage) = &self.hybrid_storage {
             if storage.pending_upload_count() > 0 {
                 return true;
@@ -921,15 +929,14 @@ impl EventLoop {
     }
 
     fn idle_progress_timeout(&self) -> Option<Duration> {
-        match (
+        [
             self.wal_actor.sync_deadline_timeout(),
             self.gc_actor.retry_deadline_timeout(),
-        ) {
-            (Some(wal), Some(gc)) => Some(wal.min(gc)),
-            (Some(wal), None) => Some(wal),
-            (None, Some(gc)) => Some(gc),
-            (None, None) => None,
-        }
+            self.state.flush_retry_deadline_timeout(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn progress_pass(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
@@ -940,6 +947,7 @@ impl EventLoop {
         let hybrid_storage = self.hybrid_storage.clone();
         self.gc_actor
             .retry_failed_cloud_deletes_if_due(&mut self.state, hybrid_storage);
+        self.drain_auto_flush_memtables();
     }
 
     fn record_wake_batch(&mut self, batch: usize) {

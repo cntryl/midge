@@ -15,11 +15,10 @@ impl FlushCoordinator {
             event_loop.hybrid_storage.as_ref(),
         ) {
             Ok(flush_output) => {
-                let sequence = event_loop.state.sequence;
                 match event_loop.publish_flushed_sst_with_reservation(
                     cf_id,
                     &flush_output.sst_name,
-                    sequence,
+                    flush_output.sequence,
                     flush_output.file_meta,
                     flush_output.frozen_memtable.as_ref(),
                     flush_output.reservation,

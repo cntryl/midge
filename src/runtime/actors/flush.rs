@@ -13,6 +13,8 @@ use std::path::Path;
 #[derive(Clone)]
 pub struct FlushOutput {
     pub sst_name: String,
+    /// Highest sequence represented by this exact frozen memtable.
+    pub sequence: u64,
     pub file_meta: Option<crate::runtime::FileMeta>,
     /// Identity of the frozen memtable represented by this output.
     pub frozen_memtable: Option<std::sync::Arc<crate::sst::SkipListMemtable>>,
@@ -23,6 +25,7 @@ pub struct FlushOutput {
 struct FlushPublication<'a> {
     cf_id: crate::types::ColumnFamilyId,
     sst_name: &'a str,
+    sequence: u64,
     frozen: &'a std::sync::Arc<crate::sst::SkipListMemtable>,
     sst_path: &'a Path,
     reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
@@ -80,20 +83,57 @@ impl FlushActor {
         if self.memory_mode {
             return Ok(FlushOutput {
                 sst_name: format!("memory_flush_{}", state.sequence),
+                sequence: state.sequence,
                 file_meta: None,
                 frozen_memtable: None,
                 reservation: None,
             });
         }
 
-        // Estimate SST size: approximate as active memtable size
-        let est_size = 1024 * 1024; // 1MB estimate; could be more precise
+        // A failed immutable always owns the next flush attempt for its CF.
+        // Explicit flushes may retry before the maintenance deadline; automatic
+        // callers select this CF only when the backoff has elapsed.
+        if let Some(attempt) = state.begin_pending_immutable_flush(cf_id, false) {
+            self.in_progress += 1;
+            let est_size = u64::try_from(attempt.memtable.size_bytes()).unwrap_or(u64::MAX);
+            let reservation = match Self::reserve_flush(sba, cf_id, est_size.max(1)) {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    self.fail_tracked_flush(state, cf_id, &attempt.memtable, sba, None);
+                    return Err(error);
+                }
+            };
+            return self.execute_tracked_flush(state, cf_id, &attempt, sba, reservation);
+        }
 
+        let active_size = state
+            .get_cf(cf_id)
+            .ok_or_else(|| MidgeError::Internal(format!("Column family {cf_id} not found")))?
+            .memtable
+            .size_bytes();
+        if active_size == 0 {
+            return Ok(FlushOutput {
+                sst_name: format!("noop_flush_{}", state.sequence),
+                sequence: state.sequence,
+                file_meta: None,
+                frozen_memtable: None,
+                reservation: None,
+            });
+        }
+
+        let est_size = u64::try_from(active_size).unwrap_or(u64::MAX).max(1);
         let flush_reservation = Self::reserve_flush(sba, cf_id, est_size)?;
-
         Self::ensure_immutable_capacity(state, cf_id, sba, flush_reservation)?;
 
         let current_segment_id = state.wal.current_segment_id;
+        let sequence = state.sequence;
+        let sst_seq = state
+            .manifest
+            .next_sst_seqs
+            .get(&cf_id)
+            .copied()
+            .unwrap_or(1);
+        let sst_name = crate::sst::file_name(cf_id, 0, sst_seq);
 
         // Get the column family (after stall check to avoid borrow issues)
         let Some(cf) = state.get_cf_mut(cf_id) else {
@@ -105,18 +145,6 @@ impl FlushActor {
             )));
         };
 
-        if cf.memtable.size_bytes() == 0 {
-            if let Some(token) = flush_reservation {
-                Self::release_flush_reservation(sba, token);
-            }
-            return Ok(FlushOutput {
-                sst_name: format!("noop_flush_{}", state.sequence),
-                file_meta: None,
-                frozen_memtable: None,
-                reservation: None,
-            });
-        }
-
         // Freeze current memtable and create new one
         let frozen = std::mem::replace(
             &mut cf.memtable,
@@ -124,62 +152,107 @@ impl FlushActor {
         );
         cf.active_memtable_started_in_segment = current_segment_id;
 
-        // Add to immutable list
-        cf.immutable_memtables.push(frozen.clone());
-
-        // Generate SST filename
-        let sst_seq = state
-            .manifest
-            .next_sst_seqs
-            .get(&cf_id)
-            .copied()
-            .unwrap_or(1);
-        let sst_name = crate::sst::file_name(cf_id, 0, sst_seq);
-        let sst_path = state.sst_dir.join(&sst_name);
-
-        // Ensure parent directory exists
-        if let Some(parent) = sst_path.parent() {
-            if let Err(error) = std::fs::create_dir_all(parent) {
-                if let Some(token) = flush_reservation {
-                    Self::release_flush_reservation(sba, token);
-                }
-                return Err(error.into());
-            }
-        }
-
-        // Update next SST sequence (journal before applying)
-        {
-            let edit = crate::metadata::ManifestEdit::BumpNextSstSeq {
-                cf_id,
-                next_seq: sst_seq + 1,
-            };
-            if let Err(error) = crate::metadata::append_edit(&state.db_path, &edit) {
-                if let Some(token) = flush_reservation {
-                    Self::release_flush_reservation(sba, token);
-                }
-                return Err(error);
-            }
-        }
-        state.manifest.next_sst_seqs.insert(cf_id, sst_seq + 1);
-
-        self.in_progress += 1;
-        tracing::info!(cf_id = cf_id, sst_name = %sst_name, "Flush started");
-
-        let publication = FlushPublication {
+        let Some(attempt) = state.track_new_immutable_flush(
             cf_id,
-            sst_name: &sst_name,
-            frozen: &frozen,
-            sst_path: &sst_path,
-            reservation: flush_reservation,
-        };
-        let result = self.publish_flush_output(state, &publication, sba);
-        if result.is_err() {
-            self.in_progress = self.in_progress.saturating_sub(1);
+            std::sync::Arc::clone(&frozen),
+            sst_name,
+            sst_seq,
+            sequence,
+        ) else {
+            if let Some(cf) = state.get_cf_mut(cf_id) {
+                cf.memtable = frozen;
+            }
             if let Some(token) = flush_reservation {
                 Self::release_flush_reservation(sba, token);
             }
+            return Err(MidgeError::Internal(format!(
+                "Column family {cf_id} disappeared while freezing its memtable"
+            )));
+        };
+        self.in_progress += 1;
+        self.execute_tracked_flush(state, cf_id, &attempt, sba, flush_reservation)
+    }
+
+    fn execute_tracked_flush(
+        &mut self,
+        state: &mut RuntimeState,
+        cf_id: crate::types::ColumnFamilyId,
+        attempt: &crate::runtime::state::ImmutableFlush,
+        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+    ) -> MidgeResult<FlushOutput> {
+        let sst_path = state.sst_dir.join(&attempt.sst_name);
+        let result = (|| {
+            if let Some(parent) = sst_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            Self::ensure_sst_sequence_reserved(state, cf_id, attempt.sst_seq)?;
+
+            tracing::info!(
+                cf_id,
+                sst_name = %attempt.sst_name,
+                failures = attempt.failures,
+                "Flush started"
+            );
+            let publication = FlushPublication {
+                cf_id,
+                sst_name: &attempt.sst_name,
+                sequence: attempt.sequence,
+                frozen: &attempt.memtable,
+                sst_path: &sst_path,
+                reservation,
+            };
+            self.publish_flush_output(state, &publication, sba)
+        })();
+
+        if result.is_err() {
+            self.fail_tracked_flush(state, cf_id, &attempt.memtable, sba, reservation);
         }
         result
+    }
+
+    fn ensure_sst_sequence_reserved(
+        state: &mut RuntimeState,
+        cf_id: crate::types::ColumnFamilyId,
+        sst_seq: u64,
+    ) -> MidgeResult<()> {
+        let next_seq = sst_seq.saturating_add(1);
+        if state
+            .manifest
+            .next_sst_seqs
+            .get(&cf_id)
+            .is_some_and(|current| *current >= next_seq)
+        {
+            return Ok(());
+        }
+
+        crate::metadata::append_edit(
+            &state.db_path,
+            &crate::metadata::ManifestEdit::BumpNextSstSeq { cf_id, next_seq },
+        )?;
+        state.manifest.next_sst_seqs.insert(cf_id, next_seq);
+        Ok(())
+    }
+
+    fn fail_tracked_flush(
+        &mut self,
+        state: &mut RuntimeState,
+        cf_id: crate::types::ColumnFamilyId,
+        frozen: &std::sync::Arc<crate::sst::SkipListMemtable>,
+        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+    ) {
+        self.in_progress = self.in_progress.saturating_sub(1);
+        if let Some(token) = reservation {
+            Self::release_flush_reservation(sba, token);
+        }
+        if let Some(retry_after) = state.mark_immutable_flush_failed(cf_id, frozen) {
+            tracing::warn!(
+                cf_id,
+                retry_after_ms = retry_after.as_millis(),
+                "Flush failed; frozen memtable retained for retry"
+            );
+        }
     }
 
     fn reserve_flush(
@@ -283,12 +356,11 @@ impl FlushActor {
         file_meta.level = 0;
         let write_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-        state.append_intent(crate::runtime::IntentLogEntry::FlushPublish {
-            phase: crate::runtime::PublicationPhase::OutputDurable,
-            cf_id: publication.cf_id,
-            sequence: state.sequence,
-            file_meta: file_meta.clone(),
-        })?;
+        state.record_flush_publication_intent(
+            publication.cf_id,
+            publication.sequence,
+            file_meta.clone(),
+        )?;
 
         fail::fail_point!("midge::flush::after_sst_write_before_publish");
 
@@ -306,6 +378,7 @@ impl FlushActor {
 
         Ok(FlushOutput {
             sst_name: publication.sst_name.to_string(),
+            sequence: publication.sequence,
             file_meta: Some(file_meta),
             frozen_memtable: Some(std::sync::Arc::clone(publication.frozen)),
             reservation: publication.reservation,
@@ -420,20 +493,10 @@ impl FlushActor {
         sequence: u64,
         frozen_memtable: Option<&std::sync::Arc<crate::sst::SkipListMemtable>>,
     ) {
-        if let Some(cf) = state.get_cf_mut(cf_id) {
-            // Remove exactly the immutable represented by this flush. A failed
-            // older flush may remain ahead of a later successful one.
-            if let Some(frozen_memtable) = frozen_memtable {
-                if let Some(index) = cf
-                    .immutable_memtables
-                    .iter()
-                    .position(|candidate| std::sync::Arc::ptr_eq(candidate, frozen_memtable))
-                {
-                    let removed = cf.immutable_memtables.remove(index);
-                    let removed_size = removed.size_bytes();
-                    state.total_memtable_bytes =
-                        state.total_memtable_bytes.saturating_sub(removed_size);
-                }
+        if let Some(frozen_memtable) = frozen_memtable {
+            if let Some(removed_size) = state.complete_immutable_flush(cf_id, frozen_memtable) {
+                state.total_memtable_bytes =
+                    state.total_memtable_bytes.saturating_sub(removed_size);
             }
         }
 
@@ -449,8 +512,16 @@ impl FlushActor {
 
     /// Abort a flush after the SST was written but before manifest
     /// publication. The frozen immutable remains queued for retry.
-    pub fn handle_flush_failure(&mut self) {
+    pub fn handle_flush_failure(
+        &mut self,
+        state: &mut RuntimeState,
+        cf_id: crate::types::ColumnFamilyId,
+        frozen_memtable: Option<&std::sync::Arc<crate::sst::SkipListMemtable>>,
+    ) {
         self.in_progress = self.in_progress.saturating_sub(1);
+        if let Some(frozen_memtable) = frozen_memtable {
+            let _ = state.mark_immutable_flush_failed(cf_id, frozen_memtable);
+        }
     }
 }
 
@@ -572,6 +643,72 @@ mod tests {
         // Assert
         assert_eq!(output.sst_name, "000000_00_00000000000000000001.sst");
         assert!(state.sst_dir.join(&output.sst_name).exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_retry_same_immutable_with_stable_identity_when_pending() -> MidgeResult<()> {
+        // Arrange
+        let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+        let db_path = temp.path().to_path_buf();
+        let mut state = RuntimeState::new(db_path.clone(), false);
+        let mut actor = FlushActor::new(
+            &db_path.join("sst"),
+            false,
+            crate::sst::compression::CompressionPolicy::default(),
+        )?;
+        state.sequence = 7;
+        state.get_cf(0).expect("default cf").memtable.put_with_seq(
+            b"frozen".to_vec(),
+            b"value".to_vec(),
+            7,
+            None,
+        )?;
+
+        let frozen = {
+            let cf = state.get_cf_mut(0).expect("default cf");
+            std::mem::replace(
+                &mut cf.memtable,
+                std::sync::Arc::new(crate::sst::SkipListMemtable::new()),
+            )
+        };
+        let failed = state
+            .track_new_immutable_flush(0, frozen, crate::sst::file_name(0, 0, 1), 1, 7)
+            .expect("track failed immutable");
+        state
+            .mark_immutable_flush_failed(0, &failed.memtable)
+            .expect("mark immutable pending");
+        state.sequence = 8;
+        state.get_cf(0).expect("default cf").memtable.put_with_seq(
+            b"later".to_vec(),
+            b"value".to_vec(),
+            8,
+            None,
+        )?;
+
+        // Act
+        let retried = actor.handle_flush(&mut state, 0, None)?;
+
+        // Assert
+        assert_eq!(retried.sst_name, failed.sst_name);
+        assert_eq!(retried.sequence, 7);
+        assert!(std::sync::Arc::ptr_eq(
+            retried
+                .frozen_memtable
+                .as_ref()
+                .expect("retry frozen memtable"),
+            &failed.memtable
+        ));
+        assert_eq!(
+            state
+                .get_cf(0)
+                .expect("default cf")
+                .immutable_memtables
+                .len(),
+            1,
+            "retry must not freeze the newer active memtable"
+        );
 
         Ok(())
     }

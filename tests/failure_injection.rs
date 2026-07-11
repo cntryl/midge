@@ -421,6 +421,204 @@ fn should_delete_orphan_flush_sst_on_reopen_when_manifest_append_hits_no_space()
 }
 
 #[test]
+fn should_retry_same_frozen_memtable_when_manifest_publication_recovers() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let engine = open_local_engine(db_path);
+    let cf = default_cf(&engine);
+
+    seed_range(&engine, &cf, 0..10, "retry-flush");
+
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::manifest::inject_no_space_on_add_sst_edit", "return")
+        .expect("configure manifest append no-space failpoint");
+    let error = engine
+        .flush_cf(&cf)
+        .expect_err("flush should fail when manifest publication runs out of space");
+    assert_no_space_like(&error);
+
+    let failed_sst_name = std::fs::read_dir(db_path.join("sst"))
+        .expect("read failed flush outputs")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.ends_with(".sst"))
+        .expect("failed publication should retain its durable SST output");
+
+    fail::remove("midge::manifest::inject_no_space_on_add_sst_edit");
+    scenario.teardown();
+
+    let mut later = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin later transaction");
+    later
+        .put(b"retry-flush-later".to_vec(), b"later-value".to_vec(), None)
+        .expect("put later active-memtable value");
+    later
+        .commit(WriteOptions::sync())
+        .expect("commit later active-memtable value");
+
+    // Act
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let metrics = loop {
+        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        if metrics.sst_count == 1 {
+            break metrics;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "failed frozen memtable was not retried by runtime maintenance"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+
+    // Assert
+    let layout = engine.get_storage_layout().expect("storage layout");
+    let published_names: Vec<_> = layout
+        .levels
+        .iter()
+        .flat_map(|level| level.files.iter())
+        .map(|file| file.name.as_str())
+        .collect();
+    assert_eq!(
+        published_names,
+        vec![failed_sst_name.as_str()],
+        "retry must publish the original frozen immutable under its stable SST identity"
+    );
+    assert!(
+        metrics.manifest_last_persisted_sequence < metrics.current_sequence,
+        "retry must not advance the persisted frontier over later active-memtable writes"
+    );
+    assert_visible(&engine, &cf, b"retry-flush-later", b"later-value");
+}
+
+#[test]
+fn should_retry_frozen_memtable_when_sst_sequence_journal_recovers() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let engine = open_local_engine(temp_dir.path());
+    let cf = default_cf(&engine);
+    seed_range(&engine, &cf, 0..6, "journal-retry");
+
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::manifest::inject_no_space_on_append_edit", "return")
+        .expect("configure manifest journal failure");
+    let error = engine
+        .flush_cf(&cf)
+        .expect_err("SST sequence reservation should fail");
+    assert_no_space_like(&error);
+    fail::remove("midge::manifest::inject_no_space_on_append_edit");
+    scenario.teardown();
+
+    // Act
+    wait_for_sst_count(&engine, 1);
+
+    // Assert
+    let layout = engine.get_storage_layout().expect("storage layout");
+    let names: Vec<_> = layout
+        .levels
+        .iter()
+        .flat_map(|level| level.files.iter())
+        .map(|file| file.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["000000_00_00000000000000000001.sst"]);
+}
+
+#[test]
+fn should_retry_frozen_memtable_when_sst_write_recovers() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let engine = open_local_engine(temp_dir.path());
+    let cf = default_cf(&engine);
+    seed_range(&engine, &cf, 0..6, "sst-retry");
+
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::sst::inject_no_space_on_finish_to_path", "return")
+        .expect("configure SST write failure");
+    let error = engine.flush_cf(&cf).expect_err("SST write should fail");
+    assert_no_space_like(&error);
+    fail::remove("midge::sst::inject_no_space_on_finish_to_path");
+    scenario.teardown();
+
+    // Act
+    wait_for_sst_count(&engine, 1);
+
+    // Assert
+    let layout = engine.get_storage_layout().expect("storage layout");
+    assert_eq!(
+        layout
+            .levels
+            .iter()
+            .map(|level| level.file_count)
+            .sum::<usize>(),
+        1
+    );
+}
+
+#[test]
+fn should_retry_frozen_memtable_when_cloud_sst_upload_recovers() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let engine = Engine::open(
+        OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "retry-prefix")
+            .background_compaction(false)
+            .build(),
+    )
+    .expect("open simulated cloud engine");
+    let cf = default_cf(&engine);
+    seed_range_with_options(
+        &engine,
+        &cf,
+        0..6,
+        "cloud-retry",
+        WriteOptions::cloud_async(),
+    );
+    let committed_before_flush = engine
+        .get_runtime_metrics()
+        .expect("pre-flush metrics")
+        .hybrid_total_committed_bytes;
+
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::cloud::inject_fail_sst_upload", "return")
+        .expect("configure cloud SST upload failure");
+    let error = engine
+        .flush_cf(&cf)
+        .expect_err("cloud SST upload should fail");
+    assert!(
+        error.to_string().contains("cloud SST upload failed"),
+        "unexpected cloud upload error: {error}"
+    );
+    assert_eq!(
+        engine
+            .get_runtime_metrics()
+            .expect("failed flush metrics")
+            .hybrid_total_committed_bytes,
+        committed_before_flush,
+        "failed cloud attempt must release its exact storage reservation"
+    );
+    fail::remove("midge::cloud::inject_fail_sst_upload");
+    scenario.teardown();
+
+    // Act
+    wait_for_sst_count(&engine, 1);
+
+    // Assert
+    let layout = engine.get_storage_layout().expect("storage layout");
+    assert_eq!(
+        layout
+            .levels
+            .iter()
+            .map(|level| level.file_count)
+            .sum::<usize>(),
+        1
+    );
+}
+
+#[test]
 fn should_restore_sequence_floor_from_flushed_ssts_without_wal_recovery() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
@@ -1075,6 +1273,24 @@ fn failpoint_test_lock() -> &'static Mutex<()> {
     FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn wait_for_sst_count(engine: &Engine, expected: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let actual = engine
+            .get_runtime_metrics()
+            .expect("runtime metrics")
+            .sst_count;
+        if actual == expected {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {expected} SSTs; observed {actual}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 fn open_local_engine(db_path: &Path) -> Engine {
     Engine::open(
         OpenOptions::local(db_path)
@@ -1122,6 +1338,16 @@ fn seed_range(
     range: std::ops::Range<u32>,
     prefix: &str,
 ) {
+    seed_range_with_options(engine, cf, range, prefix, WriteOptions::sync());
+}
+
+fn seed_range_with_options(
+    engine: &Engine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    range: std::ops::Range<u32>,
+    prefix: &str,
+    write_options: WriteOptions,
+) {
     for index in range {
         let key = format!("{prefix}-{index:02}");
         let value = format!("value-{index:02}");
@@ -1130,7 +1356,7 @@ fn seed_range(
             .expect("begin seed tx");
         tx.put(key.into_bytes(), value.into_bytes(), None)
             .expect("put seed value");
-        tx.commit(WriteOptions::sync()).expect("commit seed value");
+        tx.commit(write_options).expect("commit seed value");
     }
 }
 
