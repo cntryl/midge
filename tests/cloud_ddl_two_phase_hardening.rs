@@ -29,6 +29,11 @@ fn shutdown(mut engine: Engine) {
 #[test]
 fn should_converge_cloud_column_family_lifecycle_after_restart() {
     // Arrange
+    #[cfg(feature = "failpoints")]
+    let _guard = DDL_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock");
     let temp = tempfile::tempdir().expect("temp dir");
     let engine = open_cloud(temp.path());
     let created = engine
