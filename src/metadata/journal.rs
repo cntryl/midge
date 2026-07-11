@@ -807,8 +807,13 @@ mod tests {
     use crate::metadata::FileMeta;
     use crate::metadata::{Manifest, ManifestPersistence};
     use proptest::prelude::*;
+    use std::cell::Cell;
     use std::io::Write;
     use tempfile::tempdir;
+
+    thread_local! {
+        static OBSERVE_REQUIRED_MANIFEST_SYNC: Cell<bool> = const { Cell::new(false) };
+    }
 
     fn encode_test_record(payload_edit: &ManifestEdit, crc_edit: &ManifestEdit) -> Vec<u8> {
         let payload = serde_json::to_vec(payload_edit).expect("serialize test journal payload");
@@ -1064,12 +1069,18 @@ mod tests {
         let observed_syncs = std::sync::Arc::clone(&syncs);
         let _guard =
             fail::FailGuard::with_callback("midge::manifest::before_required_sync", move || {
-                observed_syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                OBSERVE_REQUIRED_MANIFEST_SYNC.with(|observe| {
+                    if observe.get() {
+                        observed_syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
             })
             .expect("configure sync observer");
 
         // Act
+        OBSERVE_REQUIRED_MANIFEST_SYNC.with(|observe| observe.set(true));
         append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append manifest edit");
+        OBSERVE_REQUIRED_MANIFEST_SYNC.with(|observe| observe.set(false));
 
         // Assert
         assert_eq!(syncs.load(std::sync::atomic::Ordering::SeqCst), 1);
