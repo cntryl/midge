@@ -1771,12 +1771,11 @@ impl WalActor {
             self.sync_total += elapsed;
             self.last_sync_instant = Instant::now();
 
-            // Record telemetry metric for WAL syncs and fsync latency
+            // Record the logical WAL sync here. The writer runner owns the
+            // physical fsync count and latency metrics at the filesystem call
+            // boundary so one barrier is never counted at multiple layers.
             if let Some(t) = crate::telemetry::Telemetry::global() {
                 t.metrics().record_wal_sync();
-                t.metrics().record_wal_fsync_count();
-                t.metrics()
-                    .record_wal_fsync_ns(Self::duration_nanos_u64(elapsed));
             }
 
             if std::env::var_os("MIDGE_TRACE_WAL_SYNC").is_some()

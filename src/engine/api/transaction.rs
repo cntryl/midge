@@ -532,10 +532,10 @@ impl Transaction {
             return Ok(());
         }
 
-        if opts.is_sync() {
-            self.sync()?;
-        }
-
+        // A non-empty local synchronous commit is already fsynced by the WAL
+        // actor before it acknowledges `submit_ops`. Issuing `WalSync` here
+        // would add a second physical durability barrier to every strict
+        // commit. Empty transactions still use `self.sync()` in `commit`.
         Ok(())
     }
 
