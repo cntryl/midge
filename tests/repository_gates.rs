@@ -262,8 +262,10 @@ fn should_test_supported_build_matrix_before_release() {
     assert!(ci.contains("os: [ubuntu-latest, windows-latest, macos-latest]"));
     assert!(ci.contains("cargo test --workspace --all-features"));
     assert!(ci.contains("rustup toolchain install 1.93"));
-    assert!(ci.contains("cargo +1.93 check --workspace --all-targets"));
-    assert!(ci.contains("--all-targets --no-default-features -- -D warnings"));
+    assert!(ci.contains("rustup run 1.93 cargo check --workspace --all-targets"));
+    assert!(
+        ci.contains("rustup run 1.93 cargo clippy --workspace --all-targets --no-default-features")
+    );
 }
 
 #[test]

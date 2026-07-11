@@ -131,10 +131,10 @@ jobs:
           shared-key: "ci-msrv"
 
       - name: Check MSRV
-        run: cargo +1.93 check --workspace --all-targets
+        run: rustup run 1.93 cargo check --workspace --all-targets
 
       - name: Strict no-default Clippy
-        run: cargo +1.93 clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic
+        run: rustup run 1.93 cargo clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic
 
   provider-features:
     name: Provider feature (${{ matrix.provider }})
