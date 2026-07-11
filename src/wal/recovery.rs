@@ -24,10 +24,47 @@ pub enum ReplayPolicy {
     SalvageValidPrefix,
 }
 
-fn is_salvageable_tail_corruption(message: &str) -> bool {
+fn is_incomplete_eof_frame(error: &MidgeError) -> bool {
+    let MidgeError::Corruption(message) = error else {
+        return false;
+    };
     let lower = message.to_ascii_lowercase();
-    (lower.contains("incomplete wal frame header") || lower.contains("incomplete wal record"))
-        && !lower.contains("pos 0 ")
+    lower.contains("incomplete wal frame header") || lower.contains("incomplete wal record")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayFileKind {
+    Sealed,
+    FinalActive,
+}
+
+#[derive(Debug)]
+struct ReplayFile {
+    path: FsPath,
+    kind: ReplayFileKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayErrorAction {
+    TolerateFinalActiveTail,
+    SalvageVerifiedPrefix,
+    Fail,
+}
+
+fn replay_error_action(
+    replay_file: &ReplayFile,
+    replay_policy: ReplayPolicy,
+    error: &MidgeError,
+) -> ReplayErrorAction {
+    if replay_file.kind == ReplayFileKind::FinalActive && is_incomplete_eof_frame(error) {
+        ReplayErrorAction::TolerateFinalActiveTail
+    } else if replay_policy == ReplayPolicy::SalvageValidPrefix
+        && matches!(error, MidgeError::Corruption(_))
+    {
+        ReplayErrorAction::SalvageVerifiedPrefix
+    } else {
+        ReplayErrorAction::Fail
+    }
 }
 
 fn map_fs_error(err: FsError) -> MidgeError {
@@ -173,7 +210,7 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
             epoch_frontiers: &epoch_frontiers,
             replay_ordinal: 0,
         };
-        replay_wal_paths(storage, &replay_paths, &mut replay_state)
+        replay_wal_paths(storage, &replay_paths, replay_policy, &mut replay_state)
     };
 
     stats.total_replay_ns = replay_start.elapsed().as_nanos();
@@ -193,24 +230,9 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
             Ok(stats)
         }
         Err(MidgeError::Corruption(e)) => {
-            if is_salvageable_tail_corruption(&e) {
-                tracing::info!(
-                    dir = %wal_dir,
-                    error = %e,
-                    "wal replay dropped a truncated tail and kept the valid prefix"
-                );
-                Ok(stats)
-            } else if replay_policy == ReplayPolicy::SalvageValidPrefix {
-                stats.mark_corruption();
-                tracing::warn!(dir = %wal_dir, error = %e, "wal replay encountered corruption");
-                // Tolerate corruption by returning successfully with whatever state was recovered
-                // before the corruption point (commonly a truncated tail record after a crash).
-                Ok(stats)
-            } else {
-                stats.mark_corruption();
-                tracing::warn!(dir = %wal_dir, error = %e, "wal replay encountered corruption");
-                Err(MidgeError::Corruption(e))
-            }
+            stats.mark_corruption();
+            tracing::warn!(dir = %wal_dir, error = %e, "wal replay encountered corruption");
+            Err(MidgeError::Corruption(e))
         }
         Err(e) => {
             tracing::error!(dir = %wal_dir, error = %e, "wal replay failed");
@@ -219,7 +241,7 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
     }
 }
 
-fn collect_replay_paths(storage: &dyn Fs, wal_dir: &FsPath) -> MidgeResult<Vec<FsPath>> {
+fn collect_replay_paths(storage: &dyn Fs, wal_dir: &FsPath) -> MidgeResult<Vec<ReplayFile>> {
     if !storage.exists(wal_dir).map_err(map_fs_error)? {
         return Ok(Vec::new());
     }
@@ -259,9 +281,18 @@ fn collect_replay_paths(storage: &dyn Fs, wal_dir: &FsPath) -> MidgeResult<Vec<F
         }
     }
 
-    let mut replay_paths: Vec<FsPath> = segment_files.into_iter().map(|(_, (_, p))| p).collect();
+    let mut replay_paths: Vec<ReplayFile> = segment_files
+        .into_iter()
+        .map(|(_, (_, path))| ReplayFile {
+            path,
+            kind: ReplayFileKind::Sealed,
+        })
+        .collect();
     if let Some(wal_log) = wal_log_path {
-        replay_paths.push(wal_log);
+        replay_paths.push(ReplayFile {
+            path: wal_log,
+            kind: ReplayFileKind::FinalActive,
+        });
     }
 
     Ok(replay_paths)
@@ -278,18 +309,36 @@ struct WalReplayState<'a, S: BuildHasher> {
 
 fn replay_wal_paths<S: BuildHasher>(
     storage: &dyn Fs,
-    replay_paths: &[FsPath],
+    replay_paths: &[ReplayFile],
+    replay_policy: ReplayPolicy,
     replay_state: &mut WalReplayState<'_, S>,
 ) -> MidgeResult<()> {
-    let mut result: MidgeResult<()> = Ok(());
-    for file_path in replay_paths {
-        result = replay_wal_file(storage, file_path, replay_state);
-        if result.is_err() {
-            break;
+    for replay_file in replay_paths {
+        if let Err(error) = replay_wal_file(storage, &replay_file.path, replay_state) {
+            match replay_error_action(replay_file, replay_policy, &error) {
+                ReplayErrorAction::TolerateFinalActiveTail => {
+                    tracing::info!(
+                        path = %replay_file.path,
+                        error = %error,
+                        "wal replay dropped an incomplete final active tail"
+                    );
+                    return Ok(());
+                }
+                ReplayErrorAction::SalvageVerifiedPrefix => {
+                    replay_state.stats.mark_corruption();
+                    tracing::warn!(
+                        path = %replay_file.path,
+                        error = %error,
+                        "wal replay stopped at corrupt verified-prefix boundary"
+                    );
+                    return Ok(());
+                }
+                ReplayErrorAction::Fail => return Err(error),
+            }
         }
     }
 
-    result
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -343,44 +392,50 @@ impl WriterEpochFrontiers {
 
 fn discover_writer_epoch_frontiers(
     storage: &dyn Fs,
-    replay_paths: &[FsPath],
+    replay_paths: &[ReplayFile],
     replay_policy: ReplayPolicy,
 ) -> MidgeResult<(WriterEpochFrontiers, bool)> {
     let mut frontiers = WriterEpochFrontiers::default();
     let mut had_corruption = false;
     let mut ordinal = 0_u64;
 
-    for file_path in replay_paths {
+    for replay_file in replay_paths {
         let mut pos = 0_u64;
         let mut file_read_ns = 0_u128;
 
         loop {
-            let Some(file) = open_wal_replay_file(storage, file_path, &mut file_read_ns)? else {
+            let Some(file) = open_wal_replay_file(storage, &replay_file.path, &mut file_read_ns)?
+            else {
                 break;
             };
 
-            match read_next_wal_frame(&*file, file_path, pos, &mut file_read_ns) {
+            match read_next_wal_frame(&*file, &replay_file.path, pos, &mut file_read_ns) {
                 Ok(NextWalFrame::Eof) => break,
                 Ok(NextWalFrame::Frame(frame)) => {
                     frontiers.record(&frame.record, ordinal);
                     ordinal = ordinal.saturating_add(1);
                     pos = frame.next_pos;
                 }
-                Err(MidgeError::Corruption(error)) if is_salvageable_tail_corruption(&error) => {
-                    return Ok((frontiers, had_corruption));
-                }
-                Err(MidgeError::Corruption(error))
-                    if replay_policy == ReplayPolicy::SalvageValidPrefix =>
-                {
-                    had_corruption = true;
-                    tracing::warn!(
-                        path = %file_path,
-                        error = %error,
-                        "stopped writer epoch discovery at corrupt WAL prefix boundary"
-                    );
-                    return Ok((frontiers, had_corruption));
-                }
-                Err(error) => return Err(error),
+                Err(error) => match replay_error_action(replay_file, replay_policy, &error) {
+                    ReplayErrorAction::TolerateFinalActiveTail => {
+                        tracing::info!(
+                            path = %replay_file.path,
+                            error = %error,
+                            "writer epoch discovery dropped an incomplete final active tail"
+                        );
+                        return Ok((frontiers, had_corruption));
+                    }
+                    ReplayErrorAction::SalvageVerifiedPrefix => {
+                        had_corruption = true;
+                        tracing::warn!(
+                            path = %replay_file.path,
+                            error = %error,
+                            "stopped writer epoch discovery at corrupt WAL prefix boundary"
+                        );
+                        return Ok((frontiers, had_corruption));
+                    }
+                    ReplayErrorAction::Fail => return Err(error),
+                },
             }
         }
     }
@@ -766,6 +821,23 @@ mod tests {
             .unwrap();
         file.write_all(bytes).unwrap();
         file.sync_all().unwrap();
+    }
+
+    fn encode_frame(record: &WalRecord) -> Vec<u8> {
+        let payload = crate::wal::encoding::encode(record).unwrap();
+        let mut frame = Vec::new();
+        crate::wal::frame::append_frame(&mut frame, &payload).unwrap();
+        frame
+    }
+
+    fn put_record(key: &'static [u8], sequence: u64, writer_epoch: u64) -> WalRecord {
+        WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(key),
+            Some(Bytes::from_static(b"value")),
+            sequence,
+            writer_epoch,
+        )
     }
 
     #[test]
@@ -1759,6 +1831,130 @@ mod tests {
         assert_eq!(stats.record_count, 1);
         assert_eq!(memtables[&0].get(b"good").unwrap(), Some(b"value".to_vec()));
         assert_eq!(memtables[&0].get(b"tail").unwrap(), None);
+    }
+
+    #[test]
+    fn should_fail_strict_recovery_when_sealed_wal_is_truncated_before_later_files() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
+        let first_segment = wal_subdir.join(crate::wal::segment_file_name(1));
+
+        append_raw_bytes(&first_segment, &encode_frame(&put_record(b"prefix", 1, 1)));
+        let mut torn_frame = encode_frame(&put_record(b"torn", 2, 1));
+        torn_frame.truncate(torn_frame.len() - 3);
+        append_raw_bytes(&first_segment, &torn_frame);
+        append_raw_bytes(
+            &wal_subdir.join(crate::wal::segment_file_name(2)),
+            &encode_frame(&put_record(b"later-sealed", 3, 2)),
+        );
+        append_raw_bytes(
+            &wal_subdir.join(crate::wal::ACTIVE_FILE_NAME),
+            &encode_frame(&put_record(b"active", 4, 2)),
+        );
+        let mut memtables = HashMap::new();
+
+        // Act
+        let error =
+            replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
+                .unwrap_err();
+
+        // Assert
+        match error {
+            MidgeError::Corruption(message) => {
+                assert!(message.contains("Incomplete WAL record"));
+                assert!(message.contains(&crate::wal::segment_file_name(1)));
+            }
+            other => panic!("expected corruption error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_return_degraded_verified_prefix_when_salvaging_truncated_sealed_wal() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
+        let first_segment = wal_subdir.join(crate::wal::segment_file_name(1));
+
+        append_raw_bytes(&first_segment, &encode_frame(&put_record(b"prefix", 1, 1)));
+        let mut torn_frame = encode_frame(&put_record(b"torn", 2, 1));
+        torn_frame.truncate(torn_frame.len() - 3);
+        append_raw_bytes(&first_segment, &torn_frame);
+        append_raw_bytes(
+            &wal_subdir.join(crate::wal::segment_file_name(2)),
+            &encode_frame(&put_record(b"later-sealed", 3, 2)),
+        );
+        append_raw_bytes(
+            &wal_subdir.join(crate::wal::ACTIVE_FILE_NAME),
+            &encode_frame(&put_record(b"active", 4, 2)),
+        );
+        let mut memtables = HashMap::new();
+
+        // Act
+        let stats = replay_wal_with_policy(
+            &storage,
+            &wal_dir,
+            &mut memtables,
+            ReplayPolicy::SalvageValidPrefix,
+        )
+        .unwrap();
+
+        // Assert
+        assert!(stats.had_corruption);
+        assert_eq!(stats.record_count, 1);
+        assert_eq!(stats.max_epoch_seen, 1);
+        assert_eq!(
+            memtables[&0].get(b"prefix").unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert_eq!(memtables[&0].get(b"torn").unwrap(), None);
+        assert_eq!(memtables[&0].get(b"later-sealed").unwrap(), None);
+        assert_eq!(memtables[&0].get(b"active").unwrap(), None);
+    }
+
+    #[test]
+    fn should_tolerate_incomplete_eof_frame_only_in_final_active_wal_when_strict() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
+        let storage = RealFs::new(dir.path()).unwrap();
+        let wal_dir = FsPath::new("wal");
+
+        append_raw_bytes(
+            &wal_subdir.join(crate::wal::segment_file_name(1)),
+            &encode_frame(&put_record(b"sealed", 1, 1)),
+        );
+        let active_path = wal_subdir.join(crate::wal::ACTIVE_FILE_NAME);
+        append_raw_bytes(&active_path, &encode_frame(&put_record(b"active", 2, 1)));
+        let mut torn_frame = encode_frame(&put_record(b"torn", 3, 1));
+        torn_frame.truncate(torn_frame.len() - 3);
+        append_raw_bytes(&active_path, &torn_frame);
+        let mut memtables = HashMap::new();
+
+        // Act
+        let stats =
+            replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
+                .unwrap();
+
+        // Assert
+        assert!(!stats.had_corruption);
+        assert_eq!(stats.record_count, 2);
+        assert_eq!(
+            memtables[&0].get(b"sealed").unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert_eq!(
+            memtables[&0].get(b"active").unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert_eq!(memtables[&0].get(b"torn").unwrap(), None);
     }
 
     #[test]
