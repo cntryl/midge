@@ -54,6 +54,15 @@ pub enum MidgeError {
 
     /// A cooperative operation was cancelled before it could publish a result.
     Aborted(String),
+
+    /// The operation cannot proceed while an owned resource is still active.
+    Busy(String),
+
+    /// The operation did not complete before its caller-provided deadline.
+    Timeout(String),
+
+    /// A bounded resource pool cannot admit more work.
+    ResourceLimit(String),
 }
 
 impl fmt::Display for MidgeError {
@@ -74,6 +83,9 @@ impl fmt::Display for MidgeError {
             MidgeError::Fenced(msg) => write!(f, "Fenced: writer epoch is stale: {msg}"),
             MidgeError::WriteConflict(msg) => write!(f, "Write conflict: {msg}"),
             MidgeError::Aborted(msg) => write!(f, "Aborted: {msg}"),
+            MidgeError::Busy(msg) => write!(f, "Busy: {msg}"),
+            MidgeError::Timeout(msg) => write!(f, "Timeout: {msg}"),
+            MidgeError::ResourceLimit(msg) => write!(f, "Resource limit: {msg}"),
         }
     }
 }

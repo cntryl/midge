@@ -102,43 +102,36 @@ pub struct Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        let drop_start = std::time::Instant::now();
-        tracing::debug!("Engine dropping, initiating cleanup");
-
-        // Drop all ingest coordinators
         let ingest_count = self.ingest_coordinators.len();
         self.ingest_coordinators.clear();
         tracing::trace!(count = ingest_count, "Engine: ingest coordinators dropped");
 
-        // Gracefully shutdown the runtime when engine is dropped
-        // Send shutdown message first
-        let _ = self.runtime_handle.shutdown();
-        // Then drop the runtime which will wait for the thread to finish
-        self.runtime.take();
-        tracing::trace!("Engine: runtime shutdown complete");
-
-        // Keep fencing renewal active until runtime and cloud work have
-        // quiesced. Only then stop the heartbeat and release the lease.
-        if let Some(heartbeat_mutex) = self.lease_heartbeat.take() {
-            if let Ok(mut heartbeat) = heartbeat_mutex.lock() {
-                heartbeat.stop();
-                tracing::trace!("Engine: lease heartbeat stopped");
-            }
+        let runtime = self.runtime.take();
+        let lease_heartbeat = self.lease_heartbeat.take();
+        let lease = self.lease.take();
+        let lease_guard = self.lease_guard.take();
+        if runtime.is_none()
+            && lease_heartbeat.is_none()
+            && lease.is_none()
+            && lease_guard.is_none()
+        {
+            return;
         }
 
-        // Release lease via the PrimaryLease interface
-        if let Some(lease) = self.lease.take() {
-            let _ = lease.release();
-            tracing::trace!("Engine: lease released");
+        // Runtime teardown can legitimately wait for a transaction owned by
+        // the dropping thread or for a blocked storage worker. Hand that wait
+        // to a detached reaper and move all fencing resources with it. The
+        // lease remains renewed and owned until every runtime worker exits.
+        let spawn_result = std::thread::Builder::new()
+            .name("midge-engine-reaper".to_string())
+            .spawn(move || {
+                drop(runtime);
+                Self::release_fencing_parts(lease_heartbeat, lease, lease_guard);
+                tracing::debug!("Engine reaper cleanup complete");
+            });
+        if let Err(error) = spawn_result {
+            tracing::error!(%error, "failed to spawn engine cleanup reaper");
         }
-
-        // Drop the guard last
-        self.lease_guard.take();
-
-        tracing::debug!(
-            elapsed_ms = drop_start.elapsed().as_millis(),
-            "Engine cleanup complete"
-        );
     }
 }
 
@@ -146,6 +139,50 @@ impl Drop for Engine {
 type CloudSstRecoveryProof = startup::CloudSstRecoveryProof;
 
 impl Engine {
+    fn release_fencing_parts(
+        lease_heartbeat: Option<std::sync::Mutex<crate::lease::LeaseHeartbeat>>,
+        lease: Option<Arc<dyn crate::lease::PrimaryLease>>,
+        lease_guard: Option<crate::lease::LeaseGuard>,
+    ) {
+        if let Some(heartbeat_mutex) = lease_heartbeat {
+            if let Ok(mut heartbeat) = heartbeat_mutex.lock() {
+                heartbeat.stop();
+                tracing::trace!("Engine: lease heartbeat stopped");
+            }
+        }
+        if let Some(lease) = lease {
+            loop {
+                match lease.release() {
+                    Ok(()) => break,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "primary lease release failed; cleanup reaper will retry"
+                        );
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            }
+            tracing::trace!("Engine: lease released");
+        }
+        drop(lease_guard);
+    }
+
+    fn release_fencing_resources(&mut self) -> MidgeResult<()> {
+        if let Some(heartbeat_mutex) = &self.lease_heartbeat {
+            if let Ok(mut heartbeat) = heartbeat_mutex.lock() {
+                heartbeat.stop();
+            }
+        }
+        if let Some(lease) = &self.lease {
+            lease.release()?;
+        }
+        self.lease_heartbeat.take();
+        self.lease.take();
+        self.lease_guard.take();
+        Ok(())
+    }
+
     fn verify_storage_path_internal(
         db_path: &Path,
         runtime_health: Option<EngineHealth>,
@@ -299,6 +336,9 @@ impl Engine {
     ///
     /// Returns None if the column family doesn't exist.
     pub fn get_column_family(&self, name: &str) -> Option<ColumnFamilyHandle> {
+        if !self.runtime_handle.is_open() {
+            return None;
+        }
         for entry in &self.column_families {
             if entry.value().name() == name {
                 return Some(entry.value().clone());
@@ -558,18 +598,46 @@ impl Engine {
         }
     }
 
-    /// Shutdown the engine gracefully
+    /// Shutdown the engine gracefully within `timeout`.
+    ///
+    /// Once shutdown begins, the engine remains in the closing state and
+    /// rejects new work. `Busy` and `Timeout` leave it retryable; callers may
+    /// release active transactions or wait for blocked storage I/O and invoke
+    /// this method again.
     ///
     /// # Errors
     ///
-    /// Returns an error when shutdown coordination fails.
-    pub fn shutdown(mut self) -> MidgeResult<()> {
-        let result = self.runtime_handle.shutdown();
-        // The runtime has acknowledged the shutdown and its event-loop thread
-        // has exited. Take ownership here so Drop does not issue a second
-        // request against an already terminated loop.
+    /// Returns `MidgeError::Busy` while transactions remain active,
+    /// `MidgeError::Timeout` when the deadline elapses, or a durability error
+    /// reported by the runtime during its final flush.
+    pub fn shutdown(&mut self, timeout: Duration) -> MidgeResult<()> {
+        let Some(runtime) = self.runtime.as_mut() else {
+            return self.release_fencing_resources();
+        };
+        let started = std::time::Instant::now();
+        let shutdown_result = self.runtime_handle.shutdown(timeout);
+        if matches!(
+            &shutdown_result,
+            Err(MidgeError::Busy(_) | MidgeError::Timeout(_))
+        ) {
+            return shutdown_result;
+        }
+
+        let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+            return Err(MidgeError::Timeout(
+                "runtime acknowledged shutdown at the deadline".to_string(),
+            ));
+        };
+        if !runtime.wait_for_exit(remaining) {
+            return Err(MidgeError::Timeout(
+                "runtime workers did not terminate before shutdown deadline".to_string(),
+            ));
+        }
+
         self.runtime.take();
-        result
+        self.ingest_coordinators.clear();
+        self.release_fencing_resources()?;
+        shutdown_result
     }
 
     // === Column Family Lifecycle ===
@@ -667,6 +735,7 @@ impl Engine {
     /// This method currently does not return an error, but preserves a result-based
     /// API for compatibility with future runtime-backed implementations.
     pub fn list_column_families(&self) -> MidgeResult<Vec<ColumnFamilyHandle>> {
+        self.runtime_handle.ensure_open()?;
         Ok(self
             .column_families
             .iter()
@@ -828,6 +897,7 @@ impl Engine {
     ///
     /// Returns an error when verification is unsupported or the verification pass fails.
     pub fn verify_storage(&self) -> MidgeResult<StorageVerificationReport> {
+        self.runtime_handle.ensure_open()?;
         if self.memory_mode {
             return Err(MidgeError::NotSupported(
                 "storage verification is not supported in memory mode".to_string(),
@@ -858,6 +928,80 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_return_busy_with_live_transaction_and_allow_shutdown_retry() -> MidgeResult<()> {
+        // Arrange
+        let mut engine = Engine::open(OpenOptions::in_memory().build())?;
+        let default_cf = engine
+            .get_column_family("default")
+            .ok_or_else(|| MidgeError::Internal("default column family missing".to_string()))?;
+        let transaction = engine.begin_tx(default_cf.id(), TransactionMode::ReadWrite)?;
+
+        // Act
+        let started = std::time::Instant::now();
+        let first_shutdown = engine.shutdown(Duration::from_millis(25));
+
+        // Assert
+        assert!(matches!(first_shutdown, Err(MidgeError::Busy(_))));
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "shutdown blocked on a transaction owned by the calling thread"
+        );
+        assert!(matches!(
+            engine.begin_tx(default_cf.id(), TransactionMode::ReadOnly),
+            Err(MidgeError::Busy(_))
+        ));
+
+        drop(transaction);
+        engine.shutdown(Duration::from_secs(2))?;
+        assert!(matches!(
+            engine.list_column_families(),
+            Err(MidgeError::Busy(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn should_reap_engine_without_blocking_drop_when_transaction_is_live() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir().map_err(MidgeError::Io)?;
+        let engine = Engine::open(OpenOptions::local(temp_dir.path()).build())?;
+        let default_cf = engine
+            .get_column_family("default")
+            .ok_or_else(|| MidgeError::Internal("default column family missing".to_string()))?;
+        let transaction = engine.begin_tx(default_cf.id(), TransactionMode::ReadOnly)?;
+
+        // Act
+        let started = std::time::Instant::now();
+        drop(engine);
+        let drop_elapsed = started.elapsed();
+
+        // Assert
+        assert!(
+            drop_elapsed < Duration::from_millis(250),
+            "Engine::drop waited for its live transaction: {drop_elapsed:?}"
+        );
+        assert!(
+            Engine::open(OpenOptions::local(temp_dir.path()).build()).is_err(),
+            "reaper released the primary lease while the runtime transaction was live"
+        );
+
+        drop(transaction);
+        let reopen_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut reopened = loop {
+            match Engine::open(OpenOptions::local(temp_dir.path()).build()) {
+                Ok(engine) => break engine,
+                Err(error) if std::time::Instant::now() < reopen_deadline => {
+                    tracing::trace!(%error, "waiting for engine reaper to release lease");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        reopened.shutdown(Duration::from_secs(2))?;
+        Ok(())
+    }
 
     // ============================================================================
     // Tests for ColumnFamilyId invariants

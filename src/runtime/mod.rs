@@ -33,7 +33,7 @@ use crate::wal::DurabilityPolicy;
 use bytes::Bytes;
 use crossbeam::channel::{self, Receiver, Sender};
 use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -120,6 +120,7 @@ impl Default for RuntimeConfig {
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 const WRITE_STALL_STATUS_TIMEOUT: Duration = Duration::from_millis(250);
+const RUNTIME_QUEUE_CAPACITY: usize = 1000;
 
 /// Allocate a new, globally unique request ID.
 ///
@@ -141,37 +142,57 @@ pub(crate) fn next_request_id() -> MidgeResult<u64> {
     Ok(id)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum RuntimeLifecycleState {
+    Open = 0,
+    Closing = 1,
+    Closed = 2,
+}
+
+impl RuntimeLifecycleState {
+    fn load(state: &AtomicU8) -> Self {
+        match state.load(Ordering::Acquire) {
+            0 => Self::Open,
+            1 => Self::Closing,
+            _ => Self::Closed,
+        }
+    }
+}
+
 struct RuntimeLifecycle {
-    closing: std::sync::atomic::AtomicBool,
+    state: AtomicU8,
     running: std::sync::atomic::AtomicBool,
     active_transactions: std::sync::atomic::AtomicUsize,
+    submission_gate: std::sync::RwLock<()>,
     wait_lock: std::sync::Mutex<()>,
     wait_cv: std::sync::Condvar,
+    shutdown_response: std::sync::Mutex<Option<Receiver<RuntimeResponse>>>,
+    shutdown_acknowledged: std::sync::atomic::AtomicBool,
 }
 
 impl RuntimeLifecycle {
     fn new() -> Self {
         Self {
-            closing: std::sync::atomic::AtomicBool::new(false),
+            state: AtomicU8::new(RuntimeLifecycleState::Open as u8),
             running: std::sync::atomic::AtomicBool::new(false),
             active_transactions: std::sync::atomic::AtomicUsize::new(0),
+            submission_gate: std::sync::RwLock::new(()),
             wait_lock: std::sync::Mutex::new(()),
             wait_cv: std::sync::Condvar::new(),
+            shutdown_response: std::sync::Mutex::new(None),
+            shutdown_acknowledged: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     fn acquire(self: &Arc<Self>) -> MidgeResult<RuntimeTransactionGuard> {
-        if self.closing.load(Ordering::Acquire) {
-            return Err(MidgeError::InvalidArgument(
-                "engine is shutting down".to_string(),
-            ));
+        if self.state() != RuntimeLifecycleState::Open {
+            return Err(MidgeError::Busy("engine is shutting down".to_string()));
         }
         self.active_transactions.fetch_add(1, Ordering::AcqRel);
-        if self.closing.load(Ordering::Acquire) {
+        if self.state() != RuntimeLifecycleState::Open {
             self.release();
-            return Err(MidgeError::InvalidArgument(
-                "engine is shutting down".to_string(),
-            ));
+            return Err(MidgeError::Busy("engine is shutting down".to_string()));
         }
         Ok(RuntimeTransactionGuard {
             lifecycle: Arc::clone(self),
@@ -179,13 +200,77 @@ impl RuntimeLifecycle {
     }
 
     fn release(&self) {
+        // Pair the counter transition with the same mutex used by the waiter.
+        // Without this lock, the final transaction can notify between the
+        // waiter's condition check and `Condvar::wait`, losing the wakeup.
+        let _wait_guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.active_transactions.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.wait_cv.notify_all();
         }
     }
 
+    fn state(&self) -> RuntimeLifecycleState {
+        RuntimeLifecycleState::load(&self.state)
+    }
+
+    fn ensure_open(&self) -> MidgeResult<()> {
+        if self.state() == RuntimeLifecycleState::Open {
+            Ok(())
+        } else {
+            Err(MidgeError::Busy("engine is shutting down".to_string()))
+        }
+    }
+
+    fn begin_submission(&self) -> MidgeResult<std::sync::RwLockReadGuard<'_, ()>> {
+        let guard = self
+            .submission_gate
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_open()?;
+        Ok(guard)
+    }
+
     fn begin_shutdown(&self) {
-        self.closing.store(true, Ordering::Release);
+        let _ = self.state.compare_exchange(
+            RuntimeLifecycleState::Open as u8,
+            RuntimeLifecycleState::Closing as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        // Wait for a submission that observed Open to finish its non-blocking
+        // queue send before the shutdown marker is enqueued. New submissions
+        // now observe Closing and fail immediately.
+        drop(
+            self.submission_gate
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        self.wait_cv.notify_all();
+    }
+
+    fn mark_running(&self) {
+        self.running.store(true, Ordering::Release);
+    }
+
+    fn mark_closed(&self) {
+        let _wait_guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.running.store(false, Ordering::Release);
+        self.state
+            .store(RuntimeLifecycleState::Closed as u8, Ordering::Release);
+        self.wait_cv.notify_all();
+    }
+
+    fn active_transaction_count(&self) -> usize {
+        self.active_transactions.load(Ordering::Acquire)
+    }
+
+    fn wait_for_transactions(&self) {
         let mut guard = self
             .wait_lock
             .lock()
@@ -195,6 +280,34 @@ impl RuntimeLifecycle {
                 .wait_cv
                 .wait(guard)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn wait_until_stopped(&self, timeout: Duration) -> bool {
+        if !self.running.load(Ordering::Acquire) {
+            return true;
+        }
+
+        let started = std::time::Instant::now();
+        let mut guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if !self.running.load(Ordering::Acquire) {
+                return true;
+            }
+            let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+                return false;
+            };
+            let (next_guard, wait_result) = self
+                .wait_cv
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard = next_guard;
+            if wait_result.timed_out() && self.running.load(Ordering::Acquire) {
+                return false;
+            }
         }
     }
 }
@@ -1008,6 +1121,27 @@ pub struct RuntimeHandle {
 }
 
 impl RuntimeHandle {
+    fn map_submission_error(error: crossbeam::channel::TrySendError<RuntimeMsg>) -> MidgeError {
+        match error {
+            crossbeam::channel::TrySendError::Full(message) => {
+                drop(message);
+                MidgeError::WriteStall("runtime request queue is full".to_string())
+            }
+            crossbeam::channel::TrySendError::Disconnected(message) => {
+                drop(message);
+                MidgeError::Internal("Runtime channel closed".to_string())
+            }
+        }
+    }
+
+    pub(crate) fn ensure_open(&self) -> MidgeResult<()> {
+        self.lifecycle.ensure_open()
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        self.lifecycle.state() == RuntimeLifecycleState::Open
+    }
+
     pub(crate) fn read_path_diagnostics_snapshot(
         &self,
     ) -> crate::diagnostics::ReadPathDiagnosticsSnapshot {
@@ -1042,7 +1176,10 @@ impl RuntimeHandle {
     pub(crate) fn unregister_snapshot_pin(&self, snapshot_id: u64) -> bool {
         let removed = self.snapshot_pins.unregister(snapshot_id);
         if removed {
-            let _ = self.msg_tx.send(RuntimeMsg::RetryGc);
+            // Snapshot release must never block transaction drop, especially
+            // after shutdown has entered Closing. Maintenance can retry GC on
+            // its normal cadence if this bounded queue is currently full.
+            let _ = self.msg_tx.try_send(RuntimeMsg::RetryGc);
         }
         removed
     }
@@ -1051,9 +1188,13 @@ impl RuntimeHandle {
     ///
     /// For messages that expect a response, prefer `send_and_wait`.
     pub fn send(&self, msg: RuntimeMsg) -> MidgeResult<()> {
-        self.msg_tx
-            .send(msg)
-            .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))
+        let submission_guard = self.lifecycle.begin_submission()?;
+        let result = self
+            .msg_tx
+            .try_send(msg)
+            .map_err(Self::map_submission_error);
+        drop(submission_guard);
+        result
     }
 
     /// Submit a message and wait synchronously for its response.
@@ -1061,6 +1202,7 @@ impl RuntimeHandle {
     /// The `RuntimeMsg` MUST carry a `request_id`. Use `next_request_id()` when
     /// constructing such messages.
     pub fn send_and_wait(&self, msg: RuntimeMsg) -> MidgeResult<RuntimeResponse> {
+        let submission_guard = self.lifecycle.begin_submission()?;
         let request_id = msg.request_id().ok_or_else(|| {
             MidgeError::Internal(
                 "send_and_wait called with message that has no request_id (e.g. Shutdown)"
@@ -1073,10 +1215,11 @@ impl RuntimeHandle {
         // Register for the response before sending the request.
         let rx = self.router.register(request_id);
 
-        if self.msg_tx.send(msg).is_err() {
+        if let Err(error) = self.msg_tx.try_send(msg) {
             self.router.unregister(request_id);
-            return Err(MidgeError::Internal("Runtime channel closed".to_string()));
+            return Err(Self::map_submission_error(error));
         }
+        drop(submission_guard);
 
         // Block waiting for the single response.
         // If debug-wait mode is enabled, emit a periodic warning to help
@@ -1112,6 +1255,7 @@ impl RuntimeHandle {
         msg: RuntimeMsg,
         timeout: std::time::Duration,
     ) -> MidgeResult<Option<RuntimeResponse>> {
+        let submission_guard = self.lifecycle.begin_submission()?;
         let request_id = msg.request_id().ok_or_else(|| {
             MidgeError::Internal(
                 "send_and_wait_timeout called with message that has no request_id".to_string(),
@@ -1121,10 +1265,11 @@ impl RuntimeHandle {
         // Register for the response before sending the request.
         let rx = self.router.register(request_id);
 
-        if self.msg_tx.send(msg).is_err() {
+        if let Err(error) = self.msg_tx.try_send(msg) {
             self.router.unregister(request_id);
-            return Err(MidgeError::Internal("Runtime channel closed".to_string()));
+            return Err(Self::map_submission_error(error));
         }
+        drop(submission_guard);
 
         match rx.recv_timeout(timeout) {
             Ok(resp) => Ok(Some(resp)),
@@ -1161,19 +1306,107 @@ impl RuntimeHandle {
         }
     }
 
-    /// Request runtime shutdown and wait for the final durability result.
-    pub fn shutdown(&self) -> MidgeResult<()> {
+    /// Request runtime shutdown and wait no longer than `timeout` for the
+    /// final durability result.
+    pub fn shutdown(&self, timeout: Duration) -> MidgeResult<()> {
+        let started = std::time::Instant::now();
         self.lifecycle.begin_shutdown();
-        if !self.lifecycle.running.load(Ordering::Acquire) {
+        let active_transactions = self.lifecycle.active_transaction_count();
+        if active_transactions != 0 {
+            return Err(MidgeError::Busy(format!(
+                "{active_transactions} transaction(s) are still active"
+            )));
+        }
+
+        if self.lifecycle.state() == RuntimeLifecycleState::Closed
+            || !self.lifecycle.running.load(Ordering::Acquire)
+        {
+            self.lifecycle.mark_closed();
             return Ok(());
         }
-        let request_id = next_request_id()?;
-        match self.send_and_wait(RuntimeMsg::ShutdownWithResponse { request_id })? {
-            RuntimeResponse::Ok { .. } => Ok(()),
-            RuntimeResponse::Error { error, .. } => Err(error),
-            other => Err(MidgeError::Internal(format!(
-                "Unexpected response to shutdown: {other:?}"
-            ))),
+
+        if self.lifecycle.shutdown_acknowledged.load(Ordering::Acquire) {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            return if self.lifecycle.wait_until_stopped(remaining) {
+                Ok(())
+            } else {
+                Err(MidgeError::Timeout(
+                    "runtime worker did not terminate before shutdown deadline".to_string(),
+                ))
+            };
+        }
+
+        let mut shutdown_response = self
+            .lifecycle
+            .shutdown_response
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if shutdown_response.is_none() {
+            let request_id = next_request_id()?;
+            let response_rx = self.router.register(request_id);
+            let remaining = timeout.saturating_sub(started.elapsed());
+            match self
+                .msg_tx
+                .send_timeout(RuntimeMsg::ShutdownWithResponse { request_id }, remaining)
+            {
+                Ok(()) => {}
+                Err(crossbeam::channel::SendTimeoutError::Timeout(_)) => {
+                    self.router.unregister(request_id);
+                    return Err(MidgeError::Timeout(
+                        "runtime shutdown request queue remained full until deadline".to_string(),
+                    ));
+                }
+                Err(crossbeam::channel::SendTimeoutError::Disconnected(_)) => {
+                    self.router.unregister(request_id);
+                    if self
+                        .lifecycle
+                        .wait_until_stopped(timeout.saturating_sub(started.elapsed()))
+                    {
+                        return Ok(());
+                    }
+                    return Err(MidgeError::Timeout(
+                        "runtime shutdown channel closed before worker termination".to_string(),
+                    ));
+                }
+            }
+            *shutdown_response = Some(response_rx);
+        }
+
+        let remaining = timeout.saturating_sub(started.elapsed());
+        let response = shutdown_response
+            .as_ref()
+            .expect("shutdown response receiver must be registered")
+            .recv_timeout(remaining);
+        match response {
+            Ok(response) => {
+                shutdown_response.take();
+                self.lifecycle
+                    .shutdown_acknowledged
+                    .store(true, Ordering::Release);
+                match response {
+                    RuntimeResponse::Ok { .. } => Ok(()),
+                    RuntimeResponse::Error { error, .. } => Err(error),
+                    other => Err(MidgeError::Internal(format!(
+                        "Unexpected response to shutdown: {other:?}"
+                    ))),
+                }
+            }
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => Err(MidgeError::Timeout(
+                "runtime did not acknowledge shutdown before deadline".to_string(),
+            )),
+            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                shutdown_response.take();
+                if self
+                    .lifecycle
+                    .wait_until_stopped(timeout.saturating_sub(started.elapsed()))
+                {
+                    Ok(())
+                } else {
+                    Err(MidgeError::Timeout(
+                        "runtime response channel closed before worker termination".to_string(),
+                    ))
+                }
+            }
         }
     }
 
@@ -1185,9 +1418,10 @@ impl RuntimeHandle {
         start_sequence: Option<u64>,
         conflict_policy: ConflictPolicy,
     ) -> MidgeResult<RuntimeResponse> {
+        let submission_guard = self.lifecycle.begin_submission()?;
         let (response_tx, response_rx) = channel::bounded(1);
         self.msg_tx
-            .send(RuntimeMsg::ApplyTransaction {
+            .try_send(RuntimeMsg::ApplyTransaction {
                 request_id,
                 ops,
                 durability_policy,
@@ -1195,7 +1429,8 @@ impl RuntimeHandle {
                 conflict_policy,
                 response_tx: Some(response_tx),
             })
-            .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))?;
+            .map_err(Self::map_submission_error)?;
+        drop(submission_guard);
 
         response_rx
             .recv()
@@ -1211,9 +1446,10 @@ impl RuntimeHandle {
         conflict_policy: ConflictPolicy,
         timeout: Duration,
     ) -> MidgeResult<Option<RuntimeResponse>> {
+        let submission_guard = self.lifecycle.begin_submission()?;
         let (response_tx, response_rx) = channel::bounded(1);
         self.msg_tx
-            .send(RuntimeMsg::ApplyTransaction {
+            .try_send(RuntimeMsg::ApplyTransaction {
                 request_id,
                 ops,
                 durability_policy,
@@ -1221,7 +1457,8 @@ impl RuntimeHandle {
                 conflict_policy,
                 response_tx: Some(response_tx),
             })
-            .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))?;
+            .map_err(Self::map_submission_error)?;
+        drop(submission_guard);
 
         match response_rx.recv_timeout(timeout) {
             Ok(response) => Ok(Some(response)),
@@ -1284,7 +1521,7 @@ pub struct Runtime {
 impl Runtime {
     /// Create a new runtime and a corresponding handle for submitting work.
     pub fn new() -> (Self, RuntimeHandle) {
-        let (msg_tx, msg_rx) = channel::bounded(1000);
+        let (msg_tx, msg_rx) = channel::bounded(RUNTIME_QUEUE_CAPACITY);
         let router = Arc::new(ResponseRouter::new());
 
         let trace_enabled = std::env::var("MIDGE_TRACE_RUNTIME")
@@ -1351,7 +1588,8 @@ impl Runtime {
         };
 
         let msg_tx_for_loop = self.msg_tx.clone();
-        let msg_rx = std::mem::replace(&mut self.msg_rx, channel::bounded(1000).1);
+        let msg_rx =
+            std::mem::replace(&mut self.msg_rx, channel::bounded(RUNTIME_QUEUE_CAPACITY).1);
         let router_for_thread = router.clone();
 
         let event_loop_handle = thread::Builder::new()
@@ -1361,7 +1599,7 @@ impl Runtime {
                     Ok(mut event_loop) => {
                         // Share the snapshot cache with the event loop
                         event_loop.set_snapshot_cache(snapshot_cache);
-                        lifecycle_for_thread.running.store(true, Ordering::Release);
+                        lifecycle_for_thread.mark_running();
                         // Signal successful initialization
                         let _ = init_tx.send(Ok(()));
                         let run_result =
@@ -1373,16 +1611,18 @@ impl Runtime {
                             router_for_thread
                                 .fail_all("runtime event loop panicked before responding");
                         }
-                        lifecycle_for_thread.running.store(false, Ordering::Release);
+                        // Drop actors and their worker handles before publishing Closed.
+                        // Engine fencing resources are retained until this point.
+                        drop(event_loop);
                     }
                     Err(e) => {
                         let msg = format!("Failed to create event loop: {e}");
                         tracing::error!("{}", msg);
                         // Signal initialization failure
                         let _ = init_tx.send(Err(msg));
-                        lifecycle_for_thread.running.store(false, Ordering::Release);
                     }
                 }
+                lifecycle_for_thread.mark_closed();
             })
             .map_err(|e| MidgeError::Internal(format!("Failed to spawn runtime thread: {e}")))?;
 
@@ -1398,24 +1638,46 @@ impl Runtime {
         }
     }
 
+    fn join_until(&mut self, timeout: Duration, context: &str) -> bool {
+        let Some(handle) = self.event_loop_handle.as_ref() else {
+            self.lifecycle.mark_closed();
+            return true;
+        };
+        let started = std::time::Instant::now();
+        while !handle.is_finished() {
+            if started.elapsed() >= timeout {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        if let Some(handle) = self.event_loop_handle.take() {
+            if handle.join().is_ok() {
+                tracing::debug!("Runtime {} completed cleanly", context);
+            } else {
+                tracing::warn!("Runtime thread panicked during {}", context);
+            }
+        }
+        self.lifecycle.mark_closed();
+        self.router
+            .fail_all("runtime event loop terminated before responding");
+        true
+    }
+
+    pub(crate) fn wait_for_exit(&mut self, timeout: Duration) -> bool {
+        self.join_until(timeout, "shutdown")
+    }
+
     fn shutdown_inner(&mut self, context: &str) {
         self.lifecycle.begin_shutdown();
-        if let Some(handle) = self.event_loop_handle.take() {
-            if let Err(e) = self.msg_tx.send(RuntimeMsg::Shutdown) {
-                tracing::debug!("Runtime {}: shutdown message send failed: {}", context, e);
-            }
-
-            match handle.join() {
-                Ok(()) => {
-                    tracing::debug!("Runtime {} completed cleanly", context);
-                }
-                Err(_) => {
-                    tracing::warn!("Runtime thread panicked during {}", context);
-                }
-            }
-            self.router
-                .fail_all("runtime event loop terminated before responding");
+        self.lifecycle.wait_for_transactions();
+        if self.event_loop_handle.is_some()
+            && self.lifecycle.running.load(Ordering::Acquire)
+            && self.msg_tx.send(RuntimeMsg::Shutdown).is_err()
+        {
+            tracing::debug!("Runtime {}: shutdown message send failed", context);
         }
+        let _ = self.join_until(Duration::MAX, context);
     }
 
     /// Shutdown the runtime and wait for completion.
@@ -1438,6 +1700,79 @@ impl Drop for Runtime {
 mod tests {
     use super::*;
     use std::thread;
+
+    #[test]
+    fn should_transition_open_to_closing_to_closed_without_waiting_for_transactions() {
+        // Arrange
+        let lifecycle = Arc::new(RuntimeLifecycle::new());
+        let transaction_guard = lifecycle.acquire().expect("acquire transaction guard");
+
+        // Act
+        lifecycle.begin_shutdown();
+
+        // Assert
+        assert_eq!(lifecycle.state(), RuntimeLifecycleState::Closing);
+        assert_eq!(lifecycle.active_transaction_count(), 1);
+        assert!(matches!(lifecycle.acquire(), Err(MidgeError::Busy(_))));
+
+        drop(transaction_guard);
+        lifecycle.mark_closed();
+        assert_eq!(lifecycle.state(), RuntimeLifecycleState::Closed);
+    }
+
+    #[test]
+    fn should_retain_shutdown_waiter_and_allow_retry_after_timeout() {
+        // Arrange: model a running worker that accepts the shutdown request but
+        // deliberately withholds its response past the first deadline.
+        let (runtime, handle) = Runtime::new();
+        handle.lifecycle.mark_running();
+
+        // Act
+        let first = handle.shutdown(Duration::from_millis(5));
+
+        // Assert
+        assert!(matches!(first, Err(MidgeError::Timeout(_))));
+        assert_eq!(handle.lifecycle.state(), RuntimeLifecycleState::Closing);
+        assert!(
+            handle
+                .lifecycle
+                .shutdown_response
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some(),
+            "timed-out shutdown must retain its response receiver for retry"
+        );
+
+        handle.lifecycle.mark_closed();
+        assert!(handle.shutdown(Duration::from_millis(5)).is_ok());
+        drop(runtime);
+    }
+
+    #[test]
+    fn should_not_block_snapshot_release_when_closing_queue_is_full() {
+        // Arrange
+        let (runtime, handle) = Runtime::new();
+        assert!(handle.snapshot_pins.register(7, 11, Vec::new()));
+        for _ in 0..RUNTIME_QUEUE_CAPACITY {
+            handle
+                .msg_tx
+                .try_send(RuntimeMsg::RetryGc)
+                .expect("fill bounded runtime queue");
+        }
+        handle.lifecycle.begin_shutdown();
+
+        // Act
+        let started = std::time::Instant::now();
+        let removed = handle.unregister_snapshot_pin(7);
+
+        // Assert
+        assert!(removed);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "snapshot release blocked on the full closing queue"
+        );
+        drop(runtime);
+    }
 
     // =========== next_request_id Tests ===========
 

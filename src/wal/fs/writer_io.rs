@@ -28,6 +28,7 @@ use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 const MAX_BACKOFF_MS: u64 = 100;
 const MAX_WAIT_ATTEMPTS: u32 = 50;
 const JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const WAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Filesystem-backed WAL writer using `io::Fs`.
 ///
@@ -156,6 +157,14 @@ impl FsWalWriterIo {
     }
 
     fn enqueue_encoded(&self, buf: Vec<u8>) -> MidgeResult<WalPos> {
+        self.enqueue_encoded_with_timeout(buf, WAL_IO_TIMEOUT)
+    }
+
+    fn enqueue_encoded_with_timeout(
+        &self,
+        buf: Vec<u8>,
+        acknowledgement_timeout: Duration,
+    ) -> MidgeResult<WalPos> {
         let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
 
         // Enqueue with backpressure: if queue is full, wait for it to drain.
@@ -178,13 +187,28 @@ impl FsWalWriterIo {
                     }
                 }
 
-                return match ack_rx.recv() {
+                return match ack_rx.recv_timeout(acknowledgement_timeout) {
                     Ok(result) => result,
-                    Err(_) => Err(self.writer_failure().unwrap_or_else(|| {
-                        crate::common::MidgeError::Internal(
-                            "WAL writer thread exited before append acknowledgement".to_string(),
-                        )
-                    })),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let message = format!(
+                            "WAL append acknowledgement timed out after {acknowledgement_timeout:?}"
+                        );
+                        let mut state = self.sync_state.lock();
+                        state.write_failed = true;
+                        state.last_write_error = Some(message.clone());
+                        drop(state);
+                        self.sync_cond.notify_all();
+                        self.queue_cond.notify_all();
+                        Err(crate::common::MidgeError::Timeout(message))
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        Err(self.writer_failure().unwrap_or_else(|| {
+                            crate::common::MidgeError::Internal(
+                                "WAL writer thread exited before append acknowledgement"
+                                    .to_string(),
+                            )
+                        }))
+                    }
                 };
             }
 
@@ -212,9 +236,57 @@ impl FsWalWriterIo {
         let lowered = message.to_ascii_lowercase();
         if lowered.contains("no space") || lowered.contains("disk full") {
             crate::common::MidgeError::NoSpace(message)
+        } else if lowered.contains("timed out") || lowered.contains("deadline exceeded") {
+            crate::common::MidgeError::Fenced(message)
         } else {
             crate::common::MidgeError::Internal(message)
         }
+    }
+
+    fn flush_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
+        if let Some(error) = self.writer_failure() {
+            return Err(error);
+        }
+        // A queue-empty check is insufficient because the writer drains into a
+        // local batch before the file append completes. Track a generation and
+        // wait for that generation's completion instead.
+        let my_flush_id = {
+            let mut state = self.sync_state.lock();
+            state.pending_flushes = state.pending_flushes.saturating_add(1);
+            state.pending_flushes
+        };
+        self.queue_cond.notify_one();
+
+        let started = std::time::Instant::now();
+        let mut state = self.sync_state.lock();
+        while state.completed_flushes < my_flush_id {
+            if state.write_failed {
+                let message = state
+                    .last_write_error
+                    .clone()
+                    .unwrap_or_else(|| "WAL write failed persistently".to_string());
+                return Err(Self::error_from_message(message));
+            }
+            let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+                let message = format!("WAL flush timed out after {timeout:?}");
+                state.write_failed = true;
+                state.last_write_error = Some(message.clone());
+                return Err(crate::common::MidgeError::Timeout(message));
+            };
+            if self.sync_cond.wait_for(&mut state, remaining).timed_out()
+                && state.completed_flushes < my_flush_id
+            {
+                let message = format!("WAL flush timed out after {timeout:?}");
+                state.write_failed = true;
+                state.last_write_error = Some(message.clone());
+                return Err(crate::common::MidgeError::Timeout(message));
+            }
+        }
+
+        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+            telemetry.metrics().record_wal_flush();
+        }
+        Ok(())
     }
 }
 
@@ -249,36 +321,7 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn flush(&self) -> MidgeResult<()> {
-        // Mark that a flush is requested and wake the writer; then wait for it to complete.
-        //
-        // IMPORTANT: We cannot fast-path based on `queue.is_empty()`. The writer thread drains
-        // the queue into a local batch, making the queue empty while the actual file append is
-        // still in-flight. Callers use flush() as a barrier for "all enqueued records are written".
-        let my_flush_id = {
-            let mut s = self.sync_state.lock();
-            s.pending_flushes = s.pending_flushes.saturating_add(1);
-            s.pending_flushes
-        };
-        // Wake writer so it can process queued data
-        self.queue_cond.notify_one();
-
-        // Wait until writer marks the flush as completed
-        let mut s = self.sync_state.lock();
-        while s.completed_flushes < my_flush_id {
-            if s.write_failed {
-                let msg = s
-                    .last_write_error
-                    .clone()
-                    .unwrap_or_else(|| "WAL write failed persistently".to_string());
-                return Err(Self::error_from_message(msg));
-            }
-            self.sync_cond.wait(&mut s);
-        }
-
-        if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics().record_wal_flush();
-        }
-        Ok(())
+        self.flush_with_timeout(WAL_IO_TIMEOUT)
     }
 
     fn sync(&self) -> MidgeResult<()> {
@@ -286,6 +329,9 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn sync_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
+        if let Some(error) = self.writer_failure() {
+            return Err(error);
+        }
         // Request a durable fsync and wait for writer to perform it.
         // Note: we MUST request fsync even if queue is empty, because data may have
         // been written to the file but not yet fsynced (the writer thread writes
@@ -309,23 +355,19 @@ impl WalWriter for FsWalWriterIo {
                 return Err(Self::error_from_message(msg));
             }
             let Some(remaining) = timeout.checked_sub(sync_start.elapsed()) else {
-                return Err(crate::common::MidgeError::Internal(
-                    "WAL sync deadline exceeded".to_string(),
-                ));
+                let message = format!("WAL sync timed out after {timeout:?}");
+                s.sync_failed = true;
+                s.last_sync_error = Some(message.clone());
+                return Err(crate::common::MidgeError::Timeout(message));
             };
             if self.sync_cond.wait_for(&mut s, remaining).timed_out()
                 && s.completed_fsyncs < my_sync_id
             {
-                return Err(crate::common::MidgeError::Internal(
-                    "WAL sync deadline exceeded".to_string(),
-                ));
+                let message = format!("WAL sync timed out after {timeout:?}");
+                s.sync_failed = true;
+                s.last_sync_error = Some(message.clone());
+                return Err(crate::common::MidgeError::Timeout(message));
             }
-        }
-        let elapsed = sync_start.elapsed();
-        if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics()
-                .record_wal_fsync_ns(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX));
-            t.metrics().record_wal_fsync_count();
         }
         Ok(())
     }
@@ -335,34 +377,37 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn close(&self) -> MidgeResult<()> {
+        self.close_with_timeout(JOIN_TIMEOUT)
+    }
+}
+
+impl FsWalWriterIo {
+    fn close_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
         // Signal shutdown to the writer thread
         self.shutdown
             .store(true, std::sync::atomic::Ordering::SeqCst);
         // Wake the writer thread so it can exit
         self.queue_cond.notify_all();
 
-        // === Phase 1.3: Join with timeout to prevent indefinite hangs ===
-        // If writer thread is stuck in fsync (NFS hang, disk failure), we timeout
-        // after 30s and detach the thread rather than blocking forever.
-        if let Some(handle) = self.writer_thread.lock().take() {
-            let start = std::time::Instant::now();
-            loop {
-                if handle.is_finished() {
-                    let _ = handle.join();
-                    break;
-                }
-                if start.elapsed() > JOIN_TIMEOUT {
-                    tracing::error!(
-                        timeout_secs = JOIN_TIMEOUT.as_secs(),
-                        "WAL writer thread join timeout; thread may be stuck in fsync. \
-                         Detaching thread to allow shutdown to proceed. \
-                         Data loss may occur if fsync never completes."
-                    );
-                    // Thread is orphaned but process can exit
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+        // Keep the handle on timeout. Engine cleanup moves the owning runtime
+        // to a reaper, which later joins this worker before releasing fencing.
+        let start = std::time::Instant::now();
+        let mut writer_thread = self.writer_thread.lock();
+        while writer_thread
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+        {
+            if start.elapsed() >= timeout {
+                return Err(crate::common::MidgeError::Timeout(format!(
+                    "WAL writer did not terminate within {timeout:?}"
+                )));
             }
+            drop(writer_thread);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            writer_thread = self.writer_thread.lock();
+        }
+        if let Some(handle) = writer_thread.take() {
+            let _ = handle.join();
         }
         Ok(())
     }
@@ -370,27 +415,15 @@ impl WalWriter for FsWalWriterIo {
 
 impl Drop for FsWalWriterIo {
     fn drop(&mut self) {
-        // === Phase 1.3: Ensure writer thread is stopped with timeout ===
-        // Same logic as close() to prevent drop from blocking forever
-        const JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
         self.shutdown
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.queue_cond.notify_all();
 
+        // Engine::drop moves the runtime, heartbeat, and lease into a reaper.
+        // Waiting here is therefore off the caller thread and keeps fencing
+        // alive until this writer has actually stopped.
         if let Some(handle) = self.writer_thread.lock().take() {
-            let start = std::time::Instant::now();
-            loop {
-                if handle.is_finished() {
-                    let _ = handle.join();
-                    break;
-                }
-                if start.elapsed() > JOIN_TIMEOUT {
-                    tracing::error!("WAL writer thread join timeout on drop; detaching thread");
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
+            let _ = handle.join();
         }
     }
 }
@@ -403,6 +436,20 @@ mod tests {
     use crate::wal::types::{WalOpKind, WalRecord};
     use bytes::Bytes;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn writer_without_background_worker() -> FsWalWriterIo {
+        FsWalWriterIo {
+            fs: Arc::new(crate::io::MockFs::new()),
+            queue: Arc::new(Mutex::new(Vec::new())),
+            queue_cond: Arc::new(Condvar::new()),
+            buf_pool: Arc::new(Mutex::new(Vec::new())),
+            sync_state: Arc::new(Mutex::new(SyncState::default())),
+            sync_cond: Arc::new(Condvar::new()),
+            writer_thread: Mutex::new(None),
+            shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            current_pos: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
 
     struct SyncCountingFile {
         inner: Box<dyn File>,
@@ -531,6 +578,50 @@ mod tests {
 
         // Assert
         assert_eq!(writer.current_pos(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_timeout_append_acknowledgement_and_fence_writer() {
+        // Arrange
+        let writer = writer_without_background_worker();
+
+        // Act
+        let result =
+            writer.enqueue_encoded_with_timeout(vec![1, 2, 3], std::time::Duration::from_millis(5));
+        let subsequent_result =
+            writer.enqueue_encoded_with_timeout(vec![4], std::time::Duration::from_millis(5));
+
+        // Assert
+        assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
+        assert!(matches!(
+            subsequent_result,
+            Err(crate::common::MidgeError::Fenced(_))
+        ));
+    }
+
+    #[test]
+    fn should_retain_stuck_writer_handle_when_close_times_out() -> MidgeResult<()> {
+        // Arrange
+        let writer = writer_without_background_worker();
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release_for_worker = Arc::clone(&release);
+        let handle = std::thread::spawn(move || {
+            while !release_for_worker.load(std::sync::atomic::Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        });
+        *writer.writer_thread.lock() = Some(handle);
+
+        // Act
+        let result = writer.close_with_timeout(std::time::Duration::from_millis(5));
+
+        // Assert
+        assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
+        assert!(writer.writer_thread.lock().is_some());
+
+        release.store(true, std::sync::atomic::Ordering::Release);
+        writer.close_with_timeout(std::time::Duration::from_secs(1))?;
         Ok(())
     }
 
