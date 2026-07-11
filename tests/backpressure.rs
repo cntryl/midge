@@ -71,7 +71,8 @@ fn should_auto_flush_explicit_small_memtable_without_permanent_write_stall() {
     let engine = Engine::open(
         OpenOptions::local(temp_dir.path())
             .with_memtable_size_limit(128 * 1024)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("open engine");
     let cf = engine
@@ -108,7 +109,8 @@ fn should_auto_flush_when_explicit_flush_threshold_is_lower_than_size_limit() {
             .with_memtable_size_limit(1024 * 1024)
             .with_memtable_flush_threshold(64 * 1024)
             .background_compaction(false)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("open engine");
     let cf = engine
@@ -143,12 +145,8 @@ fn should_return_write_stall_when_memory_budget_exceeded() {
         // budget path still produces a deterministic stall now that soft
         // memtable pressure auto-flushes instead of sticking.
         opts = opts.memory_budget(1024 * 1024);
-        let engine = Engine::open(
-            opts.to_open_options()
-                .with_memtable_size_limit(32 * 1024 * 1024)
-                .build(),
-        )
-        .expect("failed to open engine");
+        opts.memtable_size = 32 * 1024 * 1024;
+        let engine = Engine::open(opts.to_open_options()).expect("failed to open engine");
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut write_stall_observed = false;
@@ -201,12 +199,8 @@ fn should_succeed_after_backoff_when_write_stall_cleared() {
         // observe the stall-clear cycle deterministically after the runtime
         // started letting soft memtable pressure flush naturally.
         opts = opts.memory_budget(1024 * 1024);
-        let engine = Engine::open(
-            opts.to_open_options()
-                .with_memtable_size_limit(32 * 1024 * 1024)
-                .build(),
-        )
-        .expect("failed to open engine");
+        opts.memtable_size = 32 * 1024 * 1024;
+        let engine = Engine::open(opts.to_open_options()).expect("failed to open engine");
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Hit first stall

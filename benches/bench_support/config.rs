@@ -124,16 +124,16 @@ impl MidgeOptions {
 
         // Apply user-specified high-level knobs
         open_opts = open_opts
-            .memory_budget(match self.memory_budget {
-                Some(n) => cntryl_midge::MemoryBudget::Bytes(n),
-                None => cntryl_midge::MemoryBudget::Auto,
-            })
+            .memory_budget(cntryl_midge::MemoryBudget::Auto)
             .workload(cntryl_midge::WorkloadProfile::default())
             .goal(cntryl_midge::Goal::default())
             .background_compaction(self.enable_compaction)
             .with_memtable_size_limit(self.memtable_size)
-            .with_memtable_flush_threshold(self.memtable_size)
-            .build();
+            .with_memtable_flush_threshold(self.memtable_size);
+
+        if let Some(bytes) = self.memory_budget {
+            open_opts = open_opts.transaction_memory_pool_size(bytes);
+        }
 
         if let Some(policy) = self.cloud_write_policy.clone() {
             open_opts = open_opts.cloud_write_policy(policy);
@@ -147,7 +147,7 @@ impl MidgeOptions {
                 open_opts.with_simulated_cloud_local_storage_budget(local_storage_budget_bytes);
         }
 
-        open_opts
+        open_opts.build().expect("build benchmark open options")
     }
 }
 

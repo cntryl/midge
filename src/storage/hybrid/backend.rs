@@ -645,7 +645,7 @@ impl HybridStorage {
             upload.status = UploadStatus::InFlight { started_at: now };
 
             let forced_failure =
-                fail::eval("midge::cloud::inject_fail_wal_upload", |_| true).unwrap_or(false);
+                crate::failpoints::is_active("midge::cloud::inject_fail_wal_upload");
             if forced_failure {
                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                     telemetry.metrics().record_cloud_async_wal_upload_failed();
@@ -792,7 +792,7 @@ impl HybridStorage {
         };
 
         Self::record_wal_bytes(&data);
-        if fail::eval("midge::cloud::inject_fail_wal_upload", |_| true).unwrap_or(false) {
+        if crate::failpoints::is_active("midge::cloud::inject_fail_wal_upload") {
             if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                 telemetry.metrics().record_cloud_async_wal_upload_failed();
             }
@@ -890,7 +890,7 @@ impl HybridStorage {
         };
 
         Self::record_wal_bytes(&data);
-        if fail::eval("midge::cloud::inject_fail_wal_upload", |_| true).unwrap_or(false) {
+        if crate::failpoints::is_active("midge::cloud::inject_fail_wal_upload") {
             if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                 telemetry.metrics().record_cloud_async_wal_upload_failed();
             }
@@ -1834,8 +1834,7 @@ impl HybridStorage {
         let expected_content_crc32c = Some(crc32c::crc32c(&data));
         let local_exists = self.ensure_local_sst_retry_compatible(&key, &data)?;
 
-        let forced_failure =
-            fail::eval("midge::cloud::inject_fail_sst_upload", |_| true).unwrap_or(false);
+        let forced_failure = crate::failpoints::is_active("midge::cloud::inject_fail_sst_upload");
         if forced_failure {
             return Err(crate::common::MidgeError::Internal(
                 "failpoint: cloud SST upload failed".to_string(),

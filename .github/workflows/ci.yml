@@ -93,6 +93,15 @@ jobs:
       - name: Build
         run: cargo build --all-targets
 
+      - name: Verify default release excludes failpoints
+        shell: bash
+        run: |
+          if cargo tree --edges normal | grep -E '(^|[[:space:]])fail v'; then
+            echo "default dependency graph unexpectedly contains fail"
+            exit 1
+          fi
+          cargo check --release
+
       - name: Test
         run: cargo test --workspace --all-features
 

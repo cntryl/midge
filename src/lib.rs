@@ -35,6 +35,7 @@ pub mod types;
 mod compaction;
 #[doc(hidden)]
 pub mod diagnostics;
+mod failpoints;
 #[cfg(test)]
 pub mod io;
 #[cfg(not(test))]
@@ -84,8 +85,8 @@ pub use types::{
 
 // Configuration
 pub use engine::{
-    BlockCachePolicy, CloudWritePolicy, Goal, MemoryBudget, OpenOptions, RecoveryPolicy, Storage,
-    WorkloadProfile, WriteOptions,
+    BlockCachePolicy, CloudWritePolicy, Goal, MemoryBudget, OpenOptions, OpenOptionsBuilder,
+    RecoveryPolicy, Storage, WorkloadProfile, WriteOptions,
 };
 pub use storage::providers::{
     AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, GcsApiStyle,
@@ -151,7 +152,7 @@ pub use io::{
 /// use std::path::PathBuf;
 ///
 /// // Open engine
-/// let engine = Engine::open(OpenOptions::local("./db").build())?;
+/// let engine = Engine::open(OpenOptions::local("./db").build()?)?;
 /// let cf = engine.create_column_family("cf1")?;
 ///
 /// // Write: explicit transaction, explicit commit, explicit durability

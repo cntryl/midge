@@ -55,6 +55,7 @@ fn real_cloud_engine_options(
     OpenOptions::cloud(cache_path, provider, prefix)
         .memory_budget(MemoryBudget::Bytes(8 * 1024 * 1024))
         .build()
+        .expect("build provider engine options")
 }
 
 fn engine_recovers_from_provider_after_local_cache_loss(
@@ -78,7 +79,7 @@ fn engine_recovers_from_provider_after_local_cache_loss(
     let _ = std::fs::remove_dir_all(&cache_path);
 
     let opts = real_cloud_engine_options(cache_path.clone(), provider.clone(), prefix.clone());
-    let engine = Engine::open(opts).expect("open provider-backed engine");
+    let mut engine = Engine::open(opts).expect("open provider-backed engine");
     let default_handle = default_cf(&engine);
 
     let mut tx = engine
@@ -94,11 +95,13 @@ fn engine_recovers_from_provider_after_local_cache_loss(
         .expect("cloud-strict commit");
 
     engine.flush_cf(&default_handle).expect("force SST upload");
-    drop(engine);
+    engine
+        .shutdown(Duration::from_secs(10))
+        .expect("shutdown before provider recovery");
 
     std::fs::remove_dir_all(&cache_path).expect("delete local cache");
 
-    let reopened = Engine::open(real_cloud_engine_options(
+    let mut reopened = Engine::open(real_cloud_engine_options(
         cache_path.clone(),
         provider,
         prefix,
@@ -111,7 +114,10 @@ fn engine_recovers_from_provider_after_local_cache_loss(
     let value = read_tx.get(b"engine-provider-key").expect("read value");
     assert_eq!(value, Some(Bytes::from_static(b"engine-provider-value")));
 
-    drop(reopened);
+    drop(read_tx);
+    reopened
+        .shutdown(Duration::from_secs(10))
+        .expect("shutdown recovered engine");
     let _ = std::fs::remove_dir_all(&cache_path);
 }
 

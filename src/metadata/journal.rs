@@ -204,7 +204,7 @@ pub fn append_edit_with_fs(
         },
     )?;
 
-    fail::fail_point!("midge::manifest::inject_no_space_on_append_edit", |_| Err(
+    crate::failpoints::fail_point!("midge::manifest::inject_no_space_on_append_edit", |_| Err(
         crate::common::MidgeError::NoSpace(
             "failpoint: no space on manifest journal append".to_string()
         )
@@ -247,7 +247,7 @@ fn append_record_and_marker_with_fs(
     file.append(bytes::Bytes::from(record))
         .map_err(crate::common::MidgeError::from)?;
 
-    fail::fail_point!("midge::manifest::inject_fsync_marker_write_failure", |_| {
+    crate::failpoints::fail_point!("midge::manifest::inject_fsync_marker_write_failure", |_| {
         Err(crate::common::MidgeError::Io(std::io::Error::other(
             "injected manifest fsync marker write failure",
         )))
@@ -256,8 +256,8 @@ fn append_record_and_marker_with_fs(
         .map_err(crate::common::MidgeError::from)?;
     let write_ns = write_start.elapsed().as_nanos();
 
-    fail::fail_point!("midge::manifest::before_required_sync");
-    fail::fail_point!("midge::manifest::inject_required_sync_failure", |_| Err(
+    crate::failpoints::fail_point!("midge::manifest::before_required_sync");
+    crate::failpoints::fail_point!("midge::manifest::inject_required_sync_failure", |_| Err(
         crate::common::MidgeError::Io(std::io::Error::other(
             "injected required manifest journal sync failure"
         ))
@@ -686,7 +686,7 @@ pub fn append_edit_batch_with_fs(
         },
     )?;
 
-    fail::fail_point!(
+    crate::failpoints::fail_point!(
         "midge::manifest::inject_no_space_on_append_edit_batch",
         |_| Err(crate::common::MidgeError::NoSpace(
             "failpoint: no space on manifest journal batch append".to_string()
@@ -942,6 +942,7 @@ mod tests {
         assert!(matches!(edits[1], ManifestEdit::BumpWalSeq { seq: 3 }));
     }
 
+    #[cfg(feature = "failpoints")]
     #[test]
     fn should_return_error_when_fsync_marker_write_fails() {
         // Arrange
@@ -969,6 +970,7 @@ mod tests {
         assert!(matches!(replayed[1], ManifestEdit::BumpWalSeq { seq: 3 }));
     }
 
+    #[cfg(feature = "failpoints")]
     #[test]
     fn should_return_error_when_required_manifest_sync_fails() {
         // Arrange
@@ -985,6 +987,7 @@ mod tests {
         assert!(error.to_string().contains("sync"));
     }
 
+    #[cfg(feature = "failpoints")]
     #[test]
     fn should_issue_one_required_sync_for_manifest_append() {
         // Arrange

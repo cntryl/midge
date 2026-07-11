@@ -38,14 +38,14 @@ use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalOpKind, WalRecord, WalWrit
 use bytes::Bytes;
 use std::collections::HashSet;
 use std::path::PathBuf;
-#[cfg(test)]
+#[cfg(all(test, feature = "failpoints"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "failpoints"))]
 const TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_DISABLED_REQUEST_ID: u64 = u64::MAX;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "failpoints"))]
 static TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_REQUEST_ID: AtomicU64 =
     AtomicU64::new(TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_DISABLED_REQUEST_ID);
 
@@ -103,7 +103,7 @@ enum TransactionIntent<'a> {
 }
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "failpoints"))]
 pub(crate) fn set_txn_append_batch_no_space_failpoint_request_id(request_id: Option<u64>) {
     TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_REQUEST_ID.store(
         request_id.unwrap_or(TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_DISABLED_REQUEST_ID),
@@ -149,6 +149,8 @@ pub struct WalActor {
     batch_config: BatchConfig,
     /// Last wall-clock time we performed a WAL fsync
     last_sync_instant: Instant,
+    /// Maximum wait for storage append, flush, and sync acknowledgements.
+    storage_io_timeout: Duration,
 
     /// Fencing epoch assigned when this writer acquired leadership.
     /// Stamped on every WAL record so stale writers can be detected.
@@ -218,12 +220,13 @@ impl WalActor {
         batch_config: BatchConfig,
         memory_mode: bool,
         writer_epoch: u64,
+        storage_io_timeout: Duration,
     ) -> MidgeResult<Self> {
         let (wal_fs, writer) = if memory_mode {
             (None, None)
         } else {
             let fs: Arc<dyn Fs> = Arc::new(RealFs::new(wal_dir)?);
-            let factory = FsWalFactoryIo::new(Arc::clone(&fs));
+            let factory = FsWalFactoryIo::new(Arc::clone(&fs)).with_io_timeout(storage_io_timeout);
             let writer = Some(factory.create_writer(crate::wal::ACTIVE_FILE_NAME)?);
             (Some(fs), writer)
         };
@@ -246,6 +249,7 @@ impl WalActor {
             append_total: Duration::from_secs(0),
             batch_config,
             last_sync_instant: Instant::now(),
+            storage_io_timeout,
             current_epoch: writer_epoch,
             leader_store: None,
         };
@@ -682,11 +686,14 @@ impl WalActor {
         // Append to local WAL unless the caller explicitly requested best effort.
         if !skip_wal {
             if let Some(writer) = &mut self.writer {
-                fail::fail_point!("midge::wal::inject_no_space_on_delete_range_append", |_| {
-                    Err(MidgeError::NoSpace(
-                        "failpoint: no space on delete_range append".to_string(),
-                    ))
-                });
+                crate::failpoints::fail_point!(
+                    "midge::wal::inject_no_space_on_delete_range_append",
+                    |_| {
+                        Err(MidgeError::NoSpace(
+                            "failpoint: no space on delete_range append".to_string(),
+                        ))
+                    }
+                );
                 let a_start = Instant::now();
                 if let Err(error) = writer.append_record(&record) {
                     if matches!(error, MidgeError::NoSpace(_)) {
@@ -1165,17 +1172,20 @@ impl WalActor {
         }
 
         if let Some(writer) = &mut self.writer {
-            fail::fail_point!(
+            crate::failpoints::fail_point!(
                 "midge::wal::inject_no_space_on_txn_append_batch",
                 Self::should_inject_txn_append_batch_no_space(prepared_transactions),
                 |_| Err(MidgeError::NoSpace(
                     "failpoint: no space on transaction batch append".to_string()
                 ))
             );
-            fail::fail_point!("midge::wal::inject_no_space_on_txn_commit_append", |_| Err(
-                MidgeError::NoSpace("failpoint: no space on transaction batch append".to_string())
-            ));
-            fail::fail_point!("midge::wal::txn_after_ops_append_before_commit");
+            crate::failpoints::fail_point!(
+                "midge::wal::inject_no_space_on_txn_commit_append",
+                |_| Err(MidgeError::NoSpace(
+                    "failpoint: no space on transaction batch append".to_string()
+                ))
+            );
+            crate::failpoints::fail_point!("midge::wal::txn_after_ops_append_before_commit");
             let append_start = Instant::now();
             if let Err(error) = writer.append_batch(&records) {
                 if matches!(error, MidgeError::NoSpace(_)) {
@@ -1187,7 +1197,7 @@ impl WalActor {
             if let Some(max_sequence) = records.iter().map(|record| record.seq).max() {
                 self.record_segment_sequence(max_sequence);
             }
-            fail::fail_point!("midge::wal::after_append_batch_before_sync");
+            crate::failpoints::fail_point!("midge::wal::after_append_batch_before_sync");
         }
 
         state.wal.pending_writes += pending_wal_records;
@@ -1196,7 +1206,7 @@ impl WalActor {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "failpoints"))]
     fn should_inject_txn_append_batch_no_space(
         prepared_transactions: &[PreparedTransactionAppend],
     ) -> bool {
@@ -1208,7 +1218,7 @@ impl WalActor {
                 .any(|prepared| prepared.request_id == target_request_id)
     }
 
-    #[cfg(not(test))]
+    #[cfg(all(not(test), feature = "failpoints"))]
     fn should_inject_txn_append_batch_no_space(
         _prepared_transactions: &[PreparedTransactionAppend],
     ) -> bool {
@@ -1224,10 +1234,10 @@ impl WalActor {
     ) -> MidgeResult<()> {
         match effective_durability {
             DurabilityPolicy::Strict | DurabilityPolicy::CloudMirrored => {
-                fail::fail_point!("midge::wal::txn_after_commit_append_before_sync");
+                crate::failpoints::fail_point!("midge::wal::txn_after_commit_append_before_sync");
                 self.sync_internal(state)?;
                 state.wal.local_durable_seq = last_sequence;
-                fail::fail_point!("midge::wal::txn_after_sync_before_ack");
+                crate::failpoints::fail_point!("midge::wal::txn_after_sync_before_ack");
             }
             DurabilityPolicy::Batched => {
                 state.pending_txn_min_seq = Some(
@@ -1727,17 +1737,14 @@ impl WalActor {
         }
 
         if let Some(writer) = &mut self.writer {
-            fail::fail_point!("midge::wal::inject_no_space_on_sync", |_| Err(
+            crate::failpoints::fail_point!("midge::wal::inject_no_space_on_sync", |_| Err(
                 MidgeError::NoSpace("failpoint: no space on WAL sync".to_string())
             ));
 
-            // CRITICAL: Phase 2.3 - WAL fsync timeout protection
-            // Wraps fsync in a timeout to prevent event loop starvation.
-            // If fsync blocks >5s (unlikely except on severely degraded storage),
-            // the durability operation fails closed and leaves the frontier
-            // unchanged; the caller can surface the failure to the client.
+            // Bound the acknowledgement wait so a degraded storage device cannot
+            // starve the event loop indefinitely.
             let start = Instant::now();
-            let fsync_timeout = Duration::from_secs(5);
+            let fsync_timeout = self.storage_io_timeout;
 
             let sync_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 writer.sync_with_timeout(fsync_timeout)
@@ -1791,7 +1798,7 @@ impl WalActor {
                 );
             }
 
-            fail::fail_point!("midge::wal::after_fsync_before_durable_frontier");
+            crate::failpoints::fail_point!("midge::wal::after_fsync_before_durable_frontier");
         }
 
         state.wal.last_synced_seq = state.sequence;
@@ -1931,7 +1938,8 @@ impl WalActor {
             }
 
             // Create new writer for the next segment
-            let factory = FsWalFactoryIo::new(Arc::clone(&fs));
+            let factory =
+                FsWalFactoryIo::new(Arc::clone(&fs)).with_io_timeout(self.storage_io_timeout);
             self.writer = Some(factory.create_writer(crate::wal::ACTIVE_FILE_NAME)?);
         }
 
@@ -1952,7 +1960,7 @@ impl WalActor {
     }
 
     fn restore_active_writer_after_failed_rotate(&mut self, fs: &Arc<dyn Fs>) {
-        let factory = FsWalFactoryIo::new(Arc::clone(fs));
+        let factory = FsWalFactoryIo::new(Arc::clone(fs)).with_io_timeout(self.storage_io_timeout);
         match factory.create_writer(crate::wal::ACTIVE_FILE_NAME) {
             Ok(writer) => self.writer = Some(writer),
             Err(error) => {
@@ -2113,16 +2121,21 @@ mod tests {
     use crate::runtime::RuntimeState;
     use bytes::Bytes;
     use std::path::PathBuf;
+    #[cfg(feature = "failpoints")]
     use std::sync::{Mutex, OnceLock};
 
+    #[cfg(feature = "failpoints")]
     static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+    #[cfg(feature = "failpoints")]
     fn failpoint_test_lock() -> &'static Mutex<()> {
         FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    #[cfg(feature = "failpoints")]
     struct TxnAppendBatchNoSpaceFailpointGuard;
 
+    #[cfg(feature = "failpoints")]
     impl TxnAppendBatchNoSpaceFailpointGuard {
         fn setup(request_id: u64) -> Self {
             set_txn_append_batch_no_space_failpoint_request_id(Some(request_id));
@@ -2132,6 +2145,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "failpoints")]
     impl Drop for TxnAppendBatchNoSpaceFailpointGuard {
         fn drop(&mut self) {
             fail::remove("midge::wal::inject_no_space_on_txn_append_batch");
@@ -2212,6 +2226,7 @@ mod tests {
             BatchConfig::default(),
             true,
             1,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
 
         // Act: append a single put
@@ -2255,6 +2270,7 @@ mod tests {
             batch_cfg,
             false,
             1,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
 
         // Prepare a runtime state
@@ -2320,6 +2336,7 @@ mod tests {
             BatchConfig::default(),
             false,
             1,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
 
         let first = wal_actor.prepare_transaction_append(
@@ -2383,6 +2400,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "failpoints")]
     #[test]
     fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> MidgeResult<()> {
         // Arrange
@@ -2397,6 +2415,7 @@ mod tests {
             BatchConfig::default(),
             false,
             1,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
 
         let first = wal_actor.prepare_transaction_append(
@@ -2506,6 +2525,7 @@ mod tests {
             BatchConfig::default(),
             false,
             1,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
 
         // Act
@@ -2526,6 +2546,7 @@ mod tests {
             BatchConfig::default(),
             false,
             1,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
         let strict_actor = WalActor::new(
             temp.path().join("strict"),
@@ -2533,6 +2554,7 @@ mod tests {
             BatchConfig::default(),
             false,
             1,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
         let cloud_actor = WalActor::new(
             temp.path().join("cloud"),
@@ -2540,6 +2562,7 @@ mod tests {
             BatchConfig::default(),
             false,
             1,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
         let memory_actor = WalActor::new(
             temp.path().join("memory"),
@@ -2547,6 +2570,7 @@ mod tests {
             BatchConfig::default(),
             true,
             1,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
 
         // Act
@@ -2575,6 +2599,7 @@ mod tests {
             BatchConfig::default(),
             false,
             1,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
 
         // Act
@@ -2612,6 +2637,7 @@ mod tests {
             BatchConfig::default(),
             true,
             1,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
         wal_actor.wal_fs = Some(fs);
         wal_actor.writer = Some(writer);

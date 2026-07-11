@@ -634,17 +634,25 @@ fn should_select_same_storage_modes_from_open_options_constructors() {
     );
 
     // Act
-    let memory = OpenOptions::in_memory().build();
-    let local = OpenOptions::local("/tmp/midge-solid-local").build();
-    let cloud = OpenOptions::cloud("/tmp/midge-solid-cloud", provider, "prefix").build();
-    let simulated =
-        OpenOptions::cloud_simulated("/tmp/midge-solid-simulated", "bucket", "prefix").build();
+    let memory = OpenOptions::in_memory().build().expect("build options");
+    let local = OpenOptions::local("/tmp/midge-solid-local")
+        .build()
+        .expect("build options");
+    let cloud = OpenOptions::cloud("/tmp/midge-solid-cloud", provider, "prefix")
+        .build()
+        .expect("build options");
+    let simulated = OpenOptions::cloud_simulated("/tmp/midge-solid-simulated", "bucket", "prefix")
+        .build()
+        .expect("build options");
 
     // Assert
-    assert!(matches!(memory.storage, Storage::InMemory));
-    assert!(matches!(local.storage, Storage::Local { .. }));
-    assert!(matches!(cloud.storage, Storage::Cloud { .. }));
-    assert!(matches!(simulated.storage, Storage::CloudSimulated { .. }));
+    assert!(matches!(memory.storage(), Storage::InMemory));
+    assert!(matches!(local.storage(), Storage::Local { .. }));
+    assert!(matches!(cloud.storage(), Storage::Cloud { .. }));
+    assert!(matches!(
+        simulated.storage(),
+        Storage::CloudSimulated { .. }
+    ));
 }
 
 #[test]
@@ -794,7 +802,7 @@ fn should_keep_engine_backed_provider_qualification_out_of_storage_layer() {
 }
 
 #[test]
-fn should_keep_tier3_system_benchmarks_verified_and_registered() {
+fn should_enforce_tier3_system_benchmark_contract() {
     // Arrange
     let manifest = read_source("Cargo.toml");
     let engine = read_source("benches/tier3_system_engine.rs");

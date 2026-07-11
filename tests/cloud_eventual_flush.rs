@@ -20,13 +20,9 @@ fn buffered_cloud_policy() -> CloudWritePolicy {
 }
 
 fn open_large_cloud_engine(opts: &MidgeOptions) -> Engine {
-    Engine::open(
-        opts.to_open_options()
-            .with_memtable_size_limit(LARGE_MEMTABLE_BYTES)
-            .with_memtable_flush_threshold(LARGE_MEMTABLE_BYTES)
-            .build(),
-    )
-    .expect("open cloud engine")
+    let mut opts = opts.clone();
+    opts.memtable_size = LARGE_MEMTABLE_BYTES;
+    Engine::open(opts.to_open_options()).expect("open cloud engine")
 }
 
 fn default_cf(engine: &Engine) -> cntryl_midge::ColumnFamilyHandle {

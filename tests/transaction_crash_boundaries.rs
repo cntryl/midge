@@ -243,7 +243,7 @@ fn commit_fixed_sync_transaction(
 }
 
 fn open_local_engine(db_path: &Path) -> Engine {
-    Engine::open(OpenOptions::local(db_path).build()).expect("open engine")
+    Engine::open(OpenOptions::local(db_path).build().expect("build options")).expect("open engine")
 }
 
 fn default_cf(engine: &Engine) -> cntryl_midge::ColumnFamilyHandle {

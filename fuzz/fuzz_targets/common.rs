@@ -3,7 +3,11 @@ use std::path::Path;
 
 pub fn seed_db(path: &Path) {
     let _ = std::fs::create_dir_all(path);
-    let _ = Engine::open(OpenOptions::local(path).build());
+    let _ = Engine::open(
+        OpenOptions::local(path)
+            .build()
+            .expect("build strict recovery options"),
+    );
 }
 
 pub fn write_relative(path: &Path, relative: &str, data: &[u8]) {
@@ -19,11 +23,13 @@ pub fn exercise_open_and_verify(path: &Path) {
     let _ = Engine::open(
         OpenOptions::local(path)
             .recovery_policy(RecoveryPolicy::Strict)
-            .build(),
+            .build()
+            .expect("build strict recovery options"),
     );
     let _ = Engine::open(
         OpenOptions::local(path)
             .recovery_policy(RecoveryPolicy::Salvage)
-            .build(),
+            .build()
+            .expect("build salvage recovery options"),
     );
 }

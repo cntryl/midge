@@ -84,23 +84,22 @@ impl MidgeOptions {
         };
 
         open_opts = open_opts
-            .memory_budget(match self.memory_budget {
-                Some(n) => MemoryBudget::Bytes(n),
-                None => MemoryBudget::Auto,
-            })
+            .memory_budget(MemoryBudget::Auto)
             .workload(WorkloadProfile::default())
             .goal(Goal::default())
             .background_compaction(self.enable_compaction)
             .with_memtable_size_limit(self.memtable_size)
-            .with_memtable_flush_threshold(self.memtable_size)
-            .build();
+            .with_memtable_flush_threshold(self.memtable_size);
+        if let Some(bytes) = self.memory_budget {
+            open_opts = open_opts.transaction_memory_pool_size(bytes);
+        }
         if let Some(policy) = self.cloud_write_policy.clone() {
             open_opts = open_opts.cloud_write_policy(policy);
         }
         if let Some(bytes) = self.simulated_cloud_local_storage_budget_bytes {
             open_opts = open_opts.with_simulated_cloud_local_storage_budget(bytes);
         }
-        open_opts
+        open_opts.build().expect("build test open options")
     }
 }
 
@@ -263,9 +262,11 @@ where
     F2: FnOnce(&Engine),
 {
     {
-        let engine = Engine::open(opts.to_open_options()).expect("open");
+        let mut engine = Engine::open(opts.to_open_options()).expect("open");
         before_restart(&engine);
-        drop(engine);
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before reopen");
     }
 
     {

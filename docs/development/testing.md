@@ -17,7 +17,7 @@ cargo test --test durability_recovery
 Run the trust-critical smoke suite:
 
 ```bash
-cargo test --test external_adopter_smoke
+cargo test --test external_adopter_smoke --features failpoints
 ```
 
 Validate naming and AAA structure:
@@ -50,8 +50,8 @@ Before inviting external evaluators, run at least:
 ```bash
 cargo test --test external_adopter_smoke
 cargo test --test durability_wal
-cargo test --test failure_injection
-cargo test --test chaos_compaction
+cargo test --test failure_injection --features failpoints
+cargo test --test chaos_compaction --features failpoints
 cargo test --test engine_iterators
 cargo test --test compatibility_fixtures
 ```

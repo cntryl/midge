@@ -4,10 +4,10 @@ Use this checklist before publishing a release candidate or stable release.
 
 - [ ] `cargo clippy --all-targets -- -D warnings`
 - [ ] `cargo test`
-- [ ] `cargo test --test external_adopter_smoke`
+- [ ] `cargo test --test external_adopter_smoke --features failpoints`
 - [ ] `cargo test --test durability_wal`
-- [ ] `cargo test --test failure_injection`
-- [ ] `cargo test --test chaos_compaction`
+- [ ] `cargo test --test failure_injection --features failpoints`
+- [ ] `cargo test --test chaos_compaction --features failpoints`
 - [ ] `cargo test --test engine_iterators`
 - [ ] `cargo test --test compatibility_fixtures`
 - [ ] `cntryl-tools validate-tests`

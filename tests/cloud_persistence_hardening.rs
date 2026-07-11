@@ -18,7 +18,7 @@ fn should_recover_cloud_strict_write_from_authoritative_remote_wal_after_local_c
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
-    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
 
     put_default(
         &engine,
@@ -26,7 +26,9 @@ fn should_recover_cloud_strict_write_from_authoritative_remote_wal_after_local_c
         b"strict-remote-value",
         WriteOptions::cloud_strict(),
     );
-    drop(engine);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown before reopen");
     reset_dir(&db_path.join("wal"));
 
     // Act
@@ -45,7 +47,7 @@ fn should_remove_local_wal_segment_after_cloud_durable_upload() {
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
-    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
 
     // Act
     put_default(
@@ -58,7 +60,9 @@ fn should_remove_local_wal_segment_after_cloud_durable_upload() {
     let local_segments = list_files_with_extension(&db_path.join("wal"), "wal");
     let remote_segments =
         list_files_with_extension(&db_path.join("cloud_store").join("wal"), "wal");
-    drop(engine);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown before reopen");
     reset_dir(&db_path.join("wal"));
     let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
 
@@ -88,7 +92,7 @@ fn should_prune_remote_wal_segment_after_cloud_sst_covers_it() {
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
-    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
 
     put_default(
         &engine,
@@ -105,7 +109,9 @@ fn should_prune_remote_wal_segment_after_cloud_sst_covers_it() {
     // Act
     engine.flush_cf(&default_cf).expect("flush default cf");
     let remote_segments = wait_for_remote_wal_count(&remote_wal_dir, 0);
-    drop(engine);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown before reopen");
     reset_dir(&db_path.join("wal"));
     reset_dir(&db_path.join("sst"));
     let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
@@ -132,7 +138,7 @@ fn should_recover_delete_range_when_remote_wal_pruned_after_cache_loss() {
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
-    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
     let default_cf = default_cf(&engine);
 
     put_default(
@@ -168,7 +174,9 @@ fn should_recover_delete_range_when_remote_wal_pruned_after_cache_loss() {
     // Act
     engine.flush_cf(&default_cf).expect("flush range tombstone");
     let remote_segments = wait_for_remote_wal_count(&remote_wal_dir, 0);
-    drop(engine);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown before reopen");
     reset_dir(&db_path.join("wal"));
     reset_dir(&db_path.join("sst"));
     let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
@@ -193,7 +201,7 @@ fn should_keep_remote_wal_segment_when_unflushed_column_family_still_needs_it() 
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
-    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
     let default_cf = default_cf(&engine);
     let other_cf = engine
         .create_column_family("other")
@@ -228,7 +236,9 @@ fn should_keep_remote_wal_segment_when_unflushed_column_family_still_needs_it() 
     // Act
     engine.flush_cf(&default_cf).expect("flush default cf");
     wait_for_no_remote_wal_prune(&remote_wal_dir);
-    drop(engine);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown before reopen");
     reset_dir(&db_path.join("wal"));
     let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
 
@@ -247,7 +257,7 @@ fn should_recover_when_remote_wal_cleanup_partial_after_cache_loss() {
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
-    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
     let default_cf = default_cf(&engine);
 
     put_default(
@@ -271,7 +281,9 @@ fn should_recover_when_remote_wal_cleanup_partial_after_cache_loss() {
         WriteOptions::cloud_strict(),
     );
     let retained_segments = wait_for_remote_wal_count_at_least(&remote_wal_dir, 1);
-    drop(engine);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown before reopen");
     reset_dir(&db_path.join("wal"));
     reset_dir(&db_path.join("sst"));
     let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
@@ -316,6 +328,7 @@ fn should_reject_sync_write_option_when_cloud_engine_commits() {
     );
 }
 
+#[cfg(feature = "failpoints")]
 #[test]
 fn should_keep_cloud_async_write_local_only_when_cloud_wal_upload_fails() {
     // Arrange
@@ -326,7 +339,7 @@ fn should_keep_cloud_async_write_local_only_when_cloud_wal_upload_fails() {
     fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
         .expect("configure wal upload failure failpoint");
 
-    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
     put_default(
         &engine,
         b"buffered-local-only",
@@ -348,7 +361,9 @@ fn should_keep_cloud_async_write_local_only_when_cloud_wal_upload_fails() {
         get_default(&engine, b"buffered-local-only"),
         Some(Bytes::from_static(b"buffered-value"))
     );
-    drop(engine);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown before reopen");
 
     fail::remove("midge::cloud::inject_fail_wal_upload");
     scenario.teardown();
@@ -358,6 +373,7 @@ fn should_keep_cloud_async_write_local_only_when_cloud_wal_upload_fails() {
     assert_eq!(get_default(&reopened, b"buffered-local-only"), None);
 }
 
+#[cfg(feature = "failpoints")]
 #[test]
 fn should_fail_cloud_strict_commit_when_wal_upload_fails() {
     // Arrange
@@ -368,7 +384,7 @@ fn should_fail_cloud_strict_commit_when_wal_upload_fails() {
     fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
         .expect("configure wal upload failure failpoint");
 
-    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
     let default_cf = default_cf(&engine);
     let mut tx = engine
         .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
@@ -384,7 +400,9 @@ fn should_fail_cloud_strict_commit_when_wal_upload_fails() {
     let error = tx
         .commit(WriteOptions::cloud_strict())
         .expect_err("cloud_strict should fail when the authoritative upload fails");
-    drop(engine);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown before reopen");
 
     // Assert
     match error {
@@ -411,7 +429,7 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
-    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
 
     put_default(
         &engine,
@@ -425,7 +443,9 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
         b"truncated-value",
         WriteOptions::cloud_strict(),
     );
-    drop(engine);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown before reopen");
 
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
     corrupt_last_file(&remote_wal_dir);
@@ -458,7 +478,7 @@ fn should_restore_local_sst_cache_from_authoritative_cloud_object() {
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
-    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
     let default_cf = default_cf(&engine);
 
     put_default(
@@ -468,7 +488,9 @@ fn should_restore_local_sst_cache_from_authoritative_cloud_object() {
         WriteOptions::best_effort(),
     );
     engine.flush_cf(&default_cf).expect("flush default cf");
-    drop(engine);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown before reopen");
 
     reset_dir(&db_path.join("sst"));
 
@@ -492,7 +514,7 @@ fn should_fail_strict_reopen_when_authoritative_remote_sst_is_missing() {
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
-    let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
     let default_cf = default_cf(&engine);
 
     put_default(
@@ -502,7 +524,9 @@ fn should_fail_strict_reopen_when_authoritative_remote_sst_is_missing() {
         WriteOptions::best_effort(),
     );
     engine.flush_cf(&default_cf).expect("flush default cf");
-    drop(engine);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown before reopen");
 
     for remote_sst in list_files_with_extension(&db_path.join("cloud_store").join("sst"), "sst") {
         fs::remove_file(&remote_sst).expect("delete authoritative remote sst");
@@ -540,6 +564,7 @@ fn cloud_open_options(db_path: &Path, recovery_policy: RecoveryPolicy) -> OpenOp
     )
     .recovery_policy(recovery_policy)
     .build()
+    .expect("build cloud options")
 }
 
 fn default_cf(engine: &Engine) -> cntryl_midge::ColumnFamilyHandle {
@@ -591,6 +616,7 @@ fn get_cf_by_handle(
     tx.get(key).expect("get value")
 }
 
+#[cfg(feature = "failpoints")]
 fn wait_for_cloud_gap(engine: &Engine, min_sequence: u64) -> cntryl_midge::RuntimeMetricsSnapshot {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {

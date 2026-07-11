@@ -441,7 +441,8 @@ fn should_restore_committed_write_given_local_restart_when_sync_commit_returned(
     let db_path = temp_dir.path();
 
     {
-        let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+        let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("open engine");
         let cf = engine.create_column_family("trust").expect("create cf");
 
         let mut tx = engine
@@ -454,7 +455,8 @@ fn should_restore_committed_write_given_local_restart_when_sync_commit_returned(
     }
 
     // Act
-    let reopened = Engine::open(OpenOptions::local(db_path).build()).expect("reopen engine");
+    let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("reopen engine");
     let cf = reopened.get_column_family("trust").expect("get trust cf");
 
     // Assert
@@ -474,7 +476,8 @@ fn should_keep_valid_prefix_given_truncated_wal_tail_when_reopening_in_strict_mo
     let db_path = temp_dir.path();
 
     {
-        let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+        let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("open engine");
         let cf = engine.create_column_family("trust").expect("create cf");
 
         let mut tx = engine
@@ -498,7 +501,8 @@ fn should_keep_valid_prefix_given_truncated_wal_tail_when_reopening_in_strict_mo
     let reopened = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Strict)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("strict recovery should keep valid truncated-tail prefix");
     let cf = reopened.get_column_family("trust").expect("get trust cf");
@@ -521,7 +525,8 @@ fn should_fail_strict_but_salvage_valid_prefix_given_corrupted_first_wal_frame_w
     let db_path = temp_dir.path();
 
     {
-        let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+        let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("open engine");
         let cf = engine.create_column_family("trust").expect("create cf");
 
         let mut tx = engine
@@ -538,7 +543,8 @@ fn should_fail_strict_but_salvage_valid_prefix_given_corrupted_first_wal_frame_w
     let Err(strict_error) = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Strict)
-            .build(),
+            .build()
+            .expect("build options"),
     ) else {
         panic!("strict recovery must reject corruption at byte zero frame");
     };
@@ -546,7 +552,8 @@ fn should_fail_strict_but_salvage_valid_prefix_given_corrupted_first_wal_frame_w
     let salvaged = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Salvage)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("salvage recovery should preserve valid prefix if possible");
 
@@ -576,7 +583,8 @@ fn should_drop_partial_wal_entry_given_manual_tail_append_when_reopening_in_salv
     let db_path = temp_dir.path();
 
     {
-        let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+        let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("open engine");
         let cf = engine.create_column_family("trust").expect("create cf");
 
         let mut tx = engine
@@ -594,7 +602,8 @@ fn should_drop_partial_wal_entry_given_manual_tail_append_when_reopening_in_salv
     let reopened = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Salvage)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("salvage recovery should discard partial entry");
     let cf = reopened.get_column_family("trust").expect("get trust cf");

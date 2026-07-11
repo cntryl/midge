@@ -627,6 +627,16 @@ impl EventLoop {
     }
 
     fn handle_write_error(&mut self, request_id: u64, error: crate::common::MidgeError) {
+        if matches!(error, crate::common::MidgeError::Timeout(_)) {
+            self.state.mark_persistence_anomaly();
+            if let Some(healthy) = &self.lease_healthy {
+                healthy.store(false, std::sync::atomic::Ordering::Release);
+            }
+            tracing::error!(
+                request_id,
+                "storage acknowledgement timed out; runtime fenced from further writes"
+            );
+        }
         self.respond(request_id, RuntimeResponse::Error { request_id, error });
     }
 }
@@ -787,13 +797,16 @@ mod tests {
     use crate::runtime::{ConflictPolicy, ResponseRouter, RuntimeConfig};
     use crate::wal::DurabilityPolicy;
     use bytes::Bytes;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::Arc;
+    #[cfg(feature = "failpoints")]
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
     use tempfile::TempDir;
 
     const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
     const NO_RESPONSE_TIMEOUT: Duration = Duration::from_millis(25);
 
+    #[cfg(feature = "failpoints")]
     static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     struct EventLoopFixture {
@@ -834,12 +847,15 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "failpoints")]
     fn failpoint_test_lock() -> &'static Mutex<()> {
         FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    #[cfg(feature = "failpoints")]
     struct TxnAppendBatchNoSpaceFailpointGuard;
 
+    #[cfg(feature = "failpoints")]
     impl TxnAppendBatchNoSpaceFailpointGuard {
         fn setup(request_id: u64) -> Self {
             crate::runtime::actors::wal::set_txn_append_batch_no_space_failpoint_request_id(Some(
@@ -851,6 +867,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "failpoints")]
     impl Drop for TxnAppendBatchNoSpaceFailpointGuard {
         fn drop(&mut self) {
             fail::remove("midge::wal::inject_no_space_on_txn_append_batch");
@@ -1037,6 +1054,44 @@ mod tests {
             ) => {}
             Ok(response) => panic!("unexpected additional response: {response:?}"),
         }
+    }
+
+    #[test]
+    fn should_fence_runtime_when_storage_acknowledgement_times_out() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir().map_err(MidgeError::Io)?;
+        let state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+        let router = Arc::new(ResponseRouter::new());
+        let lease_healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            Arc::clone(&router),
+            RuntimeConfig {
+                lease_healthy: Some(Arc::clone(&lease_healthy)),
+                ..RuntimeConfig::default()
+            },
+            None,
+        )?;
+        let response = router.register(1);
+
+        // Act
+        event_loop.handle_write_error(
+            1,
+            MidgeError::Timeout("injected storage timeout".to_string()),
+        );
+
+        // Assert
+        expect_error(&response, 1, |error| {
+            matches!(error, MidgeError::Timeout(_))
+        });
+        assert!(event_loop.state.persistence_anomaly_detected());
+        assert!(!lease_healthy.load(std::sync::atomic::Ordering::Acquire));
+        assert!(matches!(
+            event_loop.check_lease_health(),
+            Err(MidgeError::Fenced(_))
+        ));
+        Ok(())
     }
 
     fn assert_memtable_value(
@@ -1498,6 +1553,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "failpoints")]
     #[test]
     fn should_fail_all_event_loop_buffered_transactions_when_append_hits_no_space(
     ) -> MidgeResult<()> {
@@ -1581,6 +1637,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "failpoints")]
     #[test]
     fn should_fail_same_key_fallback_when_coalesced_prefix_append_fails() -> MidgeResult<()> {
         // Arrange

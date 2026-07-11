@@ -98,7 +98,8 @@ fn child_create_data_flush_compact_and_crash() {
     let engine = Engine::open(
         OpenOptions::local(&db_path)
             .background_compaction(false)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("open engine");
 
@@ -243,7 +244,8 @@ fn open_local_engine(db_path: &Path) -> Engine {
     Engine::open(
         OpenOptions::local(db_path)
             .background_compaction(false)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("open engine after crash")
 }

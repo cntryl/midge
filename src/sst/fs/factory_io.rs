@@ -901,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn should_spill_sorted_compaction_entries_and_roundtrip_multiple_blocks() -> MidgeResult<()> {
+    fn should_roundtrip_multiple_blocks_when_sorted_compaction_spills() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
         let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);

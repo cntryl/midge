@@ -256,7 +256,9 @@ impl CompactionCoordinator {
             added.to_vec(),
         )?;
 
-        fail::fail_point!("slice7::after_compaction_output_durable_before_manifest_publish");
+        crate::failpoints::fail_point!(
+            "slice7::after_compaction_output_durable_before_manifest_publish"
+        );
 
         event_loop
             .manifest_actor
@@ -270,7 +272,7 @@ impl CompactionCoordinator {
     fn persist_published_compaction(
         event_loop: &mut EventLoop,
     ) -> Result<(), crate::common::MidgeError> {
-        fail::fail_point!("slice6::after_compaction_update_before_manifest_persist");
+        crate::failpoints::fail_point!("slice6::after_compaction_update_before_manifest_persist");
         crate::runtime::actors::ManifestActor::persist(&event_loop.state)?;
         event_loop.mirror_metadata_after_local_commit("compaction manifest publish")
     }
@@ -282,7 +284,7 @@ impl CompactionCoordinator {
         output_ssts: &[String],
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     ) {
-        fail::fail_point!("slice6::after_manifest_persist_before_sst_gc");
+        crate::failpoints::fail_point!("slice6::after_manifest_persist_before_sst_gc");
 
         let hybrid_storage = event_loop.hybrid_storage.clone();
         if let (Some(hybrid), Some(token)) = (&hybrid_storage, reservation) {

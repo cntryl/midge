@@ -20,7 +20,7 @@ use cntryl_midge::{Bytes, MidgeEngine, OpenOptions, Query, TransactionMode, Writ
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Open an in-memory database (no persistence)
-    let opts = OpenOptions::in_memory().build();
+    let opts = OpenOptions::in_memory().build()?;
     let engine = MidgeEngine::open(opts)?;
     
     // 2. Create a column family
@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### In-Memory (Testing)
 
 ```rust
-let opts = OpenOptions::in_memory().build();
+let opts = OpenOptions::in_memory().build()?;
 let engine = MidgeEngine::open(opts)?;
 ```
 
@@ -75,7 +75,7 @@ No persistence. Data lost when engine drops. Use for testing and caching.
 ### Local Filesystem (Single-Node)
 
 ```rust
-let opts = OpenOptions::local("./my_database").build();
+let opts = OpenOptions::local("./my_database").build()?;
 let engine = MidgeEngine::open(opts)?;
 ```
 
@@ -225,7 +225,7 @@ let opts = OpenOptions::local("./db")
     .goal(Goal::Latency)              // Optimize for low latency
     .memory_budget(MemoryBudget::Auto) // Use ~50% of available memory
     .workload(WorkloadProfile::Mixed)  // Balanced read/write
-    .build();
+    .build()?;
 ```
 
 ### Explicit Memory Budget
@@ -236,7 +236,7 @@ use cntryl_midge::{Goal, MemoryBudget};
 let opts = OpenOptions::local("./db")
     .goal(Goal::Throughput)                    // Optimize for throughput
     .memory_budget(MemoryBudget::Bytes(1 << 30))  // 1 GiB total memory
-    .build();
+    .build()?;
 ```
 
 ### Workload Profiles
@@ -247,17 +247,17 @@ use cntryl_midge::WorkloadProfile;
 // Write-heavy workload
 let opts = OpenOptions::local("./db")
     .workload(WorkloadProfile::WriteHeavy)
-    .build();
+    .build()?;
 
 // Read-mostly workload
 let opts = OpenOptions::local("./db")
     .workload(WorkloadProfile::ReadMostly)
-    .build();
+    .build()?;
 
 // Range scan workload
 let opts = OpenOptions::local("./db")
     .workload(WorkloadProfile::RangeScan)
-    .build();
+    .build()?;
 ```
 
 All low-level parameters are derived automatically from these high-level settings.

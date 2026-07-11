@@ -175,13 +175,7 @@ fn open_cloud_engine(db_path: &Path, policy: Option<CloudWritePolicy>) -> Engine
         simulated_cloud_local_storage_budget_bytes: None,
     };
 
-    Engine::open(
-        opts.to_open_options()
-            .with_memtable_size_limit(LARGE_MEMTABLE_BYTES)
-            .with_memtable_flush_threshold(LARGE_MEMTABLE_BYTES)
-            .build(),
-    )
-    .expect("open cloud engine")
+    Engine::open(opts.to_open_options()).expect("open cloud engine")
 }
 
 fn default_cf(engine: &Engine) -> cntryl_midge::ColumnFamilyHandle {

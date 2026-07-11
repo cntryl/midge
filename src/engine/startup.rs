@@ -1228,7 +1228,7 @@ impl RuntimeStorageMaterialization {
     ) -> MidgeResult<Self> {
         let cloud_runtime_policy = opts.cloud_runtime_policy();
 
-        match &opts.storage {
+        match opts.storage() {
             Storage::CloudSimulated { .. } => Self::materialize_simulated_cloud(
                 opts,
                 storage_path,
@@ -1264,15 +1264,16 @@ impl RuntimeStorageMaterialization {
             storage_path.db_path.clone(),
             storage_path.memory_mode,
             Some(&cloud.recovery_cloud_wal_dir),
-            opts.recovery_policy,
+            opts.recovery_policy(),
         )?;
 
         let runtime_config = crate::runtime::RuntimeConfig {
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+            storage_io_timeout: opts.storage_io_timeout(),
             cloud_runtime_policy,
             hybrid_storage: Some(cloud.hybrid_storage),
             hybrid_storage_events: Some(cloud.events),
-            compression_policy: opts.compression_policy.clone(),
+            compression_policy: opts.compression_policy().clone(),
             block_cache_size: opts.block_cache_size(),
             block_cache_policy: opts.block_cache_policy_type(),
             l0_compaction_trigger: opts.l0_compaction_trigger(),
@@ -1296,19 +1297,19 @@ impl RuntimeStorageMaterialization {
         storage_path: &StartupStoragePath,
         startup_lease: &StartupLease,
         cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
-        provider: &crate::storage::providers::CloudProviderConfig,
+        provider: &crate::config::CloudProviderConfig,
         prefix: &str,
     ) -> MidgeResult<Self> {
         let cloud_storage = crate::storage::providers::build_cloud_storage(provider, prefix)?;
         CloudStartupRecovery::hydrate_cloud_metadata(
             &cloud_storage,
             &storage_path.db_path,
-            opts.recovery_policy,
+            opts.recovery_policy(),
         )?;
         let recovery_wal_dir = CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
             &cloud_storage,
             &storage_path.db_path,
-            opts.recovery_policy,
+            opts.recovery_policy(),
         )?;
 
         let local_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
@@ -1329,16 +1330,17 @@ impl RuntimeStorageMaterialization {
             storage_path.db_path.clone(),
             storage_path.memory_mode,
             Some(&recovery_wal_dir),
-            opts.recovery_policy,
+            opts.recovery_policy(),
         )?;
 
         let runtime_config = crate::runtime::RuntimeConfig {
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+            storage_io_timeout: opts.storage_io_timeout(),
             cloud_runtime_policy,
             hybrid_storage: Some(hybrid_storage),
             hybrid_storage_events: Some(rx),
             cloud_metadata_storage: Some(cloud_storage.clone()),
-            compression_policy: opts.compression_policy.clone(),
+            compression_policy: opts.compression_policy().clone(),
             block_cache_size: opts.block_cache_size(),
             block_cache_policy: opts.block_cache_policy_type(),
             l0_compaction_trigger: opts.l0_compaction_trigger(),
@@ -1363,13 +1365,14 @@ impl RuntimeStorageMaterialization {
         startup_lease: &StartupLease,
         cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
     ) -> MidgeResult<Self> {
-        let batch_config = opts.wal_batch_config.unwrap_or_default();
+        let batch_config = opts.wal_batch_config().unwrap_or_default();
 
         let runtime_config = crate::runtime::RuntimeConfig {
             wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
             wal_batch_config: batch_config,
+            storage_io_timeout: opts.storage_io_timeout(),
             cloud_runtime_policy,
-            compression_policy: opts.compression_policy.clone(),
+            compression_policy: opts.compression_policy().clone(),
             block_cache_size: opts.block_cache_size(),
             block_cache_policy: opts.block_cache_policy_type(),
             l0_compaction_trigger: opts.l0_compaction_trigger(),
@@ -1384,7 +1387,7 @@ impl RuntimeStorageMaterialization {
             state: RuntimeState::try_new(
                 storage_path.db_path.clone(),
                 storage_path.memory_mode,
-                opts.recovery_policy,
+                opts.recovery_policy(),
             )?,
             runtime_config,
             cloud_root: None,
@@ -1515,7 +1518,7 @@ impl FacadeAssembly {
             db_path: storage_path.db_path,
             memory_mode: storage_path.memory_mode,
             cloud_mode: matches!(
-                &opts.storage,
+                opts.storage(),
                 Storage::Cloud { .. } | Storage::CloudSimulated { .. }
             ),
             sequence: Arc::new(std::sync::atomic::AtomicU64::new(
@@ -1542,16 +1545,16 @@ impl EngineStartup {
     pub(super) fn open(opts: &OpenOptions) -> MidgeResult<Engine> {
         let start = std::time::Instant::now();
         Self::trace_open(opts);
-        let storage_path = StartupStoragePath::resolve(&opts.storage);
+        let storage_path = StartupStoragePath::resolve(opts.storage());
         storage_path.prepare();
 
-        let startup_lease = StartupLease::acquire(&opts.storage)?;
+        let startup_lease = StartupLease::acquire(opts.storage())?;
         let materialized =
             RuntimeStorageMaterialization::materialize(opts, &storage_path, &startup_lease)?;
         let recovered = RuntimeRecoveryMaterialization::replay_and_repair(
             materialized,
             &storage_path.db_path,
-            opts.recovery_policy,
+            opts.recovery_policy(),
         )?;
         let started = StartedRuntime::start(opts, recovered)?;
 
@@ -1559,7 +1562,7 @@ impl EngineStartup {
     }
 
     fn trace_open(opts: &OpenOptions) {
-        tracing::debug!(storage = ?opts.storage, "opening midge engine");
+        tracing::debug!(storage = ?opts.storage(), "opening midge engine");
     }
 
     fn apply_post_start_config(
@@ -1638,14 +1641,14 @@ mod tests {
                 secrets[0],
                 secrets[1],
             ),
-            crate::storage::providers::CloudProviderConfig::azure_blob_connection_string(
+            crate::config::CloudProviderConfig::azure_blob_connection_string(
                 "container",
                 "DefaultEndpointsProtocol=https;AccountName=account;AccountKey=azure-secret-do-not-log",
             ),
-            crate::storage::providers::CloudProviderConfig::gcs_hmac(
+            crate::config::CloudProviderConfig::gcs_hmac(
                 "bucket", secrets[3], secrets[4],
             ),
-            crate::storage::providers::CloudProviderConfig::gcs_bearer_token(
+            crate::config::CloudProviderConfig::gcs_bearer_token(
                 "bucket", secrets[5],
             ),
         ];
@@ -1660,7 +1663,9 @@ mod tests {
         // Act
         tracing::subscriber::with_default(subscriber, || {
             for provider in providers {
-                let opts = OpenOptions::cloud("/tmp/midge-redaction", provider, "prefix").build();
+                let opts = OpenOptions::cloud("/tmp/midge-redaction", provider, "prefix")
+                    .build()
+                    .expect("build redaction options");
                 EngineStartup::trace_open(&opts);
             }
         });
@@ -1689,10 +1694,10 @@ mod tests {
         // Arrange
         let opts = OpenOptions::in_memory()
             .block_cache_policy(crate::engine::BlockCachePolicy::ClockPro)
-            .build();
-        let storage_path = StartupStoragePath::resolve(&opts.storage);
+            .build()?;
+        let storage_path = StartupStoragePath::resolve(opts.storage());
         storage_path.prepare();
-        let startup_lease = StartupLease::acquire(&opts.storage)?;
+        let startup_lease = StartupLease::acquire(opts.storage())?;
 
         // Act
         let materialized =

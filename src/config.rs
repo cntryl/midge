@@ -5,6 +5,9 @@
 //! the public engine facade.
 
 use std::path::PathBuf;
+use std::time::Duration;
+
+pub(crate) const DEFAULT_STORAGE_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub use crate::storage::providers::{
     AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, GcsApiStyle,

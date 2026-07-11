@@ -5,6 +5,7 @@
 use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 use serde::Serialize;
 use std::fs;
+use std::time::Duration;
 use tempfile::TempDir;
 
 #[derive(Serialize)]
@@ -13,8 +14,11 @@ enum TestIntentLogEntry {
 }
 
 fn initialize_format_marker(db_path: &std::path::Path) {
-    let engine = Engine::open(OpenOptions::local(db_path).build()).expect("initialize engine");
-    drop(engine);
+    let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("initialize engine");
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown initialized engine");
 }
 
 #[test]
@@ -24,7 +28,8 @@ fn should_report_wal_recovery_metrics_after_reopen_when_wal_replay_occurs() {
     let db_path = temp_dir.path();
 
     {
-        let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+        let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("open engine");
         let cf = engine
             .get_column_family("default")
             .expect("default column family exists");
@@ -39,10 +44,14 @@ fn should_report_wal_recovery_metrics_after_reopen_when_wal_replay_occurs() {
             tx.put(key, value, None).expect("put");
             tx.commit(WriteOptions::buffered()).expect("commit");
         }
+        engine
+            .shutdown(Duration::from_secs(2))
+            .expect("shutdown before reopen");
     }
 
     // Act
-    let reopened = Engine::open(OpenOptions::local(db_path).build()).expect("reopen engine");
+    let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("reopen engine");
     let recovery = reopened
         .get_recovery_metrics()
         .expect("get recovery metrics");
@@ -69,7 +78,8 @@ fn should_expose_zero_recovery_metrics_on_fresh_engine_when_no_replay_needed() {
     let db_path = temp_dir.path();
 
     // Act
-    let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+    let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("open engine");
     let recovery = engine.get_recovery_metrics().expect("get recovery metrics");
 
     // Assert
@@ -101,7 +111,8 @@ fn should_report_intent_log_replay_metrics_after_reopen_when_manifest_intents_pe
     fs::write(db_path.join("intent_log.json"), intent_json).expect("write intent fixture");
 
     // Act
-    let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+    let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("open engine");
     let recovery = engine.get_recovery_metrics().expect("get recovery metrics");
 
     // Assert

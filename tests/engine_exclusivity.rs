@@ -21,11 +21,23 @@ fn temp_db_path() -> PathBuf {
     path
 }
 
+fn local_options(path: &std::path::Path) -> cntryl_midge::OpenOptions {
+    OpenOptions::local(path)
+        .build()
+        .expect("build local options")
+}
+
+fn memory_options() -> cntryl_midge::OpenOptions {
+    OpenOptions::in_memory()
+        .build()
+        .expect("build memory options")
+}
+
 #[test]
 fn should_open_single_instance_when_no_contention() {
     // Arrange
     let db_path = temp_db_path();
-    let opts = OpenOptions::local(&db_path);
+    let opts = local_options(&db_path);
 
     // Act
     let engine = Engine::open(opts).expect("should open successfully");
@@ -48,11 +60,11 @@ fn should_fail_second_instance_when_first_holds_lease() {
     // Open first instance
 
     // Act
-    let engine1 = Engine::open(OpenOptions::local(&db_path)).expect("first instance should open");
+    let engine1 = Engine::open(local_options(&db_path)).expect("first instance should open");
     assert!(engine1.is_primary_lease_healthy());
 
     // Try to open second instance (should fail)
-    let result = Engine::open(OpenOptions::local(&db_path));
+    let result = Engine::open(local_options(&db_path));
 
     // Assert
     assert!(
@@ -74,7 +86,7 @@ fn should_fail_second_instance_when_first_holds_lease() {
 }
 
 #[test]
-fn should_allow_second_instance_when_first_is_dropped() {
+fn should_allow_second_instance_when_first_is_shutdown() {
     // Arrange
     let db_path = temp_db_path();
 
@@ -82,17 +94,19 @@ fn should_allow_second_instance_when_first_is_dropped() {
 
     // Act
     {
-        let engine1 =
-            Engine::open(OpenOptions::local(&db_path)).expect("first instance should open");
+        let mut engine1 =
+            Engine::open(local_options(&db_path)).expect("first instance should open");
         assert!(engine1.is_primary_lease_healthy());
-        drop(engine1); // Explicit drop for clarity
+        engine1
+            .shutdown(Duration::from_secs(2))
+            .expect("shutdown first instance");
     }
 
     // Small delay to ensure lease is released
     thread::sleep(Duration::from_millis(50));
 
     // Second instance should now succeed
-    let engine2 = Engine::open(OpenOptions::local(&db_path))
+    let engine2 = Engine::open(local_options(&db_path))
         .expect("second instance should open after first is dropped");
 
     // Assert
@@ -103,7 +117,7 @@ fn should_allow_second_instance_when_first_is_dropped() {
 fn should_maintain_lease_health_during_normal_operation() {
     // Arrange
     let db_path = temp_db_path();
-    let engine = Engine::open(OpenOptions::local(&db_path)).expect("should open");
+    let engine = Engine::open(local_options(&db_path)).expect("should open");
     assert!(engine.is_primary_lease_healthy());
 
     // Act
@@ -138,7 +152,7 @@ fn should_block_concurrent_opens_when_racing() {
             barrier.wait();
 
             // Try to open
-            let result = Engine::open(OpenOptions::local(&*path));
+            let result = Engine::open(local_options(&path));
             (i, result)
         });
 
@@ -165,8 +179,10 @@ fn should_block_concurrent_opens_when_racing() {
 
     // Clean up the successful instance
     for (_id, result) in results {
-        if let Ok(engine) = result {
-            drop(engine);
+        if let Ok(mut engine) = result {
+            engine
+                .shutdown(Duration::from_secs(2))
+                .expect("shutdown racing winner");
         }
     }
 }
@@ -178,7 +194,7 @@ fn should_reject_writes_if_lease_becomes_unhealthy() {
     // In production, the heartbeat thread marks itself unhealthy when renewal
     // fails. Here we verify the monitoring path works for a healthy lease.
     let db_path = temp_db_path();
-    let engine = Engine::open(OpenOptions::local(&db_path)).expect("should open");
+    let engine = Engine::open(local_options(&db_path)).expect("should open");
 
     // Act
     let healthy_before = engine.is_primary_lease_healthy();
@@ -200,10 +216,10 @@ fn should_provide_clear_error_message_when_lease_contention() {
     let db_path = temp_db_path();
 
     // Act
-    let _engine1 = Engine::open(OpenOptions::local(&db_path)).expect("first should open");
+    let _engine1 = Engine::open(local_options(&db_path)).expect("first should open");
 
     // Try second instance
-    let result = Engine::open(OpenOptions::local(&db_path));
+    let result = Engine::open(local_options(&db_path));
 
     // Assert
     assert!(result.is_err());
@@ -229,9 +245,9 @@ fn should_work_with_in_memory_storage_when_unique_paths() {
     // InMemory mode uses unique temp paths, so multiple instances are allowed
 
     // Act
-    let engine1 = Engine::open(OpenOptions::in_memory()).expect("first in-memory should open");
-    let engine2 = Engine::open(OpenOptions::in_memory())
-        .expect("second in-memory should open (different path)");
+    let engine1 = Engine::open(memory_options()).expect("first in-memory should open");
+    let engine2 =
+        Engine::open(memory_options()).expect("second in-memory should open (different path)");
 
     // Assert
     assert!(engine1.is_primary_lease_healthy());
@@ -239,20 +255,22 @@ fn should_work_with_in_memory_storage_when_unique_paths() {
 }
 
 #[test]
-fn should_release_lease_on_drop_when_clean_shutdown() {
+fn should_release_lease_when_clean_shutdown_completes() {
     // Arrange
     let db_path = temp_db_path();
 
     // Act
-    // Open, perform some work, drop
+    // Open, perform some work, and shut down.
     {
-        let engine = Engine::open(OpenOptions::local(&db_path)).expect("should open");
+        let mut engine = Engine::open(local_options(&db_path)).expect("should open");
         assert!(engine.is_primary_lease_healthy());
 
         // Simulate some work
         thread::sleep(Duration::from_millis(100));
 
-        // Drop will trigger clean shutdown and lease release
+        engine
+            .shutdown(Duration::from_secs(2))
+            .expect("clean shutdown");
     }
 
     // Give OS time to release file lock
@@ -260,7 +278,7 @@ fn should_release_lease_on_drop_when_clean_shutdown() {
 
     // Should be able to open again immediately
     let engine2 =
-        Engine::open(OpenOptions::local(&db_path)).expect("should reopen after clean shutdown");
+        Engine::open(local_options(&db_path)).expect("should reopen after clean shutdown");
 
     // Assert
     assert!(engine2.is_primary_lease_healthy());
@@ -279,16 +297,15 @@ fn should_survive_rapid_open_close_cycling() {
 
     // Act: Rapid cycle opens and closes
     for cycle in 0..50 {
-        match Engine::open(OpenOptions::local(&db_path)) {
-            Ok(engine) => {
+        match Engine::open(local_options(&db_path)) {
+            Ok(mut engine) => {
                 assert!(
                     engine.is_primary_lease_healthy(),
                     "lease healthy on cycle {cycle}"
                 );
-                // Explicitly drop to release lease
-                drop(engine);
-                // Brief pause for OS to clean up lock file
-                thread::sleep(Duration::from_millis(5));
+                engine
+                    .shutdown(Duration::from_secs(2))
+                    .expect("shutdown cycle");
             }
             Err(e) => {
                 eprintln!("Failed to open on cycle {cycle}: {e:?}");
@@ -298,8 +315,7 @@ fn should_survive_rapid_open_close_cycling() {
     }
 
     // Assert: Final open succeeds (no resource exhaustion)
-    let final_engine =
-        Engine::open(OpenOptions::local(&db_path)).expect("final open should succeed");
+    let final_engine = Engine::open(local_options(&db_path)).expect("final open should succeed");
     assert!(final_engine.is_primary_lease_healthy());
 
     eprintln!("✓ Survived 50 rapid open/close cycles without resource issues");
@@ -314,16 +330,19 @@ fn should_recover_lease_after_clean_shutdown() {
 
     // Act: Open and drop cleanly (releases lease with ancient timestamp)
     {
-        let engine =
-            Engine::open(OpenOptions::local(&db_path)).expect("initial open should succeed");
+        let mut engine =
+            Engine::open(local_options(&db_path)).expect("initial open should succeed");
         assert!(engine.is_primary_lease_healthy());
+        engine
+            .shutdown(Duration::from_secs(2))
+            .expect("clean shutdown");
     }
 
     // After clean shutdown, lease is released with ancient timestamp.
     // New process can acquire immediately (epoch increments).
 
     // Attempt: Open immediately after clean release - should succeed
-    let engine2 = Engine::open(OpenOptions::local(&db_path))
+    let engine2 = Engine::open(local_options(&db_path))
         .expect("should immediately acquire after clean release");
 
     // Assert: Recovered successfully
@@ -344,13 +363,12 @@ fn should_reject_open_when_lease_held_by_crashed_process() {
 
     // Act: Open first instance (acquire lease) and attempt second open
     {
-        let _engine =
-            Engine::open(OpenOptions::local(&db_path)).expect("first instance should open");
+        let _engine = Engine::open(local_options(&db_path)).expect("first instance should open");
 
         // Don't drop: let it hold the lease
 
         // Try to open second instance (should be rejected)
-        let attempt = Engine::open(OpenOptions::local(&db_path));
+        let attempt = Engine::open(local_options(&db_path));
 
         match attempt {
             Ok(_) => {

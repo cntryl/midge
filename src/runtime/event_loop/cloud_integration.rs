@@ -39,7 +39,7 @@ impl EventLoop {
         let seal_start = Instant::now();
         let max_sequence = self.wal_actor.flush_for_cloud_upload(&mut self.state)?;
         self.durability.mark_cloud_seal_retry_needed();
-        fail::fail_point!(
+        crate::failpoints::fail_point!(
             "midge::cloud::inject_fail_after_wal_flush_before_rotate",
             |_| Err(crate::common::MidgeError::Internal(
                 "failpoint: cloud seal failed after WAL flush before rotate".to_string(),
@@ -595,14 +595,18 @@ mod tests {
     use crate::sst::Memtable;
     use bytes::Bytes;
     use std::path::{Path, PathBuf};
+    #[cfg(feature = "failpoints")]
+    use std::sync::OnceLock;
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, Mutex,
     };
     use std::time::{Duration, Instant};
 
+    #[cfg(feature = "failpoints")]
     static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+    #[cfg(feature = "failpoints")]
     fn failpoint_test_lock() -> &'static Mutex<()> {
         FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
     }
@@ -3268,6 +3272,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "failpoints")]
     #[test]
     fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
     ) -> crate::common::MidgeResult<()> {
@@ -3448,6 +3453,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "failpoints")]
     fn append_cloud_async_put(el: &mut EventLoop) -> crate::common::MidgeResult<u64> {
         let ops = vec![crate::runtime::TransactionOp::Put {
             cf_id: 0,
@@ -3471,6 +3477,7 @@ mod tests {
         Ok(last_sequence)
     }
 
+    #[cfg(feature = "failpoints")]
     fn expect_failed_seal_response(fail_rx: &crossbeam::channel::Receiver<RuntimeResponse>) {
         match fail_rx.recv().expect("failed strict response") {
             RuntimeResponse::Error { error, .. } => match error {
@@ -3486,6 +3493,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "failpoints")]
     fn complete_retry_and_ack(
         el: &mut EventLoop,
         last_sequence: u64,
@@ -3513,6 +3521,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "failpoints")]
     #[test]
     fn should_retry_seal_wal_for_cloud_after_failpoint_before_rotate(
     ) -> crate::common::MidgeResult<()> {

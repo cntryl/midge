@@ -61,7 +61,7 @@ let opts = OpenOptions::cloud(
     CloudProviderConfig::aws_s3("midge-prod", "us-east-1"),
     "databases/example/",
 )
-.build();
+.build()?;
 
 let engine = Engine::open(opts)?;
 # Ok::<(), cntryl_midge::MidgeError>(())
@@ -81,7 +81,7 @@ let opts = OpenOptions::cloud_simulated(
     "test-bucket",
     "test-prefix/",
 )
-.build();
+.build()?;
 
 let engine = Engine::open(opts)?;
 # Ok::<(), cntryl_midge::MidgeError>(())
@@ -95,7 +95,7 @@ use cntryl_midge::{CloudProviderConfig, Engine, OpenOptions};
 let provider = CloudProviderConfig::aws_s3("midge-prod", "us-east-1");
 
 let engine = Engine::open(
-    OpenOptions::cloud("./cache", provider, "app-a/").build()
+    OpenOptions::cloud("./cache", provider, "app-a/").build()?
 )?;
 # Ok::<(), cntryl_midge::MidgeError>(())
 ```
@@ -125,7 +125,7 @@ let provider = CloudProviderConfig::s3_compatible_env(
 );
 
 let engine = Engine::open(
-    OpenOptions::cloud("./cache", provider, "dev/").build()
+    OpenOptions::cloud("./cache", provider, "dev/").build()?
 )?;
 # Ok::<(), cntryl_midge::MidgeError>(())
 ```
@@ -161,7 +161,7 @@ use cntryl_midge::{CloudProviderConfig, Engine, OpenOptions};
 let provider = CloudProviderConfig::azure_blob("mystorageaccount", "midge");
 
 let engine = Engine::open(
-    OpenOptions::cloud("./cache", provider, "prod/").build()
+    OpenOptions::cloud("./cache", provider, "prod/").build()?
 )?;
 # Ok::<(), cntryl_midge::MidgeError>(())
 ```
@@ -193,7 +193,7 @@ use cntryl_midge::{CloudProviderConfig, Engine, OpenOptions};
 let provider = CloudProviderConfig::gcs("midge-prod");
 
 let engine = Engine::open(
-    OpenOptions::cloud("./cache", provider, "prod/").build()
+    OpenOptions::cloud("./cache", provider, "prod/").build()?
 )?;
 # Ok::<(), cntryl_midge::MidgeError>(())
 ```

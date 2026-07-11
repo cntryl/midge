@@ -35,7 +35,7 @@ fn should_leave_column_family_absent_when_create_manifest_append_fails() {
     engine
         .create_column_family("create-atomic")
         .expect("retry create after manifest recovers");
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     assert!(reopened.get_column_family("create-atomic").is_some());
@@ -68,7 +68,7 @@ fn should_keep_column_family_usable_when_drop_manifest_append_fails() {
     engine
         .drop_column_family(cf.id())
         .expect("retry drop after manifest recovers");
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     assert!(reopened.get_column_family("drop-atomic").is_none());
@@ -97,7 +97,7 @@ fn should_reject_column_family_create_when_wal_sync_fails() {
     engine
         .create_column_family("sync-create")
         .expect("create after WAL sync recovers");
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     assert!(reopened.get_column_family("sync-create").is_some());
@@ -130,7 +130,7 @@ fn should_reject_column_family_drop_when_wal_sync_fails() {
     engine
         .drop_column_family(cf.id())
         .expect("drop after WAL sync recovers");
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     assert!(reopened.get_column_family("sync-drop").is_none());
@@ -179,7 +179,7 @@ fn should_reject_transaction_when_no_space_hits_before_batch_append_and_remain_u
         .commit(WriteOptions::sync())
         .expect("commit recovery txn");
 
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     let reopened_cf = default_cf(&reopened);
@@ -224,7 +224,7 @@ fn should_not_leak_partial_transaction_when_no_space_hits_before_commit_marker_a
     fail::remove("midge::wal::inject_no_space_on_txn_commit_append");
     scenario.teardown();
 
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     let reopened_cf = default_cf(&reopened);
@@ -269,7 +269,7 @@ fn should_preserve_existing_keys_when_delete_range_wal_append_hits_no_space() {
     fail::remove("midge::wal::inject_no_space_on_txn_append_batch");
     scenario.teardown();
 
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     let reopened_cf = default_cf(&reopened);
@@ -310,7 +310,7 @@ fn should_recover_wal_state_when_flush_sst_finalize_hits_no_space() {
     fail::remove("midge::sst::inject_no_space_on_finish_to_path");
     scenario.teardown();
 
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     let reopened_cf = default_cf(&reopened);
@@ -349,7 +349,7 @@ fn should_ignore_orphan_sst_when_flush_intent_log_save_hits_no_space() {
     fail::remove("midge::intent::inject_no_space_on_save");
     scenario.teardown();
 
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     let reopened_cf = default_cf(&reopened);
@@ -397,7 +397,7 @@ fn should_delete_orphan_flush_sst_on_reopen_when_manifest_append_hits_no_space()
     fail::remove("midge::manifest::inject_no_space_on_add_sst_edit");
     scenario.teardown();
 
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     let reopened_cf = default_cf(&reopened);
@@ -443,7 +443,11 @@ fn should_retry_same_frozen_memtable_when_manifest_publication_recovers() {
         .expect("read failed flush outputs")
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .find(|name| name.ends_with(".sst"))
+        .find(|name| {
+            std::path::Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("sst"))
+        })
         .expect("failed publication should retain its durable SST output");
 
     fail::remove("midge::manifest::inject_no_space_on_add_sst_edit");
@@ -566,7 +570,8 @@ fn should_retry_frozen_memtable_when_cloud_sst_upload_recovers() {
     let engine = Engine::open(
         OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "retry-prefix")
             .background_compaction(false)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("open simulated cloud engine");
     let cf = default_cf(&engine);
@@ -641,7 +646,7 @@ fn should_restore_sequence_floor_from_flushed_ssts_without_wal_recovery() {
 
     // Act
     engine.flush_cf(&cf).expect("flush sst-backed state");
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     let reopened_cf = default_cf(&reopened);
@@ -688,7 +693,7 @@ fn should_open_in_salvage_mode_when_replay_cannot_clear_intent_log() {
     assert_no_space_like(&error);
     fail::remove("midge::manifest::inject_no_space_on_add_sst_edit");
     scenario.teardown();
-    drop(engine);
+    shutdown_engine(engine);
 
     let replay_scenario = fail::FailScenario::setup();
     fail::cfg("midge::intent::inject_no_space_on_save", "return")
@@ -696,7 +701,8 @@ fn should_open_in_salvage_mode_when_replay_cannot_clear_intent_log() {
     let reopened = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Salvage)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("salvage open should survive replay intent cleanup failure");
     fail::remove("midge::intent::inject_no_space_on_save");
@@ -784,7 +790,7 @@ fn should_fail_strict_open_when_replay_cannot_clear_intent_log() {
     assert_no_space_like(&error);
     fail::remove("midge::manifest::inject_no_space_on_add_sst_edit");
     scenario.teardown();
-    drop(engine);
+    shutdown_engine(engine);
 
     let replay_scenario = fail::FailScenario::setup();
     fail::cfg("midge::intent::inject_no_space_on_save", "return")
@@ -792,7 +798,8 @@ fn should_fail_strict_open_when_replay_cannot_clear_intent_log() {
     let Err(error) = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Strict)
-            .build(),
+            .build()
+            .expect("build options"),
     ) else {
         panic!("strict open should fail when replay cannot clear intent log");
     };
@@ -838,7 +845,7 @@ fn should_open_in_salvage_mode_when_replay_cannot_checkpoint_manifest() {
         .find(|file| file.cf_id == cf.id())
         .cloned()
         .expect("flushed file layout");
-    drop(engine);
+    shutdown_engine(engine);
 
     let empty_manifest = TestManifestFixture {
         last_persisted_sequence: 0,
@@ -884,7 +891,8 @@ fn should_open_in_salvage_mode_when_replay_cannot_checkpoint_manifest() {
     let reopened = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Salvage)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("salvage open should survive replay checkpoint failure");
     fail::remove("midge::manifest::inject_no_space_on_checkpoint_save");
@@ -931,7 +939,7 @@ fn should_fail_strict_open_when_replay_cannot_checkpoint_manifest() {
         .find(|file| file.cf_id == cf.id())
         .cloned()
         .expect("flushed file layout");
-    drop(engine);
+    shutdown_engine(engine);
 
     let empty_manifest = TestManifestFixture {
         last_persisted_sequence: 0,
@@ -977,7 +985,8 @@ fn should_fail_strict_open_when_replay_cannot_checkpoint_manifest() {
     let Err(error) = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Strict)
-            .build(),
+            .build()
+            .expect("build options"),
     ) else {
         panic!("strict open should fail when replay cannot checkpoint manifest");
     };
@@ -1032,7 +1041,7 @@ fn should_recover_flushed_best_effort_data_when_manifest_checkpoint_save_hits_no
     fail::remove("midge::manifest::inject_no_space_on_checkpoint_save");
     scenario.teardown();
 
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     let reopened_cf = default_cf(&reopened);
@@ -1103,7 +1112,7 @@ fn should_preserve_compacted_input_state_when_compaction_output_hits_no_space() 
     fail::remove("midge::sst::inject_no_space_on_finish_to_path");
     scenario.teardown();
 
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     let reopened_cf = default_cf(&reopened);
@@ -1164,7 +1173,7 @@ fn should_publish_compaction_output_on_reopen_when_manifest_batch_append_hits_no
     fail::remove("midge::manifest::inject_no_space_on_compaction_batch_edit");
     scenario.teardown();
 
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     let reopened_cf = default_cf(&reopened);
@@ -1242,7 +1251,7 @@ fn should_recover_compaction_from_manifest_checkpoint_save_failure_after_batch_j
     fail::remove("midge::manifest::inject_no_space_on_checkpoint_save");
     scenario.teardown();
 
-    drop(engine);
+    shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     let reopened_cf = default_cf(&reopened);
@@ -1295,9 +1304,16 @@ fn open_local_engine(db_path: &Path) -> Engine {
     Engine::open(
         OpenOptions::local(db_path)
             .background_compaction(false)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("open engine")
+}
+
+fn shutdown_engine(mut engine: Engine) {
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown engine before same-path reopen");
 }
 
 fn default_cf(engine: &Engine) -> cntryl_midge::ColumnFamilyHandle {

@@ -102,7 +102,7 @@ impl IntentPersistence {
             &target,
             &json,
             || {
-                fail::fail_point!("midge::intent::inject_no_space_on_save", |_| Err(
+                crate::failpoints::fail_point!("midge::intent::inject_no_space_on_save", |_| Err(
                     "failpoint: no space while saving intent log".to_string()
                 ));
                 Ok(())

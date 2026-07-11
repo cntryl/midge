@@ -70,7 +70,7 @@ fn should_support_cloud_strict_for_explicit_durability() {
 fn should_flush_cloud_segments_on_shutdown() {
     // Arrange
     let opts = opts_for_mode("cloud");
-    let engine = open_with_mode(&opts, "cloud");
+    let mut engine = open_with_mode(&opts, "cloud");
     let cf = engine.create_column_family("test").expect("create cf");
     let cf_id = cf.id();
 
@@ -86,8 +86,9 @@ fn should_flush_cloud_segments_on_shutdown() {
         tx.commit(WriteOptions::cloud_async()).unwrap();
     }
 
-    // Drop engine (triggers shutdown)
-    drop(engine);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("bounded cloud shutdown");
 
     // Assert: Shutdown should complete without panics, and all pending
     // CloudAsync uploads should be flushed (verified implicitly by clean drop)

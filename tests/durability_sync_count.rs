@@ -3,7 +3,12 @@ use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 fn open_engine() -> (tempfile::TempDir, Engine, cntryl_midge::ColumnFamilyHandle) {
     cntryl_midge::init_benchmark_telemetry().expect("enable test-visible WAL metrics");
     let temp_dir = tempfile::tempdir().expect("create database directory");
-    let engine = Engine::open(OpenOptions::local(temp_dir.path()).build()).expect("open engine");
+    let engine = Engine::open(
+        OpenOptions::local(temp_dir.path())
+            .build()
+            .expect("build options"),
+    )
+    .expect("open engine");
     let cf = engine
         .get_column_family("default")
         .expect("default column family");

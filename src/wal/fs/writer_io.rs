@@ -27,8 +27,6 @@ use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 
 const MAX_BACKOFF_MS: u64 = 100;
 const MAX_WAIT_ATTEMPTS: u32 = 50;
-const JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const WAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Filesystem-backed WAL writer using `io::Fs`.
 ///
@@ -58,6 +56,9 @@ pub struct FsWalWriterIo {
 
     // Current position shared with runner
     current_pos: Arc<std::sync::atomic::AtomicU64>,
+
+    // Maximum wait for append, flush, sync, and close acknowledgements.
+    io_timeout: Duration,
 }
 impl FsWalWriterIo {
     /// Create a new WAL writer targeting `wal.log` using the provided filesystem.
@@ -66,6 +67,19 @@ impl FsWalWriterIo {
     ///
     /// Returns an error if the WAL file cannot be created or opened.
     pub fn new(path_str: &str, fs: Arc<dyn Fs>) -> MidgeResult<Self> {
+        Self::new_with_timeout(path_str, fs, crate::config::DEFAULT_STORAGE_IO_TIMEOUT)
+    }
+
+    /// Create a writer with an explicit storage acknowledgement timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WAL file cannot be created or opened.
+    pub fn new_with_timeout(
+        path_str: &str,
+        fs: Arc<dyn Fs>,
+        io_timeout: Duration,
+    ) -> MidgeResult<Self> {
         let path = FsPath::new(path_str);
 
         // Verify file exists or can be created by checking metadata
@@ -95,6 +109,7 @@ impl FsWalWriterIo {
             sync_cond: Arc::new(Condvar::new()),
             writer_thread: Mutex::new(None),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            io_timeout,
         };
 
         // Spawn background writer thread
@@ -157,7 +172,7 @@ impl FsWalWriterIo {
     }
 
     fn enqueue_encoded(&self, buf: Vec<u8>) -> MidgeResult<WalPos> {
-        self.enqueue_encoded_with_timeout(buf, WAL_IO_TIMEOUT)
+        self.enqueue_encoded_with_timeout(buf, self.io_timeout)
     }
 
     fn enqueue_encoded_with_timeout(
@@ -321,11 +336,11 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn flush(&self) -> MidgeResult<()> {
-        self.flush_with_timeout(WAL_IO_TIMEOUT)
+        self.flush_with_timeout(self.io_timeout)
     }
 
     fn sync(&self) -> MidgeResult<()> {
-        self.sync_with_timeout(Duration::from_secs(30))
+        self.sync_with_timeout(self.io_timeout)
     }
 
     fn sync_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
@@ -377,7 +392,7 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn close(&self) -> MidgeResult<()> {
-        self.close_with_timeout(JOIN_TIMEOUT)
+        self.close_with_timeout(self.io_timeout)
     }
 }
 
@@ -448,6 +463,7 @@ mod tests {
             writer_thread: Mutex::new(None),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             current_pos: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            io_timeout: Duration::from_millis(10),
         }
     }
 
@@ -582,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn should_timeout_append_acknowledgement_and_fence_writer() {
+    fn should_fence_writer_when_append_acknowledgement_times_out() {
         // Arrange
         let writer = writer_without_background_worker();
 
@@ -598,6 +614,30 @@ mod tests {
             subsequent_result,
             Err(crate::common::MidgeError::Fenced(_))
         ));
+    }
+
+    #[test]
+    fn should_apply_configured_timeout_when_append_waits_for_acknowledgement() {
+        // Arrange
+        let writer = writer_without_background_worker();
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"key"),
+            Some(Bytes::from_static(b"value")),
+            1,
+            1,
+        );
+
+        // Act
+        let started = std::time::Instant::now();
+        let result = writer.append_record(&record);
+
+        // Assert
+        assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "append ignored configured storage I/O timeout"
+        );
     }
 
     #[test]

@@ -33,7 +33,8 @@ fn should_apply_simulated_cloud_local_storage_budget_when_opening_simulated_clou
     let budget_bytes = 8 * 1024 * 1024;
     let opts = OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "test-prefix")
         .with_simulated_cloud_local_storage_budget(budget_bytes)
-        .build();
+        .build()
+        .expect("build options");
 
     // Act
     let engine = Engine::open(opts).expect("open simulated cloud engine");

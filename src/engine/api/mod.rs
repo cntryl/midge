@@ -18,8 +18,8 @@ pub use crate::types::ConflictPolicy;
 pub use iterator::{Direction, Iterator as ScanIterator};
 pub use kv::{Key, Value};
 pub use options::{
-    BlockCachePolicy, CloudWritePolicy, Goal, MemoryBudget, OpenOptions, RecoveryPolicy, Storage,
-    WorkloadProfile,
+    BlockCachePolicy, CloudWritePolicy, Goal, MemoryBudget, OpenOptions, OpenOptionsBuilder,
+    RecoveryPolicy, Storage, WorkloadProfile,
 };
 pub use query::Query;
 pub(crate) use transaction::TransactionInit;

@@ -26,7 +26,7 @@ use cntryl_midge::{Engine, OpenOptions, RecoveryPolicy};
 let engine = Engine::open(
     OpenOptions::local("./mydb")
         .recovery_policy(RecoveryPolicy::Strict)
-        .build()
+        .build()?
 )?;
 ```
 
@@ -40,7 +40,7 @@ let opts = OpenOptions::local("./mydb")
     .memory_budget(MemoryBudget::Auto) // Auto derives from system limits; or Bytes(512_000_000)
     .workload(WorkloadProfile::Mixed)  // Mixed | WriteHeavy | ReadMostly | RangeScan | TtlHeavy
     .recovery_policy(RecoveryPolicy::Strict) // Strict (default) | Salvage
-    .build();
+    .build()?;
 
 let engine = Engine::open(opts)?;
 ```
@@ -63,7 +63,7 @@ Midge's general guide centers on the local-first storage modes. **Choose via nam
 No persistence. Data lost on engine drop.
 
 ```rust
-let engine = Engine::open(OpenOptions::in_memory().build())?;
+let engine = Engine::open(OpenOptions::in_memory().build()?)?;
 ```
 
 **Use for:** Testing, benchmarks, ephemeral caches.
@@ -73,7 +73,7 @@ let engine = Engine::open(OpenOptions::in_memory().build())?;
 Persists to local filesystem.
 
 ```rust
-let engine = Engine::open(OpenOptions::local("/var/lib/myapp/db").build())?;
+let engine = Engine::open(OpenOptions::local("/var/lib/myapp/db").build()?)?;
 ```
 
 **Use for:** Traditional deployments, single-node apps, durable local disk.
@@ -432,7 +432,7 @@ engine.commit(tx, WriteOptions::sync())?;  // Both succeed or both fail
 ```rust
 let opts = OpenOptions::local("./db")
     .memory_budget(MemoryBudget::Bytes(512_000_000))  // 512MB
-    .build();
+    .build()?;
 ```
 
 **Budget distribution:** Varies by Goal. Typical: ~40-60% block cache, ~20-30% memtables, ~10-20% bloom filters, ~10% metadata. See [../operations/performance-tuning.md](../operations/performance-tuning.md) for details.

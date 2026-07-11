@@ -421,7 +421,8 @@ fn open_local_engine(db_path: &Path) -> Engine {
     Engine::open(
         OpenOptions::local(db_path)
             .background_compaction(false)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("open engine after crash")
 }

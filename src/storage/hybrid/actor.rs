@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn should_replace_compaction_inputs_with_output_and_release_reservation() {
+    fn should_finalize_compaction_publication_when_output_replaces_inputs() {
         // Arrange
         let policy = StorageBudgetPolicy::new(1024 * 1024);
         let mut actor = StorageBudgetActor::new(policy);

@@ -1,6 +1,7 @@
 use cntryl_midge::{Engine, EngineHealth, MidgeError, OpenOptions, TransactionMode, WriteOptions};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 use tempfile::TempDir;
 
 static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -11,7 +12,8 @@ fn should_expose_local_engine_observability_surfaces() {
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
-    let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+    let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("open engine");
     let default_cf = engine
         .get_column_family("default")
         .expect("default column family");
@@ -86,7 +88,8 @@ fn should_expose_local_engine_observability_surfaces() {
 #[test]
 fn should_reject_storage_verification_in_memory_mode() {
     // Arrange
-    let engine = Engine::open(OpenOptions::in_memory().build()).expect("open in-memory engine");
+    let engine = Engine::open(OpenOptions::in_memory().build().expect("build options"))
+        .expect("open in-memory engine");
 
     // Act
     let result = engine.verify_storage();
@@ -111,7 +114,8 @@ fn should_install_explicit_memtable_size_in_runtime_metrics() {
     let engine = Engine::open(
         OpenOptions::in_memory()
             .with_memtable_size_limit(memtable_size)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("open in-memory engine");
 
@@ -134,7 +138,8 @@ fn should_install_explicit_memtable_limits_in_runtime_metrics_when_both_are_set(
         OpenOptions::in_memory()
             .with_memtable_size_limit(memtable_size)
             .with_memtable_flush_threshold(flush_threshold)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("open in-memory engine");
 
@@ -153,7 +158,8 @@ fn should_report_degraded_health_given_obsolete_sst_files_and_json_verification(
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
-    let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+    let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("open engine");
     let default_cf = engine
         .get_column_family("default")
         .expect("default column family");
@@ -214,15 +220,19 @@ fn should_ignore_stale_sst_temp_files_on_reopen() {
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
-    let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
-    drop(engine);
+    let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("open engine");
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown before reopen");
 
     std::fs::create_dir_all(db_path.join("sst")).expect("create sst dir");
     std::fs::write(db_path.join("sst").join("orphan.sst.tmp"), b"temp-bytes")
         .expect("write stale temp sst");
 
     // Act
-    let reopened = Engine::open(OpenOptions::local(db_path).build()).expect("reopen engine");
+    let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("reopen engine");
     let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
     let layout = reopened.get_storage_layout().expect("storage layout");
     let report = reopened.verify_storage().expect("verify storage");
@@ -250,7 +260,8 @@ fn should_delete_orphan_sst_residue_during_startup_cleanup() {
     let db_path = temp_dir.path();
 
     {
-        let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+        let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("open engine");
         let default_cf = engine
             .get_column_family("default")
             .expect("default column family");
@@ -263,13 +274,17 @@ fn should_delete_orphan_sst_residue_during_startup_cleanup() {
         tx.commit(WriteOptions::best_effort())
             .expect("commit best effort");
         engine.flush_cf(&default_cf).expect("flush default cf");
+        engine
+            .shutdown(Duration::from_secs(2))
+            .expect("shutdown before reopen");
     }
 
     std::fs::write(db_path.join("sst").join("orphan.sst"), b"orphan-bytes")
         .expect("write orphan sst");
 
     // Act
-    let reopened = Engine::open(OpenOptions::local(db_path).build()).expect("reopen engine");
+    let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("reopen engine");
     let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
     let report = Engine::verify_path(db_path).expect("offline verify path");
 
@@ -283,6 +298,7 @@ fn should_delete_orphan_sst_residue_during_startup_cleanup() {
     );
 }
 
+#[cfg(feature = "failpoints")]
 #[test]
 fn should_report_degraded_health_when_orphan_sst_cleanup_is_blocked() {
     // Arrange
@@ -291,7 +307,8 @@ fn should_report_degraded_health_when_orphan_sst_cleanup_is_blocked() {
     let db_path = temp_dir.path();
 
     {
-        let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
+        let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("open engine");
         let default_cf = engine
             .get_column_family("default")
             .expect("default column family");
@@ -304,6 +321,9 @@ fn should_report_degraded_health_when_orphan_sst_cleanup_is_blocked() {
         tx.commit(WriteOptions::best_effort())
             .expect("commit best effort");
         engine.flush_cf(&default_cf).expect("flush default cf");
+        engine
+            .shutdown(Duration::from_secs(2))
+            .expect("shutdown before reopen");
     }
 
     std::fs::write(db_path.join("sst").join("orphan.sst"), b"orphan-bytes")
@@ -317,7 +337,8 @@ fn should_report_degraded_health_when_orphan_sst_cleanup_is_blocked() {
     .expect("configure orphan delete failure failpoint");
 
     // Act
-    let reopened = Engine::open(OpenOptions::local(db_path).build()).expect("reopen engine");
+    let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("reopen engine");
     let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
     let layout = reopened.get_storage_layout().expect("storage layout");
     let report = Engine::verify_path(db_path).expect("offline verify path");
@@ -344,8 +365,11 @@ fn should_ignore_stale_metadata_temp_files_on_reopen() {
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
-    let engine = Engine::open(OpenOptions::local(db_path).build()).expect("open engine");
-    drop(engine);
+    let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("open engine");
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown before reopen");
 
     let temp_manifest = serde_json::json!({
         "last_persisted_sequence": 99,
@@ -383,7 +407,8 @@ fn should_ignore_stale_metadata_temp_files_on_reopen() {
     .expect("write temp intent log");
 
     // Act
-    let reopened = Engine::open(OpenOptions::local(db_path).build()).expect("reopen engine");
+    let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("reopen engine");
     let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
     let layout = reopened.get_storage_layout().expect("storage layout");
 

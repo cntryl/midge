@@ -1301,10 +1301,7 @@ impl RuntimeState {
         for orphan_name in residue.orphan_ssts {
             let path = FsPath::new(crate::sst::object_key(&orphan_name));
             let injected_delete_failure =
-                fail::eval("midge::recovery::inject_orphan_sst_delete_failure", |_| {
-                    true
-                })
-                .unwrap_or(false);
+                crate::failpoints::is_active("midge::recovery::inject_orphan_sst_delete_failure");
             if injected_delete_failure {
                 self.mark_persistence_anomaly();
                 tracing::warn!(

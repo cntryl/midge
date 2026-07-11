@@ -1,10 +1,14 @@
 use cntryl_midge::{Engine, EngineHealth, MidgeError, OpenOptions, RecoveryPolicy};
 use std::fs;
+use std::time::Duration;
 use tempfile::TempDir;
 
 fn initialize_format_marker(db_path: &std::path::Path) {
-    let engine = Engine::open(OpenOptions::local(db_path).build()).expect("initialize engine");
-    drop(engine);
+    let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("initialize engine");
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown initialized engine");
 }
 
 fn write_corrupt_wal(db_path: &std::path::Path) {
@@ -30,7 +34,8 @@ fn should_fail_strict_open_when_manifest_journal_is_corrupt() {
     let result = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Strict)
-            .build(),
+            .build()
+            .expect("build options"),
     );
 
     // Assert
@@ -63,7 +68,8 @@ fn should_open_in_salvage_mode_when_manifest_journal_is_corrupt() {
     let engine = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Salvage)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("salvage open");
 
@@ -86,7 +92,8 @@ fn should_fail_strict_open_when_intent_log_is_corrupt() {
     let result = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Strict)
-            .build(),
+            .build()
+            .expect("build options"),
     );
 
     // Assert
@@ -114,7 +121,8 @@ fn should_fail_strict_open_when_wal_is_corrupt() {
     let result = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Strict)
-            .build(),
+            .build()
+            .expect("build options"),
     );
 
     // Assert
@@ -142,7 +150,8 @@ fn should_open_in_salvage_mode_when_wal_is_corrupt() {
     let engine = Engine::open(
         OpenOptions::local(db_path)
             .recovery_policy(RecoveryPolicy::Salvage)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("salvage open");
 
@@ -161,7 +170,7 @@ fn should_fail_open_given_persisted_manifest_without_format_marker() {
     fs::write(db_path.join("manifest.json"), "{}\n").expect("write manifest without marker");
 
     // Act
-    let result = Engine::open(OpenOptions::local(db_path).build());
+    let result = Engine::open(OpenOptions::local(db_path).build().expect("build options"));
 
     // Assert
     match result {

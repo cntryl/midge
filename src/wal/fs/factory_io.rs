@@ -3,17 +3,29 @@
 use crate::common::MidgeResult;
 use crate::io::Fs;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// WAL factory that uses `io::Fs` abstraction
 /// Allows using different filesystem implementations (Real, Mock, Chaos) for testing
 pub struct FsWalFactoryIo {
     fs: Arc<dyn Fs>,
+    io_timeout: Duration,
 }
 
 impl FsWalFactoryIo {
     /// Create a new factory with a custom filesystem implementation
     pub fn new(fs: Arc<dyn Fs>) -> Self {
-        Self { fs }
+        Self {
+            fs,
+            io_timeout: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        }
+    }
+
+    /// Configure the maximum acknowledgement wait for writers from this factory.
+    #[must_use]
+    pub fn with_io_timeout(mut self, timeout: Duration) -> Self {
+        self.io_timeout = timeout;
+        self
     }
 
     /// Create a new WAL writer using the `io::Fs` backend
@@ -22,7 +34,11 @@ impl FsWalFactoryIo {
     ///
     /// Returns an error if the writer cannot be created.
     pub fn create_writer(&self, path_str: &str) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
-        let writer = super::FsWalWriterIo::new(path_str, Arc::clone(&self.fs))?;
+        let writer = super::FsWalWriterIo::new_with_timeout(
+            path_str,
+            Arc::clone(&self.fs),
+            self.io_timeout,
+        )?;
         Ok(Box::new(writer))
     }
 

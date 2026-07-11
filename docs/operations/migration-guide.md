@@ -224,7 +224,7 @@ aws s3api put-bucket-replication --bucket primary-bucket --replication-configura
 #[test]
 fn should_restore_from_backup() {
     // 1. Create backup
-    let original = MidgeEngine::open(OpenOptions::local("./db").build())?;
+    let original = MidgeEngine::open(OpenOptions::local("./db").build()?)?;
     // ... populate data ...
     original.flush_cf(&cf)?;
     drop(original);
@@ -236,7 +236,7 @@ fn should_restore_from_backup() {
     std::fs::rename("./db.backup", "./db")?;
     
     // 4. Verify
-    let restored = MidgeEngine::open(OpenOptions::local("./db").build())?;
+    let restored = MidgeEngine::open(OpenOptions::local("./db").build()?)?;
     // ... verify data ...
 }
 ```

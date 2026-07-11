@@ -75,6 +75,7 @@ impl Default for CloudRuntimePolicy {
 pub struct RuntimeConfig {
     pub wal_durability_policy: DurabilityPolicy,
     pub wal_batch_config: BatchConfig,
+    pub storage_io_timeout: Duration,
     pub cloud_runtime_policy: CloudRuntimePolicy,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
@@ -100,6 +101,7 @@ impl Default for RuntimeConfig {
         Self {
             wal_durability_policy: DurabilityPolicy::Batched,
             wal_batch_config: BatchConfig::default(),
+            storage_io_timeout: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
             cloud_runtime_policy: CloudRuntimePolicy::default(),
             hybrid_storage: None,
             hybrid_storage_events: None,
@@ -1721,7 +1723,7 @@ mod tests {
     }
 
     #[test]
-    fn should_retain_shutdown_waiter_and_allow_retry_after_timeout() {
+    fn should_allow_shutdown_retry_when_initial_wait_times_out() {
         // Arrange: model a running worker that accepts the shutdown request but
         // deliberately withholds its response past the first deadline.
         let (runtime, handle) = Runtime::new();

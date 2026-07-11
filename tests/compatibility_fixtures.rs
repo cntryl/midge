@@ -66,7 +66,8 @@ fn should_verify_release_v2_fixture_given_supported_format_when_reopening() {
     let engine = Engine::open(
         OpenOptions::local(temp.path())
             .recovery_policy(RecoveryPolicy::Strict)
-            .build(),
+            .build()
+            .expect("build options"),
     )
     .expect("open release fixture");
     let runtime = engine.get_runtime_metrics().expect("runtime metrics");
@@ -87,7 +88,8 @@ fn should_reject_future_format_fixture_given_unsupported_version_when_reopening(
     let Err(open_error) = Engine::open(
         OpenOptions::local(temp.path())
             .recovery_policy(RecoveryPolicy::Strict)
-            .build(),
+            .build()
+            .expect("build options"),
     ) else {
         panic!("future fixture should fail open");
     };

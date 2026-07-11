@@ -57,6 +57,15 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
 
+      - name: Verify default release excludes failpoints
+        shell: bash
+        run: |
+          if cargo tree --edges normal | grep -E '(^|[[:space:]])fail v'; then
+            echo "default dependency graph unexpectedly contains fail"
+            exit 1
+          fi
+          cargo check --release
+
       - name: Start Sqrzl emulator
         run: docker compose up -d sqrzl
 
@@ -73,16 +82,16 @@ jobs:
         run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests -- --test-threads=1
 
       - name: Trust-critical smoke suite
-        run: cargo test --test external_adopter_smoke
+        run: cargo test --test external_adopter_smoke --features failpoints
 
       - name: Recovery correctness suite
         run: cargo test --test durability_wal
 
       - name: Failure injection suite
-        run: cargo test --test failure_injection
+        run: cargo test --test failure_injection --features failpoints
 
       - name: Compaction crash suite
-        run: cargo test --test chaos_compaction
+        run: cargo test --test chaos_compaction --features failpoints
 
       - name: Iterator correctness suite
         run: cargo test --test engine_iterators

@@ -20,7 +20,7 @@
 //! use cntryl_midge::{MidgeEngine, OpenOptions};
 //!
 //! // Open a database with default options
-//! let opts = OpenOptions::local("./my_db").build();
+//! let opts = OpenOptions::local("./my_db").build()?;
 //! let engine = MidgeEngine::open(opts)?;
 //! # Ok::<(), cntryl_midge::MidgeError>(())
 //! ```
@@ -28,14 +28,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub use crate::config::{RecoveryPolicy, Storage};
+use crate::common::{MidgeError, MidgeResult};
+#[cfg(test)]
+use crate::config::{AzureCredentialSource, GcsApiStyle, GcsCredentialSource, S3CredentialSource};
+pub use crate::config::{CloudProviderConfig, RecoveryPolicy, Storage};
 use crate::sst::cache::CachePolicyType;
 use crate::sst::compression::{CompressionAlgo, CompressionPolicy};
-use crate::storage::providers::CloudProviderConfig;
-#[cfg(test)]
-use crate::storage::providers::{
-    AzureCredentialSource, GcsApiStyle, GcsCredentialSource, S3CredentialSource,
-};
 
 /// Performance optimization goal.
 ///
@@ -177,495 +175,222 @@ impl From<CloudWritePolicy> for crate::runtime::CloudRuntimePolicy {
     }
 }
 
-/// Database open options with smart defaults.
+/// Immutable, validated database open options.
 ///
-/// Use the builder pattern to configure high-level knobs, and all low-level
-/// parameters will be derived automatically.
+/// Values of this type can only be produced by [`OpenOptionsBuilder::build`].
+/// All fields are private so derived values cannot become stale after
+/// finalization.
 ///
-/// Storage backend MUST be explicitly specified via constructors:
-/// - `OpenOptions::in_memory()`
-/// - `OpenOptions::local(path)`
-/// - `OpenOptions::cloud(cache_path`, provider, prefix)
-/// - `OpenOptions::cloud_simulated(cache_path`, bucket, prefix)
+/// ```compile_fail
+/// use cntryl_midge::{Goal, OpenOptions};
+/// let mut options = OpenOptions::in_memory().build().unwrap();
+/// options.goal = Goal::Economy;
+/// ```
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
-    /// Storage backend (REQUIRED - no default)
-    pub storage: Storage,
-
-    /// Performance goal
-    pub goal: Goal,
-
-    /// Memory budget
-    pub memory_budget: MemoryBudget,
-
-    /// Workload profile hint
-    pub workload: WorkloadProfile,
-
-    /// Recovery policy used during engine open.
-    pub recovery_policy: RecoveryPolicy,
-
-    /// Explicit override for memtable size limit in bytes.
-    explicit_memtable_size_limit: Option<usize>,
-
-    /// Explicit override for memtable flush threshold in bytes.
-    explicit_memtable_flush_threshold: Option<usize>,
-
-    /// Derived memory budget in bytes (from `build()`)
-    pub(crate) derived_memory_budget: usize,
-
-    // Derived parameters (populated by build())
-    /// Block size in bytes (derived)
-    pub(crate) block_size: usize,
-
-    /// Memtable size limit (derived)
-    pub(crate) memtable_size_limit: usize,
-
-    /// Memtable flush threshold (derived)
-    pub(crate) memtable_flush_threshold: usize,
-
-    /// Target SST file size (derived)
-    pub(crate) target_sst_size: usize,
-
-    /// Block cache size (derived)
-    pub(crate) block_cache_size: usize,
-
-    /// Block cache eviction policy.
+    storage: Storage,
+    goal: Goal,
+    memory_budget: MemoryBudget,
+    workload: WorkloadProfile,
+    recovery_policy: RecoveryPolicy,
+    derived_memory_budget: usize,
+    block_size: usize,
+    memtable_size_limit: usize,
+    memtable_flush_threshold: usize,
+    target_sst_size: usize,
+    block_cache_size: usize,
+    transaction_memory_pool_size: usize,
     block_cache_policy: BlockCachePolicy,
-
-    /// Cloud write tuning policy.
     cloud_write_policy: CloudWritePolicy,
-
-    /// Whether automatic background compaction scheduling is enabled.
     background_compaction: bool,
-
-    /// WAL buffer size (derived)
-    pub(crate) wal_buffer_size: usize,
-
-    /// L0 compaction trigger (derived)
-    pub(crate) l0_compaction_trigger: usize,
-
-    /// Compression policy for SST blocks (derived from Goal)
-    pub(crate) compression_policy: CompressionPolicy,
-
-    /// Optional WAL batch configuration (from testkit for batched durability mode)
-    pub(crate) wal_batch_config: Option<crate::wal::policy::BatchConfig>,
-
-    /// Internal simulated-cloud local cache budget override.
+    storage_io_timeout: Duration,
+    wal_buffer_size: usize,
+    l0_compaction_trigger: usize,
+    compression_policy: CompressionPolicy,
+    wal_batch_config: Option<crate::wal::policy::BatchConfig>,
     simulated_cloud_local_storage_budget_bytes: Option<u64>,
 }
 
+/// Mutable input state for constructing [`OpenOptions`].
+///
+/// Setters only record caller intent. Memory derivation and validation happen
+/// once, in [`Self::build`], so setter order cannot stale a derived value.
+#[derive(Debug, Clone)]
+pub struct OpenOptionsBuilder {
+    storage: Storage,
+    goal: Goal,
+    memory_budget: MemoryBudget,
+    workload: WorkloadProfile,
+    recovery_policy: RecoveryPolicy,
+    explicit_memtable_size_limit: Option<usize>,
+    explicit_memtable_flush_threshold: Option<usize>,
+    transaction_memory_pool_size: Option<usize>,
+    block_cache_policy: BlockCachePolicy,
+    cloud_write_policy: CloudWritePolicy,
+    background_compaction: bool,
+    storage_io_timeout: Duration,
+    wal_batch_config: Option<crate::wal::policy::BatchConfig>,
+    simulated_cloud_local_storage_budget_bytes: Option<u64>,
+}
+
+struct DerivedMemoryPools {
+    memtable_size_limit: usize,
+    memtable_flush_threshold: usize,
+    block_cache_size: usize,
+    transaction_memory_pool_size: usize,
+}
+
 impl OpenOptions {
-    /// Create in-memory database instance
-    ///
-    /// Data is NOT persisted and will be lost when engine is dropped.
-    /// Ideal for: testing, caching, ephemeral workloads
-    ///
-    /// Memtable sizing is derived automatically by default. Advanced callers can
-    /// override the runtime memtable size limit and flush threshold explicitly.
-    ///
+    /// Create an in-memory database builder.
     #[must_use]
-    pub fn in_memory() -> Self {
-        Self {
-            storage: Storage::InMemory,
-            goal: Goal::default(),
-            memory_budget: MemoryBudget::default(),
-            workload: WorkloadProfile::default(),
-            recovery_policy: RecoveryPolicy::default(),
-            explicit_memtable_size_limit: None,
-            explicit_memtable_flush_threshold: None,
-            derived_memory_budget: 0,
-            // Initial derived values until build() recomputes them
-            block_size: 16 * 1024,
-            memtable_size_limit: 64 * 1024 * 1024,
-            memtable_flush_threshold: 64 * 1024 * 1024,
-            target_sst_size: 256 * 1024 * 1024,
-            block_cache_size: 128 * 1024 * 1024,
-            block_cache_policy: BlockCachePolicy::default(),
-            cloud_write_policy: CloudWritePolicy::default(),
-            background_compaction: true,
-            wal_buffer_size: 256 * 1024,
-            l0_compaction_trigger: 4,
-            compression_policy: CompressionPolicy::default(),
-            wal_batch_config: None,
-            simulated_cloud_local_storage_budget_bytes: None,
-        }
+    pub fn in_memory() -> OpenOptionsBuilder {
+        OpenOptionsBuilder::new(Storage::InMemory)
     }
 
-    /// Create local filesystem database instance
-    ///
-    /// Data persists to the specified path on local disk.
-    /// Ideal for: traditional deployments, single-node databases
-    ///
-    pub fn local<P: Into<PathBuf>>(path: P) -> Self {
-        Self {
-            storage: Storage::Local { path: path.into() },
-            goal: Goal::default(),
-            memory_budget: MemoryBudget::default(),
-            workload: WorkloadProfile::default(),
-            recovery_policy: RecoveryPolicy::default(),
-            explicit_memtable_size_limit: None,
-            explicit_memtable_flush_threshold: None,
-            derived_memory_budget: 0,
-            // Initial derived values until build() recomputes them
-            block_size: 16 * 1024,
-            memtable_size_limit: 64 * 1024 * 1024,
-            memtable_flush_threshold: 64 * 1024 * 1024,
-            target_sst_size: 256 * 1024 * 1024,
-            block_cache_size: 128 * 1024 * 1024,
-            block_cache_policy: BlockCachePolicy::default(),
-            cloud_write_policy: CloudWritePolicy::default(),
-            background_compaction: true,
-            wal_buffer_size: 256 * 1024,
-            l0_compaction_trigger: 4,
-            compression_policy: CompressionPolicy::default(),
-            wal_batch_config: None,
-            simulated_cloud_local_storage_budget_bytes: None,
-        }
+    /// Create a local filesystem database builder.
+    #[must_use]
+    pub fn local<P: Into<PathBuf>>(path: P) -> OpenOptionsBuilder {
+        OpenOptionsBuilder::new(Storage::Local { path: path.into() })
     }
 
-    /// Create cloud-backed database instance using a real object-store provider.
-    ///
-    /// Data persists to cloud object storage (S3, Azure, GCS, OCI, etc.).
-    /// Uses hybrid model with local cache for performance.
-    /// Ideal for: cloud-native deployments, serverless, distributed systems
-    ///
-    /// # Arguments
-    /// * `local_cache_path` - Local directory for caching/staging
-    /// * `provider` - Cloud provider, bucket/container, credentials, and endpoint
-    /// * `prefix` - Object key prefix
+    /// Create a real cloud-backed database builder.
+    #[must_use]
     pub fn cloud<P: Into<PathBuf>, S: Into<String>>(
         local_cache_path: P,
         provider: CloudProviderConfig,
         prefix: S,
-    ) -> Self {
-        Self {
-            storage: Storage::Cloud {
-                local_cache_path: local_cache_path.into(),
-                provider,
-                prefix: prefix.into(),
-            },
-            goal: Goal::default(),
-            memory_budget: MemoryBudget::default(),
-            workload: WorkloadProfile::default(),
-            recovery_policy: RecoveryPolicy::default(),
-            explicit_memtable_size_limit: None,
-            explicit_memtable_flush_threshold: None,
-            derived_memory_budget: 0,
-            // Initial derived values until build() recomputes them
-            block_size: 16 * 1024,
-            memtable_size_limit: 64 * 1024 * 1024,
-            memtable_flush_threshold: 64 * 1024 * 1024,
-            target_sst_size: 256 * 1024 * 1024,
-            block_cache_size: 128 * 1024 * 1024,
-            block_cache_policy: BlockCachePolicy::default(),
-            cloud_write_policy: CloudWritePolicy::default(),
-            background_compaction: true,
-            wal_buffer_size: 256 * 1024,
-            l0_compaction_trigger: 4,
-            compression_policy: CompressionPolicy::default(),
-            wal_batch_config: None,
-            simulated_cloud_local_storage_budget_bytes: None,
-        }
+    ) -> OpenOptionsBuilder {
+        OpenOptionsBuilder::new(Storage::Cloud {
+            local_cache_path: local_cache_path.into(),
+            provider,
+            prefix: prefix.into(),
+        })
     }
 
-    /// Create a filesystem-backed cloud simulation.
-    ///
-    /// This keeps deterministic `CloudAsync` tests available without pretending to
-    /// connect to a real provider.
+    /// Create a filesystem-backed cloud simulation builder.
+    #[must_use]
     pub fn cloud_simulated<P: Into<PathBuf>, S: Into<String>>(
         local_cache_path: P,
         bucket: S,
         prefix: S,
-    ) -> Self {
-        Self {
-            storage: Storage::CloudSimulated {
-                local_cache_path: local_cache_path.into(),
-                bucket: bucket.into(),
-                prefix: prefix.into(),
-            },
-            goal: Goal::default(),
-            memory_budget: MemoryBudget::default(),
-            workload: WorkloadProfile::default(),
-            recovery_policy: RecoveryPolicy::default(),
-            explicit_memtable_size_limit: None,
-            explicit_memtable_flush_threshold: None,
-            derived_memory_budget: 0,
-            // Initial derived values until build() recomputes them
-            block_size: 16 * 1024,
-            memtable_size_limit: 64 * 1024 * 1024,
-            memtable_flush_threshold: 64 * 1024 * 1024,
-            target_sst_size: 256 * 1024 * 1024,
-            block_cache_size: 128 * 1024 * 1024,
-            block_cache_policy: BlockCachePolicy::default(),
-            cloud_write_policy: CloudWritePolicy::default(),
-            background_compaction: true,
-            wal_buffer_size: 256 * 1024,
-            l0_compaction_trigger: 4,
-            compression_policy: CompressionPolicy::default(),
-            wal_batch_config: None,
-            simulated_cloud_local_storage_budget_bytes: None,
-        }
+    ) -> OpenOptionsBuilder {
+        OpenOptionsBuilder::new(Storage::CloudSimulated {
+            local_cache_path: local_cache_path.into(),
+            bucket: bucket.into(),
+            prefix: prefix.into(),
+        })
     }
 
-    /// Set performance goal.
+    /// Return the configured storage backend.
     #[must_use]
-    pub fn goal(mut self, goal: Goal) -> Self {
-        self.goal = goal;
-        self
+    pub fn storage(&self) -> &Storage {
+        &self.storage
     }
 
-    /// Set memory budget.
+    /// Return the configured optimization goal.
     #[must_use]
-    pub fn memory_budget(mut self, budget: MemoryBudget) -> Self {
-        self.memory_budget = budget;
-        self
+    pub fn goal(&self) -> Goal {
+        self.goal
     }
 
-    /// Override the derived memtable size limit in bytes.
-    ///
-    /// By default, Midge derives memtable sizing from the goal, workload, and
-    /// memory budget. This override applies the exact requested runtime size
-    /// limit without changing `MemoryBudget`.
+    /// Return the caller-facing memory-budget selection.
     #[must_use]
-    pub fn with_memtable_size_limit(mut self, bytes: usize) -> Self {
-        self.explicit_memtable_size_limit = Some(Self::sanitize_memtable_bytes(bytes));
-        self
+    pub fn memory_budget(&self) -> MemoryBudget {
+        self.memory_budget
     }
 
-    /// Override the runtime memtable flush threshold in bytes.
-    ///
-    /// By default, the flush threshold follows the derived memtable sizing. If
-    /// only `with_memtable_size_limit` is set, the flush threshold uses that
-    /// same value unless this override is also provided.
+    /// Return the resolved total memory budget in bytes.
     #[must_use]
-    pub fn with_memtable_flush_threshold(mut self, bytes: usize) -> Self {
-        self.explicit_memtable_flush_threshold = Some(Self::sanitize_memtable_bytes(bytes));
-        self
+    pub fn memory_budget_bytes(&self) -> usize {
+        self.derived_memory_budget
     }
 
-    /// Set workload profile hint.
+    /// Return the configured workload profile.
     #[must_use]
-    pub fn workload(mut self, profile: WorkloadProfile) -> Self {
-        self.workload = profile;
-        self
+    pub fn workload(&self) -> WorkloadProfile {
+        self.workload
     }
 
-    /// Set the block cache eviction policy.
+    /// Return the configured recovery policy.
     #[must_use]
-    pub fn block_cache_policy(mut self, policy: BlockCachePolicy) -> Self {
-        self.block_cache_policy = policy;
-        self
+    pub fn recovery_policy(&self) -> RecoveryPolicy {
+        self.recovery_policy
     }
 
-    /// Set the cloud write tuning policy.
-    #[must_use]
-    pub fn cloud_write_policy(mut self, policy: CloudWritePolicy) -> Self {
-        self.cloud_write_policy = policy;
-        self
-    }
-
-    /// Enable or disable automatic background compaction scheduling.
-    ///
-    /// Manual `Engine::compact_all()` remains available when background
-    /// scheduling is disabled.
-    #[must_use]
-    pub fn background_compaction(mut self, enabled: bool) -> Self {
-        self.background_compaction = enabled;
-        self
-    }
-
-    /// Set recovery policy.
-    #[must_use]
-    pub fn recovery_policy(mut self, policy: RecoveryPolicy) -> Self {
-        self.recovery_policy = policy;
-        self
-    }
-
-    /// Override the simulated-cloud local storage budget.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn with_simulated_cloud_local_storage_budget(mut self, bytes: u64) -> Self {
-        self.simulated_cloud_local_storage_budget_bytes = Some(bytes);
-        self
-    }
-
-    /// Build options with derived parameters.
-    ///
-    /// This automatically computes all low-level parameters based on the
-    /// high-level knobs (goal, memory, workload) plus optional explicit
-    /// memtable overrides for advanced callers.
-    #[must_use]
-    pub fn build(mut self) -> Self {
-        // Derive memory budget
-        let total_memory = match self.memory_budget {
-            MemoryBudget::Auto => memory::auto_memory_budget_bytes().unwrap_or(512 * 1024 * 1024),
-            MemoryBudget::Bytes(n) => n,
-        };
-        self.derived_memory_budget = total_memory;
-
-        // Derive block size based on goal and workload
-        self.block_size = match (self.goal, self.workload) {
-            (Goal::Latency, _) => 16 * 1024, // 16KB for low latency
-            (Goal::Economy, _) => 32 * 1024, // 32KB balanced
-            (Goal::Throughput, WorkloadProfile::RangeScan) => 128 * 1024, // 128KB for bulk scans
-            (Goal::Throughput, _) => 64 * 1024, // 64KB for throughput
-        };
-
-        // Derive memtable size based on goal and workload
-        let base_memtable = match self.goal {
-            Goal::Latency => 64 * 1024 * 1024,     // 64MB for latency
-            Goal::Throughput => 256 * 1024 * 1024, // 256MB for throughput
-            Goal::Economy => 32 * 1024 * 1024,     // 32MB for cost
-        };
-
-        self.memtable_size_limit = match self.workload {
-            WorkloadProfile::WriteHeavy => base_memtable * 2, // Double for write-heavy
-            WorkloadProfile::ReadMostly => base_memtable / 2, // Half for read-heavy (more cache)
-            _ => base_memtable,
-        };
-
-        // Clamp memtable size to keep total memory usage within budget.
-        let min_memtable = 4 * 1024 * 1024;
-        let max_memtable = total_memory / 2;
-        let max_allowed = max_memtable.max(min_memtable.min(total_memory));
-        self.memtable_size_limit = self.memtable_size_limit.min(max_allowed).max(1);
-
-        if let Some(explicit_memtable_size_limit) = self.explicit_memtable_size_limit {
-            self.memtable_size_limit = Self::sanitize_memtable_bytes(explicit_memtable_size_limit);
-        }
-
-        self.memtable_flush_threshold = if let Some(explicit_memtable_flush_threshold) =
-            self.explicit_memtable_flush_threshold
-        {
-            Self::sanitize_memtable_bytes(explicit_memtable_flush_threshold)
-        } else if self.explicit_memtable_size_limit.is_some() {
-            self.memtable_size_limit
-        } else if let MemoryBudget::Bytes(n) = self.memory_budget {
-            Self::sanitize_memtable_bytes(n / 2)
-        } else {
-            self.memtable_size_limit
-        };
-
-        // Derive target SST size
-        self.target_sst_size = match self.goal {
-            Goal::Latency => 128 * 1024 * 1024,    // 128MB
-            Goal::Throughput => 512 * 1024 * 1024, // 512MB
-            Goal::Economy => 256 * 1024 * 1024,    // 256MB
-        };
-
-        // Allocate remaining memory to block cache
-        let cache_ratio_percent: usize = match self.workload {
-            WorkloadProfile::ReadMostly => 70,
-            WorkloadProfile::WriteHeavy => 20,
-            _ => 50,
-        };
-
-        let usable_memory = total_memory.saturating_sub(self.memtable_size_limit * 2); // 2 memtables
-        self.block_cache_size = usable_memory.saturating_mul(cache_ratio_percent) / 100;
-
-        // Cap cache size for Economy goal to minimize resource usage
-        if self.goal == Goal::Economy {
-            self.block_cache_size = self.block_cache_size.min(256 * 1024 * 1024);
-            // 256MB max
-        }
-
-        // Derive WAL buffer size
-        self.wal_buffer_size = match self.goal {
-            Goal::Latency => 128 * 1024,     // 128KB
-            Goal::Throughput => 1024 * 1024, // 1MB
-            Goal::Economy => 256 * 1024,     // 256KB
-        };
-        self.wal_buffer_size = self.wal_buffer_size.min(total_memory.max(32 * 1024));
-
-        // Derive compaction trigger
-        self.l0_compaction_trigger = match (self.goal, self.workload) {
-            (Goal::Latency, _) => 3,               // Aggressive
-            (_, WorkloadProfile::WriteHeavy) => 8, // Relaxed for write-heavy
-            (Goal::Throughput, _) => 6,            // Moderate
-            _ => 4,                                // Default
-        };
-
-        // Derive compression policy from goal
-        //   Latency  → fast codec, minimal CPU overhead
-        //   Throughput → adaptive, try a few codecs per block
-        //   Economy  → max compression ratio
-        self.compression_policy = match self.goal {
-            Goal::Latency => CompressionPolicy::Fixed(CompressionAlgo::Lz4),
-            Goal::Throughput => CompressionPolicy::Adaptive {
-                min_savings_bytes: 256,
-                min_ratio: 1.05,
-                check_algorithms: vec![CompressionAlgo::Lz4, CompressionAlgo::Zstd3],
-            },
-            Goal::Economy => CompressionPolicy::Fixed(CompressionAlgo::Zstd9),
-        };
-
-        self
-    }
-
-    // Getters for derived parameters
-
-    /// Get derived block size
+    /// Return the derived block size.
     #[must_use]
     pub fn block_size(&self) -> usize {
         self.block_size
     }
 
-    /// Get derived memtable size limit
+    /// Return the derived memtable size limit.
     #[must_use]
     pub fn memtable_size_limit(&self) -> usize {
         self.memtable_size_limit
     }
 
-    /// Get derived target SST size
+    /// Return the memtable flush threshold.
+    #[must_use]
+    pub fn memtable_flush_threshold(&self) -> usize {
+        self.memtable_flush_threshold
+    }
+
+    /// Return the target SST size.
     #[must_use]
     pub fn target_sst_size(&self) -> usize {
         self.target_sst_size
     }
 
-    /// Get derived block cache size
+    /// Return the block-cache allocation.
     #[must_use]
     pub fn block_cache_size(&self) -> usize {
         self.block_cache_size
     }
 
-    /// Get the configured block cache eviction policy.
+    /// Return the shared transaction-memory-pool allocation.
+    #[must_use]
+    pub fn transaction_memory_pool_size(&self) -> usize {
+        self.transaction_memory_pool_size
+    }
+
+    /// Return the configured block-cache eviction policy.
     #[must_use]
     pub fn block_cache_policy_value(&self) -> BlockCachePolicy {
         self.block_cache_policy
     }
 
-    /// Get the configured cloud write policy.
+    /// Return the configured cloud write policy.
     #[must_use]
     pub fn cloud_write_policy_value(&self) -> &CloudWritePolicy {
         &self.cloud_write_policy
     }
 
-    /// Get derived WAL buffer size
+    /// Return the maximum wait for a storage I/O acknowledgement.
+    #[must_use]
+    pub fn storage_io_timeout(&self) -> Duration {
+        self.storage_io_timeout
+    }
+
+    /// Return the derived WAL buffer size.
     #[must_use]
     pub fn wal_buffer_size(&self) -> usize {
         self.wal_buffer_size
     }
 
-    /// Get derived L0 compaction trigger
+    /// Return the derived L0 compaction trigger.
     #[must_use]
     pub fn l0_compaction_trigger(&self) -> usize {
         self.l0_compaction_trigger
     }
 
-    /// Get derived compression policy
+    /// Return the derived compression policy.
     #[must_use]
     pub fn compression_policy(&self) -> &CompressionPolicy {
         &self.compression_policy
     }
 
     pub(crate) fn runtime_memtable_size_limit(&self) -> usize {
-        if self.explicit_memtable_size_limit.is_some() {
-            self.memtable_size_limit
-        } else if let MemoryBudget::Bytes(n) = self.memory_budget {
-            Self::sanitize_memtable_bytes(n / 2)
-        } else {
-            self.memtable_size_limit
-        }
+        self.memtable_size_limit
     }
 
     pub(crate) fn runtime_memtable_flush_threshold(&self) -> usize {
@@ -684,12 +409,288 @@ impl OpenOptions {
         self.background_compaction
     }
 
+    pub(crate) fn wal_batch_config(&self) -> Option<crate::wal::policy::BatchConfig> {
+        self.wal_batch_config
+    }
+
     pub(crate) fn simulated_cloud_local_storage_budget_bytes(&self) -> Option<u64> {
         self.simulated_cloud_local_storage_budget_bytes
     }
+}
 
-    fn sanitize_memtable_bytes(bytes: usize) -> usize {
-        bytes.max(1)
+impl OpenOptionsBuilder {
+    fn new(storage: Storage) -> Self {
+        Self {
+            storage,
+            goal: Goal::default(),
+            memory_budget: MemoryBudget::default(),
+            workload: WorkloadProfile::default(),
+            recovery_policy: RecoveryPolicy::default(),
+            explicit_memtable_size_limit: None,
+            explicit_memtable_flush_threshold: None,
+            transaction_memory_pool_size: None,
+            block_cache_policy: BlockCachePolicy::default(),
+            cloud_write_policy: CloudWritePolicy::default(),
+            background_compaction: true,
+            storage_io_timeout: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+            wal_batch_config: None,
+            simulated_cloud_local_storage_budget_bytes: None,
+        }
+    }
+
+    /// Set the performance goal.
+    #[must_use]
+    pub fn goal(mut self, goal: Goal) -> Self {
+        self.goal = goal;
+        self
+    }
+
+    /// Set the total memory budget.
+    #[must_use]
+    pub fn memory_budget(mut self, budget: MemoryBudget) -> Self {
+        self.memory_budget = budget;
+        self
+    }
+
+    /// Override the derived memtable size limit in bytes.
+    #[must_use]
+    pub fn with_memtable_size_limit(mut self, bytes: usize) -> Self {
+        self.explicit_memtable_size_limit = Some(bytes);
+        self
+    }
+
+    /// Override the runtime memtable flush threshold in bytes.
+    #[must_use]
+    pub fn with_memtable_flush_threshold(mut self, bytes: usize) -> Self {
+        self.explicit_memtable_flush_threshold = Some(bytes);
+        self
+    }
+
+    /// Override the shared transaction-memory-pool allocation.
+    #[must_use]
+    pub fn transaction_memory_pool_size(mut self, bytes: usize) -> Self {
+        self.transaction_memory_pool_size = Some(bytes);
+        self
+    }
+
+    /// Set the workload profile hint.
+    #[must_use]
+    pub fn workload(mut self, profile: WorkloadProfile) -> Self {
+        self.workload = profile;
+        self
+    }
+
+    /// Set the block-cache eviction policy.
+    #[must_use]
+    pub fn block_cache_policy(mut self, policy: BlockCachePolicy) -> Self {
+        self.block_cache_policy = policy;
+        self
+    }
+
+    /// Set the cloud write policy.
+    #[must_use]
+    pub fn cloud_write_policy(mut self, policy: CloudWritePolicy) -> Self {
+        self.cloud_write_policy = policy;
+        self
+    }
+
+    /// Enable or disable automatic background compaction scheduling.
+    #[must_use]
+    pub fn background_compaction(mut self, enabled: bool) -> Self {
+        self.background_compaction = enabled;
+        self
+    }
+
+    /// Set the recovery policy.
+    #[must_use]
+    pub fn recovery_policy(mut self, policy: RecoveryPolicy) -> Self {
+        self.recovery_policy = policy;
+        self
+    }
+
+    /// Set the maximum wait for append, flush, and sync acknowledgements.
+    #[must_use]
+    pub fn storage_io_timeout(mut self, timeout: Duration) -> Self {
+        self.storage_io_timeout = timeout;
+        self
+    }
+
+    /// Override the simulated-cloud local storage budget.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_simulated_cloud_local_storage_budget(mut self, bytes: u64) -> Self {
+        self.simulated_cloud_local_storage_budget_bytes = Some(bytes);
+        self
+    }
+
+    /// Build immutable options and derive every dependent value once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MidgeError::InvalidArgument`] for zero-valued required limits
+    /// and [`MidgeError::ResourceLimit`] when an override cannot fit inside the
+    /// total memory budget.
+    pub fn build(self) -> MidgeResult<OpenOptions> {
+        if self.storage_io_timeout.is_zero() {
+            return Err(MidgeError::InvalidArgument(
+                "storage I/O timeout must be greater than zero".to_string(),
+            ));
+        }
+
+        let total_memory = self.resolve_total_memory()?;
+        let pools = self.derive_memory_pools(total_memory)?;
+
+        let block_size = match (self.goal, self.workload) {
+            (Goal::Latency, _) => 16 * 1024,
+            (Goal::Economy, _) => 32 * 1024,
+            (Goal::Throughput, WorkloadProfile::RangeScan) => 128 * 1024,
+            (Goal::Throughput, _) => 64 * 1024,
+        };
+        let target_sst_size = match self.goal {
+            Goal::Latency => 128 * 1024 * 1024,
+            Goal::Throughput => 512 * 1024 * 1024,
+            Goal::Economy => 256 * 1024 * 1024,
+        };
+        let wal_buffer_size = match self.goal {
+            Goal::Latency => 128 * 1024,
+            Goal::Throughput => 1024 * 1024,
+            Goal::Economy => 256 * 1024,
+        }
+        .min(total_memory)
+        .max(1);
+        let l0_compaction_trigger = match (self.goal, self.workload) {
+            (Goal::Latency, _) => 3,
+            (_, WorkloadProfile::WriteHeavy) => 8,
+            (Goal::Throughput, _) => 6,
+            _ => 4,
+        };
+        let compression_policy = Self::derive_compression_policy(self.goal);
+
+        Ok(OpenOptions {
+            storage: self.storage,
+            goal: self.goal,
+            memory_budget: self.memory_budget,
+            workload: self.workload,
+            recovery_policy: self.recovery_policy,
+            derived_memory_budget: total_memory,
+            block_size,
+            memtable_size_limit: pools.memtable_size_limit,
+            memtable_flush_threshold: pools.memtable_flush_threshold,
+            target_sst_size,
+            block_cache_size: pools.block_cache_size,
+            transaction_memory_pool_size: pools.transaction_memory_pool_size,
+            block_cache_policy: self.block_cache_policy,
+            cloud_write_policy: self.cloud_write_policy,
+            background_compaction: self.background_compaction,
+            storage_io_timeout: self.storage_io_timeout,
+            wal_buffer_size,
+            l0_compaction_trigger,
+            compression_policy,
+            wal_batch_config: self.wal_batch_config,
+            simulated_cloud_local_storage_budget_bytes: self
+                .simulated_cloud_local_storage_budget_bytes,
+        })
+    }
+
+    fn resolve_total_memory(&self) -> MidgeResult<usize> {
+        let total_memory = match self.memory_budget {
+            MemoryBudget::Auto => memory::auto_memory_budget_bytes().unwrap_or(512 * 1024 * 1024),
+            MemoryBudget::Bytes(bytes) => bytes,
+        };
+        if total_memory < 2 {
+            return Err(MidgeError::ResourceLimit(
+                "memory budget must hold two memtable generations".to_string(),
+            ));
+        }
+        Ok(total_memory)
+    }
+
+    fn derive_memory_pools(&self, total_memory: usize) -> MidgeResult<DerivedMemoryPools> {
+        let transaction_memory_pool_size = self
+            .transaction_memory_pool_size
+            .unwrap_or(total_memory / 10);
+        if transaction_memory_pool_size > total_memory {
+            return Err(MidgeError::ResourceLimit(format!(
+                "transaction memory pool ({transaction_memory_pool_size} bytes) exceeds total budget ({total_memory} bytes)"
+            )));
+        }
+
+        let max_memtable_size = total_memory.saturating_sub(transaction_memory_pool_size) / 2;
+        if max_memtable_size == 0 {
+            return Err(MidgeError::ResourceLimit(
+                "memory budget leaves no capacity for memtables".to_string(),
+            ));
+        }
+
+        let memtable_size_limit = self.derive_memtable_size(total_memory, max_memtable_size)?;
+        let memtable_flush_threshold = self.derive_flush_threshold(memtable_size_limit)?;
+        let mut block_cache_size = total_memory
+            .saturating_sub(transaction_memory_pool_size)
+            .saturating_sub(memtable_size_limit.saturating_mul(2));
+        if self.goal == Goal::Economy {
+            block_cache_size = block_cache_size.min(256 * 1024 * 1024);
+        }
+
+        Ok(DerivedMemoryPools {
+            memtable_size_limit,
+            memtable_flush_threshold,
+            block_cache_size,
+            transaction_memory_pool_size,
+        })
+    }
+
+    fn derive_memtable_size(
+        &self,
+        total_memory: usize,
+        max_memtable_size: usize,
+    ) -> MidgeResult<usize> {
+        let base_memtable: usize = match self.goal {
+            Goal::Latency => 64 * 1024 * 1024,
+            Goal::Throughput => 256 * 1024 * 1024,
+            Goal::Economy => 32 * 1024 * 1024,
+        };
+        let desired_memtable = match self.workload {
+            WorkloadProfile::WriteHeavy => base_memtable.saturating_mul(2),
+            WorkloadProfile::ReadMostly => base_memtable / 2,
+            _ => base_memtable,
+        };
+        match self.explicit_memtable_size_limit {
+            Some(0) => Err(MidgeError::InvalidArgument(
+                "memtable size limit must be greater than zero".to_string(),
+            )),
+            Some(bytes) if bytes > max_memtable_size => Err(MidgeError::ResourceLimit(format!(
+                "two {bytes}-byte memtables plus transaction memory exceed the {total_memory}-byte budget"
+            ))),
+            Some(bytes) => Ok(bytes),
+            None => Ok(desired_memtable.min(max_memtable_size).max(1)),
+        }
+    }
+
+    fn derive_flush_threshold(&self, memtable_size_limit: usize) -> MidgeResult<usize> {
+        match self.explicit_memtable_flush_threshold {
+            Some(0) => Err(MidgeError::InvalidArgument(
+                "memtable flush threshold must be greater than zero".to_string(),
+            )),
+            Some(bytes) if bytes > memtable_size_limit => Err(MidgeError::InvalidArgument(
+                format!(
+                    "memtable flush threshold ({bytes} bytes) exceeds size limit ({memtable_size_limit} bytes)"
+                ),
+            )),
+            Some(bytes) => Ok(bytes),
+            None => Ok(memtable_size_limit),
+        }
+    }
+
+    fn derive_compression_policy(goal: Goal) -> CompressionPolicy {
+        match goal {
+            Goal::Latency => CompressionPolicy::Fixed(CompressionAlgo::Lz4),
+            Goal::Throughput => CompressionPolicy::Adaptive {
+                min_savings_bytes: 256,
+                min_ratio: 1.05,
+                check_algorithms: vec![CompressionAlgo::Lz4, CompressionAlgo::Zstd3],
+            },
+            Goal::Economy => CompressionPolicy::Fixed(CompressionAlgo::Zstd9),
+        }
     }
 }
 
@@ -1179,10 +1180,11 @@ mod tests {
         let opts = OpenOptions::in_memory()
             .goal(Goal::Throughput)
             .memory_budget(MemoryBudget::Bytes(budget))
-            .build();
+            .build()
+            .expect("build options");
 
         // Assert
-        assert_eq!(opts.derived_memory_budget, budget);
+        assert_eq!(opts.memory_budget_bytes(), budget);
         assert!(opts.memtable_size_limit() <= budget / 2);
         assert!(opts.block_cache_size() <= budget);
     }
@@ -1195,11 +1197,12 @@ mod tests {
         // Act
         let opts = OpenOptions::in_memory()
             .with_memtable_size_limit(size_limit)
-            .build();
+            .build()
+            .expect("build options");
 
         // Assert
         assert_eq!(opts.memtable_size_limit(), size_limit);
-        assert_eq!(opts.memtable_flush_threshold, size_limit);
+        assert_eq!(opts.memtable_flush_threshold(), size_limit);
     }
 
     #[test]
@@ -1212,27 +1215,27 @@ mod tests {
         let opts = OpenOptions::in_memory()
             .with_memtable_size_limit(size_limit)
             .with_memtable_flush_threshold(flush_threshold)
-            .build();
+            .build()
+            .expect("build options");
 
         // Assert
         assert_eq!(opts.memtable_size_limit(), size_limit);
-        assert_eq!(opts.memtable_flush_threshold, flush_threshold);
+        assert_eq!(opts.memtable_flush_threshold(), flush_threshold);
     }
 
     #[test]
-    fn should_clamp_zero_memtable_overrides_to_one() {
+    fn should_reject_zero_memtable_overrides_when_building() {
         // Arrange
         // (no setup required)
 
         // Act
-        let opts = OpenOptions::in_memory()
+        let result = OpenOptions::in_memory()
             .with_memtable_size_limit(0)
             .with_memtable_flush_threshold(0)
             .build();
 
         // Assert
-        assert_eq!(opts.memtable_size_limit(), 1);
-        assert_eq!(opts.memtable_flush_threshold, 1);
+        assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
     }
 
     // ========== OpenOptions Builder Tests ==========
@@ -1306,7 +1309,8 @@ mod tests {
         let opts = OpenOptions::local("./db")
             .goal(Goal::Latency)
             .workload(WorkloadProfile::ReadMostly)
-            .build();
+            .build()
+            .expect("build options");
 
         // Assert
         assert_eq!(
@@ -1325,13 +1329,16 @@ mod tests {
         // (no setup required)
 
         // Act
-        let opts = OpenOptions::in_memory().goal(Goal::Latency).build();
+        let opts = OpenOptions::in_memory()
+            .goal(Goal::Latency)
+            .build()
+            .expect("build options");
 
         // Assert
-        assert!(opts.block_size > 0);
-        assert!(opts.memtable_size_limit > 0);
-        assert!(opts.target_sst_size > 0);
-        assert!(opts.block_cache_size > 0);
+        assert!(opts.block_size() > 0);
+        assert!(opts.memtable_size_limit() > 0);
+        assert!(opts.target_sst_size() > 0);
+        assert!(opts.block_cache_size() > 0);
     }
 
     #[test]
@@ -1340,11 +1347,17 @@ mod tests {
         // (no setup required)
 
         // Act
-        let latency_opts = OpenOptions::in_memory().goal(Goal::Latency).build();
-        let throughput_opts = OpenOptions::in_memory().goal(Goal::Throughput).build();
+        let latency_opts = OpenOptions::in_memory()
+            .goal(Goal::Latency)
+            .build()
+            .expect("build latency options");
+        let throughput_opts = OpenOptions::in_memory()
+            .goal(Goal::Throughput)
+            .build()
+            .expect("build throughput options");
 
         // Assert
-        assert_ne!(latency_opts.block_size, throughput_opts.block_size);
+        assert_ne!(latency_opts.block_size(), throughput_opts.block_size());
     }
 
     #[test]
@@ -1355,13 +1368,15 @@ mod tests {
         // Act
         let normal = OpenOptions::in_memory()
             .workload(WorkloadProfile::Mixed)
-            .build();
+            .build()
+            .expect("build normal options");
         let write_heavy = OpenOptions::in_memory()
             .workload(WorkloadProfile::WriteHeavy)
-            .build();
+            .build()
+            .expect("build write-heavy options");
 
         // Assert
-        assert!(write_heavy.memtable_size_limit >= normal.memtable_size_limit);
+        assert!(write_heavy.memtable_size_limit() >= normal.memtable_size_limit());
     }
 
     #[test]
@@ -1370,7 +1385,7 @@ mod tests {
         // (no setup required)
 
         // Act
-        let opts = OpenOptions::in_memory().build();
+        let opts = OpenOptions::in_memory().build().expect("build options");
 
         // Assert - getters should be callable
         let _ = opts.block_size();
@@ -1388,10 +1403,13 @@ mod tests {
         let budget = MemoryBudget::Bytes(512 * 1024 * 1024); // 512MB
 
         // Act
-        let opts = OpenOptions::in_memory().memory_budget(budget).build();
+        let opts = OpenOptions::in_memory()
+            .memory_budget(budget)
+            .build()
+            .expect("build options");
 
         // Assert
-        assert!(opts.block_cache_size > 0);
+        assert!(opts.block_cache_size() > 0);
     }
 
     #[test]

@@ -173,6 +173,7 @@ impl EventLoop {
             config.wal_batch_config,
             memory_mode,
             config.writer_epoch,
+            config.storage_io_timeout,
         )?;
 
         // Wire leader store for epoch validation at sync boundaries.

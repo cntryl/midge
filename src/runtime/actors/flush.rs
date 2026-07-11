@@ -362,7 +362,7 @@ impl FlushActor {
             file_meta.clone(),
         )?;
 
-        fail::fail_point!("midge::flush::after_sst_write_before_publish");
+        crate::failpoints::fail_point!("midge::flush::after_sst_write_before_publish");
 
         if let Some(hybrid) = sba {
             let remote_bytes = std::fs::read(publication.sst_path)?;

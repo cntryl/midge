@@ -9,6 +9,7 @@ mod common;
 use cntryl_midge::{Query, TransactionMode, WriteOptions};
 use common::*;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 #[test]
 fn should_recover_wal_backed_commit_when_reopening_local_engine() {
@@ -18,7 +19,7 @@ fn should_recover_wal_backed_commit_when_reopening_local_engine() {
 
     // Act
     {
-        let engine = open_with_mode(&opts, "local");
+        let mut engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("smoke").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -26,6 +27,9 @@ fn should_recover_wal_backed_commit_when_reopening_local_engine() {
         tx.put(b"wal-key".to_vec(), b"wal-value".to_vec(), None)
             .expect("put wal value");
         tx.commit(WriteOptions::sync()).expect("sync commit");
+        engine
+            .shutdown(Duration::from_secs(2))
+            .expect("shutdown before reopen");
     }
 
     let engine = open_with_mode(&opts, "local");
@@ -41,14 +45,19 @@ fn should_recover_wal_backed_commit_when_reopening_local_engine() {
     );
 }
 
+#[cfg(feature = "failpoints")]
 #[test]
 fn should_keep_data_recoverable_when_flush_publication_is_interrupted() {
     // Arrange
     let _guard = lock_smoke_tests();
     let temp_dir = tempfile::TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
-    let engine = cntryl_midge::Engine::open(cntryl_midge::OpenOptions::local(db_path).build())
-        .expect("open engine");
+    let mut engine = cntryl_midge::Engine::open(
+        cntryl_midge::OpenOptions::local(db_path)
+            .build()
+            .expect("build options"),
+    )
+    .expect("open engine");
     let cf = engine.get_column_family("default").expect("default cf");
 
     for index in 0..8 {
@@ -78,10 +87,16 @@ fn should_keep_data_recoverable_when_flush_publication_is_interrupted() {
             .contains("space"),
         "unexpected flush error: {flush_error}"
     );
-    drop(engine);
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown before reopen");
 
-    let reopened = cntryl_midge::Engine::open(cntryl_midge::OpenOptions::local(db_path).build())
-        .expect("reopen engine");
+    let reopened = cntryl_midge::Engine::open(
+        cntryl_midge::OpenOptions::local(db_path)
+            .build()
+            .expect("build options"),
+    )
+    .expect("reopen engine");
     let cf = reopened.get_column_family("default").expect("default cf");
     let tx = reopened
         .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -94,14 +109,19 @@ fn should_keep_data_recoverable_when_flush_publication_is_interrupted() {
     );
 }
 
+#[cfg(feature = "failpoints")]
 #[test]
 fn should_keep_compacted_data_visible_when_compaction_crashes_before_publish() {
     // Arrange
     let _guard = lock_smoke_tests();
     let temp_dir = tempfile::TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
-    let engine = cntryl_midge::Engine::open(cntryl_midge::OpenOptions::local(db_path).build())
-        .expect("open engine");
+    let mut engine = cntryl_midge::Engine::open(
+        cntryl_midge::OpenOptions::local(db_path)
+            .build()
+            .expect("build options"),
+    )
+    .expect("open engine");
     let cf = engine.get_column_family("default").expect("default cf");
 
     for batch in 0..4 {
@@ -131,10 +151,16 @@ fn should_keep_compacted_data_visible_when_compaction_crashes_before_publish() {
         .expect("compaction returns after failure");
     fail::remove("midge::manifest::inject_no_space_on_compaction_batch_edit");
     scenario.teardown();
-    drop(engine);
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown before reopen");
 
-    let reopened = cntryl_midge::Engine::open(cntryl_midge::OpenOptions::local(db_path).build())
-        .expect("reopen engine");
+    let reopened = cntryl_midge::Engine::open(
+        cntryl_midge::OpenOptions::local(db_path)
+            .build()
+            .expect("build options"),
+    )
+    .expect("reopen engine");
     let cf = reopened.get_column_family("default").expect("default cf");
     let tx = reopened
         .begin_tx(cf.id(), TransactionMode::ReadOnly)

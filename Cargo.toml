@@ -29,10 +29,7 @@ arc-swap = "1.9"
 crossbeam = "0.8"
 crossbeam-epoch = "0.9"
 dashmap = "6.2"
-# Note: fail is used for deterministic crash testing in test suites.
-# In production builds, this has minimal overhead. For security-critical environments,
-# consider building without this dependency if failpoint testing is not needed.
-fail = { version = "0.5", features = ["failpoints"] }
+fail = { version = "0.5", features = ["failpoints"], optional = true }
 parking_lot = "0.12"
 
 # Utilities used by stress workloads
@@ -109,6 +106,7 @@ cntryl-stress = { git = "https://github.com/cntryl/stress", branch = "main", pac
 
 [features]
 default = ["cloud-common"]
+failpoints = ["dep:fail"]
 telemetry = [
     "cloud-common",
     "dep:opentelemetry",
@@ -139,6 +137,34 @@ cloud-gcp = ["cloud-common"]
 cloud-oci = ["cloud-common"]
 cloud-all = ["cloud-aws", "cloud-azure", "cloud-gcp", "cloud-oci"]
 cloud_integration = ["cloud-all"]
+
+
+# Deterministic injection suites are compiled only when the non-production
+# `failpoints` feature is selected explicitly.
+[[test]]
+name = "failure_injection"
+path = "tests/failure_injection.rs"
+required-features = ["failpoints"]
+
+[[test]]
+name = "transaction_crash_boundaries"
+path = "tests/transaction_crash_boundaries.rs"
+required-features = ["failpoints"]
+
+[[test]]
+name = "chaos_real"
+path = "tests/chaos_real.rs"
+required-features = ["failpoints"]
+
+[[test]]
+name = "chaos_intent_log"
+path = "tests/chaos_intent_log.rs"
+required-features = ["failpoints"]
+
+[[test]]
+name = "chaos_compaction"
+path = "tests/chaos_compaction.rs"
+required-features = ["failpoints"]
 
 
 # =============================================================================

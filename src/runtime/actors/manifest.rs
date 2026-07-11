@@ -56,11 +56,12 @@ impl ManifestActor {
                 largest_seq: file_meta.largest_seq,
                 ..Default::default()
             });
-            fail::fail_point!("midge::manifest::inject_no_space_on_add_sst_edit", |_| Err(
-                crate::common::MidgeError::NoSpace(
+            crate::failpoints::fail_point!(
+                "midge::manifest::inject_no_space_on_add_sst_edit",
+                |_| Err(crate::common::MidgeError::NoSpace(
                     "failpoint: no space on manifest add_sst append".to_string()
-                )
-            ));
+                ))
+            );
             crate::metadata::append_edit(&state.db_path, &edit)?;
         }
 
@@ -121,7 +122,7 @@ impl ManifestActor {
             ));
         }
         if !edits.is_empty() {
-            fail::fail_point!(
+            crate::failpoints::fail_point!(
                 "midge::manifest::inject_no_space_on_compaction_batch_edit",
                 |_| Err(crate::common::MidgeError::NoSpace(
                     "failpoint: no space on manifest compaction batch append".to_string()

@@ -640,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn should_allow_exactly_one_concurrent_compare_and_swap_update() {
+    fn should_allow_one_winner_when_compare_swap_updates_race() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
         let key = "racing-cas.txt";

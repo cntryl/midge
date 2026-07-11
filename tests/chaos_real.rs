@@ -217,7 +217,7 @@ fn should_recover_all_sync_commits_when_manifest_file_is_zeroed_after_crash() {
     let committed = act_manifest_crash_with_zeroed_manifest(db_path);
 
     // Assert
-    match Engine::open(OpenOptions::local(db_path).build()) {
+    match Engine::open(OpenOptions::local(db_path).build().expect("build options")) {
         Ok(engine) => assert_committed_records_visible(&engine, &committed),
         Err(error) => {
             let message = error.to_string();
@@ -401,9 +401,11 @@ fn act_two_manifest_crash_cycles(db_path: &Path) -> Vec<CommitRecord> {
     expire_crashed_process_lease(db_path);
 
     let committed = read_committed_records(db_path);
-    let engine = open_local_engine(db_path);
+    let mut engine = open_local_engine(db_path);
     assert_committed_records_visible(&engine, &committed);
-    drop(engine);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown between crash cycles");
 
     run_child_expect_abort(
         "manifest_crash_after_sync",
@@ -542,7 +544,7 @@ fn child_concurrent_random_wal_append(db_path: &Path) {
 }
 
 fn open_local_engine(db_path: &Path) -> Engine {
-    Engine::open(OpenOptions::local(db_path).build()).expect("open engine")
+    Engine::open(OpenOptions::local(db_path).build().expect("build options")).expect("open engine")
 }
 
 fn default_cf(engine: &Engine) -> cntryl_midge::ColumnFamilyHandle {

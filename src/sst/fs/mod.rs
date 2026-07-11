@@ -37,7 +37,7 @@ pub(crate) fn persist_sst_bytes_to_path(bytes: &[u8], path: &Path) -> MidgeResul
 pub(crate) fn persist_sst_stream_to_path(source: &mut dyn Read, path: &Path) -> MidgeResult<()> {
     let finish_start = std::time::Instant::now();
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fail::fail_point!("midge::sst::inject_no_space_on_finish_to_path", |_| Err(
+    crate::failpoints::fail_point!("midge::sst::inject_no_space_on_finish_to_path", |_| Err(
         MidgeError::NoSpace("failpoint: no space while finalizing SST".to_string())
     ));
 

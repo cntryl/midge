@@ -19,7 +19,7 @@ cntryl-midge = "0.1"
 use cntryl_midge::prelude::*;
 use cntryl_midge::Bytes;
 
-let engine = Engine::open(OpenOptions::local("./db").build())?;
+let engine = Engine::open(OpenOptions::local("./db").build()?)?;
 let cf = engine.create_column_family("cf1")?;
 
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;

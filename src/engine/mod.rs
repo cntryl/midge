@@ -36,8 +36,8 @@ pub use crate::types::{
 };
 pub use api::{
     BlockCachePolicy, CloudWritePolicy, ConflictPolicy, Direction, Goal, Key, MemoryBudget,
-    OpenOptions, Query, RecoveryPolicy, ScanIterator, Storage, Transaction, TransactionMode, Value,
-    WorkloadProfile, WriteOptions,
+    OpenOptions, OpenOptionsBuilder, Query, RecoveryPolicy, ScanIterator, Storage, Transaction,
+    TransactionMode, Value, WorkloadProfile, WriteOptions,
 };
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<ColumnFamilyId, ColumnFamilyHandle>;
@@ -930,9 +930,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_return_busy_with_live_transaction_and_allow_shutdown_retry() -> MidgeResult<()> {
+    fn should_allow_shutdown_retry_when_live_transaction_is_released() -> MidgeResult<()> {
         // Arrange
-        let mut engine = Engine::open(OpenOptions::in_memory().build())?;
+        let mut engine = Engine::open(OpenOptions::in_memory().build()?)?;
         let default_cf = engine
             .get_column_family("default")
             .ok_or_else(|| MidgeError::Internal("default column family missing".to_string()))?;
@@ -966,7 +966,7 @@ mod tests {
     fn should_reap_engine_without_blocking_drop_when_transaction_is_live() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempfile::tempdir().map_err(MidgeError::Io)?;
-        let engine = Engine::open(OpenOptions::local(temp_dir.path()).build())?;
+        let engine = Engine::open(OpenOptions::local(temp_dir.path()).build()?)?;
         let default_cf = engine
             .get_column_family("default")
             .ok_or_else(|| MidgeError::Internal("default column family missing".to_string()))?;
@@ -983,14 +983,14 @@ mod tests {
             "Engine::drop waited for its live transaction: {drop_elapsed:?}"
         );
         assert!(
-            Engine::open(OpenOptions::local(temp_dir.path()).build()).is_err(),
+            Engine::open(OpenOptions::local(temp_dir.path()).build()?).is_err(),
             "reaper released the primary lease while the runtime transaction was live"
         );
 
         drop(transaction);
         let reopen_deadline = std::time::Instant::now() + Duration::from_secs(2);
         let mut reopened = loop {
-            match Engine::open(OpenOptions::local(temp_dir.path()).build()) {
+            match Engine::open(OpenOptions::local(temp_dir.path()).build()?) {
                 Ok(engine) => break engine,
                 Err(error) if std::time::Instant::now() < reopen_deadline => {
                     tracing::trace!(%error, "waiting for engine reaper to release lease");
@@ -1169,7 +1169,7 @@ mod tests {
     #[test]
     fn should_treat_flush_compact_as_noop_in_memory_mode() {
         // Arrange
-        let opts = OpenOptions::in_memory();
+        let opts = OpenOptions::in_memory().build().expect("build options");
 
         // Act
         let engine = Engine::open(opts).expect("open memory engine");

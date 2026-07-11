@@ -35,7 +35,7 @@ fn should_reject_insert_when_key_exists_only_in_sst() {
 }
 
 #[test]
-fn should_evaluate_duplicate_and_delete_then_insert_intents_in_order() {
+fn should_apply_ordered_intents_when_duplicate_delete_precedes_insert() {
     // Arrange
     let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("intents").expect("create cf");
@@ -178,11 +178,11 @@ fn should_use_transaction_snapshot_time_for_ttl_visibility() {
 }
 
 #[test]
-fn should_persist_range_tombstone_across_flush_and_restart() {
+fn should_persist_range_tombstone_when_flush_survives_restart() {
     // Arrange
     let opts = opts_for_mode("local");
     {
-        let engine = open_with_mode(&opts, "local");
+        let mut engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("ranges").expect("create cf");
         let mut writer = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -207,6 +207,9 @@ fn should_persist_range_tombstone_across_flush_and_restart() {
             .commit(WriteOptions::buffered())
             .expect("commit range tombstone");
         engine.flush_cf(&cf).expect("flush range tombstone");
+        engine
+            .shutdown(std::time::Duration::from_secs(2))
+            .expect("shutdown before immediate reopen");
     }
 
     // Act

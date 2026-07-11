@@ -166,11 +166,11 @@ impl ManifestPersistence {
             &target_path,
             &json,
             || {
-                fail::fail_point!(
+                crate::failpoints::fail_point!(
                     "midge::manifest::inject_no_space_on_checkpoint_save",
                     |_| Err("failpoint: no space while saving manifest checkpoint".to_string())
                 );
-                fail::fail_point!("midge::manifest::after_temp_sync_before_rename");
+                crate::failpoints::fail_point!("midge::manifest::after_temp_sync_before_rename");
                 Ok(())
             },
             |msg| msg,
@@ -207,7 +207,7 @@ impl ManifestPersistence {
 
         staging::stage_bytes(fs, &temp, &snap_path, &json, |msg| msg)?;
 
-        fail::fail_point!(
+        crate::failpoints::fail_point!(
             "midge::manifest::after_snapshot_rename_before_journal_truncate",
             |_| Err("failpoint: crash after manifest snapshot rename".to_string())
         );
