@@ -1,4 +1,15 @@
 use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+static SYNC_COUNT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn sync_count_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    SYNC_COUNT_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock physical-sync counter tests")
+}
 
 fn open_engine() -> (tempfile::TempDir, Engine, cntryl_midge::ColumnFamilyHandle) {
     cntryl_midge::init_benchmark_telemetry().expect("enable test-visible WAL metrics");
@@ -25,7 +36,8 @@ fn wal_fsync_count(engine: &Engine) -> u64 {
 #[test]
 fn should_issue_one_physical_wal_sync_when_non_empty_sync_transaction_commits() {
     // Arrange
-    let (_temp_dir, engine, cf) = open_engine();
+    let _guard = sync_count_test_guard();
+    let (_temp_dir, mut engine, cf) = open_engine();
     let before = wal_fsync_count(&engine);
     let mut tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -44,12 +56,16 @@ fn should_issue_one_physical_wal_sync_when_non_empty_sync_transaction_commits() 
         1,
         "strict WAL append must own the sole physical sync boundary"
     );
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown sync-count engine");
 }
 
 #[test]
 fn should_issue_one_physical_wal_sync_when_empty_sync_transaction_commits() {
     // Arrange
-    let (_temp_dir, engine, cf) = open_engine();
+    let _guard = sync_count_test_guard();
+    let (_temp_dir, mut engine, cf) = open_engine();
     let before = wal_fsync_count(&engine);
     let tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -66,12 +82,16 @@ fn should_issue_one_physical_wal_sync_when_empty_sync_transaction_commits() {
         1,
         "an explicit empty synchronous commit must perform exactly one barrier"
     );
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown empty-sync engine");
 }
 
 #[test]
 fn should_not_issue_physical_wal_sync_before_buffered_commit_returns() {
     // Arrange
-    let (_temp_dir, engine, cf) = open_engine();
+    let _guard = sync_count_test_guard();
+    let (_temp_dir, mut engine, cf) = open_engine();
     let before = wal_fsync_count(&engine);
     let mut tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -90,4 +110,7 @@ fn should_not_issue_physical_wal_sync_before_buffered_commit_returns() {
         0,
         "buffered commit must not introduce a synchronous physical barrier"
     );
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown buffered engine");
 }
