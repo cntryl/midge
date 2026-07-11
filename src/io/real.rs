@@ -117,9 +117,13 @@ impl RealFs {
             std_opts.truncate(true);
         }
 
-        let file = std_opts
-            .open(&full)
-            .map_err(|e| super::traits::FsError::Io(e.to_string()))?;
+        let file = std_opts.open(&full).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                super::traits::FsError::NotFound(format!("{}: {error}", full.display()))
+            } else {
+                super::traits::FsError::Io(format!("open {}: {error}", full.display()))
+            }
+        })?;
         Ok(Box::new(RealFile { file }))
     }
 }
@@ -654,6 +658,28 @@ mod tests {
             .map_err(|error| FsError::Io(error.to_string()))?;
         assert_eq!(contents, b"new");
         assert!(!temp.path().join("source.tmp").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_classify_missing_file_as_not_found() -> FsResult<()> {
+        // Arrange
+        let temp = TempDir::new().map_err(|error| FsError::Io(error.to_string()))?;
+        let fs = RealFs::new(temp.path())?;
+
+        // Act
+        let result = fs.open(
+            &FsPath::new("missing.txt"),
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        );
+
+        // Assert
+        assert!(matches!(result, Err(FsError::NotFound(_))));
         Ok(())
     }
 
