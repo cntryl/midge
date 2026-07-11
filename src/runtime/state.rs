@@ -1606,12 +1606,10 @@ impl RuntimeState {
     /// Append an intent entry and persist the intent log to disk.
     #[cfg(test)]
     pub fn append_intent(&mut self, entry: crate::runtime::IntentLogEntry) -> MidgeResult<()> {
-        self.intent_log.push(entry);
-        // Persist intent log unless running in memory mode
-        if !self.is_memory_mode() {
-            crate::runtime::IntentPersistence::save(&self.db_path, &self.intent_log)
-                .map_err(crate::common::MidgeError::Internal)?;
-        }
+        let mut proposed = self.intent_log.clone();
+        proposed.push(entry);
+        self.persist_intent_entries(&proposed)?;
+        self.intent_log = proposed;
         Ok(())
     }
 
@@ -1652,10 +1650,12 @@ impl RuntimeState {
         Ok(())
     }
 
-    /// Persist the intent log to disk (call after batched `append_intent_deferred` calls).
-    pub fn persist_intent_log(&self) -> MidgeResult<()> {
+    fn persist_intent_entries(
+        &self,
+        intents: &[crate::runtime::IntentLogEntry],
+    ) -> MidgeResult<()> {
         if !self.is_memory_mode() {
-            crate::runtime::IntentPersistence::save(&self.db_path, &self.intent_log)
+            crate::runtime::IntentPersistence::save(&self.db_path, intents)
                 .map_err(crate::common::MidgeError::Internal)?;
         }
         Ok(())
@@ -1667,7 +1667,8 @@ impl RuntimeState {
         removed: Vec<String>,
         added: Vec<crate::runtime::FileMeta>,
     ) -> MidgeResult<()> {
-        self.intent_log.retain(|entry| {
+        let mut proposed = self.intent_log.clone();
+        proposed.retain(|entry| {
             !matches!(
                 entry,
                 crate::runtime::IntentLogEntry::CompactionPublish {
@@ -1679,14 +1680,15 @@ impl RuntimeState {
                 )
             )
         });
-        self.intent_log
-            .push(crate::runtime::IntentLogEntry::CompactionPublish {
-                phase: PublicationPhase::OutputDurable,
-                cf_id,
-                removed,
-                added,
-            });
-        self.persist_intent_log()
+        proposed.push(crate::runtime::IntentLogEntry::CompactionPublish {
+            phase: PublicationPhase::OutputDurable,
+            cf_id,
+            removed,
+            added,
+        });
+        self.persist_intent_entries(&proposed)?;
+        self.intent_log = proposed;
+        Ok(())
     }
 
     pub fn transition_flush_publication_intent(
@@ -1694,7 +1696,8 @@ impl RuntimeState {
         sst_name: &str,
         phase: PublicationPhase,
     ) -> MidgeResult<()> {
-        for entry in &mut self.intent_log {
+        let mut proposed = self.intent_log.clone();
+        for entry in &mut proposed {
             if let crate::runtime::IntentLogEntry::FlushPublish {
                 phase: current_phase,
                 file_meta,
@@ -1706,18 +1709,23 @@ impl RuntimeState {
                 }
             }
         }
-        self.persist_intent_log()
+        self.persist_intent_entries(&proposed)?;
+        self.intent_log = proposed;
+        Ok(())
     }
 
     pub fn clear_flush_publication_intent(&mut self, sst_name: &str) -> MidgeResult<()> {
-        self.intent_log.retain(|entry| {
+        let mut proposed = self.intent_log.clone();
+        proposed.retain(|entry| {
             !matches!(
                 entry,
                 crate::runtime::IntentLogEntry::FlushPublish { file_meta, .. }
                     if file_meta.name == sst_name
             )
         });
-        self.persist_intent_log()
+        self.persist_intent_entries(&proposed)?;
+        self.intent_log = proposed;
+        Ok(())
     }
 
     pub fn transition_compaction_publication_intent(
@@ -1725,7 +1733,8 @@ impl RuntimeState {
         output_ssts: &[String],
         phase: PublicationPhase,
     ) -> MidgeResult<()> {
-        for entry in &mut self.intent_log {
+        let mut proposed = self.intent_log.clone();
+        for entry in &mut proposed {
             if let crate::runtime::IntentLogEntry::CompactionPublish {
                 phase: current_phase,
                 added,
@@ -1740,14 +1749,17 @@ impl RuntimeState {
                 }
             }
         }
-        self.persist_intent_log()
+        self.persist_intent_entries(&proposed)?;
+        self.intent_log = proposed;
+        Ok(())
     }
 
     pub fn clear_compaction_publication_intent(
         &mut self,
         output_ssts: &[String],
     ) -> MidgeResult<()> {
-        self.intent_log.retain(|entry| {
+        let mut proposed = self.intent_log.clone();
+        proposed.retain(|entry| {
             !matches!(
                 entry,
                 crate::runtime::IntentLogEntry::CompactionPublish { added, .. }
@@ -1757,7 +1769,9 @@ impl RuntimeState {
                     )
             )
         });
-        self.persist_intent_log()
+        self.persist_intent_entries(&proposed)?;
+        self.intent_log = proposed;
+        Ok(())
     }
 
     fn same_file_name_set<'a, I, J>(left: I, right: J) -> bool
@@ -3034,6 +3048,35 @@ mod tests {
             ),
             "expected WalSynced entry with segment_id=2, seqno=99, got: {:?}",
             state.intent_log[0]
+        );
+    }
+
+    #[test]
+    fn should_not_mutate_compaction_intent_when_persistence_rejects_output() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("create compaction intent directory");
+        let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+        let invalid_output = crate::runtime::FileMeta {
+            name: "../escape.sst".to_string(),
+            level: 1,
+            size_bytes: 1,
+            content_crc32c: None,
+            cf_id: 0,
+            smallest_key: None,
+            largest_key: None,
+            smallest_seq: None,
+            largest_seq: None,
+        };
+
+        // Act
+        let result =
+            state.record_compaction_publication_intent(0, Vec::new(), vec![invalid_output]);
+
+        // Assert
+        assert!(result.is_err(), "unsafe output name must be rejected");
+        assert!(
+            state.intent_log.is_empty(),
+            "failed intent persistence must not mutate in-memory state"
         );
     }
 

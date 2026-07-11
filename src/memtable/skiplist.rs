@@ -499,26 +499,54 @@ impl SkipList {
         guard: &Guard,
     ) -> bool {
         loop {
-            let curr_head = node.versions_head.load(AO::Acquire, guard);
+            // Keep the version chain ordered by descending sequence number.
+            // Writers may reserve sequences before they reach this CAS, so
+            // arrival order is not a safe proxy for MVCC recency.
+            let mut predecessor = None;
+            let mut current = node.versions_head.load(AO::Acquire, guard);
+            while let Some(current_ref) = unsafe { current.as_ref() } {
+                if current_ref.seq <= seq {
+                    break;
+                }
+                predecessor = Some(current);
+                current = current_ref.next.load(AO::Acquire, guard);
+            }
+
             let new_ver = Owned::new(VersionNode {
                 seq,
                 val: value.cloned(),
                 exp,
                 op,
-                next: Atomic::from(curr_head),
+                next: Atomic::from(current),
             });
 
-            match node.versions_head.compare_exchange(
-                curr_head,
-                new_ver,
-                AO::AcqRel,
-                AO::Acquire,
-                guard,
-            ) {
-                Ok(_) => return true, // success
-                Err(e) => {
-                    // CAS failed; drop newly allocated node and retry.
-                    drop(e.new);
+            let result = match predecessor {
+                Some(predecessor) => {
+                    // SAFETY: predecessor was reached through an Acquire
+                    // load while this epoch guard is pinned.
+                    unsafe { predecessor.deref() }.next.compare_exchange(
+                        current,
+                        new_ver,
+                        AO::AcqRel,
+                        AO::Acquire,
+                        guard,
+                    )
+                }
+                None => node.versions_head.compare_exchange(
+                    current,
+                    new_ver,
+                    AO::AcqRel,
+                    AO::Acquire,
+                    guard,
+                ),
+            };
+
+            match result {
+                Ok(_) => return true,
+                Err(error) => {
+                    // The insertion window changed; retry from a fresh chain
+                    // snapshot and reclaim the unpublished node.
+                    drop(error.new);
                 }
             }
         }
@@ -1310,6 +1338,37 @@ mod tests {
         assert_eq!(v_at_7, Some(Bytes::from_static(b"v1")));
         assert_eq!(v_at_12, Some(Bytes::from_static(b"v2")));
         assert_eq!(v_at_20, Some(Bytes::from_static(b"v3")));
+    }
+
+    #[test]
+    fn should_order_versions_by_sequence_when_writes_arrive_out_of_order() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v20")),
+            20,
+        );
+        sl.upsert(
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v10")),
+            10,
+        );
+        sl.upsert(
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v30")),
+            30,
+        );
+
+        // Act
+        let at_15 = sl.get(b"k", 15);
+        let at_25 = sl.get(b"k", 25);
+        let at_40 = sl.get(b"k", 40);
+
+        // Assert
+        assert_eq!(at_15, Some(Bytes::from_static(b"v10")));
+        assert_eq!(at_25, Some(Bytes::from_static(b"v20")));
+        assert_eq!(at_40, Some(Bytes::from_static(b"v30")));
     }
 
     #[test]
