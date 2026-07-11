@@ -3,12 +3,13 @@
 //! Storage provider families own their credential/configuration DTOs so lower
 //! layers can construct providers without depending on the generic engine config bag.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use crate::common::{MidgeError, MidgeResult};
 
 /// Cloud provider credential source for S3-compatible providers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum S3CredentialSource {
     /// Use an explicit access key / secret key pair.
     Static {
@@ -30,6 +31,38 @@ pub enum S3CredentialSource {
     /// `Environment`, or `SharedProfile` so they do not accidentally contact AWS
     /// metadata/role endpoints.
     AwsDefaultChain,
+}
+
+impl fmt::Debug for S3CredentialSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Static { session_token, .. } => formatter
+                .debug_struct("Static")
+                .field("access_key", &"[REDACTED]")
+                .field("secret_key", &"[REDACTED]")
+                .field(
+                    "session_token",
+                    &if session_token.is_some() {
+                        "[REDACTED]"
+                    } else {
+                        "<none>"
+                    },
+                )
+                .finish(),
+            Self::Environment => formatter.write_str("Environment"),
+            Self::SharedProfile {
+                profile,
+                credentials_file,
+                config_file,
+            } => formatter
+                .debug_struct("SharedProfile")
+                .field("profile", profile)
+                .field("credentials_file", credentials_file)
+                .field("config_file", config_file)
+                .finish(),
+            Self::AwsDefaultChain => formatter.write_str("AwsDefaultChain"),
+        }
+    }
 }
 
 impl S3CredentialSource {
@@ -78,7 +111,7 @@ impl S3CredentialSource {
 }
 
 /// Azure Blob credential source.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum AzureCredentialSource {
     SharedKey {
         account_key: String,
@@ -100,6 +133,42 @@ pub enum AzureCredentialSource {
         client_id: Option<String>,
     },
     LightweightDefaultChain,
+}
+
+impl fmt::Debug for AzureCredentialSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SharedKey { .. } => formatter
+                .debug_struct("SharedKey")
+                .field("account_key", &"[REDACTED]")
+                .finish(),
+            Self::SasToken { .. } => formatter
+                .debug_struct("SasToken")
+                .field("token", &"[REDACTED]")
+                .finish(),
+            Self::ConnectionString { .. } => formatter
+                .debug_struct("ConnectionString")
+                .field("connection_string", &"[REDACTED]")
+                .finish(),
+            Self::StorageEnvironment => formatter.write_str("StorageEnvironment"),
+            Self::EnvironmentClientSecret => formatter.write_str("EnvironmentClientSecret"),
+            Self::WorkloadIdentity {
+                tenant_id,
+                client_id,
+                token_file,
+            } => formatter
+                .debug_struct("WorkloadIdentity")
+                .field("tenant_id", tenant_id)
+                .field("client_id", client_id)
+                .field("token_file", token_file)
+                .finish(),
+            Self::ManagedIdentity { client_id } => formatter
+                .debug_struct("ManagedIdentity")
+                .field("client_id", client_id)
+                .finish(),
+            Self::LightweightDefaultChain => formatter.write_str("LightweightDefaultChain"),
+        }
+    }
 }
 
 impl AzureCredentialSource {
@@ -199,7 +268,7 @@ impl AzureCredentialSource {
 }
 
 /// Google Cloud Storage credential source.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum GcsCredentialSource {
     BearerToken { token: String },
     HmacKey { access_id: String, secret: String },
@@ -207,6 +276,32 @@ pub enum GcsCredentialSource {
     ServiceAccountJsonFile { path: PathBuf },
     AuthorizedUserJsonFile { path: PathBuf },
     MetadataServer,
+}
+
+impl fmt::Debug for GcsCredentialSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BearerToken { .. } => formatter
+                .debug_struct("BearerToken")
+                .field("token", &"[REDACTED]")
+                .finish(),
+            Self::HmacKey { .. } => formatter
+                .debug_struct("HmacKey")
+                .field("access_id", &"[REDACTED]")
+                .field("secret", &"[REDACTED]")
+                .finish(),
+            Self::ApplicationDefault => formatter.write_str("ApplicationDefault"),
+            Self::ServiceAccountJsonFile { path } => formatter
+                .debug_struct("ServiceAccountJsonFile")
+                .field("path", path)
+                .finish(),
+            Self::AuthorizedUserJsonFile { path } => formatter
+                .debug_struct("AuthorizedUserJsonFile")
+                .field("path", path)
+                .finish(),
+            Self::MetadataServer => formatter.write_str("MetadataServer"),
+        }
+    }
 }
 
 impl GcsCredentialSource {
@@ -258,7 +353,7 @@ pub enum GcsApiStyle {
 }
 
 /// Public cloud provider configuration for real object-store backends.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum CloudProviderConfig {
     AwsS3 {
         bucket: String,
@@ -285,6 +380,63 @@ pub enum CloudProviderConfig {
         api: GcsApiStyle,
         credential: GcsCredentialSource,
     },
+}
+
+impl fmt::Debug for CloudProviderConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AwsS3 {
+                bucket,
+                region,
+                credentials,
+            } => formatter
+                .debug_struct("AwsS3")
+                .field("bucket", bucket)
+                .field("region", region)
+                .field("credentials", credentials)
+                .finish(),
+            Self::S3Compatible {
+                bucket,
+                region,
+                endpoint,
+                path_style,
+                credentials,
+            } => formatter
+                .debug_struct("S3Compatible")
+                .field("bucket", bucket)
+                .field("region", region)
+                .field("endpoint", endpoint)
+                .field("path_style", path_style)
+                .field("credentials", credentials)
+                .finish(),
+            Self::AzureBlob {
+                account,
+                container,
+                endpoint,
+                credential,
+            } => formatter
+                .debug_struct("AzureBlob")
+                .field("account", account)
+                .field("container", container)
+                .field("endpoint", endpoint)
+                .field("credential", credential)
+                .finish(),
+            Self::Gcs {
+                bucket,
+                project_id,
+                endpoint,
+                api,
+                credential,
+            } => formatter
+                .debug_struct("Gcs")
+                .field("bucket", bucket)
+                .field("project_id", project_id)
+                .field("endpoint", endpoint)
+                .field("api", api)
+                .field("credential", credential)
+                .finish(),
+        }
+    }
 }
 
 /// Provider-neutral credential wrapper for fluent cloud configuration.
@@ -763,4 +915,74 @@ fn azure_connection_string_account(connection_string: &str) -> Option<String> {
     }
 
     account.or_else(|| use_development_storage.then(|| "devstoreaccount1".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CloudProviderConfig, GcsCredentialSource, S3CredentialSource};
+
+    #[test]
+    fn should_redact_all_static_provider_secrets_from_debug_output() {
+        // Arrange
+        let s3_secret = "s3-secret-do-not-log";
+        let azure_secret = "azure-secret-do-not-log";
+        let gcs_secret = "gcs-secret-do-not-log";
+        let bearer_token = "bearer-token-do-not-log";
+        let session_token = "session-token-do-not-log";
+        let providers = [
+            CloudProviderConfig::s3_compatible(
+                "bucket",
+                "region",
+                "https://endpoint.example",
+                "s3-access-do-not-log",
+                s3_secret,
+            )
+            .with_s3_credentials(S3CredentialSource::session(
+                "s3-access-do-not-log",
+                s3_secret,
+                session_token,
+            ))
+            .expect("S3 credential override should match provider"),
+            CloudProviderConfig::azure_blob_connection_string(
+                "container",
+                "DefaultEndpointsProtocol=https;AccountName=account;AccountKey=azure-secret-do-not-log",
+            ),
+            CloudProviderConfig::gcs_hmac("bucket", "gcs-access-do-not-log", gcs_secret),
+            CloudProviderConfig::gcs_bearer_token("bucket", bearer_token),
+        ];
+
+        // Act
+        let output = format!("{providers:#?}");
+
+        // Assert
+        for secret in [
+            s3_secret,
+            azure_secret,
+            gcs_secret,
+            bearer_token,
+            session_token,
+            "s3-access-do-not-log",
+            "gcs-access-do-not-log",
+        ] {
+            assert!(
+                !output.contains(secret),
+                "provider Debug output leaked configured credential {secret:?}: {output}"
+            );
+        }
+        assert!(output.contains("https://endpoint.example"));
+        assert!(output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn should_redact_direct_gcs_credential_debug_output() {
+        // Arrange
+        let credential = GcsCredentialSource::bearer_token("gcs-token-do-not-log");
+
+        // Act
+        let output = format!("{credential:?}");
+
+        // Assert
+        assert!(!output.contains("gcs-token-do-not-log"));
+        assert!(output.contains("[REDACTED]"));
+    }
 }
