@@ -2824,6 +2824,7 @@ mod tests {
             // Act
             let result = wal_actor.append_prepared_transactions(&mut state, vec![first, second]);
 
+            // Assert
             assert!(result.is_err(), "coalesced append should fail");
             let error = result.err().expect("coalesced append error");
             assert!(matches!(error, MidgeError::NoSpace(_)));
