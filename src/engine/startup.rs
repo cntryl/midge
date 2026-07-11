@@ -1316,7 +1316,9 @@ impl RuntimeStorageMaterialization {
         )?);
         let cloud_backend: Arc<dyn crate::storage::StorageBackend> = cloud_storage.clone();
 
-        let (tx, rx) = crossbeam::channel::unbounded::<crate::storage::StorageEvent>();
+        let (tx, rx) = crossbeam::channel::bounded::<crate::storage::StorageEvent>(
+            crate::storage::hybrid::backend::HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY,
+        );
         let hybrid_storage = Arc::new(crate::storage::HybridStorage::new_with_event_sender(
             local_backend,
             cloud_backend,

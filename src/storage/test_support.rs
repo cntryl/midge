@@ -30,7 +30,9 @@ pub(crate) fn build_cloud_backed_filesystem_simulation(
     let local_backend = Arc::new(FileSystem::new(db_path.join("hybrid_local"))?);
     let cloud_backend = Arc::new(FileSystem::new(cloud_root.clone())?);
 
-    let (tx, rx) = crossbeam::channel::unbounded::<StorageEvent>();
+    let (tx, rx) = crossbeam::channel::bounded::<StorageEvent>(
+        crate::storage::hybrid::backend::HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY,
+    );
     let hybrid_storage = if let Some(budget_bytes) = local_storage_budget_bytes {
         Arc::new(HybridStorage::with_policy_and_event_sender(
             local_backend,

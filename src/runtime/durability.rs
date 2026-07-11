@@ -32,6 +32,7 @@ pub enum DurabilityWaiter {
         request_id: u64,
         last_sequence: u64,
         op_count: usize,
+        touched_cfs: Vec<crate::types::ColumnFamilyId>,
     },
     /// Internal waiter used when caller already acknowledged but needs cleanup.
     ConfirmTransactionApply {

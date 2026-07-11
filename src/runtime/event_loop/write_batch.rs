@@ -26,6 +26,7 @@ enum WriteResult {
         last_sequence: u64,
         op_count: usize,
         deferred: bool,
+        touched_cfs: Vec<crate::types::ColumnFamilyId>,
     },
 }
 
@@ -40,13 +41,39 @@ impl WriteResult {
 }
 
 impl EventLoop {
+    pub(super) fn transaction_cf_ids(ops: &[TransactionOp]) -> Vec<crate::types::ColumnFamilyId> {
+        let mut seen = HashSet::new();
+        ops.iter()
+            .filter_map(|op| {
+                let cf_id = match op {
+                    TransactionOp::Put { cf_id, .. }
+                    | TransactionOp::Delete { cf_id, .. }
+                    | TransactionOp::DeleteRange { cf_id, .. } => *cf_id,
+                };
+                seen.insert(cf_id).then_some(cf_id)
+            })
+            .collect()
+    }
+
+    pub(super) fn write_stall_hint_for_cfs(&self, cf_ids: &[crate::types::ColumnFamilyId]) -> bool {
+        cf_ids.iter().any(|cf_id| self.should_stall_writes(*cf_id))
+    }
+
+    pub(super) fn should_stall_writes(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
+        self.state.should_stall_writes(cf_id)
+            || self
+                .hybrid_storage
+                .as_ref()
+                .is_some_and(|storage| storage.is_wal_upload_stalled())
+    }
+
     pub(super) fn wake_write_stall_waiters(&mut self) {
         // Avoid borrowing issues by snapshotting keys.
         let cf_ids: Vec<crate::types::ColumnFamilyId> =
             self.write_stall_waiter_queues.keys().copied().collect();
 
         for cf_id in cf_ids {
-            if self.state.should_stall_writes(cf_id) {
+            if self.should_stall_writes(cf_id) {
                 continue;
             }
 
@@ -233,8 +260,9 @@ impl EventLoop {
             PrepareOutcome::Prepared {
                 request_id,
                 prepared_transaction,
+                touched_cfs,
             } => {
-                batch.push_prepared(request_id, prepared_transaction);
+                batch.push_prepared(request_id, prepared_transaction, touched_cfs);
             }
             PrepareOutcome::Fallback(request) => {
                 self.apply_single_transaction_request(request);
@@ -335,8 +363,9 @@ impl EventLoop {
                     PrepareOutcome::Prepared {
                         request_id,
                         prepared_transaction,
+                        touched_cfs,
                     } => {
-                        batch.push_prepared(request_id, prepared_transaction);
+                        batch.push_prepared(request_id, prepared_transaction, touched_cfs);
                         true
                     }
                     PrepareOutcome::Fallback(request) => {
@@ -392,6 +421,7 @@ impl EventLoop {
         let CoalescedTransactionBatch {
             staged_touches: _,
             prepared,
+            mut touched_cfs,
             request_ids,
             mut handled,
             fallback_request,
@@ -405,12 +435,14 @@ impl EventLoop {
         match append_result {
             Ok(results) => {
                 for result in results {
+                    let touched_cfs = touched_cfs.remove(&result.request_id).unwrap_or_default();
                     self.finish_drained_write(
                         result.request_id,
                         Ok(WriteResult::TransactionApplied {
                             last_sequence: result.last_sequence,
                             op_count: result.op_count,
                             deferred: result.deferred,
+                            touched_cfs,
                         }),
                     );
                 }
@@ -460,6 +492,7 @@ impl EventLoop {
         }
 
         let request_id = request.request_id;
+        let touched_cfs = Self::transaction_cf_ids(&request.ops);
         staged_touches.record_ops(&request.ops);
         let result = self.wal_actor.prepare_transaction_append(
             &mut self.state,
@@ -475,7 +508,8 @@ impl EventLoop {
         match result {
             Ok(prepared_transaction) => PrepareOutcome::Prepared {
                 request_id,
-                prepared_transaction,
+                prepared_transaction: Box::new(prepared_transaction),
+                touched_cfs,
             },
             Err(error) => PrepareOutcome::Error { request_id, error },
         }
@@ -489,6 +523,7 @@ impl EventLoop {
             start_sequence,
             conflict_policy,
         } = request;
+        let touched_cfs = Self::transaction_cf_ids(&ops);
         let result = self
             .wal_actor
             .append_transaction(
@@ -504,6 +539,7 @@ impl EventLoop {
                     last_sequence,
                     op_count,
                     deferred,
+                    touched_cfs,
                 },
             );
         self.finish_drained_write(request_id, result);
@@ -549,6 +585,7 @@ impl EventLoop {
                 WriteResult::TransactionApplied {
                     last_sequence,
                     op_count,
+                    touched_cfs,
                     ..
                 } => {
                     self.respond(
@@ -557,7 +594,7 @@ impl EventLoop {
                             request_id,
                             last_sequence: *last_sequence,
                             op_count: *op_count,
-                            write_stall_hint: self.state.should_stall_writes(0),
+                            write_stall_hint: self.write_stall_hint_for_cfs(touched_cfs),
                         },
                     );
                 }
@@ -574,6 +611,7 @@ impl EventLoop {
                 WriteResult::TransactionApplied {
                     last_sequence,
                     op_count,
+                    touched_cfs,
                     ..
                 } => {
                     self.durability
@@ -581,6 +619,7 @@ impl EventLoop {
                             request_id,
                             last_sequence: *last_sequence,
                             op_count: *op_count,
+                            touched_cfs: touched_cfs.clone(),
                         });
                 }
             }
@@ -601,7 +640,8 @@ enum DrainOutcome {
 enum PrepareOutcome {
     Prepared {
         request_id: u64,
-        prepared_transaction: crate::runtime::actors::wal::PreparedTransactionAppend,
+        prepared_transaction: Box<crate::runtime::actors::wal::PreparedTransactionAppend>,
+        touched_cfs: Vec<crate::types::ColumnFamilyId>,
     },
     Fallback(ApplyTransactionRequest),
     Error {
@@ -614,6 +654,7 @@ enum PrepareOutcome {
 struct CoalescedTransactionBatch {
     staged_touches: StagedTransactionTouches,
     prepared: Vec<crate::runtime::actors::wal::PreparedTransactionAppend>,
+    touched_cfs: HashMap<u64, Vec<crate::types::ColumnFamilyId>>,
     request_ids: Vec<u64>,
     handled: usize,
     fallback_request: Option<ApplyTransactionRequest>,
@@ -624,10 +665,12 @@ impl CoalescedTransactionBatch {
     fn push_prepared(
         &mut self,
         request_id: u64,
-        prepared_transaction: crate::runtime::actors::wal::PreparedTransactionAppend,
+        prepared_transaction: Box<crate::runtime::actors::wal::PreparedTransactionAppend>,
+        touched_cfs: Vec<crate::types::ColumnFamilyId>,
     ) {
         self.request_ids.push(request_id);
-        self.prepared.push(prepared_transaction);
+        self.touched_cfs.insert(request_id, touched_cfs);
+        self.prepared.push(*prepared_transaction);
         self.handled += 1;
     }
 }
@@ -729,6 +772,9 @@ fn duplicate_midge_error(error: &MidgeError) -> MidgeError {
         MidgeError::Fenced(message) => MidgeError::Fenced(message.clone()),
         MidgeError::WriteConflict(message) => MidgeError::WriteConflict(message.clone()),
         MidgeError::Aborted(message) => MidgeError::Aborted(message.clone()),
+        MidgeError::Busy(message) => MidgeError::Busy(message.clone()),
+        MidgeError::Timeout(message) => MidgeError::Timeout(message.clone()),
+        MidgeError::ResourceLimit(message) => MidgeError::ResourceLimit(message.clone()),
     }
 }
 
@@ -1634,5 +1680,84 @@ mod tests {
             start_key: Bytes::from_static(b"range-z"),
             end_key: Bytes::from_static(b"zz"),
         }]));
+    }
+
+    #[test]
+    fn should_remove_cancelled_write_stall_waiter_from_all_indexes() -> MidgeResult<()> {
+        // Arrange
+        let mut fixture = EventLoopFixture::batched()?;
+        fixture.event_loop.state.set_write_stalled(true);
+        fixture.event_loop.handle_wait_for_write_stall_clear(900, 0);
+        assert_eq!(fixture.event_loop.write_stall_waiters.get(&900), Some(&0));
+        assert_eq!(
+            fixture
+                .event_loop
+                .write_stall_waiter_queues
+                .get(&0)
+                .map(std::collections::VecDeque::len),
+            Some(1)
+        );
+
+        // Act
+        fixture
+            .event_loop
+            .handle_cancel_wait_for_write_stall_clear(900);
+
+        // Assert
+        assert!(!fixture.event_loop.write_stall_waiters.contains_key(&900));
+        assert!(
+            fixture
+                .event_loop
+                .write_stall_waiter_queues
+                .get(&0)
+                .is_none_or(std::collections::VecDeque::is_empty),
+            "cancellation must remove the request from both waiter indexes"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_report_stall_hint_for_transaction_actual_column_family() -> MidgeResult<()> {
+        // Arrange
+        let mut fixture = EventLoopFixture::batched()?;
+        let secondary_cf = fixture
+            .event_loop
+            .state
+            .create_cf("stalled-secondary".to_string())?;
+        fixture.event_loop.state.max_immutable_memtables = 1;
+        fixture
+            .event_loop
+            .state
+            .get_cf_mut(secondary_cf)
+            .expect("secondary column family")
+            .immutable_memtables
+            .push(Arc::new(crate::sst::SkipListMemtable::new()));
+        assert!(!fixture.event_loop.state.should_stall_writes(0));
+        assert!(fixture.event_loop.state.should_stall_writes(secondary_cf));
+        let response_rx = fixture.register(901);
+        let (_tx, empty_rx) = crossbeam::channel::unbounded();
+
+        // Act
+        fixture.event_loop.apply_transaction_with_coalescing(
+            &empty_rx,
+            txn_request(
+                901,
+                vec![put_op(secondary_cf, b"secondary-key", b"value")],
+                Some(DurabilityPolicy::Batched),
+            ),
+            1,
+        );
+
+        // Assert
+        match recv_response(&response_rx) {
+            RuntimeResponse::TransactionApplied {
+                write_stall_hint, ..
+            } => assert!(
+                write_stall_hint,
+                "response must compute pressure from the transaction's CF, not CF 0"
+            ),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        Ok(())
     }
 }

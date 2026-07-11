@@ -38,6 +38,7 @@ impl WalCoordinator {
             start_sequence,
             conflict_policy,
         } = request;
+        let touched_cfs = EventLoop::transaction_cf_ids(&ops);
         if let Some(response_tx) = response_tx {
             event_loop.register_inline_response(request_id, response_tx);
         }
@@ -92,7 +93,7 @@ impl WalCoordinator {
                                 request_id,
                                 last_sequence,
                                 op_count,
-                                write_stall_hint: event_loop.state.should_stall_writes(0),
+                                write_stall_hint: event_loop.write_stall_hint_for_cfs(&touched_cfs),
                             },
                         );
                     } else {
@@ -102,6 +103,7 @@ impl WalCoordinator {
                                 request_id,
                                 last_sequence,
                                 op_count,
+                                touched_cfs,
                             });
                     }
                 }
@@ -357,6 +359,15 @@ impl WalCoordinator {
                 },
             );
             return false;
+        }
+
+        if event_loop.wal_actor.is_cloud_async() {
+            if let Some(storage) = &event_loop.hybrid_storage {
+                if let Err(error) = storage.ensure_wal_write_admission() {
+                    event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+                    return false;
+                }
+            }
         }
 
         true

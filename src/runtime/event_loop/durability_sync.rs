@@ -122,6 +122,7 @@ impl EventLoop {
                     request_id,
                     last_sequence,
                     op_count,
+                    touched_cfs,
                 } => {
                     if source != CompletionSource::CloudAck {
                         self.state.clear_pending_transaction_barrier();
@@ -133,7 +134,7 @@ impl EventLoop {
                             request_id,
                             last_sequence,
                             op_count,
-                            write_stall_hint: self.state.should_stall_writes(0),
+                            write_stall_hint: self.write_stall_hint_for_cfs(&touched_cfs),
                         },
                     );
                 }
@@ -393,5 +394,44 @@ mod tests {
 
         // Assert
         assert!(!event_loop.durability.has_pending_waiters());
+    }
+
+    #[test]
+    fn should_complete_transaction_with_stall_hint_from_waiter_column_family() {
+        // Arrange
+        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        let secondary_cf = event_loop
+            .state
+            .create_cf("delayed-stall-cf".to_string())
+            .expect("create secondary column family");
+        event_loop.state.max_immutable_memtables = 1;
+        event_loop
+            .state
+            .get_cf_mut(secondary_cf)
+            .expect("secondary column family")
+            .immutable_memtables
+            .push(Arc::new(crate::sst::SkipListMemtable::new()));
+        let response_rx = event_loop.router.register(101);
+        let waiter = DurabilityWaiter::TransactionApply {
+            request_id: 101,
+            last_sequence: 9,
+            op_count: 1,
+            touched_cfs: vec![secondary_cf],
+        };
+
+        // Act
+        event_loop.complete_durability_waiters(vec![waiter], CompletionSource::WalSync);
+
+        // Assert
+        match response_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("transaction response")
+        {
+            RuntimeResponse::TransactionApplied {
+                write_stall_hint, ..
+            } => assert!(write_stall_hint),
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 }

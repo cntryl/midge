@@ -30,6 +30,12 @@ impl EventLoop {
 
         let segment_id = self.state.wal.current_segment_id;
         let bytes_buffered = self.wal_actor.bytes_since_sync() as u64;
+        let local_path = self
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
+        let existing_bytes = std::fs::metadata(&local_path).map_or(0, |metadata| metadata.len());
+        storage.ensure_wal_upload_capacity(existing_bytes.max(bytes_buffered))?;
         let seal_start = Instant::now();
         let max_sequence = self.wal_actor.flush_for_cloud_upload(&mut self.state)?;
         self.durability.mark_cloud_seal_retry_needed();
@@ -46,11 +52,7 @@ impl EventLoop {
 
         self.durability.rotate_to(self.state.wal.current_segment_id);
 
-        let local_path = self
-            .state
-            .wal_dir
-            .join(crate::wal::segment_file_name(segment_id));
-        storage.enqueue_wal_segment(segment_id, &local_path, max_sequence);
+        storage.enqueue_wal_segment(segment_id, &local_path, max_sequence)?;
         self.wal_actor.complete_cloud_upload_seal(&mut self.state);
 
         let resource = crate::wal::cloud_segment_object_key(segment_id);
@@ -91,6 +93,7 @@ impl EventLoop {
         for event in storage_events {
             self.handle_storage_event(event);
         }
+        self.wake_write_stall_waiters();
     }
 
     pub(super) fn drain_hybrid_storage_events(&mut self) {

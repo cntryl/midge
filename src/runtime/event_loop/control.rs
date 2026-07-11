@@ -27,7 +27,7 @@ impl EventLoop {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
     ) {
-        let is_stalled = self.state.should_stall_writes(cf_id);
+        let is_stalled = self.should_stall_writes(cf_id);
         self.respond(
             request_id,
             RuntimeResponse::WriteStallStatus {
@@ -42,7 +42,7 @@ impl EventLoop {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
     ) {
-        if self.state.should_stall_writes(cf_id) {
+        if self.should_stall_writes(cf_id) {
             self.write_stall_waiters.insert(request_id, cf_id);
             self.write_stall_waiter_queues
                 .entry(cf_id)
@@ -56,7 +56,19 @@ impl EventLoop {
     }
 
     pub(super) fn handle_cancel_wait_for_write_stall_clear(&mut self, wait_request_id: u64) {
-        let _ = self.write_stall_waiters.remove(&wait_request_id);
+        let Some(cf_id) = self.write_stall_waiters.remove(&wait_request_id) else {
+            return;
+        };
+
+        let remove_queue = if let Some(queue) = self.write_stall_waiter_queues.get_mut(&cf_id) {
+            queue.retain(|request_id| *request_id != wait_request_id);
+            queue.is_empty()
+        } else {
+            false
+        };
+        if remove_queue {
+            self.write_stall_waiter_queues.remove(&cf_id);
+        }
     }
 
     pub(super) fn handle_get_read_amp_metrics(&self, request_id: u64) {
