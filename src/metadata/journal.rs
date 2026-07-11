@@ -98,81 +98,25 @@ pub struct FsyncMarker {
 const BATCH_RECORD_TYPE: u8 = 8;
 const FSYNC_MARKER_TYPE: u8 = 9;
 
-/// Configurable journal sync policy (can be set via env var `MIDGE_MANIFEST_SYNC_POLICY`)
-#[derive(Default, PartialEq, Eq, Debug, Clone, Copy)]
-pub enum ManifestSyncPolicy {
-    #[default]
-    Always,
-    EveryN(u64),
-    TimeBased(std::time::Duration),
-}
-
-fn parse_manifest_sync_policy_from_env() -> ManifestSyncPolicy {
-    let mut policy = ManifestSyncPolicy::default();
-    if let Ok(s_raw) = std::env::var("MIDGE_MANIFEST_SYNC_POLICY") {
-        let s = s_raw.trim().to_lowercase();
-        if s == "always" {
-            policy = ManifestSyncPolicy::Always;
-        } else if s.starts_with("everyn:") {
-            if let Some((_lhs, rhs)) = s.split_once(':') {
-                if let Ok(n) = rhs.parse::<u64>() {
-                    policy = ManifestSyncPolicy::EveryN(n);
-                }
-            }
-        } else if s.starts_with("time:") {
-            if let Some((_lhs, rhs)) = s.split_once(':') {
-                if let Some(stripped) = rhs.strip_suffix("ms") {
-                    if let Ok(v) = stripped.parse::<u64>() {
-                        policy = ManifestSyncPolicy::TimeBased(std::time::Duration::from_millis(v));
-                    }
-                } else if let Some(stripped) = rhs.strip_suffix('s') {
-                    if let Ok(v) = stripped.parse::<u64>() {
-                        policy = ManifestSyncPolicy::TimeBased(std::time::Duration::from_secs(v));
-                    }
-                }
-            }
-        }
-    }
-
-    // Reset sync state when policy changes to maintain deterministic behavior in tests
-    if let Some(mut state) = MANIFEST_SYNC_STATE.try_lock() {
-        if state.last_policy != policy {
-            state.batches_since_fsync = 0;
-            state.last_policy = policy;
-            state.last_fsync = std::time::Instant::now();
-        }
-    }
-
-    policy
-}
-
-struct ManifestSyncState {
-    batches_since_fsync: u64,
-    last_fsync: std::time::Instant,
-    last_policy: ManifestSyncPolicy,
-}
-
-impl Default for ManifestSyncState {
-    fn default() -> Self {
-        Self {
-            batches_since_fsync: 0,
-            last_fsync: std::time::Instant::now(),
-            last_policy: ManifestSyncPolicy::default(),
-        }
-    }
-}
-
-use parking_lot::Mutex;
-static MANIFEST_SYNC_STATE: std::sync::LazyLock<Mutex<ManifestSyncState>> =
-    std::sync::LazyLock::new(|| {
-        Mutex::new(ManifestSyncState {
-            batches_since_fsync: 0,
-            last_fsync: std::time::Instant::now(),
-            last_policy: ManifestSyncPolicy::default(),
-        })
-    });
-
 const JOURNAL_FILE: &str = "manifest.journal";
+const JOURNAL_REPAIR_TEMP_FILE: &str = "manifest.journal.repair.tmp";
+
+fn encode_journal_record<T: ?Sized + serde::Serialize>(
+    record_type: u8,
+    value: &T,
+) -> MidgeResult<Vec<u8>> {
+    let payload = journal_serialize(value)?;
+    let mut hasher = Crc32::new();
+    hasher.update(&payload);
+    let crc = hasher.finalize();
+
+    let mut record = Vec::with_capacity(1 + 4 + payload.len() + 4);
+    record.push(record_type);
+    record.extend_from_slice(&payload_len_u32(&payload)?.to_le_bytes());
+    record.extend_from_slice(&payload);
+    record.extend_from_slice(&crc.to_le_bytes());
+    Ok(record)
+}
 
 fn checkpoint_edit_id_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> MidgeResult<u64> {
     use crate::io::traits::{FsPath, OpenMode, OpenOptions};
@@ -207,7 +151,23 @@ fn checkpoint_edit_id_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) ->
 
 fn next_edit_id_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> MidgeResult<u64> {
     let checkpoint = checkpoint_edit_id_with_fs(fs)?;
-    let (_edits, journal_max) = replay_journal_with_ids_and_max_with_fs(fs, true)?;
+    let replay = replay_journal_with_state(fs)?;
+    if let JournalReplayTail::PartialEof {
+        last_valid_offset,
+        record_start,
+        reason,
+    } = replay.tail
+    {
+        tracing::warn!(
+            last_valid_offset,
+            record_start,
+            file_len = replay.file_len,
+            reason,
+            "repairing incomplete manifest journal tail before append"
+        );
+        repair_partial_journal_tail(fs, last_valid_offset)?;
+    }
+    let journal_max = replay.max_edit_id;
     Ok(checkpoint.max(journal_max).saturating_add(1).max(1))
 }
 
@@ -215,11 +175,7 @@ pub(crate) fn highest_edit_id_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
 ) -> MidgeResult<u64> {
     let checkpoint = checkpoint_edit_id_with_fs(fs)?;
-    let journal_max = replay_journal_with_ids_with_fs(fs)?
-        .into_iter()
-        .map(|edit| edit.edit_id)
-        .max()
-        .unwrap_or(0);
+    let journal_max = replay_journal_with_state(fs)?.max_edit_id;
     Ok(checkpoint.max(journal_max))
 }
 
@@ -239,25 +195,45 @@ pub fn append_edit_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     edit: &ManifestEdit,
 ) -> MidgeResult<()> {
+    let edit_id = next_edit_id_with_fs(fs)?;
+    let record = encode_journal_record(
+        edit.record_type(),
+        &JournalEditEnvelope {
+            edit_id,
+            edit: edit.clone(),
+        },
+    )?;
+
+    fail::fail_point!("midge::manifest::inject_no_space_on_append_edit", |_| Err(
+        crate::common::MidgeError::NoSpace(
+            "failpoint: no space on manifest journal append".to_string()
+        )
+    ));
+    let (write_ns, fsync_ns) = append_record_and_marker_with_fs(fs, record, edit_id)?;
+    tracing::info!(
+        write_ns,
+        fsync_ns,
+        "manifest journal append: edit and marker durably synced (ns)"
+    );
+    Ok(())
+}
+
+fn append_record_and_marker_with_fs(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    record: Vec<u8>,
+    edit_id: u64,
+) -> MidgeResult<(u128, u128)> {
     use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
 
-    let edit_id = next_edit_id_with_fs(fs)?;
-    let payload = journal_serialize(&JournalEditEnvelope {
-        edit_id,
-        edit: edit.clone(),
-    })?;
-    let mut hasher = Crc32::new();
-    hasher.update(&payload);
-    let crc = hasher.finalize();
+    let marker = encode_journal_record(
+        FSYNC_MARKER_TYPE,
+        &FsyncMarker {
+            last_persisted_sequence: edit_id,
+            ts_millis: millis_since_epoch(),
+        },
+    )?;
 
-    // Layout: [type:u8][len:u32LE][payload][crc:u32LE]
-    let mut buf = Vec::with_capacity(1 + 4 + payload.len() + 4);
-    buf.push(edit.record_type());
-    buf.extend_from_slice(&payload_len_u32(&payload)?.to_le_bytes());
-    buf.extend_from_slice(&payload);
-    buf.extend_from_slice(&crc.to_le_bytes());
-
-    let mut f = fs.open(
+    let mut file = fs.open(
         &FsPath::new(JOURNAL_FILE),
         OpenOptions {
             mode: OpenMode::ReadWrite,
@@ -267,65 +243,67 @@ pub fn append_edit_with_fs(
         },
     )?;
 
-    fail::fail_point!("midge::manifest::inject_no_space_on_append_edit", |_| Err(
-        crate::common::MidgeError::NoSpace(
-            "failpoint: no space on manifest journal append".to_string()
-        )
-    ));
     let write_start = std::time::Instant::now();
-    f.append(bytes::Bytes::from(buf))
+    file.append(bytes::Bytes::from(record))
+        .map_err(crate::common::MidgeError::from)?;
+
+    fail::fail_point!("midge::manifest::inject_fsync_marker_write_failure", |_| {
+        Err(crate::common::MidgeError::Io(std::io::Error::other(
+            "injected manifest fsync marker write failure",
+        )))
+    });
+    file.append(bytes::Bytes::from(marker))
         .map_err(crate::common::MidgeError::from)?;
     let write_ns = write_start.elapsed().as_nanos();
 
-    // Honor optional bench-only skip for manifest fsync to reduce overhead.
-    let skip_fsync = std::env::var("MIDGE_SKIP_MANIFEST_FSYNC").ok().as_deref() == Some("1")
-        && (std::env::var("MIDGE_ALLOW_MANIFEST_SKIP_FSYNC")
-            .ok()
-            .as_deref()
-            == Some("1"));
+    fail::fail_point!("midge::manifest::before_required_sync");
+    fail::fail_point!("midge::manifest::inject_required_sync_failure", |_| Err(
+        crate::common::MidgeError::Io(std::io::Error::other(
+            "injected required manifest journal sync failure"
+        ))
+    ));
+    let fsync_start = std::time::Instant::now();
+    file.sync(Durability::Durable)
+        .map_err(crate::common::MidgeError::from)?;
+    let fsync_ns = fsync_start.elapsed().as_nanos();
 
-    // Determine sync policy
-    let policy = parse_manifest_sync_policy_from_env();
-    let mut should_sync = matches!(policy, ManifestSyncPolicy::Always);
+    Ok((write_ns, fsync_ns))
+}
 
-    if !should_sync {
-        let mut state = MANIFEST_SYNC_STATE.lock();
-        match policy {
-            ManifestSyncPolicy::EveryN(n) => {
-                state.batches_since_fsync += 1;
-                if state.batches_since_fsync >= n {
-                    should_sync = true;
-                    state.batches_since_fsync = 0;
-                }
-            }
-            ManifestSyncPolicy::TimeBased(dur) if state.last_fsync.elapsed() >= dur => {
-                should_sync = true;
-                state.last_fsync = std::time::Instant::now();
-            }
-            _ => {}
-        }
+fn repair_partial_journal_tail(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    last_valid_offset: u64,
+) -> MidgeResult<()> {
+    use crate::io::traits::{FsPath, OpenMode, OpenOptions};
+
+    let journal_path = FsPath::new(JOURNAL_FILE);
+    let file = fs.open(
+        &journal_path,
+        OpenOptions {
+            mode: OpenMode::ReadOnly,
+            create: false,
+            create_new: false,
+            truncate: false,
+        },
+    )?;
+    let file_len = file.len().map_err(crate::common::MidgeError::from)?;
+    if last_valid_offset > file_len {
+        return Err(crate::common::MidgeError::Corruption(format!(
+            "manifest journal repair offset {last_valid_offset} exceeds file length {file_len}"
+        )));
     }
+    let valid_prefix = file
+        .read_at(0, last_valid_offset)
+        .map_err(crate::common::MidgeError::from)?;
+    drop(file);
 
-    if skip_fsync {
-        tracing::info!(
-            write_ns = write_ns,
-            "manifest journal append: write (fsync skipped via bench flag)"
-        );
-    } else if should_sync {
-        let fsync_start = std::time::Instant::now();
-        f.sync(Durability::Durable)
-            .map_err(crate::common::MidgeError::from)?;
-        let fsync_ns = fsync_start.elapsed().as_nanos();
-        tracing::info!(write_ns = write_ns, fsync_ns = fsync_ns, policy = ?policy, "manifest journal append: write and fsync times (ns)");
-        // Append a durable marker to indicate fsync boundary
-        if let Err(e) = append_fsync_marker_with_fs(fs, 0) {
-            tracing::warn!(error = ?e, "failed to append fsync marker after append_edit_with_fs");
-        }
-    } else {
-        tracing::info!(write_ns = write_ns, policy = ?policy, "manifest journal append: write (deferred sync by policy)");
-    }
-
-    Ok(())
+    crate::io::staging::stage_bytes(
+        fs,
+        &FsPath::new(JOURNAL_REPAIR_TEMP_FILE),
+        &journal_path,
+        &valid_prefix,
+        crate::common::MidgeError::Internal,
+    )
 }
 
 /// Convenience wrapper: append via a `RealFs` created from `db_path` (backwards compatible)
@@ -347,8 +325,8 @@ pub fn replay_journal(db_path: &Path) -> MidgeResult<Vec<ManifestEdit>> {
     replay_journal_with_fs(&fs)
 }
 
-/// Replay a journal file at `db_path`. Returns Vec<ManifestEdit> in order.
-/// Stops cleanly on partial or corrupt tail record (returns edits up to that point).
+/// Replay a journal file at `db_path`. Returns durable edits in order.
+/// A genuine incomplete EOF append is ignored; complete corrupt records are rejected.
 #[cfg(test)]
 pub fn replay_journal_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
@@ -360,64 +338,105 @@ pub fn replay_journal_with_fs(
 fn replay_journal_with_ids_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
 ) -> MidgeResult<Vec<JournalEdit>> {
-    replay_journal_with_ids_and_max_with_fs(fs, false).map(|(edits, _max_edit_id)| edits)
+    replay_journal_with_state(fs).map(|replay| replay.edits)
 }
 
-fn replay_journal_with_ids_and_max_with_fs(
+fn replay_journal_with_state(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
-    include_uncommitted: bool,
-) -> MidgeResult<(Vec<JournalEdit>, u64)> {
+) -> MidgeResult<JournalReplay> {
     let Some(file) = open_journal_for_replay(fs)? else {
-        return Ok((Vec::new(), 0));
+        return Ok(JournalReplay::empty());
     };
 
     let file_len = file.len().map_err(crate::common::MidgeError::from)?;
     let mut state = JournalReplayState::default();
     let mut offset: u64 = 0;
+    let mut tail = JournalReplayTail::Clean;
 
     while offset < file_len {
         match read_journal_record(&*file, offset, file_len)? {
             JournalRecordStatus::Record(record) => {
                 offset = record.next_offset;
-                match validate_journal_record_crc(&record, &state) {
-                    JournalCrcValidation::Valid => {}
-                    JournalCrcValidation::StopAtCorruptTail => break,
-                    JournalCrcValidation::FatalPrefix(message) => {
-                        state.fatal_prefix_error = Some(message);
-                        break;
-                    }
-                }
-                if !handle_journal_record(&record, &mut state) {
-                    break;
-                }
+                validate_journal_record_crc(&record)?;
+                handle_journal_record(&record, &mut state)?;
             }
             JournalRecordStatus::PartialHeader { record_start } => {
-                maybe_mark_fatal_prefix(
-                    &mut state,
+                tail = JournalReplayTail::PartialEof {
+                    last_valid_offset: state.last_marker_offset.unwrap_or(0),
                     record_start,
-                    "manifest journal has truncated header at byte 0".to_string(),
-                );
+                    reason: "partial record header at EOF",
+                };
                 break;
             }
             JournalRecordStatus::PartialPayload { record_start } => {
-                maybe_mark_fatal_prefix(
-                    &mut state,
+                tail = JournalReplayTail::PartialEof {
+                    last_valid_offset: state.last_marker_offset.unwrap_or(0),
                     record_start,
-                    "manifest journal has incomplete first record".to_string(),
-                );
+                    reason: "partial record payload or CRC at EOF",
+                };
                 break;
             }
         }
     }
 
-    finalize_journal_replay(state, include_uncommitted)
+    let durable_edit_count = state.last_marker_edit_idx.unwrap_or(0);
+    if matches!(tail, JournalReplayTail::Clean) && state.edits.len() > durable_edit_count {
+        tail = JournalReplayTail::PartialEof {
+            last_valid_offset: state.last_marker_offset.unwrap_or(0),
+            record_start: state.last_marker_offset.unwrap_or(0),
+            reason: "edit record at EOF is missing its durability marker",
+        };
+    }
+
+    state.edits.truncate(durable_edit_count);
+    let max_edit_id = state
+        .edits
+        .iter()
+        .map(|edit| edit.edit_id)
+        .max()
+        .unwrap_or(0);
+
+    Ok(JournalReplay {
+        edits: state.edits,
+        max_edit_id,
+        file_len,
+        tail,
+    })
+}
+
+struct JournalReplay {
+    edits: Vec<JournalEdit>,
+    max_edit_id: u64,
+    file_len: u64,
+    tail: JournalReplayTail,
+}
+
+impl JournalReplay {
+    fn empty() -> Self {
+        Self {
+            edits: Vec::new(),
+            max_edit_id: 0,
+            file_len: 0,
+            tail: JournalReplayTail::Clean,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum JournalReplayTail {
+    Clean,
+    PartialEof {
+        last_valid_offset: u64,
+        record_start: u64,
+        reason: &'static str,
+    },
 }
 
 #[derive(Default)]
 struct JournalReplayState {
     edits: Vec<JournalEdit>,
     last_marker_edit_idx: Option<usize>,
-    fatal_prefix_error: Option<String>,
+    last_marker_offset: Option<u64>,
     max_edit_id: u64,
 }
 
@@ -433,12 +452,6 @@ enum JournalRecordStatus {
     Record(JournalRecord),
     PartialHeader { record_start: u64 },
     PartialPayload { record_start: u64 },
-}
-
-enum JournalCrcValidation {
-    Valid,
-    StopAtCorruptTail,
-    FatalPrefix(String),
 }
 
 fn open_journal_for_replay(
@@ -472,13 +485,14 @@ fn read_journal_record(
     file_len: u64,
 ) -> MidgeResult<JournalRecordStatus> {
     let record_start = offset;
+    let typ = file
+        .read_at(offset, 1)
+        .map_err(crate::common::MidgeError::from)?[0];
+    validate_journal_record_type(typ, record_start)?;
     if offset + 5 > file_len {
         return Ok(JournalRecordStatus::PartialHeader { record_start });
     }
 
-    let typ = file
-        .read_at(offset, 1)
-        .map_err(crate::common::MidgeError::from)?[0];
     let len_offset = offset + 1;
     let len_bytes = file
         .read_at(len_offset, 4)
@@ -508,27 +522,34 @@ fn read_journal_record(
     }))
 }
 
-fn validate_journal_record_crc(
-    record: &JournalRecord,
-    state: &JournalReplayState,
-) -> JournalCrcValidation {
+fn validate_journal_record_type(record_type: u8, record_start: u64) -> MidgeResult<()> {
+    if (1..=FSYNC_MARKER_TYPE).contains(&record_type) {
+        return Ok(());
+    }
+
+    Err(crate::common::MidgeError::Corruption(format!(
+        "manifest journal has unknown record type {record_type} at byte {record_start}"
+    )))
+}
+
+fn validate_journal_record_crc(record: &JournalRecord) -> MidgeResult<()> {
     let mut hasher = Crc32::new();
     hasher.update(&record.payload);
     let calc = hasher.finalize();
     if calc == record.got_crc {
-        return JournalCrcValidation::Valid;
+        return Ok(());
     }
 
-    tracing::warn!("journal crc mismatch, stopping at tail");
-    if is_fatal_first_journal_record(state, record.record_start) {
-        return JournalCrcValidation::FatalPrefix(
-            "manifest journal CRC mismatch at byte 0".to_string(),
-        );
-    }
-    JournalCrcValidation::StopAtCorruptTail
+    Err(crate::common::MidgeError::Corruption(format!(
+        "manifest journal CRC mismatch at byte {}",
+        record.record_start
+    )))
 }
 
-fn handle_journal_record(record: &JournalRecord, state: &mut JournalReplayState) -> bool {
+fn handle_journal_record(
+    record: &JournalRecord,
+    state: &mut JournalReplayState,
+) -> MidgeResult<()> {
     let typ = record.typ;
     if typ == FSYNC_MARKER_TYPE {
         return handle_fsync_marker_record(record, state);
@@ -539,31 +560,31 @@ fn handle_journal_record(record: &JournalRecord, state: &mut JournalReplayState)
     handle_manifest_edit_record(record, state)
 }
 
-fn handle_fsync_marker_record(record: &JournalRecord, state: &mut JournalReplayState) -> bool {
-    match journal_deserialize::<FsyncMarker>(&record.payload) {
-        Ok(marker) => {
-            tracing::info!(
-                last_seq = marker.last_persisted_sequence,
-                ts = marker.ts_millis,
-                "journal fsync marker encountered"
-            );
-            state.last_marker_edit_idx = Some(state.edits.len());
-            true
-        }
-        Err(e) => {
-            tracing::warn!("fsync marker deserialize failed: {}", e);
-            maybe_mark_fatal_prefix(
-                state,
-                record.record_start,
-                format!("manifest journal fsync marker deserialize failed: {e}"),
-            );
-            false
-        }
-    }
+fn handle_fsync_marker_record(
+    record: &JournalRecord,
+    state: &mut JournalReplayState,
+) -> MidgeResult<()> {
+    let marker = journal_deserialize::<FsyncMarker>(&record.payload).map_err(|error| {
+        crate::common::MidgeError::Corruption(format!(
+            "manifest journal fsync marker at byte {} is invalid: {error}",
+            record.record_start
+        ))
+    })?;
+    tracing::info!(
+        last_seq = marker.last_persisted_sequence,
+        ts = marker.ts_millis,
+        "journal fsync marker encountered"
+    );
+    state.last_marker_edit_idx = Some(state.edits.len());
+    state.last_marker_offset = Some(record.next_offset);
+    Ok(())
 }
 
-fn handle_batch_record(record: &JournalRecord, state: &mut JournalReplayState) -> bool {
+fn handle_batch_record(record: &JournalRecord, state: &mut JournalReplayState) -> MidgeResult<()> {
     if let Ok(envelope) = journal_deserialize::<JournalEditEnvelope>(&record.payload) {
+        if !matches!(envelope.edit, ManifestEdit::Batch(_)) {
+            return Err(journal_record_type_mismatch(record, &envelope.edit));
+        }
         push_journal_edit(
             state,
             JournalEdit {
@@ -571,35 +592,41 @@ fn handle_batch_record(record: &JournalRecord, state: &mut JournalReplayState) -
                 edit: envelope.edit,
             },
         );
-        return true;
+        return Ok(());
     }
 
-    match journal_deserialize::<Vec<ManifestEdit>>(&record.payload) {
-        Ok(batch) => {
-            let edit_id = next_replay_edit_id(state);
-            push_journal_edit(
-                state,
-                JournalEdit {
-                    edit_id,
-                    edit: ManifestEdit::Batch(batch),
-                },
-            );
-            true
-        }
-        Err(e) => {
-            tracing::warn!("journal batch deserialize failed: {}", e);
-            maybe_mark_fatal_prefix(
-                state,
-                record.record_start,
-                format!("manifest journal batch deserialize failed: {e}"),
-            );
-            false
-        }
-    }
+    let batch = journal_deserialize::<Vec<ManifestEdit>>(&record.payload).map_err(|error| {
+        crate::common::MidgeError::Corruption(format!(
+            "manifest journal batch at byte {} is invalid: {error}",
+            record.record_start
+        ))
+    })?;
+    let edit_id = next_replay_edit_id(state);
+    push_journal_edit(
+        state,
+        JournalEdit {
+            edit_id,
+            edit: ManifestEdit::Batch(batch),
+        },
+    );
+    Ok(())
 }
 
-fn handle_manifest_edit_record(record: &JournalRecord, state: &mut JournalReplayState) -> bool {
+fn handle_manifest_edit_record(
+    record: &JournalRecord,
+    state: &mut JournalReplayState,
+) -> MidgeResult<()> {
+    if !(1..BATCH_RECORD_TYPE).contains(&record.typ) {
+        return Err(crate::common::MidgeError::Corruption(format!(
+            "manifest journal has unknown record type {} at byte {}",
+            record.typ, record.record_start
+        )));
+    }
+
     if let Ok(envelope) = journal_deserialize::<JournalEditEnvelope>(&record.payload) {
+        if envelope.edit.record_type() != record.typ {
+            return Err(journal_record_type_mismatch(record, &envelope.edit));
+        }
         push_journal_edit(
             state,
             JournalEdit {
@@ -607,25 +634,33 @@ fn handle_manifest_edit_record(record: &JournalRecord, state: &mut JournalReplay
                 edit: envelope.edit,
             },
         );
-        return true;
+        return Ok(());
     }
 
-    match journal_deserialize::<ManifestEdit>(&record.payload) {
-        Ok(edit) => {
-            let edit_id = next_replay_edit_id(state);
-            push_journal_edit(state, JournalEdit { edit_id, edit });
-            true
-        }
-        Err(e) => {
-            tracing::warn!("journal record deserialize failed: {}", e);
-            maybe_mark_fatal_prefix(
-                state,
-                record.record_start,
-                format!("manifest journal record deserialize failed: {e}"),
-            );
-            false
-        }
+    let edit = journal_deserialize::<ManifestEdit>(&record.payload).map_err(|error| {
+        crate::common::MidgeError::Corruption(format!(
+            "manifest journal edit at byte {} is invalid: {error}",
+            record.record_start
+        ))
+    })?;
+    if edit.record_type() != record.typ {
+        return Err(journal_record_type_mismatch(record, &edit));
     }
+    let edit_id = next_replay_edit_id(state);
+    push_journal_edit(state, JournalEdit { edit_id, edit });
+    Ok(())
+}
+
+fn journal_record_type_mismatch(
+    record: &JournalRecord,
+    edit: &ManifestEdit,
+) -> crate::common::MidgeError {
+    crate::common::MidgeError::Corruption(format!(
+        "manifest journal record type {} at byte {} does not match payload type {}",
+        record.typ,
+        record.record_start,
+        edit.record_type()
+    ))
 }
 
 fn push_journal_edit(state: &mut JournalReplayState, edit: JournalEdit) {
@@ -637,70 +672,17 @@ fn next_replay_edit_id(state: &JournalReplayState) -> u64 {
     state.max_edit_id.saturating_add(1).max(1)
 }
 
-fn maybe_mark_fatal_prefix(state: &mut JournalReplayState, record_start: u64, message: String) {
-    if is_fatal_first_journal_record(state, record_start) {
-        state.fatal_prefix_error = Some(message);
-    }
-}
-
-fn is_fatal_first_journal_record(state: &JournalReplayState, record_start: u64) -> bool {
-    state.edits.is_empty() && state.last_marker_edit_idx.is_none() && record_start == 0
-}
-
-fn finalize_journal_replay(
-    mut state: JournalReplayState,
-    include_uncommitted: bool,
-) -> MidgeResult<(Vec<JournalEdit>, u64)> {
-    if let Some(message) = state.fatal_prefix_error {
-        return Err(crate::common::MidgeError::Corruption(message));
-    }
-
-    if !include_uncommitted {
-        if let Some(idx) = state.last_marker_edit_idx {
-            state.edits.truncate(idx);
-        }
-    }
-
-    let max_edit_id = state.max_edit_id;
-    Ok((state.edits, max_edit_id))
-}
-
 /// Append a batch of edits as a single TLV record using the provided Fs (preferred).
 pub fn append_edit_batch_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     batch: &[ManifestEdit],
 ) -> MidgeResult<()> {
-    use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
-
     let edit_id = next_edit_id_with_fs(fs)?;
-    let payload = journal_serialize(&JournalEditEnvelope {
-        edit_id,
-        edit: ManifestEdit::Batch(batch.to_vec()),
-    })?;
-    let mut hasher = Crc32::new();
-    hasher.update(&payload);
-    let crc = hasher.finalize();
-
-    // Layout: [type:u8][len:u32LE][payload][crc:u32LE]
-    let mut buf = Vec::with_capacity(1 + 4 + payload.len() + 4);
-    buf.push(BATCH_RECORD_TYPE);
-    buf.extend_from_slice(
-        &u32::try_from(payload.len())
-            .map_err(|_| {
-                crate::common::MidgeError::Internal("journal payload too large".to_string())
-            })?
-            .to_le_bytes(),
-    );
-    buf.extend_from_slice(&payload);
-    buf.extend_from_slice(&crc.to_le_bytes());
-
-    let mut f = fs.open(
-        &FsPath::new(JOURNAL_FILE),
-        OpenOptions {
-            mode: OpenMode::ReadWrite,
-            create: true,
-            create_new: false,
-            truncate: false,
+    let record = encode_journal_record(
+        BATCH_RECORD_TYPE,
+        &JournalEditEnvelope {
+            edit_id,
+            edit: ManifestEdit::Batch(batch.to_vec()),
         },
     )?;
 
@@ -710,60 +692,13 @@ pub fn append_edit_batch_with_fs(
             "failpoint: no space on manifest journal batch append".to_string()
         ))
     );
-    let write_start = std::time::Instant::now();
-    f.append(bytes::Bytes::from(buf))
-        .map_err(crate::common::MidgeError::from)?;
-    let write_ns = write_start.elapsed().as_nanos();
-
-    // Honor optional bench-only skip for manifest fsync to reduce overhead.
-    let skip_fsync = std::env::var("MIDGE_SKIP_MANIFEST_FSYNC").ok().as_deref() == Some("1")
-        && (std::env::var("MIDGE_ALLOW_MANIFEST_SKIP_FSYNC")
-            .ok()
-            .as_deref()
-            == Some("1"));
-
-    // Determine sync policy
-    let policy = parse_manifest_sync_policy_from_env();
-    let mut should_sync = matches!(policy, ManifestSyncPolicy::Always);
-
-    if !should_sync {
-        let mut state = MANIFEST_SYNC_STATE.lock();
-        match policy {
-            ManifestSyncPolicy::EveryN(n) => {
-                state.batches_since_fsync += 1;
-                if state.batches_since_fsync >= n {
-                    should_sync = true;
-                    state.batches_since_fsync = 0;
-                }
-            }
-            ManifestSyncPolicy::TimeBased(dur) if state.last_fsync.elapsed() >= dur => {
-                should_sync = true;
-                state.last_fsync = std::time::Instant::now();
-            }
-            _ => {}
-        }
-    }
-
-    if skip_fsync {
-        tracing::info!(
-            batch_size = batch.len(),
-            write_ns = write_ns,
-            "manifest journal batch append: write (fsync skipped via bench flag)"
-        );
-    } else if should_sync {
-        let fsync_start = std::time::Instant::now();
-        f.sync(Durability::Durable)
-            .map_err(crate::common::MidgeError::from)?;
-        let fsync_ns = fsync_start.elapsed().as_nanos();
-        tracing::info!(batch_size = batch.len(), write_ns = write_ns, fsync_ns = fsync_ns, policy = ?policy, "manifest journal batch append: write and fsync times (ns)");
-        // Append a durable marker (we write a marker to denote durability boundary)
-        if let Err(e) = append_fsync_marker_with_fs(fs, 0) {
-            tracing::warn!(error = ?e, "failed to append fsync marker after batch append");
-        }
-    } else {
-        tracing::info!(batch_size = batch.len(), write_ns = write_ns, policy = ?policy, "manifest journal batch append: write (deferred sync by policy)");
-    }
-
+    let (write_ns, fsync_ns) = append_record_and_marker_with_fs(fs, record, edit_id)?;
+    tracing::info!(
+        batch_size = batch.len(),
+        write_ns,
+        fsync_ns,
+        "manifest journal batch append: edit and marker durably synced (ns)"
+    );
     Ok(())
 }
 
@@ -774,59 +709,6 @@ pub fn append_edit_batch(db_path: &Path, batch: &[ManifestEdit]) -> MidgeResult<
             crate::common::MidgeError::Internal(format!("failed to create RealFs: {e:?}"))
         })?);
     append_edit_batch_with_fs(&fs, batch)
-}
-
-/// Append an FSYNC marker to indicate a durable prefix (fsynced up to now) using provided Fs.
-pub fn append_fsync_marker_with_fs(
-    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
-    last_seq: u64,
-) -> MidgeResult<()> {
-    use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
-
-    let marker = FsyncMarker {
-        last_persisted_sequence: last_seq,
-        ts_millis: millis_since_epoch(),
-    };
-    let payload = journal_serialize(&marker)?;
-    let mut hasher = Crc32::new();
-    hasher.update(&payload);
-    let crc = hasher.finalize();
-
-    let mut buf = Vec::with_capacity(1 + 4 + payload.len() + 4);
-    buf.push(FSYNC_MARKER_TYPE);
-    buf.extend_from_slice(&payload_len_u32(&payload)?.to_le_bytes());
-    buf.extend_from_slice(&payload);
-    buf.extend_from_slice(&crc.to_le_bytes());
-
-    let mut f = fs.open(
-        &FsPath::new(JOURNAL_FILE),
-        OpenOptions {
-            mode: OpenMode::ReadWrite,
-            create: true,
-            create_new: false,
-            truncate: false,
-        },
-    )?;
-
-    f.append(bytes::Bytes::from(buf))
-        .map_err(crate::common::MidgeError::from)?;
-
-    // Honor optional bench-only skip for manifest fsync when writing markers.
-    let skip_fsync = std::env::var("MIDGE_SKIP_MANIFEST_FSYNC").ok().as_deref() == Some("1")
-        && (std::env::var("MIDGE_ALLOW_MANIFEST_SKIP_FSYNC")
-            .ok()
-            .as_deref()
-            == Some("1"));
-    if skip_fsync {
-        tracing::info!(
-            "skip_manifest_fsync enabled: append_fsync_marker did not fsync (bench mode)"
-        );
-    } else {
-        f.sync(Durability::Durable)
-            .map_err(crate::common::MidgeError::from)?;
-    }
-
-    Ok(())
 }
 
 /// Truncate or rotate journal after snapshot using provided Fs.
@@ -978,26 +860,36 @@ mod tests {
     }
 
     #[test]
-    fn should_stop_before_valid_json_record_when_crc_is_stale() {
+    fn should_fail_when_corrupt_record_precedes_valid_record() {
         // Arrange
         let td = tempdir().expect("create temp directory");
         let first = ManifestEdit::BumpWalSeq { seq: 7 };
-        let corrupted_tail = ManifestEdit::RemoveSst {
+        append_edit(td.path(), &first).expect("append durable first edit");
+
+        let corrupted_middle = ManifestEdit::RemoveSst {
             name: "avoid.sst".to_string(),
         };
         let stale_crc_source = ManifestEdit::RemoveSst {
             name: "apply.sst".to_string(),
         };
-        let mut journal = encode_test_record(&first, &first);
-        journal.extend_from_slice(&encode_test_record(&corrupted_tail, &stale_crc_source));
-        write_and_sync_test_journal(td.path(), &journal);
+        let valid_later = ManifestEdit::BumpWalSeq { seq: 9 };
+        let mut suffix = encode_test_record(&corrupted_middle, &stale_crc_source);
+        suffix.extend_from_slice(&encode_test_record(&valid_later, &valid_later));
+        let mut journal = std::fs::OpenOptions::new()
+            .append(true)
+            .open(td.path().join(JOURNAL_FILE))
+            .expect("open journal for corrupt suffix");
+        journal
+            .write_all(&suffix)
+            .expect("append corrupt record followed by valid record");
+        journal.sync_all().expect("sync corrupt test journal");
 
         // Act
-        let edits = replay_journal(td.path()).expect("replay valid journal prefix");
+        let error = replay_journal(td.path())
+            .expect_err("mid-file corruption before a valid record must fail");
 
         // Assert
-        assert_eq!(edits.len(), 1);
-        assert!(matches!(edits[0], ManifestEdit::BumpWalSeq { seq: 7 }));
+        assert!(matches!(error, crate::common::MidgeError::Corruption(_)));
     }
 
     #[test]
@@ -1018,6 +910,98 @@ mod tests {
 
         // Assert
         assert!(matches!(error, crate::common::MidgeError::Corruption(_)));
+    }
+
+    #[test]
+    fn should_truncate_partial_eof_tail_before_next_append() {
+        // Arrange
+        let td = tempdir().expect("create temp directory");
+        let first = ManifestEdit::BumpWalSeq { seq: 1 };
+        append_edit(td.path(), &first).expect("append first edit");
+
+        let partial = ManifestEdit::BumpWalSeq { seq: 2 };
+        let encoded = encode_test_record(&partial, &partial);
+        let mut journal = std::fs::OpenOptions::new()
+            .append(true)
+            .open(td.path().join(JOURNAL_FILE))
+            .expect("open journal for partial tail");
+        journal
+            .write_all(&encoded[..encoded.len() - 3])
+            .expect("append partial EOF record");
+        journal.sync_all().expect("sync partial EOF record");
+
+        let after_repair = ManifestEdit::BumpWalSeq { seq: 3 };
+
+        // Act
+        append_edit(td.path(), &after_repair).expect("repair tail and append next edit");
+        let edits = replay_journal(td.path()).expect("replay repaired journal");
+
+        // Assert
+        assert_eq!(edits.len(), 2);
+        assert!(matches!(edits[0], ManifestEdit::BumpWalSeq { seq: 1 }));
+        assert!(matches!(edits[1], ManifestEdit::BumpWalSeq { seq: 3 }));
+    }
+
+    #[test]
+    fn should_return_error_when_fsync_marker_write_fails() {
+        // Arrange
+        let td = tempdir().expect("create temp directory");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 })
+            .expect("append durable prefix");
+        let marker_failure = fail::FailGuard::new(
+            "midge::manifest::inject_fsync_marker_write_failure",
+            "return",
+        )
+        .expect("configure marker-write failpoint");
+
+        // Act
+        let error = append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 2 })
+            .expect_err("marker write failure must be returned");
+        drop(marker_failure);
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 3 })
+            .expect("repair incomplete append and write next edit");
+        let replayed = replay_journal(td.path()).expect("replay repaired journal");
+
+        // Assert
+        assert!(error.to_string().contains("marker"));
+        assert_eq!(replayed.len(), 2);
+        assert!(matches!(replayed[0], ManifestEdit::BumpWalSeq { seq: 1 }));
+        assert!(matches!(replayed[1], ManifestEdit::BumpWalSeq { seq: 3 }));
+    }
+
+    #[test]
+    fn should_return_error_when_required_manifest_sync_fails() {
+        // Arrange
+        let td = tempdir().expect("create temp directory");
+        let _guard =
+            fail::FailGuard::new("midge::manifest::inject_required_sync_failure", "return")
+                .expect("configure sync failpoint");
+
+        // Act
+        let error = append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 })
+            .expect_err("required sync failure must be returned");
+
+        // Assert
+        assert!(error.to_string().contains("sync"));
+    }
+
+    #[test]
+    fn should_issue_one_required_sync_for_manifest_append() {
+        // Arrange
+        let td = tempdir().expect("create temp directory");
+        let syncs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_syncs = std::sync::Arc::clone(&syncs);
+        let _guard =
+            fail::FailGuard::with_callback("midge::manifest::before_required_sync", move || {
+                observed_syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .expect("configure sync observer");
+
+        // Act
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append manifest edit");
+
+        // Assert
+        assert_eq!(syncs.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1169,32 +1153,18 @@ mod tests {
     }
 
     #[test]
-    fn should_emit_fsync_marker_under_every_n_policy() {
+    fn should_emit_fsync_marker_for_batch_append() {
         // Arrange
         let td = tempdir().unwrap();
         let db = td.path();
 
-        // Use EveryN:1 to make the test deterministic even when tests run in parallel
-        std::env::set_var("MIDGE_MANIFEST_SYNC_POLICY", "EveryN:1");
-        // Reset policy state to ensure deterministic behavior in test
-        {
-            let mut s = MANIFEST_SYNC_STATE.lock();
-            s.batches_since_fsync = 0;
-            s.last_policy = ManifestSyncPolicy::default();
-            s.last_fsync = std::time::Instant::now();
-        }
-        parse_manifest_sync_policy_from_env();
-
-        // Act: append a single batch (policy should trigger a marker immediately)
+        // Act
         let e = ManifestEdit::BumpWalSeq { seq: 1 };
         append_edit_batch(db, std::slice::from_ref(&e)).expect("append batch failed");
 
         // Assert: journal file contains an FSYNC_MARKER_TYPE record
         let data = std::fs::read(db.join(JOURNAL_FILE)).expect("read journal");
         assert!(data.contains(&FSYNC_MARKER_TYPE));
-
-        // Cleanup
-        std::env::remove_var("MIDGE_MANIFEST_SYNC_POLICY");
     }
 
     proptest! {
