@@ -2813,6 +2813,7 @@ mod tests {
         );
 
         {
+            let _test_guard = crate::failpoints::test_failpoint_guard();
             let scenario = fail::FailScenario::setup();
             let failpoint_guard = TxnAppendBatchNoSpaceFailpointGuard::setup(20);
 

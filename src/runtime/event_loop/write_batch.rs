@@ -1573,6 +1573,7 @@ mod tests {
             .expect("queue second transaction");
 
         {
+            let _test_guard = crate::failpoints::test_failpoint_guard();
             let scenario = fail::FailScenario::setup();
             let failpoint_guard = TxnAppendBatchNoSpaceFailpointGuard::setup(60);
 
@@ -1661,6 +1662,7 @@ mod tests {
             .expect("queue same-key fallback transaction");
 
         {
+            let _test_guard = crate::failpoints::test_failpoint_guard();
             let scenario = fail::FailScenario::setup();
             let failpoint_guard = TxnAppendBatchNoSpaceFailpointGuard::setup(80);
 

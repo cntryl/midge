@@ -3270,6 +3270,7 @@ mod tests {
     ) -> crate::common::MidgeResult<()> {
         // Arrange
         let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+        let _test_guard = crate::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
@@ -3519,6 +3520,7 @@ mod tests {
     ) -> crate::common::MidgeResult<()> {
         // Arrange
         let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+        let _test_guard = crate::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
         let mut el = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),

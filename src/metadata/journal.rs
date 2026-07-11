@@ -1020,6 +1020,7 @@ mod tests {
     fn should_return_error_when_fsync_marker_write_fails() {
         // Arrange
         let td = tempdir().expect("create temp directory");
+        let _test_guard = crate::failpoints::test_failpoint_guard();
         append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 })
             .expect("append durable prefix");
         let marker_failure = fail::FailGuard::new(
@@ -1048,6 +1049,7 @@ mod tests {
     fn should_return_error_when_required_manifest_sync_fails() {
         // Arrange
         let td = tempdir().expect("create temp directory");
+        let _test_guard = crate::failpoints::test_failpoint_guard();
         let _guard =
             fail::FailGuard::new("midge::manifest::inject_required_sync_failure", "return")
                 .expect("configure sync failpoint");
@@ -1065,6 +1067,7 @@ mod tests {
     fn should_issue_one_required_sync_for_manifest_append() {
         // Arrange
         let td = tempdir().expect("create temp directory");
+        let _test_guard = crate::failpoints::test_failpoint_guard();
         let syncs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_syncs = std::sync::Arc::clone(&syncs);
         let _guard =
