@@ -1,0 +1,51 @@
+name: Fuzz
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bounded-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: 0
+      FUZZ_TOOLCHAIN: nightly-2026-07-01
+      RUSTUP_TOOLCHAIN: nightly-2026-07-01
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Install pinned fuzz toolchain
+        run: |
+          rustup toolchain install "${FUZZ_TOOLCHAIN}" --profile minimal
+          cargo install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: "fuzz"
+
+      - name: Build every fuzz target
+        run: cargo fuzz build
+
+      - name: Smoke WAL frame recovery
+        run: cargo fuzz run wal_frame_recovery -- -max_total_time=30 -timeout=10
+
+      - name: Smoke manifest journal replay
+        run: cargo fuzz run manifest_journal_replay -- -max_total_time=30 -timeout=10
+
+      - name: Smoke intent log replay
+        run: cargo fuzz run intent_log_replay -- -max_total_time=30 -timeout=10
+
+      - name: Smoke SST block decode
+        run: cargo fuzz run sst_block_decode -- -max_total_time=30 -timeout=10

@@ -8,16 +8,20 @@ RUN apt-get update \
 		ca-certificates \
 	&& rm -rf /var/lib/apt/lists/*
 
-RUN rustup component add clippy
+RUN rustup component add clippy rustfmt
 
 WORKDIR /workspace
 
-# Copy the full repository and run the same quality gates we expect in CI.
+# Copy the full repository and run the same feature gates we expect in CI.
 COPY . .
 
-RUN cargo clippy --all-targets --all-features -- -D warnings
-RUN cargo build --all-targets
-RUN cargo test --lib --features uring
-RUN cargo test
+RUN cargo fmt --check
+RUN cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
+RUN cargo test --workspace --all-features
+RUN cargo clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic
+RUN cargo check --workspace --all-targets --no-default-features --features cloud-aws
+RUN cargo check --workspace --all-targets --no-default-features --features cloud-azure
+RUN cargo check --workspace --all-targets --no-default-features --features cloud-gcp
+RUN cargo check --workspace --all-targets --no-default-features --features cloud-oci
 
 CMD ["bash"]

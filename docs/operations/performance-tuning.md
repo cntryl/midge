@@ -474,17 +474,20 @@ match engine.commit(tx, WriteOptions::buffered()) {
 
 ### Benchmarking
 
-Use Criterion benches to validate changes:
+Use the registered `cntryl-stress` suites to validate changes:
 
 ```bash
-# Run specific benchmark
-cargo bench --bench tier1_hotpath_api
+# Run a fast semantic pass
+cargo bench --bench tier1_hotpath_api -- --profile smoke
 
-# Compare before/after
-cargo bench --bench tier1_hotpath_api -- --save-baseline before
-# Make changes
-cargo bench --bench tier1_hotpath_api -- --baseline before
+# Emit an artifact suitable for before/after comparison
+cargo bench --bench tier1_hotpath_api -- --profile default --json
 ```
+
+Retain the timestamped artifacts under `target/stress/tier1_hotpath_api/`, make
+the change, and run the same profile again on the same host. Compare matching
+rows from the two JSON artifacts; the harness does not use Criterion baseline
+flags.
 
 See [../development/benchmarks.md](../development/benchmarks.md) for benchmarking best practices.
 

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -9,6 +10,77 @@ fn read_workflow(path: impl AsRef<Path>) -> String {
     let path = repository_root().join(path);
     fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read workflow {}: {error}", path.display()))
+}
+
+fn named_targets(manifest: &str, table: &str) -> BTreeSet<String> {
+    let mut targets = BTreeSet::new();
+    let mut in_target = false;
+    let target_header = format!("[[{table}]]");
+
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with("[[") {
+            in_target = line == target_header;
+            continue;
+        }
+        if in_target {
+            if let Some(name) = line.strip_prefix("name = \"") {
+                if let Some(name) = name.strip_suffix('"') {
+                    targets.insert(name.to_owned());
+                }
+            }
+        }
+    }
+
+    targets
+}
+
+fn manifest_features(manifest: &str) -> BTreeSet<String> {
+    let mut features = BTreeSet::new();
+    let mut in_features = false;
+
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line == "[features]" {
+            in_features = true;
+            continue;
+        }
+        if in_features && line.starts_with('[') {
+            break;
+        }
+        if in_features {
+            if let Some((name, _)) = line.split_once('=') {
+                features.insert(name.trim().to_owned());
+            }
+        }
+    }
+
+    features
+}
+
+fn command_argument(source: &str, command: &str, argument: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter(|line| line.contains(command))
+        .filter_map(|line| {
+            let words: Vec<_> = line.split_whitespace().collect();
+            words
+                .iter()
+                .position(|word| *word == argument)
+                .and_then(|index| words.get(index + 1))
+                .map(|value| {
+                    value
+                        .trim_matches(|character| matches!(character, '\'' | '"' | '`'))
+                        .to_owned()
+                })
+        })
+        .collect()
+}
+
+fn target_matches(pattern: &str, target: &str) -> bool {
+    pattern
+        .strip_suffix('*')
+        .map_or(pattern == target, |prefix| target.starts_with(prefix))
 }
 
 #[test]
@@ -139,12 +211,13 @@ fn should_publish_only_version_matching_tags_with_least_privilege() {
 }
 
 #[test]
-fn should_pin_external_actions_and_release_tools_to_immutable_revisions() {
+fn should_pin_external_actions_to_immutable_revisions() {
     // Arrange
     let workflows = [
         read_workflow(".github/workflows/bench.yml"),
         read_workflow(".github/workflows/ci.yml"),
         read_workflow(".github/workflows/cleanup.yml"),
+        read_workflow(".github/workflows/fuzz.yml"),
         read_workflow(".github/workflows/publish.yml"),
     ];
 
@@ -167,13 +240,20 @@ fn should_pin_external_actions_and_release_tools_to_immutable_revisions() {
         );
         assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
+}
 
-    let publish = &workflows[3];
+#[test]
+fn should_pin_release_tools_to_immutable_revisions() {
+    // Arrange
+    let publish = read_workflow(".github/workflows/publish.yml");
+
+    // Act
+    // Assert
     assert!(publish.contains("cargo install --git https://github.com/cntryl/tools --rev "));
 }
 
 #[test]
-fn should_test_msrv_no_default_and_all_supported_platforms() {
+fn should_test_supported_build_matrix_before_release() {
     // Arrange
     let ci = read_workflow(".github/workflows/ci.yml");
 
@@ -187,7 +267,7 @@ fn should_test_msrv_no_default_and_all_supported_platforms() {
 }
 
 #[test]
-fn should_run_ci_for_docker_scripts_and_fuzz_changes() {
+fn should_trigger_ci_for_repository_contract_changes() {
     // Arrange
     let ci = read_workflow(".github/workflows/ci.yml");
 
@@ -200,4 +280,196 @@ fn should_run_ci_for_docker_scripts_and_fuzz_changes() {
             "push and pull requests must include {path}"
         );
     }
+}
+
+#[test]
+fn should_reference_only_manifest_features_when_docker_images_build() {
+    // Arrange
+    let manifest = read_workflow("Cargo.toml");
+    let known_features = manifest_features(&manifest);
+    let dockerfiles = [
+        read_workflow("Dockerfile.tests"),
+        read_workflow("Dockerfile.benches"),
+    ];
+
+    // Act
+    let referenced_features: Vec<_> = dockerfiles
+        .iter()
+        .flat_map(|dockerfile| command_argument(dockerfile, "cargo ", "--features"))
+        .flat_map(|features| features.split(',').map(str::to_owned).collect::<Vec<_>>())
+        .collect();
+
+    // Assert
+    for feature in referenced_features {
+        assert!(
+            known_features.contains(&feature),
+            "Dockerfile references unknown Cargo feature {feature}"
+        );
+    }
+}
+
+#[test]
+fn should_apply_strict_feature_matrix_when_test_image_builds() {
+    // Arrange
+    let dockerfile = read_workflow("Dockerfile.tests");
+
+    // Act
+    // Assert
+    assert!(dockerfile.contains("cargo fmt --check"));
+    assert!(dockerfile.contains(
+        "cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic"
+    ));
+    assert!(dockerfile.contains("cargo test --workspace --all-features"));
+    assert!(dockerfile.contains(
+        "cargo clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic"
+    ));
+    for provider in ["cloud-aws", "cloud-azure", "cloud-gcp", "cloud-oci"] {
+        assert!(dockerfile.contains(&format!(
+            "cargo check --workspace --all-targets --no-default-features --features {provider}"
+        )));
+    }
+}
+
+#[test]
+fn should_defer_timed_execution_when_benchmark_image_builds() {
+    // Arrange
+    let dockerfile = read_workflow("Dockerfile.benches");
+
+    // Act
+    // Assert
+    assert!(dockerfile.contains("RUN cargo bench --workspace --all-features --no-run"));
+    assert!(dockerfile.contains("CMD [\"cargo\", \"bench\", \"--workspace\", \"--all-features\"]"));
+}
+
+#[test]
+fn should_match_documented_benchmark_targets_when_manifest_is_authoritative() {
+    // Arrange
+    let manifest = read_workflow("Cargo.toml");
+    let registered = named_targets(&manifest, "bench");
+    let documents = [
+        read_workflow("docs/development/benchmarks.md"),
+        read_workflow("docs/development/performance-targets.md"),
+        read_workflow("docs/operations/performance-tuning.md"),
+    ];
+
+    // Act
+    let advertised: Vec<_> = documents
+        .iter()
+        .flat_map(|document| command_argument(document, "cargo bench", "--bench"))
+        .collect();
+
+    // Assert
+    assert!(!advertised.is_empty());
+    for target in advertised {
+        assert!(
+            registered.contains(&target),
+            "documentation advertises unregistered benchmark target {target}"
+        );
+    }
+}
+
+#[test]
+fn should_reject_criterion_contract_when_stress_benchmarks_documented() {
+    // Arrange
+    let documents = [
+        read_workflow("docs/development/benchmarks.md"),
+        read_workflow("docs/development/performance-targets.md"),
+        read_workflow("docs/operations/performance-tuning.md"),
+    ];
+
+    // Act
+    // Assert
+    for document in documents {
+        assert!(!document.contains("Use Criterion"));
+        assert!(!document.contains("--save-baseline"));
+        assert!(!document.contains("--baseline"));
+    }
+}
+
+#[test]
+fn should_cover_registered_benchmarks_when_benchmark_workflow_runs() {
+    // Arrange
+    let manifest = read_workflow("Cargo.toml");
+    let registered = named_targets(&manifest, "bench");
+    let workflow = read_workflow(".github/workflows/bench.yml");
+
+    // Act
+    let patterns = command_argument(&workflow, "cargo bench", "--bench");
+
+    // Assert
+    for target in registered {
+        assert!(
+            patterns
+                .iter()
+                .any(|pattern| target_matches(pattern, &target)),
+            "benchmark workflow does not execute registered target {target}"
+        );
+    }
+}
+
+#[test]
+fn should_describe_manual_trigger_when_benchmark_automation_documented() {
+    // Arrange
+    let document = read_workflow("docs/development/benchmarks.md");
+    let workflow = read_workflow(".github/workflows/bench.yml");
+
+    // Act
+    let normalized_document = document.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Assert
+    assert!(workflow.contains("workflow_dispatch:"));
+    assert!(!workflow.contains("pull_request:"));
+    assert!(document.contains("manually with `workflow_dispatch`"));
+    assert!(normalized_document.contains("not a pull-request performance gate"));
+}
+
+#[test]
+fn should_schedule_bounded_fuzz_smokes_when_fuzz_workflow_runs() {
+    // Arrange
+    let workflow = read_workflow(".github/workflows/fuzz.yml");
+
+    // Act
+    // Assert
+    assert!(workflow.contains("schedule:"));
+    assert!(workflow.contains("timeout-minutes:"));
+    assert!(workflow.contains("cargo install cargo-fuzz --version 0.13.2 --locked"));
+    assert!(workflow.contains("FUZZ_TOOLCHAIN: nightly-2026-07-01"));
+    assert!(workflow.contains("cargo fuzz build"));
+    let smoke_commands: Vec<_> = workflow
+        .lines()
+        .filter(|line| line.contains("cargo fuzz run"))
+        .collect();
+    assert_eq!(smoke_commands.len(), 4);
+    for command in smoke_commands {
+        assert!(command.contains("-max_total_time=30"));
+        assert!(command.contains("-timeout=10"));
+    }
+}
+
+#[test]
+fn should_cover_every_fuzz_target_when_scheduled_smokes_run() {
+    // Arrange
+    let manifest = read_workflow("fuzz/Cargo.toml");
+    let registered = named_targets(&manifest, "bin");
+    let workflow = read_workflow(".github/workflows/fuzz.yml");
+
+    // Act
+    let exercised: BTreeSet<_> = command_argument(&workflow, "cargo fuzz run", "run")
+        .into_iter()
+        .collect();
+
+    // Assert
+    assert_eq!(exercised, registered);
+}
+
+#[test]
+fn should_validate_benchmark_contract_when_ci_runs() {
+    // Arrange
+    let ci = read_workflow(".github/workflows/ci.yml");
+    let validator = repository_root().join("scripts/validate_benchmark_contract.py");
+
+    // Act
+    // Assert
+    assert!(validator.is_file());
+    assert!(ci.contains("scripts/validate_benchmark_contract.py"));
 }

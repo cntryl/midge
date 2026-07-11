@@ -260,11 +260,6 @@ path = "benches/tier2_subsystem_event_loop.rs"
 harness = false
 
 [[bench]]
-name = "tier4_system_local_throughput_regression"
-path = "benches/tier4_system_local_throughput_regression.rs"
-harness = false
-
-[[bench]]
 name = "tier2_subsystem_transaction_latency"
 path = "benches/tier2_subsystem_transaction_latency.rs"
 harness = false
@@ -301,6 +296,11 @@ path = "benches/tier3_system_lifecycle.rs"
 harness = false
 
 # Tier 4
+[[bench]]
+name = "tier4_system_local_throughput_regression"
+path = "benches/tier4_system_local_throughput_regression.rs"
+harness = false
+
 [[bench]]
 name = "tier4_ycsb_workload_a"
 path = "benches/tier4_ycsb_workload_a.rs"

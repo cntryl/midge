@@ -45,6 +45,18 @@ cargo bench --bench tier4_ycsb_workload_c -- --json
 Stress artifacts are written under `target/stress/{suite}/` as `latest.json`,
 `latest.md`, and `latest.txt` plus timestamped copies.
 
+## Automation Contract
+
+The `Bench` GitHub Actions workflow runs every benchmark target registered in
+`Cargo.toml`. It is started manually with `workflow_dispatch`. It is not a
+pull-request performance gate. Normal CI compiles benchmark targets through its
+`--all-targets` checks, but does not execute timed benchmark rows.
+
+Benchmark commands in this document and the performance-target document are
+validated against Cargo metadata by `scripts/validate_benchmark_contract.py`.
+The same validator checks that the workflow's tier patterns cover every
+registered benchmark. Add a target to `Cargo.toml` before advertising it here.
+
 ## Tier Model
 
 - Tier 1: hot-path microbenchmarks. Small, deterministic, allocation-aware

@@ -10,13 +10,13 @@ machine, with the same configuration, and compare against a saved baseline.
 
 ## Regression Posture
 
-Tier 1 Criterion benchmarks:
+Tier 1 stress microbenchmarks:
 
 - Investigate a regression greater than 5% from a saved baseline.
 - Treat smaller movements as noise unless they repeat across runs or affect a
   known critical path.
 
-Tier 2 Criterion benchmarks:
+Tier 2 stress subsystem benchmarks:
 
 - Investigate a regression greater than 8-10% from a saved baseline.
 - For transaction latency guardrails, also investigate any explicit benchmark
@@ -83,14 +83,14 @@ Hybrid:
 
 ## Benchmark Ownership
 
-- `tier2_subsystem_local_throughput_regression` owns the local buffered
-  throughput guard against memory mode.
+- `tier4_system_local_throughput_regression` owns the local buffered throughput
+  guard against memory mode and end-to-end local batch throughput.
 - `tier2_subsystem_transaction_latency` owns public transaction lifecycle
   latency, commit percentile reporting, and buffered coalescing.
-- `tier4_system_engine_batch_throughput` owns end-to-end local batch-size
-  scaling; cloud coverage is intentionally limited to representative cases.
-- `tier4_system_durability_cloud` owns cloud commit latency tags and cloud WAL
-  health guardrails.
+- `tier4_system_compaction_backpressure` owns sustained local throughput and
+  stall signals while compaction is active.
+- `tier4_system_recovery_throughput` owns recovery throughput after flush and
+  compaction in the supported storage modes.
 - Tier 4 YCSB workloads own long-running workload regressions and hybrid
   backlog health tags.
 
@@ -100,9 +100,9 @@ Run focused checks before broad suites:
 
 ```bash
 cargo bench --bench tier2_subsystem_transaction_latency -- --quiet
-cargo bench --bench tier2_subsystem_local_throughput_regression -- --quiet
-BENCH_RUNS=5 cargo bench --bench tier4_system_engine_batch_throughput -- --quiet
-BENCH_RUNS=5 cargo bench --bench tier4_system_durability_cloud -- --quiet
+cargo bench --bench tier4_system_local_throughput_regression -- --quiet
+BENCH_RUNS=3 cargo bench --bench tier4_system_compaction_backpressure -- --quiet
+BENCH_RUNS=3 cargo bench --bench tier4_system_recovery_throughput -- --quiet
 BENCH_RUNS=3 cargo bench --bench tier4_ycsb_workload_a -- --quiet
 ```
 
