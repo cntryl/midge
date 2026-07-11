@@ -18,15 +18,11 @@ In particular:
 - `WriteOptions::cloud_strict()` is not a stronger local mode. In cloud-backed mode it waits for the runtime to `seal`, rotate, `upload`, and acknowledge the WAL segment covering the committed sequence.
 - Empty cloud-backed `cloud_strict()` transactions are allowed without inventing a WAL record.
 
-## Benchmark-Only Fsync Skips
+## Manifest Journal Sync Boundary
 
-`MIDGE_SKIP_MANIFEST_FSYNC=1` is a benchmark-only escape hatch for manifest
-journal writes and fsync markers. It is honored only when
-`MIDGE_ALLOW_MANIFEST_SKIP_FSYNC=1` is also set.
-
-Treat these as a double opt-in for controlled benchmark runs only. They weaken
-manifest durability and must not be used to evaluate crash safety, recovery
-behavior, or production-like durability.
+Manifest journal edits and their durability markers are written before one
+required filesystem sync. Midge does not provide a configuration or benchmark
+escape hatch for this durability boundary.
 
 ## Verification Reading Order
 

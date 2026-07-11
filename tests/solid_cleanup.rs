@@ -754,26 +754,22 @@ fn should_document_cloud_strict_durability_contract() {
 }
 
 #[test]
-fn should_document_manifest_fsync_skip_as_benchmark_only_double_opt_in() {
+fn should_require_manifest_fsync_without_an_escape_hatch() {
     // Arrange
     let durability = read_source("docs/user-guides/durability.md");
     let journal = read_source("src/metadata/journal.rs");
 
     // Act
-    let docs_flag_skip = durability.contains("MIDGE_SKIP_MANIFEST_FSYNC=1");
-    let docs_flag_double_opt_in = durability.contains("MIDGE_ALLOW_MANIFEST_SKIP_FSYNC=1");
-    let docs_flag_benchmark_only = durability.contains("benchmark-only");
-    let docs_flag_double_opt_in_text = durability.contains("double opt-in");
+    let docs_require_one_sync = durability.contains("one\nrequired filesystem sync");
+    let docs_reject_escape_hatch = durability.contains("does not provide");
     let journal_names_skip_flag = journal.contains("MIDGE_SKIP_MANIFEST_FSYNC");
     let journal_names_guard_flag = journal.contains("MIDGE_ALLOW_MANIFEST_SKIP_FSYNC");
 
     // Assert
-    assert!(docs_flag_skip);
-    assert!(docs_flag_double_opt_in);
-    assert!(docs_flag_benchmark_only);
-    assert!(docs_flag_double_opt_in_text);
-    assert!(journal_names_skip_flag);
-    assert!(journal_names_guard_flag);
+    assert!(docs_require_one_sync);
+    assert!(docs_reject_escape_hatch);
+    assert!(!journal_names_skip_flag);
+    assert!(!journal_names_guard_flag);
 }
 
 #[test]
