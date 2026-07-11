@@ -28,7 +28,7 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write and flush to create SST file
@@ -47,7 +47,9 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
             tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
                 .expect("put");
             tx.commit(buffered_write_options(mode)).expect("commit");
-            // Engine is dropped after a flush and a later committed write
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -80,7 +82,7 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write and flush (manifest updated)
@@ -105,7 +107,9 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
                     .expect("put");
                 tx.commit(buffered_write_options(mode)).expect("commit");
             }
-            // Engine is dropped before a second flush occurs
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -144,7 +148,7 @@ fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write, flush, then overwrite
@@ -162,7 +166,9 @@ fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
             tx.put(b"key".to_vec(), b"value_new".to_vec(), None)
                 .expect("put");
             tx.commit(buffered_write_options(mode)).expect("commit");
-            // Engine is dropped before flushing the newer WAL value
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -189,7 +195,7 @@ fn should_apply_wal_tombstone_when_reopening_after_clean_shutdown() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Create SST
@@ -207,7 +213,9 @@ fn should_apply_wal_tombstone_when_reopening_after_clean_shutdown() {
                 .expect("begin_tx");
             tx.delete(b"key".to_vec()).expect("delete");
             tx.commit(buffered_write_options(mode)).expect("commit");
-            // Engine is dropped after the tombstone commit
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -234,7 +242,7 @@ fn should_preserve_data_visibility_when_reopening_after_successful_flush_and_cle
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Flush the committed writes to persistent storage
@@ -248,8 +256,9 @@ fn should_preserve_data_visibility_when_reopening_after_successful_flush_and_cle
                 tx.commit(buffered_write_options(mode)).expect("commit");
             }
             engine.flush_cf(&cf).expect("flush");
-
-            // Engine is dropped after the successful flush
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -307,7 +316,12 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
             for handle in handles {
                 handle.join().expect("thread join");
             }
-            // Engine is dropped after all worker threads complete
+            let mut engine = std::sync::Arc::try_unwrap(engine)
+                .ok()
+                .expect("unique engine");
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -338,7 +352,7 @@ fn should_preserve_single_cf_data_when_reopening_after_flush() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf_default = engine.create_column_family("test").expect("create cf");
 
             // Write to a single CF, then flush it
@@ -354,8 +368,9 @@ fn should_preserve_single_cf_data_when_reopening_after_flush() {
 
             // Flush the CF
             engine.flush_cf(&cf_default).expect("flush");
-
-            // Engine is dropped after the successful flush
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -384,7 +399,7 @@ fn should_preserve_data_when_reopening_after_flush_with_optional_compaction() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Create enough data to trigger compaction
@@ -402,8 +417,9 @@ fn should_preserve_data_when_reopening_after_flush_with_optional_compaction() {
                 tx.commit(buffered_write_options(mode)).expect("commit");
             }
             engine.flush_cf(&cf).expect("flush");
-
-            // Compaction may or may not run automatically before shutdown
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -432,7 +448,7 @@ fn should_preserve_original_data_when_reopening_after_flush() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Create data
@@ -446,8 +462,9 @@ fn should_preserve_original_data_when_reopening_after_flush() {
                 tx.commit(buffered_write_options(mode)).expect("commit");
             }
             engine.flush_cf(&cf).expect("flush");
-
-            // Engine is dropped after the successful flush
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -476,7 +493,7 @@ fn should_preserve_updated_values_when_reopening_after_multiple_flushes() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Create initial SST
@@ -502,8 +519,9 @@ fn should_preserve_updated_values_when_reopening_after_multiple_flushes() {
                 tx.commit(buffered_write_options(mode)).expect("commit");
             }
             engine.flush_cf(&cf).expect("flush");
-
-            // Engine is dropped after the second successful flush
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -532,7 +550,7 @@ fn should_recover_valid_wal_records_when_reopening_after_clean_shutdown() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write valid records
@@ -545,8 +563,9 @@ fn should_recover_valid_wal_records_when_reopening_after_clean_shutdown() {
                     .expect("put");
                 tx.commit(buffered_write_options(mode)).expect("commit");
             }
-
-            // Engine is dropped after writing valid WAL records
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)

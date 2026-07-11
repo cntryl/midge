@@ -939,7 +939,7 @@ fn should_recover_conflict_state_after_engine_restart() {
         // Arrange
         // Act (Phase 1) - create conflicts and commit
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Create conflicting transactions where last-write wins
@@ -956,8 +956,9 @@ fn should_recover_conflict_state_after_engine_restart() {
             txn2.put(b"conflict_key".to_vec(), b"value2".to_vec(), None)
                 .unwrap();
             txn2.commit(buffered_write_options(mode)).unwrap();
-
-            // Engine dropped (simulated crash)
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before restart");
         }
 
         // Assert (Phase 2) - restart and verify
@@ -981,7 +982,7 @@ fn should_persist_lost_update_prevention_after_restart() {
         // Arrange
         // Act (Phase 1) - set up concurrent updates
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Initial value
@@ -1005,8 +1006,9 @@ fn should_persist_lost_update_prevention_after_restart() {
                 .unwrap();
             txn2.put(b"counter".to_vec(), b"2".to_vec(), None).unwrap();
             txn2.commit(buffered_write_options(mode)).unwrap();
-
-            // Engine dropped (simulated crash)
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before restart");
         }
 
         // Assert (Phase 2) - restart and verify

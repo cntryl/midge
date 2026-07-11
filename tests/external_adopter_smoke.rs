@@ -213,19 +213,22 @@ fn should_filter_point_delete_tombstones_during_cross_sst_iteration() {
     let tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadOnly)
         .expect("begin read tx");
-    let mut iter = tx.scan(&Query::new()).expect("scan");
-    let results: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
+    let results = tx
+        .scan(&Query::new())
+        .expect("scan")
+        .try_collect()
+        .expect("collect scan");
 
     // Assert
     for deleted in [b"k010", b"k011", b"k024"] {
         assert!(
-            !results.iter().any(|(k, _)| k.as_slice() == deleted),
+            !results.iter().any(|(k, _)| k.as_ref() == deleted),
             "deleted key {:?} should stay hidden",
             String::from_utf8_lossy(deleted)
         );
     }
-    assert!(results.iter().any(|(k, _)| k.as_slice() == b"k000"));
-    assert!(results.iter().any(|(k, _)| k.as_slice() == b"k039"));
+    assert!(results.iter().any(|(k, _)| k.as_ref() == b"k000"));
+    assert!(results.iter().any(|(k, _)| k.as_ref() == b"k039"));
 }
 
 fn smoke_test_lock() -> &'static Mutex<()> {

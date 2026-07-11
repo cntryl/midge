@@ -30,7 +30,7 @@ fn should_recover_writes_given_unflushed_memtable_when_reopening() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -41,7 +41,9 @@ fn should_recover_writes_given_unflushed_memtable_when_reopening() {
             tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
                 .expect("put");
             tx.commit(buffered_write_options(mode)).unwrap();
-            // Engine dropped here, simulating crash with unflushed memtable
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -71,7 +73,7 @@ fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -80,7 +82,9 @@ fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
             tx.put(b"critical_key".to_vec(), b"critical_value".to_vec(), None)
                 .expect("put");
             tx.commit(buffered_write_options(mode)).unwrap();
-            // Simulate immediate crash
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -127,7 +131,7 @@ fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -142,6 +146,9 @@ fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
             tx.commit(buffered_write_options(mode)).unwrap();
             // Force checkpoint to ensure WAL segments are created
             engine.flush_cf(&cf).expect("flush");
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2): All writes recovered after rotation
@@ -169,7 +176,7 @@ fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -184,6 +191,9 @@ fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
                 }
                 tx.commit(buffered_write_options(mode)).unwrap();
             }
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2): All records from all segments recovered
@@ -240,7 +250,12 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
             for handle in handles {
                 handle.join().expect("thread join");
             }
-            // Simulate crash
+            let mut engine = std::sync::Arc::try_unwrap(engine)
+                .ok()
+                .expect("unique engine");
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2): All concurrent writes recovered
@@ -273,7 +288,7 @@ fn should_skip_corrupted_wal_tail_given_truncated_tail_when_recovering() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -285,7 +300,9 @@ fn should_skip_corrupted_wal_tail_given_truncated_tail_when_recovering() {
                     .expect("put");
             }
             tx.commit(buffered_write_options(mode)).unwrap();
-            // Simulate crash without flushing final records
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2): Skips corrupted records, recovers valid ones
@@ -308,7 +325,7 @@ fn should_not_recover_data_given_truncated_wal_append_when_reopening() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine
                 .get_column_family("test")
                 .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
@@ -319,7 +336,9 @@ fn should_not_recover_data_given_truncated_wal_append_when_reopening() {
             tx.put(b"unsafe_key".to_vec(), b"unsafe_value".to_vec(), None)
                 .expect("put");
             tx.commit(buffered_write_options(mode)).unwrap();
-            // Immediate crash before fsync
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2): Graceful recovery
@@ -347,7 +366,7 @@ fn should_allow_data_loss_given_skipped_fsync_when_crash_occurs() {
 
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
@@ -356,7 +375,9 @@ fn should_allow_data_loss_given_skipped_fsync_when_crash_occurs() {
             tx.put(b"transient_key".to_vec(), b"transient_value".to_vec(), None)
                 .expect("put");
             tx.commit(buffered_write_options(mode)).unwrap();
-            // Crash
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -379,7 +400,7 @@ fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine
                 .get_column_family("test")
                 .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
@@ -392,7 +413,9 @@ fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
             tx.put(b"valid_key_2".to_vec(), b"value_2".to_vec(), None)
                 .expect("put");
             tx.commit(buffered_write_options(mode)).unwrap();
-            // Simulate corruption by crashing mid-record
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2): Recovery is tolerant and doesn't crash
@@ -441,7 +464,7 @@ fn should_restore_committed_write_given_local_restart_when_sync_commit_returned(
     let db_path = temp_dir.path();
 
     {
-        let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
             .expect("open engine");
         let cf = engine.create_column_family("trust").expect("create cf");
 
@@ -452,6 +475,9 @@ fn should_restore_committed_write_given_local_restart_when_sync_commit_returned(
             .expect("put committed key");
         tx.commit(WriteOptions::sync())
             .expect("sync commit must succeed");
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before reopen");
     }
 
     // Act
@@ -476,7 +502,7 @@ fn should_keep_valid_prefix_given_truncated_wal_tail_when_reopening_in_strict_mo
     let db_path = temp_dir.path();
 
     {
-        let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
             .expect("open engine");
         let cf = engine.create_column_family("trust").expect("create cf");
 
@@ -493,6 +519,9 @@ fn should_keep_valid_prefix_given_truncated_wal_tail_when_reopening_in_strict_mo
         tx.put(b"torn".to_vec(), b"value".to_vec(), None)
             .expect("put torn");
         tx.commit(WriteOptions::sync()).expect("sync torn commit");
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before corruption");
     }
 
     truncate_last_bytes(&db_path.join("wal").join("wal.log"), 3);
@@ -525,7 +554,7 @@ fn should_fail_strict_but_salvage_valid_prefix_given_corrupted_first_wal_frame_w
     let db_path = temp_dir.path();
 
     {
-        let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
             .expect("open engine");
         let cf = engine.create_column_family("trust").expect("create cf");
 
@@ -535,6 +564,9 @@ fn should_fail_strict_but_salvage_valid_prefix_given_corrupted_first_wal_frame_w
         tx.put(b"first".to_vec(), b"value".to_vec(), None)
             .expect("put first");
         tx.commit(WriteOptions::sync()).expect("sync commit");
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before corruption");
     }
 
     corrupt_byte(&db_path.join("wal").join("wal.log"), 4);
@@ -583,7 +615,7 @@ fn should_drop_partial_wal_entry_given_manual_tail_append_when_reopening_in_salv
     let db_path = temp_dir.path();
 
     {
-        let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
             .expect("open engine");
         let cf = engine.create_column_family("trust").expect("create cf");
 
@@ -594,6 +626,9 @@ fn should_drop_partial_wal_entry_given_manual_tail_append_when_reopening_in_salv
             .expect("put complete");
         tx.commit(WriteOptions::sync())
             .expect("sync complete commit");
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before corruption");
     }
 
     append_partial_frame_bytes(&db_path.join("wal").join("wal.log"));

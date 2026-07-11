@@ -153,7 +153,12 @@ fn should_use_manifest_ssts_when_crashing_after_manifest_persist_before_gc() {
     let tx = engine
         .begin_tx(default_cf.id(), TransactionMode::ReadOnly)
         .expect("begin read tx after 2nd compact");
-    let count = tx.scan(&Query::new()).expect("scan").remaining();
+    let count = tx
+        .scan(&Query::new())
+        .expect("scan")
+        .try_collect()
+        .expect("collect scan")
+        .len();
     assert_eq!(
         count,
         committed.len(),

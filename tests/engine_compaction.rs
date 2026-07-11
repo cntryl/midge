@@ -97,7 +97,12 @@ fn should_preserve_both_write_batches_after_flushing_between_batches() {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin read tx");
-    let total_keys = tx.scan(&Query::new()).expect("scan all keys").remaining();
+    let total_keys = tx
+        .scan(&Query::new())
+        .expect("scan all keys")
+        .try_collect()
+        .expect("collect all keys")
+        .len();
     assert_eq!(total_keys, 1000);
 }
 
@@ -140,8 +145,12 @@ fn should_preserve_range_tombstones_after_flushing_deleted_range() {
     let query = Query::new()
         .start_key(Bytes::from(&b"k300"[..]))
         .end_key(Bytes::from(&b"k700"[..]));
-    let mut iter = tx.scan(&query).expect("scan deleted range");
-    let remaining = std::iter::from_fn(|| iter.next()).count();
+    let remaining = tx
+        .scan(&query)
+        .expect("scan deleted range")
+        .try_collect()
+        .expect("collect deleted range")
+        .len();
     assert_eq!(remaining, 0);
 }
 
@@ -240,7 +249,12 @@ fn should_preserve_all_keys_after_repeated_flushes() {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin read tx");
-    let key_count = tx.scan(&Query::new()).expect("scan all keys").remaining();
+    let key_count = tx
+        .scan(&Query::new())
+        .expect("scan all keys")
+        .try_collect()
+        .expect("collect all keys")
+        .len();
     assert_eq!(key_count, 1500);
 }
 
@@ -293,7 +307,12 @@ fn should_publish_compacted_ssts_in_manifest_when_compaction_completes() {
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin read tx after compaction");
 
-    let key_count = tx.scan(&Query::new()).expect("scan all keys").remaining();
+    let key_count = tx
+        .scan(&Query::new())
+        .expect("scan all keys")
+        .try_collect()
+        .expect("collect all keys")
+        .len();
     assert_eq!(
         key_count, 500,
         "All 500 keys should be queryable after compaction (proves manifest was updated)"
@@ -369,7 +388,12 @@ fn should_cleanup_input_ssts_after_compaction_manifest_publishes() {
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin read tx after cleanup");
 
-    let count = tx.scan(&Query::new()).expect("scan all keys").remaining();
+    let count = tx
+        .scan(&Query::new())
+        .expect("scan all keys")
+        .try_collect()
+        .expect("collect all keys")
+        .len();
     assert_eq!(
         count, 600,
         "All 600 keys (500 old + 100 new) present after cleanup proves old L0s deleted"
@@ -442,7 +466,9 @@ fn should_assign_unique_output_sequences_given_emergent_followup_compaction() {
     let total = read_tx
         .scan(&Query::new())
         .expect("scan compacted data")
-        .remaining();
+        .try_collect()
+        .expect("collect compacted data")
+        .len();
     assert_eq!(
         total,
         batch_count * keys_per_batch,

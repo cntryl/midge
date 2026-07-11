@@ -91,8 +91,11 @@ fn should_scan_inserted_keys_given_cloud_mode_when_range_scanned() {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin scan transaction");
-    let mut iter = tx.scan(&Query::new()).expect("scan cloud keys");
-    let results: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
+    let results = tx
+        .scan(&Query::new())
+        .expect("scan cloud keys")
+        .try_collect()
+        .expect("collect cloud keys");
 
     // Assert
     assert_eq!(results.len(), 20);

@@ -190,7 +190,7 @@ fn should_persist_gc_state_across_restart() {
         // Arrange
         // Act: Write and trigger compaction
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write batch 1
@@ -217,7 +217,9 @@ fn should_persist_gc_state_across_restart() {
 
             // Trigger manual compaction (marks orphans for deletion)
             engine.compact_all().ok();
-            // Engine dropped; GC may be pending
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before restart");
         }
 
         // Assert: Reopen and verify state
@@ -356,7 +358,7 @@ fn should_not_collect_wal_segments_still_needed_for_recovery() {
         // Arrange
         // Act: Write uncommitted data and crash
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write to memtable (committed but not flushed)
@@ -369,7 +371,9 @@ fn should_not_collect_wal_segments_still_needed_for_recovery() {
                     .ok();
             }
             tx.commit(buffered_write_options(mode)).expect("commit");
-            // Do NOT flush; simulate crash by dropping engine
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before restart");
         }
 
         // Assert: Restart and verify WAL recovery

@@ -506,14 +506,15 @@ fn should_hide_deleted_range_given_scan_after_delete_range_when_scanning() {
         let txn = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let mut iter = txn
+        let results = txn
             .scan(
                 &Query::new()
                     .start_key(Bytes::from(&b"key0"[..]))
                     .end_key(Bytes::from(&b"key9"[..])),
             )
-            .unwrap();
-        let results: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
+            .unwrap()
+            .try_collect()
+            .expect("collect post-delete range scan");
 
         // Assert - Should only see key3
         assert_eq!(results.len(), 1);
@@ -590,14 +591,15 @@ fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
         txn.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
 
         // Scan within transaction
-        let mut iter = txn
+        let results = txn
             .scan(
                 &Query::new()
                     .start_key(Bytes::from(&b"key0"[..]))
                     .end_key(Bytes::from(&b"key9"[..])),
             )
-            .unwrap();
-        let results: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
+            .unwrap()
+            .try_collect()
+            .expect("collect transaction intent scan");
 
         // Assert - should see uncommitted writes
         assert_eq!(results.len(), 2);
@@ -654,14 +656,16 @@ fn should_persist_transaction_given_commit_when_crash_after() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let mut txn = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
             txn.commit(buffered_write_options(mode)).unwrap();
-            // Engine dropped (simulated crash)
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -683,14 +687,17 @@ fn should_not_persist_transaction_given_abort_when_crash_after() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let mut txn = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
             // Txn dropped without commit
-            // Engine dropped (simulated crash)
+            drop(txn);
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -712,7 +719,7 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Multiple transactions
@@ -730,7 +737,9 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
                 .unwrap();
             txn2.commit(buffered_write_options(mode)).unwrap();
 
-            // Engine dropped
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)

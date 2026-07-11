@@ -23,7 +23,7 @@ fn should_persist_atomic_transactions_after_restart() {
 
         // Act: Phase 1 - Write and commit
         {
-            let engine = open_with_mode(&opts_clone, mode);
+            let mut engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -34,7 +34,9 @@ fn should_persist_atomic_transactions_after_restart() {
             tx.put(b"tx_key2".to_vec(), b"tx_value2".to_vec(), None)
                 .expect("put");
             tx.commit(buffered_write_options(mode)).expect("commit");
-            // engine dropped, crash simulation
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before restart");
         }
 
         // Assert: Phase 2 - Recover
@@ -74,7 +76,7 @@ fn should_not_persist_uncommitted_transaction_after_restart() {
 
         // Act: Phase 1 - Write but don't commit
         {
-            let engine = open_with_mode(&opts_clone, mode);
+            let mut engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -86,7 +88,10 @@ fn should_not_persist_uncommitted_transaction_after_restart() {
                 None,
             )
             .expect("put");
-            // No commit - engine dropped, crash before commit
+            drop(tx);
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before restart");
         }
 
         // Assert: Phase 2 - Recover
@@ -115,7 +120,7 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
 
         // Act: Phase 1 - Initial data
         {
-            let engine = open_with_mode(&opts_clone, mode);
+            let mut engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             for i in 0..10 {
                 let key = format!("key{i}");
@@ -126,11 +131,14 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
                     .expect("put");
                 tx.commit(buffered_write_options(mode)).expect("commit");
             }
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before delete-range restart");
         }
 
         // Act: Phase 2 - Delete range as a standalone CF-scoped operation
         {
-            let engine = open_with_mode(&opts_clone, mode);
+            let mut engine = open_with_mode(&opts_clone, mode);
             let cf = engine.get_column_family("test").expect("get cf");
             let mut delete_tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -141,7 +149,9 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
             delete_tx
                 .commit(buffered_write_options(mode))
                 .expect("commit delete_range");
-            // crash simulation
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before verification restart");
         }
 
         // Assert: Phase 3 - Verify delete_range persisted
@@ -188,7 +198,7 @@ fn should_recover_committed_spill_given_restart_after_commit() {
 
         // Act: Phase 1 - Write large transaction
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -201,7 +211,9 @@ fn should_recover_committed_spill_given_restart_after_commit() {
                     .expect("put");
             }
             tx.commit(buffered_write_options(mode)).expect("commit");
-            // crash simulation
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before spill restart");
         }
 
         // Assert: Phase 2 - Recover and verify
@@ -239,7 +251,7 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
 
         // Act: Phase 1 - Write but don't commit
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -251,7 +263,10 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
-            // No commit - crash
+            drop(tx);
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before spill restart");
         }
 
         // Assert: Phase 2 - Verify no data recovered
@@ -285,7 +300,7 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
         // Act
         for cycle in 0..3 {
             {
-                let engine = open_with_mode(&opts_clone, mode);
+                let mut engine = open_with_mode(&opts_clone, mode);
                 let cf = engine.create_column_family("test").expect("create cf");
 
                 let mut tx = engine
@@ -296,10 +311,13 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
                 tx.commit(buffered_write_options(mode)).expect("commit");
+                engine
+                    .shutdown(std::time::Duration::from_secs(5))
+                    .expect("shutdown before cycle restart");
             }
 
             {
-                let engine = open_with_mode(&opts_clone, mode);
+                let mut engine = open_with_mode(&opts_clone, mode);
                 let cf = engine.create_column_family("test").expect("create cf");
                 let key = format!("cycle{cycle}_key");
                 let expected = format!("cycle{cycle}_value");
@@ -313,6 +331,10 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
                     Some(expected),
                     "cycle {cycle} mismatch in mode: {mode}"
                 );
+                drop(tx_read);
+                engine
+                    .shutdown(std::time::Duration::from_secs(5))
+                    .expect("shutdown after cycle verification");
             }
         }
 
@@ -330,7 +352,7 @@ fn should_maintain_exactly_once_semantics_given_transaction_with_crash() {
 
         // Act: Phase 1 - Write twice to same key
         {
-            let engine = open_with_mode(&opts_clone, mode);
+            let mut engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -341,11 +363,14 @@ fn should_maintain_exactly_once_semantics_given_transaction_with_crash() {
             tx.put(b"idempotent_key".to_vec(), b"value2".to_vec(), None)
                 .expect("put");
             tx.commit(buffered_write_options(mode)).expect("commit");
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before idempotency restart");
         }
 
         // Assert: Final value should be the last write (value2)
         {
-            let engine = open_with_mode(&opts_clone, mode);
+            let mut engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx_read = engine
@@ -357,6 +382,10 @@ fn should_maintain_exactly_once_semantics_given_transaction_with_crash() {
                 Some(Bytes::from_static(b"value2")),
                 "idempotent key has wrong value in mode: {mode}"
             );
+            drop(tx_read);
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown after idempotency verification");
         }
     });
 }
@@ -373,7 +402,7 @@ fn should_recover_large_transaction_given_crash_during_spill() {
 
         // Act: Phase 1 - Write transaction
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -386,11 +415,14 @@ fn should_recover_large_transaction_given_crash_during_spill() {
                     .expect("put");
             }
             tx.commit(buffered_write_options(mode)).expect("commit");
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before large spill restart");
         }
 
         // Assert: All data recovered
         {
-            let engine = open_with_mode(&opts_clone, mode);
+            let mut engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx_read = engine
@@ -401,6 +433,10 @@ fn should_recover_large_transaction_given_crash_during_spill() {
                 let got = tx_read.get(key.as_bytes()).expect("get");
                 assert!(got.is_some(), "large key {key} missing in mode: {mode}");
             }
+            drop(tx_read);
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown after large spill verification");
         }
     });
 }
@@ -415,7 +451,7 @@ fn should_not_lose_transaction_writes_given_incomplete_wal_sync() {
 
         // Act
         {
-            let engine = open_with_mode(&opts_clone, mode);
+            let mut engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -424,11 +460,14 @@ fn should_not_lose_transaction_writes_given_incomplete_wal_sync() {
             tx.put(b"wal_test_key".to_vec(), b"wal_test_value".to_vec(), None)
                 .expect("put");
             tx.commit(buffered_write_options(mode)).expect("commit");
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before WAL restart");
         }
 
         // Assert
         {
-            let engine = open_with_mode(&opts_clone, mode);
+            let mut engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx_read = engine
@@ -440,6 +479,10 @@ fn should_not_lose_transaction_writes_given_incomplete_wal_sync() {
                 Some(Bytes::from_static(b"wal_test_value")),
                 "WAL write lost in mode: {mode}"
             );
+            drop(tx_read);
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown after WAL verification");
         }
     });
 }
@@ -456,7 +499,7 @@ fn should_survive_mid_spill_crash_given_transaction_recovery() {
 
         // Act
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -469,11 +512,14 @@ fn should_survive_mid_spill_crash_given_transaction_recovery() {
                     .expect("put");
             }
             tx.commit(buffered_write_options(mode)).expect("commit");
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before mid-spill restart");
         }
 
         // Assert
         {
-            let engine = open_with_mode(&opts_clone, mode);
+            let mut engine = open_with_mode(&opts_clone, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let tx_read = engine
@@ -484,6 +530,10 @@ fn should_survive_mid_spill_crash_given_transaction_recovery() {
                 let got = tx_read.get(key.as_bytes()).expect("get");
                 assert!(got.is_some(), "mid-spill key {key} missing");
             }
+            drop(tx_read);
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown after mid-spill verification");
         }
     });
 }

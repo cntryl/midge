@@ -258,7 +258,7 @@ fn should_reset_memtable_wal_gap_after_reopen_before_new_segment_churn() {
     });
 
     {
-        let engine = open_large_cloud_engine(&opts);
+        let mut engine = open_large_cloud_engine(&opts);
         let cf = default_cf(&engine);
         for i in 0..16 {
             let key = format!("reopen-gap-key-{i:04}");
@@ -285,6 +285,10 @@ fn should_reset_memtable_wal_gap_after_reopen_before_new_segment_churn() {
             "pre-restart workload should build historical WAL segment churn; saw {}",
             metrics.wal_current_segment_id
         );
+
+        engine
+            .shutdown(Duration::from_secs(5))
+            .expect("shutdown before reopen");
     }
 
     let reopened = open_large_cloud_engine(&opts);

@@ -209,7 +209,7 @@ fn should_persist_keys_across_delete_range_with_restart_when_durable() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             for (key, value) in [("key1", "val1"), ("key2", "val2"), ("key3", "val3")] {
@@ -230,6 +230,9 @@ fn should_persist_keys_across_delete_range_with_restart_when_durable() {
             delete_tx
                 .commit(buffered_write_options(mode))
                 .expect("commit delete_range");
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Act

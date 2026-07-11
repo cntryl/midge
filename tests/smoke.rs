@@ -130,7 +130,7 @@ fn should_persist_data_given_write_when_restarted() {
 
     // Act - Write and restart
     {
-        let engine = open_with_mode(&opts, "local");
+        let mut engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -142,6 +142,9 @@ fn should_persist_data_given_write_when_restarted() {
         )
         .expect("put");
         tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before restart");
     }
 
     // Reopen engine
@@ -167,7 +170,7 @@ fn should_persist_tombstone_given_delete_when_restarted() {
 
     // Act - Delete and restart
     {
-        let engine = open_with_mode(&opts, "local");
+        let mut engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -181,6 +184,9 @@ fn should_persist_tombstone_given_delete_when_restarted() {
             .unwrap();
         tx.delete(b"key".to_vec()).expect("delete");
         tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before restart");
     }
 
     // Reopen engine
@@ -289,14 +295,15 @@ fn should_respect_visibility_rules_given_range_scan_when_scanning() {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .unwrap();
-    let mut iter = tx
+    let results = tx
         .scan(
             &Query::new()
                 .start_key(Bytes::from(&b"a"[..]))
                 .end_key(Bytes::from(&b"d"[..])),
         )
-        .expect("scan");
-    let results: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
+        .expect("scan")
+        .try_collect()
+        .expect("collect scan");
 
     // Assert - 'b' should be filtered out by delete
     assert_eq!(
@@ -344,7 +351,7 @@ fn should_reopen_committed_values_given_engine_dropped_without_close_when_reopen
 
     // Act
     {
-        let engine = open_with_mode(&opts, "local");
+        let mut engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("test").expect("create cf");
         let mut tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -354,7 +361,9 @@ fn should_reopen_committed_values_given_engine_dropped_without_close_when_reopen
         tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
             .expect("put");
         tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
-        // Intentionally drop without an explicit close call.
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before reopen");
     }
 
     // Reopen and verify state

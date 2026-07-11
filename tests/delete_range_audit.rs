@@ -82,8 +82,11 @@ fn should_return_all_inserted_keys_when_scanning_unbounded_query() {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin scan transaction");
-        let mut iter = tx.scan(&Query::new()).expect("scan all keys");
-        let results: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
+        let results = tx
+            .scan(&Query::new())
+            .expect("scan all keys")
+            .try_collect()
+            .expect("collect all keys");
 
         // Assert
         assert_eq!(results.len(), 4, "mode: {mode}");

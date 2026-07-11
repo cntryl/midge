@@ -91,7 +91,7 @@ fn should_persist_ttl_metadata_given_restart_when_reopening() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -99,7 +99,9 @@ fn should_persist_ttl_metadata_given_restart_when_reopening() {
             tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(3600))
                 .unwrap(); // 1 hour
             tx.commit(buffered_write_options(mode)).unwrap();
-            // Engine dropped
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -118,7 +120,7 @@ fn should_persist_ttl_metadata_given_flush_and_restart_when_reopening() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -127,6 +129,9 @@ fn should_persist_ttl_metadata_given_flush_and_restart_when_reopening() {
                 .unwrap();
             tx.commit(buffered_write_options(mode)).unwrap();
             engine.flush_cf(&cf).unwrap();
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Act
@@ -150,7 +155,7 @@ fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening(
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine
                 .get_column_family("test")
                 .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
@@ -161,7 +166,9 @@ fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening(
                 .unwrap(); // 1 second
             tx.commit(buffered_write_options(mode)).unwrap();
             thread::sleep(Duration::from_millis(1100)); // Wait for expiration
-                                                        // Engine dropped
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)

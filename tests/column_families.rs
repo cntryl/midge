@@ -191,7 +191,7 @@ fn should_delete_cf_data_given_cf_dropped_when_persisted() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test_cf").unwrap();
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -199,7 +199,9 @@ fn should_delete_cf_data_given_cf_dropped_when_persisted() {
             tx.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
             tx.commit(buffered_write_options(mode)).unwrap();
             engine.drop_column_family(cf.id()).unwrap();
-            // Engine dropped
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2) - dropped CF data should not be recovered
@@ -489,9 +491,11 @@ fn should_persist_cf_metadata_given_restart_when_cf_created() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             engine.create_column_family("test_cf").unwrap();
-            // Engine dropped
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -513,14 +517,16 @@ fn should_persist_cf_data_given_restart_when_data_flushed() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test_cf").unwrap();
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
             tx.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
             tx.commit(buffered_write_options(mode)).unwrap();
-            // Engine dropped
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -540,7 +546,7 @@ fn should_persist_multiple_cfs_given_restart_when_all_flushed() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf1 = engine.create_column_family("cf1").unwrap();
             let cf2 = engine.create_column_family("cf2").unwrap();
             let mut tx1 = engine
@@ -554,7 +560,9 @@ fn should_persist_multiple_cfs_given_restart_when_all_flushed() {
                 .unwrap();
             tx2.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
             tx2.commit(buffered_write_options(mode)).unwrap();
-            // Engine dropped
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -572,7 +580,7 @@ fn should_persist_cf_drop_given_restart_when_cf_was_dropped() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = Arc::new(open_with_mode(&opts, mode));
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test_cf").unwrap();
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -582,7 +590,9 @@ fn should_persist_cf_drop_given_restart_when_cf_was_dropped() {
             engine.flush_cf(&cf).ok(); // Flush before dropping
             engine.drop_column_family(cf.id()).unwrap();
             engine.flush_cf(&cf).ok(); // Flush after dropping to persist the deletion
-                                       // Engine dropped
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)

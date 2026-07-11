@@ -29,8 +29,12 @@ fn should_recover_data_from_wal_after_flush() {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin read tx");
-    let mut iter = tx.scan(&cntryl_midge::Query::new()).expect("scan");
-    let count = std::iter::from_fn(|| iter.next()).count();
+    let count = tx
+        .scan(&cntryl_midge::Query::new())
+        .expect("scan")
+        .try_collect()
+        .expect("collect scan")
+        .len();
 
     // Assert
     assert_eq!(count, 50, "expected all WAL-backed keys to survive flush");
@@ -141,8 +145,13 @@ fn should_recover_range_tombstones_from_wal() {
     let scan_tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin scan tx");
-    let mut iter = scan_tx.scan(&cntryl_midge::Query::new()).expect("scan");
-    let in_range = std::iter::from_fn(|| iter.next())
+    let rows = scan_tx
+        .scan(&cntryl_midge::Query::new())
+        .expect("scan")
+        .try_collect()
+        .expect("collect scan");
+    let in_range = rows
+        .iter()
         .filter(|(k, _)| {
             let k_str = String::from_utf8_lossy(k.as_ref());
             k_str.as_ref() >= "k020" && k_str.as_ref() < "k080"
@@ -180,8 +189,12 @@ fn should_handle_wal_rotation_multiple_segments() {
     let final_tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin read tx");
-    let mut iter = final_tx.scan(&cntryl_midge::Query::new()).expect("scan");
-    let total = std::iter::from_fn(|| iter.next()).count();
+    let total = final_tx
+        .scan(&cntryl_midge::Query::new())
+        .expect("scan")
+        .try_collect()
+        .expect("collect scan")
+        .len();
 
     // Assert
     assert_eq!(total, batch_count * 100, "expected every batch to survive");
@@ -242,8 +255,13 @@ fn should_recover_mixed_operations_from_wal() {
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin read tx");
     let put_val = verify_tx.get(b"put_key").expect("get");
-    let mut iter = verify_tx.scan(&cntryl_midge::Query::new()).expect("scan");
-    let dr_remaining = std::iter::from_fn(|| iter.next())
+    let rows = verify_tx
+        .scan(&cntryl_midge::Query::new())
+        .expect("scan")
+        .try_collect()
+        .expect("collect scan");
+    let dr_remaining = rows
+        .iter()
         .filter(|(k, _)| {
             let k_str = String::from_utf8_lossy(k.as_ref());
             k_str.as_ref() >= "dr_05" && k_str.as_ref() < "dr_15"

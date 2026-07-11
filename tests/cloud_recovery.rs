@@ -30,7 +30,7 @@ fn should_preserve_flushed_values_when_reopening_after_short_upload_window() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -49,6 +49,10 @@ fn should_preserve_flushed_values_when_reopening_after_short_upload_window() {
 
             engine.flush_cf(&cf).expect("flush");
             thread::sleep(Duration::from_millis(50));
+
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -84,7 +88,7 @@ fn should_preserve_both_flushed_batches_when_reopening_after_compaction_request(
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -110,6 +114,10 @@ fn should_preserve_both_flushed_batches_when_reopening_after_compaction_request(
             engine.flush_cf(&cf).expect("flush");
 
             engine.compact_all().ok();
+
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -143,7 +151,7 @@ fn should_preserve_flushed_values_when_reopening_after_background_upload_delay()
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -157,6 +165,10 @@ fn should_preserve_flushed_values_when_reopening_after_background_upload_delay()
             tx.commit(buffered_write_options(mode)).expect("commit");
 
             engine.flush_cf(&cf).expect("flush");
+
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -225,7 +237,7 @@ fn should_preserve_both_generations_when_reopening_after_compaction_request() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -252,6 +264,10 @@ fn should_preserve_both_generations_when_reopening_after_compaction_request() {
 
             engine.compact_all().ok();
             thread::sleep(Duration::from_millis(50)); // Let compaction start
+
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -286,7 +302,7 @@ fn should_preserve_values_when_reopening_after_flush_attempt() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -300,6 +316,10 @@ fn should_preserve_values_when_reopening_after_flush_attempt() {
             tx.commit(buffered_write_options(mode)).expect("commit");
 
             engine.flush_cf(&cf).ok();
+
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -328,7 +348,7 @@ fn should_preserve_multiple_flushed_batches_when_reopening_after_short_upload_wi
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -354,6 +374,10 @@ fn should_preserve_multiple_flushed_batches_when_reopening_after_short_upload_wi
             engine.flush_cf(&cf).expect("flush");
 
             thread::sleep(Duration::from_millis(50));
+
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)
@@ -389,7 +413,7 @@ fn should_preserve_flushed_values_when_reopening_after_short_retry_window() {
         // Arrange
         // Act (Phase 1)
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -404,6 +428,10 @@ fn should_preserve_flushed_values_when_reopening_after_short_retry_window() {
 
             engine.flush_cf(&cf).expect("flush");
             thread::sleep(Duration::from_millis(50));
+
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2)

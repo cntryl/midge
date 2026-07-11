@@ -32,7 +32,7 @@ fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
         // Arrange
         // Act (Phase 1): Commit WAL-backed writes, then drop the engine
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write data (goes to WAL)
@@ -56,6 +56,10 @@ fn should_recover_committed_wal_writes_when_reopening_after_clean_shutdown() {
                     .expect("put");
             }
             tx.commit(WriteOptions::buffered()).expect("commit");
+
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2): Reopen and validate recovery
@@ -94,7 +98,7 @@ fn should_recover_committed_writes_when_reopening_after_flush_and_clean_shutdown
         // Arrange
         // Act (Phase 1): Commit writes, flush, then drop the engine
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Load memtable with many keys
@@ -110,6 +114,10 @@ fn should_recover_committed_writes_when_reopening_after_flush_and_clean_shutdown
 
             // Flush the committed data successfully
             engine.flush_cf(&cf).expect("flush");
+
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2): Reopen and verify all flushed data
@@ -143,7 +151,7 @@ fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shu
         // Arrange
         // Act (Phase 1): Create multiple SSTs, compact, then drop the engine
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Create SST A
@@ -172,6 +180,10 @@ fn should_recover_committed_writes_when_reopening_after_compaction_and_clean_shu
 
             // Trigger compaction before shutdown
             engine.compact_all().expect("compact_all");
+
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2): Reopen and verify all committed data
@@ -210,7 +222,7 @@ fn should_preserve_readability_when_reopening_after_manifest_updates_and_clean_s
         // Arrange
         // Act (Phase 1): Flush data, run compaction-related work, then drop the engine
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write and flush (updates manifest)
@@ -227,6 +239,10 @@ fn should_preserve_readability_when_reopening_after_manifest_updates_and_clean_s
 
             // Trigger compaction-related manifest updates before shutdown
             engine.compact_all().expect("compact_all");
+
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2): Reopen and verify readability
@@ -259,7 +275,7 @@ fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdo
         // Arrange
         // Act (Phase 1): Write, flush, add more writes, then drop the engine
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write batch 1
@@ -286,6 +302,10 @@ fn should_preserve_sst_backed_values_when_reopening_after_flush_and_clean_shutdo
                     .expect("put");
             }
             tx.commit(WriteOptions::buffered()).expect("commit");
+
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2): Reopen and verify exact values
@@ -331,7 +351,7 @@ fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
         // Arrange
         // Act (Phase 1): Commit two WAL-backed write batches, then drop the engine
         {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write batch 1 (committed to WAL)
@@ -355,6 +375,10 @@ fn should_preserve_wal_backed_values_when_reopening_after_clean_shutdown() {
                     .expect("put");
             }
             tx.commit(WriteOptions::buffered()).expect("commit");
+
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before reopen");
         }
 
         // Assert (Phase 2): Reopen with WAL replay
