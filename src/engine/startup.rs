@@ -1576,7 +1576,20 @@ impl EngineStartup {
     }
 
     fn trace_open(opts: &OpenOptions) {
-        tracing::debug!(storage = ?opts.storage(), "opening midge engine");
+        if let Storage::Cloud { provider, .. } = opts.storage() {
+            let endpoint = provider_endpoint(provider)
+                .map(redact_endpoint_metadata)
+                .unwrap_or_else(|| "<provider-default>".to_string());
+            tracing::debug!(
+                storage = "cloud",
+                provider = provider_kind(provider),
+                endpoint = %endpoint,
+                credentials = "[REDACTED]",
+                "opening midge engine"
+            );
+        } else {
+            tracing::debug!(storage = ?opts.storage(), "opening midge engine");
+        }
     }
 
     fn apply_post_start_config(
@@ -1603,6 +1616,36 @@ impl EngineStartup {
             )),
         }
     }
+}
+
+fn provider_kind(provider: &crate::config::CloudProviderConfig) -> &'static str {
+    match provider {
+        crate::config::CloudProviderConfig::AwsS3 { .. } => "aws-s3",
+        crate::config::CloudProviderConfig::S3Compatible { .. } => "s3-compatible",
+        crate::config::CloudProviderConfig::AzureBlob { .. } => "azure-blob",
+        crate::config::CloudProviderConfig::Gcs { .. } => "gcs",
+    }
+}
+
+fn provider_endpoint(provider: &crate::config::CloudProviderConfig) -> Option<&str> {
+    match provider {
+        crate::config::CloudProviderConfig::AwsS3 { .. } => None,
+        crate::config::CloudProviderConfig::S3Compatible { endpoint, .. } => Some(endpoint),
+        crate::config::CloudProviderConfig::AzureBlob { endpoint, .. }
+        | crate::config::CloudProviderConfig::Gcs { endpoint, .. } => endpoint.as_deref(),
+    }
+}
+
+fn redact_endpoint_metadata(endpoint: &str) -> String {
+    let endpoint = endpoint.split(['?', '#']).next().unwrap_or(endpoint);
+    let Some((scheme, authority_and_path)) = endpoint.split_once("://") else {
+        return endpoint.to_string();
+    };
+    let authority = authority_and_path
+        .split('/')
+        .next()
+        .unwrap_or(authority_and_path);
+    format!("{scheme}://{authority}")
 }
 
 #[cfg(test)]
