@@ -110,7 +110,7 @@ let tx = old_engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
 let mut query = tx.scan(&Query::new())?;
 
 let mut export = std::fs::File::create("export.bin")?;
-while let Some((key, value)) = query.next() {
+while let Some((key, value)) = query.next().transpose()? {
     // Write key length, key, value length, value
     export.write_u32::<LittleEndian>(key.len() as u32)?;
     export.write_all(&key)?;
@@ -307,8 +307,8 @@ println!("Midge version: {}", env!("CARGO_PKG_VERSION"));
 
 // Verify data integrity
 let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-let mut iter = tx.scan(&Query::new())?;
-let count = iter.collect_all().len();
+let iter = tx.scan(&Query::new())?;
+let count = iter.try_collect()?.len();
 println!("Total keys: {}", count);
 
 // Check recovery time

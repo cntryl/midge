@@ -148,6 +148,9 @@ fn should_merge_transaction_intents_when_scanning_after_spill() {
     let rows = tx
         .scan(&Query::new().prefix(Bytes::from_static(b"scan:")))
         .expect("scan intents")
+        .try_collect()
+        .expect("collect scan intents")
+        .into_iter()
         .collect::<BTreeMap<_, _>>();
     let had_spills = !spill_files(temp.path()).is_empty();
     tx.rollback().expect("rollback transaction");
@@ -158,16 +161,16 @@ fn should_merge_transaction_intents_when_scanning_after_spill() {
     // Assert
     assert!(had_spills, "test must merge at least one spill run");
     assert_eq!(
-        rows.get(b"scan:a".as_slice()),
-        Some(&b"resident-or-spilled-a".to_vec())
+        rows.get(b"scan:a".as_slice()).map(Bytes::as_ref),
+        Some(b"resident-or-spilled-a".as_slice())
     );
     assert_eq!(
-        rows.get(b"scan:b".as_slice()),
-        Some(&b"resident-or-spilled-b".to_vec())
+        rows.get(b"scan:b".as_slice()).map(Bytes::as_ref),
+        Some(b"resident-or-spilled-b".as_slice())
     );
     assert_eq!(
-        rows.get(b"scan:base".as_slice()),
-        Some(&b"overridden".to_vec())
+        rows.get(b"scan:base".as_slice()).map(Bytes::as_ref),
+        Some(b"overridden".as_slice())
     );
 }
 

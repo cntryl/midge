@@ -107,7 +107,11 @@ fn should_keep_prefix_descendants_when_prefix_ends_in_ff() {
         .begin_tx(cf.id(), TransactionMode::ReadOnly)
         .expect("begin read transaction");
     let query = Query::new().prefix(Bytes::from(vec![0x10, 0xff]));
-    let results: Vec<_> = read.scan(&query).expect("scan prefix").collect();
+    let results = read
+        .scan(&query)
+        .expect("scan prefix")
+        .try_collect()
+        .expect("collect prefix scan");
 
     // Assert
     assert_eq!(results.len(), 2);

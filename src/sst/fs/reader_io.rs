@@ -70,6 +70,242 @@ pub struct SstFileIo {
     range_tombstones: Vec<RangeTombstone>,
 }
 
+enum BlockEntryCursor {
+    Forward(std::vec::IntoIter<SstEntry>),
+    Reverse(std::iter::Rev<std::vec::IntoIter<SstEntry>>),
+}
+
+impl BlockEntryCursor {
+    fn next(&mut self) -> Option<SstEntry> {
+        match self {
+            Self::Forward(entries) => entries.next(),
+            Self::Reverse(entries) => entries.next(),
+        }
+    }
+}
+
+/// Fallible, block-at-a-time cursor over the visible key states in one SST.
+///
+/// Index metadata is loaded on the first call to `next`; data blocks are read
+/// only as the caller advances the cursor. This keeps a small query limit from
+/// turning into a full-table read and lets corruption discovered in a later
+/// block surface from the corresponding iterator item.
+pub(crate) struct SstStateScan {
+    reader: Arc<SstFileIo>,
+    start: Option<Vec<u8>>,
+    end: Option<Vec<u8>>,
+    reverse: bool,
+    snapshot_seq: u64,
+    now_millis: u64,
+    initialized: bool,
+    exhausted: bool,
+    index: Option<IndexEntries>,
+    first_block: usize,
+    last_block: usize,
+    next_block: usize,
+    block_entries: Option<BlockEntryCursor>,
+    pending_entry: Option<SstEntry>,
+}
+
+impl SstStateScan {
+    fn new(
+        reader: Arc<SstFileIo>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        reverse: bool,
+        snapshot_seq: u64,
+        now_millis: u64,
+    ) -> Self {
+        Self {
+            reader,
+            start,
+            end,
+            reverse,
+            snapshot_seq,
+            now_millis,
+            initialized: false,
+            exhausted: false,
+            index: None,
+            first_block: 0,
+            last_block: 0,
+            next_block: 0,
+            block_entries: None,
+            pending_entry: None,
+        }
+    }
+
+    fn initialize(&mut self) -> MidgeResult<()> {
+        if self.initialized {
+            return Ok(());
+        }
+        self.initialized = true;
+
+        if self
+            .reader
+            .range_outside_persisted_bounds(self.start.as_deref(), self.end.as_deref())
+        {
+            self.exhausted = true;
+            return Ok(());
+        }
+
+        let index = self.reader.index_entries()?;
+        if index.is_empty() {
+            self.exhausted = true;
+            return Ok(());
+        }
+
+        self.first_block = self
+            .start
+            .as_deref()
+            .and_then(|start| self.reader.candidate_block_indices(index.as_ref(), start))
+            .map_or(0, |range| *range.start());
+        self.last_block = self
+            .end
+            .as_deref()
+            .and_then(|end| self.reader.candidate_block_indices(index.as_ref(), end))
+            .map_or_else(|| index.len().saturating_sub(1), |range| *range.end());
+
+        if self.first_block >= index.len() || self.first_block > self.last_block {
+            self.exhausted = true;
+            return Ok(());
+        }
+        self.last_block = self.last_block.min(index.len() - 1);
+        self.next_block = if self.reverse {
+            self.last_block
+        } else {
+            self.first_block
+        };
+        self.index = Some(index);
+        Ok(())
+    }
+
+    fn load_next_block(&mut self) -> MidgeResult<bool> {
+        self.initialize()?;
+        if self.exhausted {
+            return Ok(false);
+        }
+
+        let block_index = self.next_block;
+        let handle = self
+            .index
+            .as_ref()
+            .and_then(|index| index.get(block_index))
+            .map(|(_, handle)| *handle)
+            .ok_or_else(|| MidgeError::Corruption("SST scan block index is invalid".into()))?;
+
+        if self.reverse {
+            if block_index == self.first_block {
+                self.exhausted = true;
+            } else {
+                self.next_block = block_index - 1;
+            }
+        } else if block_index == self.last_block {
+            self.exhausted = true;
+        } else {
+            self.next_block = block_index + 1;
+        }
+
+        self.reader
+            .diagnostics
+            .sst_metrics()
+            .record_candidate_blocks_checked(1);
+        let block = self.reader.read_cached_data_block(&handle)?;
+        let entries = self.reader.scan_block_entries_from_bytes(&block)?;
+        self.block_entries = Some(if self.reverse {
+            BlockEntryCursor::Reverse(entries.into_iter().rev())
+        } else {
+            BlockEntryCursor::Forward(entries.into_iter())
+        });
+        Ok(true)
+    }
+
+    fn next_raw_entry(&mut self) -> MidgeResult<Option<SstEntry>> {
+        loop {
+            if let Some(entry) = self.block_entries.as_mut().and_then(BlockEntryCursor::next) {
+                if self
+                    .start
+                    .as_deref()
+                    .is_some_and(|start| entry.key.as_slice() < start)
+                    || self
+                        .end
+                        .as_deref()
+                        .is_some_and(|end| entry.key.as_slice() >= end)
+                {
+                    continue;
+                }
+                return Ok(Some(entry));
+            }
+            self.block_entries = None;
+            if !self.load_next_block()? {
+                return Ok(None);
+            }
+        }
+    }
+
+    fn consider_entry(&self, best: &mut KeyState, entry: SstEntry) {
+        if self.snapshot_seq != u64::MAX && entry.sequence > self.snapshot_seq {
+            return;
+        }
+
+        let candidate = if entry.is_tombstone() || entry.is_expired(self.now_millis) {
+            KeyState::Tombstone(entry.sequence)
+        } else {
+            SstFileIo::state_from_entry(entry)
+        };
+        SstFileIo::merge_newer_state(best, candidate);
+    }
+
+    fn next_state(&mut self) -> MidgeResult<Option<(Bytes, KeyState)>> {
+        loop {
+            let Some(first) = self
+                .pending_entry
+                .take()
+                .map_or_else(|| self.next_raw_entry(), |entry| Ok(Some(entry)))?
+            else {
+                return Ok(None);
+            };
+
+            let key = first.key.clone();
+            let mut best = KeyState::Absent;
+            self.consider_entry(&mut best, first);
+
+            while let Some(entry) = self.next_raw_entry()? {
+                if entry.key == key {
+                    self.consider_entry(&mut best, entry);
+                } else {
+                    self.pending_entry = Some(entry);
+                    break;
+                }
+            }
+
+            if !matches!(best, KeyState::Absent) {
+                return Ok(Some((Bytes::from(key), best)));
+            }
+        }
+    }
+}
+
+impl std::iter::Iterator for SstStateScan {
+    type Item = MidgeResult<(Bytes, KeyState)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.exhausted && self.block_entries.is_none() && self.pending_entry.is_none() {
+            return None;
+        }
+
+        match self.next_state() {
+            Ok(Some(state)) => Some(Ok(state)),
+            Ok(None) => None,
+            Err(error) => {
+                self.exhausted = true;
+                self.block_entries = None;
+                self.pending_entry = None;
+                Some(Err(error))
+            }
+        }
+    }
+}
+
 impl SstFileIo {
     fn stable_sst_id(path: &str, fs: &Arc<dyn Fs>) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -208,6 +444,24 @@ impl SstFileIo {
 
     pub(crate) fn sst_id(&self) -> u64 {
         self.sst_id
+    }
+
+    pub(crate) fn state_scan(
+        self: &Arc<Self>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        reverse: bool,
+        snapshot_seq: u64,
+        now_millis: u64,
+    ) -> SstStateScan {
+        SstStateScan::new(
+            Arc::clone(self),
+            start,
+            end,
+            reverse,
+            snapshot_seq,
+            now_millis,
+        )
     }
 
     /// Get reference to bloom metrics for this reader

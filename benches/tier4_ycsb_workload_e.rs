@@ -120,7 +120,8 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
                     // Actually consume the iterator to measure scan throughput
                     let mut iter = tx.scan(&query).expect("warmup range");
                     let mut count = 0;
-                    while iter.next().is_some() {
+                    for row in &mut iter {
+                        row.expect("warmup scan row");
                         count += 1;
                     }
                     std::hint::black_box(count);
@@ -182,7 +183,8 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
                         // Actually consume the iterator to measure scan throughput
                         let mut iter = tx.scan(&query).expect("measured range");
                         let mut count = 0;
-                        while iter.next().is_some() {
+                        for row in &mut iter {
+                            row.expect("measured scan row");
                             count += 1;
                         }
                         std::hint::black_box(count);

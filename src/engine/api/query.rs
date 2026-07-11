@@ -77,18 +77,26 @@ impl Query {
     /// Get the effective start bound for iteration
     #[inline]
     pub fn effective_start(&self) -> Option<&[u8]> {
-        self.start
-            .as_ref()
-            .map(std::convert::AsRef::as_ref)
-            .or_else(|| self.prefix.as_ref().map(std::convert::AsRef::as_ref))
+        match (self.start.as_deref(), self.prefix.as_deref()) {
+            (Some(start), Some(prefix)) => Some(start.max(prefix)),
+            (Some(start), None) => Some(start),
+            (None, Some(prefix)) => Some(prefix),
+            (None, None) => None,
+        }
     }
 
     /// Get the effective end bound for iteration
     #[inline]
     pub fn effective_end(&self) -> Option<Vec<u8>> {
-        match (self.end.as_ref(), self.prefix.as_ref()) {
-            (Some(e), _) => Some(e.to_vec()),
-            (None, Some(p)) => Self::prefix_successor(p),
+        match (
+            self.end.as_ref().map(Bytes::as_ref),
+            self.prefix
+                .as_ref()
+                .and_then(|prefix| Self::prefix_successor(prefix)),
+        ) {
+            (Some(end), Some(prefix_end)) => Some(end.min(prefix_end.as_slice()).to_vec()),
+            (Some(end), None) => Some(end.to_vec()),
+            (None, Some(prefix_end)) => Some(prefix_end),
             (None, None) => None,
         }
     }

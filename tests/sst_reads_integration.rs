@@ -221,9 +221,11 @@ fn should_error_given_corrupt_sst_when_transaction_scan_reads_flushed_range() ->
 
     // Act
     let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
-    let Err(error) = read_tx.scan(&Query::new()) else {
-        panic!("corrupt SST range scan must surface an error");
-    };
+    let mut scan = read_tx.scan(&Query::new())?;
+    let error = scan
+        .next()
+        .transpose()
+        .expect_err("corrupt SST range scan must surface an error while advancing");
 
     // Assert
     assert!(

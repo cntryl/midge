@@ -15,8 +15,13 @@ use cntryl_midge::{Query, Transaction};
 use common::*;
 
 fn collect_scan(tx: &Transaction, query: &Query) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let mut iter = tx.scan(query).unwrap();
-    std::iter::from_fn(|| iter.next()).collect()
+    tx.scan(query)
+        .unwrap()
+        .try_collect()
+        .unwrap()
+        .into_iter()
+        .map(|(key, value)| (key.to_vec(), value.to_vec()))
+        .collect()
 }
 
 fn scan_between(tx: &Transaction, start: &[u8], end: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {

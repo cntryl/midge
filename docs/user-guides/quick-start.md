@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 5. Scan a range
     let query = Query::new().prefix(Bytes::from_static(b"user:"));
     let mut iter = tx.scan(&query)?;
-    while let Some((key, value)) = iter.next() {
+    while let Some((key, value)) = iter.next().transpose()? {
         println!(
             "{} = {}",
             String::from_utf8_lossy(&key),
@@ -151,7 +151,7 @@ let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
 let query = Query::new().prefix(Bytes::from_static(b"user:"));
 let mut iter = tx.scan(&query)?;
 
-while let Some((key, value)) = iter.next() {
+while let Some((key, value)) = iter.next().transpose()? {
     // Process entries with "user:" prefix
 }
 ```
@@ -166,7 +166,7 @@ let query = Query::new()
     .end_key(Bytes::from_static(b"user:200"));
 let mut iter = tx.scan(&query)?;
 
-while let Some((key, value)) = iter.next() {
+while let Some((key, value)) = iter.next().transpose()? {
     // Process entries between user:100 and user:200
 }
 ```
@@ -181,7 +181,7 @@ let query = Query::new()
     .reverse();
 let mut iter = tx.scan(&query)?;
 
-while let Some((key, value)) = iter.next() {
+while let Some((key, value)) = iter.next().transpose()? {
     // Process entries in reverse order
 }
 ```
@@ -196,7 +196,7 @@ let query = Query::new()
     .limit(10);
 let mut iter = tx.scan(&query)?;
 
-while let Some((key, value)) = iter.next() {
+while let Some((key, value)) = iter.next().transpose()? {
     // Process at most 10 entries
 }
 ```

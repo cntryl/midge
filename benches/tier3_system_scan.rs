@@ -114,9 +114,9 @@ fn run_scan_case(
     let _ = ctx.measure_batch(scenario, 1, || {
         let query = Query::new().prefix(Bytes::from_static(&[0x7a]));
         match snapshot.scan(&query).ok().and_then(|mut rows| rows.next()) {
-            Some((key, value))
-                if key.as_slice() == expected_key.as_slice()
-                    && value.as_slice() == expected_value.as_slice() => {}
+            Some(Ok((key, value)))
+                if key.as_ref() == expected_key.as_slice()
+                    && value.as_ref() == expected_value.as_slice() => {}
             _ => validation_failures += 1,
         }
     });
@@ -130,14 +130,19 @@ fn run_scan_case(
         "candidate_blocks_checked_delta",
         read_path_after.candidate_blocks_checked - read_path_before.candidate_blocks_checked,
     );
+    ctx.parameter(
+        "data_blocks_read_delta",
+        read_path_after.data_blocks_read - read_path_before.data_blocks_read,
+    );
     assert_eq!(
         validation_failures, 0,
         "each measured scan must return its expected first row"
     );
     assert!(
         read_path_after.candidate_sst_files_checked > read_path_before.candidate_sst_files_checked
-            && read_path_after.candidate_blocks_checked > read_path_before.candidate_blocks_checked,
-        "scan row must exercise candidate SST and block work"
+            && read_path_after.candidate_blocks_checked > read_path_before.candidate_blocks_checked
+            && read_path_after.data_blocks_read > read_path_before.data_blocks_read,
+        "scan construction plus first row must exercise candidate SST and data-block work"
     );
     drop(snapshot);
     drop(engine);

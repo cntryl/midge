@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(read_tx.get(b"user:1")?, Some(Bytes::from_static(b"alice")));
 
     let query = Query::new().prefix(Bytes::from_static(b"user:"));
-    let rows = read_tx.scan(&query)?.collect::<Vec<_>>();
+    let rows = read_tx.scan(&query)?.try_collect()?;
     assert_eq!(rows.len(), 2);
     drop(read_tx);
 

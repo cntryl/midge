@@ -175,9 +175,9 @@ fn run_sst_range_seek_case(
             let expected_value =
                 vec![u8::try_from(start_index % 251).expect("value byte fits"); VALUE_SIZE];
             match it.next() {
-                Some((key, value))
-                    if key.as_slice() == start.as_slice()
-                        && value.as_slice() == expected_value.as_slice() => {}
+                Some(Ok((key, value)))
+                    if key.as_ref() == start.as_slice()
+                        && value.as_ref() == expected_value.as_slice() => {}
                 _ => validation_failures += 1,
             }
         }

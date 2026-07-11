@@ -214,19 +214,13 @@ impl TransactionWriteSet {
         Ok(latest.map(|(_, lookup)| lookup))
     }
 
-    pub(crate) fn for_each_ordinal<F>(&self, mut visitor: F) -> MidgeResult<()>
-    where
-        F: FnMut(u64, TransactionOp) -> MidgeResult<()>,
-    {
-        for run in &self.runs {
-            for_each_run_ordinal(run, |ordinal_op| visitor(ordinal_op.ordinal, ordinal_op.op))?;
-        }
-        let mut resident = self.resident.iter().collect::<Vec<_>>();
-        resident.sort_unstable_by_key(|entry| entry.ordinal);
-        for ordinal_op in resident {
-            visitor(ordinal_op.ordinal, ordinal_op.op.clone())?;
-        }
-        Ok(())
+    pub(crate) fn key_scan(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        reverse: bool,
+    ) -> MidgeResult<IntentKeyScan> {
+        IntentKeyScan::new(self, start, end, reverse)
     }
 
     pub(crate) fn take_in_memory_ops(&mut self) -> Vec<TransactionOp> {
@@ -269,6 +263,367 @@ impl TransactionWriteSet {
 impl Drop for TransactionWriteSet {
     fn drop(&mut self) {
         self.cleanup();
+    }
+}
+
+enum RunKeyDirection {
+    Forward,
+    Reverse {
+        chunks: Vec<(u64, u64)>,
+        next_chunk: usize,
+        keys: std::vec::IntoIter<Bytes>,
+    },
+}
+
+struct RunKeyCursor {
+    file: File,
+    cursor: u64,
+    data_end: u64,
+    start: Option<Vec<u8>>,
+    end: Option<Vec<u8>>,
+    direction: RunKeyDirection,
+    previous_key: Option<Bytes>,
+    exhausted: bool,
+}
+
+impl RunKeyCursor {
+    fn new(
+        run: &SpillRun,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        reverse: bool,
+    ) -> MidgeResult<Self> {
+        let mut file = File::open(&run.path)?;
+        let header = read_header(&mut file)?;
+        if header.record_count != run.record_count {
+            return Err(MidgeError::Corruption(
+                "transaction spill record count changed".to_string(),
+            ));
+        }
+
+        let (cursor, direction) = if reverse {
+            let starts = read_sparse_offsets(&mut file, &header)?;
+            let chunks = starts
+                .iter()
+                .enumerate()
+                .map(|(index, chunk_start)| {
+                    let chunk_end = starts
+                        .get(index + 1)
+                        .copied()
+                        .unwrap_or(header.ordinal_table_offset);
+                    (*chunk_start, chunk_end)
+                })
+                .collect::<Vec<_>>();
+            let next_chunk = chunks.len();
+            (
+                RUN_HEADER_LEN as u64,
+                RunKeyDirection::Reverse {
+                    chunks,
+                    next_chunk,
+                    keys: Vec::new().into_iter(),
+                },
+            )
+        } else {
+            (
+                sparse_start_for_key(&mut file, &header, start)?,
+                RunKeyDirection::Forward,
+            )
+        };
+
+        Ok(Self {
+            file,
+            cursor,
+            data_end: header.ordinal_table_offset,
+            start: start.map(<[u8]>::to_vec),
+            end: end.map(<[u8]>::to_vec),
+            direction,
+            previous_key: None,
+            exhausted: header.record_count == 0,
+        })
+    }
+
+    fn key_in_bounds(&self, key: &[u8]) -> bool {
+        self.start.as_deref().is_none_or(|start| key >= start)
+            && self.end.as_deref().is_none_or(|end| key < end)
+    }
+
+    fn next_forward_key(&mut self) -> MidgeResult<Option<Bytes>> {
+        while self.cursor < self.data_end {
+            self.file.seek(SeekFrom::Start(self.cursor))?;
+            let (key, next_cursor) = read_op_primary_key_frame(&mut self.file)?;
+            if next_cursor > self.data_end || next_cursor <= self.cursor {
+                return Err(MidgeError::Corruption(
+                    "transaction spill data frame exceeds its data section".to_string(),
+                ));
+            }
+            self.cursor = next_cursor;
+            if self.end.as_deref().is_some_and(|end| key.as_ref() >= end) {
+                self.exhausted = true;
+                return Ok(None);
+            }
+            if !self.key_in_bounds(&key)
+                || self
+                    .previous_key
+                    .as_ref()
+                    .is_some_and(|previous| previous == &key)
+            {
+                continue;
+            }
+            self.previous_key = Some(key.clone());
+            return Ok(Some(key));
+        }
+        self.exhausted = true;
+        Ok(None)
+    }
+
+    fn load_reverse_chunk(&mut self) -> MidgeResult<bool> {
+        let (chunk_start, chunk_end) = {
+            let RunKeyDirection::Reverse {
+                chunks, next_chunk, ..
+            } = &mut self.direction
+            else {
+                return Ok(false);
+            };
+            if *next_chunk == 0 {
+                self.exhausted = true;
+                return Ok(false);
+            }
+            *next_chunk -= 1;
+            chunks[*next_chunk]
+        };
+        let mut cursor = chunk_start;
+        let mut chunk_keys = Vec::new();
+        while cursor < chunk_end {
+            self.file.seek(SeekFrom::Start(cursor))?;
+            let (key, next_cursor) = read_op_primary_key_frame(&mut self.file)?;
+            if next_cursor > chunk_end || next_cursor <= cursor {
+                return Err(MidgeError::Corruption(
+                    "transaction spill sparse chunk does not align to operation frames".to_string(),
+                ));
+            }
+            cursor = next_cursor;
+            if self.key_in_bounds(&key) {
+                chunk_keys.push(key);
+            }
+        }
+        chunk_keys.dedup();
+        chunk_keys.reverse();
+        if let RunKeyDirection::Reverse { keys, .. } = &mut self.direction {
+            *keys = chunk_keys.into_iter();
+        }
+        Ok(true)
+    }
+
+    fn next_reverse_key(&mut self) -> MidgeResult<Option<Bytes>> {
+        loop {
+            let key = match &mut self.direction {
+                RunKeyDirection::Reverse { keys, .. } => keys.next(),
+                RunKeyDirection::Forward => None,
+            };
+            if let Some(key) = key {
+                if self
+                    .previous_key
+                    .as_ref()
+                    .is_some_and(|previous| previous == &key)
+                {
+                    continue;
+                }
+                self.previous_key = Some(key.clone());
+                return Ok(Some(key));
+            }
+            if !self.load_reverse_chunk()? {
+                return Ok(None);
+            }
+        }
+    }
+}
+
+impl std::iter::Iterator for RunKeyCursor {
+    type Item = MidgeResult<Bytes>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.exhausted {
+            return None;
+        }
+        let result = match self.direction {
+            RunKeyDirection::Forward => self.next_forward_key(),
+            RunKeyDirection::Reverse { .. } => self.next_reverse_key(),
+        };
+        match result {
+            Ok(Some(key)) => Some(Ok(key)),
+            Ok(None) => None,
+            Err(error) => {
+                self.exhausted = true;
+                Some(Err(error))
+            }
+        }
+    }
+}
+
+enum IntentKeyIterator {
+    Resident(std::vec::IntoIter<Bytes>),
+    Run(RunKeyCursor),
+}
+
+impl IntentKeyIterator {
+    fn next(&mut self) -> Option<MidgeResult<Bytes>> {
+        match self {
+            Self::Resident(keys) => keys.next().map(Ok),
+            Self::Run(keys) => keys.next(),
+        }
+    }
+}
+
+struct IntentKeySource {
+    iterator: IntentKeyIterator,
+    head: Option<MidgeResult<Bytes>>,
+    primed: bool,
+    needs_advance: bool,
+}
+
+impl IntentKeySource {
+    fn new(iterator: IntentKeyIterator) -> Self {
+        Self {
+            iterator,
+            head: None,
+            primed: false,
+            needs_advance: false,
+        }
+    }
+
+    fn prime(&mut self) {
+        if !self.primed {
+            self.head = self.iterator.next();
+            self.primed = true;
+        }
+    }
+
+    fn advance_if_needed(&mut self) {
+        if self.needs_advance {
+            self.head = self.iterator.next();
+            self.needs_advance = false;
+        }
+    }
+
+    fn consume(&mut self) {
+        self.head = None;
+        self.needs_advance = true;
+    }
+}
+
+/// K-way unique-key merge over resident intents and private spill runs.
+pub(crate) struct IntentKeyScan {
+    reverse: bool,
+    sources: Vec<IntentKeySource>,
+    exhausted: bool,
+}
+
+impl IntentKeyScan {
+    fn new(
+        write_set: &TransactionWriteSet,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        reverse: bool,
+    ) -> MidgeResult<Self> {
+        let mut resident = write_set
+            .resident
+            .iter()
+            .map(|entry| op_primary_key_bytes(&entry.op))
+            .filter(|key| {
+                start.is_none_or(|start| key.as_ref() >= start)
+                    && end.is_none_or(|end| key.as_ref() < end)
+            })
+            .collect::<Vec<_>>();
+        resident.sort_unstable();
+        resident.dedup();
+        if reverse {
+            resident.reverse();
+        }
+
+        let mut sources = Vec::with_capacity(write_set.runs.len() + 1);
+        sources.push(IntentKeySource::new(IntentKeyIterator::Resident(
+            resident.into_iter(),
+        )));
+        for run in &write_set.runs {
+            sources.push(IntentKeySource::new(IntentKeyIterator::Run(
+                RunKeyCursor::new(run, start, end, reverse)?,
+            )));
+        }
+        Ok(Self {
+            reverse,
+            sources,
+            exhausted: false,
+        })
+    }
+
+    fn next_key(&mut self) -> MidgeResult<Option<Bytes>> {
+        for source in &mut self.sources {
+            source.prime();
+            source.advance_if_needed();
+        }
+        if let Some(error) = self.sources.iter_mut().find_map(|source| {
+            if source.head.as_ref().is_some_and(Result::is_err) {
+                source.head.take().and_then(Result::err)
+            } else {
+                None
+            }
+        }) {
+            return Err(error);
+        }
+
+        let Some(selected) = self
+            .sources
+            .iter()
+            .filter_map(|source| source.head.as_ref()?.as_ref().ok())
+            .cloned()
+            .reduce(|selected, candidate| {
+                let candidate_wins = if self.reverse {
+                    candidate > selected
+                } else {
+                    candidate < selected
+                };
+                if candidate_wins {
+                    candidate
+                } else {
+                    selected
+                }
+            })
+        else {
+            return Ok(None);
+        };
+
+        for source in &mut self.sources {
+            if source
+                .head
+                .as_ref()
+                .and_then(|head| head.as_ref().ok())
+                .is_some_and(|key| key == &selected)
+            {
+                source.consume();
+            }
+        }
+        Ok(Some(selected))
+    }
+}
+
+impl std::iter::Iterator for IntentKeyScan {
+    type Item = MidgeResult<Bytes>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.exhausted {
+            return None;
+        }
+        match self.next_key() {
+            Ok(Some(key)) => Some(Ok(key)),
+            Ok(None) => {
+                self.exhausted = true;
+                None
+            }
+            Err(error) => {
+                self.exhausted = true;
+                Some(Err(error))
+            }
+        }
     }
 }
 
@@ -749,6 +1104,62 @@ fn validate_sparse_index(file: &mut File, header: &RunHeader) -> MidgeResult<()>
     sparse_start_for_key(file, header, None).map(|_| ())
 }
 
+fn read_sparse_offsets(file: &mut File, header: &RunHeader) -> MidgeResult<Vec<u64>> {
+    let mut cursor = header.sparse_index_offset;
+    let mut previous_key: Option<Vec<u8>> = None;
+    let mut offsets = Vec::with_capacity(header.sparse_count);
+    for _ in 0..header.sparse_count {
+        file.seek(SeekFrom::Start(cursor))?;
+        let (payload, next_cursor) = read_frame(file)?;
+        cursor = next_cursor;
+        if payload.len() < 12 {
+            return Err(MidgeError::Corruption(
+                "transaction spill sparse index entry is truncated".to_string(),
+            ));
+        }
+        let key_len = read_u32_at(&payload, 0)? as usize;
+        let key_end = 4_usize.checked_add(key_len).ok_or_else(|| {
+            MidgeError::Corruption("transaction spill sparse key length overflow".to_string())
+        })?;
+        if key_end.checked_add(8) != Some(payload.len()) {
+            return Err(MidgeError::Corruption(
+                "transaction spill sparse index entry has invalid length".to_string(),
+            ));
+        }
+        let key = payload[4..key_end].to_vec();
+        if previous_key
+            .as_ref()
+            .is_some_and(|previous| previous > &key)
+        {
+            return Err(MidgeError::Corruption(
+                "transaction spill sparse index is not sorted".to_string(),
+            ));
+        }
+        let record_offset = read_u64_at(&payload, key_end)?;
+        if record_offset < RUN_HEADER_LEN as u64 || record_offset >= header.ordinal_table_offset {
+            return Err(MidgeError::Corruption(
+                "transaction spill sparse index offset is out of bounds".to_string(),
+            ));
+        }
+        if offsets
+            .last()
+            .is_some_and(|previous| *previous >= record_offset)
+        {
+            return Err(MidgeError::Corruption(
+                "transaction spill sparse offsets are not increasing".to_string(),
+            ));
+        }
+        offsets.push(record_offset);
+        previous_key = Some(key);
+    }
+    if header.record_count != 0 && offsets.first().copied() != Some(RUN_HEADER_LEN as u64) {
+        return Err(MidgeError::Corruption(
+            "transaction spill sparse index does not cover the first record".to_string(),
+        ));
+    }
+    Ok(offsets)
+}
+
 fn sparse_start_for_key(
     file: &mut File,
     header: &RunHeader,
@@ -1005,27 +1416,28 @@ fn lookup_range_index(
     if header.node_count == 0 {
         return Ok(());
     }
-    lookup_range_subtree(
-        &mut file,
-        &header,
-        0,
-        None,
+    let mut lookup = RangeLookup {
+        file: &mut file,
+        header: &header,
         key,
         ordinal_ceiling,
         latest,
-        header.node_count,
-    )
+    };
+    lookup_range_subtree(&mut lookup, 0, None, header.node_count)
 }
 
-#[allow(clippy::too_many_arguments)]
+struct RangeLookup<'a> {
+    file: &'a mut File,
+    header: &'a RangeHeader,
+    key: &'a [u8],
+    ordinal_ceiling: u64,
+    latest: &'a mut Option<(u64, IntentLookup)>,
+}
+
 fn lookup_range_subtree(
-    file: &mut File,
-    header: &RangeHeader,
+    lookup: &mut RangeLookup<'_>,
     node_index: u64,
     loaded: Option<RangeNode>,
-    key: &[u8],
-    ordinal_ceiling: u64,
-    latest: &mut Option<(u64, IntentLookup)>,
     remaining_nodes: usize,
 ) -> MidgeResult<()> {
     if remaining_nodes == 0 {
@@ -1035,43 +1447,26 @@ fn lookup_range_subtree(
     }
     let node = match loaded {
         Some(node) => node,
-        None => read_range_node(file, header, node_index)?,
+        None => read_range_node(lookup.file, lookup.header, node_index)?,
     };
     if node.left != NO_RANGE_CHILD {
-        let left = read_range_node(file, header, node.left)?;
-        if key < left.max_end.as_ref() {
-            lookup_range_subtree(
-                file,
-                header,
-                node.left,
-                Some(left),
-                key,
-                ordinal_ceiling,
-                latest,
-                remaining_nodes - 1,
-            )?;
+        let left = read_range_node(lookup.file, lookup.header, node.left)?;
+        if lookup.key < left.max_end.as_ref() {
+            lookup_range_subtree(lookup, node.left, Some(left), remaining_nodes - 1)?;
         }
     }
-    if node.ordinal < ordinal_ceiling
-        && node.start_key.as_ref() <= key
-        && key < node.end_key.as_ref()
-        && latest
+    if node.ordinal < lookup.ordinal_ceiling
+        && node.start_key.as_ref() <= lookup.key
+        && lookup.key < node.end_key.as_ref()
+        && lookup
+            .latest
             .as_ref()
             .is_none_or(|(ordinal, _)| node.ordinal > *ordinal)
     {
-        *latest = Some((node.ordinal, IntentLookup::Deleted));
+        *lookup.latest = Some((node.ordinal, IntentLookup::Deleted));
     }
-    if node.right != NO_RANGE_CHILD && node.start_key.as_ref() <= key {
-        lookup_range_subtree(
-            file,
-            header,
-            node.right,
-            None,
-            key,
-            ordinal_ceiling,
-            latest,
-            remaining_nodes - 1,
-        )?;
+    if node.right != NO_RANGE_CHILD && node.start_key.as_ref() <= lookup.key {
+        lookup_range_subtree(lookup, node.right, None, remaining_nodes - 1)?;
     }
     Ok(())
 }
@@ -1206,6 +1601,71 @@ fn read_op_frame(file: &mut File) -> MidgeResult<(OrdinalOp, u64)> {
         }
     };
     Ok((OrdinalOp { ordinal, op }, file.stream_position()?))
+}
+
+/// Read and checksum one key-sorted operation while retaining only its key.
+///
+/// A spilled value may be as large as a WAL frame. Scan cursors must not
+/// reconstruct that value merely to merge intent keys, so the second field is
+/// checksummed through a fixed scratch buffer and discarded.
+fn read_op_primary_key_frame(file: &mut File) -> MidgeResult<(Bytes, u64)> {
+    let (payload_len, expected_crc) = read_frame_header(file)?;
+    if payload_len < 29 {
+        return Err(MidgeError::Corruption(
+            "transaction spill operation is truncated".to_string(),
+        ));
+    }
+
+    let mut crc = 0_u32;
+    let mut fixed = [0_u8; 21];
+    read_crc_exact(file, &mut fixed, &mut crc)?;
+    let tag = fixed[8];
+    if tag > 3 {
+        return Err(MidgeError::Corruption(format!(
+            "transaction spill operation has invalid tag {tag}"
+        )));
+    }
+
+    let mut key_len_bytes = [0_u8; 4];
+    read_crc_exact(file, &mut key_len_bytes, &mut crc)?;
+    let key_len = read_u32_at(&key_len_bytes, 0)? as usize;
+    let mut consumed = 25_usize;
+    if consumed.saturating_add(key_len).saturating_add(4) > payload_len {
+        return Err(MidgeError::Corruption(
+            "transaction spill key length exceeds its frame".to_string(),
+        ));
+    }
+    let key = read_crc_vec(file, key_len, &mut crc)?;
+    consumed = consumed.saturating_add(key_len);
+
+    let mut second_len_bytes = [0_u8; 4];
+    read_crc_exact(file, &mut second_len_bytes, &mut crc)?;
+    consumed = consumed.saturating_add(4);
+    let second_len = read_u32_at(&second_len_bytes, 0)? as usize;
+    if consumed.saturating_add(second_len) != payload_len {
+        return Err(MidgeError::Corruption(
+            "transaction spill value length does not match its frame".to_string(),
+        ));
+    }
+    if tag == 2 && second_len != 0 {
+        return Err(MidgeError::Corruption(
+            "transaction spill delete has a value".to_string(),
+        ));
+    }
+
+    let mut remaining = second_len;
+    let mut scratch = [0_u8; 8192];
+    while remaining != 0 {
+        let chunk_len = remaining.min(scratch.len());
+        read_crc_exact(file, &mut scratch[..chunk_len], &mut crc)?;
+        remaining -= chunk_len;
+    }
+    if crc != expected_crc {
+        return Err(MidgeError::Corruption(
+            "transaction spill frame checksum mismatch".to_string(),
+        ));
+    }
+    Ok((Bytes::from(key), file.stream_position()?))
 }
 
 fn write_frame(file: &mut File, payload: &[u8]) -> MidgeResult<()> {
@@ -1502,6 +1962,68 @@ mod tests {
 
         // Assert
         assert_eq!(read_value.as_ref().map(Bytes::len), Some(value.len()));
+        Ok(())
+    }
+
+    #[test]
+    fn should_scan_spill_keys_in_both_directions_across_sparse_chunks() -> MidgeResult<()> {
+        // Arrange
+        let temp = tempfile::tempdir()?;
+        let mut ops = (0_u64..40)
+            .map(|ordinal| OrdinalOp {
+                ordinal,
+                op: put(format!("key-{ordinal:02}").as_bytes(), b"value"),
+            })
+            .collect::<Vec<_>>();
+        let run = write_run(temp.path(), 1, 0, &mut ops)?;
+
+        // Act
+        let forward = RunKeyCursor::new(&run, Some(b"key-10"), Some(b"key-20"), false)?
+            .collect::<MidgeResult<Vec<_>>>()?;
+        let reverse = RunKeyCursor::new(&run, Some(b"key-10"), Some(b"key-20"), true)?
+            .collect::<MidgeResult<Vec<_>>>()?;
+
+        // Assert
+        let expected = (10_u64..20)
+            .map(|ordinal| Bytes::from(format!("key-{ordinal:02}")))
+            .collect::<Vec<_>>();
+        assert_eq!(forward, expected);
+        assert_eq!(reverse, expected.into_iter().rev().collect::<Vec<_>>());
+        Ok(())
+    }
+
+    #[test]
+    fn should_surface_late_spill_corruption_from_key_cursor_item() -> MidgeResult<()> {
+        // Arrange
+        let temp = tempfile::tempdir()?;
+        let mut ops = vec![
+            OrdinalOp {
+                ordinal: 0,
+                op: put(b"alpha", b"one"),
+            },
+            OrdinalOp {
+                ordinal: 1,
+                op: put(b"bravo", b"two"),
+            },
+        ];
+        let run = write_run(temp.path(), 1, 0, &mut ops)?;
+        let mut file = File::open(&run.path)?;
+        file.seek(SeekFrom::Start(RUN_HEADER_LEN as u64))?;
+        let (_, second_offset) = read_op_frame(&mut file)?;
+        drop(file);
+        let mut bytes = fs::read(&run.path)?;
+        let corrupt_at = u64_to_usize(second_offset)?.saturating_add(8);
+        bytes[corrupt_at] ^= 0x55;
+        fs::write(&run.path, bytes)?;
+        let mut scan = RunKeyCursor::new(&run, None, None, false)?;
+
+        // Act
+        let first = scan.next().transpose()?;
+        let late = scan.next().expect("second item must report corruption");
+
+        // Assert
+        assert_eq!(first, Some(Bytes::from_static(b"alpha")));
+        assert!(matches!(late, Err(MidgeError::Corruption(_))));
         Ok(())
     }
 }

@@ -326,8 +326,11 @@ fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_act
         }
 
         // Act
-        let mut iter = snapshot.scan(&Query::new()).expect("snapshot scan");
-        let rows: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
+        let rows = snapshot
+            .scan(&Query::new())
+            .expect("snapshot scan")
+            .try_collect()
+            .expect("collect snapshot scan");
 
         // Assert
         assert_eq!(rows.len(), 64, "mode: {mode}");
@@ -392,10 +395,11 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() {
             engine.flush_cf(&cf).expect("overwrite flush");
             engine.compact_all().expect("compact all");
 
-            let mut iter = snapshot
+            let rows = snapshot
                 .scan(&Query::new())
-                .expect("snapshot scan after compaction round");
-            let rows: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
+                .expect("snapshot scan after compaction round")
+                .try_collect()
+                .expect("collect snapshot scan after compaction round");
             assert_eq!(rows.len(), 32, "mode: {mode}");
             for (_key, value) in rows {
                 assert_eq!(
@@ -407,10 +411,11 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() {
         }
 
         // Assert
-        let mut iter = snapshot
+        let rows = snapshot
             .scan(&Query::new())
-            .expect("snapshot scan after compaction");
-        let rows: Vec<_> = std::iter::from_fn(|| iter.next()).collect();
+            .expect("snapshot scan after compaction")
+            .try_collect()
+            .expect("collect snapshot scan after compaction");
         assert_eq!(rows.len(), 32, "mode: {mode}");
         for (_key, value) in rows {
             assert_eq!(

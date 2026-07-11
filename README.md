@@ -99,7 +99,7 @@ tx.commit(WriteOptions::sync())?;
 let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
 let query = Query::new().prefix(Bytes::from_static(b"user:"));
 let mut iter = tx.scan(&query)?;
-while let Some((k, v)) = iter.next() {
+while let Some((k, v)) = iter.next().transpose()? {
     println!("{:?} = {:?}", k, v);
 }
 ```

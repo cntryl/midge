@@ -10,10 +10,12 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::engine::api::write_options::effective_wal_durability_policy;
 use crate::engine::ingest::IngestCoordinator;
 use crate::engine::ColumnFamilyId;
-use crate::runtime::transaction_spill::{IntentLookup, TransactionMemoryPool, TransactionWriteSet};
+use crate::runtime::read_snapshot::SnapshotScan;
+use crate::runtime::transaction_spill::{
+    IntentKeyScan, IntentLookup, TransactionMemoryPool, TransactionWriteSet,
+};
 use crate::runtime::RuntimeHandle;
 use crate::types::ConflictPolicy;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -161,6 +163,202 @@ pub(crate) struct TransactionInit {
     pub(crate) memory_mode: bool,
     pub(crate) transaction_memory_pool: Arc<TransactionMemoryPool>,
     pub(crate) runtime_transaction_guard: crate::runtime::RuntimeTransactionGuard,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanLifecycle {
+    Uninitialized,
+    Active,
+    Exhausted,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceAdvance {
+    None,
+    Snapshot,
+    Intent,
+    Both,
+}
+
+struct TransactionScan<'a> {
+    snapshot: SnapshotScan,
+    intents: IntentKeyScan,
+    write_set: &'a TransactionWriteSet,
+    snapshot_head: Option<MidgeResult<(bytes::Bytes, bytes::Bytes)>>,
+    intent_head: Option<MidgeResult<bytes::Bytes>>,
+    direction: super::iterator::Direction,
+    prefix: Option<bytes::Bytes>,
+    remaining: Option<usize>,
+    lifecycle: ScanLifecycle,
+    pending_advance: SourceAdvance,
+}
+
+impl<'a> TransactionScan<'a> {
+    fn new(
+        snapshot: SnapshotScan,
+        intents: IntentKeyScan,
+        write_set: &'a TransactionWriteSet,
+        query: &super::query::Query,
+    ) -> Self {
+        Self {
+            snapshot,
+            intents,
+            write_set,
+            snapshot_head: None,
+            intent_head: None,
+            direction: query.direction,
+            prefix: query.prefix.clone(),
+            remaining: query.limit,
+            lifecycle: ScanLifecycle::Uninitialized,
+            pending_advance: SourceAdvance::None,
+        }
+    }
+
+    fn initialize(&mut self) {
+        if self.lifecycle == ScanLifecycle::Uninitialized {
+            self.snapshot_head = self.snapshot.next();
+            self.intent_head = self.intents.next();
+            self.lifecycle = ScanLifecycle::Active;
+        }
+    }
+
+    fn take_source_error(&mut self) -> Option<MidgeError> {
+        if self.snapshot_head.as_ref().is_some_and(Result::is_err) {
+            return self.snapshot_head.take().and_then(Result::err);
+        }
+        if self.intent_head.as_ref().is_some_and(Result::is_err) {
+            return self.intent_head.take().and_then(Result::err);
+        }
+        None
+    }
+
+    fn advance_consumed_sources(&mut self) {
+        match self.pending_advance {
+            SourceAdvance::Snapshot => self.snapshot_head = self.snapshot.next(),
+            SourceAdvance::Intent => self.intent_head = self.intents.next(),
+            SourceAdvance::Both => {
+                self.snapshot_head = self.snapshot.next();
+                self.intent_head = self.intents.next();
+            }
+            SourceAdvance::None => {}
+        }
+        self.pending_advance = SourceAdvance::None;
+    }
+
+    fn selected_key(&self) -> Option<bytes::Bytes> {
+        let snapshot_key = self
+            .snapshot_head
+            .as_ref()
+            .and_then(|row| row.as_ref().ok())
+            .map(|(key, _)| key);
+        let intent_key = self.intent_head.as_ref().and_then(|key| key.as_ref().ok());
+        match (snapshot_key, intent_key) {
+            (Some(snapshot), Some(intent)) => {
+                let intent_wins = if self.direction == super::iterator::Direction::Reverse {
+                    intent > snapshot
+                } else {
+                    intent < snapshot
+                };
+                Some(if intent_wins {
+                    intent.clone()
+                } else {
+                    snapshot.clone()
+                })
+            }
+            (Some(snapshot), None) => Some(snapshot.clone()),
+            (None, Some(intent)) => Some(intent.clone()),
+            (None, None) => None,
+        }
+    }
+
+    fn next_visible(&mut self) -> MidgeResult<Option<(bytes::Bytes, bytes::Bytes)>> {
+        if self.remaining == Some(0) {
+            return Ok(None);
+        }
+        self.initialize();
+
+        loop {
+            self.advance_consumed_sources();
+            if let Some(error) = self.take_source_error() {
+                return Err(error);
+            }
+            let Some(key) = self.selected_key() else {
+                return Ok(None);
+            };
+
+            let mut base_value = None;
+            if self
+                .snapshot_head
+                .as_ref()
+                .and_then(|row| row.as_ref().ok())
+                .is_some_and(|(candidate, _)| candidate == &key)
+            {
+                base_value = self
+                    .snapshot_head
+                    .take()
+                    .and_then(Result::ok)
+                    .map(|(_, value)| value);
+                self.pending_advance = match self.pending_advance {
+                    SourceAdvance::None | SourceAdvance::Intent => SourceAdvance::Snapshot,
+                    SourceAdvance::Snapshot | SourceAdvance::Both => SourceAdvance::Both,
+                };
+            }
+            if self
+                .intent_head
+                .as_ref()
+                .and_then(|candidate| candidate.as_ref().ok())
+                .is_some_and(|candidate| candidate == &key)
+            {
+                self.intent_head = None;
+                self.pending_advance = match self.pending_advance {
+                    SourceAdvance::None | SourceAdvance::Snapshot => SourceAdvance::Intent,
+                    SourceAdvance::Intent | SourceAdvance::Both => SourceAdvance::Both,
+                };
+            }
+
+            let value = match self.write_set.latest_for_key(&key)? {
+                Some(IntentLookup::Present(value)) => Some(value),
+                Some(IntentLookup::Deleted) => None,
+                None => base_value,
+            };
+            let Some(value) = value else {
+                continue;
+            };
+            if self
+                .prefix
+                .as_ref()
+                .is_some_and(|prefix| !key.starts_with(prefix))
+            {
+                continue;
+            }
+
+            if let Some(remaining) = &mut self.remaining {
+                *remaining = remaining.saturating_sub(1);
+            }
+            return Ok(Some((key, value)));
+        }
+    }
+}
+
+impl std::iter::Iterator for TransactionScan<'_> {
+    type Item = MidgeResult<(bytes::Bytes, bytes::Bytes)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.lifecycle == ScanLifecycle::Exhausted {
+            return None;
+        }
+        match self.next_visible() {
+            Ok(Some(row)) => Some(Ok(row)),
+            Ok(None) => {
+                self.lifecycle = ScanLifecycle::Exhausted;
+                None
+            }
+            Err(error) => {
+                self.lifecycle = ScanLifecycle::Exhausted;
+                Some(Err(error))
+            }
+        }
+    }
 }
 
 impl Transaction {
@@ -489,103 +687,22 @@ impl Transaction {
     /// # Errors
     ///
     /// Returns an error when the transaction snapshot is unavailable.
-    pub fn scan(&self, query: &super::query::Query) -> MidgeResult<super::iterator::Iterator> {
-        let start = query.effective_start().unwrap_or(&[]);
-        // A prefix has no safe finite lexical upper bound when it ends in
-        // 0xFF. Use an unbounded storage scan and apply the prefix predicate
-        // explicitly below.
-        let end_vec = query.end.as_ref().map_or_else(Vec::new, |end| end.to_vec());
-        let end = if end_vec.is_empty() {
-            &[][..]
-        } else {
-            &end_vec[..]
-        };
-
-        // Execute directly against snapshot (bypasses event loop)
+    pub fn scan(&self, query: &super::query::Query) -> MidgeResult<super::iterator::Iterator<'_>> {
         let snapshot = self.read_snapshot.as_ref().ok_or_else(|| {
             MidgeError::Internal("read snapshot not available - this is a bug".to_string())
         })?;
-        let base_results = snapshot
-            .range_scan(start, end, self.start_sequence)?
-            .into_iter()
-            .map(|(k, v)| (bytes::Bytes::from(k), bytes::Bytes::from(v)))
-            .collect::<Vec<_>>();
-
-        let mut merged: BTreeMap<Vec<u8>, Option<bytes::Bytes>> = BTreeMap::new();
-
-        for (key, value) in base_results {
-            if Self::key_matches_query(&key, query) {
-                merged.insert(key.to_vec(), Some(value));
-            }
-        }
-
-        self.write_set.for_each_ordinal(|_, intent| {
-            match intent {
-                crate::runtime::TransactionOp::Put { key, value, .. } => {
-                    if Self::key_matches_query(&key, query) {
-                        merged.insert(key.to_vec(), Some(value));
-                    }
-                }
-                crate::runtime::TransactionOp::Delete { key, .. } => {
-                    if Self::key_matches_query(&key, query) {
-                        merged.insert(key.to_vec(), None);
-                    }
-                }
-                crate::runtime::TransactionOp::DeleteRange {
-                    start_key, end_key, ..
-                } => {
-                    // Mark all keys in [start_key, end_key) as deleted
-                    let mut to_delete = Vec::new();
-                    for (key, _) in merged.range(start_key.to_vec()..end_key.to_vec()) {
-                        to_delete.push(key.clone());
-                    }
-                    for key in to_delete {
-                        merged.insert(key, None);
-                    }
-                }
-            }
-            Ok(())
-        })?;
-
-        let mut results = Vec::new();
-        for (key, value_opt) in merged {
-            if let Some(value) = value_opt {
-                results.push((key, value.to_vec()));
-            }
-        }
-
-        // Apply limit (respect direction semantics: for Reverse keep the last N elements)
-        if let Some(limit) = query.limit {
-            if query.direction == super::iterator::Direction::Forward {
-                if results.len() > limit {
-                    results.truncate(limit);
-                }
-            } else if results.len() > limit {
-                let start = results.len() - limit;
-                results = results[start..].to_vec();
-            }
-        }
-
-        // Apply direction
-        let iter = match query.direction {
-            super::iterator::Direction::Forward => super::iterator::Iterator::forward(results),
-            super::iterator::Direction::Reverse => super::iterator::Iterator::reverse(results),
-        };
-
-        Ok(iter)
-    }
-
-    fn key_matches_query(key: &[u8], query: &super::query::Query) -> bool {
-        if query.effective_start().is_some_and(|start| key < start) {
-            return false;
-        }
-        if query.end.as_ref().is_some_and(|end| key >= end.as_ref()) {
-            return false;
-        }
-        query
-            .prefix
-            .as_ref()
-            .is_none_or(|prefix| key.starts_with(prefix.as_ref()))
+        let start = query.effective_start().map(<[u8]>::to_vec);
+        let end = query.effective_end();
+        let reverse = query.direction == super::iterator::Direction::Reverse;
+        let snapshot_scan =
+            snapshot.state_scan(start.clone(), end.clone(), reverse, self.start_sequence);
+        let intent_scan = self
+            .write_set
+            .key_scan(start.as_deref(), end.as_deref(), reverse)?;
+        Ok(super::iterator::Iterator::from_iter(
+            TransactionScan::new(snapshot_scan, intent_scan, &self.write_set, query),
+            query.direction,
+        ))
     }
 }
 

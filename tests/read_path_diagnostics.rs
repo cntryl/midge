@@ -104,7 +104,7 @@ fn should_count_flushed_range_scan_work_in_its_own_window() -> MidgeResult<()> {
 
     // Act
     let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-    let rows: Vec<_> = read.scan(&Query::new())?.collect();
+    let rows = read.scan(&Query::new())?.try_collect()?;
     let end = engine.read_path_diagnostics_snapshot_for_benchmarks();
 
     // Assert

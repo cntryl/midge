@@ -3,15 +3,18 @@
 //! Captures immutable references to memtables and SST metadata
 //! at a specific sequence number, allowing safe parallel reads.
 
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 use crate::io::Fs;
 use crate::metadata::FileMeta;
 use crate::runtime::read_resources::ReadResources;
+use crate::sst::fs::reader_io::SstStateScan;
 use crate::sst::fs::SstFileIo;
 use crate::sst::traits::SstStateReader;
 use crate::sst::types::{KeyState, RangeTombstone};
 use crate::sst::SkipListMemtable;
-use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Immutable snapshot of readable state for a column family
@@ -40,6 +43,286 @@ pub struct ReadSnapshot {
     read_resources: Option<Arc<ReadResources>>,
     diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
     sst_readers: HashMap<String, Arc<SstFileIo>>,
+}
+
+enum SnapshotStateIterator {
+    Memory(std::vec::IntoIter<(bytes::Bytes, KeyState)>),
+    Sst(Box<SstStateScan>),
+}
+
+impl SnapshotStateIterator {
+    fn next(&mut self) -> Option<MidgeResult<(bytes::Bytes, KeyState)>> {
+        match self {
+            Self::Memory(entries) => entries.next().map(Ok),
+            Self::Sst(entries) => entries.next(),
+        }
+    }
+}
+
+struct SnapshotStateSource {
+    iterator: SnapshotStateIterator,
+    head: Option<MidgeResult<(bytes::Bytes, KeyState)>>,
+    needs_advance: bool,
+}
+
+impl SnapshotStateSource {
+    fn new(mut iterator: SnapshotStateIterator) -> Self {
+        let head = iterator.next();
+        Self {
+            iterator,
+            head,
+            needs_advance: false,
+        }
+    }
+
+    fn advance_if_needed(&mut self) {
+        if self.needs_advance {
+            self.head = self.iterator.next();
+            self.needs_advance = false;
+        }
+    }
+
+    fn take_head(&mut self) -> Option<MidgeResult<(bytes::Bytes, KeyState)>> {
+        let head = self.head.take();
+        self.needs_advance = head.is_some();
+        head
+    }
+}
+
+/// Lazy merge cursor over every state source pinned by a read snapshot.
+pub(crate) struct SnapshotScan {
+    snapshot: Arc<ReadSnapshot>,
+    start: Option<Vec<u8>>,
+    end: Option<Vec<u8>>,
+    reverse: bool,
+    sequence: u64,
+    initialized: bool,
+    exhausted: bool,
+    sources: Vec<SnapshotStateSource>,
+    range_tombstones: Vec<RangeTombstone>,
+}
+
+impl SnapshotScan {
+    fn new(
+        snapshot: Arc<ReadSnapshot>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        reverse: bool,
+        sequence: u64,
+    ) -> Self {
+        Self {
+            snapshot,
+            start,
+            end,
+            reverse,
+            sequence,
+            initialized: false,
+            exhausted: false,
+            sources: Vec::new(),
+            range_tombstones: Vec::new(),
+        }
+    }
+
+    fn memory_iterator(
+        mut states: Vec<(Vec<u8>, KeyState)>,
+        reverse: bool,
+    ) -> SnapshotStateIterator {
+        if reverse {
+            states.reverse();
+        }
+        SnapshotStateIterator::Memory(
+            states
+                .into_iter()
+                .map(|(key, state)| (bytes::Bytes::from(key), state))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        )
+    }
+
+    fn initialize(&mut self) -> MidgeResult<()> {
+        if self.initialized {
+            return Ok(());
+        }
+        self.initialized = true;
+
+        let start = self.start.as_deref();
+        let end = self.end.as_deref();
+        let snapshot = &self.snapshot;
+
+        self.sources
+            .push(SnapshotStateSource::new(Self::memory_iterator(
+                snapshot.memtable.range_state_at_with_time(
+                    start,
+                    end,
+                    self.sequence,
+                    snapshot.read_time_millis,
+                ),
+                self.reverse,
+            )));
+        self.range_tombstones.extend(
+            snapshot
+                .memtable
+                .range_tombstones_at(self.sequence)
+                .into_iter()
+                .filter(|tombstone| {
+                    ReadSnapshot::range_tombstone_overlaps_query(tombstone, start, end)
+                }),
+        );
+
+        for immutable in &snapshot.immutable_memtables {
+            self.sources
+                .push(SnapshotStateSource::new(Self::memory_iterator(
+                    immutable.range_state_at_with_time(
+                        start,
+                        end,
+                        self.sequence,
+                        snapshot.read_time_millis,
+                    ),
+                    self.reverse,
+                )));
+            self.range_tombstones.extend(
+                immutable
+                    .range_tombstones_at(self.sequence)
+                    .into_iter()
+                    .filter(|tombstone| {
+                        ReadSnapshot::range_tombstone_overlaps_query(tombstone, start, end)
+                    }),
+            );
+        }
+
+        if !snapshot.memory_mode {
+            for file_meta in &snapshot.sst_files {
+                file_meta.record_read();
+                snapshot
+                    .diagnostics
+                    .sst_metrics()
+                    .record_candidate_sst_file_checked();
+                let reader = snapshot.sst_reader(file_meta)?;
+                self.range_tombstones
+                    .extend(reader.range_tombstones().into_iter().filter(|tombstone| {
+                        snapshot
+                            .diagnostics
+                            .sst_metrics()
+                            .record_range_tombstone_scan();
+                        (self.sequence == u64::MAX || tombstone.seq <= self.sequence)
+                            && ReadSnapshot::range_tombstone_overlaps_query(tombstone, start, end)
+                    }));
+                self.sources
+                    .push(SnapshotStateSource::new(SnapshotStateIterator::Sst(
+                        Box::new(reader.state_scan(
+                            self.start.clone(),
+                            self.end.clone(),
+                            self.reverse,
+                            self.sequence,
+                            snapshot.read_time_millis,
+                        )),
+                    )));
+            }
+        }
+        Ok(())
+    }
+
+    fn take_source_error(&mut self) -> Option<MidgeError> {
+        self.sources.iter_mut().find_map(|source| {
+            if source.head.as_ref().is_some_and(Result::is_err) {
+                source.take_head().and_then(Result::err)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn next_key(&self) -> Option<bytes::Bytes> {
+        self.sources
+            .iter()
+            .filter_map(|source| source.head.as_ref()?.as_ref().ok().map(|(key, _)| key))
+            .cloned()
+            .reduce(|selected, candidate| {
+                let candidate_wins = if self.reverse {
+                    candidate > selected
+                } else {
+                    candidate < selected
+                };
+                if candidate_wins {
+                    candidate
+                } else {
+                    selected
+                }
+            })
+    }
+
+    fn next_visible(&mut self) -> MidgeResult<Option<(bytes::Bytes, bytes::Bytes)>> {
+        self.initialize()?;
+        loop {
+            for source in &mut self.sources {
+                source.advance_if_needed();
+            }
+            if let Some(error) = self.take_source_error() {
+                return Err(error);
+            }
+
+            let Some(key) = self.next_key() else {
+                return Ok(None);
+            };
+            let mut best = None;
+
+            for source in &mut self.sources {
+                let matches_key = source
+                    .head
+                    .as_ref()
+                    .and_then(|head| head.as_ref().ok())
+                    .is_some_and(|(candidate, _)| candidate == &key);
+                if !matches_key {
+                    continue;
+                }
+
+                let state = source
+                    .take_head()
+                    .and_then(Result::ok)
+                    .map_or(KeyState::Absent, |(_, state)| state);
+                ReadSnapshot::merge_best_state(&mut best, state, self.snapshot.read_time_millis);
+            }
+
+            let Some(best) = best else {
+                continue;
+            };
+
+            if ReadSnapshot::range_tombstone_covers_state(
+                &self.range_tombstones,
+                key.as_ref(),
+                &best,
+            ) {
+                continue;
+            }
+
+            if let KeyState::Value(value, _, expiration, _) = best {
+                if !crate::common::time::is_expired_at(expiration, self.snapshot.read_time_millis) {
+                    return Ok(Some((key, value)));
+                }
+            }
+        }
+    }
+}
+
+impl std::iter::Iterator for SnapshotScan {
+    type Item = MidgeResult<(bytes::Bytes, bytes::Bytes)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.exhausted {
+            return None;
+        }
+        match self.next_visible() {
+            Ok(Some(row)) => Some(Ok(row)),
+            Ok(None) => {
+                self.exhausted = true;
+                None
+            }
+            Err(error) => {
+                self.exhausted = true;
+                Some(Err(error))
+            }
+        }
+    }
 }
 
 impl ReadSnapshot {
@@ -75,6 +358,7 @@ impl ReadSnapshot {
                 && !matches!(existing, KeyState::Tombstone(_)))
     }
 
+    #[cfg(test)]
     fn merge_state(
         states: &mut BTreeMap<Vec<u8>, KeyState>,
         key: Vec<u8>,
@@ -108,6 +392,7 @@ impl ReadSnapshot {
         }
     }
 
+    #[cfg(test)]
     fn is_visible_state(state: &KeyState, snapshot_seq: u64) -> bool {
         snapshot_seq == u64::MAX
             || Self::state_sequence(state).is_some_and(|state_seq| state_seq <= snapshot_seq)
@@ -204,6 +489,16 @@ impl ReadSnapshot {
     pub(crate) fn with_read_time_millis(mut self, read_time_millis: u64) -> Self {
         self.read_time_millis = read_time_millis;
         self
+    }
+
+    pub(crate) fn state_scan(
+        self: &Arc<Self>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        reverse: bool,
+        sequence: u64,
+    ) -> SnapshotScan {
+        SnapshotScan::new(Arc::clone(self), start, end, reverse, sequence)
     }
 
     fn sst_reader(&self, file_meta: &FileMeta) -> crate::common::MidgeResult<Arc<SstFileIo>> {
@@ -414,6 +709,7 @@ impl ReadSnapshot {
     }
 
     /// Perform a range scan on this snapshot
+    #[cfg(test)]
     pub fn range_scan(
         &self,
         start: &[u8],

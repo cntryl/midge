@@ -195,7 +195,7 @@ let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
 
 // All keys (forward)
 let mut iter = tx.scan(&Query::new())?;
-while let Some((key, value)) = iter.next() {
+while let Some((key, value)) = iter.next().transpose()? {
     println!("k={:?} v={:?}", key, value);
 }
 

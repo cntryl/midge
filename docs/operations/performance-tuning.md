@@ -431,6 +431,9 @@ match tx.commit(WriteOptions::buffered()) {
        .prefix(Bytes::from_static(b"user:"))
        .limit(100);  // Don't scan entire dataset
    let mut iter = tx.scan(&query)?;
+   while let Some((_key, _value)) = iter.next().transpose()? {
+       // Process each row; late storage errors are returned here.
+   }
    ```
 
 3. **Consider data layout:**
