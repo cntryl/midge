@@ -33,7 +33,7 @@ compaction
 
 ### Commit flow
 
-1. `Engine::commit` sends the transaction into the runtime.
+1. `Transaction::commit` sends the transaction into the runtime.
 2. The WAL actor allocates sequence numbers and appends WAL records unless the caller chose `WriteOptions::best_effort()`.
 3. After the local visibility barrier succeeds, the same operations are applied to the active memtable.
 4. The runtime either:

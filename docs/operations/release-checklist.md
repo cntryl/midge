@@ -2,8 +2,19 @@
 
 Use this checklist before publishing a release candidate or stable release.
 
-- [ ] `cargo clippy --all-targets -- -D warnings`
-- [ ] `cargo test`
+- [ ] `cargo fmt --check`
+- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic`
+- [ ] `cargo clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic`
+- [ ] Rust 1.93 MSRV checks pass
+- [ ] Linux, macOS, and Windows tests pass
+- [ ] each provider-only feature check passes (`cloud-aws`, `cloud-azure`, `cloud-gcp`, `cloud-oci`)
+- [ ] `cargo test --workspace --all-features`
+- [ ] `cargo test --workspace --all-features --doc`
+- [ ] `cargo check --example documented_quick_start --all-features`
+- [ ] `cargo machete`
+- [ ] `python3 scripts/validate_benchmark_contract.py`
+- [ ] `cargo package --locked`
+- [ ] `docker build --file Dockerfile.tests --tag midge-tests:release .`
 - [ ] `cargo test --test external_adopter_smoke --features failpoints`
 - [ ] `cargo test --test durability_wal`
 - [ ] `cargo test --test failure_injection --features failpoints`
@@ -11,6 +22,11 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] `cargo test --test engine_iterators`
 - [ ] `cargo test --test compatibility_fixtures`
 - [ ] `cntryl-tools validate-tests`
+- [ ] default `cargo tree --edges normal` and `cargo check --release` exclude `fail`
+- [ ] `MIDGE_REQUIRE_SQRZL=1`
+- [ ] Sqrzl `/healthz` responds successfully
+- [ ] Sqrzl provider and provider-engine qualification suites pass
+- [ ] every registered fuzz target completed a bounded smoke run
 - [ ] production contract docs present:
       `docs/development/one-dot-zero-contract.md`,
       `docs/development/support-matrix.md`,

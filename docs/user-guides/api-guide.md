@@ -2,7 +2,7 @@
 
 Comprehensive guide to using Midge in your application.
 
-**Thread Safety:** The `Engine` type is `Send + Sync` and can be safely shared across threads (wrap in `Arc<Engine>` for multi-threaded access). All operations are synchronous (no async/await). Write coordination and lifecycle operations go through the runtime; read transactions execute against immutable snapshots captured at `begin_tx()`. For threading model details, see [../development/architecture.md#threading-model](../development/architecture.md#threading-model).
+**Thread Safety:** The `Engine` type is `Send + Sync` and can be safely shared across threads (wrap in `Arc<Engine>` for multi-threaded access). Stop worker use and recover sole ownership before calling bounded `shutdown(&mut self, timeout)`. All operations are synchronous (no async/await). Write coordination and lifecycle operations go through the runtime; read transactions execute against immutable snapshots captured at `begin_tx()`. For threading model details, see [../development/architecture.md#threading-model](../development/architecture.md#threading-model).
 
 ## Table of Contents
 
@@ -100,7 +100,7 @@ tx.put(b"key1".to_vec(), b"value1".to_vec(), None)?;
 tx.put(b"key2".to_vec(), b"value2".to_vec(), None)?;
 tx.delete(b"key3".to_vec())?;
 tx.delete_range(b"key10".to_vec(), b"key20".to_vec())?;
-engine.commit(tx, WriteOptions::sync())?;
+tx.commit(WriteOptions::sync())?;
 ```
 
 ### Transaction Lifecycle
@@ -124,7 +124,7 @@ Write a key-value pair:
 ```rust
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 tx.put(b"user:42".to_vec(), b"alice".to_vec(), None)?;
-engine.commit(tx, WriteOptions::buffered())?;
+tx.commit(WriteOptions::buffered())?;
 ```
 
 Optional TTL (third parameter):
@@ -141,7 +141,7 @@ Remove a single key:
 ```rust
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 tx.delete(b"user:42".to_vec())?;
-engine.commit(tx, WriteOptions::sync())?;
+tx.commit(WriteOptions::sync())?;
 ```
 
 Deletes are tombstones—removed during compaction.
@@ -156,7 +156,7 @@ Remove all keys in range `[start, end)`. May be used in two ways:
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 tx.put(b"user:50".to_vec(), b"alice".to_vec(), None)?;
 tx.delete_range(b"user:100".to_vec(), b"user:200".to_vec())?;
-engine.commit(tx, WriteOptions::sync())?;
+tx.commit(WriteOptions::sync())?;
 ```
 
 **At engine level** (standalone operation):
@@ -242,7 +242,7 @@ For comprehensive durability guarantees, recovery behavior, and crash scenarios,
 Blocks until fsync completes. Write is durable when call returns.
 
 ```rust
-engine.commit(tx, WriteOptions::sync())?;
+tx.commit(WriteOptions::sync())?;
 ```
 
 **Use for:** Financial transactions, critical metadata, anything that cannot be lost.
@@ -252,7 +252,7 @@ engine.commit(tx, WriteOptions::sync())?;
 Write accepted immediately, fsync batched in background.
 
 ```rust
-engine.commit(tx, WriteOptions::buffered())?;
+tx.commit(WriteOptions::buffered())?;
 ```
 
 **Guarantees:** Visible after the WAL append barrier and memtable apply. Durable only after a later background fsync.
@@ -266,7 +266,7 @@ engine.commit(tx, WriteOptions::buffered())?;
 **No durability.** Fastest. No WAL writes. Data lost on crash before flush.
 
 ```rust
-engine.commit(tx, WriteOptions::best_effort())?;
+tx.commit(WriteOptions::best_effort())?;
 ```
 
 **Use ONLY for:** Bulk loads, benchmark setup, test data.
@@ -278,7 +278,7 @@ engine.commit(tx, WriteOptions::best_effort())?;
 for i in 0..100_000 {
     let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
     tx.put(format!("key:{}", i).into_bytes(), b"value".to_vec(), None)?;
-    engine.commit(tx, WriteOptions::best_effort())?;
+    tx.commit(WriteOptions::best_effort())?;
 }
 
 // Make durable
@@ -300,7 +300,7 @@ let cf2 = engine.create_column_family("sessions")?;
 // Each transaction specifies its CF
 let mut tx = engine.begin_tx(cf1.id(), TransactionMode::ReadWrite)?;
 tx.put(b"user:42".to_vec(), b"alice".to_vec(), None)?;
-engine.commit(tx, WriteOptions::sync())?;
+tx.commit(WriteOptions::sync())?;
 ```
 
 **Operations:**
@@ -341,13 +341,20 @@ engine.compact_all()?;
 Recommended pattern:
 
 ```rust
+use std::time::Duration;
+
 // Flush all column families
 for cf in engine.list_column_families()? {
     engine.flush_cf(&cf)?;
 }
 
-drop(engine);  // Engine::drop() cleans up automatically
+engine.shutdown(Duration::from_secs(30))?;
 ```
+
+`shutdown` returns `Busy` while transactions remain and `Timeout` if workers do
+not stop before the deadline. Release transactions and retry with the same
+engine. `Drop` delegates cleanup to a non-blocking reaper and retains the lease;
+it is a safety fallback, not a bounded-shutdown success signal.
 
 ### Recovery
 
@@ -370,19 +377,19 @@ All operations return `MidgeResult<T>` (alias for `Result<T, MidgeError>`).
 **WriteStall:** Backpressure—memtable queue full.
 
 ```rust
-match engine.commit(tx, WriteOptions::sync()) {
+match tx.commit(WriteOptions::sync()) {
     Ok(_) => println!("Committed"),
-    Err(MidgeError::WriteStall) => {
-        // Retry with exponential backoff
+    Err(MidgeError::WriteStall(_)) => {
+        // Rebuild the consumed transaction and replay its writes before retrying.
         std::thread::sleep(Duration::from_millis(100));
     }
     Err(e) => return Err(e),
 }
 ```
 
-**ReadOnlyTransaction:** Attempted write in readonly mode.
+**InvalidArgument:** Invalid API input, including a write attempted in a read-only transaction.
 
-**ColumnFamilyNotFound:** Invalid CF name.
+**NotFound:** A requested persisted object was not found. Column-family lookup returns `None` for an unknown name.
 
 ### Error Recovery
 
@@ -395,16 +402,18 @@ match engine.commit(tx, WriteOptions::sync()) {
 **1. Always specify WriteOptions:**
 
 ```rust
-engine.commit(tx, WriteOptions::buffered())?;  // No defaults - explicit choice
+tx.commit(WriteOptions::buffered())?;  // No defaults - explicit choice
 ```
 
 **2. Handle WriteStall with backoff:**
 
 ```rust
 loop {
-    match engine.commit(tx, opts) {
+    let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+    apply_pending_writes(&mut tx)?;
+    match tx.commit(opts.clone()) {
         Ok(_) => break,
-        Err(MidgeError::WriteStall) => std::thread::sleep(Duration::from_millis(50)),
+        Err(MidgeError::WriteStall(_)) => std::thread::sleep(Duration::from_millis(50)),
         Err(e) => return Err(e),
     }
 }
@@ -422,7 +431,7 @@ engine.flush_cf(&cf)?;
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 tx.put(b"account:1".to_vec(), b"-100".to_vec(), None)?;
 tx.put(b"account:2".to_vec(), b"+100".to_vec(), None)?;
-engine.commit(tx, WriteOptions::sync())?;  // Both succeed or both fail
+tx.commit(WriteOptions::sync())?;  // Both succeed or both fail
 ```
 
 ## Advanced Topics
@@ -446,12 +455,12 @@ println!("L0 overlap rate: {}", metrics.l0_overlap_rate);      // higher = more 
 
 let runtime = engine.get_runtime_metrics()?;
 let layout = engine.get_storage_layout()?;
-let report = engine.verify_storage()?;
+let report = engine.verify_storage(std::time::Duration::from_secs(30))?;
 ```
 
 - `get_runtime_metrics()` exposes health, WAL frontiers, memtable usage, compaction counters, and WAL latency totals.
 - `get_storage_layout()` exposes published SST metadata grouped by level plus active snapshot pins.
-- `verify_storage()` runs a strict, non-mutating verification pass over manifest, intent log, WAL, and SST files.
+- `verify_storage(timeout)` acquires a runtime-wide publication barrier, then strictly checks manifest length/CRC metadata and every checksummed SST/WAL block before the deadline. A timed-out verifier keeps the barrier until its background pass can release it safely.
 - Offline verification is also available through `midge verify <db-path>`.
 
 ### Performance Tuning

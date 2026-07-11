@@ -2,6 +2,9 @@
 
 **Get started with Midge in 5 minutes**
 
+The release gate compile-checks the canonical source for this walkthrough at
+[`examples/documented_quick_start.rs`](../../examples/documented_quick_start.rs).
+
 ## Installation
 
 Add Midge to your `Cargo.toml`:
@@ -16,21 +19,25 @@ cntryl-midge = "0.1"  # Check latest version
 Here's a complete example showing basic operations:
 
 ```rust
-use cntryl_midge::{Bytes, MidgeEngine, OpenOptions, Query, TransactionMode, WriteOptions};
+use std::time::Duration;
+
+use cntryl_midge::{Bytes, Engine, OpenOptions, Query, TransactionMode, WriteOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Open an in-memory database (no persistence)
     let opts = OpenOptions::in_memory().build()?;
-    let engine = MidgeEngine::open(opts)?;
+    let mut engine = Engine::open(opts)?;
     
     // 2. Create a column family
-    let cf = engine.create_column_family("default")?;
+    let cf = engine
+        .get_column_family("default")
+        .expect("new engines contain the default column family");
     
     // 3. Write some data
     let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
     tx.put(b"user:1".to_vec(), b"alice".to_vec(), None)?;
     tx.put(b"user:2".to_vec(), b"bob".to_vec(), None)?;
-    engine.commit(tx, WriteOptions::sync())?;
+    tx.commit(WriteOptions::sync())?;
     
     // 4. Read data
     let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
@@ -52,10 +59,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 6. Delete data
     let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
     tx.delete(b"user:2".to_vec())?;
-    engine.commit(tx, WriteOptions::sync())?;
+    tx.commit(WriteOptions::sync())?;
     
     // 7. Clean shutdown
-    drop(engine);
+    engine.shutdown(Duration::from_secs(30))?;
     
     Ok(())
 }
@@ -87,13 +94,13 @@ All commits require explicit `WriteOptions`:
 
 ```rust
 // Full durability (fsync to disk)
-engine.commit(tx, WriteOptions::sync())?;
+sync_tx.commit(WriteOptions::sync())?;
 
 // Group commit batching (visible after WAL append; local durability follows later fsync)
-engine.commit(tx, WriteOptions::buffered())?;
+buffered_tx.commit(WriteOptions::buffered())?;
 
 // No durability until flush (bulk loads only)
-engine.commit(tx, WriteOptions::best_effort())?;
+best_effort_tx.commit(WriteOptions::best_effort())?;
 engine.flush_cf(&cf)?;  // Make durable
 ```
 
@@ -119,7 +126,7 @@ tx.put(b"key2".to_vec(), b"value2".to_vec(), None)?;
 tx.delete(b"old_key".to_vec())?;
 
 // Atomic commit - all writes visible together
-engine.commit(tx, WriteOptions::buffered())?;
+tx.commit(WriteOptions::buffered())?;
 ```
 
 ### Transaction with TTL
@@ -130,7 +137,7 @@ let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 // Value expires after 3600 seconds
 tx.put(b"session:123".to_vec(), b"data".to_vec(), Some(3600))?;
 
-engine.commit(tx, WriteOptions::buffered())?;
+tx.commit(WriteOptions::buffered())?;
 ```
 
 ## Range Scans
@@ -209,11 +216,11 @@ let comments_cf = engine.create_column_family("comments")?;
 // Each CF is independent
 let mut tx = engine.begin_tx(users_cf.id(), TransactionMode::ReadWrite)?;
 tx.put(b"user:1".to_vec(), b"alice".to_vec(), None)?;
-engine.commit(tx, WriteOptions::buffered())?;
+tx.commit(WriteOptions::buffered())?;
 
 let mut tx = engine.begin_tx(posts_cf.id(), TransactionMode::ReadWrite)?;
 tx.put(b"post:1".to_vec(), b"Hello world".to_vec(), None)?;
-engine.commit(tx, WriteOptions::buffered())?;
+tx.commit(WriteOptions::buffered())?;
 ```
 
 ## Configuration
@@ -267,14 +274,14 @@ All low-level parameters are derived automatically from these high-level setting
 ```rust
 use cntryl_midge::MidgeError;
 
-match engine.commit(tx, WriteOptions::sync()) {
+match tx.commit(WriteOptions::sync()) {
     Ok(_) => println!("Committed successfully"),
-    Err(MidgeError::WriteStall) => {
+    Err(MidgeError::WriteStall(_)) => {
         // Memtable queue full, backpressure
         std::thread::sleep(std::time::Duration::from_millis(100));
-        // Retry...
+        // Rebuild the consumed transaction and replay its writes before retrying.
     }
-    Err(MidgeError::KeyNotFound) => println!("Key does not exist"),
+    Err(MidgeError::NotFound) => println!("Key does not exist"),
     Err(e) => eprintln!("Error: {:?}", e),
 }
 ```
@@ -296,12 +303,12 @@ for i in 0..1_000_000 {
     
     // Commit every 10k writes
     if i % 10_000 == 0 {
-        engine.commit(tx, WriteOptions::best_effort())?;
+        tx.commit(WriteOptions::best_effort())?;
         tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
     }
 }
 
-engine.commit(tx, WriteOptions::best_effort())?;
+tx.commit(WriteOptions::best_effort())?;
 
 // Make all writes durable
 engine.flush_cf(&cf)?;
@@ -322,7 +329,7 @@ let new_value = (count + 1).to_le_bytes().to_vec();
 
 // Write back
 tx.put(b"counter".to_vec(), new_value, None)?;
-engine.commit(tx, WriteOptions::buffered())?;
+tx.commit(WriteOptions::buffered())?;
 ```
 
 ### Graceful Shutdown
@@ -333,8 +340,8 @@ for cf in engine.list_column_families()? {
     engine.flush_cf(&cf)?;
 }
 
-// Drop engine (releases locks, closes files)
-drop(engine);
+// Bound shutdown; retry Busy after releasing any remaining transactions.
+engine.shutdown(Duration::from_secs(30))?;
 ```
 
 ## Next Steps

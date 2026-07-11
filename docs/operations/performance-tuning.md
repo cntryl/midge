@@ -372,8 +372,8 @@ if metrics.avg_ssts_per_read > 10.0 {
 **Diagnosis:**
 
 ```rust
-match engine.commit(tx, WriteOptions::buffered()) {
-    Err(MidgeError::WriteStall) => {
+match tx.commit(WriteOptions::buffered()) {
+    Err(MidgeError::WriteStall(_)) => {
         println!("Memtable queue full");
     }
     _ => {}
@@ -528,7 +528,7 @@ let opts = OpenOptions::local("./db")
     .build();
 
 // Use buffered() for fast commits
-engine.commit(tx, WriteOptions::buffered())?;
+tx.commit(WriteOptions::buffered())?;
 ```
 
 ---
@@ -543,7 +543,7 @@ let opts = OpenOptions::local("./db")
     .build();
 
 // Use best_effort() for bulk loads
-engine.commit(tx, WriteOptions::best_effort())?;
+tx.commit(WriteOptions::best_effort())?;
 // Flush when done
 engine.flush_cf(&cf)?;
 ```

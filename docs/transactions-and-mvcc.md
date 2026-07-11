@@ -56,7 +56,7 @@ A transaction is scoped to a single column family. There is no cross-CF atomic t
 
 ### When writes become visible
 
-Writes become visible only after a successful `engine.commit(tx, opts)`. The commit:
+Writes become visible only after a successful `tx.commit(opts)`. The commit:
 
 1. Submits the transaction's runtime operations through the ingest coordinator for the target column family.
 2. The runtime allocates a contiguous sequence-number range for the transaction (one per op, plus begin and commit), appends the full batch to the WAL unless the caller chose `best_effort()`, applies all ops to the active memtable, and advances the global sequence.
@@ -315,7 +315,7 @@ fn example(engine: &MidgeEngine, cf_id: u32) -> MidgeResult<()> {
 
     // Commit — sends all writes atomically to the event loop.
     // WAL write + memtable apply happen before this call returns.
-    engine.commit(tx, WriteOptions::buffered())?;
+    tx.commit(WriteOptions::buffered())?;
 
     // Read-only snapshot transaction — sees the committed state.
     let ro = engine.begin_tx(cf_id, TransactionMode::ReadOnly)?;

@@ -32,8 +32,8 @@
 
 ```rust
 // Check for write stalls
-match engine.commit(tx, WriteOptions::buffered()) {
-    Err(MidgeError::WriteStall) => {
+match tx.commit(WriteOptions::buffered()) {
+    Err(MidgeError::WriteStall(_)) => {
         println!("Write stall detected - memtable queue full");
     }
     Ok(_) => { /* success */ }
@@ -50,14 +50,14 @@ let opts = OpenOptions::local("./db")
     .build();
 
 // Option 2: Use buffered() instead of sync()
-engine.commit(tx, WriteOptions::buffered())?;
+tx.commit(WriteOptions::buffered())?;
 
 // Option 3: Batch writes
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 for i in 0..1000 {
     tx.put(format!("key:{}", i).into_bytes(), b"value".to_vec(), None)?;
 }
-engine.commit(tx, WriteOptions::buffered())?;  // Commit batch
+tx.commit(WriteOptions::buffered())?;  // Commit batch
 ```
 
 ---
@@ -199,7 +199,7 @@ println!("Recovery took: {:?}", recovery_time);
 for cf in engine.list_column_families()? {
     engine.flush_cf(&cf)?;
 }
-drop(engine);
+engine.shutdown(std::time::Duration::from_secs(30))?;
 
 // Use smaller memtables (more frequent flushes = smaller WAL)
 let opts = OpenOptions::local("./db")
@@ -281,10 +281,10 @@ tar -xzf backup-YYYYMMDD.tar.gz
 
 ```rust
 // Use sync() for critical data
-engine.commit(tx, WriteOptions::sync())?;
+tx.commit(WriteOptions::sync())?;
 
 // Verify commit succeeded
-match engine.commit(tx, WriteOptions::buffered()) {
+match tx.commit(WriteOptions::buffered()) {
     Ok(_) => {
         // Write acknowledged
     }
@@ -315,13 +315,14 @@ Memtable queue is full. Engine applying backpressure to prevent memory exhaustio
 **Solution:**
 
 ```rust
-// Wait and retry
+// Rebuild and replay the transaction on each retry because commit consumes it.
 loop {
-    match engine.commit(tx, WriteOptions::buffered()) {
+    let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+    apply_pending_writes(&mut tx)?;
+    match tx.commit(WriteOptions::buffered()) {
         Ok(_) => break,
-        Err(MidgeError::WriteStall) => {
+        Err(MidgeError::WriteStall(_)) => {
             std::thread::sleep(Duration::from_millis(100));
-            // Retry...
         }
         Err(e) => return Err(e),
     }
@@ -339,7 +340,7 @@ engine.flush_cf(&cf)?;
 
 **Error:**
 ```
-MidgeError::KeyNotFound
+MidgeError::NotFound
 ```
 
 **Cause:**

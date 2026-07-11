@@ -273,7 +273,7 @@ fn should_trigger_ci_for_repository_contract_changes() {
 
     // Act
     // Assert
-    for path in ["Dockerfile*", "scripts/**", "fuzz/**"] {
+    for path in ["Dockerfile*", "examples/**", "scripts/**", "fuzz/**"] {
         assert_eq!(
             ci.matches(&format!("\"{path}\"")).count(),
             2,
@@ -472,4 +472,196 @@ fn should_validate_benchmark_contract_when_ci_runs() {
     // Assert
     assert!(validator.is_file());
     assert!(ci.contains("scripts/validate_benchmark_contract.py"));
+}
+
+#[test]
+fn should_run_provider_feature_matrix_when_ci_runs() {
+    // Arrange
+    let ci = read_workflow(".github/workflows/ci.yml");
+
+    // Act
+    // Assert
+    assert!(ci.contains("provider: [cloud-aws, cloud-azure, cloud-gcp, cloud-oci]"));
+    assert!(ci.contains(
+        "cargo check --workspace --all-targets --no-default-features --features ${{ matrix.provider }}"
+    ));
+}
+
+#[test]
+fn should_run_repository_qualification_when_ci_runs() {
+    // Arrange
+    let ci = read_workflow(".github/workflows/ci.yml");
+
+    // Act
+    let required_commands = [
+        "cargo install --git https://github.com/cntryl/tools --rev d36dc1c09462a4fd691ed9fdcc4413eb61f0c80c --locked",
+        "cargo install cargo-machete --version 0.9.2 --locked",
+        "cntryl-tools validate-tests",
+        "cargo machete",
+        "cargo test --workspace --all-features --doc",
+        "cargo check --example documented_quick_start --all-features",
+        "cargo package --locked",
+    ];
+
+    // Assert
+    for command in required_commands {
+        assert!(
+            ci.contains(command),
+            "CI is missing qualification command: {command}"
+        );
+    }
+}
+
+#[test]
+fn should_run_repository_qualification_before_publish() {
+    // Arrange
+    let publish = read_workflow(".github/workflows/publish.yml");
+
+    // Act
+    let required_commands = [
+        "cargo install cargo-machete --version 0.9.2 --locked",
+        "cargo machete",
+        "cargo test --workspace --all-features --doc",
+        "cargo check --example documented_quick_start --all-features",
+        "cargo package --locked",
+    ];
+
+    // Assert
+    for command in required_commands {
+        assert!(
+            publish.contains(command),
+            "publish gate is missing qualification command: {command}"
+        );
+    }
+}
+
+#[test]
+fn should_build_test_image_when_ci_runs() {
+    // Arrange
+    let ci = read_workflow(".github/workflows/ci.yml");
+
+    // Act
+    // Assert
+    assert!(ci.contains("docker build --file Dockerfile.tests --tag midge-tests:ci ."));
+}
+
+#[test]
+fn should_include_repository_contract_inputs_when_test_image_builds() {
+    // Arrange
+    let dockerignore = read_workflow(".dockerignore");
+
+    // Act
+    let ignored_paths: BTreeSet<_> = dockerignore.lines().map(str::trim).collect();
+
+    // Assert
+    assert!(ignored_paths.contains("target/"));
+    assert!(ignored_paths.contains(".git/"));
+    assert!(!ignored_paths.contains(".github/"));
+}
+
+#[test]
+fn should_trigger_ci_when_lockfile_changes() {
+    // Arrange
+    let ci = read_workflow(".github/workflows/ci.yml");
+
+    // Act
+    // Assert
+    assert_eq!(ci.matches("\"Cargo.lock\"").count(), 2);
+}
+
+#[test]
+fn should_trigger_ci_when_docker_context_changes() {
+    // Arrange
+    let ci = read_workflow(".github/workflows/ci.yml");
+
+    // Act
+    // Assert
+    assert_eq!(ci.matches("\".dockerignore\"").count(), 2);
+}
+
+#[test]
+fn should_limit_validation_workflow_permissions_to_read_only() {
+    // Arrange
+    let ci = read_workflow(".github/workflows/ci.yml");
+    let bench = read_workflow(".github/workflows/bench.yml");
+
+    // Act
+    // Assert
+    assert!(ci.contains("permissions:\n  contents: read"));
+    assert!(bench.contains("permissions:\n  contents: read"));
+}
+
+#[test]
+fn should_compile_canonical_example_when_repository_qualifies() {
+    // Arrange
+    let example = repository_root().join("examples/documented_quick_start.rs");
+    let ci = read_workflow(".github/workflows/ci.yml");
+    let publish = read_workflow(".github/workflows/publish.yml");
+
+    // Act
+    // Assert
+    assert!(example.is_file());
+    assert!(ci.contains("cargo check --example documented_quick_start --all-features"));
+    assert!(publish.contains("cargo check --example documented_quick_start --all-features"));
+}
+
+#[test]
+fn should_document_transaction_owned_commit_in_canonical_guides() {
+    // Arrange
+    let guides = [
+        "README.md",
+        "docs/user-guides/quick-start.md",
+        "docs/user-guides/api-guide.md",
+        "docs/user-guides/faq.md",
+        "docs/user-guides/troubleshooting.md",
+        "docs/operations/performance-tuning.md",
+        "docs/operations/migration-guide.md",
+        "docs/transactions-and-mvcc.md",
+        "docs/development/architecture.md",
+        "docs/development/architecture-diagrams.md",
+    ];
+
+    // Act
+    // Assert
+    for guide in guides {
+        let document = read_workflow(guide);
+        assert!(
+            !document.contains("engine.commit("),
+            "{guide} still documents the removed Engine::commit API"
+        );
+        assert!(
+            !document.contains(".commit(tx,"),
+            "{guide} still commits by passing a transaction into an engine"
+        );
+        assert!(
+            !document.contains("Engine::commit"),
+            "{guide} still names the removed Engine::commit API"
+        );
+        assert!(
+            !document.contains("drop(engine)"),
+            "{guide} treats Drop as successful bounded shutdown"
+        );
+    }
+}
+
+#[test]
+fn should_document_bounded_shutdown_in_quick_start() {
+    // Arrange
+    let quick_start = read_workflow("docs/user-guides/quick-start.md");
+
+    // Act
+    // Assert
+    assert!(quick_start.contains("engine.shutdown(Duration::from_secs("));
+    assert!(!quick_start.contains("drop(engine)"));
+}
+
+#[test]
+fn should_remove_dependencies_rejected_by_machete() {
+    // Arrange
+    let manifest = read_workflow("Cargo.toml");
+
+    // Act
+    // Assert
+    assert!(!manifest.contains("anyhow ="));
+    assert!(!manifest.contains("once_cell ="));
 }

@@ -108,11 +108,11 @@ See [../operations/performance-tuning.md](../operations/performance-tuning.md) f
 Write stalls occur when memtable queue is full (backpressure). This prevents memory exhaustion.
 
 ```rust
-match engine.commit(tx, opts) {
-    Err(MidgeError::WriteStall) => {
+match tx.commit(opts) {
+    Err(MidgeError::WriteStall(_)) => {
         // Wait for flush to complete
         std::thread::sleep(Duration::from_millis(100));
-        // Retry...
+        // Commit consumes tx; rebuild it and replay the writes before retrying.
     }
     Ok(_) => { /* success */ }
     Err(e) => { /* other error */ }
@@ -248,8 +248,8 @@ for cf in engine.list_column_families()? {
     engine.flush_cf(&cf)?;
 }
 
-// 3. Drop engine (releases locks, closes files)
-drop(engine);
+// 3. Bound shutdown after all transactions are released
+engine.shutdown(std::time::Duration::from_secs(30))?;
 ```
 
 ## Troubleshooting

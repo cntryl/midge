@@ -145,7 +145,7 @@ loop {
     // Import
     let mut tx = new_engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
     tx.put(key, value, None)?;
-    new_engine.commit(tx, WriteOptions::buffered())?;
+    tx.commit(WriteOptions::buffered())?;
 }
 
 // Flush to make durable

@@ -26,6 +26,30 @@ Validate naming and AAA structure:
 cntryl-tools validate-tests
 ```
 
+Run the repository and packaging qualification gates:
+
+```bash
+cargo test --workspace --all-features --doc
+cargo check --example documented_quick_start --all-features
+cargo machete
+python3 scripts/validate_benchmark_contract.py
+cargo package --locked
+docker build --file Dockerfile.tests --tag midge-tests:local .
+```
+
+Provider features are checked independently so one provider cannot hide a
+dependency on another provider's implementation:
+
+```bash
+cargo check --workspace --all-targets --no-default-features --features cloud-aws
+cargo check --workspace --all-targets --no-default-features --features cloud-azure
+cargo check --workspace --all-targets --no-default-features --features cloud-gcp
+cargo check --workspace --all-targets --no-default-features --features cloud-oci
+```
+
+The scheduled fuzz workflow builds every registered target and runs bounded
+smokes. Local smoke commands should use the same time and per-input bounds.
+
 ## Trust Matrix
 
 Use this matrix when updating guarantees or reviewing whether Midge is safe enough to evaluate.

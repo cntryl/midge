@@ -16,10 +16,12 @@ cntryl-midge = "0.1"
 ```
 
 ```rust
+use std::time::Duration;
+
 use cntryl_midge::prelude::*;
 use cntryl_midge::Bytes;
 
-let engine = Engine::open(OpenOptions::local("./db").build()?)?;
+let mut engine = Engine::open(OpenOptions::local("./db").build()?)?;
 let cf = engine.create_column_family("cf1")?;
 
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
@@ -28,7 +30,13 @@ tx.commit(WriteOptions::sync())?;
 
 let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
 let value = tx.get(b"hello")?;
+drop(tx);
+
+engine.shutdown(Duration::from_secs(30))?;
 ```
+
+The release gate compile-checks a complete in-memory walkthrough at
+[`examples/documented_quick_start.rs`](examples/documented_quick_start.rs).
 
 ## What Midge Is Good For
 
@@ -46,7 +54,7 @@ let value = tx.get(b"hello")?;
 
 - explicit `sync()`, `buffered()`, `best_effort()`, and cloud durability semantics
 - deterministic recovery-oriented tests for WAL, flush, and compaction paths
-- public observability and verification APIs such as `get_recovery_metrics()`, `get_runtime_metrics()`, `get_storage_layout()`, and `verify_storage()`
+- public observability and verification APIs such as `get_recovery_metrics()`, `get_runtime_metrics()`, `get_storage_layout()`, and `verify_storage(timeout)`
 
 ## What To Read Before Trying Midge
 
