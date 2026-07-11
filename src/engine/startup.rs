@@ -1577,9 +1577,10 @@ impl EngineStartup {
 
     fn trace_open(opts: &OpenOptions) {
         if let Storage::Cloud { provider, .. } = opts.storage() {
-            let endpoint = provider_endpoint(provider)
-                .map(redact_endpoint_metadata)
-                .unwrap_or_else(|| "<provider-default>".to_string());
+            let endpoint = provider_endpoint(provider).map_or_else(
+                || "<provider-default>".to_string(),
+                redact_endpoint_metadata,
+            );
             tracing::debug!(
                 storage = "cloud",
                 provider = provider_kind(provider),
