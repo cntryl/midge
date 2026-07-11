@@ -731,11 +731,11 @@ mod memory {
     fn host_total_memory_bytes() -> Option<u64> {
         let mut system = sysinfo::System::new();
         system.refresh_memory();
-        let total_kb = system.total_memory();
-        if total_kb == 0 {
+        let total_bytes = system.total_memory();
+        if total_bytes == 0 {
             return None;
         }
-        Some(total_kb.saturating_mul(1024))
+        Some(total_bytes)
     }
 
     #[cfg(target_os = "linux")]
@@ -776,6 +776,29 @@ mod memory {
             return None;
         }
         Some(limit)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::host_total_memory_bytes;
+
+        #[test]
+        fn should_treat_sysinfo_total_memory_as_bytes() {
+            // Arrange
+            let mut system = sysinfo::System::new();
+            system.refresh_memory();
+            let expected_bytes = system.total_memory();
+
+            // Act
+            let detected_bytes = host_total_memory_bytes();
+
+            // Assert
+            if expected_bytes == 0 {
+                assert_eq!(detected_bytes, None);
+            } else {
+                assert_eq!(detected_bytes, Some(expected_bytes));
+            }
+        }
     }
 }
 
