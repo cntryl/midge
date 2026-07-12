@@ -84,6 +84,26 @@ fn target_matches(pattern: &str, target: &str) -> bool {
 }
 
 #[test]
+fn should_keep_production_module_size_guard_wired_into_repository_tools() {
+    // Arrange
+    let checker = repository_root().join("scripts/check_module_sizes.py");
+    let qualification = read_workflow(".github/workflows/qualification.yml");
+
+    // Act
+    let checker_source = fs::read_to_string(&checker)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", checker.display()));
+
+    // Assert
+    assert!(checker.is_file(), "module-size checker must be checked in");
+    assert!(checker_source.contains("WARN_LINES = 1_200"));
+    assert!(checker_source.contains("NEW_MODULE_LINES = 1_600"));
+    assert!(checker_source.contains("#[cfg(test)]"));
+    assert!(checker_source.contains("TEMPORARY_ALLOWLIST"));
+    assert!(qualification.contains("scripts/check_module_sizes.py"));
+    assert!(qualification.contains("python3 scripts/check_module_sizes.py"));
+}
+
+#[test]
 fn should_require_rust_formatting_when_ci_runs() {
     // Arrange
     let ci = read_workflow(".github/workflows/ci.yml");

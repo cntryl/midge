@@ -131,6 +131,22 @@ pub use io::{
     Durability as FsDurability, Fs, FsPath, OpenMode as FsOpenMode, OpenOptions as FsOpenOptions,
 };
 
+#[cfg(test)]
+mod internal_path_guards {
+    fn assert_type_exists<T>() {}
+
+    #[test]
+    fn should_keep_key_internal_paths_compilable() {
+        // Arrange
+        // Act
+        assert_type_exists::<crate::runtime::actors::WalActor>();
+        assert_type_exists::<crate::sst::fs::SstFileIo>();
+        assert_type_exists::<crate::storage::HybridStorage>();
+        assert_type_exists::<crate::storage::hybrid::backend::HybridStorage>();
+        // Assert
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Canonical Prelude
 // ---------------------------------------------------------------------------

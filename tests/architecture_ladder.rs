@@ -18,6 +18,9 @@ fn rust_sources_under(relative: &str) -> Vec<PathBuf> {
 }
 
 fn production_source(path: &Path) -> String {
+    if path.file_name().is_some_and(|name| name == "tests.rs") {
+        return String::new();
+    }
     let source = std::fs::read_to_string(path).expect("read Rust source");
     source
         .split("\n#[cfg(test)]\nmod tests")

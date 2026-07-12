@@ -404,7 +404,7 @@ fn should_keep_hybrid_storage_out_of_wal_frame_decoding() {
 fn should_construct_runtime_observability_dtos_from_shared_types() {
     // Arrange
     let state = read_source("src/runtime/state.rs");
-    let runtime = read_source("src/runtime/mod.rs");
+    let protocol = read_source("src/runtime/protocol.rs");
     let engine = read_source("src/engine/mod.rs");
     let shared = read_source("src/types.rs");
 
@@ -413,8 +413,8 @@ fn should_construct_runtime_observability_dtos_from_shared_types() {
     // Assert
     assert!(state.contains("crate::types::RuntimeMetricsSnapshot"));
     assert!(state.contains("crate::types::StorageLayoutSnapshot"));
-    assert!(runtime.contains("Box<crate::types::RuntimeMetricsSnapshot>"));
-    assert!(runtime.contains("snapshot: crate::types::StorageLayoutSnapshot"));
+    assert!(protocol.contains("Box<crate::types::RuntimeMetricsSnapshot>"));
+    assert!(protocol.contains("snapshot: crate::types::StorageLayoutSnapshot"));
     assert!(!engine.contains("pub struct RuntimeMetricsSnapshot"));
     assert!(!engine.contains("pub struct StorageLayoutSnapshot"));
     assert!(shared.contains("pub struct RuntimeMetricsSnapshot"));
@@ -486,7 +486,15 @@ fn should_keep_event_loop_message_families_in_owned_coordinators() {
 #[test]
 fn should_make_startup_recovery_phases_owned() {
     // Arrange
-    let startup = read_source("src/engine/startup.rs");
+    let startup = [
+        "src/engine/startup/mod.rs",
+        "src/engine/startup/cloud_recovery.rs",
+        "src/engine/startup/storage.rs",
+        "src/engine/startup/assembly.rs",
+    ]
+    .into_iter()
+    .map(read_source)
+    .collect::<String>();
     let required_phases = [
         "struct StartupStoragePath",
         "struct StartupLease",

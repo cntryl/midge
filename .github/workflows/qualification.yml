@@ -16,6 +16,8 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
+      - "src/**"
+      - "tests/**"
       - ".github/workflows/qualification.yml"
   pull_request:
     branches: [main]
@@ -29,6 +31,8 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
+      - "src/**"
+      - "tests/**"
       - ".github/workflows/qualification.yml"
 
 permissions:
@@ -76,6 +80,9 @@ jobs:
           else
             python scripts/validate_benchmark_contract.py
           fi
+
+      - name: Check production module sizes
+        run: python3 scripts/check_module_sizes.py
 
       - name: Install repository tools
         run: |
