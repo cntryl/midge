@@ -15,6 +15,16 @@ use tempfile::TempDir;
 
 const SMALL_POOL_BYTES: usize = 24 * 1024;
 const VALUE_BYTES: usize = 12 * 1024;
+
+fn spill_shutdown_timeout() -> Duration {
+    // Windows CI runs this filesystem-heavy test binary in parallel. Leave
+    // enough bounded time for durable lease cleanup under that contention.
+    if cfg!(windows) {
+        Duration::from_secs(10)
+    } else {
+        Duration::from_secs(2)
+    }
+}
 #[cfg(feature = "failpoints")]
 const CHILD_TEST_NAME: &str =
     "should_abort_in_child_process_when_spilled_transaction_commit_is_interrupted";
@@ -51,7 +61,7 @@ fn should_bound_shared_resident_bytes_when_two_transactions_pressure_one_pool() 
     first.rollback().expect("rollback first transaction");
     second.rollback().expect("rollback second transaction");
     engine
-        .shutdown(Duration::from_secs(2))
+        .shutdown(spill_shutdown_timeout())
         .expect("shutdown engine");
 
     // Assert
@@ -79,7 +89,7 @@ fn should_create_engine_private_runs_under_txn_when_durable_transaction_spills()
     let all_are_files = files.iter().all(|path| path.is_file());
     tx.rollback().expect("rollback transaction");
     engine
-        .shutdown(Duration::from_secs(2))
+        .shutdown(spill_shutdown_timeout())
         .expect("shutdown engine");
 
     // Assert
@@ -111,7 +121,7 @@ fn should_read_latest_point_intent_after_spilling() {
     let had_spills = !spill_files(temp.path()).is_empty();
     tx.rollback().expect("rollback transaction");
     engine
-        .shutdown(Duration::from_secs(2))
+        .shutdown(spill_shutdown_timeout())
         .expect("shutdown engine");
 
     // Assert
@@ -155,7 +165,7 @@ fn should_merge_transaction_intents_when_scanning_after_spill() {
     let had_spills = !spill_files(temp.path()).is_empty();
     tx.rollback().expect("rollback transaction");
     engine
-        .shutdown(Duration::from_secs(2))
+        .shutdown(spill_shutdown_timeout())
         .expect("shutdown engine");
 
     // Assert
@@ -202,7 +212,7 @@ fn should_preserve_put_delete_insert_ordinals_across_spill_runs() {
     let after_commit = read.get(b"ordered").expect("read committed ordinal");
     drop(read);
     engine
-        .shutdown(Duration::from_secs(2))
+        .shutdown(spill_shutdown_timeout())
         .expect("shutdown engine");
 
     // Assert
@@ -230,7 +240,7 @@ fn should_reject_duplicate_insert_when_duplicate_is_in_older_spill_run() {
     // Act
     let result = tx.commit(WriteOptions::sync());
     engine
-        .shutdown(Duration::from_secs(2))
+        .shutdown(spill_shutdown_timeout())
         .expect("shutdown engine");
 
     // Assert
@@ -257,7 +267,7 @@ fn should_remove_spill_runs_when_transaction_rolls_back() {
     tx.rollback().expect("rollback transaction");
     let after = spill_files(temp.path());
     engine
-        .shutdown(Duration::from_secs(2))
+        .shutdown(spill_shutdown_timeout())
         .expect("shutdown engine");
 
     // Assert
@@ -284,7 +294,7 @@ fn should_remove_spill_runs_when_transaction_is_dropped() {
     drop(tx);
     let after = spill_files(temp.path());
     engine
-        .shutdown(Duration::from_secs(2))
+        .shutdown(spill_shutdown_timeout())
         .expect("shutdown engine");
 
     // Assert
@@ -325,7 +335,7 @@ fn should_return_resource_limit_when_memory_mode_exhausts_transaction_pool() {
     }
     drop(tx);
     engine
-        .shutdown(Duration::from_secs(2))
+        .shutdown(spill_shutdown_timeout())
         .expect("shutdown memory engine");
 
     // Assert
@@ -341,7 +351,7 @@ fn should_remove_orphaned_spill_runs_when_engine_starts() {
     let temp = TempDir::new().expect("temp dir");
     let mut initialized = open_local(temp.path(), SMALL_POOL_BYTES);
     initialized
-        .shutdown(Duration::from_secs(2))
+        .shutdown(spill_shutdown_timeout())
         .expect("shutdown initialized engine");
     let txn_dir = temp.path().join("txn");
     fs::create_dir_all(&txn_dir).expect("create txn dir");
@@ -352,7 +362,7 @@ fn should_remove_orphaned_spill_runs_when_engine_starts() {
     let mut reopened = open_local(temp.path(), SMALL_POOL_BYTES);
     let remaining = spill_files(temp.path());
     reopened
-        .shutdown(Duration::from_secs(2))
+        .shutdown(spill_shutdown_timeout())
         .expect("shutdown reopened engine");
 
     // Assert
@@ -378,7 +388,7 @@ fn should_frame_large_transaction_with_one_commit_marker() {
     tx.commit(WriteOptions::sync())
         .expect("commit large transaction");
     engine
-        .shutdown(Duration::from_secs(2))
+        .shutdown(spill_shutdown_timeout())
         .expect("shutdown committed engine");
     let frames = read_wal_frames(&temp.path().join("wal").join("wal.log"));
     let records = frames.iter().map(|(record, _)| record).collect::<Vec<_>>();
@@ -391,7 +401,7 @@ fn should_frame_large_transaction_with_one_commit_marker() {
     let visible = read.get(b"chunked-000").expect("read committed key");
     drop(read);
     reopened
-        .shutdown(Duration::from_secs(2))
+        .shutdown(spill_shutdown_timeout())
         .expect("shutdown reopened engine");
 
     // Assert
@@ -450,7 +460,7 @@ fn should_hide_spilled_transaction_when_commit_marker_is_missing() {
     drop(read);
     let remaining_spills = spill_files(temp.path());
     engine
-        .shutdown(Duration::from_secs(2))
+        .shutdown(spill_shutdown_timeout())
         .expect("shutdown recovered engine");
 
     // Assert
