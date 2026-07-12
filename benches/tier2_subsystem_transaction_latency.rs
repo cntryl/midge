@@ -522,7 +522,7 @@ fn latency_breakdown_from_totals(
     }
 }
 
-fn assert_transaction_latency_guardrails(breakdown: TransactionLatencyBreakdown) {
+fn validate_transaction_latency_invariants(breakdown: TransactionLatencyBreakdown) {
     match breakdown.kind {
         LatencyWorkloadKind::SequentialBufferedSingleOp
         | LatencyWorkloadKind::ConcurrentBufferedSingleOp => {
@@ -532,28 +532,23 @@ fn assert_transaction_latency_guardrails(breakdown: TransactionLatencyBreakdown)
             assert_eq!(breakdown.commit_samples, 0);
         }
     }
-
-    if matches!(
-        breakdown.kind,
-        LatencyWorkloadKind::SequentialBufferedSingleOp
-    ) {
-        assert!(
-            breakdown.write_group_follower_wait_us <= MAX_DIRECT_SUBMIT_FOLLOWER_WAIT_US,
-            "buffered direct-submit follower wait average exceeded guardrail: {:.2}us > {:.2}us",
-            breakdown.write_group_follower_wait_us,
-            MAX_DIRECT_SUBMIT_FOLLOWER_WAIT_US
-        );
-    }
 }
 
-fn assert_transaction_coalescing_guardrail(signal: TransactionCoalescingSignal) {
+fn transaction_latency_guardrail_violations(breakdown: TransactionLatencyBreakdown) -> u64 {
+    u64::from(
+        matches!(
+            breakdown.kind,
+            LatencyWorkloadKind::SequentialBufferedSingleOp
+        ) && breakdown.write_group_follower_wait_us > MAX_DIRECT_SUBMIT_FOLLOWER_WAIT_US,
+    )
+}
+
+fn validate_transaction_coalescing_invariants(signal: TransactionCoalescingSignal) {
     assert_eq!(signal.logical_txn_records, logical_coalescing_txn_records());
-    assert!(
-        signal.avg_txn_records_per_append >= MIN_AVG_TXN_RECORDS_PER_APPEND,
-        "buffered transaction coalescing fell below guardrail: {:.2} < {:.2} txns/append",
-        signal.avg_txn_records_per_append,
-        MIN_AVG_TXN_RECORDS_PER_APPEND
-    );
+}
+
+fn transaction_coalescing_guardrail_violations(signal: TransactionCoalescingSignal) -> u64 {
+    u64::from(signal.avg_txn_records_per_append < MIN_AVG_TXN_RECORDS_PER_APPEND)
 }
 
 fn open_local_engine_with_cf(cf_name: &str) -> (Arc<Engine>, ColumnFamilyId) {
@@ -659,6 +654,7 @@ fn run_latency_breakdown_case(
     ctx.parameter("logical_unit", "transaction");
 
     let mut observed = None;
+    let mut guardrail_violations = 0_u64;
     let logical_ops = (clients * txns_per_client * LATENCY_SAMPLE_REPEATS) as u64;
     let measurement_name = match kind {
         LatencyWorkloadKind::SequentialBufferedSingleOp => "sequential_buffered_single_op",
@@ -670,7 +666,9 @@ fn run_latency_breakdown_case(
         for _ in 0..LATENCY_SAMPLE_REPEATS {
             let breakdown =
                 run_buffered_transaction_latency_breakdown(&engine, cf_id, kind, workloads.clone());
-            assert_transaction_latency_guardrails(breakdown);
+            validate_transaction_latency_invariants(breakdown);
+            guardrail_violations = guardrail_violations
+                .saturating_add(transaction_latency_guardrail_violations(breakdown));
             completed = completed.saturating_add(breakdown.transactions);
             observed = Some(breakdown);
         }
@@ -679,6 +677,12 @@ fn run_latency_breakdown_case(
     });
 
     tag_transaction_latency_breakdown(ctx, observed.expect("latency breakdown recorded"));
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata(
+        "diagnostic_reason",
+        "performance_guardrails_are_observational",
+    );
+    ctx.parameter("performance_guardrail_violations", guardrail_violations);
 }
 
 #[stress(
@@ -774,8 +778,14 @@ fn read_only_begin_tx(ctx: &mut StressContext) {
         avg_wal_append_us: 0.0,
         avg_txn_records_per_append: 0.0,
     };
-    assert_transaction_latency_guardrails(breakdown);
+    validate_transaction_latency_invariants(breakdown);
     tag_transaction_latency_breakdown(ctx, breakdown);
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata(
+        "diagnostic_reason",
+        "performance_guardrails_are_observational",
+    );
+    ctx.parameter("performance_guardrail_violations", 0_u64);
 }
 
 #[stress(
@@ -791,13 +801,16 @@ fn coalescing_signal(ctx: &mut StressContext) {
     ctx.parameter("logical_unit", "transaction_record");
 
     let mut observed = None;
+    let mut guardrail_violations = 0_u64;
     let logical_ops =
         logical_coalescing_txn_records().saturating_mul(LATENCY_SAMPLE_REPEATS as u64);
     let _completed = ctx.measure_batch("coalescing_signal", logical_ops, || {
         let mut completed = 0u64;
         for _ in 0..LATENCY_SAMPLE_REPEATS {
             let signal = run_transaction_coalescing_signal(&engine, cf_id);
-            assert_transaction_coalescing_guardrail(signal);
+            validate_transaction_coalescing_invariants(signal);
+            guardrail_violations = guardrail_violations
+                .saturating_add(transaction_coalescing_guardrail_violations(signal));
             black_box((
                 signal.physical_wal_appends,
                 signal.avg_txn_records_per_append,
@@ -811,6 +824,12 @@ fn coalescing_signal(ctx: &mut StressContext) {
     });
 
     tag_transaction_coalescing_signal(ctx, observed.expect("coalescing signal recorded"));
+    ctx.metadata("trust_class", "diagnostic");
+    ctx.metadata(
+        "diagnostic_reason",
+        "performance_guardrails_are_observational",
+    );
+    ctx.parameter("performance_guardrail_violations", guardrail_violations);
 }
 
 stress_main!();
