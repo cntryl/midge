@@ -17,6 +17,14 @@ fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).expect("benchmark count fits in u64")
 }
 
+fn memory_budget_bytes() -> usize {
+    std::env::var("MIDGE_BENCH_HOTPATH_API_TRANSACTION_MEMORY_BUDGET_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(2 * 1024 * 1024 * 1024)
+}
+
 fn make_fixed_kv(size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
     let mut keys = Vec::with_capacity(size);
     let mut vals = Vec::with_capacity(size);
@@ -39,7 +47,7 @@ fn setup_db() -> MidgeEngine {
         memtable_size: 1024 * 1024 * 1024,
         compression: false,
         enable_compaction: false,
-        memory_budget: Some(4 * 1024 * 1024 * 1024),
+        memory_budget: Some(memory_budget_bytes()),
         cloud_write_policy: None,
         simulated_cloud_overrides: None,
     };
