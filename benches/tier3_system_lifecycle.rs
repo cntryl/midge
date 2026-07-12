@@ -8,6 +8,7 @@ mod stress_config;
 
 use cntryl_midge::{TransactionMode, WriteOptions};
 use cntryl_stress::{stress, stress_main, StressContext};
+use std::time::Duration;
 
 const FLUSH_BATCH_SIZE: usize = 32;
 
@@ -73,14 +74,20 @@ fn run_clean_reopen(ctx: &mut StressContext, scenario: &'static str, mode: &'sta
     row_metadata(ctx, "clean_reopen", mode);
     let opts = stress_config::opts_for_mode(mode);
     {
-        let engine = stress_config::bench_stress::open_engine_no_compaction(opts.clone());
-        drop(engine);
+        let mut engine = stress_config::bench_stress::open_engine_no_compaction(opts.clone());
+        engine
+            .shutdown(Duration::from_secs(10))
+            .expect("prepare clean reopen benchmark");
     }
     let mut failures = 0_u64;
 
     let _ = ctx.measure_batch(scenario, 1, || {
         match cntryl_midge::Engine::open(opts.to_open_options()) {
-            Ok(engine) => drop(engine),
+            Ok(mut engine) => {
+                if engine.shutdown(Duration::from_secs(10)).is_err() {
+                    failures += 1;
+                }
+            }
             Err(_) => failures += 1,
         }
     });
