@@ -770,10 +770,10 @@ where
                 // Block waiting for stall to clear, but use a timeout so we can
                 // observe stop and avoid hanging on pathological stalls.
                 while !stop.load(Ordering::Acquire) {
-                    let cleared =
-                        engine.wait_for_write_stall_clear(cf_id, Duration::from_millis(50))?;
-                    if cleared {
-                        break;
+                    match engine.wait_for_write_stall_clear(cf_id, Duration::from_millis(50)) {
+                        Ok(true) => break,
+                        Ok(false) | Err(MidgeError::WriteStall(_)) => {}
+                        Err(e) => return Err(e),
                     }
                 }
             }

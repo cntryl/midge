@@ -1,4 +1,4 @@
-#![allow(dead_code, unused_imports)]
+#![allow(dead_code)]
 
 use cntryl_midge::{
     CloudWritePolicy, ColumnFamilyHandle, Engine, Goal, MemoryBudget, MidgeEngine, MidgeResult,

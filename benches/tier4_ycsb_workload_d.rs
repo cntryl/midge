@@ -6,8 +6,7 @@
 mod stress_config;
 
 use cntryl_stress::{stress, stress_main, StressContext};
-#[allow(unused_imports)]
-use stress_config::{BenchConfig, MidgeStressContextExt as _};
+use stress_config::MidgeStressContextExt as _;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,7 +24,57 @@ const CLIENTS_64: usize = 64;
 
 const WORKLOAD_SEED: u64 = 0xD0D0_EA5E_5678_9ABC;
 
-#[allow(clippy::too_many_lines)]
+fn run_workload_d_warmup(
+    engine: &Arc<cntryl_midge::MidgeEngine>,
+    cf_id: cntryl_midge::ColumnFamilyId,
+    clients: usize,
+    initial_keys: usize,
+) {
+    let _warmup_ops =
+        ycsb::run_multi_client_for_duration(engine, clients, WARMUP, |client_id, stop| {
+            let mut inserts_so_far = 0_u64;
+            move |e, _cf, op_index| {
+                let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
+                let is_insert = (r0 % 100) >= 95;
+
+                if is_insert {
+                    inserts_so_far = inserts_so_far.wrapping_add(1);
+                    let key_id = (initial_keys as u64)
+                        .wrapping_add((client_id as u64) << 32)
+                        .wrapping_add(inserts_so_far);
+                    let k = ycsb::make_key(key_id);
+                    let v = ycsb::make_value((op_index % 251) as u8);
+                    ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
+                        let mut tx = e
+                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                            .expect("begin");
+                        tx.put(k.to_vec(), v.clone(), None).expect("warmup insert");
+                        tx.commit(cntryl_midge::WriteOptions::best_effort())
+                    })
+                    .expect("commit");
+                    return;
+                }
+
+                let latest = (initial_keys as u64)
+                    .wrapping_add((client_id as u64) << 32)
+                    .wrapping_add(inserts_so_far);
+                let recent_window = (latest / 10).max(1);
+                let pick = if (r0 % 100) < 90 {
+                    let r1 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 1);
+                    latest.saturating_sub(1).saturating_sub(r1 % recent_window)
+                } else {
+                    let r2 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 2);
+                    r2 % latest.max(1)
+                };
+                let k = ycsb::make_key(pick);
+                let tx = e
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                    .expect("begin");
+                let _ = tx.get(&k[..]).expect("warmup get");
+            }
+        });
+}
+
 fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
     ctx.tag("storage_profile", profile);
     ctx.parameter("clients", clients);
@@ -55,55 +104,7 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     // Use a deterministic, stochastic mix (avoid periodic scheduling artifacts).
 
     // Phase 2: Warm-up (not measured)
-    {
-        let cf_id = cf.id();
-        let _warmup_ops =
-            ycsb::run_multi_client_for_duration(&engine, clients, WARMUP, |client_id, stop| {
-                let mut inserts_so_far: u64 = 0;
-                move |e, _cf, op_index| {
-                    let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
-                    let is_insert = (r0 % 100) >= 95;
-
-                    if is_insert {
-                        inserts_so_far = inserts_so_far.wrapping_add(1);
-                        let key_id = (initial_keys as u64)
-                            .wrapping_add((client_id as u64) << 32)
-                            .wrapping_add(inserts_so_far);
-                        let k = ycsb::make_key(key_id);
-                        let v = ycsb::make_value((op_index % 251) as u8);
-                        ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
-                            let mut tx = e
-                                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                                .expect("begin");
-                            tx.put(k.to_vec(), v.clone(), None).expect("warmup insert");
-                            tx.commit(cntryl_midge::WriteOptions::best_effort())
-                            // Fast warmup
-                        })
-                        .expect("commit");
-                        return;
-                    }
-
-                    let latest = (initial_keys as u64)
-                        .wrapping_add((client_id as u64) << 32)
-                        .wrapping_add(inserts_so_far);
-
-                    let recent_window = (latest / 10).max(1);
-                    let pick = if (r0 % 100) < 90 {
-                        let r1 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 1);
-                        latest.saturating_sub(1).saturating_sub(r1 % recent_window)
-                    } else {
-                        let r2 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 2);
-                        r2 % latest.max(1)
-                    };
-
-                    let k = ycsb::make_key(pick);
-                    let tx = e
-                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                        .expect("begin");
-                    let _ = tx.get(&k[..]).expect("warmup get");
-                }
-            });
-    }
+    run_workload_d_warmup(&engine, cf.id(), clients, initial_keys);
 
     // Flush to ensure warmup data is durable before measured phase
     engine.flush_cf(&cf).unwrap();

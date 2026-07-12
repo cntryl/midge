@@ -16,8 +16,8 @@
 mod stress_config;
 
 use cntryl_stress::{stress, stress_main, StressContext};
-#[allow(unused_imports)]
-use stress_config::{BenchConfig, MidgeStressContextExt as _};
+use std::time::Duration;
+use stress_config::MidgeStressContextExt as _;
 
 use cntryl_midge::MidgeEngine;
 use stress_config::MidgeOptions;
@@ -60,7 +60,9 @@ fn run_reopen_after_flush_case(
         let cf = e.create_column_family("cf1").unwrap();
         write_some(&e, 5_000);
         e.flush_cf(&cf).unwrap(); // Ensure durability before measurement
-        drop(e);
+        let mut e = e;
+        e.shutdown(Duration::from_secs(10))
+            .expect("prepare flushed recovery benchmark");
     }
 
     // Measure reopen latency under flushed manifest state
@@ -68,8 +70,10 @@ fn run_reopen_after_flush_case(
     stress_config::mark_capped_probe(ctx, "fixed_reopen_count_latency_probe");
 
     stress_config::measure_external(ctx, scenario, 100, || {
-        let engine = setup_engine(opts.clone());
-        drop(engine);
+        let mut engine = setup_engine(opts.clone());
+        engine
+            .shutdown(Duration::from_secs(10))
+            .expect("complete flushed recovery measurement");
     });
 }
 
@@ -87,7 +91,9 @@ fn run_reopen_after_compaction_case(
         write_some(&e, 3_000);
         e.flush_cf(&cf).unwrap(); // Ensure durability before compaction
         e.compact_all().unwrap();
-        drop(e);
+        let mut e = e;
+        e.shutdown(Duration::from_secs(10))
+            .expect("prepare compacted recovery benchmark");
     }
 
     // Measure reopen latency under compacted multi-level state
@@ -95,8 +101,10 @@ fn run_reopen_after_compaction_case(
     stress_config::mark_capped_probe(ctx, "fixed_reopen_count_latency_probe");
 
     stress_config::measure_external(ctx, scenario, 100, || {
-        let engine = setup_engine(opts.clone());
-        drop(engine);
+        let mut engine = setup_engine(opts.clone());
+        engine
+            .shutdown(Duration::from_secs(10))
+            .expect("complete compacted recovery measurement");
     });
 }
 

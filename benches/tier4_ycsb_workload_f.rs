@@ -6,8 +6,7 @@
 mod stress_config;
 
 use cntryl_stress::{stress, stress_main, StressContext};
-#[allow(unused_imports)]
-use stress_config::{BenchConfig, MidgeStressContextExt as _};
+use stress_config::MidgeStressContextExt as _;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,7 +27,42 @@ const CLIENTS_64: usize = 64;
 
 const WORKLOAD_SEED: u64 = 0xF0F0_EA5E_5678_9ABC;
 
-#[allow(clippy::too_many_lines)]
+fn run_workload_f_warmup(
+    engine: &Arc<cntryl_midge::MidgeEngine>,
+    cf_id: cntryl_midge::ColumnFamilyId,
+    clients: usize,
+    initial_keys: usize,
+) {
+    let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
+    let _warmup_ops =
+        ycsb::run_multi_client_for_duration(engine, clients, WARMUP, |client_id, stop| {
+            let zipf = Arc::clone(&zipf);
+            move |e, _cf, op_index| {
+                let mut draw = 0_u64;
+                let key_idx = zipf.next_from_u64(&mut || {
+                    let r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, draw);
+                    draw = draw.wrapping_add(1);
+                    r
+                }) as u64;
+                let k = ycsb::make_key(key_idx);
+                let tx = e
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                    .expect("begin");
+                let _old = tx.get(&k[..]).expect("warmup get");
+                drop(tx);
+                let v = ycsb::make_value((op_index % 251) as u8);
+                ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
+                    let mut tx = e
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                        .expect("begin");
+                    tx.put(k.to_vec(), v.clone(), None).expect("warmup put");
+                    tx.commit(cntryl_midge::WriteOptions::best_effort())
+                })
+                .expect("commit");
+            }
+        });
+}
+
 fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
     ctx.tag("storage_profile", profile);
     ctx.parameter("clients", clients);
@@ -56,36 +90,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     ycsb::load_initial_dataset(engine.as_ref(), &cf, initial_keys);
 
     // Phase 2: Warm-up (not measured)
-    {
-        let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
-        let cf_id = cf.id();
-        let _warmup_ops =
-            ycsb::run_multi_client_for_duration(&engine, clients, WARMUP, |client_id, stop| {
-                let zipf = Arc::clone(&zipf);
-                move |e, _cf, op_index| {
-                    let mut draw: u64 = 0;
-                    let key_idx = zipf.next_from_u64(&mut || {
-                        let r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, draw);
-                        draw = draw.wrapping_add(1);
-                        r
-                    }) as u64;
-                    let k = ycsb::make_key(key_idx);
-                    let tx = e
-                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                        .expect("begin");
-                    let _old = tx.get(&k[..]).expect("warmup get");
-                    let v = ycsb::make_value((op_index % 251) as u8);
-                    ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
-                        let mut tx = e
-                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                            .expect("begin");
-                        tx.put(k.to_vec(), v.clone(), None).expect("warmup put");
-                        tx.commit(cntryl_midge::WriteOptions::best_effort()) // Fast warmup
-                    })
-                    .expect("commit");
-                }
-            });
-    }
+    run_workload_f_warmup(&engine, cf.id(), clients, initial_keys);
 
     // Flush to ensure warmup data is durable before measured phase
     engine.flush_cf(&cf).unwrap();

@@ -6,8 +6,7 @@
 mod stress_config;
 
 use cntryl_stress::{stress, stress_main, StressContext};
-#[allow(unused_imports)]
-use stress_config::{BenchConfig, MidgeStressContextExt as _};
+use stress_config::MidgeStressContextExt as _;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,7 +32,126 @@ const CLIENTS_64: usize = 64;
 
 const WORKLOAD_SEED: u64 = 0xA0A0_EA5E_5678_9ABC;
 
-#[allow(clippy::too_many_lines)]
+fn run_workload_a_warmup(
+    engine: &Arc<cntryl_midge::MidgeEngine>,
+    clients: usize,
+    initial_keys: usize,
+    distribution: KeyDistribution,
+) {
+    let zipf = match distribution {
+        KeyDistribution::Zipf { theta } => {
+            Some(Arc::new(ZipfianGenerator::new(initial_keys, theta)))
+        }
+    };
+    let write_opts = cntryl_midge::WriteOptions::best_effort();
+    let _warmup_ops =
+        ycsb::run_multi_client_for_duration(engine, clients, WARMUP, |client_id, stop| {
+            let zipf = zipf.clone();
+            move |e, cf, op_index| {
+                let op_r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
+                let cf_id = cf.id();
+                let key_idx = match &zipf {
+                    Some(zipf) => {
+                        let mut draw = 1_u64;
+                        zipf.next_from_u64(&mut || {
+                            let r =
+                                ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, draw);
+                            draw = draw.wrapping_add(1);
+                            r
+                        }) as u64
+                    }
+                    None => 0,
+                };
+                let k = ycsb::make_key(key_idx);
+
+                if (op_r & 1) == 0 {
+                    let tx = e
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                        .expect("begin");
+                    let _ = tx.get(&k[..]).expect("warmup get");
+                } else {
+                    let v = ycsb::make_value((op_index % 251) as u8);
+                    ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
+                        let mut tx = e
+                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                            .expect("begin");
+                        tx.put(k.to_vec(), v.clone(), None).expect("warmup put");
+                        tx.commit(write_opts)
+                    })
+                    .expect("warmup commit");
+                }
+            }
+        });
+}
+
+fn run_workload_a_measured(
+    ctx: &mut StressContext,
+    engine: &Arc<cntryl_midge::MidgeEngine>,
+    clients: usize,
+    initial_keys: usize,
+    profile: &str,
+    distribution: KeyDistribution,
+    write_opts: cntryl_midge::WriteOptions,
+) -> ycsb::MultiClientRunStats {
+    let client_suffix = if clients == 1 { "client" } else { "clients" };
+    let measurement_name = format!("tier4_ycsb_a_{profile}_{clients}_{client_suffix}");
+    stress_config::measure_external_counted(ctx, measurement_name, || {
+        let zipf = match distribution {
+            KeyDistribution::Zipf { theta } => {
+                Some(Arc::new(ZipfianGenerator::new(initial_keys, theta)))
+            }
+        };
+        let measured = ycsb::run_multi_client_for_duration_with_stats(
+            engine,
+            clients,
+            MEASURED,
+            |client_id, stop| {
+                let zipf = zipf.clone();
+                move |e, cf, op_index| {
+                    let op_r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
+                    let cf_id = cf.id();
+                    let key_idx = match &zipf {
+                        Some(zipf) => {
+                            let mut draw = 1_u64;
+                            zipf.next_from_u64(&mut || {
+                                let r = ycsb::deterministic_u64(
+                                    WORKLOAD_SEED,
+                                    client_id,
+                                    op_index,
+                                    draw,
+                                );
+                                draw = draw.wrapping_add(1);
+                                r
+                            }) as u64
+                        }
+                        None => 0,
+                    };
+                    let k = ycsb::make_key(key_idx);
+
+                    if (op_r & 1) == 0 {
+                        let tx = e
+                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                            .expect("measured begin");
+                        let _ = tx.get(&k[..]).expect("measured get");
+                    } else {
+                        let v = ycsb::make_value((op_index % 251) as u8);
+                        ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
+                            let mut tx = e
+                                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                                .expect("measured begin");
+                            tx.put(k.to_vec(), v.clone(), None).expect("measured put");
+                            tx.commit(write_opts)
+                        })
+                        .expect("measured commit");
+                    }
+                }
+            },
+        );
+        let operations = measured.operations;
+        (measured, operations)
+    })
+}
+
 fn run_workload_a_with_distribution(
     ctx: &mut StressContext,
     opts: MidgeOptions,
@@ -65,128 +183,22 @@ fn run_workload_a_with_distribution(
     ycsb::load_initial_dataset(engine.as_ref(), &cf, initial_keys);
 
     // Phase 2: Warm-up (not measured)
-    {
-        let zipf = match distribution {
-            KeyDistribution::Zipf { theta } => {
-                Some(Arc::new(ZipfianGenerator::new(initial_keys, theta)))
-            }
-        };
-        let write_opts = cntryl_midge::WriteOptions::best_effort(); // Fast warmup: skip WAL I/O
-        let _warmup_ops =
-            ycsb::run_multi_client_for_duration(&engine, clients, WARMUP, |client_id, stop| {
-                let zipf = zipf.clone();
-                move |e, cf, op_index| {
-                    let op_r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
-                    let cf_id = cf.id();
-
-                    let key_idx = match &zipf {
-                        Some(zipf) => {
-                            // Reserve draw=0 for op selection; use draw>=1 for key selection.
-                            let mut draw: u64 = 1;
-                            zipf.next_from_u64(&mut || {
-                                let r = ycsb::deterministic_u64(
-                                    WORKLOAD_SEED,
-                                    client_id,
-                                    op_index,
-                                    draw,
-                                );
-                                draw = draw.wrapping_add(1);
-                                r
-                            }) as u64
-                        }
-                        None => 0,
-                    };
-                    let k = ycsb::make_key(key_idx);
-
-                    // Deterministic, stochastic 50/50 mix (avoids perfect alternation).
-                    if (op_r & 1) == 0 {
-                        let tx = e
-                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                            .expect("begin");
-                        let _ = tx.get(&k[..]).expect("warmup get");
-                    } else {
-                        let v = ycsb::make_value((op_index % 251) as u8);
-                        ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
-                            let mut tx = e
-                                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                                .expect("begin");
-                            tx.put(k.to_vec(), v.clone(), None).expect("warmup put");
-                            tx.commit(write_opts)
-                        })
-                        .expect("warmup commit");
-                    }
-                }
-            });
-    }
+    run_workload_a_warmup(&engine, clients, initial_keys, distribution);
 
     // Flush to ensure warmup data is durable before measured phase
     engine.flush_cf(&cf).unwrap();
     let perf_start = ycsb::capture_runtime_perf_snapshot(engine.as_ref());
 
     // Phase 3: Measured (duration-based; multi-client)
-    let client_suffix = if clients == 1 { "client" } else { "clients" };
-    let measurement_name = format!("tier4_ycsb_a_{profile}_{clients}_{client_suffix}");
-    let measured = stress_config::measure_external_counted(ctx, measurement_name, || {
-        let measured = {
-            let zipf = match distribution {
-                KeyDistribution::Zipf { theta } => {
-                    Some(Arc::new(ZipfianGenerator::new(initial_keys, theta)))
-                }
-            };
-            let write_opts = measured_write_opts;
-            ycsb::run_multi_client_for_duration_with_stats(
-                &engine,
-                clients,
-                MEASURED,
-                |client_id, stop| {
-                    let zipf = zipf.clone();
-                    move |e, cf, op_index| {
-                        let op_r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
-                        let cf_id = cf.id();
-
-                        let key_idx = match &zipf {
-                            Some(zipf) => {
-                                // Reserve draw=0 for op selection; use draw>=1 for key selection.
-                                let mut draw: u64 = 1;
-                                zipf.next_from_u64(&mut || {
-                                    let r = ycsb::deterministic_u64(
-                                        WORKLOAD_SEED,
-                                        client_id,
-                                        op_index,
-                                        draw,
-                                    );
-                                    draw = draw.wrapping_add(1);
-                                    r
-                                }) as u64
-                            }
-                            None => 0,
-                        };
-                        let k = ycsb::make_key(key_idx);
-
-                        // Deterministic, stochastic 50/50 mix (avoids perfect alternation).
-                        if (op_r & 1) == 0 {
-                            let tx = e
-                                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                                .expect("measured begin");
-                            let _ = tx.get(&k[..]).expect("measured get");
-                        } else {
-                            let v = ycsb::make_value((op_index % 251) as u8);
-                            ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
-                                let mut tx = e
-                                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                                    .expect("measured begin");
-                                tx.put(k.to_vec(), v.clone(), None).expect("measured put");
-                                tx.commit(write_opts)
-                            })
-                            .expect("measured commit");
-                        }
-                    }
-                },
-            )
-        };
-        let operations = measured.operations;
-        (measured, operations)
-    });
+    let measured = run_workload_a_measured(
+        ctx,
+        &engine,
+        clients,
+        initial_keys,
+        profile,
+        distribution,
+        measured_write_opts,
+    );
 
     ctx.set_elements(measured.operations);
     ctx.set_bytes(measured.operations * ycsb::logical_entry_size_bytes() as u64);

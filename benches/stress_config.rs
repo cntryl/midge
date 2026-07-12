@@ -5,7 +5,7 @@
 //! fixed-operation `measure` or `measure_batch`, and Tiers 3+ use
 //! fixed-duration `measure_batch` or externally timed `record_external`.
 
-#![allow(dead_code, unused_imports)]
+#![allow(dead_code)]
 
 use cntryl_stress::StressContext;
 use std::time::Instant;
@@ -19,10 +19,28 @@ pub mod ycsb;
 #[path = "bench_support/zipfian.rs"]
 pub mod zipfian;
 
-pub use config::{
-    measured_write_options, memory_opts, opts_for_mode, write_coordination_opts_for_mode,
-    MidgeOptions, StorageMode,
-};
+pub type MidgeOptions = config::MidgeOptions;
+pub type StorageMode = config::StorageMode;
+
+#[must_use]
+pub fn measured_write_options(opts: &MidgeOptions) -> cntryl_midge::WriteOptions {
+    config::measured_write_options(opts)
+}
+
+#[must_use]
+pub fn memory_opts() -> MidgeOptions {
+    config::memory_opts()
+}
+
+#[must_use]
+pub fn opts_for_mode(mode: &str) -> MidgeOptions {
+    config::opts_for_mode(mode)
+}
+
+#[must_use]
+pub fn write_coordination_opts_for_mode(mode: &str) -> MidgeOptions {
+    config::write_coordination_opts_for_mode(mode)
+}
 
 pub fn init_benchmark_telemetry() -> cntryl_midge::MidgeResult<()> {
     cntryl_midge::init_benchmark_telemetry()

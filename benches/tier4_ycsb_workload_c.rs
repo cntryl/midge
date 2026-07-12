@@ -6,8 +6,7 @@
 mod stress_config;
 
 use cntryl_stress::{stress, stress_main, StressContext};
-#[allow(unused_imports)]
-use stress_config::{BenchConfig, MidgeStressContextExt as _};
+use stress_config::MidgeStressContextExt as _;
 
 use cntryl_midge::{ColumnFamilyId, MidgeEngine};
 use std::sync::Arc;
