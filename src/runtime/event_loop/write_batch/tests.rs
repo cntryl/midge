@@ -102,6 +102,22 @@ fn txn_request(
     }
 }
 
+fn ordered_txn_request(
+    request_id: u64,
+    ops: Vec<TransactionOp>,
+    durability_policy: DurabilityPolicy,
+    start_sequence: u64,
+    conflict_policy: ConflictPolicy,
+) -> ApplyTransactionRequest {
+    ApplyTransactionRequest {
+        request_id,
+        ops,
+        durability_policy: Some(durability_policy),
+        start_sequence: Some(start_sequence),
+        conflict_policy,
+    }
+}
+
 fn txn_msg(
     request_id: u64,
     ops: Vec<TransactionOp>,
@@ -391,6 +407,58 @@ fn should_coalesce_independent_buffered_transactions_into_one_wal_append() -> Mi
 }
 
 #[test]
+fn should_coalesce_independent_strict_transactions_with_one_durable_append() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let first_rx = fixture.register(13);
+    let second_rx = fixture.register(14);
+    let third_rx = fixture.register(15);
+    msg_tx
+        .send(txn_msg(
+            14,
+            vec![insert_only_put_op(0, b"strict-b", b"value-b")],
+            Some(DurabilityPolicy::Strict),
+        ))
+        .expect("queue second strict transaction");
+    msg_tx
+        .send(txn_msg(
+            15,
+            vec![delete_range_op(0, b"strict-range-a", b"strict-range-z")],
+            Some(DurabilityPolicy::Strict),
+        ))
+        .expect("queue third strict transaction");
+
+    // Act
+    let handled = fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        txn_request(
+            13,
+            vec![put_op(0, b"strict-a", b"value-a")],
+            Some(DurabilityPolicy::Strict),
+        ),
+        1024,
+    );
+
+    // Assert
+    assert_eq!(handled, 3);
+    assert_eq!(fixture.event_loop.wal_actor.append_calls(), 1);
+    assert_eq!(fixture.event_loop.wal_actor.sync_calls(), 1);
+    assert_eq!(fixture.event_loop.state.wal.pending_writes, 0);
+    assert_eq!(
+        fixture.event_loop.state.wal.local_durable_seq,
+        fixture.event_loop.state.sequence
+    );
+    assert_eq!(expect_transaction_applied(&first_rx, 13), (3, 1));
+    assert_eq!(expect_transaction_applied(&second_rx, 14), (6, 1));
+    assert_eq!(expect_transaction_applied(&third_rx, 15), (9, 1));
+    assert_memtable_value(&fixture.event_loop, 0, b"strict-a", Some(b"value-a"));
+    assert_memtable_value(&fixture.event_loop, 0, b"strict-b", Some(b"value-b"));
+
+    Ok(())
+}
+
+#[test]
 fn should_coalesce_mixed_transaction_contents_across_column_families() -> MidgeResult<()> {
     // Arrange
     let mut fixture = EventLoopFixture::batched()?;
@@ -474,37 +542,38 @@ fn should_coalesce_mixed_transaction_contents_across_column_families() -> MidgeR
 
 #[test]
 fn should_fall_back_from_coalescing_when_point_range_overlap() -> MidgeResult<()> {
-    // Arrange
-    let mut fixture = EventLoopFixture::batched()?;
-    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
-    let first_rx = fixture.register(30);
-    let fallback_rx = fixture.register(31);
+    for (policy, expected_syncs) in [
+        (DurabilityPolicy::Batched, 0),
+        (DurabilityPolicy::Strict, 2),
+    ] {
+        // Arrange
+        let mut fixture = EventLoopFixture::with_policy(policy)?;
+        let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+        let first_rx = fixture.register(30);
+        let fallback_rx = fixture.register(31);
+        msg_tx
+            .send(txn_msg(
+                31,
+                vec![delete_range_op(0, b"overlap-a", b"overlap-z")],
+                Some(policy),
+            ))
+            .expect("queue overlapping delete range");
 
-    msg_tx
-        .send(txn_msg(
-            31,
-            vec![delete_range_op(0, b"overlap-a", b"overlap-z")],
-            Some(DurabilityPolicy::Batched),
-        ))
-        .expect("queue overlapping delete range");
+        // Act
+        let handled = fixture.event_loop.apply_transaction_with_coalescing(
+            &msg_rx,
+            txn_request(30, vec![put_op(0, b"overlap-m", b"value")], Some(policy)),
+            1024,
+        );
 
-    // Act
-    let handled = fixture.event_loop.apply_transaction_with_coalescing(
-        &msg_rx,
-        txn_request(
-            30,
-            vec![put_op(0, b"overlap-m", b"value")],
-            Some(DurabilityPolicy::Batched),
-        ),
-        1024,
-    );
-
-    // Assert
-    assert_eq!(handled, 2);
-    assert_eq!(fixture.event_loop.wal_actor.append_calls(), 2);
-    assert_eq!(expect_transaction_applied(&first_rx, 30).1, 1);
-    assert_eq!(expect_transaction_applied(&fallback_rx, 31).1, 1);
-    assert_memtable_value(&fixture.event_loop, 0, b"overlap-m", None);
+        // Assert
+        assert_eq!(handled, 2);
+        assert_eq!(fixture.event_loop.wal_actor.append_calls(), 2);
+        assert_eq!(fixture.event_loop.wal_actor.sync_calls(), expected_syncs);
+        assert_eq!(expect_transaction_applied(&first_rx, 30).1, 1);
+        assert_eq!(expect_transaction_applied(&fallback_rx, 31).1, 1);
+        assert_memtable_value(&fixture.event_loop, 0, b"overlap-m", None);
+    }
 
     Ok(())
 }
@@ -642,36 +711,41 @@ fn should_coalesce_across_snapshot_bookkeeping_messages() -> MidgeResult<()> {
 
 #[test]
 fn should_not_drop_non_write_after_coalescing_stashes_pending_message() -> MidgeResult<()> {
-    // Arrange
-    let mut fixture = EventLoopFixture::batched()?;
-    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
-    let (txn_msg, txn_rx) = inline_txn_msg(
-        38,
-        vec![put_op(0, b"coalesce-before-non-write", b"value")],
-        Some(DurabilityPolicy::Batched),
-    );
+    for (policy, expected_syncs) in [
+        (DurabilityPolicy::Batched, 0),
+        (DurabilityPolicy::Strict, 1),
+    ] {
+        // Arrange
+        let mut fixture = EventLoopFixture::with_policy(policy)?;
+        let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+        let (txn_msg, txn_rx) = inline_txn_msg(
+            38,
+            vec![put_op(0, b"coalesce-before-non-write", b"value")],
+            Some(policy),
+        );
+        msg_tx.send(txn_msg).expect("queue transaction");
+        msg_tx
+            .send(RuntimeMsg::Noop { request_id: 39 })
+            .expect("queue first non-write");
+        msg_tx
+            .send(RuntimeMsg::Noop { request_id: 40 })
+            .expect("queue second non-write");
 
-    msg_tx.send(txn_msg).expect("queue transaction");
-    msg_tx
-        .send(RuntimeMsg::Noop { request_id: 39 })
-        .expect("queue first non-write");
-    msg_tx
-        .send(RuntimeMsg::Noop { request_id: 40 })
-        .expect("queue second non-write");
+        // Act
+        let handled = fixture.event_loop.drain_pending_writes(&msg_rx, 1024);
 
-    // Act
-    let handled = fixture.event_loop.drain_pending_writes(&msg_rx, 1024);
-
-    // Assert
-    assert_eq!(handled, 1);
-    assert_eq!(expect_transaction_applied(&txn_rx, 38).1, 1);
-    match fixture.event_loop.pending_msg.take() {
-        Some(RuntimeMsg::Noop { request_id }) => assert_eq!(request_id, 39),
-        other => panic!("expected first non-write to be stashed, got {other:?}"),
-    }
-    match msg_rx.try_recv() {
-        Ok(RuntimeMsg::Noop { request_id }) => assert_eq!(request_id, 40),
-        other => panic!("expected second non-write to remain queued, got {other:?}"),
+        // Assert
+        assert_eq!(handled, 1);
+        assert_eq!(expect_transaction_applied(&txn_rx, 38).1, 1);
+        assert_eq!(fixture.event_loop.wal_actor.sync_calls(), expected_syncs);
+        match fixture.event_loop.pending_msg.take() {
+            Some(RuntimeMsg::Noop { request_id }) => assert_eq!(request_id, 39),
+            other => panic!("expected first non-write to be stashed, got {other:?}"),
+        }
+        match msg_rx.try_recv() {
+            Ok(RuntimeMsg::Noop { request_id }) => assert_eq!(request_id, 40),
+            other => panic!("expected second non-write to remain queued, got {other:?}"),
+        }
     }
 
     Ok(())
@@ -719,9 +793,9 @@ fn should_error_insert_only_fallback_after_first_transaction_publishes() -> Midg
 }
 
 #[test]
-fn should_not_enter_coalesced_path_for_non_buffered_durability() -> MidgeResult<()> {
+fn should_not_enter_coalesced_path_for_non_local_strict_or_buffered_durability() -> MidgeResult<()>
+{
     for (policy_name, durability_policy, expected_append_calls) in [
-        ("strict", DurabilityPolicy::Strict, 1),
         ("best_effort", DurabilityPolicy::BestEffort, 0),
         ("cloud_effective", DurabilityPolicy::CloudAsync, 1),
     ] {
@@ -762,6 +836,118 @@ fn should_not_enter_coalesced_path_for_non_buffered_durability() -> MidgeResult<
         assert_eq!(expect_transaction_applied(&first_rx, 50).1, 1);
         assert_no_response(&queued_rx);
     }
+
+    Ok(())
+}
+
+#[test]
+fn should_order_mixed_policy_transactions_on_fallback() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = EventLoopFixture::batched()?;
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let strict_rx = fixture.register(52);
+    let buffered_rx = fixture.register(53);
+    msg_tx
+        .send(txn_msg(
+            53,
+            vec![put_op(0, b"mixed-buffered", b"buffered")],
+            Some(DurabilityPolicy::Batched),
+        ))
+        .expect("queue buffered fallback");
+
+    // Act
+    let handled = fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        txn_request(
+            52,
+            vec![put_op(0, b"mixed-strict", b"strict")],
+            Some(DurabilityPolicy::Strict),
+        ),
+        1024,
+    );
+
+    // Assert
+    assert_eq!(handled, 2);
+    assert_eq!(fixture.event_loop.wal_actor.append_calls(), 2);
+    assert_eq!(fixture.event_loop.wal_actor.sync_calls(), 1);
+    assert_eq!(expect_transaction_applied(&strict_rx, 52), (3, 1));
+    assert_eq!(expect_transaction_applied(&buffered_rx, 53), (6, 1));
+    assert_memtable_value(&fixture.event_loop, 0, b"mixed-strict", Some(b"strict"));
+    assert_memtable_value(&fixture.event_loop, 0, b"mixed-buffered", Some(b"buffered"));
+
+    Ok(())
+}
+
+#[test]
+fn should_fall_back_when_strict_transactions_have_different_ordering_contracts() -> MidgeResult<()>
+{
+    // Arrange
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let first_rx = fixture.register(54);
+    let second_rx = fixture.register(55);
+    msg_tx
+        .send(RuntimeMsg::ApplyTransaction {
+            request_id: 55,
+            ops: vec![put_op(0, b"ordered-b", b"value-b")],
+            durability_policy: Some(DurabilityPolicy::Strict),
+            start_sequence: Some(0),
+            conflict_policy: ConflictPolicy::AbortOnWriteConflict,
+            response_tx: None,
+        })
+        .expect("queue differently ordered strict transaction");
+
+    // Act
+    let handled = fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        ordered_txn_request(
+            54,
+            vec![put_op(0, b"ordered-a", b"value-a")],
+            DurabilityPolicy::Strict,
+            0,
+            ConflictPolicy::LastWriteWins,
+        ),
+        1024,
+    );
+
+    // Assert
+    assert_eq!(handled, 2);
+    assert_eq!(fixture.event_loop.wal_actor.append_calls(), 2);
+    assert_eq!(fixture.event_loop.wal_actor.sync_calls(), 2);
+    assert_eq!(expect_transaction_applied(&first_rx, 54), (3, 1));
+    assert_eq!(expect_transaction_applied(&second_rx, 55), (6, 1));
+
+    Ok(())
+}
+
+#[test]
+fn should_exclude_empty_strict_request_without_draining_following_commit() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let empty_rx = fixture.register(56);
+    let queued_rx = fixture.register(57);
+    msg_tx
+        .send(txn_msg(
+            57,
+            vec![put_op(0, b"after-empty", b"value")],
+            Some(DurabilityPolicy::Strict),
+        ))
+        .expect("queue strict transaction after empty request");
+
+    // Act
+    let handled = fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        txn_request(56, Vec::new(), Some(DurabilityPolicy::Strict)),
+        1024,
+    );
+
+    // Assert
+    assert_eq!(handled, 1);
+    assert_eq!(expect_transaction_applied(&empty_rx, 56), (0, 0));
+    assert_no_response(&queued_rx);
+    assert_eq!(fixture.event_loop.wal_actor.append_calls(), 0);
+    assert_eq!(fixture.event_loop.wal_actor.sync_calls(), 0);
 
     Ok(())
 }
@@ -846,6 +1032,120 @@ fn should_fail_all_event_loop_buffered_transactions_when_append_hits_no_space() 
     assert_eq!(fixture.event_loop.wal_actor.append_calls(), 1);
     assert_memtable_value(&fixture.event_loop, 0, b"recovered", Some(b"value"));
 
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_fail_all_event_loop_strict_transactions_when_shared_append_fails() -> MidgeResult<()> {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let first_rx = fixture.register(63);
+    let second_rx = fixture.register(64);
+    msg_tx
+        .send(txn_msg(
+            64,
+            vec![put_op(0, b"strict-append-failed-b", b"value-b")],
+            Some(DurabilityPolicy::Strict),
+        ))
+        .expect("queue second strict transaction");
+
+    {
+        let scenario = fail::FailScenario::setup();
+        let failpoint_guard = TxnAppendBatchNoSpaceFailpointGuard::setup(63);
+
+        // Act
+        let handled = fixture.event_loop.apply_transaction_with_coalescing(
+            &msg_rx,
+            txn_request(
+                63,
+                vec![put_op(0, b"strict-append-failed-a", b"value-a")],
+                Some(DurabilityPolicy::Strict),
+            ),
+            1024,
+        );
+
+        // Assert
+        assert_eq!(handled, 2);
+        expect_error(&first_rx, 63, |error| {
+            matches!(error, MidgeError::NoSpace(_))
+        });
+        expect_error(&second_rx, 64, |error| {
+            matches!(error, MidgeError::NoSpace(_))
+        });
+        assert_eq!(fixture.event_loop.wal_actor.append_calls(), 0);
+        assert_eq!(fixture.event_loop.wal_actor.sync_calls(), 0);
+        assert!(fixture
+            .event_loop
+            .state
+            .get_cf(0)
+            .expect("default column family")
+            .memtable
+            .iter_all(u64::MAX)
+            .is_empty());
+
+        drop(failpoint_guard);
+        scenario.teardown();
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> MidgeResult<()> {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let first_rx = fixture.register(65);
+    let second_rx = fixture.register(66);
+    msg_tx
+        .send(txn_msg(
+            66,
+            vec![put_op(0, b"strict-sync-failed-b", b"value-b")],
+            Some(DurabilityPolicy::Strict),
+        ))
+        .expect("queue second strict transaction");
+    fail::cfg("midge::wal::inject_no_space_on_sync", "return").expect("configure WAL sync failure");
+
+    // Act
+    let handled = fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        txn_request(
+            65,
+            vec![put_op(0, b"strict-sync-failed-a", b"value-a")],
+            Some(DurabilityPolicy::Strict),
+        ),
+        1024,
+    );
+
+    // Assert
+    assert_eq!(handled, 2);
+    expect_error(&first_rx, 65, |error| {
+        matches!(error, MidgeError::NoSpace(_))
+    });
+    expect_error(&second_rx, 66, |error| {
+        matches!(error, MidgeError::NoSpace(_))
+    });
+    assert_eq!(fixture.event_loop.wal_actor.append_calls(), 1);
+    assert_eq!(fixture.event_loop.wal_actor.sync_calls(), 0);
+    assert!(fixture
+        .event_loop
+        .state
+        .get_cf(0)
+        .expect("default column family")
+        .memtable
+        .iter_all(u64::MAX)
+        .is_empty());
+
+    fail::remove("midge::wal::inject_no_space_on_sync");
+    scenario.teardown();
+    drop(test_guard);
     Ok(())
 }
 
@@ -949,6 +1249,82 @@ fn should_detect_overlapping_point_range_touches_when_staging_transactions() {
         start_key: Bytes::from_static(b"range-z"),
         end_key: Bytes::from_static(b"zz"),
     }]));
+}
+
+#[test]
+fn should_keep_strict_group_commit_window_inside_screened_candidates() {
+    // Arrange
+    // Act
+    let selected = LOCAL_STRICT_GROUP_COMMIT_CANDIDATE_WINDOWS_US
+        [LOCAL_STRICT_GROUP_COMMIT_SELECTED_WINDOW_INDEX];
+
+    // Assert
+    assert_eq!(
+        LOCAL_STRICT_GROUP_COMMIT_CANDIDATE_WINDOWS_US,
+        [0, 10, 25, 50, 100]
+    );
+    assert_eq!(selected, 100);
+    assert_eq!(
+        LOCAL_STRICT_GROUP_COMMIT_WINDOW,
+        Duration::from_micros(selected)
+    );
+    assert_eq!(local_strict_group_commit_collect_window(true), None);
+    assert_eq!(
+        local_strict_group_commit_collect_window(false),
+        Some(Duration::from_micros(selected))
+    );
+}
+
+#[test]
+fn should_stop_strict_group_at_existing_batch_cap() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let first_rx = fixture.register(910);
+    let second_rx = fixture.register(911);
+    let third_rx = fixture.register(912);
+    msg_tx
+        .send(txn_msg(
+            911,
+            vec![put_op(0, b"cap-b", b"value-b")],
+            Some(DurabilityPolicy::Strict),
+        ))
+        .expect("queue second strict transaction");
+    msg_tx
+        .send(txn_msg(
+            912,
+            vec![put_op(0, b"cap-c", b"value-c")],
+            Some(DurabilityPolicy::Strict),
+        ))
+        .expect("queue strict transaction beyond cap");
+
+    // Act
+    let handled = fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        txn_request(
+            910,
+            vec![put_op(0, b"cap-a", b"value-a")],
+            Some(DurabilityPolicy::Strict),
+        ),
+        2,
+    );
+
+    // Assert
+    assert_eq!(handled, 2);
+    assert_eq!(fixture.event_loop.wal_actor.append_calls(), 1);
+    assert_eq!(fixture.event_loop.wal_actor.sync_calls(), 1);
+    assert_eq!(expect_transaction_applied(&first_rx, 910), (3, 1));
+    assert_eq!(expect_transaction_applied(&second_rx, 911), (6, 1));
+    assert_no_response(&third_rx);
+    assert!(matches!(
+        msg_rx.try_recv(),
+        Ok(RuntimeMsg::ApplyTransaction {
+            request_id: 912,
+            ..
+        })
+    ));
+
+    Ok(())
 }
 
 #[test]

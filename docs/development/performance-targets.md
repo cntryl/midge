@@ -87,6 +87,14 @@ Hybrid:
   guard against memory mode and end-to-end local batch throughput.
 - `tier2_subsystem_transaction_latency` owns public transaction lifecycle
   latency, commit percentile reporting, and buffered coalescing.
+- `tier2_subsystem_durability_commit_latency` owns 1-, 16-, and 64-writer local
+  strict throughput, commit p50/p99, WAL append/fsync counts, and commits per
+  physical fsync.
+- `tier4_system_strict_group_commit` owns fixed-work complete-system strict
+  throughput through flush, compaction, clean shutdown, reopen digest
+  verification, and final SST footprint. The current window selection and
+  promotion evidence are recorded in
+  `local-strict-group-commit-promotion-2026-07-24.md`.
 - `tier4_system_compaction_backpressure` owns sustained local throughput and
   stall signals while compaction is active.
 - `tier4_system_recovery_throughput` owns recovery throughput after flush and
@@ -100,6 +108,8 @@ Run focused checks before broad suites:
 
 ```bash
 cargo bench --bench tier2_subsystem_transaction_latency -- --quiet
+cargo bench --bench tier2_subsystem_durability_commit_latency -- --quiet
+cargo bench --bench tier4_system_strict_group_commit -- --quiet
 cargo bench --bench tier4_system_local_throughput_regression -- --quiet
 BENCH_RUNS=3 cargo bench --bench tier4_system_compaction_backpressure -- --quiet
 BENCH_RUNS=3 cargo bench --bench tier4_system_recovery_throughput -- --quiet

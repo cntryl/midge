@@ -1,5 +1,5 @@
 use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Barrier, Mutex, OnceLock};
 use std::time::Duration;
 
 static SYNC_COUNT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -38,6 +38,13 @@ fn wal_fsync_count(engine: &Engine) -> u64 {
         .get_runtime_metrics()
         .expect("read runtime metrics")
         .wal_fsync_count
+}
+
+fn wal_append_count(engine: &Engine) -> u64 {
+    engine
+        .get_runtime_metrics()
+        .expect("read runtime metrics")
+        .wal_append_count
 }
 
 #[test]
@@ -165,4 +172,93 @@ fn should_not_issue_physical_wal_sync_before_buffered_commit_returns() {
     engine
         .shutdown(Duration::from_secs(2))
         .expect("shutdown buffered engine");
+}
+
+#[test]
+fn should_share_physical_wal_sync_across_concurrent_strict_transactions() {
+    // Arrange
+    const WRITERS: usize = 16;
+    let _guard = sync_count_test_guard();
+    let (temp_dir, engine, cf) = open_engine();
+    let engine = Arc::new(engine);
+    let before_fsyncs = wal_fsync_count(&engine);
+    let before_appends = wal_append_count(&engine);
+    let barrier = Arc::new(Barrier::new(WRITERS + 1));
+    let mut handles = Vec::with_capacity(WRITERS);
+    for writer in 0..WRITERS {
+        let engine = Arc::clone(&engine);
+        let barrier = Arc::clone(&barrier);
+        let cf_id = cf.id();
+        handles.push(std::thread::spawn(move || {
+            let mut tx = engine
+                .begin_tx(cf_id, TransactionMode::ReadWrite)
+                .expect("begin concurrent strict transaction");
+            tx.put(
+                format!("strict-group-{writer:02}").into_bytes(),
+                format!("value-{writer:02}").into_bytes(),
+                None,
+            )
+            .expect("stage concurrent strict value");
+            barrier.wait();
+            tx.commit(WriteOptions::sync())
+                .expect("commit concurrent strict transaction");
+        }));
+    }
+
+    // Act
+    barrier.wait();
+    for handle in handles {
+        handle.join().expect("join concurrent strict writer");
+    }
+    let after_fsyncs = wal_fsync_count(&engine);
+    let after_appends = wal_append_count(&engine);
+
+    // Assert
+    let physical_fsyncs = after_fsyncs.saturating_sub(before_fsyncs);
+    let wal_appends = after_appends.saturating_sub(before_appends);
+    assert!(
+        physical_fsyncs < u64::try_from(WRITERS).expect("writer count fits in u64"),
+        "concurrent strict commits must share at least one physical fsync"
+    );
+    assert_eq!(
+        wal_appends, physical_fsyncs,
+        "each strict group should use one WAL append and one physical fsync"
+    );
+    for writer in 0..WRITERS {
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin verification transaction");
+        assert_eq!(
+            tx.get(format!("strict-group-{writer:02}").as_bytes())
+                .expect("read concurrent strict value")
+                .as_deref(),
+            Some(format!("value-{writer:02}").as_bytes())
+        );
+    }
+
+    let mut engine =
+        Arc::try_unwrap(engine).unwrap_or_else(|_| panic!("all writer handles must be released"));
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown grouped strict engine");
+    let reopened = Engine::open(
+        OpenOptions::local(temp_dir.path())
+            .build()
+            .expect("build reopen options"),
+    )
+    .expect("reopen grouped strict engine");
+    let reopened_cf = reopened
+        .get_column_family("default")
+        .expect("reopened default column family");
+    for writer in 0..WRITERS {
+        let tx = reopened
+            .begin_tx(reopened_cf.id(), TransactionMode::ReadOnly)
+            .expect("begin reopened verification transaction");
+        assert_eq!(
+            tx.get(format!("strict-group-{writer:02}").as_bytes())
+                .expect("read recovered strict value")
+                .as_deref(),
+            Some(format!("value-{writer:02}").as_bytes())
+        );
+    }
 }

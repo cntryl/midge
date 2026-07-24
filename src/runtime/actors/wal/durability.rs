@@ -15,10 +15,7 @@ impl WalActor {
     ) -> MidgeResult<()> {
         match effective_durability {
             DurabilityPolicy::Strict | DurabilityPolicy::CloudMirrored => {
-                crate::failpoints::fail_point!("midge::wal::txn_after_commit_append_before_sync");
-                self.sync_internal(state)?;
-                state.wal.local_durable_seq = last_sequence;
-                crate::failpoints::fail_point!("midge::wal::txn_after_sync_before_ack");
+                self.apply_strict_transaction_group_durability(state, last_sequence)?;
             }
             DurabilityPolicy::Batched => {
                 state.pending_txn_min_seq = Some(
@@ -35,6 +32,18 @@ impl WalActor {
             }
             DurabilityPolicy::CloudAsync | DurabilityPolicy::BestEffort => {}
         }
+        Ok(())
+    }
+
+    pub(super) fn apply_strict_transaction_group_durability(
+        &mut self,
+        state: &mut RuntimeState,
+        last_sequence: u64,
+    ) -> MidgeResult<()> {
+        crate::failpoints::fail_point!("midge::wal::txn_after_commit_append_before_sync");
+        self.sync_internal(state)?;
+        state.wal.local_durable_seq = last_sequence;
+        crate::failpoints::fail_point!("midge::wal::txn_after_sync_before_ack");
         Ok(())
     }
 

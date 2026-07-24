@@ -43,6 +43,32 @@ impl Drop for TxnAppendBatchNoSpaceFailpointGuard {
     }
 }
 
+fn prepare_put_transaction(
+    wal_actor: &mut WalActor,
+    state: &mut RuntimeState,
+    request_id: u64,
+    key: &'static [u8],
+    value: &'static [u8],
+    durability_policy: DurabilityPolicy,
+) -> MidgeResult<PreparedTransactionAppend> {
+    wal_actor.prepare_transaction_append(
+        state,
+        TransactionAppendParams {
+            request_id,
+            ops: vec![crate::runtime::TransactionOp::Put {
+                cf_id: 0,
+                key: Bytes::from_static(key),
+                value: Bytes::from_static(value),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            durability_policy: Some(durability_policy),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    )
+}
+
 struct RenameFailingFs {
     inner: MockFs,
 }
@@ -290,6 +316,118 @@ fn should_append_multiple_prepared_transactions_with_one_physical_call() -> Midg
     Ok(())
 }
 
+#[test]
+fn should_durably_append_strict_transaction_group_once_before_memtable_apply() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let db_path = temp.path().to_path_buf();
+    let mut state = RuntimeState::new(db_path.clone(), false);
+    let mut wal_actor = WalActor::new(
+        db_path.join("wal"),
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let first = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        12,
+        b"strict-a",
+        b"value-a",
+        DurabilityPolicy::Strict,
+    )?;
+    let second = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        13,
+        b"strict-b",
+        b"value-b",
+        DurabilityPolicy::Strict,
+    )?;
+
+    // Act
+    let results = wal_actor.append_prepared_transactions(&mut state, vec![first, second])?;
+
+    // Assert
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.request_id)
+            .collect::<Vec<_>>(),
+        vec![12, 13]
+    );
+    assert_eq!(wal_actor.append_calls(), 1);
+    assert_eq!(wal_actor.sync_calls(), 1);
+    assert_eq!(state.wal.pending_writes, 0);
+    assert_eq!(state.wal.local_durable_seq, state.sequence);
+    let entries = state
+        .get_cf(0)
+        .expect("default column family")
+        .memtable
+        .iter_all(u64::MAX);
+    assert_eq!(entries.len(), 2);
+
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_apply_no_strict_group_member_when_shared_sync_fails() -> MidgeResult<()> {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let db_path = temp.path().to_path_buf();
+    let mut state = RuntimeState::new(db_path.clone(), false);
+    let mut wal_actor = WalActor::new(
+        db_path.join("wal"),
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let first = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        14,
+        b"sync-failed-a",
+        b"value-a",
+        DurabilityPolicy::Strict,
+    )?;
+    let second = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        15,
+        b"sync-failed-b",
+        b"value-b",
+        DurabilityPolicy::Strict,
+    )?;
+    fail::cfg("midge::wal::inject_no_space_on_sync", "return").expect("configure WAL sync failure");
+
+    // Act
+    let result = wal_actor.append_prepared_transactions(&mut state, vec![first, second]);
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::NoSpace(_))));
+    assert_eq!(wal_actor.append_calls(), 1);
+    assert_eq!(wal_actor.sync_calls(), 0);
+    assert!(state
+        .get_cf(0)
+        .expect("default column family")
+        .memtable
+        .iter_all(u64::MAX)
+        .is_empty());
+
+    fail::remove("midge::wal::inject_no_space_on_sync");
+    scenario.teardown();
+    drop(test_guard);
+    Ok(())
+}
+
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> MidgeResult<()> {
@@ -426,7 +564,7 @@ fn should_not_report_sync_deadline_without_pending_data() -> MidgeResult<()> {
 }
 
 #[test]
-fn should_only_coalesce_local_batched_transaction_appends() -> MidgeResult<()> {
+fn should_only_coalesce_supported_local_transaction_appends() -> MidgeResult<()> {
     // Arrange
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
     let batched_actor = WalActor::new(
@@ -465,12 +603,17 @@ fn should_only_coalesce_local_batched_transaction_appends() -> MidgeResult<()> {
     // Act
     // Assert
     assert!(batched_actor.can_coalesce_transaction_append(Some(DurabilityPolicy::Batched)));
-    assert!(!batched_actor.can_coalesce_transaction_append(Some(DurabilityPolicy::Strict)));
+    assert!(batched_actor.can_coalesce_transaction_append(Some(DurabilityPolicy::Strict)));
     assert!(!batched_actor.can_coalesce_transaction_append(Some(DurabilityPolicy::BestEffort)));
     assert!(!batched_actor.can_coalesce_transaction_append(Some(DurabilityPolicy::CloudAsync)));
-    assert!(!strict_actor.can_coalesce_transaction_append(None));
+    assert!(strict_actor.can_coalesce_transaction_append(None));
+    assert_eq!(
+        strict_actor.coalesced_transaction_durability(None),
+        Some(DurabilityPolicy::Strict)
+    );
     assert!(!cloud_actor.can_coalesce_transaction_append(Some(DurabilityPolicy::Batched)));
     assert!(!memory_actor.can_coalesce_transaction_append(Some(DurabilityPolicy::Batched)));
+    assert!(!memory_actor.can_coalesce_transaction_append(Some(DurabilityPolicy::Strict)));
 
     Ok(())
 }

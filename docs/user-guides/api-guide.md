@@ -239,7 +239,9 @@ For comprehensive durability guarantees, recovery behavior, and crash scenarios,
 
 ### sync()
 
-Blocks until fsync completes. Write is durable when call returns.
+Blocks until an fsync covering the transaction completes. The transaction is
+durable when the call returns; independent concurrent sync commits may share
+that physical fsync without sharing a WAL transaction frame.
 
 ```rust
 tx.commit(WriteOptions::sync())?;

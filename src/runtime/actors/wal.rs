@@ -304,10 +304,21 @@ impl WalActor {
         &self,
         durability_policy: Option<DurabilityPolicy>,
     ) -> bool {
+        self.coalesced_transaction_durability(durability_policy)
+            .is_some()
+    }
+
+    pub(crate) fn coalesced_transaction_durability(
+        &self,
+        durability_policy: Option<DurabilityPolicy>,
+    ) -> Option<DurabilityPolicy> {
         let effective_durability = durability_policy.unwrap_or(self.durability_policy);
-        matches!(effective_durability, DurabilityPolicy::Batched)
-            && !self.is_cloud_async()
-            && self.writer.is_some()
+        (matches!(
+            effective_durability,
+            DurabilityPolicy::Strict | DurabilityPolicy::Batched
+        ) && !self.is_cloud_async()
+            && self.writer.is_some())
+        .then_some(effective_durability)
     }
 
     pub fn has_pending_cloud_writes(&self) -> bool {

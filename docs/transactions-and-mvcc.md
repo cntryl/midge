@@ -70,7 +70,7 @@ All ops in a commit become visible atomically. There is no partial visibility.
 
 | `WriteOptions` | WAL behavior |
 |---|---|
-| `sync()` | WAL append plus local fsync before returning. |
+| `sync()` | Independent `TxnBatch` WAL frame plus a covering local fsync before returning. Concurrent non-overlapping strict commits may share the physical fsync. |
 | `buffered()` | WAL write, no fsync. Crash between write and fsync loses data. |
 | `best_effort()` | WAL skipped entirely. Data lives only in the memtable until flush. |
 | `cloud_strict()` | Uses the cloud durability path and waits for the cloud durability frontier before returning. Empty write-set commits validate cloud-mode compatibility but do not seal or wait for a new cloud sequence. |

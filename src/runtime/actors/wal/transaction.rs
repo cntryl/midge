@@ -144,6 +144,15 @@ impl WalActor {
         }
 
         self.append_prepared_transaction_batches(state, &prepared_transactions)?;
+        let strict_group = prepared_transactions
+            .iter()
+            .all(|prepared| matches!(prepared.effective_durability, DurabilityPolicy::Strict));
+        if strict_group {
+            let last_sequence = prepared_transactions
+                .last()
+                .map_or(state.sequence, |prepared| prepared.sequence_plan.commit_seq);
+            self.apply_strict_transaction_group_durability(state, last_sequence)?;
+        }
 
         let mut results = Vec::with_capacity(prepared_transactions.len());
         for prepared in prepared_transactions {
@@ -157,12 +166,14 @@ impl WalActor {
             let last_sequence = sequence_plan.commit_seq;
             let apply_op_count = apply_ops.len();
 
-            self.apply_transaction_durability(
-                state,
-                effective_durability,
-                last_sequence,
-                sequence_plan.begin_seq,
-            )?;
+            if !strict_group {
+                self.apply_transaction_durability(
+                    state,
+                    effective_durability,
+                    last_sequence,
+                    sequence_plan.begin_seq,
+                )?;
+            }
             #[cfg(test)]
             self.apply_transaction_ops(
                 state,

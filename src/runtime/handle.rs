@@ -91,8 +91,9 @@ impl RuntimeHandle {
     }
 
     pub(crate) fn unregister_snapshot_pin(&self, snapshot_id: u64) -> bool {
-        let removed = self.snapshot_pins.unregister(snapshot_id);
-        if removed {
+        let (removed, released_last_sst_pin) =
+            self.snapshot_pins.unregister_with_gc_hint(snapshot_id);
+        if released_last_sst_pin {
             // Snapshot release must never block transaction drop, especially
             // after shutdown has entered Closing. Maintenance can retry GC on
             // its normal cadence if this bounded queue is currently full.

@@ -135,7 +135,10 @@ A write can cross several boundaries:
 
 `sync()` is valid only for local or in-memory storage. Cloud-backed storage rejects it with `MidgeError::InvalidArgument`.
 
-`commit()` returns only after local WAL append and fsync complete.
+`commit()` returns only after the transaction's independent WAL frame has been
+appended and a local fsync covering that frame has completed. Independent
+concurrent `sync()` transactions may share one physical fsync; every caller is
+acknowledged only after that shared durability barrier succeeds.
 
 At return:
 

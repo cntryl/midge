@@ -58,13 +58,27 @@ impl SnapshotPinRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn unregister(&self, snapshot_id: u64) -> bool {
+        self.unregister_with_gc_hint(snapshot_id).0
+    }
+
+    pub(crate) fn unregister_with_gc_hint(&self, snapshot_id: u64) -> (bool, bool) {
         // A transaction drops this pin only after it has stopped using the
         // captured snapshot. Sharing the acquisition guard keeps normal read
         // transactions concurrent while a GC pass obtains the exclusive guard
         // before sampling pins and deleting obsolete files.
         let _guard = self.acquisition.read();
-        self.active.remove(&snapshot_id).is_some()
+        self.active
+            .remove(&snapshot_id)
+            .map_or((false, false), |(_, pin)| {
+                let released_last_pin = pin.pinned_ssts.iter().any(|sst_name| {
+                    self.active
+                        .iter()
+                        .all(|active| !active.pinned_ssts.contains(sst_name))
+                });
+                (true, released_last_pin)
+            })
     }
 
     pub(crate) fn begin_acquisition(&self) -> SnapshotAcquisitionGuard<'_> {
@@ -202,6 +216,25 @@ mod tests {
         assert!(removed);
         assert_eq!(registry.active_count(), 0);
         assert!(registry.pinned_sst_names(Duration::from_mins(1)).is_empty());
+    }
+
+    #[test]
+    fn should_only_request_gc_retry_when_released_snapshot_removes_last_sst_pin() {
+        // Arrange
+        let registry = SnapshotPinRegistry::default();
+        assert!(registry.register(7, 42, Vec::new()));
+        assert!(registry.register(8, 42, vec!["a.sst".to_string()]));
+        assert!(registry.register(9, 43, vec!["a.sst".to_string()]));
+
+        // Act
+        let empty_release = registry.unregister_with_gc_hint(7);
+        let shared_sst_release = registry.unregister_with_gc_hint(8);
+        let last_sst_release = registry.unregister_with_gc_hint(9);
+
+        // Assert
+        assert_eq!(empty_release, (true, false));
+        assert_eq!(shared_sst_release, (true, false));
+        assert_eq!(last_sst_release, (true, true));
     }
 
     #[test]

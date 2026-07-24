@@ -4,7 +4,7 @@
 //! and `wake_write_stall_waiters` (backpressure release).
 
 use super::super::durability::DurabilityWaiter;
-use super::super::{RuntimeMsg, RuntimeResponse, TransactionOp};
+use super::super::{ConflictPolicy, RuntimeMsg, RuntimeResponse, TransactionOp};
 #[cfg(test)]
 use super::snapshot::SnapshotCoordinator;
 use super::wal::ApplyTransactionRequest;
@@ -18,6 +18,15 @@ const EXPLICIT_TRANSACTION_COALESCE_TARGET: usize = 8;
 const EXPLICIT_TRANSACTION_COALESCE_COLD_WINDOW: Duration = Duration::from_micros(25);
 const EXPLICIT_TRANSACTION_COALESCE_BUSY_WINDOW: Duration = Duration::from_micros(100);
 const EXPLICIT_TRANSACTION_COALESCE_IDLE_WAIT: Duration = Duration::from_micros(5);
+const LOCAL_STRICT_GROUP_COMMIT_CANDIDATE_WINDOWS_US: [u64; 5] = [0, 10, 25, 50, 100];
+const LOCAL_STRICT_GROUP_COMMIT_SELECTED_WINDOW_INDEX: usize = 4;
+const LOCAL_STRICT_GROUP_COMMIT_WINDOW: Duration = Duration::from_micros(
+    LOCAL_STRICT_GROUP_COMMIT_CANDIDATE_WINDOWS_US[LOCAL_STRICT_GROUP_COMMIT_SELECTED_WINDOW_INDEX],
+);
+
+fn local_strict_group_commit_collect_window(queue_is_empty: bool) -> Option<Duration> {
+    (!queue_is_empty).then_some(LOCAL_STRICT_GROUP_COMMIT_WINDOW)
+}
 
 enum WriteResult {
     #[cfg(test)]
@@ -245,18 +254,18 @@ impl EventLoop {
             return 0;
         }
 
-        if !self
-            .wal_actor
-            .can_coalesce_transaction_append(initial.durability_policy)
-        {
+        let Some(coalescing_key) = self.transaction_coalescing_key(&initial) else {
             self.apply_single_transaction_request(initial);
             return 1;
-        }
+        };
 
-        let initial_is_explicit = initial.start_sequence.is_some();
-        let mut batch = CoalescedTransactionBatch::default();
+        let mut batch = CoalescedTransactionBatch::new(coalescing_key);
 
-        match self.prepare_transaction_for_coalescing(initial, &mut batch.staged_touches) {
+        match self.prepare_transaction_for_coalescing(
+            initial,
+            batch.coalescing_key,
+            &mut batch.staged_touches,
+        ) {
             PrepareOutcome::Prepared {
                 request_id,
                 prepared_transaction,
@@ -274,15 +283,40 @@ impl EventLoop {
             }
         }
 
-        let explicit_collect_window = initial_is_explicit.then(|| {
-            if msg_rx.is_empty() {
-                EXPLICIT_TRANSACTION_COALESCE_COLD_WINDOW
-            } else {
-                EXPLICIT_TRANSACTION_COALESCE_BUSY_WINDOW
+        let collect_window = match coalescing_key.durability_policy {
+            crate::wal::DurabilityPolicy::Strict => {
+                local_strict_group_commit_collect_window(msg_rx.is_empty())
             }
-        });
-        self.collect_coalesced_transaction_batch(msg_rx, max, &mut batch, explicit_collect_window);
+            crate::wal::DurabilityPolicy::Batched if coalescing_key.has_start_sequence => {
+                Some(if msg_rx.is_empty() {
+                    EXPLICIT_TRANSACTION_COALESCE_COLD_WINDOW
+                } else {
+                    EXPLICIT_TRANSACTION_COALESCE_BUSY_WINDOW
+                })
+            }
+            _ => None,
+        };
+        if matches!(
+            coalescing_key.durability_policy,
+            crate::wal::DurabilityPolicy::Strict
+        ) {
+            crate::failpoints::fail_point!("midge::runtime::strict_group_before_collect");
+        }
+        self.collect_coalesced_transaction_batch(msg_rx, max, &mut batch, collect_window);
         self.finish_coalesced_transaction_batch(batch)
+    }
+
+    fn transaction_coalescing_key(
+        &self,
+        request: &ApplyTransactionRequest,
+    ) -> Option<TransactionCoalescingKey> {
+        self.wal_actor
+            .coalesced_transaction_durability(request.durability_policy)
+            .map(|durability_policy| TransactionCoalescingKey {
+                durability_policy,
+                has_start_sequence: request.start_sequence.is_some(),
+                conflict_policy: request.conflict_policy,
+            })
     }
 
     fn collect_coalesced_transaction_batch(
@@ -359,7 +393,11 @@ impl EventLoop {
                     start_sequence,
                     conflict_policy,
                 };
-                match self.prepare_transaction_for_coalescing(request, &mut batch.staged_touches) {
+                match self.prepare_transaction_for_coalescing(
+                    request,
+                    batch.coalescing_key,
+                    &mut batch.staged_touches,
+                ) {
                     PrepareOutcome::Prepared {
                         request_id,
                         prepared_transaction,
@@ -419,6 +457,7 @@ impl EventLoop {
 
     fn finish_coalesced_transaction_batch(&mut self, batch: CoalescedTransactionBatch) -> usize {
         let CoalescedTransactionBatch {
+            coalescing_key: _,
             staged_touches: _,
             prepared,
             mut touched_cfs,
@@ -434,9 +473,12 @@ impl EventLoop {
 
         match append_result {
             Ok(results) => {
+                if !results.is_empty() {
+                    self.publish_snapshot();
+                }
                 for result in results {
                     let touched_cfs = touched_cfs.remove(&result.request_id).unwrap_or_default();
-                    self.finish_drained_write(
+                    self.finish_drained_write_after_publish(
                         result.request_id,
                         Ok(WriteResult::TransactionApplied {
                             last_sequence: result.last_sequence,
@@ -480,12 +522,11 @@ impl EventLoop {
     fn prepare_transaction_for_coalescing(
         &mut self,
         request: ApplyTransactionRequest,
+        coalescing_key: TransactionCoalescingKey,
         staged_touches: &mut StagedTransactionTouches,
     ) -> PrepareOutcome {
         if request.ops.is_empty()
-            || !self
-                .wal_actor
-                .can_coalesce_transaction_append(request.durability_policy)
+            || self.transaction_coalescing_key(&request) != Some(coalescing_key)
             || staged_touches.touches_ops(&request.ops)
         {
             return PrepareOutcome::Fallback(request);
@@ -550,6 +591,17 @@ impl EventLoop {
         request_id: u64,
         result: Result<WriteResult, crate::common::MidgeError>,
     ) {
+        if result.is_ok() {
+            self.publish_snapshot();
+        }
+        self.finish_drained_write_after_publish(request_id, result);
+    }
+
+    fn finish_drained_write_after_publish(
+        &mut self,
+        request_id: u64,
+        result: Result<WriteResult, crate::common::MidgeError>,
+    ) {
         match result {
             Ok(result) => self.handle_write_success(request_id, &result),
             Err(error) => self.handle_write_error(request_id, error),
@@ -557,8 +609,6 @@ impl EventLoop {
     }
 
     fn handle_write_success(&mut self, request_id: u64, result: &WriteResult) {
-        self.publish_snapshot();
-
         let is_transaction = matches!(result, WriteResult::TransactionApplied { .. });
         let deferred = result.deferred();
         if self.should_ack_immediately(deferred) {
@@ -660,8 +710,8 @@ enum PrepareOutcome {
     },
 }
 
-#[derive(Default)]
 struct CoalescedTransactionBatch {
+    coalescing_key: TransactionCoalescingKey,
     staged_touches: StagedTransactionTouches,
     prepared: Vec<crate::runtime::actors::wal::PreparedTransactionAppend>,
     touched_cfs: HashMap<u64, Vec<crate::types::ColumnFamilyId>>,
@@ -672,6 +722,19 @@ struct CoalescedTransactionBatch {
 }
 
 impl CoalescedTransactionBatch {
+    fn new(coalescing_key: TransactionCoalescingKey) -> Self {
+        Self {
+            coalescing_key,
+            staged_touches: StagedTransactionTouches::default(),
+            prepared: Vec::new(),
+            touched_cfs: HashMap::new(),
+            request_ids: Vec::new(),
+            handled: 0,
+            fallback_request: None,
+            deferred_error: None,
+        }
+    }
+
     fn push_prepared(
         &mut self,
         request_id: u64,
@@ -683,6 +746,13 @@ impl CoalescedTransactionBatch {
         self.prepared.push(*prepared_transaction);
         self.handled += 1;
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TransactionCoalescingKey {
+    durability_policy: crate::wal::DurabilityPolicy,
+    has_start_sequence: bool,
+    conflict_policy: ConflictPolicy,
 }
 
 #[derive(Default)]
