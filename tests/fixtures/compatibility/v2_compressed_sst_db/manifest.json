@@ -1,0 +1,65 @@
+{
+  "last_persisted_sequence": 514,
+  "files": [
+    {
+      "name": "000001_00_00000000000000000001.sst",
+      "level": 0,
+      "size_bytes": 26238,
+      "content_crc32c": 3569882798,
+      "cf_id": 1,
+      "sst_seq": 0,
+      "smallest_key": [
+        102,
+        105,
+        120,
+        116,
+        117,
+        114,
+        101,
+        58,
+        107,
+        101,
+        121,
+        58,
+        48,
+        48,
+        48,
+        48
+      ],
+      "largest_key": [
+        102,
+        105,
+        120,
+        116,
+        117,
+        114,
+        101,
+        58,
+        107,
+        101,
+        121,
+        58,
+        48,
+        53,
+        49,
+        49
+      ],
+      "smallest_seq": 2,
+      "largest_seq": 513,
+      "sublevel": 0
+    }
+  ],
+  "column_families": [
+    {
+      "id": 1,
+      "name": "fixture",
+      "created_at": 1784834826162,
+      "reclaimed": false
+    }
+  ],
+  "next_wal_seq": 1,
+  "next_sst_seqs": {
+    "1": 2
+  },
+  "edit_checkpoint_id": 3
+}

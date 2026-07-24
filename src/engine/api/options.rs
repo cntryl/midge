@@ -686,7 +686,7 @@ impl OpenOptionsBuilder {
             Goal::Latency => CompressionPolicy::Fixed(CompressionAlgo::Lz4),
             Goal::Throughput => CompressionPolicy::Adaptive {
                 min_savings_bytes: 256,
-                min_ratio: 1.05,
+                min_ratio: 0.95,
                 check_algorithms: vec![CompressionAlgo::Lz4, CompressionAlgo::Zstd3],
             },
             Goal::Economy => CompressionPolicy::Fixed(CompressionAlgo::Zstd9),
@@ -1280,6 +1280,30 @@ mod tests {
 
         // Assert
         assert_eq!(opts.goal, Goal::Throughput);
+    }
+
+    #[test]
+    fn should_use_inclusive_worth_compressing_ratio_for_throughput_goal() {
+        // Arrange
+        let options = OpenOptions::in_memory()
+            .goal(Goal::Throughput)
+            .build()
+            .expect("build throughput options");
+
+        // Act
+        let policy = options.compression_policy();
+
+        // Assert
+        assert!(matches!(
+            policy,
+            CompressionPolicy::Adaptive {
+                min_savings_bytes: 256,
+                min_ratio,
+                check_algorithms,
+            } if (*min_ratio - 0.95).abs() < f32::EPSILON
+                && check_algorithms
+                    == &[CompressionAlgo::Lz4, CompressionAlgo::Zstd3]
+        ));
     }
 
     #[test]

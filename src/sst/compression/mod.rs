@@ -51,7 +51,7 @@ pub enum CompressionPolicy {
         /// Minimum bytes saved to use compression
         min_savings_bytes: usize,
 
-        /// Minimum compression ratio (compressed/original)
+        /// Inclusive compressed/original ratio threshold
         min_ratio: f32,
 
         /// Algorithms to try (in order)
@@ -63,7 +63,7 @@ impl Default for CompressionPolicy {
     fn default() -> Self {
         Self::Adaptive {
             min_savings_bytes: 256,
-            min_ratio: 1.05,
+            min_ratio: 0.95,
             check_algorithms: vec![
                 CompressionAlgo::Lz4,
                 CompressionAlgo::Zstd3,
@@ -152,11 +152,83 @@ fn compress_adaptive(
     min_ratio: f32,
     algos: &[CompressionAlgo],
 ) -> (Bytes, CompressionAlgo) {
-    let mut best_compressed = Bytes::copy_from_slice(data);
-    let mut best_algo = CompressionAlgo::None;
-    let mut best_size = data.len();
-    let min_ratio = f64::from(min_ratio);
-    let data_len = f64::from(u32::try_from(data.len()).unwrap_or(u32::MAX));
+    let mut best: Option<(Bytes, CompressionAlgo)> = None;
+
+    for &algo in algos {
+        if algo == CompressionAlgo::None {
+            continue;
+        }
+
+        if let Ok((compressed, _)) = compress_with_algo(data, algo) {
+            let compressed_size = compressed.len();
+            if compression_qualifies(data.len(), compressed_size, min_savings, min_ratio)
+                && best
+                    .as_ref()
+                    .is_none_or(|(current, _)| compressed_size < current.len())
+            {
+                best = Some((compressed, algo));
+            }
+        }
+    }
+
+    best.unwrap_or_else(|| (Bytes::copy_from_slice(data), CompressionAlgo::None))
+}
+
+fn compression_qualifies(
+    original_size: usize,
+    compressed_size: usize,
+    min_savings: usize,
+    min_ratio: f32,
+) -> bool {
+    compressed_size < original_size
+        && original_size.saturating_sub(compressed_size) >= min_savings
+        && ratio_at_or_below_f32_threshold(original_size, compressed_size, min_ratio)
+}
+
+fn ratio_at_or_below_f32_threshold(
+    original_size: usize,
+    compressed_size: usize,
+    threshold: f32,
+) -> bool {
+    if threshold.is_nan() || threshold.is_sign_negative() || original_size == 0 {
+        return false;
+    }
+
+    let threshold = if threshold.is_infinite() {
+        f64::INFINITY
+    } else {
+        let threshold_value = f64::from(threshold);
+        let next_value = f64::from(f32::from_bits(threshold.to_bits().saturating_add(1)));
+        threshold_value + (next_value - threshold_value) / 2.0
+    };
+    let original_size = f64::from(u32::try_from(original_size).unwrap_or(u32::MAX));
+    let compressed_size = f64::from(u32::try_from(compressed_size).unwrap_or(u32::MAX));
+    compressed_size / original_size <= threshold
+}
+
+#[cfg(test)]
+fn meets_fast_accept(
+    original_size: usize,
+    compressed_size: usize,
+    min_ratio: f32,
+    fast_accept_ratio: f32,
+) -> bool {
+    ratio_at_or_below_f32_threshold(
+        original_size,
+        compressed_size,
+        min_ratio.min(fast_accept_ratio),
+    )
+}
+
+#[cfg(test)]
+fn compress_adaptive_with_fast_accept(
+    data: &[u8],
+    min_savings: usize,
+    min_ratio: f32,
+    algos: &[CompressionAlgo],
+    fast_accept_ratio: f32,
+) -> (Bytes, CompressionAlgo) {
+    let mut best: Option<(Bytes, CompressionAlgo)> = None;
 
     for &algo in algos {
         if algo == CompressionAlgo::None {
@@ -166,19 +238,23 @@ fn compress_adaptive(
         // Try compression
         if let Ok((compressed, _)) = compress_with_algo(data, algo) {
             let compressed_size = compressed.len();
-            let ratio = f64::from(u32::try_from(compressed_size).unwrap_or(u32::MAX)) / data_len;
-            let savings = data.len().saturating_sub(compressed_size);
 
-            // Check if this is better
-            if ratio < min_ratio && savings >= min_savings && compressed_size < best_size {
-                best_compressed = compressed;
-                best_algo = algo;
-                best_size = compressed_size;
+            if compression_qualifies(data.len(), compressed_size, min_savings, min_ratio) {
+                if meets_fast_accept(data.len(), compressed_size, min_ratio, fast_accept_ratio) {
+                    return (compressed, algo);
+                }
+
+                if best
+                    .as_ref()
+                    .is_none_or(|(current, _)| compressed_size < current.len())
+                {
+                    best = Some((compressed, algo));
+                }
             }
         }
     }
 
-    (best_compressed, best_algo)
+    best.unwrap_or_else(|| (Bytes::copy_from_slice(data), CompressionAlgo::None))
 }
 
 /// Decompress block data based on compression type.
@@ -383,6 +459,11 @@ pub fn decompress_wal_value(value: &[u8], compression: Option<u8>) -> MidgeResul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn structured_test_block(size: usize) -> Vec<u8> {
+        let pattern = b"account=0042|region=east|status=active|segment=business|";
+        pattern.iter().copied().cycle().take(size).collect()
+    }
 
     // ====================== CompressionAlgo Tests ======================
 
@@ -613,7 +694,7 @@ mod tests {
                 check_algorithms,
             } => {
                 assert_eq!(min_savings_bytes, 256);
-                assert!(min_ratio > 1.04 && min_ratio < 1.06);
+                assert!((min_ratio - 0.95).abs() < f32::EPSILON);
                 assert!(check_algorithms.contains(&CompressionAlgo::Lz4));
                 assert!(check_algorithms.contains(&CompressionAlgo::Zstd3));
                 assert!(check_algorithms.contains(&CompressionAlgo::Zstd9));
@@ -796,6 +877,154 @@ mod tests {
                 || algo == CompressionAlgo::Lz4
                 || algo == CompressionAlgo::Zstd3
         );
+    }
+
+    #[test]
+    fn should_include_exact_adaptive_eligibility_boundaries() {
+        // Arrange
+        let original_size = 1_000;
+        let compressed_size = 950;
+
+        // Act
+        let exact = compression_qualifies(original_size, compressed_size, 50, 0.95);
+        let too_few_bytes = compression_qualifies(original_size, compressed_size, 51, 0.95);
+        let too_weak_ratio = compression_qualifies(original_size, compressed_size, 50, 0.949);
+
+        // Assert
+        assert!(exact);
+        assert!(!too_few_bytes);
+        assert!(!too_weak_ratio);
+    }
+
+    #[test]
+    fn should_apply_inclusive_fast_accept_with_custom_ratio_cap() {
+        // Arrange
+        let original_size = 1_000;
+
+        // Act
+        let exact_fast = meets_fast_accept(original_size, 300, 0.95, 0.30);
+        let above_fast = meets_fast_accept(original_size, 301, 0.95, 0.30);
+        let exact_custom = meets_fast_accept(original_size, 200, 0.20, 0.30);
+        let above_custom = meets_fast_accept(original_size, 201, 0.20, 0.30);
+
+        // Assert
+        assert!(exact_fast);
+        assert!(!above_fast);
+        assert!(exact_custom);
+        assert!(!above_custom);
+    }
+
+    #[test]
+    fn should_return_strong_lz4_without_trying_for_smaller_output() {
+        // Arrange
+        let data = vec![b'A'; 16 * 1024];
+        let algorithms = [CompressionAlgo::Lz4, CompressionAlgo::Zstd3];
+
+        // Act
+        let (_, algorithm) =
+            compress_adaptive_with_fast_accept(&data, 256, 0.95, &algorithms, 0.30);
+
+        // Assert
+        assert_eq!(algorithm, CompressionAlgo::Lz4);
+    }
+
+    #[test]
+    fn should_continue_from_weak_lz4_to_strong_zstd3() {
+        // Arrange
+        let data = structured_test_block(16 * 1024);
+        let algorithms = [CompressionAlgo::Lz4, CompressionAlgo::Zstd3];
+
+        // Act
+        let (_, algorithm) =
+            compress_adaptive_with_fast_accept(&data, 256, 0.95, &algorithms, 0.005);
+
+        // Assert
+        assert_eq!(algorithm, CompressionAlgo::Zstd3);
+    }
+
+    #[test]
+    fn should_emit_smallest_qualifying_result_when_no_result_is_strong() {
+        // Arrange
+        let data = structured_test_block(16 * 1024);
+        let algorithms = [CompressionAlgo::Lz4, CompressionAlgo::Zstd3];
+
+        // Act
+        let (compressed, algorithm) =
+            compress_adaptive_with_fast_accept(&data, 256, 0.95, &algorithms, 0.0);
+        let (lz4, _) = compress_with_algo(&data, CompressionAlgo::Lz4).expect("compress LZ4");
+        let (zstd3, _) = compress_with_algo(&data, CompressionAlgo::Zstd3).expect("compress Zstd3");
+
+        // Assert
+        assert_eq!(algorithm, CompressionAlgo::Zstd3);
+        assert_eq!(compressed.len(), lz4.len().min(zstd3.len()));
+    }
+
+    #[test]
+    fn should_keep_production_adaptive_selection_exhaustive_after_rejected_candidate() {
+        // Arrange
+        let data = vec![b'A'; 16 * 1024];
+        let policy = CompressionPolicy::Adaptive {
+            min_savings_bytes: 256,
+            min_ratio: 0.95,
+            check_algorithms: vec![CompressionAlgo::Lz4, CompressionAlgo::Zstd3],
+        };
+        let (lz4, _) = compress_with_algo(&data, CompressionAlgo::Lz4).expect("compress LZ4");
+        let (zstd3, _) = compress_with_algo(&data, CompressionAlgo::Zstd3).expect("compress Zstd3");
+
+        // Act
+        let (compressed, algorithm) = compress_block(&data, &policy).expect("compress adaptively");
+
+        // Assert
+        assert_eq!(algorithm, CompressionAlgo::Zstd3);
+        assert_eq!(compressed.len(), lz4.len().min(zstd3.len()));
+    }
+
+    #[test]
+    fn should_continue_past_non_operational_codecs_in_declared_order() {
+        // Arrange
+        let data = vec![b'A'; 16 * 1024];
+        let algorithms = [
+            CompressionAlgo::None,
+            CompressionAlgo::Zlib,
+            CompressionAlgo::Snappy,
+            CompressionAlgo::Lz4,
+        ];
+
+        // Act
+        let (_, algorithm) =
+            compress_adaptive_with_fast_accept(&data, 256, 0.95, &algorithms, 0.30);
+
+        // Assert
+        assert_eq!(algorithm, CompressionAlgo::Lz4);
+    }
+
+    #[test]
+    fn should_emit_raw_fallback_for_empty_or_ineligible_adaptive_lists() {
+        // Arrange
+        let data = vec![b'A'; 16 * 1024];
+
+        // Act
+        let empty = compress_adaptive_with_fast_accept(&data, 256, 0.95, &[], 0.30);
+        let ineligible = compress_adaptive_with_fast_accept(
+            &data,
+            data.len(),
+            0.95,
+            &[CompressionAlgo::Lz4, CompressionAlgo::Zstd3],
+            0.30,
+        );
+        let unsupported = compress_adaptive_with_fast_accept(
+            &data,
+            256,
+            0.95,
+            &[CompressionAlgo::Zlib, CompressionAlgo::Snappy],
+            0.30,
+        );
+
+        // Assert
+        for (raw, algorithm) in [empty, ineligible, unsupported] {
+            assert_eq!(algorithm, CompressionAlgo::None);
+            assert_eq!(raw.as_ref(), data.as_slice());
+        }
     }
 
     #[test]

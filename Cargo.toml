@@ -352,6 +352,11 @@ path = "benches/tier4_system_strict_group_commit.rs"
 harness = false
 
 [[bench]]
+name = "tier4_system_adaptive_compression_promotion"
+path = "benches/tier4_system_adaptive_compression_promotion.rs"
+harness = false
+
+[[bench]]
 name = "tier4_ycsb_workload_a"
 path = "benches/tier4_ycsb_workload_a.rs"
 harness = false

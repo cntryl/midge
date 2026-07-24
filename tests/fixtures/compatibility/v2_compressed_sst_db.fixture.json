@@ -1,0 +1,33 @@
+{
+  "source_commit": "87ea77b",
+  "database_format": 2,
+  "sst_format": "V3",
+  "generation": {
+    "goal": "Throughput",
+    "workload": "WriteHeavy",
+    "background_compaction": false,
+    "column_family": "fixture",
+    "record_count": 512,
+    "key_format": "fixture:key:{index:04}",
+    "value_size_bytes": 8192,
+    "value_pattern": "customer={index:04}|region={east|west|north|south}|status=active|segment={consumer|business|public}| repeated and truncated to value_size_bytes",
+    "commit": "WriteOptions::sync",
+    "flush": "Engine::flush_cf completed",
+    "shutdown": "Engine::shutdown completed with a 10 second timeout"
+  },
+  "expected_data": {
+    "canonical_encoding": "u32 little-endian key length, key bytes, u32 little-endian value length, value bytes, in ascending index order",
+    "logical_bytes": 4206592,
+    "xxh3_64": "00092c669deb80b7"
+  },
+  "sha256": {
+    ".midge_leader": "4aa1725b9014823684a1c1729c43072dc52331a5fd2aa8d0c4b0e908b0bd21fd",
+    "FORMAT": "e1e9f4d12ce67d93255bc4803a67735b267e4738eceb0cd3dcd59d3865efa391",
+    "intent_log.json": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "manifest.journal": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "manifest.json": "5fded67aaaf7f7ab0d28e077312456e77c6a032d900409513a24faab976eddbc",
+    "manifest.snapshot.json": "5fded67aaaf7f7ab0d28e077312456e77c6a032d900409513a24faab976eddbc",
+    "sst/000001_00_00000000000000000001.sst": "2b1bb93ad68f64e4507b93d3981d30e97bccbb641ba5c15b24751831f9eaff16",
+    "wal/wal.log": "9b7d215036d5aaa49ae154bebdb2e8ed74a3d86229df95b03046f5feb5eb1a65"
+  }
+}
