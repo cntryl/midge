@@ -115,6 +115,7 @@ pub struct SkipListMemtable {
     skiplist: Arc<SkipList>,
     seq_generator: std::sync::atomic::AtomicU64,
     size_bytes: std::sync::atomic::AtomicUsize,
+    range_tombstone_count: std::sync::atomic::AtomicUsize,
     range_tombstones: RwLock<Vec<crate::sst::types::RangeTombstone>>,
 }
 
@@ -125,6 +126,7 @@ impl SkipListMemtable {
             skiplist: Arc::new(SkipList::new()),
             seq_generator: std::sync::atomic::AtomicU64::new(1),
             size_bytes: std::sync::atomic::AtomicUsize::new(0),
+            range_tombstone_count: std::sync::atomic::AtomicUsize::new(0),
             range_tombstones: RwLock::new(Vec::new()),
         }
     }
@@ -440,13 +442,15 @@ impl SkipListMemtable {
             return Ok(());
         }
 
-        self.range_tombstones
-            .write()
-            .push(crate::sst::types::RangeTombstone::new(
-                start_key.to_vec(),
-                end_key.to_vec(),
-                seq,
-            ));
+        let mut range_tombstones = self.range_tombstones.write();
+        range_tombstones.push(crate::sst::types::RangeTombstone::new(
+            start_key.to_vec(),
+            end_key.to_vec(),
+            seq,
+        ));
+        self.range_tombstone_count
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        drop(range_tombstones);
         // Keep the estimate bounded by the tombstone itself. The range marker,
         // rather than one point tombstone per currently resident key, is the
         // durable representation.
@@ -459,6 +463,13 @@ impl SkipListMemtable {
     /// Return range tombstones visible at `snapshot_seq` in insertion order.
     #[must_use]
     pub fn range_tombstones_at(&self, snapshot_seq: u64) -> Vec<crate::sst::types::RangeTombstone> {
+        if self
+            .range_tombstone_count
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            return Vec::new();
+        }
         self.range_tombstones
             .read()
             .iter()
@@ -470,6 +481,13 @@ impl SkipListMemtable {
     /// Return all range tombstones for flush/compaction publication.
     #[must_use]
     pub fn range_tombstones(&self) -> Vec<crate::sst::types::RangeTombstone> {
+        if self
+            .range_tombstone_count
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            return Vec::new();
+        }
         self.range_tombstones.read().clone()
     }
 }

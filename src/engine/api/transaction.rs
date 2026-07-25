@@ -672,8 +672,7 @@ impl Transaction {
         let snapshot = self.read_snapshot.as_ref().ok_or_else(|| {
             MidgeError::Internal("read snapshot not available - this is a bug".to_string())
         })?;
-        let value = snapshot.get(key, self.start_sequence)?;
-        Ok(value.map(bytes::Bytes::from))
+        snapshot.get_bytes(key, self.start_sequence)
     }
 
     /// Range scan within this transaction

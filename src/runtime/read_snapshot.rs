@@ -519,8 +519,8 @@ impl ReadSnapshot {
         ))
     }
 
-    /// Perform a point read on this snapshot
-    pub fn get(&self, key: &[u8], seq: u64) -> MidgeResult<Option<Vec<u8>>> {
+    /// Perform a point read on this snapshot without copying the value.
+    pub fn get_bytes(&self, key: &[u8], seq: u64) -> MidgeResult<Option<bytes::Bytes>> {
         let mut best_state = None;
         let mut range_tombstones = Vec::new();
 
@@ -577,10 +577,16 @@ impl ReadSnapshot {
             KeyState::Value(value, _, exp, _)
                 if !crate::common::time::is_expired_at(exp, self.read_time_millis) =>
             {
-                Some(value.to_vec())
+                Some(value)
             }
             _ => None,
         })
+    }
+
+    /// Perform a point read on this snapshot.
+    pub fn get(&self, key: &[u8], seq: u64) -> MidgeResult<Option<Vec<u8>>> {
+        self.get_bytes(key, seq)
+            .map(|value| value.map(|bytes| bytes.to_vec()))
     }
 
     /// Return the latest sequence touching `key` across memtables + SSTs.
