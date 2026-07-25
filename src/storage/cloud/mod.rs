@@ -19,7 +19,7 @@
 //! ## Async Model
 //!
 //! - `submit_*()` methods return immediately (non-blocking)
-//! - Results are sent back via `CloudCallback` channels (`mpsc::Sender`<CloudEvent>)
+//! - Results are sent back via `CloudCallback` channels (`mpsc::Sender<CloudEvent>`)
 //! - Events are received asynchronously but callback processing is synchronous
 //! - No futures in the engine: all async work happens in `CloudExecutor` embedded tokio runtime
 

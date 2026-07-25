@@ -21,6 +21,27 @@ use std::sync::Arc;
 /// 20 is a common choice in production LSM engines (e.g., similar to Pebble).
 const MAX_LEVEL: usize = 20;
 
+/// Sequence numbers at or above this value mark versions created by the
+/// memtable leak probe test. Instrumentation is scoped to this range so a
+/// probe run stays isolated from other unit tests executing in parallel.
+#[cfg(test)]
+pub(crate) const PROBE_SEQ_BASE: u64 = 0xF000_0000_0000_0000;
+
+/// Live `VersionNode` count for versions in the probe sequence range.
+#[cfg(test)]
+pub(crate) static PROBE_LIVE_VERSIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of times a probe-range node lost the level-0 splice race and had to
+/// reclaim its freshly built node.
+#[cfg(test)]
+pub(crate) static PROBE_SPLICE_RETRIES: AtomicUsize = AtomicUsize::new(0);
+
+/// Test-only rendezvous immediately before probe nodes attempt level-0
+/// publication.
+#[cfg(test)]
+pub(crate) static PROBE_SPLICE_BARRIER: std::sync::OnceLock<Arc<std::sync::Barrier>> =
+    std::sync::OnceLock::new();
+
 /// Entry metadata tuple: (key, `value_opt`, sequence, `is_tombstone`)
 pub type SkipListEntry = (Bytes, Option<Bytes>, u64, bool);
 
@@ -66,12 +87,36 @@ struct VersionNode {
 
 impl VersionNode {
     fn new(seq: u64, val: Option<Bytes>, exp: Option<u64>, op: OpType) -> Self {
+        Self::with_next(seq, val, exp, op, Atomic::null())
+    }
+
+    fn with_next(
+        seq: u64,
+        val: Option<Bytes>,
+        exp: Option<u64>,
+        op: OpType,
+        next: Atomic<VersionNode>,
+    ) -> Self {
+        #[cfg(test)]
+        if seq >= PROBE_SEQ_BASE {
+            PROBE_LIVE_VERSIONS.fetch_add(1, AO::Relaxed);
+        }
+
         VersionNode {
             seq,
             val,
             exp,
             op,
-            next: Atomic::null(),
+            next,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for VersionNode {
+    fn drop(&mut self) {
+        if self.seq >= PROBE_SEQ_BASE {
+            PROBE_LIVE_VERSIONS.fetch_sub(1, AO::Relaxed);
         }
     }
 }
@@ -445,12 +490,19 @@ impl SkipList {
             // it is valid and exclusively owned until the CAS publishes it.
             unsafe { new_ptr.deref() }.forward[0].store(level0_succ, AO::Relaxed);
 
+            #[cfg(test)]
+            if seq >= PROBE_SEQ_BASE {
+                if let Some(barrier) = PROBE_SPLICE_BARRIER.get() {
+                    barrier.wait();
+                }
+            }
+
             // Validate window and splice at level 0.
             let pred_next0 = level0_pred.forward[0].load(AO::Acquire, guard);
             if pred_next0 != level0_succ {
-                // SAFETY: new_ptr is not yet published; we are the sole owner.
-                // defer_destroy schedules reclamation after all pinned guards unpin.
-                unsafe { guard.defer_destroy(new_ptr) };
+                // SAFETY: new_ptr is not yet published, so we are the sole owner
+                // and may reclaim it (and its version chain) immediately.
+                unsafe { Self::reclaim_unpublished_node(new_ptr, guard) };
                 continue;
             }
 
@@ -461,7 +513,7 @@ impl SkipList {
                 break new_ptr;
             }
             // SAFETY: CAS failed so new_ptr was never published.
-            unsafe { guard.defer_destroy(new_ptr) };
+            unsafe { Self::reclaim_unpublished_node(new_ptr, guard) };
         };
 
         // Stage 2: best-effort link higher levels (1..node_level-1).
@@ -490,6 +542,38 @@ impl SkipList {
         }
     }
 
+    /// Reclaim a node that lost the level-0 splice race and was therefore
+    /// never published.
+    ///
+    /// `Node` owns its version chain through a raw `Atomic`, which does not
+    /// free the chain when the node itself is dropped. The chain must be
+    /// released explicitly or every lost splice race leaks a `VersionNode`
+    /// along with the value payload it holds.
+    ///
+    /// # Safety
+    /// `node` must never have been made reachable by another thread, so the
+    /// caller is its sole owner.
+    unsafe fn reclaim_unpublished_node(node: Shared<'_, Node>, guard: &Guard) {
+        #[cfg(test)]
+        {
+            let seq = node
+                .deref()
+                .versions_head
+                .load(AO::Relaxed, guard)
+                .as_ref()
+                .map_or(0, |version| version.seq);
+            if seq >= PROBE_SEQ_BASE {
+                PROBE_SPLICE_RETRIES.fetch_add(1, AO::Relaxed);
+            }
+        }
+
+        // SAFETY: the node was never published, so no other thread can observe
+        // it or its version chain; we hold exclusive ownership of both.
+        let owned = node.into_owned();
+        Self::drop_version_chain(&owned.versions_head, guard);
+        drop(owned);
+    }
+
     fn try_append_version(
         node: &Node,
         seq: u64,
@@ -512,13 +596,13 @@ impl SkipList {
                 current = current_ref.next.load(AO::Acquire, guard);
             }
 
-            let new_ver = Owned::new(VersionNode {
+            let new_ver = Owned::new(VersionNode::with_next(
                 seq,
-                val: value.cloned(),
+                value.cloned(),
                 exp,
                 op,
-                next: Atomic::from(current),
-            });
+                Atomic::from(current),
+            ));
 
             let result = match predecessor {
                 Some(predecessor) => {
@@ -834,8 +918,65 @@ unsafe impl Sync for SkipList {}
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
     use std::thread;
+
+    #[test]
+    fn should_reclaim_version_chain_when_node_loses_level_zero_splice_race() {
+        // Arrange
+        let list = Arc::new(SkipList::new());
+        let start_barrier = Arc::new(Barrier::new(2));
+        assert!(
+            PROBE_SPLICE_BARRIER.set(Arc::new(Barrier::new(2))).is_ok(),
+            "probe splice barrier must be initialized only once"
+        );
+        let payload = Bytes::from(vec![b'v'; 4096]);
+
+        PROBE_LIVE_VERSIONS.store(0, AO::SeqCst);
+        PROBE_SPLICE_RETRIES.store(0, AO::SeqCst);
+
+        // Act
+        // Both writers enter the absent-key path together. The test-only
+        // splice barrier holds them after constructing their private nodes,
+        // guaranteeing that exactly one CAS wins and the other node is
+        // reclaimed before either writer can observe the published key.
+        let handles: Vec<_> = [1_u64, 2]
+            .into_iter()
+            .map(|seq| {
+                let list = Arc::clone(&list);
+                let start_barrier = Arc::clone(&start_barrier);
+                let payload = payload.clone();
+                thread::spawn(move || {
+                    start_barrier.wait();
+                    list.upsert(
+                        Bytes::from_static(b"race"),
+                        Some(payload),
+                        PROBE_SEQ_BASE + seq,
+                    );
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("probe writer thread should not panic");
+        }
+
+        let Ok(list) = Arc::try_unwrap(list) else {
+            panic!("probe holds the only reference to the skiplist");
+        };
+        drop(list);
+
+        // Assert
+        assert!(
+            PROBE_SPLICE_RETRIES.load(AO::SeqCst) > 0,
+            "probe never observed a lost splice race, so the leak path was not exercised"
+        );
+        assert_eq!(
+            PROBE_LIVE_VERSIONS.load(AO::SeqCst),
+            0,
+            "every version node allocated by the probe must be reclaimed, \
+             including those attached to nodes that lost the splice race"
+        );
+    }
 
     #[test]
     fn should_insert_value() {
