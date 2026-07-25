@@ -1,353 +1,50 @@
-# Quick Start Guide
+# Quick start
 
-**Get started with Midge in 5 minutes**
-
-The release gate compile-checks the canonical source for this walkthrough at
-[`examples/documented_quick_start.rs`](../../examples/documented_quick_start.rs).
-
-## Installation
-
-Add Midge to your `Cargo.toml`:
-
-```toml
-[dependencies]
-cntryl-midge = "0.1"  # Check latest version
-```
-
-## Basic Example
-
-Here's a complete example showing basic operations:
+This walkthrough uses only the re-exported API and mirrors the executable
+[`documented_quick_start`](../../examples/documented_quick_start.rs) example.
 
 ```rust
 use std::time::Duration;
-
 use cntryl_midge::{Bytes, Engine, OpenOptions, Query, TransactionMode, WriteOptions};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Open an in-memory database (no persistence)
-    let opts = OpenOptions::in_memory().build()?;
-    let mut engine = Engine::open(opts)?;
-    
-    // 2. Create a column family
-    let cf = engine
-        .get_column_family("default")
-        .expect("new engines contain the default column family");
-    
-    // 3. Write some data
-    let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-    tx.put(b"user:1".to_vec(), b"alice".to_vec(), None)?;
-    tx.put(b"user:2".to_vec(), b"bob".to_vec(), None)?;
-    tx.commit(WriteOptions::sync())?;
-    
-    // 4. Read data
-    let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-    if let Some(value) = tx.get(b"user:1")? {
-        println!("user:1 = {}", String::from_utf8_lossy(&value));
-    }
-    
-    // 5. Scan a range
-    let query = Query::new().prefix(Bytes::from_static(b"user:"));
-    let mut iter = tx.scan(&query)?;
-    while let Some((key, value)) = iter.next().transpose()? {
-        println!(
-            "{} = {}",
-            String::from_utf8_lossy(&key),
-            String::from_utf8_lossy(&value)
-        );
-    }
-    
-    // 6. Delete data
-    let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-    tx.delete(b"user:2".to_vec())?;
-    tx.commit(WriteOptions::sync())?;
-    
-    // 7. Clean shutdown
-    engine.shutdown(Duration::from_secs(30))?;
-    
-    Ok(())
-}
-```
+let mut engine = Engine::open(OpenOptions::in_memory().build()?)?;
+let cf = engine.get_column_family("default").unwrap();
 
-## Storage Modes
+let mut write = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+write.put(b"user:1".to_vec(), b"alice".to_vec(), None)?;
+write.put(b"user:2".to_vec(), b"bob".to_vec(), None)?;
+write.commit(WriteOptions::sync())?;
 
-### In-Memory (Testing)
-
-```rust
-let opts = OpenOptions::in_memory().build()?;
-let engine = MidgeEngine::open(opts)?;
-```
-
-No persistence. Data lost when engine drops. Use for testing and caching.
-
-### Local Filesystem (Single-Node)
-
-```rust
-let opts = OpenOptions::local("./my_database").build()?;
-let engine = MidgeEngine::open(opts)?;
-```
-
-Data persists to local disk. Use for traditional single-node deployments.
-
-## Write Durability
-
-All commits require explicit `WriteOptions`:
-
-```rust
-// Full durability (fsync to disk)
-sync_tx.commit(WriteOptions::sync())?;
-
-// Group commit batching (visible after WAL append; local durability follows later fsync)
-buffered_tx.commit(WriteOptions::buffered())?;
-
-// No durability until flush (bulk loads only)
-best_effort_tx.commit(WriteOptions::best_effort())?;
-engine.flush_cf(&cf)?;  // Make durable
-```
-
-For comprehensive durability guarantees and recovery behavior, see [durability.md](durability.md).
-
-## Transactions
-
-### Read-Only Transaction
-
-```rust
-let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-let value = tx.get(b"key")?;
-// No commit needed for read-only
-drop(tx);
-```
-
-### Read-Write Transaction
-
-```rust
-let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-tx.put(b"key1".to_vec(), b"value1".to_vec(), None)?;
-tx.put(b"key2".to_vec(), b"value2".to_vec(), None)?;
-tx.delete(b"old_key".to_vec())?;
-
-// Atomic commit - all writes visible together
-tx.commit(WriteOptions::buffered())?;
-```
-
-### Transaction with TTL
-
-```rust
-let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-
-// Value expires after 3600 seconds
-tx.put(b"session:123".to_vec(), b"data".to_vec(), Some(3600))?;
-
-tx.commit(WriteOptions::buffered())?;
-```
-
-## Range Scans
-
-### Prefix Scan
-
-```rust
-use cntryl_midge::{Bytes, Query};
-
-let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
+let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
+assert_eq!(read.get(b"user:1")?, Some(Bytes::from_static(b"alice")));
 let query = Query::new().prefix(Bytes::from_static(b"user:"));
-let mut iter = tx.scan(&query)?;
-
-while let Some((key, value)) = iter.next().transpose()? {
-    // Process entries with "user:" prefix
-}
+let rows = read.scan(&query)?.try_collect()?;
+assert_eq!(rows.len(), 2);
+drop(read);
+engine.shutdown(Duration::from_secs(5))?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-### Bounded Range Scan
+## Choose storage
 
-```rust
-use cntryl_midge::{Bytes, Query};
+Use `OpenOptions::local(path)` for restart-persistent local files,
+`OpenOptions::in_memory()` for tests that do not need persistence, and
+`OpenOptions::cloud_simulated(cache, bucket, prefix)` for a local simulation of
+cloud lifecycle behavior. `OpenOptions::cloud(cache, provider, prefix)` is
+feature-gated provider-backed storage and remains pre-1.0.
 
-let query = Query::new()
-    .start_key(Bytes::from_static(b"user:100"))
-    .end_key(Bytes::from_static(b"user:200"));
-let mut iter = tx.scan(&query)?;
+## Choose commit durability
 
-while let Some((key, value)) = iter.next().transpose()? {
-    // Process entries between user:100 and user:200
-}
-```
+Every write transaction must pass `WriteOptions` to `commit`:
 
-### Reverse Scan
+- `sync()` waits for local synchronous WAL durability.
+- `buffered()` uses the local batched WAL policy; it has a bounded crash window.
+- `best_effort()` provides no crash durability before data is flushed.
+- `cloud_async()` and `cloud_strict()` select asynchronous or waited-for cloud
+  upload behavior when using cloud-backed storage.
 
-```rust
-use cntryl_midge::{Bytes, Query};
+## Finish cleanly
 
-let query = Query::new()
-    .prefix(Bytes::from_static(b"user:"))
-    .reverse();
-let mut iter = tx.scan(&query)?;
-
-while let Some((key, value)) = iter.next().transpose()? {
-    // Process entries in reverse order
-}
-```
-
-### Limited Scan
-
-```rust
-use cntryl_midge::{Bytes, Query};
-
-let query = Query::new()
-    .prefix(Bytes::from_static(b"user:"))
-    .limit(10);
-let mut iter = tx.scan(&query)?;
-
-while let Some((key, value)) = iter.next().transpose()? {
-    // Process at most 10 entries
-}
-```
-
-## Column Families
-
-Use column families to logically separate data:
-
-```rust
-let engine = MidgeEngine::open(opts)?;
-
-// Create multiple column families
-let users_cf = engine.create_column_family("users")?;
-let posts_cf = engine.create_column_family("posts")?;
-let comments_cf = engine.create_column_family("comments")?;
-
-// Each CF is independent
-let mut tx = engine.begin_tx(users_cf.id(), TransactionMode::ReadWrite)?;
-tx.put(b"user:1".to_vec(), b"alice".to_vec(), None)?;
-tx.commit(WriteOptions::buffered())?;
-
-let mut tx = engine.begin_tx(posts_cf.id(), TransactionMode::ReadWrite)?;
-tx.put(b"post:1".to_vec(), b"Hello world".to_vec(), None)?;
-tx.commit(WriteOptions::buffered())?;
-```
-
-## Configuration
-
-### Smart Defaults
-
-```rust
-let opts = OpenOptions::local("./db")
-    .goal(Goal::Latency)              // Optimize for low latency
-    .memory_budget(MemoryBudget::Auto) // Use ~50% of available memory
-    .workload(WorkloadProfile::Mixed)  // Balanced read/write
-    .build()?;
-```
-
-### Explicit Memory Budget
-
-```rust
-use cntryl_midge::{Goal, MemoryBudget};
-
-let opts = OpenOptions::local("./db")
-    .goal(Goal::Throughput)                    // Optimize for throughput
-    .memory_budget(MemoryBudget::Bytes(1 << 30))  // 1 GiB total memory
-    .build()?;
-```
-
-### Workload Profiles
-
-```rust
-use cntryl_midge::WorkloadProfile;
-
-// Write-heavy workload
-let opts = OpenOptions::local("./db")
-    .workload(WorkloadProfile::WriteHeavy)
-    .build()?;
-
-// Read-mostly workload
-let opts = OpenOptions::local("./db")
-    .workload(WorkloadProfile::ReadMostly)
-    .build()?;
-
-// Range scan workload
-let opts = OpenOptions::local("./db")
-    .workload(WorkloadProfile::RangeScan)
-    .build()?;
-```
-
-All low-level parameters are derived automatically from these high-level settings.
-
-## Error Handling
-
-```rust
-use cntryl_midge::MidgeError;
-
-match tx.commit(WriteOptions::sync()) {
-    Ok(_) => println!("Committed successfully"),
-    Err(MidgeError::WriteStall(_)) => {
-        // Memtable queue full, backpressure
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        // Rebuild the consumed transaction and replay its writes before retrying.
-    }
-    Err(MidgeError::NotFound) => println!("Key does not exist"),
-    Err(e) => eprintln!("Error: {:?}", e),
-}
-```
-
-## Common Patterns
-
-### Bulk Load
-
-```rust
-// Fast bulk load with best_effort, then flush
-let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-
-for i in 0..1_000_000 {
-    tx.put(
-        format!("key:{}", i).into_bytes(),
-        b"value".to_vec(),
-        None
-    )?;
-    
-    // Commit every 10k writes
-    if i % 10_000 == 0 {
-        tx.commit(WriteOptions::best_effort())?;
-        tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-    }
-}
-
-tx.commit(WriteOptions::best_effort())?;
-
-// Make all writes durable
-engine.flush_cf(&cf)?;
-```
-
-### Read-Modify-Write
-
-```rust
-let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-
-// Read current value
-let current = tx.get(b"counter")?
-    .unwrap_or_else(|| vec![0]);
-
-// Modify
-let count = u64::from_le_bytes(current.try_into().unwrap());
-let new_value = (count + 1).to_le_bytes().to_vec();
-
-// Write back
-tx.put(b"counter".to_vec(), new_value, None)?;
-tx.commit(WriteOptions::buffered())?;
-```
-
-### Graceful Shutdown
-
-```rust
-// Flush all column families before shutdown
-for cf in engine.list_column_families()? {
-    engine.flush_cf(&cf)?;
-}
-
-// Bound shutdown; retry Busy after releasing any remaining transactions.
-engine.shutdown(Duration::from_secs(30))?;
-```
-
-## Next Steps
-
-- **Complete API reference**: [api-guide.md](api-guide.md)
-- **Durability guarantees**: [durability.md](durability.md)
-- **Performance tuning**: [../operations/performance-tuning.md](../operations/performance-tuning.md)
-- **FAQ**: [faq.md](faq.md)
-- **Troubleshooting**: [troubleshooting.md](troubleshooting.md)
+Release transactions and call `engine.shutdown(timeout)`. A shutdown error or
+timeout should be recorded and investigated. The [durability contract](transaction-durability-contract.md)
+explains what each acknowledgement means.

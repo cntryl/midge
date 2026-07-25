@@ -37,7 +37,7 @@ A capability may move from experimental to production-ready only when:
 
 ## Reading Order
 
-1. [one-dot-zero-contract.md](one-dot-zero-contract.md)
+1. [stability-policy.md](stability-policy.md)
 2. [format-compatibility.md](format-compatibility.md)
 3. [release-policy.md](release-policy.md)
-4. [../operations/production-runbook.md](../operations/production-runbook.md)
+4. [../operations/operator-runbook.md](../operations/operator-runbook.md)

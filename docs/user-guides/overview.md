@@ -1,137 +1,36 @@
-# Midge Overview
+# Overview
 
-**An embedded LSM-tree key-value storage engine**
+Midge is an embedded, single-process Rust LSM key-value engine. Version `0.1.0`
+requires Rust `1.97` or newer. It is intended for evaluation and controlled
+local deployments while the 0.x API and cloud operations continue to evolve.
 
-## What is Midge?
+## Storage modes
 
-Midge is an embedded LSM storage engine designed for predictable behavior and explicit control. It runs in-process as a library, with durability guarantees defined by the selected storage mode and explicit write options.
+- `InMemory`: process-local state with no restart persistence.
+- `Local`: WAL and SST files under the configured local path.
+- `CloudSimulated`: filesystem-backed cloud behavior for deterministic tests.
+- `Cloud`: an optional provider-backed local cache and remote store. Provider
+  support is feature-gated and remains pre-1.0.
 
-### Key Features
+## Core model
 
-- **Three storage modes**: Memory (ephemeral), Local (disk), and Cloud (cloud-backed local cache)
-- **Explicit durability control**: Choose between sync, buffered, best-effort, and cloud-strict modes
-- **Actor-based architecture**: Single-threaded event loop for predictable state transitions
-- **Transaction support**: ACID transactions with snapshot-based reads
-- **Smart configuration**: Automatically derive tuning parameters from high-level goals
+Each transaction is bound to one column family. A read-only transaction reads a
+snapshot. A read-write transaction buffers `put`, `delete`, and half-open
+`delete_range` intents until `commit`. Commit validates the configured conflict
+policy and publishes the transaction's writes together. Dropping an uncommitted
+transaction abandons its buffered writes; orderly engine termination requires
+`shutdown(timeout)`.
 
-### Design Philosophy
+Durability is selected per commit: `sync`, `buffered`, `best_effort`,
+`cloud_async`, or `cloud_strict`. The exact crash boundaries are defined in the
+[transaction durability contract](transaction-durability-contract.md).
 
-Midge optimizes for:
+## Boundaries
 
-- **Predictability**: Bounded latency, deterministic behavior, no surprise thread explosions
-- **Auditability**: Every state transition is explicit, loggable, and reproducible
-- **Explicit storage modes**: Clear durability contracts for memory, local, and cloud-backed operation
-- **Embeddability**: Synchronous APIs, explicit control, no hidden background threads
+Midge does not provide a server protocol, multi-process coordination, or a
+stable 1.0 compatibility promise. Cloud setup, credentials, provider behavior,
+and cache-loss recovery must be qualified with the relevant feature and test
+environment before adoption.
 
-## When to Use Midge
-
-**Ideal use cases:**
-
-- State management in distributed system components
-- Embedded in search indexers or stream processors
-- Local materialization for edge/serverless workloads
-- Applications requiring deterministic testability and replay
-- Durable queues or changelogs in message brokers
-- Applications that need deterministic embedded storage semantics
-
-**Choose Midge when you need:**
-
-- Predictable behavior over raw throughput
-- Explicit durability choices for memory, local disk, and cloud-backed storage
-- Explicit control over durability and lifecycle
-- Deterministic state transitions for testing/debugging
-- Synchronous APIs without async/await complexity
-
-## Core Operations
-
-Midge provides standard key-value operations through a transaction API:
-
-- **Point operations**: `get()`, `put()`, `delete()`
-- **Range operations**: `scan()` with prefix/bounds/limits
-- **Bulk operations**: `Transaction::delete_range()` or `Engine::delete_range()` for range tombstones
-- **Transactions**: Multi-operation atomic commits with snapshot-based reads
-
-### Storage Modes
-
-**Memory**
-- No persistence, data lost on shutdown
-- Use for: testing, caching, ephemeral workloads
-
-**Local**
-- Persists to local filesystem
-- Use for: traditional deployments, single-node databases
-
-**Cloud**
-- Uses a local cache plus cloud WAL/SST durability
-- Use for: cloud-backed experiments and environments that need remote recovery state
-
-### Durability Levels
-
-All writes require explicit `WriteOptions`:
-
-| Mode | Guarantee | Latency | Use Case |
-|------|-----------|---------|----------|
-| `sync()` | Local fsync completed before return | Highest | Critical data, financial transactions |
-| `buffered()` | Visible after WAL append; fsync follows later | Lower | General workloads |
-| `best_effort()` | WAL skipped; durable only after flush publication | Lowest | Bulk loads, reloadable data |
-| `cloud_strict()` | Cloud WAL upload acknowledged before return | Cloud-dependent | Cloud-backed commits that must survive local cache loss |
-
-See [durability.md](durability.md) for detailed guarantees and recovery behavior.
-
-## Performance Characteristics
-
-Midge prioritizes **predictability over raw speed**:
-
-- **Write latency**: strongly depends on durability mode and storage backend
-- **Read latency**: dominated by cache warmth, SST layout, and storage mode
-- **Throughput**: workload-dependent; measure with the included benches for your target profile
-- **Cache overhead**: ~10-20% of cache size for metadata
-
-Midge optimizes for predictable behavior and explicitness over raw throughput maximization.
-
-## Configuration
-
-Midge uses smart defaults with automatic parameter derivation:
-
-```rust
-use cntryl_midge::{MidgeEngine, OpenOptions, Goal, MemoryBudget};
-
-// Simple configuration - all tuning parameters derived automatically
-let opts = OpenOptions::local("./my_db")
-    .goal(Goal::Latency)           // Optimize for low latency
-    .memory_budget(MemoryBudget::Auto)  // Use ~50% of available memory
-    .build();
-
-let engine = MidgeEngine::open(opts)?;
-```
-
-**Configuration levels:**
-
-1. **Storage mode** (required): Memory, Local, or Cloud
-2. **Goal** (optional): Latency, Throughput, or Economy
-3. **Memory budget** (optional): Auto or explicit bytes
-4. **Workload profile** (optional): Mixed, WriteHeavy, ReadMostly, RangeScan, TtlHeavy
-
-All low-level parameters (block sizes, memtable sizes, compaction triggers) are derived from these high-level knobs.
-
-See [api-guide.md](api-guide.md) for comprehensive API documentation.
-
-## Observability
-
-Midge exposes comprehensive metrics and state:
-
-- **Runtime metrics**: Sequence number rate, memtable/SST counts, flush/compaction frequency
-- **Read amplification**: SSTs touched per read, L0 overlap patterns, budget violations
-- **WAL metrics**: Upload latency, batch sizes, durability guarantees
-- **Cache metrics**: Hit rates, eviction patterns, size distribution
-
-All configuration is explicit - no hidden magic constants or adaptive tuning.
-
-## Next Steps
-
-- **Quick start**: [quick-start.md](quick-start.md) — 5-minute hello-world
-- **API reference**: [api-guide.md](api-guide.md) — Complete API documentation
-- **Durability**: [durability.md](durability.md) — Recovery guarantees and crash behavior
-- **FAQ**: [faq.md](faq.md) — Common questions and troubleshooting
-- **Performance tuning**: [../operations/performance-tuning.md](../operations/performance-tuning.md) — Optimization guide
-- **Architecture deep-dive**: [../development/the-big-idea.md](../development/the-big-idea.md) — Design philosophy and internals
+Continue with the [quick start](quick-start.md), [API guide](api-guide.md), or
+[documentation hub](../README.md).

@@ -27,12 +27,12 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] Sqrzl `/healthz` responds successfully
 - [ ] Sqrzl provider and provider-engine qualification suites pass
 - [ ] every registered fuzz target completed a bounded smoke run
-- [ ] production contract docs present:
-      `docs/development/one-dot-zero-contract.md`,
+- [ ] current contract docs present:
+      `docs/user-guides/transaction-durability-contract.md`,
       `docs/development/support-matrix.md`,
       `docs/development/format-compatibility.md`,
       `docs/development/release-policy.md`,
-      `docs/operations/production-runbook.md`,
+      `docs/operations/operator-runbook.md`,
       `docs/operations/release-checklist.md`
 - [ ] `cargo run --bin midge -- verify --json tests/fixtures/compatibility/v2_empty_db` validated where applicable
 - [ ] changelog updated

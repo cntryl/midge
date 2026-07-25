@@ -254,6 +254,6 @@ See also:
 
 - [durability.md](durability.md)
 - [api-guide.md](api-guide.md)
-- [../development/one-dot-zero-contract.md](../development/one-dot-zero-contract.md)
+- [../development/stability-policy.md](../development/stability-policy.md)
 - [../development/support-matrix.md](../development/support-matrix.md)
 - [../development/recovery-internals.md](../development/recovery-internals.md)

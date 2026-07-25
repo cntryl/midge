@@ -59,14 +59,14 @@ jobs:
         with:
           shared-key: "qualification"
 
-      - name: Verify production contract docs are present
+      - name: Validate current documentation inventory
         shell: bash
         run: |
-          test -f docs/development/one-dot-zero-contract.md
+          python3 scripts/validate_docs.py
           test -f docs/development/support-matrix.md
           test -f docs/development/format-compatibility.md
           test -f docs/development/release-policy.md
-          test -f docs/operations/production-runbook.md
+          test -f docs/operations/operator-runbook.md
           test -f docs/operations/release-checklist.md
           test -f docs/development/stability-policy.md
           test -f docs/operations/migration-guide.md

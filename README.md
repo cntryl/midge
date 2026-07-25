@@ -1,145 +1,42 @@
 [![CI](https://github.com/cntryl/midge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/cntryl/midge/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/cntryl-midge.svg)](https://crates.io/crates/cntryl-midge)
-[![license](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 # Midge
 
-Midge is an experimental embedded Rust LSM engine for engineers who want to evaluate explicit durability and recovery behavior without standing up a separate database.
+Midge `0.1.0` is an embedded Rust 2021 LSM key-value engine. It uses explicit
+transactions and explicit write durability policies. The crate MSRV is Rust
+`1.97`.
 
-It is not production-ready. The current goal is narrower: make the crate understandable and failure-tested enough that experienced engineers are willing to try it in controlled environments.
+The supported storage constructors are `OpenOptions::in_memory()`,
+`OpenOptions::local(path)`, `OpenOptions::cloud(...)`, and
+`OpenOptions::cloud_simulated(...)`. The real cloud providers are optional,
+pre-1.0 integrations. `CloudSimulated` is a local filesystem simulation for
+cloud lifecycle tests; it is not a cloud service.
+
+Midge is single-process embedded storage. The 0.x API and operational contract
+may change. Cloud-backed production use is not endorsed by this release line.
 
 ## Quick start
 
-```toml
-[dependencies]
-cntryl-midge = "0.1"
-```
-
 ```rust
 use std::time::Duration;
-
-use cntryl_midge::prelude::*;
-use cntryl_midge::Bytes;
+use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 
 let mut engine = Engine::open(OpenOptions::local("./db").build()?)?;
-let cf = engine.create_column_family("cf1")?;
-
+let cf = engine.get_column_family("default").unwrap();
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 tx.put(b"hello".to_vec(), b"world".to_vec(), None)?;
 tx.commit(WriteOptions::sync())?;
-
-let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-let value = tx.get(b"hello")?;
-drop(tx);
-
-engine.shutdown(Duration::from_secs(30))?;
+engine.shutdown(Duration::from_secs(5))?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The release gate compile-checks a complete in-memory walkthrough at
-[`examples/documented_quick_start.rs`](examples/documented_quick_start.rs).
+The executable canonical example is [examples/documented_quick_start.rs](examples/documented_quick_start.rs).
 
-## What Midge Is Good For
+## Reading paths
 
-- evaluating an embedded Rust store with explicit write durability choices
-- local-disk and cloud-backed experiments that use the same API
-- systems work where restart behavior and crash boundaries matter
+- Users: [overview](docs/user-guides/overview.md) → [quick start](docs/user-guides/quick-start.md) → [API guide](docs/user-guides/api-guide.md).
+- Durability: [transaction durability contract](docs/user-guides/transaction-durability-contract.md) → [recovery internals](docs/development/recovery-internals.md).
+- Contributors: [architecture](docs/development/architecture.md) → [invariants](docs/development/storage-invariants.md) → [testing](docs/development/testing.md).
+- Operators: [operator runbook](docs/operations/operator-runbook.md) and [cloud setup](docs/operations/cloud-setup.md).
 
-## What Midge Is Not Claiming Yet
-
-- production readiness
-- stable long-term API guarantees
-- a polished operational story for broad deployment
-
-## Why Evaluate It
-
-- explicit `sync()`, `buffered()`, `best_effort()`, and cloud durability semantics
-- deterministic recovery-oriented tests for WAL, flush, and compaction paths
-- public observability and verification APIs such as `get_recovery_metrics()`, `get_runtime_metrics()`, `get_storage_layout()`, and `verify_storage(timeout)`
-
-## What To Read Before Trying Midge
-
-Use the [documentation reading order](docs/#what-to-read-before-trying-midge) before evaluating Midge. It defines what `commit()` means, how restart recovery works, and which tests back the guarantees.
-
-## Common operations
-
-**Put**
-
-```rust
-let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-tx.put(b"key".to_vec(), b"value".to_vec(), None)?;
-tx.commit(WriteOptions::sync())?;
-```
-
-**Get**
-
-```rust
-let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-let value = tx.get(b"key")?;
-```
-
-**Delete**
-
-```rust
-let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-tx.delete(b"key".to_vec())?;
-tx.commit(WriteOptions::sync())?;
-```
-
-**Delete range**
-
-```rust
-let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-tx.delete_range(b"start".to_vec(), b"end".to_vec())?;
-tx.commit(WriteOptions::sync())?;
-```
-
-**Scan**
-
-```rust
-let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-let query = Query::new().prefix(Bytes::from_static(b"user:"));
-let mut iter = tx.scan(&query)?;
-while let Some((k, v)) = iter.next().transpose()? {
-    println!("{:?} = {:?}", k, v);
-}
-```
-
-## Observability
-
-```rust
-let recovery = engine.get_recovery_metrics()?;
-println!("WAL records replayed: {}", recovery.wal_recovery_records_replayed);
-println!("WAL bytes replayed: {}", recovery.wal_recovery_bytes_replayed);
-println!("Intent replay runs: {}", recovery.intent_log_replay_runs);
-println!("Intent entries replayed: {}", recovery.intent_log_entries_replayed);
-
-let runtime = engine.get_runtime_metrics()?;
-println!("Health: {:?}", runtime.health);
-println!("Current sequence: {}", runtime.current_sequence);
-println!("Write stalled: {}", runtime.write_stalled);
-```
-
-Use these snapshots to confirm what recovery ran at startup and what the runtime is doing now.
-
-## Documentation
-
-- [Full documentation hub](docs/)
-- [Quick start](docs/user-guides/quick-start.md)
-- [API guide](docs/user-guides/api-guide.md)
-- [Transactions and MVCC](docs/transactions-and-mvcc.md)
-- [Stability policy](docs/development/stability-policy.md)
-- [Testing](docs/development/testing.md)
-- [1.0 production contract](docs/development/one-dot-zero-contract.md)
-- [1.0 readiness scorecard](docs/development/one-dot-zero-readiness-scorecard.md)
-- [Support matrix](docs/development/support-matrix.md)
-- [Production runbook](docs/operations/production-runbook.md)
-
-## Current Position
-
-The intended status for Midge right now is:
-
-> Experimental but safe enough for serious engineers to try.
-
-Not:
-
-> Production ready.
+See [docs/README.md](docs/README.md) for the complete current inventory.

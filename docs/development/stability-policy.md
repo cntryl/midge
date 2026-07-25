@@ -9,7 +9,7 @@ Midge is in the 0.1 release line. It is usable for evaluation and targeted deplo
 - Minor version updates in the 0.x line may include API, operational, or on-disk compatibility changes.
 - Patch version updates are intended to be low risk, but the strongest compatibility contract will not exist until 1.0.
 - Public docs should describe guarantees only where there is matching implementation and test coverage.
-- The 1.0 production target is defined in [one-dot-zero-contract.md](one-dot-zero-contract.md), not yet claimed by this release line.
+- The crate is pre-1.0; this policy describes the current 0.x compatibility boundary.
 
 ## What Is Expected To Stay Stable
 
@@ -36,18 +36,7 @@ Before adopting a new version:
 
 Midge docs should not claim production readiness, stability, or durability guarantees that exceed the current tested and documented implementation.
 
-## Path To 1.0
+## Release evidence
 
-The transition to production-stable `1.x` requires:
-
-- a frozen API and format contract
-- compatibility and rollback guidance
-- qualification gates in CI and release workflow
-- operator runbooks and support matrix documentation
-
-See:
-
-- [one-dot-zero-contract.md](one-dot-zero-contract.md)
-- [format-compatibility.md](format-compatibility.md)
-- [release-policy.md](release-policy.md)
-- [../operations/production-runbook.md](../operations/production-runbook.md)
+See [format compatibility](format-compatibility.md), [release policy](release-policy.md),
+the [support matrix](support-matrix.md), and the [operator runbook](../operations/operator-runbook.md).

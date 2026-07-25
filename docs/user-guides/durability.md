@@ -1,35 +1,20 @@
-# Durability Guide
+# Durability
 
-Midge's canonical transaction and write acknowledgment contract lives in
-[transaction-durability-contract.md](transaction-durability-contract.md).
+The [transaction durability contract](transaction-durability-contract.md) is
+the single external source of truth for commit acknowledgement, local WAL
+behavior, cloud upload modes, flush, restart recovery, and shutdown.
 
-Read that page for:
+This page is intentionally only a pointer. If another guide disagrees with the
+contract, treat the contract, Rust API documentation, and recovery tests as the
+authorities.
 
-- what each `WriteOptions` mode waits for before `commit()` returns
-- which modes are local-only and which modes are cloud-only
-- which writes survive restart after local crashes or cloud cache loss
-- how visibility, local durability, cloud durability, and SST publication differ
-- how `RecoveryPolicy::Strict` and `RecoveryPolicy::Salvage` should be interpreted
+For the quick operational summary: `WriteOptions::cloud_async()` returns after
+the local cloud-backed WAL barrier while seal and upload continue;
+`WriteOptions::cloud_strict()` waits for seal and upload. These modes are
+cloud-only, while `sync()` and `buffered()` are local-only. Non-cloud storage rejects
+the cloud modes. Empty cloud-backed transactions still follow the
+same policy validation and acknowledgement path; it does not invent durability.
 
-In particular:
-
-- `WriteOptions::sync()` and `WriteOptions::buffered()` are local-only; cloud-backed storage rejects them.
-- `WriteOptions::cloud_async()` and `WriteOptions::cloud_strict()` are cloud-only. Non-cloud storage rejects them.
-- `WriteOptions::cloud_strict()` is not a stronger local mode. In cloud-backed mode it waits for the runtime to `seal`, rotate, `upload`, and acknowledge the WAL segment covering the committed sequence.
-- Empty cloud-backed `cloud_strict()` transactions are allowed without inventing a WAL record.
-
-## Manifest Journal Sync Boundary
-
-Manifest journal edits and their durability markers are written before one
-required filesystem sync. Midge does not provide a configuration or benchmark
-escape hatch for this durability boundary.
-
-## Verification Reading Order
-
-Before evaluating durability behavior, read:
-
-1. [transaction-durability-contract.md](transaction-durability-contract.md)
-2. [../development/storage-invariants.md](../development/storage-invariants.md)
-3. [../development/architecture.md](../development/architecture.md)
-4. [../development/recovery-internals.md](../development/recovery-internals.md)
-5. [../development/testing.md](../development/testing.md)
+Manifest publication requires one
+required filesystem sync for its durable journal/checkpoint boundary. Midge
+does not provide an escape hatch to skip that sync.

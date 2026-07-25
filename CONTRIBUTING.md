@@ -58,7 +58,7 @@ cargo bench
 Start with these docs:
 
 - [architecture.md](docs/development/architecture.md) - Technical implementation guide
-- [the-big-idea.md](docs/development/the-big-idea.md) - Design philosophy
+- [documentation hub](docs/README.md) - Current documentation inventory
 - [testing.md](docs/development/testing.md) - Testing conventions and workflows
 - [benchmarks.md](docs/development/benchmarks.md) - Benchmarking workflows and rules
 - `.github/copilot-instructions.md` - Development conventions
@@ -185,7 +185,7 @@ common/ → io/ → storage/ → wal/, sst/ → metadata/, iterators/
 - Code review + keeping module boundaries clean
 - CI runs `cargo clippy --all-targets -- -D warnings`, `cargo build`, and `cargo test`
 
-See [architecture.md](docs/architecture.md) for details.
+See [architecture.md](docs/development/architecture.md) for details.
 
 ### Test Naming Convention (Required)
 
