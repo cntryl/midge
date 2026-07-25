@@ -32,7 +32,7 @@ jobs:
           shared-key: "bench"
 
       - name: Install cntryl-tools
-        run: cargo install --git https://github.com/cntryl/tools --rev d36dc1c09462a4fd691ed9fdcc4413eb61f0c80c --locked
+        run: cargo install --git https://github.com/cntryl/tools --rev 1ceecf1a6501793080235d2d46b2982f1424727c --locked
 
       - name: Build all benchmarks
         run: cargo bench --no-run

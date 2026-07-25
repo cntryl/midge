@@ -86,21 +86,20 @@ fn target_matches(pattern: &str, target: &str) -> bool {
 #[test]
 fn should_keep_production_module_size_guard_wired_into_repository_tools() {
     // Arrange
-    let checker = repository_root().join("scripts/check_module_sizes.py");
+    let config = repository_root().join(".cntryl/repository.toml");
     let qualification = read_workflow(".github/workflows/qualification.yml");
 
     // Act
-    let checker_source = fs::read_to_string(&checker)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", checker.display()));
-
     // Assert
-    assert!(checker.is_file(), "module-size checker must be checked in");
-    assert!(checker_source.contains("WARN_LINES = 1_200"));
-    assert!(checker_source.contains("NEW_MODULE_LINES = 1_600"));
-    assert!(checker_source.contains("#[cfg(test)]"));
-    assert!(checker_source.contains("TEMPORARY_ALLOWLIST"));
-    assert!(qualification.contains("scripts/check_module_sizes.py"));
-    assert!(qualification.contains("python3 scripts/check_module_sizes.py"));
+    assert!(config.is_file(), "repository policy must be checked in");
+    let config_source = fs::read_to_string(&config)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", config.display()));
+    assert!(config_source.contains("warn_lines = 1200"));
+    assert!(config_source.contains("max_lines = 1600"));
+    assert!(config_source.contains("src/wal/encoding.rs"));
+    assert!(
+        qualification.contains("cntryl-tools check-module-sizes --config .cntryl/repository.toml")
+    );
 }
 
 #[test]
@@ -344,7 +343,7 @@ fn should_trigger_ci_for_repository_contract_changes() {
 
     // Act
     // Assert
-    for path in ["examples/**", "scripts/**", "fuzz/**"] {
+    for path in ["examples/**", ".cntryl/**", "fuzz/**"] {
         assert_eq!(
             qualification.matches(&format!("\"{path}\"")).count(),
             2,
@@ -538,12 +537,11 @@ fn should_cover_every_fuzz_target_when_scheduled_smokes_run() {
 fn should_validate_benchmark_contract_when_ci_runs() {
     // Arrange
     let qualification = read_workflow(".github/workflows/qualification.yml");
-    let validator = repository_root().join("scripts/validate_benchmark_contract.py");
-
     // Act
     // Assert
-    assert!(validator.is_file());
-    assert!(qualification.contains("scripts/validate_benchmark_contract.py"));
+    assert!(
+        qualification.contains("cntryl-tools validate-benchmarks --config .cntryl/repository.toml")
+    );
 }
 
 #[test]
@@ -566,9 +564,12 @@ fn should_run_repository_qualification_when_ci_runs() {
 
     // Act
     let required_commands = [
-        "cargo install --git https://github.com/cntryl/tools --rev d36dc1c09462a4fd691ed9fdcc4413eb61f0c80c --locked",
+        "cargo install --git https://github.com/cntryl/tools --rev 1ceecf1a6501793080235d2d46b2982f1424727c --locked",
         "cargo install cargo-machete --version 0.9.2 --locked",
         "cntryl-tools validate-tests",
+        "cntryl-tools validate-docs --config .cntryl/repository.toml",
+        "cntryl-tools validate-benchmarks --config .cntryl/repository.toml",
+        "cntryl-tools check-module-sizes --config .cntryl/repository.toml",
         "cargo machete",
         "cargo test --workspace --all-features --doc",
         "cargo check --example documented_quick_start --all-features",

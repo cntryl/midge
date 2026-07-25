@@ -10,12 +10,12 @@ on:
       - "docs/**"
       - "examples/**"
       - "benches/**"
-      - "scripts/**"
       - "fuzz/**"
       - "*.md"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
+      - ".cntryl/**"
       - "src/**"
       - "tests/**"
       - ".github/workflows/qualification.yml"
@@ -25,12 +25,12 @@ on:
       - "docs/**"
       - "examples/**"
       - "benches/**"
-      - "scripts/**"
       - "fuzz/**"
       - "*.md"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
+      - ".cntryl/**"
       - "src/**"
       - "tests/**"
       - ".github/workflows/qualification.yml"
@@ -59,10 +59,15 @@ jobs:
         with:
           shared-key: "qualification"
 
+      - name: Install repository tools
+        run: |
+          cargo install --git https://github.com/cntryl/tools --rev 1ceecf1a6501793080235d2d46b2982f1424727c --locked
+          cargo install cargo-machete --version 0.9.2 --locked
+
       - name: Validate current documentation inventory
         shell: bash
         run: |
-          python3 scripts/validate_docs.py
+          cntryl-tools validate-docs --config .cntryl/repository.toml
           test -f docs/development/support-matrix.md
           test -f docs/development/format-compatibility.md
           test -f docs/development/release-policy.md
@@ -73,21 +78,10 @@ jobs:
           test -f CHANGELOG.md
 
       - name: Validate benchmark contract
-        shell: bash
-        run: |
-          if command -v python3 >/dev/null; then
-            python3 scripts/validate_benchmark_contract.py
-          else
-            python scripts/validate_benchmark_contract.py
-          fi
+        run: cntryl-tools validate-benchmarks --config .cntryl/repository.toml
 
       - name: Check production module sizes
-        run: python3 scripts/check_module_sizes.py
-
-      - name: Install repository tools
-        run: |
-          cargo install --git https://github.com/cntryl/tools --rev d36dc1c09462a4fd691ed9fdcc4413eb61f0c80c --locked
-          cargo install cargo-machete --version 0.9.2 --locked
+        run: cntryl-tools check-module-sizes --config .cntryl/repository.toml
 
       - name: Validate test contracts
         run: cntryl-tools validate-tests

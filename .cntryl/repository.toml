@@ -1,0 +1,56 @@
+[docs]
+required = [
+  "README.md",
+  "CHANGELOG.md",
+  "docs/README.md",
+  "docs/user-guides/overview.md",
+  "docs/user-guides/quick-start.md",
+  "docs/user-guides/api-guide.md",
+  "docs/user-guides/durability.md",
+  "docs/user-guides/transaction-durability-contract.md",
+  "docs/operations/operator-runbook.md",
+  "docs/operations/cloud-setup.md",
+]
+forbidden_paths = [
+  "docs/development/one-dot-zero-contract.md",
+  "docs/development/one-dot-zero-readiness-scorecard.md",
+  "docs/operations/production-runbook.md",
+  "docs/operations/resource-limits.md",
+]
+forbidden_text = [
+  "delete_range(&",
+  "cache_stats",
+  "MidgeError::IoError",
+  "env_logger",
+  "one-dot-zero",
+  "production-runbook.md",
+  "ACID",
+  "Snappy",
+  "rm -rf",
+  "rm -r",
+  "delete the database directory",
+  "delete the lock file",
+]
+
+[benchmarks]
+documentation = [
+  "docs/development/benchmarks.md",
+  "docs/development/performance-targets.md",
+  "docs/operations/performance-tuning.md",
+]
+workflow = ".github/workflows/bench.yml"
+not_pr_gate_phrase = "pull-request performance gate"
+
+[module_sizes]
+warn_lines = 1200
+max_lines = 1600
+allowlist = [
+  "src/metadata/journal.rs",
+  "src/sst/types.rs",
+  "src/storage/cloud/mod.rs",
+  "src/storage/providers/azure.rs",
+  "src/storage/providers/gcs.rs",
+  "src/storage/providers/s3.rs",
+  "src/wal/encoding.rs",
+]
+legacy_allowlist = []

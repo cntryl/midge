@@ -12,7 +12,7 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] `cargo test --workspace --all-features --doc`
 - [ ] `cargo check --example documented_quick_start --all-features`
 - [ ] `cargo machete`
-- [ ] `python3 scripts/validate_benchmark_contract.py`
+- [ ] `cntryl-tools validate-benchmarks --config .cntryl/repository.toml`
 - [ ] `cargo package --locked`
 - [ ] `docker build --file Dockerfile.tests --tag midge-tests:release .`
 - [ ] `cargo test --test external_adopter_smoke --features failpoints`
