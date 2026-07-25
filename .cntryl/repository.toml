@@ -39,7 +39,7 @@ documentation = [
   "docs/operations/performance-tuning.md",
 ]
 workflow = ".github/workflows/bench.yml"
-not_pr_gate_phrase = "pull-request performance gate"
+not_pr_gate_phrase = "not a pull-request performance gate"
 
 [module_sizes]
 warn_lines = 1200
