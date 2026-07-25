@@ -63,11 +63,13 @@ impl FileSystem {
     pub fn new<P: AsRef<Path>>(base_path: P) -> MidgeResult<Self> {
         let path = base_path.as_ref().to_path_buf();
         fs::create_dir_all(&path)?; // Ensure base dir exists
-        Ok(Self { base_path: path })
+        Ok(Self {
+            base_path: fs::canonicalize(path)?,
+        })
     }
 
     /// Compute a sanitized full path for a given key.
-    fn full_path(&self, key: &str) -> PathBuf {
+    fn full_path(&self, key: &str) -> Result<PathBuf, String> {
         // Prevent absolute paths or path traversal outside the base directory.
         // Treat the key as a relative, forward-slash-friendly path.
         let mut out = self.base_path.clone();
@@ -80,7 +82,33 @@ impl FileSystem {
                 | Component::Prefix(_) => {}
             }
         }
-        out
+        let relative = out
+            .strip_prefix(&self.base_path)
+            .map_err(|error| format!("storage path escaped base directory: {error}"))?;
+        let mut current = self.base_path.clone();
+        for component in relative.components() {
+            let Component::Normal(part) = component else {
+                continue;
+            };
+            current.push(part);
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(format!(
+                        "storage path contains a symlink: {}",
+                        current.display()
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => {
+                    return Err(format!(
+                        "inspect storage path component {}: {error}",
+                        current.display()
+                    ));
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn acquire_process_lock(&self, full_path: &Path) -> Result<ProcessMutationLock, String> {
@@ -172,7 +200,16 @@ fn create_file_new_with_parents(full_path: &Path, data: &[u8]) -> StorageOutcome
 
 impl StorageBackend for FileSystem {
     fn submit_read(&self, key: &str, callback: StorageCallback) {
-        let full_path = self.full_path(key);
+        let full_path = match self.full_path(key) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::ReadComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
 
         let outcome = match fs::read(&full_path) {
             Ok(bytes) => StorageOutcome::Ok(bytes),
@@ -186,7 +223,16 @@ impl StorageBackend for FileSystem {
     }
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
-        let full_path = self.full_path(key);
+        let full_path = match self.full_path(key) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::WriteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
         let _lock = mutation_lock(&full_path);
         let _process_lock = match self.acquire_process_lock(&full_path) {
             Ok(lock) => lock,
@@ -234,7 +280,16 @@ impl StorageBackend for FileSystem {
             return;
         }
 
-        let full_path = self.full_path(key);
+        let full_path = match self.full_path(key) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::WriteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
         let if_none_match = headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("if-none-match"))
@@ -284,7 +339,16 @@ impl StorageBackend for FileSystem {
     }
 
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
-        let full_path = self.full_path(key);
+        let full_path = match self.full_path(key) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::DeleteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
         let _lock = mutation_lock(&full_path);
         let _process_lock = match self.acquire_process_lock(&full_path) {
             Ok(lock) => lock,
@@ -319,7 +383,16 @@ impl StorageBackend for FileSystem {
             return;
         }
 
-        let full_path = self.full_path(key);
+        let full_path = match self.full_path(key) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::DeleteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
         let _lock = mutation_lock(&full_path);
         let _process_lock = match self.acquire_process_lock(&full_path) {
             Ok(lock) => lock,
@@ -369,7 +442,16 @@ impl StorageBackend for FileSystem {
 
     #[cfg(test)]
     fn submit_list(&self, prefix: &str, callback: StorageCallback) {
-        let full = self.full_path(prefix);
+        let full = match self.full_path(prefix) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::ListComplete {
+                    prefix: prefix.to_string(),
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
 
         let outcome = if full.is_dir() {
             match fs::read_dir(&full) {
@@ -1063,6 +1145,28 @@ mod tests {
             }
             _ => panic!("Expected WriteComplete"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_reject_write_through_symlinked_parent() {
+        // Arrange
+        let temp_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(outside_dir.path(), temp_dir.path().join("link")).unwrap();
+        let fs = FileSystem::new(temp_dir.path()).unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        // Act
+        fs.submit_write("link/escaped.txt", b"must stay inside".to_vec(), tx);
+        let event = rx.recv().unwrap();
+
+        // Assert
+        match event {
+            StorageEvent::WriteComplete { result, .. } => assert!(result.is_err()),
+            _ => panic!("Expected WriteComplete"),
+        }
+        assert!(!outside_dir.path().join("escaped.txt").exists());
     }
 
     #[test]
