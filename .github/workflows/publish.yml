@@ -35,10 +35,13 @@ jobs:
         with:
           shared-key: "release-gate"
 
+      - name: Install cntryl-tools
+        run: cargo install --git https://github.com/cntryl/tools --rev 1ceecf1a6501793080235d2d46b2982f1424727c --locked
+
       - name: Validate current documentation inventory
         shell: bash
         run: |
-          python3 scripts/validate_docs.py
+          cntryl-tools validate-docs --config .cntryl/repository.toml
           test -f docs/development/support-matrix.md
           test -f docs/development/format-compatibility.md
           test -f docs/development/release-policy.md
@@ -47,9 +50,6 @@ jobs:
           test -f docs/development/stability-policy.md
           test -f docs/operations/migration-guide.md
           test -f CHANGELOG.md
-
-      - name: Install cntryl-tools
-        run: cargo install --git https://github.com/cntryl/tools --rev d36dc1c09462a4fd691ed9fdcc4413eb61f0c80c --locked
 
       - name: Install cargo-machete
         run: cargo install cargo-machete --version 0.9.2 --locked

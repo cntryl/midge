@@ -48,12 +48,12 @@ Stress artifacts are written under `target/stress/{suite}/` as `latest.json`,
 ## Automation Contract
 
 The `Bench` GitHub Actions workflow runs every benchmark target registered in
-`Cargo.toml`. It is started manually with `workflow_dispatch`. It is not a
-pull-request performance gate. Normal CI compiles benchmark targets through its
+`Cargo.toml`. It is started manually with `workflow_dispatch`. It is not a pull-request performance gate. Normal CI compiles benchmark targets through its
 `--all-targets` checks, but does not execute timed benchmark rows.
 
 Benchmark commands in this document and the performance-target document are
-validated against Cargo metadata by `scripts/validate_benchmark_contract.py`.
+validated against Cargo metadata by `cntryl-tools validate-benchmarks` using
+`.cntryl/repository.toml`.
 The same validator checks that the workflow's tier patterns cover every
 registered benchmark. Add a target to `Cargo.toml` before advertising it here.
 
