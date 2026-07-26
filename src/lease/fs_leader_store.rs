@@ -262,10 +262,41 @@ impl FsLeaderStore {
     where
         F: FnOnce(Option<&LeaderRecord>) -> Result<(), LeaseError>,
     {
+        self.acquire_leadership_after_validation_and_publish(
+            holder_id,
+            validate_current,
+            |_| Ok(()),
+        )
+    }
+
+    pub(crate) fn acquire_leadership_after_validation_and_publish<V, P>(
+        &self,
+        holder_id: &str,
+        validate_current: V,
+        publish: P,
+    ) -> Result<LeaderRecord, LeaseError>
+    where
+        V: FnOnce(Option<&LeaderRecord>) -> Result<(), LeaseError>,
+        P: FnOnce(&LeaderRecord) -> Result<(), LeaseError>,
+    {
         let _lock = self.acquire_lock(holder_id)?;
         let current = self.read_current()?;
         validate_current(current.as_ref())?;
-        self.acquire_inner(holder_id)
+        let record = self.acquire_inner(holder_id)?;
+        publish(&record)?;
+        Ok(record)
+    }
+
+    pub(crate) fn with_exclusive_lock<T, F>(
+        &self,
+        holder_id: &str,
+        operation: F,
+    ) -> Result<T, LeaseError>
+    where
+        F: FnOnce() -> Result<T, LeaseError>,
+    {
+        let _lock = self.acquire_lock(holder_id)?;
+        operation()
     }
 
     /// Refresh the leader record's `acquired_at` timestamp without changing
