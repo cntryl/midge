@@ -167,7 +167,7 @@ impl Fs for RealFs {
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         let full = self.full_path(path)?;
-        fs::remove_file(&full).map_err(|e| io_err("remove_file", &full, &e))
+        fs::remove_file(&full).map_err(|error| file_op_err("remove_file", &full, &error))
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -181,7 +181,7 @@ impl Fs for RealFs {
 
     fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
         let full = self.full_path(path)?;
-        let meta = fs::metadata(&full).map_err(|e| io_err("metadata", &full, &e))?;
+        let meta = fs::metadata(&full).map_err(|error| file_op_err("metadata", &full, &error))?;
         Ok(Metadata { len: meta.len() })
     }
 
@@ -509,6 +509,15 @@ fn io_err(op: &str, path: &Path, e: &io::Error) -> FsError {
     FsError::Io(format!("{op} {}: {e}", path.display()))
 }
 
+fn file_op_err(op: &str, path: &Path, error: &io::Error) -> FsError {
+    let message = format!("{op} {}: {error}", path.display());
+    match error.kind() {
+        io::ErrorKind::NotFound => FsError::NotFound(message),
+        io::ErrorKind::AlreadyExists => FsError::AlreadyExists(message),
+        _ => FsError::Io(message),
+    }
+}
+
 #[cfg(unix)]
 fn read_exact_at_unix(file: &fs::File, mut offset: u64, mut dst: &mut [u8]) -> FsResult<()> {
     use std::os::unix::fs::FileExt;
@@ -729,6 +738,34 @@ mod tests {
                 truncate: false,
             },
         );
+
+        // Assert
+        assert!(matches!(result, Err(FsError::NotFound(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn should_classify_missing_metadata_as_not_found() -> FsResult<()> {
+        // Arrange
+        let temp = TempDir::new().map_err(|error| FsError::Io(error.to_string()))?;
+        let fs = RealFs::new(temp.path())?;
+
+        // Act
+        let result = fs.metadata(&FsPath::new("missing.txt"));
+
+        // Assert
+        assert!(matches!(result, Err(FsError::NotFound(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn should_classify_missing_removal_as_not_found() -> FsResult<()> {
+        // Arrange
+        let temp = TempDir::new().map_err(|error| FsError::Io(error.to_string()))?;
+        let fs = RealFs::new(temp.path())?;
+
+        // Act
+        let result = fs.remove_file(&FsPath::new("missing.txt"));
 
         // Assert
         assert!(matches!(result, Err(FsError::NotFound(_))));

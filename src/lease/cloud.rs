@@ -977,6 +977,19 @@ mod tests {
         assert!(!lease_file_exists(&cache_path));
     }
 
+    #[test]
+    fn should_allow_removing_missing_simulated_lease() {
+        // Arrange
+        let cache_path = temp_cache_path();
+        let lease = CloudStorageLease::new(test_config(), cache_path);
+
+        // Act
+        let result = lease.remove_lease_file();
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
     #[cfg(unix)]
     #[test]
     fn should_reject_simulated_lease_read_through_symlink() {
