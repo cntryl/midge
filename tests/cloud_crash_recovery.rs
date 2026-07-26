@@ -328,10 +328,12 @@ fn clear_crashed_process_acquisition_lock(db_path: &Path) {
     // The child can abort between create_new and writing the lock payload, so
     // the harness cannot rely on its fields here. Removing the lock preserves
     // production's fail-closed handling while simulating the crash timeout.
-    match std::fs::remove_file(lock_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => panic!("remove crashed process acquisition lock: {error}"),
+    if let Err(error) = std::fs::remove_file(lock_path) {
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "remove crashed process acquisition lock: {error}"
+        );
     }
 }
 
