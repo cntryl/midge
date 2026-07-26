@@ -39,7 +39,7 @@ fn should_abort_in_child_process_when_cloud_crash_scenario_requested() {
 }
 
 #[test]
-fn should_expire_acquisition_lock_when_simulating_crash_timeout() {
+fn should_clear_acquisition_lock_when_simulating_crash_timeout() {
     // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
@@ -58,9 +58,27 @@ fn should_expire_acquisition_lock_when_simulating_crash_timeout() {
     expire_crashed_process_lease(db_path);
 
     // Assert
-    let lock =
-        std::fs::read_to_string(db_path.join(".midge_leader.lock")).expect("read acquisition lock");
-    assert!(lock.contains("created_at=1970-01-01T00:00:00Z"));
+    assert!(!db_path.join(".midge_leader.lock").exists());
+    let _reopened = open_cloud_engine(db_path, None);
+}
+
+#[test]
+fn should_clear_incomplete_acquisition_lock_when_crashed_child_has_exited() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    std::fs::write(
+        db_path.join("midge_primary_lease.json"),
+        "holder_id: crashed@host\nowner_token: lease-token\nacquired_at: 2026-07-26T11:00:00Z\nexpires_at: 2026-07-26T11:00:30Z\n",
+    )
+    .expect("write lease record");
+    std::fs::write(db_path.join(".midge_leader.lock"), []).expect("write incomplete lock");
+
+    // Act
+    expire_crashed_process_lease(db_path);
+
+    // Assert
+    assert!(!db_path.join(".midge_leader.lock").exists());
     let _reopened = open_cloud_engine(db_path, None);
 }
 
@@ -281,10 +299,6 @@ fn expire_crashed_process_lease(db_path: &Path) {
     }
 
     let mut content = std::fs::read_to_string(&lease_path).expect("read lease record");
-    let crashed_holder_id = content
-        .lines()
-        .find_map(|line| line.strip_prefix("holder_id: "))
-        .map(str::to_string);
     if content.contains("acquired_at: ") || content.contains("expires_at: ") {
         content = content
             .lines()
@@ -303,47 +317,21 @@ fn expire_crashed_process_lease(db_path: &Path) {
         std::fs::write(&lease_path, content).expect("rewrite lease record as stale");
     }
 
-    if let Some(crashed_holder_id) = crashed_holder_id {
-        expire_crashed_process_acquisition_lock(db_path, &crashed_holder_id);
-    }
+    clear_crashed_process_acquisition_lock(db_path);
 }
 
-fn expire_crashed_process_acquisition_lock(db_path: &Path, crashed_holder_id: &str) {
+fn clear_crashed_process_acquisition_lock(db_path: &Path) {
     let lock_path = db_path.join(".midge_leader.lock");
-    if !lock_path.exists() {
-        return;
+    // The crash-recovery callers wait for the isolated child process to exit
+    // before reaching this helper. The child can abort between create_new and
+    // writing the lock payload, so the harness cannot rely on its fields here.
+    // Removing that proven-orphaned test lock preserves production's fail-closed
+    // handling for malformed locks while simulating the elapsed crash timeout.
+    match std::fs::remove_file(lock_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("remove crashed process acquisition lock: {error}"),
     }
-
-    let mut content = std::fs::read_to_string(&lock_path).expect("read acquisition lock");
-    let belongs_to_crashed_holder = content
-        .lines()
-        .find_map(|line| line.strip_prefix("holder_id="))
-        == Some(crashed_holder_id);
-    let has_owner_token = content
-        .lines()
-        .find_map(|line| line.strip_prefix("owner_token="))
-        .is_some_and(|value| !value.is_empty());
-    let has_valid_timestamp = content
-        .lines()
-        .find_map(|line| line.strip_prefix("created_at="))
-        .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok());
-    if !belongs_to_crashed_holder || !has_owner_token || !has_valid_timestamp {
-        return;
-    }
-
-    content = content
-        .lines()
-        .map(|line| {
-            if line.starts_with("created_at=") {
-                "created_at=1970-01-01T00:00:00Z".to_string()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    content.push('\n');
-    std::fs::write(lock_path, content).expect("rewrite acquisition lock as stale");
 }
 
 fn reset_dir(dir: &Path) {
