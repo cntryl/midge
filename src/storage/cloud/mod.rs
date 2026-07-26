@@ -30,6 +30,13 @@
     feature = "cloud-oci"
 ))]
 pub mod executor;
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-azure",
+    feature = "cloud-gcp",
+    feature = "cloud-oci"
+))]
+mod list_budget;
 
 use super::{StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome};
 #[cfg(test)]
@@ -47,6 +54,13 @@ use std::sync::Arc;
     feature = "cloud-oci"
 ))]
 pub use executor::{CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-azure",
+    feature = "cloud-gcp",
+    feature = "cloud-oci"
+))]
+pub(crate) use list_budget::CloudListBudget;
 
 /// Cloud operation outcome sent across the callback boundary.
 pub type CloudOutcome<T> = Result<T, String>;
