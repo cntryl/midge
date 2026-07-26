@@ -79,6 +79,9 @@ pub const MIN_COMPRESS_SIZE: usize = 256;
 /// Maximum block size after compression
 pub const MAX_BLOCK_SIZE: usize = 64 * 1024;
 
+/// Hard ceiling for decompressed data from one persisted block.
+pub const MAX_DECOMPRESSED_BLOCK_SIZE: usize = 64 * 1024 * 1024;
+
 /// Block trailer size (`compression_type` + crc32c)
 pub const BLOCK_TRAILER_SIZE: usize = 5;
 
@@ -268,6 +271,15 @@ pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult
         CompressionAlgo::None => Ok(Bytes::copy_from_slice(compressed)),
 
         CompressionAlgo::Lz4 => {
+            if compressed.len() < 4 {
+                return Err(crate::common::MidgeError::Corruption(
+                    "LZ4 block is missing its size prefix".to_string(),
+                ));
+            }
+            let declared_size =
+                u32::from_le_bytes([compressed[0], compressed[1], compressed[2], compressed[3]])
+                    as usize;
+            enforce_decompressed_size(declared_size, "LZ4")?;
             let decompressed = lz4_flex::decompress_size_prepended(compressed).map_err(|e| {
                 crate::common::MidgeError::Corruption(format!("LZ4 decompression failed: {e}"))
             })?;
@@ -281,11 +293,14 @@ pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult
             // so use it as the bound and keep MAX_BLOCK_SIZE as the fallback for
             // external frames without a declared size.
             let max_decompressed_size = match zstd::zstd_safe::get_frame_content_size(compressed) {
-                Ok(Some(size)) => usize::try_from(size).map_err(|_| {
-                    crate::common::MidgeError::Corruption(format!(
-                        "Zstd frame content size {size} exceeds addressable memory"
-                    ))
-                })?,
+                Ok(Some(size)) => {
+                    let size = usize::try_from(size).map_err(|_| {
+                        crate::common::MidgeError::Corruption(format!(
+                            "Zstd frame content size {size} exceeds addressable memory"
+                        ))
+                    })?;
+                    enforce_decompressed_size(size, "Zstd")?
+                }
                 Ok(None) => MAX_BLOCK_SIZE,
                 Err(err) => {
                     return Err(crate::common::MidgeError::Corruption(format!(
@@ -307,6 +322,15 @@ pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult
             )))
         }
     }
+}
+
+fn enforce_decompressed_size(size: usize, algorithm: &str) -> MidgeResult<usize> {
+    if size > MAX_DECOMPRESSED_BLOCK_SIZE {
+        return Err(crate::common::MidgeError::Corruption(format!(
+            "{algorithm} declared output size {size} exceeds {MAX_DECOMPRESSED_BLOCK_SIZE} byte limit"
+        )));
+    }
+    Ok(size.max(MAX_BLOCK_SIZE))
 }
 
 /// Compress block data and append a trailer (`[compressed_data][algo:u8][crc32c:u32 LE]`).
@@ -1087,6 +1111,36 @@ mod tests {
 
         // Assert
         assert!(!compressed.is_empty());
+    }
+
+    #[test]
+    fn should_reject_lz4_block_with_oversized_declared_output() {
+        // Arrange
+        let declared_size = u32::try_from(MAX_DECOMPRESSED_BLOCK_SIZE + 1).unwrap();
+        let mut forged = declared_size.to_le_bytes().to_vec();
+        forged.extend_from_slice(&[0_u8; 4]);
+
+        // Act
+        let result = decompress_block(&forged, CompressionAlgo::Lz4);
+
+        // Assert
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::Corruption(message)) if message.contains("exceeds"))
+        );
+    }
+
+    #[test]
+    fn should_reject_zstd_block_with_oversized_declared_output() {
+        // Arrange
+        let declared_size = MAX_DECOMPRESSED_BLOCK_SIZE + 1;
+
+        // Act
+        let result = enforce_decompressed_size(declared_size, "Zstd");
+
+        // Assert
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::Corruption(message)) if message.contains("exceeds"))
+        );
     }
 
     // ====================== decompress_block Tests ======================

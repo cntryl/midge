@@ -37,6 +37,8 @@ impl RealFs {
     pub fn new(base_path: impl AsRef<Path>) -> FsResult<Self> {
         let path = base_path.as_ref().to_path_buf();
         fs::create_dir_all(&path).map_err(|e| io_err("create_dir_all", &path, &e))?;
+        let path =
+            fs::canonicalize(path).map_err(|e| io_err("canonicalize", base_path.as_ref(), &e))?;
         Ok(Self { base_path: path })
     }
 
@@ -57,6 +59,8 @@ impl RealFs {
                 path.display()
             )));
         }
+        let path =
+            fs::canonicalize(path).map_err(|e| io_err("canonicalize", base_path.as_ref(), &e))?;
         Ok(Self { base_path: path })
     }
 
@@ -65,7 +69,7 @@ impl RealFs {
     /// Current policy (drop-in compatible with your tests):
     /// - keeps `Normal` components
     /// - ignores `.` and any attempts to traverse (`..`, roots, prefixes)
-    fn full_path(&self, rel: &FsPath) -> PathBuf {
+    fn full_path(&self, rel: &FsPath) -> FsResult<PathBuf> {
         let mut out = self.base_path.clone();
         for component in Path::new(&rel.0).components() {
             match component {
@@ -76,7 +80,28 @@ impl RealFs {
                 | Component::Prefix(_) => {}
             }
         }
-        out
+        let relative = out
+            .strip_prefix(&self.base_path)
+            .map_err(|error| FsError::Io(format!("filesystem path escaped root: {error}")))?;
+        let mut current = self.base_path.clone();
+        for component in relative.components() {
+            let Component::Normal(part) = component else {
+                continue;
+            };
+            current.push(part);
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(FsError::Io(format!(
+                        "filesystem path contains a symlink: {}",
+                        current.display()
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                Err(error) => return Err(io_err("symlink_metadata", &current, &error)),
+            }
+        }
+        Ok(out)
     }
 
     /// Best-effort parent directory extraction for directory fsync barriers.
@@ -93,7 +118,7 @@ impl RealFs {
         // Forward to the `Fs`-level implementation so the code is colocated and
         // reusable when `RealFs` is used as a backend for in-memory tests.
         // Note: this helper returns a `'static` file handle.
-        let full = self.full_path(path);
+        let full = self.full_path(path)?;
 
         if opts.create || opts.create_new {
             if let Some(parent) = Self::parent_dir(&full) {
@@ -141,12 +166,12 @@ impl Fs for RealFs {
     }
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
-        let full = self.full_path(path);
+        let full = self.full_path(path)?;
         fs::remove_file(&full).map_err(|e| io_err("remove_file", &full, &e))
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        let full = self.full_path(path);
+        let full = self.full_path(path)?;
         match fs::metadata(&full) {
             Ok(_) => Ok(true),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -155,18 +180,18 @@ impl Fs for RealFs {
     }
 
     fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        let full = self.full_path(path);
+        let full = self.full_path(path)?;
         let meta = fs::metadata(&full).map_err(|e| io_err("metadata", &full, &e))?;
         Ok(Metadata { len: meta.len() })
     }
 
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
-        let full = self.full_path(path);
+        let full = self.full_path(path)?;
         fs::create_dir_all(&full).map_err(|e| io_err("create_dir_all", &full, &e))
     }
 
     fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        let full = self.full_path(path);
+        let full = self.full_path(path)?;
         let entries = fs::read_dir(&full)
             .map_err(|e| io_err("read_dir", &full, &e))?
             .map(|entry| {
@@ -183,7 +208,7 @@ impl Fs for RealFs {
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
-        let full = self.full_path(path);
+        let full = self.full_path(path)?;
         fs::remove_dir_all(&full).map_err(|e| io_err("remove_dir_all", &full, &e))
     }
 
@@ -192,7 +217,7 @@ impl Fs for RealFs {
             return Ok(());
         }
 
-        let full = self.full_path(path);
+        let full = self.full_path(path)?;
 
         // Unix: directory fsync barrier.
         #[cfg(unix)]
@@ -232,8 +257,8 @@ impl Fs for RealFs {
     }
 
     fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
-        let from_full = self.full_path(from);
-        let to_full = self.full_path(to);
+        let from_full = self.full_path(from)?;
+        let to_full = self.full_path(to)?;
 
         // Ensure destination parent exists (helps callers that assume it).
         if let Some(parent) = Self::parent_dir(&to_full) {
@@ -637,6 +662,33 @@ mod tests {
         // Assert
         // File should be in temp dir, not parent
         assert!(fs.exists(&FsPath::new("escape.txt"))?);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_reject_open_through_symlinked_parent() -> FsResult<()> {
+        // Arrange
+        let temp = TempDir::new().map_err(|e| FsError::Io(e.to_string()))?;
+        let outside = TempDir::new().map_err(|e| FsError::Io(e.to_string()))?;
+        std::os::unix::fs::symlink(outside.path(), temp.path().join("link"))
+            .map_err(|e| FsError::Io(e.to_string()))?;
+        let fs = RealFs::new(temp.path())?;
+
+        // Act
+        let result = fs.open(
+            &FsPath::new("link/escaped.txt"),
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: false,
+            },
+        );
+
+        // Assert
+        assert!(result.is_err());
+        assert!(!outside.path().join("escaped.txt").exists());
         Ok(())
     }
 

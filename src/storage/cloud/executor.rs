@@ -6,6 +6,7 @@ use std::time::Duration;
 
 const MAX_TRANSIENT_RETRIES: u32 = 3;
 const TRANSIENT_BACKOFF_BASE_MS: u64 = 50;
+pub(crate) const MAX_CLOUD_RESPONSE_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Represents a generic HTTP request issued by cloud providers.
 #[derive(Clone)]
@@ -222,7 +223,7 @@ impl CloudExecutor {
         }
 
         match builder.send().await {
-            Ok(resp) => {
+            Ok(mut resp) => {
                 let status = resp.status().as_u16();
                 let headers = resp
                     .headers()
@@ -230,18 +231,49 @@ impl CloudExecutor {
                     .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
                     .collect::<Vec<_>>();
 
-                match resp.bytes().await {
-                    Ok(bytes) => Ok(CloudResponse {
-                        status,
-                        headers,
-                        body: bytes.to_vec(),
-                    }),
-                    Err(err) => Err(RequestError::permanent(format!("cloud body error: {err}"))),
+                if resp.content_length().is_some_and(|length| {
+                    length > u64::try_from(MAX_CLOUD_RESPONSE_BYTES).unwrap_or(u64::MAX)
+                }) {
+                    return Err(RequestError::permanent(format!(
+                        "cloud response exceeds {MAX_CLOUD_RESPONSE_BYTES} byte limit"
+                    )));
                 }
+
+                let mut body = Vec::new();
+                while let Some(chunk) = resp
+                    .chunk()
+                    .await
+                    .map_err(|err| RequestError::permanent(format!("cloud body error: {err}")))?
+                {
+                    append_bounded_response_chunk(&mut body, &chunk, MAX_CLOUD_RESPONSE_BYTES)
+                        .map_err(RequestError::permanent)?;
+                }
+
+                Ok(CloudResponse {
+                    status,
+                    headers,
+                    body,
+                })
             }
             Err(err) => Err(RequestError::from_reqwest(&err)),
         }
     }
+}
+
+fn append_bounded_response_chunk(
+    body: &mut Vec<u8>,
+    chunk: &[u8],
+    max_size: usize,
+) -> Result<(), String> {
+    let next_len = body
+        .len()
+        .checked_add(chunk.len())
+        .ok_or_else(|| format!("cloud response exceeds {max_size} byte limit"))?;
+    if next_len > max_size {
+        return Err(format!("cloud response exceeds {max_size} byte limit"));
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
 }
 
 struct RequestError {
@@ -285,5 +317,23 @@ impl Drop for CloudExecutor {
             // Multiple references exist - runtime will cleanup when last ref drops
             tracing::debug!("CloudExecutor dropping with shared runtime reference");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_bounded_response_chunk;
+
+    #[test]
+    fn should_reject_cloud_response_chunk_past_limit() {
+        // Arrange
+        let mut body = vec![0_u8; 4];
+
+        // Act
+        let result = append_bounded_response_chunk(&mut body, &[1, 2], 5);
+
+        // Assert
+        assert!(result.is_err());
+        assert_eq!(body.len(), 4);
     }
 }
