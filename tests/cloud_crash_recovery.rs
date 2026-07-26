@@ -322,11 +322,12 @@ fn expire_crashed_process_lease(db_path: &Path) {
 
 fn clear_crashed_process_acquisition_lock(db_path: &Path) {
     let lock_path = db_path.join(".midge_leader.lock");
-    // The crash-recovery callers wait for the isolated child process to exit
-    // before reaching this helper. The child can abort between create_new and
-    // writing the lock payload, so the harness cannot rely on its fields here.
-    // Removing that proven-orphaned test lock preserves production's fail-closed
-    // handling for malformed locks while simulating the elapsed crash timeout.
+    // The end-to-end crash path waits for its isolated child process to exit;
+    // the focused tests above invoke this helper directly to model that state.
+    // Because every call uses a private test directory, its lock is orphaned.
+    // The child can abort between create_new and writing the lock payload, so
+    // the harness cannot rely on its fields here. Removing the lock preserves
+    // production's fail-closed handling while simulating the crash timeout.
     match std::fs::remove_file(lock_path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
