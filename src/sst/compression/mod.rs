@@ -1131,8 +1131,11 @@ mod tests {
 
     #[test]
     fn should_reject_zstd_block_with_oversized_declared_output() {
-        // Arrange / Act
-        let result = enforce_decompressed_size(MAX_DECOMPRESSED_BLOCK_SIZE + 1, "Zstd");
+        // Arrange
+        let declared_size = MAX_DECOMPRESSED_BLOCK_SIZE + 1;
+
+        // Act
+        let result = enforce_decompressed_size(declared_size, "Zstd");
 
         // Assert
         assert!(
