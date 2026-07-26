@@ -8,8 +8,8 @@
 //! - All operations routed through the same `CloudBackend` trait as S3
 
 use super::super::cloud::{
-    CloudBackend, CloudCallback, CloudEvent, CloudExecutor, CloudOutcome, CloudRequest,
-    CloudResponse, CloudSigner, ObjectMetadata,
+    CloudBackend, CloudCallback, CloudEvent, CloudExecutor, CloudListBudget, CloudOutcome,
+    CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
 };
 use crate::common::{MidgeError, MidgeResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as Base64Engine};
@@ -707,6 +707,7 @@ struct AzureListState {
     sas_token: Option<String>,
     marker: Option<String>,
     items: Vec<String>,
+    budget: CloudListBudget,
 }
 
 impl AzureListState {
@@ -853,6 +854,7 @@ impl CloudBackend for AzureBackend {
             sas_token: self.sas_token.clone(),
             marker: None,
             items: Vec::new(),
+            budget: CloudListBudget::default(),
         };
         self.executor.spawn_request_loop(
             state,
@@ -867,11 +869,14 @@ impl CloudBackend for AzureBackend {
                     )));
                 }
                 let body = String::from_utf8_lossy(&resp.body);
-                state.items.extend(extract_xml_tag_values(&body, "Name"));
-                state.marker = extract_xml_tag_values(&body, "NextMarker")
+                let page_items = extract_xml_tag_values(&body, "Name");
+                let marker = extract_xml_tag_values(&body, "NextMarker")
                     .into_iter()
                     .next()
                     .filter(|marker| !marker.is_empty());
+                state.budget.record_page(&page_items, marker.as_deref())?;
+                state.items.extend(page_items);
+                state.marker = marker;
                 Ok(state.marker.is_some())
             },
             |ctx, result| match result {
@@ -1541,11 +1546,41 @@ impl CloudSigner for ManagedIdentitySigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::providers::test_support::{
+        receive_list_result, spawn_scripted_http_server,
+    };
     use std::sync::{Mutex, OnceLock};
 
     fn azure_client_id_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn should_reject_repeated_azure_list_marker() {
+        // Arrange
+        let repeated_page = "<EnumerationResults><Blobs><Blob><Name>sst/a.sst</Name></Blob></Blobs><NextMarker>repeat</NextMarker></EnumerationResults>";
+        let final_page =
+            "<EnumerationResults><Blobs></Blobs><NextMarker></NextMarker></EnumerationResults>";
+        let server = spawn_scripted_http_server(vec![
+            repeated_page.to_string(),
+            repeated_page.to_string(),
+            final_page.to_string(),
+        ]);
+        let backend = AzureBackend::new(
+            "account".into(),
+            "container".into(),
+            Some(AzureEndpoint::PathStyleBase(server.endpoint.clone())),
+            None,
+            CloudExecutor::new(None).unwrap(),
+        );
+
+        // Act
+        let error = receive_list_result(&backend).expect_err("repeated marker should fail LIST");
+
+        // Assert
+        assert!(error.contains("repeated continuation token"), "{error}");
+        assert_eq!(server.finish(), 2);
     }
 
     // =========== AzureCredential Tests ===========

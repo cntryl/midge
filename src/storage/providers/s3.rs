@@ -8,7 +8,8 @@
 //! - Any other S3-compatible service
 
 use super::super::cloud::{
-    CloudBackend, CloudExecutor, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
+    CloudBackend, CloudExecutor, CloudListBudget, CloudRequest, CloudResponse, CloudSigner,
+    ObjectMetadata,
 };
 use super::super::cloud::{CloudCallback, CloudEvent, CloudOutcome};
 use crate::common::{MidgeError, MidgeResult};
@@ -767,6 +768,7 @@ struct S3ListState {
     base_url: String,
     continuation_token: Option<String>,
     items: Vec<String>,
+    budget: CloudListBudget,
 }
 
 impl S3ListState {
@@ -906,6 +908,7 @@ impl CloudBackend for S3Backend {
             base_url,
             continuation_token: None,
             items: Vec::new(),
+            budget: CloudListBudget::default(),
         };
         self.executor.spawn_request_loop(
             state,
@@ -917,18 +920,25 @@ impl CloudBackend for S3Backend {
                     return Err(MidgeError::Internal(format!("status {}", resp.status)));
                 }
                 let body = String::from_utf8_lossy(&resp.body);
-                state.items.extend(extract_xml_tag_values(&body, "Key"));
+                let page_items = extract_xml_tag_values(&body, "Key");
                 let truncated = extract_xml_tag_values(&body, "IsTruncated")
                     .first()
                     .is_some_and(|value| value.eq_ignore_ascii_case("true"));
-                state.continuation_token = extract_xml_tag_values(&body, "NextContinuationToken")
+                let continuation_token = extract_xml_tag_values(&body, "NextContinuationToken")
                     .into_iter()
-                    .next();
-                if truncated && state.continuation_token.is_none() {
+                    .next()
+                    .filter(|token| !token.is_empty());
+                if truncated && continuation_token.is_none() {
                     return Err(MidgeError::Internal(
                         "S3 list response was truncated without NextContinuationToken".to_string(),
                     ));
                 }
+                let continuation_token = truncated.then_some(continuation_token).flatten();
+                state
+                    .budget
+                    .record_page(&page_items, continuation_token.as_deref())?;
+                state.items.extend(page_items);
+                state.continuation_token = continuation_token;
                 Ok(truncated)
             },
             |ctx, result| match result {
@@ -1181,8 +1191,37 @@ fn decode_xml_entities(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::providers::test_support::{
+        receive_list_result, spawn_scripted_http_server,
+    };
     use reqwest::Method;
     use std::sync::Arc;
+
+    #[test]
+    fn should_reject_repeated_s3_list_continuation_token() {
+        // Arrange
+        let repeated_page = "<ListBucketResult><Contents><Key>sst/a.sst</Key></Contents><IsTruncated>true</IsTruncated><NextContinuationToken>repeat</NextContinuationToken></ListBucketResult>";
+        let final_page = "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>";
+        let server = spawn_scripted_http_server(vec![
+            repeated_page.to_string(),
+            repeated_page.to_string(),
+            final_page.to_string(),
+        ]);
+        let config = S3Config::custom(
+            "bucket".into(),
+            "us-east-1".into(),
+            server.endpoint.clone(),
+            true,
+        );
+        let backend = S3Backend::new(config, CloudExecutor::new(None).unwrap());
+
+        // Act
+        let error = receive_list_result(&backend).expect_err("repeated token should fail LIST");
+
+        // Assert
+        assert!(error.contains("repeated continuation token"), "{error}");
+        assert_eq!(server.finish(), 2);
+    }
 
     #[test]
     fn should_add_security_token_header_when_signing_with_session_credentials() {

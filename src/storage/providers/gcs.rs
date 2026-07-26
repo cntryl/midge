@@ -7,8 +7,8 @@
 //! - All operations routed through the same `CloudBackend` trait as S3/Azure
 
 use super::super::cloud::{
-    CloudBackend, CloudCallback, CloudEvent, CloudExecutor, CloudOutcome, CloudRequest,
-    CloudResponse, CloudSigner, ObjectMetadata,
+    CloudBackend, CloudCallback, CloudEvent, CloudExecutor, CloudListBudget, CloudOutcome,
+    CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
 };
 use crate::common::{MidgeError, MidgeResult};
 use base64::{
@@ -822,6 +822,7 @@ struct GcsListState {
     mode: GcsBackendMode,
     page_token: Option<String>,
     items: Vec<String>,
+    budget: CloudListBudget,
 }
 
 impl GcsListState {
@@ -996,6 +997,7 @@ impl CloudBackend for GcsBackend {
             mode: self.mode,
             page_token: None,
             items: Vec::new(),
+            budget: CloudListBudget::default(),
         };
         self.executor.spawn_request_loop(
             state,
@@ -1010,36 +1012,41 @@ impl CloudBackend for GcsBackend {
                     )));
                 }
                 let body = String::from_utf8_lossy(&resp.body);
-                match state.mode {
+                let (page_items, page_token) = match state.mode {
                     GcsBackendMode::Json => {
                         let (items, next_page_token) = extract_gcs_json_list(&body)?;
-                        state.items.extend(items);
-                        state.page_token = next_page_token;
+                        (items, next_page_token)
                     }
                     GcsBackendMode::Xml => {
-                        state.items.extend(extract_xml_tag_values(&body, "Key"));
+                        let items = extract_xml_tag_values(&body, "Key");
                         let truncated = extract_xml_tag_values(&body, "IsTruncated")
                             .first()
                             .is_some_and(|value| value.eq_ignore_ascii_case("true"));
-                        state.page_token = extract_xml_tag_values(&body, "NextMarker")
+                        let page_token = extract_xml_tag_values(&body, "NextMarker")
                             .into_iter()
                             .next()
                             .or_else(|| {
                                 if truncated {
-                                    state.items.last().cloned()
+                                    items.last().cloned()
                                 } else {
                                     None
                                 }
                             })
                             .filter(|marker| !marker.is_empty());
-                        if truncated && state.page_token.is_none() {
+                        if truncated && page_token.is_none() {
                             return Err(MidgeError::Internal(
                                 "GCS XML list response was truncated without NextMarker"
                                     .to_string(),
                             ));
                         }
+                        (items, truncated.then_some(page_token).flatten())
                     }
-                }
+                };
+                state
+                    .budget
+                    .record_page(&page_items, page_token.as_deref())?;
+                state.items.extend(page_items);
+                state.page_token = page_token;
                 Ok(state.page_token.is_some())
             },
             |ctx, result| match result {
@@ -1316,6 +1323,56 @@ impl CloudSigner for Goog1HmacSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::providers::test_support::{
+        receive_list_result, spawn_scripted_http_server,
+    };
+
+    #[test]
+    fn should_reject_repeated_gcs_json_list_page_token() {
+        // Arrange
+        let repeated_page = r#"{"items":[{"name":"sst/a.sst"}],"nextPageToken":"repeat"}"#;
+        let server = spawn_scripted_http_server(vec![
+            repeated_page.to_string(),
+            repeated_page.to_string(),
+            "{}".to_string(),
+        ]);
+        let backend = GcsBackend::json(
+            "bucket".into(),
+            Some(server.endpoint.clone()),
+            CloudExecutor::new(None).unwrap(),
+        );
+
+        // Act
+        let error = receive_list_result(&backend).expect_err("repeated token should fail LIST");
+
+        // Assert
+        assert!(error.contains("repeated continuation token"), "{error}");
+        assert_eq!(server.finish(), 2);
+    }
+
+    #[test]
+    fn should_reject_repeated_gcs_xml_list_marker() {
+        // Arrange
+        let repeated_page = "<ListBucketResult><Contents><Key>sst/a.sst</Key></Contents><IsTruncated>true</IsTruncated><NextMarker>repeat</NextMarker></ListBucketResult>";
+        let final_page = "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>";
+        let server = spawn_scripted_http_server(vec![
+            repeated_page.to_string(),
+            repeated_page.to_string(),
+            final_page.to_string(),
+        ]);
+        let backend = GcsBackend::xml(
+            "bucket".into(),
+            Some(server.endpoint.clone()),
+            CloudExecutor::new(None).unwrap(),
+        );
+
+        // Act
+        let error = receive_list_result(&backend).expect_err("repeated marker should fail LIST");
+
+        // Assert
+        assert!(error.contains("repeated continuation token"), "{error}");
+        assert_eq!(server.finish(), 2);
+    }
 
     // =========== GcsCredential Tests ===========
 

@@ -60,6 +60,86 @@ pub mod s3;
 #[cfg(any(feature = "cloud-aws", feature = "cloud-oci"))]
 mod s3_resolver;
 
+#[cfg(all(test, feature = "cloud-common"))]
+pub(crate) mod test_support {
+    use crate::storage::cloud::{CloudBackend, CloudEvent, CloudOutcome};
+    use std::io::{ErrorKind, Read, Write};
+    use std::net::TcpListener;
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
+
+    pub(crate) struct ScriptedHttpServer {
+        pub(crate) endpoint: String,
+        handle: JoinHandle<usize>,
+    }
+
+    impl ScriptedHttpServer {
+        pub(crate) fn finish(self) -> usize {
+            self.handle.join().expect("scripted HTTP server panicked")
+        }
+    }
+
+    pub(crate) fn spawn_scripted_http_server(bodies: Vec<String>) -> ScriptedHttpServer {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted HTTP server");
+        listener
+            .set_nonblocking(true)
+            .expect("configure scripted HTTP server");
+        let endpoint = format!("http://{}", listener.local_addr().expect("server address"));
+        let handle = std::thread::spawn(move || {
+            let overall_deadline = Instant::now() + Duration::from_secs(5);
+            let mut idle_deadline = None;
+            let mut served = 0;
+
+            while served < bodies.len() && Instant::now() < overall_deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .expect("configure request timeout");
+                        let mut request = [0_u8; 4096];
+                        let _ = stream.read(&mut request);
+
+                        let body = &bodies[served];
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        stream
+                            .write_all(response.as_bytes())
+                            .expect("write scripted response");
+                        served += 1;
+                        idle_deadline = Some(Instant::now() + Duration::from_millis(500));
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        if idle_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("scripted HTTP server accept failed: {error}"),
+                }
+            }
+
+            served
+        });
+
+        ScriptedHttpServer { endpoint, handle }
+    }
+
+    pub(crate) fn receive_list_result(backend: &dyn CloudBackend) -> CloudOutcome<Vec<String>> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        backend.submit_list("sst/", sender);
+        match receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("receive LIST result")
+        {
+            CloudEvent::List { result, .. } => result,
+            event => panic!("expected LIST event, got {event:?}"),
+        }
+    }
+}
+
 use std::sync::Arc;
 
 #[cfg(not(feature = "cloud-common"))]
