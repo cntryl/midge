@@ -17,16 +17,14 @@ use base64::{
 };
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
+use ring::{
+    rand,
+    signature::{RsaKeyPair, RSA_PKCS1_SHA256},
+};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::Method;
-use rsa::pkcs1::DecodeRsaPrivateKey;
-use rsa::pkcs1v15::SigningKey;
-use rsa::pkcs8::DecodePrivateKey;
-use rsa::signature::{SignatureEncoding, Signer as _};
-use rsa::RsaPrivateKey;
 use serde_json::json;
 use sha1::Sha1;
-use sha2::Sha256;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -557,21 +555,97 @@ fn fetch_service_account_token(json: &serde_json::Value) -> MidgeResult<CachedGc
 }
 
 fn sign_service_account_jwt(private_key: &str, signing_input: &str) -> MidgeResult<String> {
-    let key = match RsaPrivateKey::from_pkcs8_pem(private_key) {
-        Ok(key) => key,
-        Err(pkcs8_error) => RsaPrivateKey::from_pkcs1_pem(private_key).map_err(|pkcs1_error| {
-            MidgeError::InvalidArgument(format!(
-                "invalid GCS service account private key: PKCS#8 parse failed: {pkcs8_error}; PKCS#1 parse failed: {pkcs1_error}"
-            ))
-        })?,
-    };
-    let signing_key = SigningKey::<Sha256>::new(key);
-    let signature = signing_key.sign(signing_input.as_bytes());
+    let (format, key_der) = parse_service_account_private_key(private_key)?;
+    let key_pair = match format {
+        ServiceAccountPrivateKeyFormat::Pkcs8 => RsaKeyPair::from_pkcs8(&key_der),
+        ServiceAccountPrivateKeyFormat::Pkcs1 => RsaKeyPair::from_der(&key_der),
+    }
+    .map_err(|_error| {
+        MidgeError::InvalidArgument("invalid GCS service account private key".to_string())
+    })?;
+    let mut signature = vec![0u8; key_pair.public().modulus_len()];
+    key_pair
+        .sign(
+            &RSA_PKCS1_SHA256,
+            &rand::SystemRandom::new(),
+            signing_input.as_bytes(),
+            &mut signature,
+        )
+        .map_err(|_error| {
+            MidgeError::Internal("failed to sign GCS service account JWT".to_string())
+        })?;
     Ok(format!(
         "{}.{}",
         signing_input,
-        URL_SAFE_NO_PAD.encode(signature.to_bytes())
+        URL_SAFE_NO_PAD.encode(signature)
     ))
+}
+
+#[derive(Clone, Copy)]
+enum ServiceAccountPrivateKeyFormat {
+    Pkcs1,
+    Pkcs8,
+}
+
+fn parse_service_account_private_key(private_key: &str) -> MidgeResult<(ServiceAccountPrivateKeyFormat, Vec<u8>)> {
+    if private_key.contains("-----BEGIN PRIVATE KEY-----")
+        || private_key.contains("-----BEGIN PRIVATE KEY-----\n")
+    {
+        return Ok((
+            ServiceAccountPrivateKeyFormat::Pkcs8,
+            decode_pem_block(
+                private_key,
+                "-----BEGIN PRIVATE KEY-----",
+                "-----END PRIVATE KEY-----",
+            )?,
+        ));
+    }
+
+    if private_key.contains("-----BEGIN RSA PRIVATE KEY-----")
+        || private_key.contains("-----BEGIN RSA PRIVATE KEY-----\n")
+    {
+        return Ok((
+            ServiceAccountPrivateKeyFormat::Pkcs1,
+            decode_pem_block(
+                private_key,
+                "-----BEGIN RSA PRIVATE KEY-----",
+                "-----END RSA PRIVATE KEY-----",
+            )?,
+        ));
+    }
+
+    Err(MidgeError::InvalidArgument(
+        "invalid GCS service account private key: expected PKCS#8 or PKCS#1 PEM".to_string(),
+    ))
+}
+
+fn decode_pem_block(private_key: &str, begin: &str, end: &str) -> MidgeResult<Vec<u8>> {
+    let start = private_key.find(begin).ok_or_else(|| {
+        MidgeError::InvalidArgument("invalid GCS service account private key: missing PEM header".to_string())
+    })?;
+    let finish = private_key.find(end).ok_or_else(|| {
+        MidgeError::InvalidArgument("invalid GCS service account private key: missing PEM footer".to_string())
+    })?;
+    if finish <= start {
+        return Err(MidgeError::InvalidArgument(
+            "invalid GCS service account private key: malformed PEM block".to_string(),
+        ));
+    }
+
+    let payload = &private_key[start + begin.len()..finish];
+    let encoded = payload
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<String>();
+
+    BASE64
+        .decode(encoded.as_bytes())
+        .map_err(|error| {
+            MidgeError::InvalidArgument(format!(
+                "invalid GCS service account private key: base64 decode failure: {error}"
+            ))
+        })
 }
 
 fn fetch_metadata_token() -> MidgeResult<CachedGcsToken> {

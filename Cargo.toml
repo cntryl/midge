@@ -77,10 +77,10 @@ base64 = { version = "0.22", optional = true }
 hmac = { version = "0.13", optional = true }
 percent-encoding = { version = "2.3", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "blocking"], optional = true }
-rsa = { version = "0.10.0-rc.18", features = ["sha2"], optional = true }
 sha2 = { version = "0.11", optional = true }
 sha1 = { version = "0.11", optional = true }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros"], optional = true }
+ring = { version = "0.17", optional = true }
 url = { version = "2.5", optional = true }
 urlencoding = { version = "2.1", optional = true }
 
@@ -139,10 +139,10 @@ cloud-gcp = [
     "cloud-common",
     "dep:base64",
     "dep:hmac",
+    "dep:ring",
     "dep:sha1",
     "dep:sha2",
     "dep:percent-encoding",
-    "dep:rsa",
     "dep:url",
     "dep:urlencoding",
 ]
