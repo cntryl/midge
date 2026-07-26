@@ -10,7 +10,7 @@
 
 use super::fs_leader_store::FsLeaderStore;
 use super::traits::{LeaderRecord, LeaderStore, LeaseError, LeaseGuard, PrimaryLease};
-use crate::io::{staging, Fs, FsPath, RealFs};
+use crate::io::{staging, Fs, FsError, FsPath, OpenMode, OpenOptions, RealFs};
 use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -125,8 +125,6 @@ impl LeaderStore for ProviderLeaderStore {
 pub struct CloudStorageLease {
     /// Cloud provider configuration.
     config: CloudLeaseConfig,
-    /// Local cache path where lease coordination file is staged.
-    local_cache_path: std::path::PathBuf,
     /// Unique identity of this holder (pid@hostname).
     holder_id: String,
     /// Random per-instance token persisted in every lease mutation.
@@ -158,7 +156,7 @@ impl CloudStorageLease {
     ///
     /// `local_cache_path` must be the local staging directory for cloud storage.
     /// The lease coordination file will be written here.
-    pub fn new(config: CloudLeaseConfig, local_cache_path: std::path::PathBuf) -> Self {
+    pub fn new(config: CloudLeaseConfig, local_cache_path: impl AsRef<std::path::Path>) -> Self {
         let holder_id = format!(
             "{}@{}",
             std::process::id(),
@@ -170,7 +168,7 @@ impl CloudStorageLease {
 
         let mut local_fs = None;
         let mut local_leader_store = None;
-        let leader_store = match RealFs::new(&local_cache_path) {
+        let leader_store = match RealFs::new(local_cache_path) {
             Ok(fs) => {
                 let fs: Arc<dyn Fs> = Arc::new(fs);
                 let local_store = Arc::new(FsLeaderStore::new(Arc::clone(&fs)));
@@ -187,7 +185,6 @@ impl CloudStorageLease {
 
         Self {
             config,
-            local_cache_path,
             holder_id,
             owner_token,
             ttl: Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS),
@@ -230,23 +227,53 @@ impl CloudStorageLease {
         }
     }
 
-    /// Path to the local lease coordination file.
-    fn local_lease_path(&self) -> std::path::PathBuf {
-        self.local_cache_path.join(LEASE_OBJECT_KEY)
-    }
-
     /// Read the current lease state from the local coordination file.
     fn read_lease_file(&self) -> Result<Option<LeaseDocument>, LeaseError> {
-        let path = self.local_lease_path();
-        let content = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        let fs = self.local_filesystem()?;
+        let path = FsPath::new(LEASE_OBJECT_KEY);
+        match fs.exists(&path) {
+            Ok(false) => return Ok(None),
+            Ok(true) => {}
             Err(error) => {
                 return Err(LeaseError::IoError(format!(
-                    "failed to read lease file: {error}"
-                )))
+                    "failed to check lease file existence: {error}"
+                )));
+            }
+        }
+        let metadata = match fs.metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(FsError::NotFound(_)) => return Ok(None),
+            Err(error) => {
+                return Err(LeaseError::IoError(format!(
+                    "failed to read lease file metadata: {error}"
+                )));
             }
         };
+        let file = match fs.open(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        ) {
+            Ok(file) => file,
+            Err(FsError::NotFound(_)) => return Ok(None),
+            Err(error) => {
+                return Err(LeaseError::IoError(format!(
+                    "failed to open lease file: {error}"
+                )));
+            }
+        };
+        let bytes = file
+            .read_at(0, metadata.len)
+            .map_err(|error| LeaseError::IoError(format!("failed to read lease file: {error}")))?;
+        let content = String::from_utf8(bytes.to_vec()).map_err(|error| {
+            LeaseError::IoError(format!(
+                "local lease coordination document is not UTF-8: {error}"
+            ))
+        })?;
         parse_lease_document(&content).map(Some).ok_or_else(|| {
             LeaseError::IoError("local lease coordination document is malformed".to_string())
         })
@@ -254,9 +281,7 @@ impl CloudStorageLease {
 
     /// Write a lease document to the local coordination file.
     fn write_lease_file(&self, doc: &LeaseDocument) -> Result<(), LeaseError> {
-        let fs = self.local_fs.as_ref().ok_or_else(|| {
-            LeaseError::IoError("simulated-cloud lease filesystem is unavailable".to_string())
-        })?;
+        let fs = self.local_filesystem()?;
         let content = format_lease_document(doc);
         let temp_path = FsPath::new(format!("{LEASE_OBJECT_KEY}.{}.tmp", self.owner_token));
         staging::stage_bytes(
@@ -270,12 +295,13 @@ impl CloudStorageLease {
 
     /// Remove the local lease coordination file.
     fn remove_lease_file(&self) -> Result<(), LeaseError> {
-        let path = self.local_lease_path();
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|e| LeaseError::IoError(format!("failed to remove lease file: {e}")))?;
+        let fs = self.local_filesystem()?;
+        match fs.remove_file(&FsPath::new(LEASE_OBJECT_KEY)) {
+            Ok(()) | Err(FsError::NotFound(_)) => Ok(()),
+            Err(error) => Err(LeaseError::IoError(format!(
+                "failed to remove lease file: {error}"
+            ))),
         }
-        Ok(())
     }
 
     fn remote_head(&self) -> Result<Option<ObjectMetadata>, LeaseError> {
@@ -347,6 +373,12 @@ impl CloudStorageLease {
     fn local_store(&self) -> Result<&Arc<FsLeaderStore>, LeaseError> {
         self.local_leader_store.as_ref().ok_or_else(|| {
             LeaseError::IoError("simulated-cloud lease has no conditional leader store".to_string())
+        })
+    }
+
+    fn local_filesystem(&self) -> Result<&Arc<dyn Fs>, LeaseError> {
+        self.local_fs.as_ref().ok_or_else(|| {
+            LeaseError::IoError("simulated-cloud lease filesystem is unavailable".to_string())
         })
     }
 
@@ -538,7 +570,7 @@ impl PrimaryLease for CloudStorageLease {
         if !self.owns_document(&existing, expected_epoch) {
             self.acquired.store(false, Ordering::Release);
             return Err(LeaseError::RenewalFailed(format!(
-                "lease stolen by another instance (holder: {}, epoch: {:?})",
+                "cloud lease ownership changed (holder: {}, epoch: {:?})",
                 existing.holder_id, existing.epoch
             )));
         }
@@ -946,6 +978,67 @@ mod tests {
     }
 
     #[test]
+    fn should_allow_removing_missing_simulated_lease() {
+        // Arrange
+        let cache_path = temp_cache_path();
+        let lease = CloudStorageLease::new(test_config(), cache_path);
+
+        // Act
+        let result = lease.remove_lease_file();
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_reject_simulated_lease_read_through_symlink() {
+        // Arrange
+        let cache_path = temp_cache_path();
+        let outside_path = temp_cache_path().join("outside-lease");
+        let now = chrono::Utc::now();
+        let document = LeaseDocument {
+            epoch: Some(1),
+            holder_id: "outside-holder@host".to_string(),
+            owner_token: Some("outside-owner-token".to_string()),
+            acquired_at: now.to_rfc3339(),
+            expires_at: (now + chrono::Duration::seconds(60)).to_rfc3339(),
+        };
+        std::fs::write(&outside_path, format_lease_document(&document)).unwrap();
+        std::os::unix::fs::symlink(&outside_path, cache_path.join(LEASE_OBJECT_KEY)).unwrap();
+        let lease = CloudStorageLease::new(test_config(), cache_path);
+
+        // Act
+        let result = lease.read_lease_file();
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::IoError(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_reject_simulated_lease_removal_through_symlink() {
+        // Arrange
+        let cache_path = temp_cache_path();
+        let outside_path = temp_cache_path().join("outside-lease");
+        std::fs::write(&outside_path, "outside lease").unwrap();
+        let lease_path = cache_path.join(LEASE_OBJECT_KEY);
+        std::os::unix::fs::symlink(&outside_path, &lease_path).unwrap();
+        let lease = CloudStorageLease::new(test_config(), cache_path);
+
+        // Act
+        let result = lease.remove_lease_file();
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::IoError(_))));
+        assert!(lease_path.symlink_metadata().is_ok());
+        assert_eq!(
+            std::fs::read_to_string(outside_path).unwrap(),
+            "outside lease"
+        );
+    }
+
+    #[test]
     fn should_preserve_newer_simulated_lease_when_stale_same_process_holder_releases() {
         // Arrange
         let cache_path = temp_cache_path();
@@ -1310,6 +1403,39 @@ mod tests {
         // Assert
         assert!(content.lines().any(|line| line == "epoch: 1"));
         assert_eq!(lease.epoch(), 1);
+    }
+
+    #[test]
+    fn should_report_provider_ownership_change_when_owner_token_changes() {
+        // Arrange
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+        let lease = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            Arc::clone(&cloud),
+        ));
+        let _guard = Arc::clone(&lease)
+            .try_acquire()
+            .expect("acquire provider lease");
+        let now = chrono::Utc::now();
+        let successor = LeaseDocument {
+            epoch: Some(lease.epoch()),
+            holder_id: lease.holder_id(),
+            owner_token: Some("successor-owner-token".to_string()),
+            acquired_at: now.to_rfc3339(),
+            expires_at: (now + chrono::Duration::seconds(60)).to_rfc3339(),
+        };
+        put_remote_lease(&cloud, format_lease_document(&successor));
+
+        // Act
+        let result = lease.renew();
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(LeaseError::RenewalFailed(message))
+                if message.contains("ownership changed")
+        ));
     }
 
     #[test]
