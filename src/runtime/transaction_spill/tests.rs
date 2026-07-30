@@ -154,7 +154,8 @@ fn should_stream_large_spill_record_with_wal_sized_bound() -> MidgeResult<()> {
 }
 
 #[test]
-fn should_scan_spill_keys_in_both_directions_across_sparse_chunks() -> MidgeResult<()> {
+fn should_return_reverse_rows_in_descending_order_given_prefix_and_limit_when_scanning(
+) -> MidgeResult<()> {
     // Arrange
     let temp = tempfile::tempdir()?;
     let mut ops = (0_u64..40)

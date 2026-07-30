@@ -13,6 +13,60 @@ use std::sync::Arc;
 // ============================================================================
 
 #[test]
+fn should_reject_insert_given_read_only_transaction_when_called() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(&opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .expect("begin read-only transaction");
+
+        // Act
+        let result = txn.insert(b"key".to_vec(), b"value".to_vec(), None);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+    });
+}
+
+#[test]
+fn should_reject_delete_given_read_only_transaction_when_called() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(&opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .expect("begin read-only transaction");
+
+        // Act
+        let result = txn.delete(b"key".to_vec());
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+    });
+}
+
+#[test]
+fn should_reject_delete_range_given_read_only_transaction_when_called() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(&opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .expect("begin read-only transaction");
+
+        // Act
+        let result = txn.delete_range(b"a".to_vec(), b"z".to_vec());
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+    });
+}
+
+#[test]
 fn should_commit_transaction_given_multiple_operations_when_committed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -122,7 +176,7 @@ fn should_reject_local_only_write_options_given_cloud_transaction_when_committed
 }
 
 #[test]
-fn should_succeed_given_read_only_transaction_when_committed() {
+fn should_unregister_snapshot_given_commit_of_read_only_transaction_when_committing() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(&opts, mode));
@@ -312,6 +366,46 @@ fn should_read_own_writes_given_transaction_when_reading() {
 }
 
 #[test]
+fn should_preserve_write_set_semantics_given_put_delete_put_sequence_when_reading_own_writes() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(&opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin transaction");
+
+        // Act
+        txn.put(b"key".to_vec(), b"one".to_vec(), None).unwrap();
+        txn.delete(b"key".to_vec()).unwrap();
+        txn.put(b"key".to_vec(), b"three".to_vec(), None).unwrap();
+
+        // Assert
+        assert_eq!(txn.get(b"key").unwrap(), Some(Bytes::from_static(b"three")));
+    });
+}
+
+#[test]
+fn should_preserve_write_set_semantics_given_delete_put_delete_sequence_when_reading_own_writes() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(&opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin transaction");
+
+        // Act
+        txn.delete(b"key".to_vec()).unwrap();
+        txn.put(b"key".to_vec(), b"two".to_vec(), None).unwrap();
+        txn.delete(b"key".to_vec()).unwrap();
+
+        // Assert
+        assert_eq!(txn.get(b"key").unwrap(), None);
+    });
+}
+
+#[test]
 fn should_read_own_writes_given_kv_transaction_when_getting() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -480,7 +574,7 @@ fn should_delete_range_given_committed_engine_operation_when_delete_range() {
 }
 
 #[test]
-fn should_hide_deleted_range_given_scan_after_delete_range_when_scanning() {
+fn should_hide_deleted_key_given_delete_range_and_point_put_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(&opts, mode));
@@ -606,12 +700,36 @@ fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
     });
 }
 
+#[test]
+fn should_return_no_rows_given_zero_limit_when_scanning() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(&opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin transaction");
+        txn.put(b"key".to_vec(), b"value".to_vec(), None)
+            .expect("stage value");
+
+        // Act
+        let rows = txn
+            .scan(&Query::new().limit(0))
+            .expect("zero-limit scan should initialize")
+            .try_collect()
+            .expect("zero-limit scan should complete");
+
+        // Assert
+        assert!(rows.is_empty());
+    });
+}
+
 // ============================================================================
 // Error Handling
 // ============================================================================
 
 #[test]
-fn should_allow_operations_given_previous_commit_failed_when_disk_full() {
+fn should_unregister_snapshot_given_commit_failure_when_commit_returns_error() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(&opts, mode));
