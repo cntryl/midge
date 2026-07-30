@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn should_return_error_when_parent_directory_sync_fails() {
+    fn should_preserve_target_atomically_given_parent_directory_sync_failure_when_publishing() {
         // Arrange
         let fs: Arc<dyn Fs> = Arc::new(RecordingFs::new(true));
 

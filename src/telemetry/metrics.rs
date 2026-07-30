@@ -936,6 +936,18 @@ mod tests {
     }
 
     #[test]
+    fn should_return_zero_cache_hit_ratio_given_no_cache_requests_when_snapshotting_metrics() {
+        // Arrange
+        let metrics = Metrics::new(&TelemetryConfig::default().with_enabled(true));
+
+        // Act
+        let snapshot = metrics.snapshot();
+
+        // Assert
+        assert!(snapshot.cache_hit_ratio().abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn should_not_record_when_disabled() {
         // Arrange
         let config = TelemetryConfig::default().with_enabled(false);

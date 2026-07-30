@@ -922,7 +922,7 @@ mod tests {
     use super::{CloudProviderConfig, GcsCredentialSource, S3CredentialSource};
 
     #[test]
-    fn should_redact_all_static_provider_secrets_from_debug_output() {
+    fn should_redact_nested_credentials_given_provider_debug_format_when_formatting() {
         // Arrange
         let s3_secret = "s3-secret-do-not-log";
         let azure_secret = "azure-secret-do-not-log";

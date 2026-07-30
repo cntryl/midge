@@ -235,7 +235,7 @@ mod tests {
     use crate::io::OpenMode;
 
     #[test]
-    fn should_inject_open_failure() {
+    fn should_fail_each_chaos_operation_given_configured_failure_when_invoked() {
         // Arrange
         let inner = Arc::new(MockFs::new());
         let chaos = ChaosFs::new(inner, 1); // fail every 1st operation

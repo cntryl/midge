@@ -676,7 +676,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn should_reject_open_through_symlinked_parent() -> FsResult<()> {
+    fn should_reject_open_through_symlinked_existing_component_given_real_filesystem_when_opening(
+    ) -> FsResult<()> {
         // Arrange
         let temp = TempDir::new().map_err(|e| FsError::Io(e.to_string()))?;
         let outside = TempDir::new().map_err(|e| FsError::Io(e.to_string()))?;
