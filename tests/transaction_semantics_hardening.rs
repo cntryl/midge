@@ -35,7 +35,7 @@ fn should_reject_insert_when_key_exists_only_in_sst() {
 }
 
 #[test]
-fn should_apply_ordered_intents_when_duplicate_delete_precedes_insert() {
+fn should_apply_last_intent_given_duplicate_operations_on_same_key_when_committing() {
     // Arrange
     let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("intents").expect("create cf");
@@ -86,7 +86,7 @@ fn should_apply_ordered_intents_when_duplicate_delete_precedes_insert() {
 }
 
 #[test]
-fn should_keep_prefix_descendants_when_prefix_ends_in_ff() {
+fn should_honor_prefix_upper_bound_given_prefix_ending_in_ff_when_scanning() {
     // Arrange
     let engine = open_with_mode(&opts_for_mode("memory"), "memory");
     let cf = engine.create_column_family("binary").expect("create cf");
