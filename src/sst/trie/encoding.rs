@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_invalid_child_indices() {
+    fn should_reject_corrupt_trie_node_given_invalid_child_offset_when_opening() {
         // Arrange
         let mut parent = TrieNode::new(0, b"parent".to_vec(), None);
         parent.add_child(TrieEdge::new(b'a', 999)); // Index way out of bounds

@@ -391,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_corrupted_bloom_in_block() {
+    fn should_reject_corrupt_bloom_block_given_invalid_length_or_crc_when_opening() {
         // Arrange - Create valid structure then corrupt internal bloom
         let mut filter = BlockBloomFilter::new();
         let mut bloom = BloomWriter::with_defaults(100);
