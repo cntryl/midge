@@ -17,10 +17,6 @@ use base64::{
 };
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
-use ring::{
-    rand,
-    signature::{RsaKeyPair, RSA_PKCS1_SHA256},
-};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::Method;
 use ring::{
