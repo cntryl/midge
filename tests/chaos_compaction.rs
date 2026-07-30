@@ -43,8 +43,7 @@ struct CommitRecord {
 /// Crash BEFORE manifest persist: manifest update in memory, but not durable.
 /// Recovery should restore compaction state from WAL, not manifest.
 #[test]
-fn should_recover_all_data_when_crashing_after_compaction_output_is_durable_but_before_manifest_publish(
-) {
+fn should_retain_input_ssts_given_compaction_failure_before_manifest_publish() {
     // Arrange: Create engine and write enough data to trigger compaction
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
@@ -112,7 +111,7 @@ fn should_recover_all_data_when_crashing_after_compaction_but_before_manifest_pe
 /// Manifest references new SSTs, but old SSTs still exist on disk.
 /// Recovery should use manifest (with new SSTs), old files will be cleaned up on next GC.
 #[test]
-fn should_use_manifest_ssts_when_crashing_after_manifest_persist_before_gc() {
+fn should_not_delete_input_ssts_given_compaction_gc_failure_after_manifest_publish() {
     // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();

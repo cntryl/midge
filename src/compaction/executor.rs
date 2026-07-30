@@ -604,14 +604,14 @@ mod tests {
     }
 
     #[test]
-    fn should_detect_expired_version_when_past_expiration() {
+    fn should_drop_expired_value_given_compaction_time_after_expiration() {
         let now = 1_000_000u64;
         let v = mk_version("k", 1, false, Some("v"), Some(now - 1));
         assert!(is_expired(&v, now));
     }
 
     #[test]
-    fn should_not_expire_version_when_future_or_none() {
+    fn should_not_drop_unexpired_value_given_compaction_time_before_expiration() {
         // Arrange
         let now = 1_000_000u64;
         let v_future = mk_version("k", 1, false, Some("v"), Some(now + 10));
@@ -627,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn should_collect_versions_when_stateful_reader_exposes_range_tombstones() {
+    fn should_preserve_tombstone_visibility_given_overlapping_ssts_when_scanning() {
         use crate::sst::traits::{SstReader, SstStateReader};
 
         // Arrange
@@ -777,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn should_not_drop_recent_tombstones_when_snapshot_horizon_exists() {
+    fn should_retain_recent_tombstone_given_snapshot_horizon_when_compacting() {
         // Arrange: create versions where one key has a recent tombstone
         let recent_tombstone = mk_version("k", 200, true, None::<&[u8]>, None);
         let older_put = mk_version("k", 100, false, Some("v"), None);
@@ -854,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_empty_streams_in_merge() {
+    fn should_produce_no_output_given_empty_compaction_input() {
         use crate::compaction::merge::{MergeEntry, MergeIterator};
         use bytes::Bytes;
 

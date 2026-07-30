@@ -346,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn should_yield_newest_sequence_first_when_same_key_same_seq() {
+    fn should_preserve_latest_version_given_equal_sequence_versions_when_compacting() {
         // Arrange: different inputs with identical key and sequence
         let s0 = vec![entry("k", "first", 10)];
         let s1 = vec![entry("k", "second", 10)];

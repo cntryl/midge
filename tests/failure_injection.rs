@@ -234,7 +234,7 @@ fn should_not_leak_partial_transaction_when_no_space_hits_before_commit_marker_a
 }
 
 #[test]
-fn should_preserve_existing_keys_when_delete_range_wal_append_hits_no_space() {
+fn should_preserve_range_tombstone_atomicity_given_crash_between_wal_append_and_memtable_apply() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let temp_dir = TempDir::new().expect("temp dir");
@@ -369,7 +369,7 @@ fn should_ignore_orphan_sst_when_flush_intent_log_save_hits_no_space() {
 }
 
 #[test]
-fn should_delete_orphan_flush_sst_on_reopen_when_manifest_append_hits_no_space() {
+fn should_not_publish_flush_output_given_sst_write_failure_when_flushing() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let temp_dir = TempDir::new().expect("temp dir");
@@ -421,7 +421,7 @@ fn should_delete_orphan_flush_sst_on_reopen_when_manifest_append_hits_no_space()
 }
 
 #[test]
-fn should_retry_same_frozen_memtable_when_manifest_publication_recovers() {
+fn should_retry_flush_given_transient_publish_failure_when_reopening() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let temp_dir = TempDir::new().expect("temp dir");
