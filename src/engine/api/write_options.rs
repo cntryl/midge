@@ -172,3 +172,57 @@ pub(crate) fn effective_wal_durability_policy(
 
     Ok(opts.to_wal_durability_policy())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_map_every_local_write_option_to_expected_wal_policy_given_local_storage_when_committing(
+    ) {
+        // Arrange
+        let options = [
+            (WriteOptions::sync(), crate::wal::DurabilityPolicy::Strict),
+            (
+                WriteOptions::buffered(),
+                crate::wal::DurabilityPolicy::Batched,
+            ),
+            (
+                WriteOptions::best_effort(),
+                crate::wal::DurabilityPolicy::BestEffort,
+            ),
+        ];
+
+        // Act
+        let mapped = options.map(|(opts, _)| effective_wal_durability_policy(false, opts));
+
+        // Assert
+        for ((_, expected), actual) in options.into_iter().zip(mapped) {
+            assert_eq!(actual.expect("local option should be accepted"), expected);
+        }
+    }
+
+    #[test]
+    fn should_reject_sync_buffered_options_given_cloud_storage_when_committing() {
+        // Arrange
+        let options = [WriteOptions::sync(), WriteOptions::buffered()];
+
+        // Act
+        let errors = options.map(|opts| effective_wal_durability_policy(true, opts));
+
+        // Assert
+        assert!(errors.into_iter().all(|result| result.is_err()));
+    }
+
+    #[test]
+    fn should_reject_cloud_options_given_local_storage_when_committing() {
+        // Arrange
+        let options = [WriteOptions::cloud_async(), WriteOptions::cloud_strict()];
+
+        // Act
+        let errors = options.map(|opts| effective_wal_durability_policy(false, opts));
+
+        // Assert
+        assert!(errors.into_iter().all(|result| result.is_err()));
+    }
+}
