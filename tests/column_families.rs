@@ -48,7 +48,7 @@ fn should_create_multiple_column_families_given_unique_names_when_engine_open() 
 }
 
 #[test]
-fn should_fail_create_column_family_given_duplicate_name_when_cf_exists() {
+fn should_reject_duplicate_column_family_name_given_existing_active_column_family_when_creating() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(&opts, mode));
@@ -213,7 +213,7 @@ fn should_delete_cf_data_given_cf_dropped_when_persisted() {
 }
 
 #[test]
-fn should_allow_recreate_cf_with_same_name_given_cf_dropped_when_creating() {
+fn should_allocate_monotonic_column_family_ids_given_deleted_column_family_when_creating() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(&opts, mode));

@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 #[test]
-fn should_transition_open_to_closing_to_closed_without_waiting_for_transactions() {
+fn should_reject_new_transactions_given_runtime_is_closing_when_beginning() {
     // Arrange
     let lifecycle = Arc::new(RuntimeLifecycle::new());
     let transaction_guard = lifecycle.acquire().expect("acquire transaction guard");
