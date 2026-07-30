@@ -1553,7 +1553,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_empty_bucket_name() {
+    fn should_reject_empty_bucket_given_cloud_provider_config_when_building() {
         // Arrange
         let bucket = "";
         let project = "project";

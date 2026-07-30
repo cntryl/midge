@@ -1075,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_mismatched_cloud_credentials() {
+    fn should_reject_credential_provider_mismatch_given_provider_config_when_building() {
         // Arrange
         let result = CloudProviderConfig::gcs("bucket")
             .try_with_credentials(S3CredentialSource::access_key("key", "secret"));

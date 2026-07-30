@@ -1788,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_empty_container_name() {
+    fn should_reject_empty_container_given_cloud_provider_config_when_building() {
         // Arrange
         let account = "account";
         let container = "";
@@ -1904,7 +1904,8 @@ mod tests {
     }
 
     #[test]
-    fn should_prefer_explicit_client_id_over_env() {
+    fn should_preserve_explicit_credential_over_environment_credential_given_both_are_set_when_building(
+    ) {
         // Arrange
         let _env_guard = azure_client_id_env_lock().lock().unwrap();
         std::env::set_var("AZURE_CLIENT_ID", "env-client-id");
