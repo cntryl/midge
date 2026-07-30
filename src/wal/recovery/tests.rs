@@ -386,7 +386,7 @@ fn should_count_records_across_multiple_column_families() {
 }
 
 #[test]
-fn should_track_max_sequence_across_multiple_records() {
+fn should_restore_sequence_frontier_given_recovered_wal_with_sequence_gaps() {
     // Arrange
     let dir = TempDir::new().unwrap();
     let wal_subdir = dir.path().join("wal");
@@ -771,7 +771,8 @@ fn should_apply_txn_batch_atomically_during_recovery() {
 }
 
 #[test]
-fn should_not_apply_transaction_ops_without_commit_marker_during_recovery() {
+fn should_recover_only_committed_transaction_given_split_wal_records_when_commit_marker_is_missing()
+{
     // Arrange
     let dir = TempDir::new().unwrap();
     let wal_subdir = dir.path().join("wal");
@@ -1003,7 +1004,7 @@ fn should_salvage_valid_prefix_when_txn_batch_frame_is_truncated() {
 }
 
 #[test]
-fn should_fail_strict_recovery_on_bad_crc_at_byte_zero() {
+fn should_reject_corrupt_final_active_wal_frame_given_complete_frame_header_when_recovering() {
     // Arrange
     let dir = TempDir::new().unwrap();
     let wal_subdir = dir.path().join("wal");
@@ -1039,7 +1040,7 @@ fn should_fail_strict_recovery_on_bad_crc_at_byte_zero() {
 }
 
 #[test]
-fn should_salvage_valid_prefix_on_bad_crc_tail() {
+fn should_return_degraded_verified_prefix_when_salvaging_truncated_sealed_wal() {
     // Arrange
     let dir = TempDir::new().unwrap();
     let wal_subdir = dir.path().join("wal");
@@ -1149,7 +1150,7 @@ fn should_salvage_valid_prefix_on_truncated_tail_frame() {
 }
 
 #[test]
-fn should_fail_strict_recovery_when_sealed_wal_is_truncated_before_later_files() {
+fn should_fail_strict_recovery_given_corruption_in_a_sealed_wal_segment() {
     // Arrange
     let dir = TempDir::new().unwrap();
     let wal_subdir = dir.path().join("wal");
@@ -1187,7 +1188,8 @@ fn should_fail_strict_recovery_when_sealed_wal_is_truncated_before_later_files()
 }
 
 #[test]
-fn should_return_degraded_verified_prefix_when_salvaging_truncated_sealed_wal() {
+fn should_salvage_verified_prefix_given_corruption_in_a_sealed_wal_segment_when_salvage_policy_is_enabled(
+) {
     // Arrange
     let dir = TempDir::new().unwrap();
     let wal_subdir = dir.path().join("wal");
@@ -1233,7 +1235,7 @@ fn should_return_degraded_verified_prefix_when_salvaging_truncated_sealed_wal() 
 }
 
 #[test]
-fn should_tolerate_incomplete_eof_frame_only_in_final_active_wal_when_strict() {
+fn should_ignore_only_incomplete_final_active_wal_tail_given_truncated_frame_when_recovering() {
     // Arrange
     let dir = TempDir::new().unwrap();
     let wal_subdir = dir.path().join("wal");
@@ -1271,7 +1273,8 @@ fn should_tolerate_incomplete_eof_frame_only_in_final_active_wal_when_strict() {
 }
 
 #[test]
-fn should_skip_stale_writer_epoch_records() {
+fn should_skip_stale_writer_epoch_records_given_interleaved_epochs_when_replaying_multiple_segments(
+) {
     // Arrange
     let dir = TempDir::new().unwrap();
     let wal_subdir = dir.path().join("wal");
