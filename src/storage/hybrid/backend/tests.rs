@@ -714,7 +714,7 @@ fn should_not_reuse_size_only_sst_proof_when_manifest_later_requires_crc() {
 }
 
 #[test]
-fn should_not_overwrite_existing_remote_sst_during_authoritative_upload() {
+fn should_not_overwrite_remote_object_given_different_content_when_authoritative_upload_runs() {
     // Arrange
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let sst_name = "collision.sst";
@@ -795,7 +795,7 @@ fn should_resume_same_content_sst_publication_after_remote_only_success() {
 }
 
 #[test]
-fn should_accept_same_content_sst_retry_when_both_copies_exist() {
+fn should_retry_same_content_upload_idempotently_given_remote_object_already_exists() {
     // Arrange
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let sst_name = "fully-published-retry.sst";
@@ -816,7 +816,7 @@ fn should_accept_same_content_sst_retry_when_both_copies_exist() {
 }
 
 #[test]
-fn should_revalidate_remote_wal_readback() {
+fn should_not_prune_remote_wal_given_manifest_validation_failure_when_gc_runs() {
     // Arrange
     let (mock_cloud, storage) = hybrid_with_mock_cloud();
     let segment_id = 7;
@@ -881,7 +881,7 @@ fn should_reject_cached_remote_wal_proof_when_cloud_object_is_deleted() {
 }
 
 #[test]
-fn should_not_prune_remote_wal_when_verified_object_identity_changed() {
+fn should_not_prune_remote_wal_given_remote_sst_identity_change_when_gc_runs() {
     // Arrange
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let segment_id = 11;
@@ -1394,7 +1394,7 @@ fn should_restore_wal_admission_after_upload_capacity_drains() {
 }
 
 #[test]
-fn should_time_out_missing_cloud_upload_callback_without_hanging_worker() {
+fn should_release_storage_reservation_given_upload_callback_is_lost_when_worker_times_out() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create callback timeout test dir");
     let local = Arc::new(

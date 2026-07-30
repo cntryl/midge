@@ -132,7 +132,7 @@ fn should_prune_remote_wal_segment_after_cloud_sst_covers_it() {
 }
 
 #[test]
-fn should_recover_delete_range_when_remote_wal_pruned_after_cache_loss() {
+fn should_recover_delete_range_given_remote_wal_only_when_local_cache_is_lost() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
@@ -195,7 +195,7 @@ fn should_recover_delete_range_when_remote_wal_pruned_after_cache_loss() {
 }
 
 #[test]
-fn should_keep_remote_wal_segment_when_unflushed_column_family_still_needs_it() {
+fn should_preserve_remote_wal_when_unflushed_column_family_still_depends_on_it_given_partial_gc() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
@@ -251,7 +251,7 @@ fn should_keep_remote_wal_segment_when_unflushed_column_family_still_needs_it() 
 }
 
 #[test]
-fn should_recover_when_remote_wal_cleanup_partial_after_cache_loss() {
+fn should_not_prune_remote_wal_given_manifest_validation_failure_when_gc_runs() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
@@ -306,7 +306,7 @@ fn should_recover_when_remote_wal_cleanup_partial_after_cache_loss() {
 }
 
 #[test]
-fn should_reject_sync_write_option_when_cloud_engine_commits() {
+fn should_reject_sync_buffered_options_given_cloud_storage_when_committing() {
     // Arrange
     let opts = opts_for_mode("cloud");
     let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
@@ -330,7 +330,7 @@ fn should_reject_sync_write_option_when_cloud_engine_commits() {
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_keep_cloud_async_write_local_only_when_cloud_wal_upload_fails() {
+fn should_keep_cloud_async_commit_visible_given_cloud_upload_failure_when_committing() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
@@ -375,7 +375,7 @@ fn should_keep_cloud_async_write_local_only_when_cloud_wal_upload_fails() {
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_fail_cloud_strict_commit_when_wal_upload_fails() {
+fn should_fail_cloud_strict_commit_given_cloud_upload_failure_when_waiting_for_ack() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
@@ -473,7 +473,7 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
 }
 
 #[test]
-fn should_restore_local_sst_cache_from_authoritative_cloud_object() {
+fn should_restore_local_cache_given_authoritative_remote_sst_when_reopening_after_cache_loss() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
@@ -509,7 +509,7 @@ fn should_restore_local_sst_cache_from_authoritative_cloud_object() {
 }
 
 #[test]
-fn should_fail_strict_reopen_when_authoritative_remote_sst_is_missing() {
+fn should_fail_strict_recovery_given_authoritative_remote_sst_missing_when_reopening() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");

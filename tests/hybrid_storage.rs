@@ -156,7 +156,7 @@ fn should_block_writes_at_emergency_watermark() {
 }
 
 #[test]
-fn should_resume_writes_after_eviction_clears_pressure() {
+fn should_resume_writes_given_cloud_upload_completes_when_emergency_watermark_is_active() {
     for_each_storage_mode(&["local"], |mode, opts| {
         eprintln!("\n=== Hybrid: Resume Writes After Eviction (mode: {mode}) ===");
 
@@ -419,7 +419,7 @@ fn should_handle_cloud_unavailable_during_eviction() {
 }
 
 #[test]
-fn should_not_evict_ssts_with_active_readers() {
+fn should_keep_pinned_sst_local_given_active_snapshot_when_eviction_runs() {
     for_each_storage_mode(&["local"], |mode, opts| {
         eprintln!("\n=== Hybrid: Don't Evict Active Readers (mode: {mode}) ===");
 
