@@ -106,7 +106,7 @@ fn wait_until_reclaimed(
 }
 
 #[test]
-fn should_reclaim_dropped_column_family_when_no_snapshot_is_pinned() {
+fn should_reclaim_column_family_files_given_no_snapshot_pin_when_gc_runs() {
     for storage in [TestStorage::Local, TestStorage::SimulatedCloud] {
         // Arrange
         let temp = tempfile::tempdir().expect("temp dir");
@@ -127,7 +127,7 @@ fn should_reclaim_dropped_column_family_when_no_snapshot_is_pinned() {
 }
 
 #[test]
-fn should_defer_column_family_reclamation_when_older_snapshot_is_pinned() {
+fn should_defer_column_family_file_reclamation_given_old_snapshot_pin_when_gc_runs() {
     for storage in [TestStorage::Local, TestStorage::SimulatedCloud] {
         // Arrange
         let temp = tempfile::tempdir().expect("temp dir");

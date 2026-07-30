@@ -27,7 +27,7 @@ fn shutdown(mut engine: Engine) {
 }
 
 #[test]
-fn should_converge_cloud_column_family_lifecycle_after_restart() {
+fn should_converge_local_remote_ddl_state_given_remote_cas_failure_when_reopening() {
     // Arrange
     #[cfg(feature = "failpoints")]
     let _guard = DDL_TEST_LOCK
@@ -113,7 +113,7 @@ fn should_reconcile_remote_commit_when_local_commit_fails() {
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_abort_torn_prepare_when_remote_cas_never_started() {
+fn should_abort_torn_ddl_prepare_given_local_prepare_without_remote_commit_when_reopening() {
     // Arrange
     let _guard = DDL_TEST_LOCK
         .get_or_init(|| Mutex::new(()))

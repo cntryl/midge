@@ -113,7 +113,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_create_format_marker_for_empty_database_directory() {
+    fn should_create_format_marker_atomically_given_new_database_when_opening() {
         // Arrange
         let temp_dir = tempfile::tempdir().expect("temp dir");
 
@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn should_fail_given_unknown_format_version() {
+    fn should_reject_open_given_future_format_version_when_starting() {
         // Arrange
         let temp_dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn should_fail_given_previous_format_version() {
+    fn should_reject_open_given_invalid_format_marker_when_starting() {
         // Arrange
         let temp_dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(

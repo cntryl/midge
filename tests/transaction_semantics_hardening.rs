@@ -121,7 +121,7 @@ fn should_honor_prefix_upper_bound_given_prefix_ending_in_ff_when_scanning() {
 }
 
 #[test]
-fn should_reject_commit_after_column_family_drop_without_acknowledging_write() {
+fn should_reject_write_given_dropped_column_family_when_committing() {
     // Arrange
     let engine = open_with_mode(&opts_for_mode("local"), "local");
     let cf = engine.create_column_family("stale").expect("create cf");
