@@ -370,7 +370,8 @@ mod tests {
     }
 
     #[test]
-    fn should_preserve_range_tombstones_when_compacting_only_deletes() -> MidgeResult<()> {
+    fn should_preserve_range_tombstone_given_compaction_across_multiple_levels() -> MidgeResult<()>
+    {
         // Arrange
         let temp_dir = tempdir()?;
         let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
@@ -473,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn should_remove_staged_output_when_compaction_is_cancelled_after_writing() -> MidgeResult<()> {
+    fn should_clean_temporary_output_given_compaction_write_failure() -> MidgeResult<()> {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         // Arrange: make cancellation happen after input collection and the
