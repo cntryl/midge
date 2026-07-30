@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn should_scan_range_with_both_bounds_inclusive_exclusive() {
+    fn should_seek_to_first_key_at_or_after_bound_given_sparse_index_when_reading() {
         // Arrange
         let mut reader = MockSstReader::new();
         reader.insert(b"a".to_vec(), b"val_a".to_vec());
@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn should_scan_range_respects_inclusive_start_boundary() {
+    fn should_return_empty_scan_given_start_bound_after_all_keys_when_reading() {
         // Arrange
         let mut reader = MockSstReader::new();
         reader.insert(b"apple".to_vec(), b"v1".to_vec());
@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn should_scan_range_respects_exclusive_end_boundary() {
+    fn should_return_empty_scan_given_end_bound_before_all_keys_when_reading() {
         // Arrange
         let mut reader = MockSstReader::new();
         reader.insert(b"apple".to_vec(), b"v1".to_vec());

@@ -1114,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_lz4_block_with_oversized_declared_output() {
+    fn should_reject_compressed_block_given_declared_size_mismatch_when_reading() {
         // Arrange
         let declared_size = u32::try_from(MAX_DECOMPRESSED_BLOCK_SIZE + 1).unwrap();
         let mut forged = declared_size.to_le_bytes().to_vec();

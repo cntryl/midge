@@ -690,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn should_find_binary_keys() {
+    fn should_preserve_binary_keys_given_trie_prefix_compression_when_roundtripping() {
         // Arrange
         let mut builder = TrieBuilder::new();
         builder.add_key(&[0, 1, 2], 0).unwrap();
