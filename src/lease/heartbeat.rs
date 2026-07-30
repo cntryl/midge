@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn should_mark_unhealthy_when_renewal_fails() {
+    fn should_mark_heartbeat_unhealthy_given_renewal_failure_when_running() {
         // Arrange
         let mock = Arc::new(MockLease::new());
         let mut heartbeat = LeaseHeartbeat::new(mock.clone() as Arc<dyn PrimaryLease>);
@@ -274,5 +274,36 @@ mod tests {
             "expected heartbeat to be unhealthy after renewal failure"
         );
         heartbeat.stop();
+    }
+
+    #[test]
+    fn should_stop_heartbeat_given_renewal_failure_when_running() {
+        // Arrange
+        let mock = Arc::new(MockLease::new());
+        mock.set_should_fail(true);
+        let mut heartbeat = LeaseHeartbeat::new(mock as Arc<dyn PrimaryLease>);
+
+        // Act
+        heartbeat.start();
+        std::thread::sleep(Duration::from_millis(200));
+        heartbeat.stop();
+
+        // Assert
+        assert!(!heartbeat.is_healthy());
+    }
+
+    #[test]
+    fn should_remain_single_threaded_given_start_called_twice_when_heartbeat_is_running() {
+        // Arrange
+        let mock = Arc::new(MockLease::new());
+        let mut heartbeat = LeaseHeartbeat::new(mock);
+
+        // Act
+        heartbeat.start();
+        heartbeat.start();
+        heartbeat.stop();
+
+        // Assert
+        assert!(heartbeat.thread_handle.is_none());
     }
 }

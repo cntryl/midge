@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn should_increment_epoch_on_reacquisition() {
+    fn should_allow_reacquisition_given_expired_filesystem_lease_when_new_holder_acquires() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
         let lease1 = Arc::new(FileSystemLease::new(temp_dir.path(), false).unwrap());
@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn should_fail_renew_when_not_acquired() {
+    fn should_reject_renewal_given_epoch_mismatch_when_renewing() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
         let lease = Arc::new(FileSystemLease::new(temp_dir.path(), false).unwrap());
@@ -301,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_takeover_when_leader_timestamp_is_in_the_future() {
+    fn should_reject_takeover_given_future_leader_timestamp_when_acquiring() {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
         let future_record = LeaderRecord {

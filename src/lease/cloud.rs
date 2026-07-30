@@ -1039,7 +1039,7 @@ mod tests {
     }
 
     #[test]
-    fn should_preserve_newer_simulated_lease_when_stale_same_process_holder_releases() {
+    fn should_preserve_newer_owner_given_stale_guard_drop_when_releasing() {
         // Arrange
         let cache_path = temp_cache_path();
         let stale = Arc::new(CloudStorageLease::new(test_config(), cache_path.clone()));
@@ -1171,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn should_not_delete_provider_lease_owned_by_new_holder_on_stale_release() {
+    fn should_not_delete_new_holder_lease_given_stale_process_release_when_releasing() {
         // Arrange
         let cache_path = temp_cache_path();
         let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
@@ -1317,7 +1317,7 @@ mod tests {
     }
 
     #[test]
-    fn should_increment_expired_remote_epoch_on_provider_failover() {
+    fn should_increment_remote_epoch_given_expired_provider_lease_when_reacquiring() {
         // Arrange
         let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
         let past = chrono::Utc::now() - chrono::Duration::seconds(60);
