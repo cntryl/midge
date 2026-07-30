@@ -73,7 +73,7 @@ sysinfo = "0.39"
 tempfile = "3.27"
 
 # Cloud Backend Support (optional)
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 hmac = { version = "0.13", optional = true }
 percent-encoding = { version = "2.3", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "blocking"], optional = true }
