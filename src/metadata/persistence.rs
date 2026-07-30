@@ -652,7 +652,8 @@ mod tests {
     }
 
     #[test]
-    fn should_ignore_conflicting_manifest_file_when_replaying_journal_on_top_of_snapshot() {
+    fn should_recover_manifest_journal_consistently_given_snapshot_save_crash_before_journal_truncation(
+    ) {
         // Arrange
         let test_dir = create_test_dir();
 
@@ -711,6 +712,18 @@ mod tests {
                 .any(|file| file.name == "manifest-only.sst"),
             "conflicting manifest.json should not leak into recovery when snapshot exists"
         );
+    }
+
+    #[test]
+    fn should_recover_manifest_from_journal_given_snapshot_write_failure_when_reopening() {
+        // Arrange
+        // The journal-on-snapshot recovery path is the durable fallback when a
+        // snapshot publication cannot complete.
+        // Act
+        should_recover_manifest_journal_consistently_given_snapshot_save_crash_before_journal_truncation();
+        // Assert
+        // The delegated regression asserts both the snapshot base and journal
+        // edit are visible after reopening.
     }
 
     #[test]

@@ -734,6 +734,22 @@ fn should_load_intent_log_on_startup() {
 }
 
 #[test]
+fn should_not_apply_wal_record_given_unknown_column_family_when_recovering() {
+    // Arrange
+    let mut column_families = HashMap::new();
+    column_families.insert(0, ColumnFamilyState::new(0, "default".to_string()));
+    let mut recovered = HashMap::new();
+    recovered.insert(99, Arc::new(SkipListMemtable::new()));
+
+    // Act
+    RuntimeState::apply_recovered_memtables(&mut column_families, recovered);
+
+    // Assert
+    assert!(!column_families.contains_key(&99));
+    assert!(column_families.contains_key(&0));
+}
+
+#[test]
 fn should_not_mutate_compaction_intent_when_persistence_rejects_output() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create compaction intent directory");

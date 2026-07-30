@@ -409,7 +409,7 @@ impl RuntimeState {
         );
     }
 
-    fn apply_recovered_memtables(
+    pub(super) fn apply_recovered_memtables(
         column_families: &mut HashMap<u32, ColumnFamilyState>,
         recovery_memtables: HashMap<u32, Arc<SkipListMemtable>>,
     ) {
@@ -417,10 +417,10 @@ impl RuntimeState {
             if let Some(cf_state) = column_families.get_mut(&cf_id) {
                 cf_state.memtable = recovered_memtable;
             } else {
-                let name = format!("cf_{cf_id}");
-                let mut cf_state = ColumnFamilyState::new(cf_id, name);
-                cf_state.memtable = recovered_memtable;
-                column_families.insert(cf_id, cf_state);
+                // WAL records cannot create schema. An unknown column family
+                // belongs to a dropped or stale manifest generation and must
+                // not be resurrected during recovery.
+                tracing::warn!(cf_id, "ignoring WAL records for unknown column family");
             }
         }
     }
