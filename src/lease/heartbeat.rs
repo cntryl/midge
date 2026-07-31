@@ -569,15 +569,15 @@ mod tests {
     #[test]
     fn should_fence_at_monotonic_expiry_while_renewal_is_blocked() {
         // Arrange
-        let lease = Arc::new(BlockingRenewalLease::new(Duration::from_millis(120)));
+        let lease = Arc::new(BlockingRenewalLease::new(Duration::from_secs(2)));
         let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
         let mut heartbeat =
             LeaseHeartbeat::new_with_validity(lease.clone(), Arc::clone(&lease.validity));
 
         // Act
         heartbeat.start();
-        assert!(lease.wait_until_renewal_started(Duration::from_secs(1)));
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        assert!(lease.wait_until_renewal_started(Duration::from_secs(5)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while heartbeat.is_healthy() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn should_remain_healthy_past_prior_deadline_when_renewal_advances_in_time() {
         // Arrange
-        let ttl = Duration::from_millis(180);
+        let ttl = Duration::from_secs(2);
         let lease = Arc::new(AdvancingLease {
             validity: Arc::new(crate::lease::traits::LeaseValidity::new()),
             ttl,

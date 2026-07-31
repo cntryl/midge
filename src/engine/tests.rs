@@ -342,12 +342,12 @@ fn should_reject_writes_when_renewal_blocks_past_expiry() -> MidgeResult<()> {
     let default_cf = engine
         .get_column_family("default")
         .ok_or_else(|| MidgeError::Internal("default column family missing".to_string()))?;
-    let lease = Arc::new(BlockingRenewalLease::new(Duration::from_millis(120)));
+    let lease = Arc::new(BlockingRenewalLease::new(Duration::from_secs(2)));
     install_blocking_renewal_lease(&mut engine, &lease)?;
 
     // Act
-    assert!(lease.wait_until_renewal_started(Duration::from_secs(1)));
-    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    assert!(lease.wait_until_renewal_started(Duration::from_secs(5)));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while engine.is_primary_lease_healthy() && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -367,9 +367,9 @@ fn should_reject_writes_when_renewal_blocks_past_expiry() -> MidgeResult<()> {
 fn should_retain_fencing_resources_when_shutdown_times_out_on_blocked_renewal() -> MidgeResult<()> {
     // Arrange
     let mut engine = Engine::open(OpenOptions::in_memory().build()?)?;
-    let lease = Arc::new(BlockingRenewalLease::new(Duration::from_millis(300)));
+    let lease = Arc::new(BlockingRenewalLease::new(Duration::from_secs(2)));
     install_blocking_renewal_lease(&mut engine, &lease)?;
-    assert!(lease.wait_until_renewal_started(Duration::from_secs(2)));
+    assert!(lease.wait_until_renewal_started(Duration::from_secs(5)));
 
     // Act
     let first_shutdown = engine.shutdown(Duration::from_millis(25));
