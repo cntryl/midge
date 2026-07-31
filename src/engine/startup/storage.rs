@@ -53,12 +53,28 @@ impl StartupStoragePath {
 
 impl StartupLease {
     pub(super) fn acquire(storage: &Storage) -> MidgeResult<Self> {
-        let lease = crate::lease::create_lease(storage).map_err(|error| {
+        let created = crate::lease::create_lease_with_validity(storage).map_err(|error| {
             MidgeError::Internal(format!(
                 "failed to create lease for storage backend: {error}"
             ))
         })?;
 
+        Self::acquire_created(created.lease, created.validity, Some(storage))
+    }
+
+    #[cfg(test)]
+    pub(super) fn acquire_for_test(
+        lease: Arc<dyn crate::lease::PrimaryLease>,
+        validity: Option<Arc<crate::lease::LeaseValidity>>,
+    ) -> MidgeResult<Self> {
+        Self::acquire_created(lease, validity, None)
+    }
+
+    fn acquire_created(
+        lease: Arc<dyn crate::lease::PrimaryLease>,
+        lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
+        storage: Option<&Storage>,
+    ) -> MidgeResult<Self> {
         let lease_guard = lease.clone().try_acquire().map_err(|error| match error {
             crate::lease::LeaseError::AcquisitionFailed(message) => MidgeError::Internal(format!(
                 "FATAL: another Midge instance is already running against this storage. \
@@ -81,23 +97,29 @@ impl StartupLease {
         let leader_store = lease.get_leader_store();
         let lease_healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
-        Ok(Self {
+        let mut startup_lease = Self {
             lease,
             lease_guard: Some(lease_guard),
             writer_epoch,
             leader_store,
             lease_healthy,
-        })
+            lease_validity,
+            lease_heartbeat: None,
+        };
+        startup_lease.start_heartbeat()?;
+        startup_lease.ensure_healthy("immediately after lease acquisition")?;
+        Ok(startup_lease)
     }
 
     fn runtime_lease_health(&self) -> Arc<std::sync::atomic::AtomicBool> {
         Arc::clone(&self.lease_healthy)
     }
 
-    pub(super) fn start_heartbeat(&self) -> MidgeResult<crate::lease::LeaseHeartbeat> {
-        let mut lease_heartbeat = crate::lease::LeaseHeartbeat::new_with_healthy(
+    fn start_heartbeat(&mut self) -> MidgeResult<()> {
+        let mut lease_heartbeat = crate::lease::LeaseHeartbeat::new_with_healthy_and_validity(
             Arc::clone(&self.lease),
             Arc::clone(&self.lease_healthy),
+            self.lease_validity.as_ref().map(Arc::clone),
         );
         lease_heartbeat.start();
         if !lease_heartbeat.is_healthy() {
@@ -106,12 +128,35 @@ impl StartupLease {
             ));
         }
 
-        Ok(lease_heartbeat)
+        self.lease_heartbeat = Some(lease_heartbeat);
+        Ok(())
+    }
+
+    pub(super) fn ensure_healthy(&self, phase: &str) -> MidgeResult<()> {
+        if self
+            .lease_healthy
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            Ok(())
+        } else {
+            Err(MidgeError::Fenced(format!(
+                "primary lease became invalid {phase}"
+            )))
+        }
+    }
+
+    pub(super) fn take_heartbeat(&mut self) -> MidgeResult<crate::lease::LeaseHeartbeat> {
+        self.lease_heartbeat.take().ok_or_else(|| {
+            MidgeError::Internal("startup lease heartbeat was already transferred".to_string())
+        })
     }
 }
 
 impl Drop for StartupLease {
     fn drop(&mut self) {
+        if let Some(mut heartbeat) = self.lease_heartbeat.take() {
+            heartbeat.stop();
+        }
         if self.lease_guard.is_some() {
             let _ = self.lease.release();
         }

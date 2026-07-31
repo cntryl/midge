@@ -67,6 +67,8 @@ struct StartupLease {
     writer_epoch: u64,
     leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     lease_healthy: Arc<std::sync::atomic::AtomicBool>,
+    lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
+    lease_heartbeat: Option<crate::lease::LeaseHeartbeat>,
 }
 
 struct RuntimeStorageMaterialization {

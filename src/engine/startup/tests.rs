@@ -1,5 +1,49 @@
 use super::*;
 
+struct StartupWatchdogLease {
+    validity: std::sync::Arc<crate::lease::LeaseValidity>,
+    renewals: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::lease::PrimaryLease for StartupWatchdogLease {
+    fn try_acquire(
+        self: std::sync::Arc<Self>,
+    ) -> Result<crate::lease::LeaseGuard, crate::lease::LeaseError> {
+        self.validity.activate(
+            1,
+            std::time::Instant::now() + std::time::Duration::from_millis(150),
+        )?;
+        Ok(crate::lease::LeaseGuard::token())
+    }
+
+    fn renew(&self) -> Result<(), crate::lease::LeaseError> {
+        self.validity.advance(
+            1,
+            std::time::Instant::now() + std::time::Duration::from_millis(150),
+        )?;
+        self.renewals
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    fn release(&self) -> Result<(), crate::lease::LeaseError> {
+        self.validity.deactivate(1);
+        Ok(())
+    }
+
+    fn ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(150)
+    }
+
+    fn holder_id(&self) -> String {
+        "startup-watchdog".to_string()
+    }
+
+    fn epoch(&self) -> u64 {
+        1
+    }
+}
+
 #[derive(Clone)]
 struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -109,5 +153,31 @@ fn should_apply_open_options_block_cache_policy_to_runtime_config() -> MidgeResu
         materialized.runtime_config.block_cache_policy,
         crate::sst::cache::CachePolicyType::ClockPro
     );
+    Ok(())
+}
+
+#[test]
+fn should_run_heartbeat_before_cloud_recovery_can_block_startup() -> MidgeResult<()> {
+    // Arrange
+    let lease = std::sync::Arc::new(StartupWatchdogLease {
+        validity: std::sync::Arc::new(crate::lease::LeaseValidity::new()),
+        renewals: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let lease_object: std::sync::Arc<dyn crate::lease::PrimaryLease> = lease.clone();
+
+    // Act
+    let startup_lease =
+        StartupLease::acquire_for_test(lease_object, Some(std::sync::Arc::clone(&lease.validity)))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while lease.renewals.load(std::sync::atomic::Ordering::Acquire) == 0
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    // Assert
+    assert!(startup_lease.lease_heartbeat.is_some());
+    assert!(lease.renewals.load(std::sync::atomic::Ordering::Acquire) > 0);
+    startup_lease.ensure_healthy("while recovery is blocked")?;
     Ok(())
 }

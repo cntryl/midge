@@ -45,7 +45,8 @@ impl FacadeAssembly {
         let default_coordinator = Arc::new(ingest::IngestCoordinator::new(0));
         ingest_coordinators.insert(0, default_coordinator);
 
-        let lease_heartbeat = startup_lease.start_heartbeat()?;
+        startup_lease.ensure_healthy("before engine assembly")?;
+        let lease_heartbeat = startup_lease.take_heartbeat()?;
 
         tracing::info!(
             db_path = %storage_path.db_path.display(),
@@ -67,6 +68,8 @@ impl FacadeAssembly {
         let lease_guard = startup_lease.lease_guard.take().ok_or_else(|| {
             MidgeError::Internal("startup lease guard was already transferred".to_string())
         })?;
+
+        startup_lease.ensure_healthy("before returning the engine")?;
 
         Ok(Engine {
             runtime: Some(started.runtime),
@@ -119,6 +122,7 @@ impl EngineStartup {
             &storage_path.db_path,
             opts.recovery_policy(),
         )?;
+        startup_lease.ensure_healthy("before runtime creation")?;
         let started = StartedRuntime::start(opts, recovered)?;
 
         FacadeAssembly::assemble(opts, storage_path, startup_lease, started, start)

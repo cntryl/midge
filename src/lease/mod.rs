@@ -31,6 +31,7 @@ mod traits;
 pub use cloud::{CloudLeaseConfig, CloudStorageLease};
 pub use filesystem::FileSystemLease;
 pub use heartbeat::LeaseHeartbeat;
+pub(crate) use traits::LeaseValidity;
 pub use traits::{LeaderStore, LeaseError, LeaseGuard, PrimaryLease};
 
 use crate::config::Storage;
@@ -47,8 +48,12 @@ impl From<LeaseError> for crate::common::MidgeError {
     }
 }
 
-/// Create a lease implementation appropriate for the given storage backend.
-pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseError> {
+pub(crate) struct CreatedLease {
+    pub(crate) lease: Arc<dyn PrimaryLease>,
+    pub(crate) validity: Option<Arc<LeaseValidity>>,
+}
+
+pub(crate) fn create_lease_with_validity(storage: &Storage) -> Result<CreatedLease, LeaseError> {
     match storage {
         Storage::InMemory => {
             // In-memory mode: use filesystem lease on temp directory (no disk I/O)
@@ -68,11 +73,17 @@ pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseErr
                     .as_nanos()
             ));
             // Memory mode: use MockFs for lease coordination (no disk I/O)
-            Ok(Arc::new(FileSystemLease::new(&temp_path, true)?))
+            Ok(CreatedLease {
+                lease: Arc::new(FileSystemLease::new(&temp_path, true)?),
+                validity: None,
+            })
         }
         Storage::Local { path } => {
             // Local storage: use filesystem lease with RealFs
-            Ok(Arc::new(FileSystemLease::new(path.as_path(), false)?))
+            Ok(CreatedLease {
+                lease: Arc::new(FileSystemLease::new(path.as_path(), false)?),
+                validity: None,
+            })
         }
         Storage::Cloud {
             local_cache_path,
@@ -86,11 +97,15 @@ pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseErr
             };
             let cloud = crate::storage::providers::build_cloud_storage(provider, prefix)
                 .map_err(|error| LeaseError::IoError(format!("cloud lease backend: {error}")))?;
-            Ok(Arc::new(CloudStorageLease::new_provider_backed(
+            let lease = Arc::new(CloudStorageLease::new_provider_backed(
                 config,
                 local_cache_path.clone(),
                 cloud,
-            )))
+            ));
+            Ok(CreatedLease {
+                validity: Some(lease.lease_validity()),
+                lease,
+            })
         }
         Storage::CloudSimulated {
             local_cache_path,
@@ -101,10 +116,11 @@ pub fn create_lease(storage: &Storage) -> Result<Arc<dyn PrimaryLease>, LeaseErr
                 bucket: bucket.clone(),
                 prefix: prefix.clone(),
             };
-            Ok(Arc::new(CloudStorageLease::new(
-                config,
-                local_cache_path.clone(),
-            )))
+            let lease = Arc::new(CloudStorageLease::new(config, local_cache_path.clone()));
+            Ok(CreatedLease {
+                validity: Some(lease.lease_validity()),
+                lease,
+            })
         }
     }
 }

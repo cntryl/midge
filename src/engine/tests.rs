@@ -94,6 +94,169 @@ impl crate::lease::PrimaryLease for BlockingReleaseLease {
     }
 }
 
+#[derive(Default, PartialEq, Eq)]
+enum RenewalBlockState {
+    #[default]
+    Waiting,
+    Blocked,
+    Allowed,
+}
+
+#[derive(Default, PartialEq, Eq)]
+enum ReleaseState {
+    #[default]
+    Waiting,
+    Completed,
+}
+
+#[derive(Default)]
+struct BlockingRenewalState {
+    renewal: RenewalBlockState,
+    release: ReleaseState,
+}
+
+struct BlockingRenewalLease {
+    state: std::sync::Mutex<BlockingRenewalState>,
+    changed: std::sync::Condvar,
+    validity: Arc<crate::lease::LeaseValidity>,
+    ttl: Duration,
+}
+
+impl BlockingRenewalLease {
+    fn new(ttl: Duration) -> Self {
+        Self {
+            state: std::sync::Mutex::new(BlockingRenewalState::default()),
+            changed: std::sync::Condvar::new(),
+            validity: Arc::new(crate::lease::LeaseValidity::new()),
+            ttl,
+        }
+    }
+
+    fn wait_until_renewal_started(&self, timeout: Duration) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, timeout, |state| {
+                state.renewal == RenewalBlockState::Waiting
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.renewal != RenewalBlockState::Waiting
+    }
+
+    fn allow_renewal(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.renewal = RenewalBlockState::Allowed;
+        self.changed.notify_all();
+    }
+
+    fn release_started(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .release
+            != ReleaseState::Waiting
+    }
+
+    fn wait_until_release_completed(&self, timeout: Duration) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, timeout, |state| {
+                state.release == ReleaseState::Waiting
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.release == ReleaseState::Completed
+    }
+}
+
+impl crate::lease::PrimaryLease for BlockingRenewalLease {
+    fn try_acquire(self: Arc<Self>) -> Result<crate::lease::LeaseGuard, crate::lease::LeaseError> {
+        self.validity
+            .activate(1, std::time::Instant::now() + self.ttl)?;
+        Ok(crate::lease::LeaseGuard::token())
+    }
+
+    fn renew(&self) -> Result<(), crate::lease::LeaseError> {
+        let candidate_until = std::time::Instant::now() + self.ttl;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.renewal = RenewalBlockState::Blocked;
+        self.changed.notify_all();
+        state = self
+            .changed
+            .wait_while(state, |state| state.renewal != RenewalBlockState::Allowed)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(state);
+        self.validity.advance(1, candidate_until)
+    }
+
+    fn release(&self) -> Result<(), crate::lease::LeaseError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.validity.deactivate(1);
+        state.release = ReleaseState::Completed;
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    fn holder_id(&self) -> String {
+        "blocking-renewal-test".to_string()
+    }
+
+    fn epoch(&self) -> u64 {
+        1
+    }
+}
+
+fn install_blocking_renewal_lease(
+    engine: &mut Engine,
+    lease: &Arc<BlockingRenewalLease>,
+) -> MidgeResult<()> {
+    let heartbeat_mutex = engine
+        .lease_heartbeat
+        .take()
+        .ok_or_else(|| MidgeError::Internal("engine heartbeat missing".to_string()))?;
+    let mut heartbeat = heartbeat_mutex
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let healthy = heartbeat.healthy_flag();
+    heartbeat.stop();
+    if let Some(original_lease) = engine.lease.take() {
+        original_lease.release()?;
+    }
+    engine.lease_guard.take();
+
+    let lease_guard = Arc::clone(lease).try_acquire()?;
+    let engine_lease: Arc<dyn crate::lease::PrimaryLease> = lease.clone();
+    let mut heartbeat = crate::lease::LeaseHeartbeat::new_with_healthy_and_validity(
+        Arc::clone(&engine_lease),
+        healthy,
+        Some(Arc::clone(&lease.validity)),
+    );
+    heartbeat.start();
+    engine.lease = Some(engine_lease);
+    engine.lease_guard = Some(lease_guard);
+    engine.lease_heartbeat = Some(std::sync::Mutex::new(heartbeat));
+    Ok(())
+}
+
 #[test]
 fn should_bound_shutdown_when_primary_lease_release_blocks() -> MidgeResult<()> {
     // Arrange
@@ -168,6 +331,57 @@ fn should_bound_shutdown_when_primary_lease_release_blocks() -> MidgeResult<()> 
         release_completed,
         "detached fencing cleanup did not finish after lease release resumed"
     );
+    retry_shutdown?;
+    Ok(())
+}
+
+#[test]
+fn should_reject_writes_when_renewal_blocks_past_expiry() -> MidgeResult<()> {
+    // Arrange
+    let mut engine = Engine::open(OpenOptions::in_memory().build()?)?;
+    let default_cf = engine
+        .get_column_family("default")
+        .ok_or_else(|| MidgeError::Internal("default column family missing".to_string()))?;
+    let lease = Arc::new(BlockingRenewalLease::new(Duration::from_millis(120)));
+    install_blocking_renewal_lease(&mut engine, &lease)?;
+
+    // Act
+    assert!(lease.wait_until_renewal_started(Duration::from_secs(1)));
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while engine.is_primary_lease_healthy() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut transaction = engine.begin_tx(default_cf.id(), TransactionMode::ReadWrite)?;
+    transaction.put(b"fenced-key".to_vec(), b"value".to_vec(), None)?;
+    let write = transaction.commit(WriteOptions::sync());
+
+    // Assert
+    assert!(!engine.is_primary_lease_healthy());
+    assert!(matches!(write, Err(MidgeError::Fenced(_))));
+    lease.allow_renewal();
+    engine.shutdown(Duration::from_secs(2))?;
+    Ok(())
+}
+
+#[test]
+fn should_retain_fencing_resources_when_shutdown_times_out_on_blocked_renewal() -> MidgeResult<()> {
+    // Arrange
+    let mut engine = Engine::open(OpenOptions::in_memory().build()?)?;
+    let lease = Arc::new(BlockingRenewalLease::new(Duration::from_millis(300)));
+    install_blocking_renewal_lease(&mut engine, &lease)?;
+    assert!(lease.wait_until_renewal_started(Duration::from_secs(2)));
+
+    // Act
+    let first_shutdown = engine.shutdown(Duration::from_millis(25));
+    let released_before_unblock = lease.release_started();
+    lease.allow_renewal();
+    let cleanup_completed = lease.wait_until_release_completed(Duration::from_secs(2));
+    let retry_shutdown = engine.shutdown(Duration::from_secs(2));
+
+    // Assert
+    assert!(matches!(first_shutdown, Err(MidgeError::Timeout(_))));
+    assert!(!released_before_unblock);
+    assert!(cleanup_completed);
     retry_shutdown?;
     Ok(())
 }

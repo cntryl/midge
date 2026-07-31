@@ -1,11 +1,156 @@
 //! Core lease traits and types.
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 // Type alias to improve readability and satisfy Clippy's type_complexity lint
 type ReleaseFn = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
+/// Monotonic validity for one cloud-lease acquisition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LeaseValidityState {
+    Inactive,
+    Active { epoch: u64, valid_until: Instant },
+    Fenced { epoch: u64 },
+}
+
+/// Shared lease validity watched independently from provider renewal I/O.
+pub(crate) struct LeaseValidity {
+    state: Mutex<LeaseValidityState>,
+    changed: Condvar,
+}
+
+impl LeaseValidity {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Mutex::new(LeaseValidityState::Inactive),
+            changed: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn activate(&self, epoch: u64, valid_until: Instant) -> Result<(), LeaseError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if valid_until <= Instant::now() {
+            return Err(LeaseError::AcquisitionFailed(
+                "cloud lease expired before acquisition completed".to_string(),
+            ));
+        }
+        if !matches!(*state, LeaseValidityState::Inactive) {
+            return Err(LeaseError::AcquisitionFailed(
+                "cloud lease validity was already active".to_string(),
+            ));
+        }
+        *state = LeaseValidityState::Active { epoch, valid_until };
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    pub(crate) fn advance(&self, epoch: u64, candidate_until: Instant) -> Result<(), LeaseError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        match *state {
+            LeaseValidityState::Active {
+                epoch: active_epoch,
+                valid_until,
+            } if active_epoch == epoch && valid_until > now && candidate_until > now => {
+                *state = LeaseValidityState::Active {
+                    epoch,
+                    valid_until: candidate_until,
+                };
+                self.changed.notify_all();
+                Ok(())
+            }
+            LeaseValidityState::Active {
+                epoch: active_epoch,
+                ..
+            } => {
+                *state = LeaseValidityState::Fenced {
+                    epoch: active_epoch,
+                };
+                self.changed.notify_all();
+                Err(LeaseError::RenewalFailed(
+                    "cloud lease renewal completed after monotonic validity was lost".to_string(),
+                ))
+            }
+            LeaseValidityState::Fenced { .. } => Err(LeaseError::RenewalFailed(
+                "cloud lease acquisition is terminally fenced".to_string(),
+            )),
+            LeaseValidityState::Inactive => Err(LeaseError::RenewalFailed(
+                "cloud lease validity is inactive".to_string(),
+            )),
+        }
+    }
+
+    pub(crate) fn fence(&self, epoch: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(
+            *state,
+            LeaseValidityState::Active {
+                epoch: active_epoch,
+                ..
+            } if active_epoch == epoch
+        ) {
+            *state = LeaseValidityState::Fenced { epoch };
+            self.changed.notify_all();
+        }
+    }
+
+    pub(crate) fn deactivate(&self, epoch: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(
+            *state,
+            LeaseValidityState::Active { epoch: active_epoch, .. }
+                | LeaseValidityState::Fenced { epoch: active_epoch }
+                if active_epoch == epoch
+        ) {
+            *state = LeaseValidityState::Inactive;
+            self.changed.notify_all();
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> LeaseValidityState {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn wait_for_change(
+        &self,
+        observed: LeaseValidityState,
+        timeout: Duration,
+        running: &std::sync::atomic::AtomicBool,
+    ) -> LeaseValidityState {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, timeout, |state| {
+                *state == observed && running.load(std::sync::atomic::Ordering::Acquire)
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state
+    }
+
+    pub(crate) fn notify_all(&self) {
+        self.changed.notify_all();
+    }
+}
 
 /// Error type for lease operations.
 #[derive(Debug)]
