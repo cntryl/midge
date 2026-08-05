@@ -629,8 +629,11 @@ impl Transaction {
     }
 
     fn validate_assertions(&self) -> MidgeResult<()> {
+        let snapshot = self.read_snapshot.as_ref().ok_or_else(|| {
+            MidgeError::Internal("read snapshot not available - this is a bug".to_string())
+        })?;
         for (key, expected) in &self.assertions {
-            let actual = self.get(key)?;
+            let actual = snapshot.get_bytes(key, self.start_sequence)?;
             if actual.as_deref() != expected.as_deref() {
                 return Err(MidgeError::WriteConflict(format!(
                     "value assertion failed for key {key:?}"

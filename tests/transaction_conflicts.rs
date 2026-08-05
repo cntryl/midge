@@ -79,6 +79,44 @@ fn should_reject_assertion_when_snapshot_value_differs() {
 }
 
 #[test]
+fn should_validate_assertion_against_snapshot_when_key_is_written() {
+    // Arrange
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("assertion_snapshot")
+        .expect("create cf");
+    let mut seed = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin seed tx");
+    seed.put(b"key".to_vec(), b"old".to_vec(), None)
+        .expect("seed value");
+    seed.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("seed commit");
+
+    let mut txn = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin assertion tx");
+    txn.put(b"key".to_vec(), b"new".to_vec(), None)
+        .expect("pending write");
+    txn.assert_value(b"key".to_vec(), Some(b"old".to_vec()))
+        .expect("register assertion");
+
+    // Act
+    let result = txn.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(result.is_ok());
+
+    let read_tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin read tx");
+    assert_eq!(
+        read_tx.get(b"key").expect("read value"),
+        Some(Bytes::from_static(b"new"))
+    );
+}
+
+#[test]
 fn should_bound_assertion_memory_by_transaction_pool() {
     // Arrange
     let opts = cntryl_midge::OpenOptions::in_memory()
