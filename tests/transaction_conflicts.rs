@@ -12,6 +12,42 @@ use common::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[test]
+fn should_assert_expected_value_without_creating_a_write_conflict() {
+    // Arrange
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("assertions")
+        .expect("create cf");
+    let mut seed = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin seed tx");
+    seed.put(b"key".to_vec(), b"value".to_vec(), None)
+        .expect("seed value");
+    seed.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("seed commit");
+
+    // Act
+    let mut txn = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin assertion tx");
+    txn.assert_value(b"key".to_vec(), Some(b"value".to_vec()))
+        .expect("register assertion");
+    txn.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("assertion commit");
+
+    // Assert
+    let mut missing = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin missing assertion tx");
+    missing
+        .assert_value(b"absent".to_vec(), None)
+        .expect("register missing assertion");
+    missing
+        .commit(cntryl_midge::WriteOptions::buffered())
+        .expect("missing assertion commit");
+}
+
 // ============================================================================
 // BASIC LWW SEMANTICS TESTS
 // ============================================================================

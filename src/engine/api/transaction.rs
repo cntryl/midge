@@ -46,6 +46,9 @@ pub struct Transaction {
     conflict_policy: ConflictPolicy,
     /// Bounded resident write set with optional durable spill runs.
     write_set: TransactionWriteSet,
+    /// Value assertions checked before a transaction is submitted. Assertions
+    /// never enter the write set and therefore do not create write conflicts.
+    assertions: Vec<(Vec<u8>, Option<Vec<u8>>)>,
     /// Start sequence number (snapshot point)
     start_sequence: u64,
     /// Immutable snapshot for direct read execution (bypasses event loop)
@@ -378,6 +381,7 @@ impl Transaction {
                 init.memory_mode,
                 init.id,
             ),
+            assertions: Vec::new(),
             start_sequence: init.start_sequence,
             read_snapshot: init.read_snapshot,
             cloud_mode: init.cloud_mode,
@@ -481,6 +485,19 @@ impl Transaction {
             })
     }
 
+    /// Assert that `key` has the expected value in this transaction snapshot.
+    /// Pass `None` to assert that the key is absent. The assertion is not a
+    /// write and is therefore excluded from the transaction write set.
+    pub fn assert_value(&mut self, key: Vec<u8>, expected: Option<Vec<u8>>) -> MidgeResult<()> {
+        if self.is_read_only() {
+            return Err(MidgeError::InvalidArgument(
+                "Cannot assert in ReadOnly transaction".to_string(),
+            ));
+        }
+        self.assertions.push((key, expected));
+        Ok(())
+    }
+
     // === Internal helpers for engine/mod.rs commit logic ===
 
     pub(crate) fn is_read_only(&self) -> bool {
@@ -508,6 +525,8 @@ impl Transaction {
     /// confirmation fails.
     pub fn commit(mut self, opts: crate::engine::api::WriteOptions) -> MidgeResult<()> {
         let mut timing = CommitTiming::maybe_start();
+
+        self.validate_assertions()?;
 
         if self.is_read_only() {
             let unregister_started_at = CommitTiming::phase_start(timing.as_ref());
@@ -578,6 +597,18 @@ impl Transaction {
         CommitTiming::record_unregister(&mut timing, unregister_started_at);
         CommitTiming::finish(timing, result.is_ok());
         result
+    }
+
+    fn validate_assertions(&self) -> MidgeResult<()> {
+        for (key, expected) in &self.assertions {
+            let actual = self.get(key)?;
+            if actual.as_deref() != expected.as_deref() {
+                return Err(MidgeError::WriteConflict(format!(
+                    "value assertion failed for key {key:?}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Roll back this transaction and unregister its snapshot.
