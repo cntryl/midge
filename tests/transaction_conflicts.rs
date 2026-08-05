@@ -48,6 +48,36 @@ fn should_assert_expected_value_without_creating_a_write_conflict() {
         .expect("missing assertion commit");
 }
 
+#[test]
+fn should_reject_assertion_when_snapshot_value_differs() {
+    // Arrange
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("assertions")
+        .expect("create cf");
+    let mut seed = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin seed tx");
+    seed.put(b"key".to_vec(), b"actual".to_vec(), None)
+        .expect("seed value");
+    seed.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("seed commit");
+
+    // Act
+    let mut txn = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin assertion tx");
+    txn.assert_value(b"key".to_vec(), Some(b"expected".to_vec()))
+        .expect("register assertion");
+    let result = txn.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(cntryl_midge::MidgeError::WriteConflict(_))
+    ));
+}
+
 // ============================================================================
 // BASIC LWW SEMANTICS TESTS
 // ============================================================================
