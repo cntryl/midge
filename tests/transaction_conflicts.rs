@@ -78,6 +78,33 @@ fn should_reject_assertion_when_snapshot_value_differs() {
     ));
 }
 
+#[test]
+fn should_bound_assertion_memory_by_transaction_pool() {
+    // Arrange
+    let opts = cntryl_midge::OpenOptions::in_memory()
+        .transaction_memory_pool_size(512)
+        .build()
+        .expect("build options");
+    let engine = cntryl_midge::Engine::open(opts).expect("open engine");
+    let cf = engine
+        .create_column_family("assertion_limit")
+        .expect("create cf");
+    let mut txn = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin transaction");
+
+    // Act
+    let first = txn.assert_value(vec![b'a'; 128], None);
+    let second = txn.assert_value(vec![b'b'; 128], None);
+
+    // Assert
+    assert!(first.is_ok());
+    assert!(matches!(
+        second,
+        Err(cntryl_midge::MidgeError::ResourceLimit(_))
+    ));
+}
+
 // ============================================================================
 // BASIC LWW SEMANTICS TESTS
 // ============================================================================

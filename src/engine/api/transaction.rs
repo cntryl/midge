@@ -21,6 +21,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+const ASSERTION_ACCOUNTING_OVERHEAD: usize = 256;
+
 /// Transaction mode controls read/write capabilities
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransactionMode {
@@ -49,6 +51,8 @@ pub struct Transaction {
     /// Value assertions checked before a transaction is submitted. Assertions
     /// never enter the write set and therefore do not create write conflicts.
     assertions: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    assertion_bytes: usize,
+    memory_pool: Arc<TransactionMemoryPool>,
     /// Start sequence number (snapshot point)
     start_sequence: u64,
     /// Immutable snapshot for direct read execution (bypasses event loop)
@@ -376,12 +380,14 @@ impl Transaction {
             mode: init.mode,
             conflict_policy: ConflictPolicy::LastWriteWins,
             write_set: TransactionWriteSet::new(
-                init.transaction_memory_pool,
+                Arc::clone(&init.transaction_memory_pool),
                 &init.db_path,
                 init.memory_mode,
                 init.id,
             ),
             assertions: Vec::new(),
+            assertion_bytes: 0,
+            memory_pool: init.transaction_memory_pool,
             start_sequence: init.start_sequence,
             read_snapshot: init.read_snapshot,
             cloud_mode: init.cloud_mode,
@@ -488,13 +494,36 @@ impl Transaction {
     /// Assert that `key` has the expected value in this transaction snapshot.
     /// Pass `None` to assert that the key is absent. The assertion is not a
     /// write and is therefore excluded from the transaction write set.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` when called on a read-only
+    /// transaction or `MidgeError::ResourceLimit` when the transaction memory
+    /// pool cannot admit the assertion.
     pub fn assert_value(&mut self, key: Vec<u8>, expected: Option<Vec<u8>>) -> MidgeResult<()> {
         if self.is_read_only() {
             return Err(MidgeError::InvalidArgument(
                 "Cannot assert in ReadOnly transaction".to_string(),
             ));
         }
+        let expected_bytes = expected.as_ref().map_or(0, Vec::len);
+        let bytes = key
+            .len()
+            .saturating_add(expected_bytes)
+            .saturating_add(ASSERTION_ACCOUNTING_OVERHEAD);
+        if !self.memory_pool.try_reserve(bytes) {
+            return Err(MidgeError::ResourceLimit(format!(
+                "transaction memory pool cannot admit {bytes} assertion bytes"
+            )));
+        }
+        if let Err(error) = self.assertions.try_reserve(1) {
+            self.memory_pool.release(bytes);
+            return Err(MidgeError::ResourceLimit(format!(
+                "cannot allocate transaction assertion: {error}"
+            )));
+        }
         self.assertions.push((key, expected));
+        self.assertion_bytes = self.assertion_bytes.saturating_add(bytes);
         Ok(())
     }
 
@@ -739,5 +768,6 @@ impl Transaction {
 impl Drop for Transaction {
     fn drop(&mut self) {
         self.unregister_snapshot();
+        self.memory_pool.release(self.assertion_bytes);
     }
 }

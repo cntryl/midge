@@ -60,7 +60,7 @@ impl TransactionMemoryPool {
         }
     }
 
-    fn try_reserve(&self, bytes: usize) -> bool {
+    pub(crate) fn try_reserve(&self, bytes: usize) -> bool {
         let mut current = self.resident.load(Ordering::Acquire);
         loop {
             let Some(next) = current.checked_add(bytes) else {
@@ -81,7 +81,7 @@ impl TransactionMemoryPool {
         }
     }
 
-    fn release(&self, bytes: usize) {
+    pub(crate) fn release(&self, bytes: usize) {
         if bytes == 0 {
             return;
         }
